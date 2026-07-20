@@ -72,7 +72,25 @@ pub async fn reconcile(
         };
 
         let workspace_id = match workspace_id {
-            Some(id) => id,
+            Some(id) => {
+                // Qualify a bare name once the remote tells us the owner:
+                // "services" → "authava/services". Deliberately narrow — only
+                // when the discovered name is the same repo with an owner
+                // prefix, so a hand-picked name is never clobbered.
+                if let Some((_, repo)) = d.name.split_once('/') {
+                    sqlx::query(
+                        "UPDATE workspaces SET name = $2, slug = $3, updated_at = now()
+                         WHERE id = $1 AND name = $4",
+                    )
+                    .bind(id)
+                    .bind(&d.name)
+                    .bind(slugify(&d.name))
+                    .bind(repo)
+                    .execute(&state.db)
+                    .await?;
+                }
+                id
+            }
             None => {
                 let id = create_workspace_for(state, tenant, &d.name).await?;
                 let event = events::record(

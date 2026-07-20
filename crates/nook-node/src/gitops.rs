@@ -40,12 +40,71 @@ fn run_git(args: &[&str], cwd: Option<&Path>, ssh_key: Option<&Path>) -> Result<
 /// Derive "repo" from ".../repo.git" or ".../repo".
 pub fn repo_name_from_url(url: &str) -> Option<String> {
     let trimmed = url.trim_end_matches('/').trim_end_matches(".git");
-    let name = trimmed
-        .rsplit(['/', ':'])
-        .next()?
-        .trim()
-        .to_string();
+    let name = trimmed.rsplit(['/', ':']).next()?.trim().to_string();
     (!name.is_empty()).then_some(name)
+}
+
+fn safe_segment(s: &str) -> bool {
+    !s.is_empty()
+        && s != "."
+        && s != ".."
+        && !s.starts_with('.')
+        && !s.contains('/')
+        && !s.contains('\\')
+}
+
+/// Derive the qualified checkout path "owner/repo" from a remote URL:
+/// `git@github.com:authava/services.git` → `authava/services`.
+///
+/// Repos are cloned into `<root>/<owner>/<repo>` so two orgs can each own a
+/// "services" (or "api", or "web") without colliding — and so a workspace's
+/// name says who it belongs to. Falls back to the bare repo name when no
+/// owner is present in the URL.
+pub fn repo_path_from_url(url: &str) -> Option<String> {
+    let trimmed = url
+        .trim()
+        .trim_end_matches('/')
+        .trim_end_matches(".git")
+        .trim_end_matches('/');
+    // Normalize scp-style (git@host:owner/repo) to a slash-separated tail.
+    let after_host = match trimmed.split_once(':') {
+        // scp-style has no "//" right after the colon; a URL scheme does.
+        Some((_, rest)) if !rest.starts_with("//") => rest.to_string(),
+        _ => {
+            let no_scheme = trimmed
+                .split_once("://")
+                .map(|(_, rest)| rest)
+                .unwrap_or(trimmed);
+            // drop host (and any credentials) — keep the path
+            match no_scheme.split_once('/') {
+                Some((_, path)) => path.to_string(),
+                None => return None,
+            }
+        }
+    };
+
+    let parts: Vec<&str> = after_host
+        .split('/')
+        .filter(|p| !p.is_empty())
+        .collect();
+    let repo = parts.last()?.trim();
+    if !safe_segment(repo) {
+        return None;
+    }
+    // The owner is the segment directly above the repo (handles nested
+    // GitLab-style groups by taking the closest one).
+    match parts.len() {
+        0 => None,
+        1 => Some(repo.to_string()),
+        _ => {
+            let owner = parts[parts.len() - 2].trim();
+            if safe_segment(owner) {
+                Some(format!("{owner}/{repo}"))
+            } else {
+                Some(repo.to_string())
+            }
+        }
+    }
 }
 
 /// Write a control-plane-supplied private key to a transient 0600 file.
@@ -81,19 +140,25 @@ pub fn clone_repo(
     ssh_key_material: Option<&str>,
 ) -> OpOutcome {
     let root = crate::config::expand_path(workspace_root);
+    // Checkouts live at <root>/<owner>/<repo> so repos with the same name in
+    // different orgs don't collide. An explicit dest_name may itself be
+    // qualified ("owner/repo"); every segment is validated.
     let name = match dest_name
         .map(str::to_string)
-        .or_else(|| repo_name_from_url(url))
+        .or_else(|| repo_path_from_url(url))
     {
-        Some(n) if !n.contains('/') && !n.starts_with('.') => n,
+        Some(n) if n.split('/').all(safe_segment) => n,
         _ => return fail("could not derive a safe directory name from the URL"),
     };
     let dest = Path::new(&root).join(&name);
     if dest.exists() {
         return fail(format!("{} already exists", dest.display()));
     }
-    if std::fs::create_dir_all(&root).is_err() {
-        return fail(format!("cannot create workspace root {root}"));
+    // Creates the owner directory too.
+    if let Some(parent) = dest.parent() {
+        if std::fs::create_dir_all(parent).is_err() {
+            return fail(format!("cannot create {}", parent.display()));
+        }
     }
 
     // Tenant credential (if provided) lives on disk only for the duration of
@@ -282,4 +347,50 @@ pub fn write_workspace_file(checkout_path: &str, name: &str, content: &[u8]) -> 
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
         .map_err(|e| e.to_string())?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{repo_name_from_url, repo_path_from_url};
+
+    #[test]
+    fn derives_owner_and_repo_across_url_shapes() {
+        for url in [
+            "git@github.com:authava/services.git",
+            "https://github.com/authava/services.git",
+            "https://github.com/authava/services",
+            "ssh://git@github.com/authava/services.git",
+            "https://user:pass@github.com/authava/services.git",
+            "git@github.com:authava/services/",
+        ] {
+            assert_eq!(
+                repo_path_from_url(url).as_deref(),
+                Some("authava/services"),
+                "{url}"
+            );
+        }
+    }
+
+    #[test]
+    fn nested_groups_use_the_closest_owner() {
+        assert_eq!(
+            repo_path_from_url("https://gitlab.com/team/sub/group/api.git").as_deref(),
+            Some("group/api")
+        );
+    }
+
+    #[test]
+    fn same_repo_name_in_two_orgs_does_not_collide() {
+        assert_ne!(
+            repo_path_from_url("git@github.com:authava/services.git"),
+            repo_path_from_url("git@github.com:engrain/services.git"),
+        );
+    }
+
+    #[test]
+    fn rejects_path_traversal_and_keeps_bare_name_fallback() {
+        assert_eq!(repo_path_from_url("git@github.com:owner/..").as_deref(), None);
+        // A local path with no owner segment still yields the repo name.
+        assert_eq!(repo_name_from_url("/srv/git/solo.git").as_deref(), Some("solo"));
+    }
 }

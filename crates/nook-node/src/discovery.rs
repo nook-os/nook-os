@@ -27,10 +27,18 @@ fn inspect(dir: &Path) -> Option<DiscoveredWorkspace> {
     // A primary checkout has a `.git` directory; a linked worktree has a
     // `.git` file pointing back at the primary repo.
     let worktree = git_marker.is_file();
+    let remote = git(dir, &["config", "--get", "remote.origin.url"]);
+    // Name a workspace after its remote ("owner/repo") — that's its real
+    // identity, and it keeps two orgs' "services" repos distinguishable. Only
+    // remote-less checkouts fall back to the directory name.
+    let name = remote
+        .as_deref()
+        .and_then(crate::gitops::repo_path_from_url)
+        .unwrap_or_else(|| dir.file_name().unwrap_or_default().to_string_lossy().to_string());
     Some(DiscoveredWorkspace {
         path: dir.to_string_lossy().to_string(),
-        name: dir.file_name()?.to_string_lossy().to_string(),
-        git_remote_url: git(dir, &["config", "--get", "remote.origin.url"]),
+        name,
+        git_remote_url: remote,
         branch: git(dir, &["rev-parse", "--abbrev-ref", "HEAD"]),
         dirty: git(dir, &["status", "--porcelain"]).is_some_and(|s| !s.is_empty()),
         worktree,
