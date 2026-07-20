@@ -1,6 +1,7 @@
 FROM rust:1-slim-bookworm AS build
 WORKDIR /src
-RUN apt-get update && apt-get install -y --no-install-recommends pkg-config libssl-dev && rm -rf /var/lib/apt/lists/*
+# curl: utoipa-swagger-ui's build script downloads the UI bundle at compile time.
+RUN apt-get update && apt-get install -y --no-install-recommends pkg-config libssl-dev curl ca-certificates && rm -rf /var/lib/apt/lists/*
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 RUN cargo build --release -p nook-control
