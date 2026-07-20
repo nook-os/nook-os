@@ -9,6 +9,7 @@ import { NotesPanel } from "./Notes";
 import { useNewWork } from "../newwork";
 import { WorkspaceLocations } from "../WorkspaceLocations";
 import { askChoice, askConfirm, askForm, askText, notify } from "../dialogs";
+import { useSecretKeys } from "../secretkeys";
 
 export function WorkspacesPage() {
   const showNewWork = useNewWork((s) => s.show);
@@ -126,7 +127,9 @@ function EnvPanel({ workspaceId }: { workspaceId: string }) {
     }
     setContent(data?.content ?? "");
     setUnlocked(true);
-    setStatus("unlocked · synced to checkouts");
+    // Hold it for this browser session so new checkouts sync automatically.
+    useSecretKeys.getState().remember(workspaceId, passphrase);
+    setStatus("unlocked · auto-sync on for this session");
   };
 
   const save = async () => {
@@ -190,6 +193,7 @@ function EnvPanel({ workspaceId }: { workspaceId: string }) {
     setStatus(error ? "save failed" : (data?.message ?? "saved"));
     if (!error && passphrase) {
       setUnlocked(true);
+      useSecretKeys.getState().remember(workspaceId, passphrase);
       refetch();
     }
   };

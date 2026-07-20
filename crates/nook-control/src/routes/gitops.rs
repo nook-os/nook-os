@@ -224,13 +224,16 @@ pub async fn clone_repo(
         }
     };
 
+    // Every clone carries a job id so a watcher can correlate the finish
+    // event with the request that started it.
+    let job_id = uuid::Uuid::now_v7().to_string();
     events::record(
         &state,
         auth.tenant_id,
         EventDraft::new("git.clone_started")
             .actor("user", auth.user_id.0)
             .node(node_id)
-            .payload(serde_json::json!({ "url": req.url })),
+            .payload(serde_json::json!({ "url": req.url, "job_id": job_id })),
     )
     .await;
 
@@ -244,6 +247,41 @@ pub async fn clone_repo(
             ssh_key,
         })
         .ok_or_else(|| ApiError::BadRequest("node is offline".into()))?;
+
+    // Fire-and-forget: hand the caller a job id and report completion through
+    // the activity stream. Cloning a large repo shouldn't hold a request (or a
+    // modal) open for minutes.
+    if req.background {
+        let state = state.clone();
+        let tenant = auth.tenant_id;
+        let user = auth.user_id.0;
+        let job = job_id.clone();
+        let url = url.clone();
+        tokio::spawn(async move {
+            let outcome = tokio::time::timeout(std::time::Duration::from_secs(900), rx).await;
+            let (ok, message) = match outcome {
+                Ok(Ok(p)) => (p.ok, p.message),
+                Ok(Err(_)) => (false, "node disconnected mid-clone".to_string()),
+                Err(_) => (false, "clone timed out".to_string()),
+            };
+            events::record(
+                &state,
+                tenant,
+                EventDraft::new("git.clone_finished")
+                    .actor("user", user)
+                    .node(node_id)
+                    .payload(serde_json::json!({
+                        "url": url, "ok": ok, "message": message, "job_id": job
+                    })),
+            )
+            .await;
+        });
+        return Ok(Json(OpResponse {
+            ok: true,
+            path: Some(job_id),
+            message: "cloning in the background".into(),
+        }));
+    }
 
     let payload = match tokio::time::timeout(std::time::Duration::from_secs(90), rx).await {
         Ok(Ok(p)) => p,
@@ -265,9 +303,9 @@ pub async fn clone_repo(
         EventDraft::new("git.clone_finished")
             .actor("user", auth.user_id.0)
             .node(node_id)
-            .payload(
-                serde_json::json!({ "url": url, "ok": payload.ok, "message": payload.message }),
-            ),
+            .payload(serde_json::json!({
+                "url": url, "ok": payload.ok, "message": payload.message, "job_id": job_id
+            })),
     )
     .await;
 

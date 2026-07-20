@@ -2411,6 +2411,10 @@
           "url"
         ],
         "properties": {
+          "background": {
+            "type": "boolean",
+            "description": "Return as soon as the node has been asked, instead of waiting for the\nclone to finish. Progress arrives as activity events carrying `job_id`."
+          },
           "credential_id": {
             "oneOf": [
               {

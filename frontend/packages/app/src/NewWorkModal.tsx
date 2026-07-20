@@ -11,6 +11,7 @@ import { FolderGit2, Sparkles, X } from "lucide-react";
 import { api, type NodeInfo } from "@nookos/api";
 import { defaultRuntime, RuntimePicker } from "@nookos/ui";
 import { useNewWork } from "./newwork";
+import { useJobs } from "./jobs";
 import { WorkspaceLocations } from "./WorkspaceLocations";
 
 const AUTO = "";
@@ -18,6 +19,13 @@ type Tab = "new" | "existing";
 
 const looksLikeGitUrl = (q: string) =>
   /^(https?:\/\/|git@|ssh:\/\/|git:\/\/)/.test(q.trim()) || /\.git$/.test(q.trim());
+
+/** "git@github.com:authava/services.git" → "authava/services" */
+function repoLabel(url: string): string {
+  const tail = url.trim().replace(/\.git$/, "").replace(/\/$/, "");
+  const parts = tail.split(/[/:]/).filter(Boolean);
+  return parts.slice(-2).join("/") || tail;
+}
 
 /** Rendered once (in Shell); opens via the useNewWork store. */
 export function NewWorkHost() {
@@ -142,11 +150,20 @@ function NewWorkModal() {
   };
 
   const cloneAndResolve = async (node: string): Promise<string> => {
+    // Background clone: the modal shouldn't hold you hostage while a large
+    // repo downloads. The HUD tracks it and the activity stream reports back.
     const { data, error } = await api.POST("/api/v1/nodes/{id}/clone", {
       params: { path: { id: node } },
-      body: { url: q, credential_id: credentialId || null },
+      body: { url: q, credential_id: credentialId || null, background: true },
     });
     if (error || !data?.ok) throw new Error(data?.message ?? "clone failed");
+    if (data.path) {
+      useJobs.getState().start({
+        id: data.path, // the job id
+        label: `Cloning ${repoLabel(q)}`,
+        kind: "clone",
+      });
+    }
     setStatus(data.message);
     const want = q.replace(/\/$/, "").replace(/\.git$/, "").split(/[/:]/).pop();
     return pollWorkspace(want ?? "");

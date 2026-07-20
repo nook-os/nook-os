@@ -505,6 +505,17 @@ pub struct CloneRequest {
     pub name: Option<String>,
     /// Tenant git credential to clone with (private repos over SSH).
     pub credential_id: Option<GitCredentialId>,
+    /// Return as soon as the node has been asked, instead of waiting for the
+    /// clone to finish. Progress arrives as activity events carrying `job_id`.
+    #[serde(default)]
+    pub background: bool,
+}
+
+/// A long-running operation the caller can watch instead of blocking on.
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct JobAccepted {
+    pub job_id: String,
+    pub message: String,
 }
 
 #[derive(Debug, Clone, Deserialize, ToSchema)]

@@ -4,6 +4,9 @@ import { create } from "zustand";
 import type { QueryClient } from "@tanstack/react-query";
 import { connectUiSocket, type EventItem, type UiEvent } from "@nookos/api";
 import { notifyEvent } from "./notify";
+import { useJobs } from "./jobs";
+import { resyncSealedSecrets, useSecretKeys } from "./secretkeys";
+import { api } from "@nookos/api";
 
 const ACTIVITY_BUFFER = 250;
 
@@ -69,6 +72,29 @@ export function startLive(queryClient: QueryClient) {
       const kind = event.data.event.kind;
       if (kind.startsWith("workspace.") || kind.startsWith("git.")) {
         queryClient.invalidateQueries({ queryKey: ["workspaces"] });
+      }
+      // Background jobs report completion through activity events.
+      const payload = (event.data.event.payload ?? {}) as Record<string, unknown>;
+      if (kind === "git.clone_finished" && typeof payload.job_id === "string") {
+        useJobs
+          .getState()
+          .finish(
+            payload.job_id,
+            payload.ok !== false,
+            typeof payload.message === "string" ? payload.message : undefined,
+          );
+      }
+      // A new checkout can't receive sealed secrets from the server, so push
+      // them from here while we still hold the passphrase.
+      if (
+        kind === "git.clone_finished" ||
+        kind === "workspace.worktree_added" ||
+        kind === "workspace.discovered"
+      ) {
+        const wsId = event.data.event.workspace_id;
+        if (wsId && useSecretKeys.getState().keys[wsId]) {
+          void resyncSealedSecrets(wsId, api as never);
+        }
       }
       // Desktop notification + chime for things worth looking up for.
       notifyEvent(event.data.event);

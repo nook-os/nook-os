@@ -1240,3 +1240,109 @@ textarea.env-paste {
 table.nook-table tr.picked td {
   background: color-mix(in srgb, var(--nook-accent) 12%, transparent);
 }
+
+/* ── Jobs HUD: floating, draggable progress for background work ─────────── */
+.jobs-hud {
+  position: fixed;
+  z-index: 150;
+  width: 320px;
+  max-width: calc(100vw - 32px);
+  background: var(--nook-bg-panel);
+  border: 1px solid var(--nook-border-bright);
+  border-radius: var(--nook-radius);
+  box-shadow: 0 10px 34px rgba(0, 0, 0, 0.55);
+  overflow: hidden;
+  user-select: none;
+}
+.jobs-hud-header {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  height: var(--nook-ctrl);
+  padding: 0 8px 0 10px;
+  background: var(--nook-bg-raised);
+  border-bottom: 1px solid var(--nook-border);
+  color: var(--nook-fg-dim);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  /* The whole bar is the drag handle. */
+  cursor: grab;
+  touch-action: none;
+}
+.jobs-hud-header:active { cursor: grabbing; }
+.jobs-hud-header > span { flex: 1; }
+.jobs-hud-body { max-height: 240px; overflow-y: auto; }
+
+.job-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 8px 7px 10px;
+  border-bottom: 1px solid var(--nook-border);
+  font-size: 12px;
+}
+.job-row:last-child { border-bottom: none; }
+.job-row.clickable { cursor: pointer; }
+.job-row.clickable:hover { background: var(--nook-bg-raised); }
+.job-icon { flex: none; display: inline-flex; }
+.job-icon .ok { color: var(--nook-ok); }
+.job-icon .err { color: var(--nook-err); }
+.job-label {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  color: var(--nook-fg);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.job-message {
+  color: var(--nook-fg-faint);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.job-time { flex: none; color: var(--nook-fg-faint); font-size: 11px; }
+.job-dismiss {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: none;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--nook-fg-faint);
+  cursor: pointer;
+}
+.job-dismiss:hover { background: var(--nook-bg); color: var(--nook-fg-bright); }
+
+/* Indeterminate sweep — we don't know clone percentage, so don't fake it. */
+.jobs-hud-bar {
+  height: 2px;
+  background: var(--nook-border);
+  overflow: hidden;
+  position: relative;
+}
+.jobs-hud-bar::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  width: 40%;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    var(--nook-accent),
+    transparent
+  );
+  animation: nook-sweep 1.25s ease-in-out infinite;
+}
+@keyframes nook-sweep {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(350%); }
+}

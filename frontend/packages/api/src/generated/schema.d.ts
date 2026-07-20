@@ -912,6 +912,11 @@ export interface components {
             tmux: boolean;
         };
         CloneRequest: {
+            /**
+             * @description Return as soon as the node has been asked, instead of waiting for the
+             *     clone to finish. Progress arrives as activity events carrying `job_id`.
+             */
+            background?: boolean;
             credential_id?: null | components["schemas"]["GitCredentialId"];
             /** @description Directory name; derived from the URL when omitted. */
             name?: string | null;

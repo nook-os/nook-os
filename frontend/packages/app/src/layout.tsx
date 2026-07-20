@@ -23,6 +23,7 @@ import { useLive } from "./live";
 import { useWorkspaceContext } from "./context";
 import { NewWorkHost } from "./NewWorkModal";
 import { DialogHost } from "./dialogs";
+import { JobsHud } from "./JobsHud";
 import { useNewWork } from "./newwork";
 
 // Left rail: the permanent global nav. The top bar never repeats it — top is
@@ -194,6 +195,7 @@ export function Shell({ me }: { me: MeResponse }) {
     <div className="nook-app">
       <NewWorkHost />
       <DialogHost />
+      <JobsHud />
       <header className="nook-topbar">
         <div className="nook-brand">
           <span>◆</span>
