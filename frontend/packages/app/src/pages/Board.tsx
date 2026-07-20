@@ -24,6 +24,7 @@ import {
 import { api, type TaskItem } from "@nookos/api";
 import { Empty, Panel, Pill } from "@nookos/ui";
 import { useNewWork } from "../newwork";
+import { askChoice, askConfirm, askForm, askText, notify } from "../dialogs";
 
 function CardActions({
   task,
@@ -41,38 +42,69 @@ function CardActions({
     const { error } = await api.POST("/api/v1/tasks/{id}/dispatch", {
       params: { path: { id: task.id } },
     });
-    if (error) alert(JSON.stringify(error));
+    if (error) await notify("Dispatch failed", JSON.stringify(error));
     refresh();
   };
   const submitPr = async () => {
-    const pr_url = prompt("PR URL (leave blank to auto-generate a compare link):") ?? "";
+    const pr_url = await askText({
+      title: "Submit PR",
+      description: "Leave blank to auto-generate a compare link from the branch.",
+      label: "PR URL",
+      placeholder: "https://github.com/org/repo/pull/123",
+      value: "",
+      confirmLabel: "submit",
+    });
+    // askText returns null for cancel AND for empty — treat empty as auto.
     const { error } = await api.POST("/api/v1/tasks/{id}/submit-pr", {
       params: { path: { id: task.id } },
       body: { pr_url: pr_url || null },
     });
-    if (error) alert(JSON.stringify(error));
+    if (error) await notify("Submit failed", JSON.stringify(error));
     refresh();
   };
   const prune = async () => {
-    if (!confirm("Remove this task's worktree checkout?")) return;
+    const ok = await askConfirm({
+      title: "Prune worktree",
+      description: `Remove this task's worktree checkout from ${task.worktree_path ?? "the node"}?`,
+      confirmLabel: "prune",
+      danger: true,
+    });
+    if (!ok) return;
     const { error } = await api.POST("/api/v1/tasks/{id}/prune-worktree", {
       params: { path: { id: task.id } },
     });
-    if (error) alert(JSON.stringify(error));
+    if (error) await notify("Prune failed", JSON.stringify(error));
     refresh();
   };
   const edit = async () => {
-    const title = prompt("Task title", task.title);
-    if (title === null) return;
-    const description = prompt("Description (optional)", task.description ?? "");
+    const out = await askForm({
+      title: "Edit task",
+      fields: [
+        { name: "title", label: "Title", value: task.title, required: true },
+        {
+          name: "description",
+          label: "Description",
+          value: task.description ?? "",
+          multiline: true,
+          placeholder: "What needs doing?",
+        },
+      ],
+    });
+    if (!out) return;
     await api.PATCH("/api/v1/tasks/{id}", {
       params: { path: { id: task.id } },
-      body: { title: title.trim() || task.title, description: description ?? "" },
+      body: { title: out.title.trim() || task.title, description: out.description },
     });
     refresh();
   };
   const del = async () => {
-    if (!confirm(`Delete task "${task.title}"?`)) return;
+    const ok = await askConfirm({
+      title: "Delete task",
+      description: `"${task.title}" will be removed from the board.`,
+      confirmLabel: "delete",
+      danger: true,
+    });
+    if (!ok) return;
     await api.DELETE("/api/v1/tasks/{id}", { params: { path: { id: task.id } } });
     refresh();
   };
@@ -177,7 +209,7 @@ function Column({
   id: string;
   name: string;
   tasks: TaskItem[];
-  onAdd?: (title: string) => void;
+  onAdd?: (title: string, description?: string) => void;
   onStartWork: (task: TaskItem) => void;
   onRename: (name: string) => void;
   onDelete: () => void;
@@ -195,9 +227,21 @@ function Column({
             <button
               className="btn small"
               title="add task"
-              onClick={() => {
-                const title = prompt("Task title");
-                if (title?.trim()) onAdd(title.trim());
+              onClick={async () => {
+                const out = await askForm({
+                  title: `New task in ${name}`,
+                  fields: [
+                    { name: "title", label: "Title", required: true },
+                    {
+                      name: "description",
+                      label: "Description",
+                      multiline: true,
+                      placeholder: "Optional detail",
+                    },
+                  ],
+                  confirmLabel: "add task",
+                });
+                if (out?.title.trim()) onAdd(out.title.trim(), out.description);
               }}
             >
               <Plus size={12} />
@@ -206,9 +250,13 @@ function Column({
           <button
             className="btn small"
             title="rename column"
-            onClick={() => {
-              const n = prompt("Column name", name);
-              if (n?.trim()) onRename(n.trim());
+            onClick={async () => {
+              const n = await askText({
+                title: "Rename column",
+                value: name,
+                confirmLabel: "rename",
+              });
+              if (n) onRename(n);
             }}
           >
             <Pencil size={11} />
@@ -216,8 +264,17 @@ function Column({
           <button
             className="btn small"
             title="delete column (and its tasks)"
-            onClick={() => {
-              if (confirm(`Delete column "${name}" and its ${tasks.length} task(s)?`)) onDelete();
+            onClick={async () => {
+              const ok = await askConfirm({
+                title: `Delete column "${name}"`,
+                description:
+                  tasks.length > 0
+                    ? `${tasks.length} task(s) in this column will be deleted too.`
+                    : "This column is empty.",
+                confirmLabel: "delete",
+                danger: true,
+              });
+              if (ok) onDelete();
             }}
           >
             <X size={11} />
@@ -304,19 +361,24 @@ export function BoardPage() {
 
   const bust = () => queryClient.invalidateQueries({ queryKey: ["boards"] });
 
-  const addTask = async (columnId: string, title: string) => {
+  const addTask = async (columnId: string, title: string, description?: string) => {
     await api.POST("/api/v1/boards/{id}/tasks", {
       params: { path: { id: board.id } },
-      body: { title, column_id: columnId },
+      body: { title, column_id: columnId, description: description || null },
     });
     bust();
   };
   const addColumn = async () => {
-    const name = prompt("New column name");
-    if (!name?.trim()) return;
+    const name = await askText({
+      title: "New column",
+      label: "Column name",
+      placeholder: "In Review",
+      confirmLabel: "add column",
+    });
+    if (!name) return;
     await api.POST("/api/v1/boards/{id}/columns", {
       params: { path: { id: board.id } },
-      body: { name: name.trim() },
+      body: { name },
     });
     bust();
   };
@@ -329,13 +391,23 @@ export function BoardPage() {
     bust();
   };
   const renameBoard = async () => {
-    const name = prompt("Board name", detail.board.name);
-    if (!name?.trim()) return;
-    await api.PATCH("/api/v1/boards/{id}", { params: { path: { id: board.id } }, body: { name: name.trim() } });
+    const name = await askText({
+      title: "Rename board",
+      value: detail.board.name,
+      confirmLabel: "rename",
+    });
+    if (!name) return;
+    await api.PATCH("/api/v1/boards/{id}", { params: { path: { id: board.id } }, body: { name } });
     bust();
   };
   const deleteBoard = async () => {
-    if (!confirm(`Delete board "${detail.board.name}" and everything on it?`)) return;
+    const ok = await askConfirm({
+      title: `Delete board "${detail.board.name}"`,
+      description: "Every column and task on this board is deleted. This cannot be undone.",
+      confirmLabel: "delete board",
+      danger: true,
+    });
+    if (!ok) return;
     await api.DELETE("/api/v1/boards/{id}", { params: { path: { id: board.id } } });
     bust();
   };
@@ -367,7 +439,7 @@ export function BoardPage() {
                   id={c.id}
                   name={c.name}
                   tasks={detail.tasks.filter((t) => t.column_id === c.id)}
-                  onAdd={(title) => addTask(c.id, title)}
+                  onAdd={(title, description) => addTask(c.id, title, description)}
                   onStartWork={(t) =>
                     showNewWork({
                       taskId: t.id,

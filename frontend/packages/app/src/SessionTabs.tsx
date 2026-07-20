@@ -10,6 +10,7 @@ import { useWorkspaceContext } from "./context";
 import { useLive } from "./live";
 import { useNewWork } from "./newwork";
 import { useSessionTabs } from "./sessiontabs";
+import { askText, notify } from "./dialogs";
 
 interface MenuState {
   id: string;
@@ -52,16 +53,21 @@ export function SessionTabs({ activeId }: { activeId?: string }) {
 
   /** Rename the session itself, so every viewer sees it — not just this tab. */
   const renameSession = async (id: string, current: string) => {
-    const name = window.prompt("Rename session", current);
-    if (!name?.trim() || name === current) return;
-    store.rename(id, name.trim()); // optimistic
+    const name = await askText({
+      title: "Rename session",
+      label: "Session name",
+      value: current,
+      confirmLabel: "rename",
+    });
+    if (!name || name === current) return;
+    store.rename(id, name); // optimistic
     const { error } = await api.PATCH("/api/v1/sessions/{id}", {
       params: { path: { id } },
-      body: { name: name.trim() },
+      body: { name },
     });
     if (error) {
       store.rename(id, current);
-      window.alert("Rename failed");
+      await notify("Rename failed", "The control plane rejected the change.");
       return;
     }
     queryClient.invalidateQueries();

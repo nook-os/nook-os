@@ -7,6 +7,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Columns2, Plus, Rows2 } from "lucide-react";
 import { api } from "@nookos/api";
 import { TabMenu } from "./SessionTabs";
+import { askText } from "./dialogs";
 
 export function SessionWindows({ sessionId }: { sessionId: string }) {
   const queryClient = useQueryClient();
@@ -63,9 +64,13 @@ export function SessionWindows({ sessionId }: { sessionId: string }) {
               e.preventDefault();
               setMenu({ index: w.index, x: e.clientX, y: e.clientY });
             }}
-            onDoubleClick={() => {
-              const name = window.prompt("Rename terminal", w.name);
-              if (name?.trim()) act({ action: "rename", index: w.index, name: name.trim() });
+            onDoubleClick={async () => {
+              const name = await askText({
+                title: "Rename terminal",
+                value: w.name,
+                confirmLabel: "rename",
+              });
+              if (name) act({ action: "rename", index: w.index, name });
             }}
             title={`${w.name}${(w.panes ?? 1) > 1 ? ` · ${w.panes} panes` : ""}`}
           >
@@ -99,11 +104,14 @@ export function SessionWindows({ sessionId }: { sessionId: string }) {
             {
               label: "Rename Terminal…",
               divider: true,
-              onSelect: () => {
+              onSelect: async () => {
                 const w = list.find((x) => x.index === menu.index);
-                const name = window.prompt("Rename terminal", w?.name ?? "");
-                if (name?.trim())
-                  act({ action: "rename", index: menu.index, name: name.trim() });
+                const name = await askText({
+                  title: "Rename terminal",
+                  value: w?.name ?? "",
+                  confirmLabel: "rename",
+                });
+                if (name) act({ action: "rename", index: menu.index, name });
               },
             },
             {

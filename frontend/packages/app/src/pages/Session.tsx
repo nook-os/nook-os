@@ -10,6 +10,7 @@ import { ScopeChip } from "../layout";
 import { SessionTabs } from "../SessionTabs";
 import { SessionWindows, SplitButtons } from "../SessionWindows";
 import { useSessionTabs } from "../sessiontabs";
+import { askConfirm } from "../dialogs";
 
 const DIFF_PANEL_KEY = "nookos-diff-panel-open";
 
@@ -200,7 +201,14 @@ export function SessionPage() {
   };
 
   const kill = async () => {
-    if (confirm("Kill this session? The tmux session ends for real.")) {
+    const ok = await askConfirm({
+      title: "Kill session",
+      description:
+        "The tmux session ends for real on the node — running processes are terminated.",
+      confirmLabel: "kill",
+      danger: true,
+    });
+    if (ok) {
       await api.POST("/api/v1/sessions/{id}/kill", {
         params: { path: { id: session.id } },
       });

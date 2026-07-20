@@ -8,6 +8,7 @@ import { ActivityFeed } from "./Activity";
 import { NotesPanel } from "./Notes";
 import { useNewWork } from "../newwork";
 import { WorkspaceLocations } from "../WorkspaceLocations";
+import { askChoice, askConfirm, notify } from "../dialogs";
 
 export function WorkspacesPage() {
   const showNewWork = useNewWork((s) => s.show);
@@ -292,19 +293,36 @@ function DeleteWorkspaceButton({
   const del = async () => {
     let deleteFiles = false;
     if (checkouts > 0) {
-      const answer = window.prompt(
-        `Delete workspace "${name}"?\n\n` +
-          `It has ${checkouts} checkout(s) on disk.\n\n` +
-          `Type "files" to delete the checkouts too (destructive — the code is removed),\n` +
-          `or "forget" to only remove it from NookOS (it will be rediscovered ` +
-          `while the files remain).`,
-        "forget",
-      );
-      if (answer === null) return;
-      const choice = answer.trim().toLowerCase();
-      if (choice !== "files" && choice !== "forget") return;
+      const choice = await askChoice({
+        title: `Delete workspace "${name}"`,
+        description: `It has ${checkouts} checkout(s) on disk.`,
+        choices: [
+          {
+            value: "forget",
+            label: "Forget it — keep the code",
+            description:
+              "Removes it from NookOS only. Discovery will find the files again on the next scan.",
+          },
+          {
+            value: "files",
+            label: "Delete the checkouts too",
+            description:
+              "Destructive: the code is removed from every online node. Uncommitted work is lost.",
+          },
+        ],
+        confirmLabel: "delete",
+        danger: true,
+      });
+      if (!choice) return;
       deleteFiles = choice === "files";
-    } else if (!window.confirm(`Delete workspace "${name}"?`)) {
+    } else if (
+      !(await askConfirm({
+        title: `Delete workspace "${name}"`,
+        description: "It has no checkouts on disk.",
+        confirmLabel: "delete",
+        danger: true,
+      }))
+    ) {
       return;
     }
 
@@ -315,15 +333,16 @@ function DeleteWorkspaceButton({
     });
     setBusy(false);
     if (error || !response.ok) {
-      window.alert(
+      await notify(
+        "Delete failed",
         response.status === 409
           ? "This workspace still has live sessions — kill them first."
-          : `Delete failed: ${JSON.stringify(error)}`,
+          : JSON.stringify(error),
       );
       return;
     }
     queryClient.invalidateQueries();
-    if (data?.checkouts_remaining) window.alert(data.message);
+    if (data?.checkouts_remaining) await notify("Deleted", data.message);
   };
 
   return (

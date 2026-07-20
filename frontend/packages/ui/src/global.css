@@ -1194,3 +1194,24 @@ textarea.env-paste {
   cursor: pointer;
 }
 .term-strip-add:hover { color: var(--nook-accent); border-color: var(--nook-accent); }
+
+/* ── Dialogs (themed replacements for prompt/confirm/alert) ──────────────── */
+.modal.dialog { width: min(480px, calc(100vw - 32px)); }
+.dialog-description { margin: 0; line-height: 1.55; white-space: pre-line; }
+.dialog-choice {
+  display: flex;
+  gap: 9px;
+  align-items: flex-start;
+  padding: 9px 10px;
+  border: 1px solid var(--nook-border);
+  border-radius: var(--nook-radius);
+  cursor: pointer;
+}
+.dialog-choice:hover { border-color: var(--nook-border-bright); }
+.dialog-choice.selected {
+  border-color: var(--nook-accent);
+  background: var(--nook-bg-raised);
+}
+.dialog-choice input { margin-top: 2px; flex: none; }
+.dialog-choice > span { display: flex; flex-direction: column; gap: 2px; }
+.dialog-choice-desc { line-height: 1.45; }

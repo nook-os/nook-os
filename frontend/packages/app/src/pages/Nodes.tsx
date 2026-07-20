@@ -3,6 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { Link, useParams } from "react-router-dom";
 import { api } from "@nookos/api";
 import { Empty, Panel, Pill, ResourceBars, StatusDot, statusTone } from "@nookos/ui";
+import { askConfirm } from "../dialogs";
 import { useLive } from "../live";
 
 export function NodesPage() {
@@ -118,7 +119,14 @@ export function NodesPage() {
                       <button
                         className="btn danger small"
                         onClick={async () => {
-                          if (confirm(`Remove node ${n.name}?`)) {
+                          const ok = await askConfirm({
+                            title: `Remove node ${n.name}`,
+                            description:
+                              "It stops appearing in NookOS. Re-running `nook setup` on that machine rejoins it.",
+                            confirmLabel: "remove",
+                            danger: true,
+                          });
+                          if (ok) {
                             await api.DELETE("/api/v1/nodes/{id}", {
                               params: { path: { id: n.id } },
                             });
