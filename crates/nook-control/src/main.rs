@@ -38,11 +38,11 @@ async fn main() -> Result<()> {
 
     match cli.command.unwrap_or(Command::Serve) {
         Command::Serve => {
-            // Dev boots always seed — the wipe-and-reboot loop stays
-            // predictable with zero extra steps.
-            if !cfg.is_production() {
-                nook_control::seed::run(&db, &cfg).await?;
-            }
+            // Always seed: built-in themes ship with every install, so a fresh
+            // production instance has real choice out of the box. `seed::run`
+            // stops there in production — demo tenants and dev join tokens
+            // stay dev-only.
+            nook_control::seed::run(&db, &cfg).await?;
             serve(db, cfg).await
         }
         Command::Seed => nook_control::seed::run(&db, &cfg).await,
