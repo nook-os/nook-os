@@ -519,6 +519,27 @@ pub struct RemoveWorktreeRequest {
     pub path: String,
 }
 
+/// Deleting a workspace. Records always go; the checkouts on disk only go
+/// when explicitly asked for (and if they stay, discovery re-adds them).
+#[derive(Debug, Clone, Default, Deserialize, ToSchema)]
+pub struct DeleteWorkspaceRequest {
+    /// Also delete the checkout directories on every online node.
+    #[serde(default)]
+    pub delete_files: bool,
+}
+
+/// What a workspace delete actually did.
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct DeleteWorkspaceResponse {
+    pub deleted: bool,
+    /// Checkouts removed from disk.
+    pub checkouts_removed: usize,
+    /// Checkouts left behind (node offline, or removal failed) — these will
+    /// be rediscovered.
+    pub checkouts_remaining: usize,
+    pub message: String,
+}
+
 #[derive(Debug, Clone, Deserialize, ToSchema)]
 pub struct InitProjectRequest {
     pub name: String,

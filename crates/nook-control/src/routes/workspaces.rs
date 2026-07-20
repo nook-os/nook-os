@@ -4,7 +4,9 @@ use nook_types::*;
 
 use crate::auth::AuthCtx;
 use crate::error::{ApiError, ApiResult};
+use crate::events::{self, EventDraft};
 use crate::services::{core, identity::slugify};
+use nook_proto::ControlToNode;
 use crate::state::AppState;
 
 #[utoipa::path(get, path = "/api/v1/workspaces",
@@ -107,4 +109,117 @@ pub async fn create(
         _ => e.into(),
     })?;
     Ok(Json(workspace))
+}
+
+#[utoipa::path(delete, path = "/api/v1/workspaces/{id}",
+    operation_id = "delete_workspace",
+    params(("id" = String, Path,)),
+    request_body = DeleteWorkspaceRequest,
+    responses(
+        (status = 200, body = DeleteWorkspaceResponse),
+        (status = 404),
+        (status = 409, description = "the workspace still has live sessions")))]
+pub async fn delete(
+    State(state): State<AppState>,
+    auth: AuthCtx,
+    Path(id): Path<WorkspaceId>,
+    body: Option<Json<DeleteWorkspaceRequest>>,
+) -> ApiResult<Json<DeleteWorkspaceResponse>> {
+    let Json(req) = body.unwrap_or_default();
+
+    let workspace: Option<Workspace> =
+        sqlx::query_as("SELECT * FROM workspaces WHERE id = $1 AND tenant_id = $2")
+            .bind(id)
+            .bind(auth.tenant_id)
+            .fetch_optional(&state.db)
+            .await?;
+    let workspace = workspace.ok_or(ApiError::NotFound)?;
+
+    // Live sessions would be killed by the cascade with their tmux left
+    // orphaned on the node — make the caller deal with them first.
+    let (live,): (i64,) = sqlx::query_as(
+        "SELECT count(*) FROM sessions
+         WHERE workspace_id = $1 AND status IN ('starting', 'running', 'detached')",
+    )
+    .bind(id)
+    .fetch_one(&state.db)
+    .await?;
+    if live > 0 {
+        return Err(ApiError::Conflict(format!(
+            "{live} live session(s) — kill them first"
+        )));
+    }
+
+    let checkouts: Vec<(NodeId, String)> =
+        sqlx::query_as("SELECT node_id, path FROM node_workspaces WHERE workspace_id = $1")
+            .bind(id)
+            .fetch_all(&state.db)
+            .await?;
+    let total = checkouts.len();
+    let mut removed = 0usize;
+
+    if req.delete_files {
+        // Worktrees first: removing a primary clone out from under its linked
+        // worktrees would leave them dangling.
+        let mut ordered = checkouts.clone();
+        ordered.sort_by_key(|(_, path)| path.matches('/').count());
+        ordered.reverse();
+        for (node_id, path) in ordered {
+            let Some(rx) = state.registry.request_op(node_id, |request_id| {
+                ControlToNode::RemoveCheckout {
+                    request_id,
+                    path: path.clone(),
+                }
+            }) else {
+                continue; // node offline — the checkout stays
+            };
+            if let Ok(Ok(payload)) =
+                tokio::time::timeout(std::time::Duration::from_secs(30), rx).await
+            {
+                if payload.ok {
+                    removed += 1;
+                } else {
+                    tracing::warn!(%node_id, error = %payload.message, "checkout removal failed");
+                }
+            }
+        }
+    }
+
+    // Cascades node_workspaces, sessions, notes and secrets; tasks and events
+    // keep their history with a null workspace.
+    sqlx::query("DELETE FROM workspaces WHERE id = $1 AND tenant_id = $2")
+        .bind(id)
+        .bind(auth.tenant_id)
+        .execute(&state.db)
+        .await?;
+
+    events::record(
+        &state,
+        auth.tenant_id,
+        EventDraft::new("workspace.deleted")
+            .actor("user", auth.user_id.0)
+            .payload(serde_json::json!({
+                "name": workspace.name,
+                "checkouts_removed": removed,
+                "deleted_files": req.delete_files,
+            })),
+    )
+    .await;
+
+    let remaining = total - removed;
+    let message = if remaining > 0 {
+        format!(
+            "deleted '{}' — {remaining} checkout(s) still on disk and will be \
+             rediscovered until removed",
+            workspace.name
+        )
+    } else {
+        format!("deleted '{}'", workspace.name)
+    };
+    Ok(Json(DeleteWorkspaceResponse {
+        deleted: true,
+        checkouts_removed: removed,
+        checkouts_remaining: remaining,
+        message,
+    }))
 }

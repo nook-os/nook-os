@@ -141,6 +141,12 @@ pub enum ControlToNode {
         request_id: uuid::Uuid,
         worktree_path: String,
     },
+    /// Delete a checkout directory outright — primary clone or worktree —
+    /// when a workspace is deleted with "also remove the files".
+    RemoveCheckout {
+        request_id: uuid::Uuid,
+        path: String,
+    },
     /// Create a brand-new empty git project under the node's workspace root.
     InitProject {
         request_id: uuid::Uuid,

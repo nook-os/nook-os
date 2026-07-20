@@ -35,7 +35,10 @@ pub fn build_router(state: AppState) -> Router {
             "/workspaces",
             get(workspaces::list).post(workspaces::create),
         )
-        .route("/workspaces/{id}", get(workspaces::get_one))
+        .route(
+            "/workspaces/{id}",
+            get(workspaces::get_one).delete(workspaces::delete),
+        )
         .route("/workspaces/{id}/git", get(workspaces::git_status))
         .route("/workspaces/{id}/worktrees", post(gitops::add_worktree))
         .route("/workspaces/{id}/secrets", get(gitops::list_secrets))

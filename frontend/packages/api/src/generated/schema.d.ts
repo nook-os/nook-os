@@ -593,7 +593,7 @@ export interface paths {
         get: operations["get_workspace"];
         put?: never;
         post?: never;
-        delete?: never;
+        delete: operations["delete_workspace"];
         options?: never;
         head?: never;
         patch?: never;
@@ -878,6 +878,26 @@ export interface components {
         CreateWorkspaceRequest: {
             description?: string | null;
             name: string;
+        };
+        /**
+         * @description Deleting a workspace. Records always go; the checkouts on disk only go
+         *     when explicitly asked for (and if they stay, discovery re-adds them).
+         */
+        DeleteWorkspaceRequest: {
+            /** @description Also delete the checkout directories on every online node. */
+            delete_files?: boolean;
+        };
+        /** @description What a workspace delete actually did. */
+        DeleteWorkspaceResponse: {
+            /**
+             * @description Checkouts left behind (node offline, or removal failed) — these will
+             *     be rediscovered.
+             */
+            checkouts_remaining: number;
+            /** @description Checkouts removed from disk. */
+            checkouts_removed: number;
+            deleted: boolean;
+            message: string;
         };
         DevLoginRequest: {
             display_name?: string | null;
@@ -2421,6 +2441,44 @@ export interface operations {
                 };
             };
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    delete_workspace: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DeleteWorkspaceRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DeleteWorkspaceResponse"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description the workspace still has live sessions */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };

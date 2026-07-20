@@ -176,6 +176,47 @@ pub fn clone_repo(
     }
 }
 
+/// Delete a checkout directory — primary clone or linked worktree.
+///
+/// Deliberately paranoid: this is the only operation that removes user files,
+/// so the path must sit inside one of the node's configured workspace roots
+/// AND look like a git checkout. A worktree is removed through git so the
+/// primary repo's metadata stays consistent.
+pub fn remove_checkout(path: &str, workspace_roots: &[String]) -> OpOutcome {
+    let dir = Path::new(path);
+    // Resolve symlinks/.. before comparing against the roots.
+    let Ok(canonical) = dir.canonicalize() else {
+        return fail(format!("{path} does not exist"));
+    };
+    let inside_root = workspace_roots.iter().any(|root| {
+        Path::new(&crate::config::expand_path(root))
+            .canonicalize()
+            .is_ok_and(|r| canonical.starts_with(&r) && canonical != r)
+    });
+    if !inside_root {
+        return fail(format!(
+            "refusing to delete {path}: outside this node's workspace roots"
+        ));
+    }
+    let git_marker = canonical.join(".git");
+    if !git_marker.exists() {
+        return fail(format!("refusing to delete {path}: not a git checkout"));
+    }
+
+    // Linked worktree (.git is a file) → let git unregister it properly.
+    if git_marker.is_file() {
+        return remove_worktree(&canonical.to_string_lossy());
+    }
+    match std::fs::remove_dir_all(&canonical) {
+        Ok(()) => OpOutcome {
+            ok: true,
+            path: Some(path.to_string()),
+            message: format!("removed checkout {path}"),
+        },
+        Err(e) => fail(format!("could not remove {path}: {e}")),
+    }
+}
+
 /// Turn git's terse transport errors into something the operator can act on.
 /// Auth failures are the common case and the fix depends on which key the
 /// node is using, so say exactly which one was presented.

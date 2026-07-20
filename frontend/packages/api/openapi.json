@@ -1462,6 +1462,50 @@
             "description": ""
           }
         }
+      },
+      "delete": {
+        "tags": [
+          "crate::routes::workspaces"
+        ],
+        "operationId": "delete_workspace",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DeleteWorkspaceRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeleteWorkspaceResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": ""
+          },
+          "409": {
+            "description": "the workspace still has live sessions"
+          }
+        }
       }
     },
     "/api/v1/workspaces/{id}/git": {
@@ -2341,6 +2385,44 @@
             ]
           },
           "name": {
+            "type": "string"
+          }
+        }
+      },
+      "DeleteWorkspaceRequest": {
+        "type": "object",
+        "description": "Deleting a workspace. Records always go; the checkouts on disk only go\nwhen explicitly asked for (and if they stay, discovery re-adds them).",
+        "properties": {
+          "delete_files": {
+            "type": "boolean",
+            "description": "Also delete the checkout directories on every online node."
+          }
+        }
+      },
+      "DeleteWorkspaceResponse": {
+        "type": "object",
+        "description": "What a workspace delete actually did.",
+        "required": [
+          "deleted",
+          "checkouts_removed",
+          "checkouts_remaining",
+          "message"
+        ],
+        "properties": {
+          "checkouts_remaining": {
+            "type": "integer",
+            "description": "Checkouts left behind (node offline, or removal failed) — these will\nbe rediscovered.",
+            "minimum": 0
+          },
+          "checkouts_removed": {
+            "type": "integer",
+            "description": "Checkouts removed from disk.",
+            "minimum": 0
+          },
+          "deleted": {
+            "type": "boolean"
+          },
+          "message": {
             "type": "string"
           }
         }

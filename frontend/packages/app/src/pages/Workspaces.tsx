@@ -1,7 +1,7 @@
 import React, { useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useParams } from "react-router-dom";
-import { Plus } from "lucide-react";
+import { Plus, Trash2 } from "lucide-react";
 import { api } from "@nookos/api";
 import { Empty, Panel, Pill, StatusDot, statusTone } from "@nookos/ui";
 import { ActivityFeed } from "./Activity";
@@ -37,6 +37,7 @@ export function WorkspacesPage() {
               <tr>
                 <th style={{ width: "28%" }}>Workspace</th>
                 <th>Where it lives</th>
+                <th style={{ width: 40 }} />
               </tr>
             </thead>
             <tbody>
@@ -49,6 +50,13 @@ export function WorkspacesPage() {
                   </td>
                   <td>
                     <WorkspaceLocations locations={w.locations} />
+                  </td>
+                  <td>
+                    <DeleteWorkspaceButton
+                      id={w.id}
+                      name={w.name}
+                      checkouts={w.locations.length}
+                    />
                   </td>
                 </tr>
               ))}
@@ -264,5 +272,68 @@ export function WorkspaceDetail() {
         </Panel>
       </div>
     </div>
+  );
+}
+
+/** Delete a workspace, optionally removing its checkouts from disk.
+ *  Records alone aren't enough: leave the files and discovery re-adds it. */
+function DeleteWorkspaceButton({
+  id,
+  name,
+  checkouts,
+}: {
+  id: string;
+  name: string;
+  checkouts: number;
+}) {
+  const queryClient = useQueryClient();
+  const [busy, setBusy] = useState(false);
+
+  const del = async () => {
+    let deleteFiles = false;
+    if (checkouts > 0) {
+      const answer = window.prompt(
+        `Delete workspace "${name}"?\n\n` +
+          `It has ${checkouts} checkout(s) on disk.\n\n` +
+          `Type "files" to delete the checkouts too (destructive — the code is removed),\n` +
+          `or "forget" to only remove it from NookOS (it will be rediscovered ` +
+          `while the files remain).`,
+        "forget",
+      );
+      if (answer === null) return;
+      const choice = answer.trim().toLowerCase();
+      if (choice !== "files" && choice !== "forget") return;
+      deleteFiles = choice === "files";
+    } else if (!window.confirm(`Delete workspace "${name}"?`)) {
+      return;
+    }
+
+    setBusy(true);
+    const { data, error, response } = await api.DELETE("/api/v1/workspaces/{id}", {
+      params: { path: { id } },
+      body: { delete_files: deleteFiles },
+    });
+    setBusy(false);
+    if (error || !response.ok) {
+      window.alert(
+        response.status === 409
+          ? "This workspace still has live sessions — kill them first."
+          : `Delete failed: ${JSON.stringify(error)}`,
+      );
+      return;
+    }
+    queryClient.invalidateQueries();
+    if (data?.checkouts_remaining) window.alert(data.message);
+  };
+
+  return (
+    <button
+      className="btn danger small icon"
+      title="delete workspace"
+      onClick={del}
+      disabled={busy}
+    >
+      <Trash2 size={12} />
+    </button>
   );
 }

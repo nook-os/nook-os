@@ -272,6 +272,26 @@ pub async fn connect_once(cfg: &NodeConfig) -> Result<()> {
                     }
                 });
             }
+            ControlToNode::RemoveCheckout { request_id, path } => {
+                let tx = out_tx.clone();
+                let roots = cfg.workspace_roots.clone();
+                let scan_roots = roots.clone();
+                tokio::task::spawn_blocking(move || {
+                    let outcome = crate::gitops::remove_checkout(&path, &roots);
+                    let ok = outcome.ok;
+                    let _ = tx.blocking_send(NodeToControl::OpResult {
+                        request_id,
+                        ok: outcome.ok,
+                        path: outcome.path,
+                        message: outcome.message,
+                    });
+                    if ok {
+                        let _ = tx.blocking_send(NodeToControl::WorkspacesDiscovered {
+                            workspaces: discovery::scan(&scan_roots),
+                        });
+                    }
+                });
+            }
             ControlToNode::InitProject { request_id, name } => {
                 let tx = out_tx.clone();
                 let root = cfg
