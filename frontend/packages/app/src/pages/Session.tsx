@@ -8,6 +8,7 @@ import { useLive } from "../live";
 import { useWorkspaceContext } from "../context";
 import { ScopeChip } from "../layout";
 import { SessionTabs } from "../SessionTabs";
+import { SessionWindows, SplitButtons } from "../SessionWindows";
 import { useSessionTabs } from "../sessiontabs";
 
 const DIFF_PANEL_KEY = "nookos-diff-panel-open";
@@ -229,8 +230,10 @@ export function SessionPage() {
           <span
             style={{ display: "inline-flex", alignItems: "center", gap: 6 }}
           >
+            <SessionWindows sessionId={session.id} />
             <Pill tone="accent">{session.runtime}</Pill>
             <Pill tone={statusTone(status)}>{status}</Pill>
+            <SplitButtons sessionId={session.id} />
             <button
               className="btn small icon"
               onClick={toggleGit}

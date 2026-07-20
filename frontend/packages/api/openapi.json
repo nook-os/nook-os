@@ -986,6 +986,47 @@
             "description": ""
           }
         }
+      },
+      "patch": {
+        "tags": [
+          "crate::routes::sessions"
+        ],
+        "operationId": "update_session",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateSessionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Session"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": ""
+          }
+        }
       }
     },
     "/api/v1/sessions/{id}/kill": {
@@ -1007,6 +1048,53 @@
         "responses": {
           "204": {
             "description": ""
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      }
+    },
+    "/api/v1/sessions/{id}/windows": {
+      "post": {
+        "tags": [
+          "crate::routes::sessions"
+        ],
+        "summary": "The terminals inside a session — tmux windows. Listing, opening, splitting,\nfocusing, closing and renaming all go through here and always answer with\nthe resulting list.",
+        "operationId": "session_windows",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WindowAction"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/SessionWindow"
+                  }
+                }
+              }
+            }
           },
           "404": {
             "description": ""
@@ -3152,6 +3240,34 @@
         "type": "string",
         "format": "uuid"
       },
+      "SessionWindow": {
+        "type": "object",
+        "description": "One terminal inside a session (a tmux window).",
+        "required": [
+          "index",
+          "name",
+          "active"
+        ],
+        "properties": {
+          "active": {
+            "type": "boolean"
+          },
+          "index": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "name": {
+            "type": "string"
+          },
+          "panes": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Panes in this window — >1 means it's split.",
+            "minimum": 0
+          }
+        }
+      },
       "Setting": {
         "type": "object",
         "description": "Scope values: `tenant` | `user`.",
@@ -3676,6 +3792,18 @@
           }
         }
       },
+      "UpdateSessionRequest": {
+        "type": "object",
+        "description": "Renaming a session (tabs are named things people recognize).",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          }
+        }
+      },
       "UpdateSettingRequest": {
         "type": "object",
         "required": [
@@ -3783,6 +3911,130 @@
       "UserId": {
         "type": "string",
         "format": "uuid"
+      },
+      "WindowAction": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "Just report the current terminals.",
+            "required": [
+              "action"
+            ],
+            "properties": {
+              "action": {
+                "type": "string",
+                "enum": [
+                  "list"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Open another terminal in the session and focus it.",
+            "required": [
+              "action"
+            ],
+            "properties": {
+              "action": {
+                "type": "string",
+                "enum": [
+                  "new"
+                ]
+              },
+              "cwd": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Split the visible terminal so two are on screen at once.",
+            "required": [
+              "vertical",
+              "action"
+            ],
+            "properties": {
+              "action": {
+                "type": "string",
+                "enum": [
+                  "split"
+                ]
+              },
+              "vertical": {
+                "type": "boolean"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "index",
+              "action"
+            ],
+            "properties": {
+              "action": {
+                "type": "string",
+                "enum": [
+                  "select"
+                ]
+              },
+              "index": {
+                "type": "integer",
+                "format": "int32",
+                "minimum": 0
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "index",
+              "action"
+            ],
+            "properties": {
+              "action": {
+                "type": "string",
+                "enum": [
+                  "close"
+                ]
+              },
+              "index": {
+                "type": "integer",
+                "format": "int32",
+                "minimum": 0
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "index",
+              "name",
+              "action"
+            ],
+            "properties": {
+              "action": {
+                "type": "string",
+                "enum": [
+                  "rename"
+                ]
+              },
+              "index": {
+                "type": "integer",
+                "format": "int32",
+                "minimum": 0
+              },
+              "name": {
+                "type": "string"
+              }
+            }
+          }
+        ],
+        "description": "What to do with a session's terminals (tmux windows/panes)."
       },
       "Workspace": {
         "type": "object",

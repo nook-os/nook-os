@@ -519,6 +519,23 @@ pub struct RemoveWorktreeRequest {
     pub path: String,
 }
 
+/// Renaming a session (tabs are named things people recognize).
+#[derive(Debug, Clone, Deserialize, ToSchema)]
+pub struct UpdateSessionRequest {
+    pub name: String,
+}
+
+/// One terminal inside a session (a tmux window).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, Default)]
+pub struct SessionWindow {
+    pub index: u32,
+    pub name: String,
+    pub active: bool,
+    /// Panes in this window — >1 means it's split.
+    #[serde(default)]
+    pub panes: u32,
+}
+
 /// Deleting a workspace. Records always go; the checkouts on disk only go
 /// when explicitly asked for (and if they stay, discovery re-adds them).
 #[derive(Debug, Clone, Default, Deserialize, ToSchema)]

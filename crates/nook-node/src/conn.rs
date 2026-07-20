@@ -292,6 +292,45 @@ pub async fn connect_once(cfg: &NodeConfig) -> Result<()> {
                     }
                 });
             }
+            ControlToNode::SessionWindows {
+                request_id,
+                tmux_session,
+                action,
+            } => {
+                let tx = out_tx.clone();
+                tokio::task::spawn_blocking(move || {
+                    use nook_proto::WindowAction as W;
+                    // Every action ends by reporting the resulting window list,
+                    // so the UI always renders from truth rather than guessing.
+                    let applied = match &action {
+                        W::List => Ok(()),
+                        W::New { cwd } => crate::tmux::new_window(&tmux_session, cwd.as_deref()),
+                        W::Split { vertical } => {
+                            crate::tmux::split_window(&tmux_session, *vertical)
+                        }
+                        W::Select { index } => crate::tmux::select_window(&tmux_session, *index),
+                        W::Close { index } => crate::tmux::kill_window(&tmux_session, *index),
+                        W::Rename { index, name } => {
+                            crate::tmux::rename_window(&tmux_session, *index, name)
+                        }
+                    };
+                    let result = applied.and_then(|()| crate::tmux::list_windows(&tmux_session));
+                    let _ = tx.blocking_send(match result {
+                        Ok(json) => NodeToControl::OpResult {
+                            request_id,
+                            ok: true,
+                            path: None,
+                            message: json,
+                        },
+                        Err(e) => NodeToControl::OpResult {
+                            request_id,
+                            ok: false,
+                            path: None,
+                            message: e.to_string(),
+                        },
+                    });
+                });
+            }
             ControlToNode::InitProject { request_id, name } => {
                 let tx = out_tx.clone();
                 let root = cfg

@@ -1116,3 +1116,81 @@ textarea.env-paste {
   width: 100%;
   box-sizing: border-box;
 }
+
+/* ── Context menu (tab / terminal right-click) ───────────────────────────── */
+.context-menu {
+  position: fixed;
+  z-index: 200;
+  min-width: 190px;
+  padding: 4px;
+  background: var(--nook-bg-panel);
+  border: 1px solid var(--nook-border-bright);
+  border-radius: var(--nook-radius);
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.55);
+  display: flex;
+  flex-direction: column;
+}
+.context-menu-item {
+  display: block;
+  width: 100%;
+  padding: 5px 10px;
+  border: none;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--nook-fg);
+  font-size: 12px;
+  text-align: left;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.context-menu-item:hover:not(:disabled) {
+  background: var(--nook-bg-raised);
+  color: var(--nook-fg-bright);
+}
+.context-menu-item:disabled { opacity: 0.35; cursor: default; }
+.context-menu-item.danger { color: var(--nook-err); }
+.context-menu-sep {
+  height: 1px;
+  margin: 4px 6px;
+  background: var(--nook-border);
+}
+
+/* Pinned tabs read as anchored: accent pin, no wasted width. */
+.session-tab-pin { flex: none; color: var(--nook-accent); }
+.session-tab.pinned .session-tab-close { opacity: 0.45; }
+
+/* ── Terminals within a session (tmux windows) ───────────────────────────── */
+.term-strip { display: inline-flex; align-items: center; gap: 3px; }
+.term-chip {
+  height: var(--nook-ctrl-sm);
+  padding: 0 8px;
+  border: 1px solid var(--nook-border-bright);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--nook-fg-dim);
+  font-size: 11px;
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.term-chip:hover { color: var(--nook-fg-bright); border-color: var(--nook-accent); }
+.term-chip.active {
+  color: var(--nook-bg);
+  background: var(--nook-accent);
+  border-color: var(--nook-accent);
+}
+.term-strip-add,
+.term-strip-add.lonely {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: var(--nook-ctrl-sm);
+  padding: 0 8px;
+  border: 1px dashed var(--nook-border-bright);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--nook-fg-faint);
+  font-size: 11px;
+  cursor: pointer;
+}
+.term-strip-add:hover { color: var(--nook-accent); border-color: var(--nook-accent); }

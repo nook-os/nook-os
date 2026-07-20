@@ -1,6 +1,6 @@
 use axum::extract::{Path, Query, State};
 use axum::Json;
-use nook_proto::ControlToNode;
+use nook_proto::{ControlToNode, UiEvent, WindowAction};
 use nook_types::*;
 use serde::Deserialize;
 
@@ -100,4 +100,88 @@ pub async fn kill(
     )
     .await;
     Ok(axum::http::StatusCode::NO_CONTENT)
+}
+
+#[utoipa::path(patch, path = "/api/v1/sessions/{id}",
+    operation_id = "update_session",
+    params(("id" = String, Path,)),
+    request_body = UpdateSessionRequest,
+    responses((status = 200, body = Session), (status = 404)))]
+pub async fn update(
+    State(state): State<AppState>,
+    auth: AuthCtx,
+    Path(id): Path<SessionId>,
+    Json(req): Json<UpdateSessionRequest>,
+) -> ApiResult<Json<Session>> {
+    let name = req.name.trim();
+    if name.is_empty() {
+        return Err(ApiError::BadRequest("name cannot be empty".into()));
+    }
+    let session: Option<Session> = sqlx::query_as(
+        "UPDATE sessions SET name = $3, updated_at = now()
+         WHERE id = $1 AND tenant_id = $2 RETURNING *",
+    )
+    .bind(id)
+    .bind(auth.tenant_id)
+    .bind(name)
+    .fetch_optional(&state.db)
+    .await?;
+    let session = session.ok_or(ApiError::NotFound)?;
+    state.registry.publish(
+        auth.tenant_id,
+        UiEvent::SessionStatus {
+            session_id: id,
+            status: session.status.clone(),
+        },
+    );
+    Ok(Json(session))
+}
+
+/// The terminals inside a session — tmux windows. Listing, opening, splitting,
+/// focusing, closing and renaming all go through here and always answer with
+/// the resulting list.
+#[utoipa::path(post, path = "/api/v1/sessions/{id}/windows",
+    operation_id = "session_windows",
+    params(("id" = String, Path,)),
+    request_body = WindowAction,
+    responses((status = 200, body = [SessionWindow]), (status = 404)))]
+pub async fn windows(
+    State(state): State<AppState>,
+    auth: AuthCtx,
+    Path(id): Path<SessionId>,
+    body: Option<Json<WindowAction>>,
+) -> ApiResult<Json<Vec<SessionWindow>>> {
+    let action = body.map(|Json(a)| a).unwrap_or(WindowAction::List);
+    let session: Option<Session> =
+        sqlx::query_as("SELECT * FROM sessions WHERE id = $1 AND tenant_id = $2")
+            .bind(id)
+            .bind(auth.tenant_id)
+            .fetch_optional(&state.db)
+            .await?;
+    let session = session.ok_or(ApiError::NotFound)?;
+    let tmux_session = session
+        .tmux_session
+        .clone()
+        .ok_or_else(|| ApiError::BadRequest("session has no terminal yet".into()))?;
+
+    let rx = state
+        .registry
+        .request_op(session.node_id, |request_id| {
+            ControlToNode::SessionWindows {
+                request_id,
+                tmux_session,
+                action,
+            }
+        })
+        .ok_or_else(|| ApiError::BadRequest("node is offline".into()))?;
+    let payload = tokio::time::timeout(std::time::Duration::from_secs(15), rx)
+        .await
+        .map_err(|_| ApiError::BadRequest("node did not answer in time".into()))?
+        .map_err(|_| ApiError::BadRequest("node disconnected".into()))?;
+    if !payload.ok {
+        return Err(ApiError::BadRequest(payload.message));
+    }
+    let windows: Vec<SessionWindow> =
+        serde_json::from_str(&payload.message).unwrap_or_default();
+    Ok(Json(windows))
 }

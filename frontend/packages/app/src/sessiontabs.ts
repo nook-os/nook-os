@@ -12,6 +12,8 @@ export interface SessionTab {
    *  every context until revisited (which backfills it). */
   workspaceId?: string;
   workspaceName?: string;
+  /** Pinned tabs sort first and survive "close others" / "close all". */
+  pinned?: boolean;
 }
 
 const KEY = "nook.session-tabs";
@@ -39,6 +41,14 @@ interface SessionTabsState {
   /** Add (or refresh) a tab; visiting a session calls this. */
   open(tab: SessionTab): void;
   close(id: string): void;
+  /** Close every tab except `id` (pinned tabs stay). */
+  closeOthers(id: string): void;
+  /** Close tabs after `id` in the given visible order (pinned tabs stay). */
+  closeToTheRight(id: string, visible: string[]): void;
+  /** Close all tabs in `ids` that aren't pinned. */
+  closeAll(ids: string[]): void;
+  togglePin(id: string): void;
+  rename(id: string, name: string): void;
 }
 
 export const useSessionTabs = create<SessionTabsState>((set) => ({
@@ -55,6 +65,42 @@ export const useSessionTabs = create<SessionTabsState>((set) => ({
   close: (id) =>
     set((s) => {
       const tabs = s.tabs.filter((t) => t.id !== id);
+      save(tabs);
+      return { tabs };
+    }),
+  closeOthers: (id) =>
+    set((s) => {
+      const tabs = s.tabs.filter((t) => t.id === id || t.pinned);
+      save(tabs);
+      return { tabs };
+    }),
+  closeToTheRight: (id, visible) =>
+    set((s) => {
+      const cut = visible.indexOf(id);
+      if (cut < 0) return s;
+      const doomed = new Set(visible.slice(cut + 1));
+      const tabs = s.tabs.filter((t) => !doomed.has(t.id) || t.pinned);
+      save(tabs);
+      return { tabs };
+    }),
+  closeAll: (ids) =>
+    set((s) => {
+      const doomed = new Set(ids);
+      const tabs = s.tabs.filter((t) => !doomed.has(t.id) || t.pinned);
+      save(tabs);
+      return { tabs };
+    }),
+  togglePin: (id) =>
+    set((s) => {
+      const tabs = s.tabs.map((t) =>
+        t.id === id ? { ...t, pinned: !t.pinned } : t,
+      );
+      save(tabs);
+      return { tabs };
+    }),
+  rename: (id, name) =>
+    set((s) => {
+      const tabs = s.tabs.map((t) => (t.id === id ? { ...t, name } : t));
       save(tabs);
       return { tabs };
     }),

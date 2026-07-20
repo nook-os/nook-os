@@ -135,3 +135,63 @@ pub fn repaint(session: &str) {
             .output();
     }
 }
+
+/// A terminal inside a session: tmux calls these windows. One tmux session
+/// can hold many, and the attached client renders whichever is active — so
+/// "more terminals in this session" is just window management.
+pub fn list_windows(session: &str) -> Result<String> {
+    // JSON so the control plane can hand it straight to the UI.
+    let raw = tmux(&[
+        "list-windows",
+        "-t",
+        session,
+        "-F",
+        "#{window_index}\u{1}#{window_name}\u{1}#{window_active}\u{1}#{window_panes}",
+    ])?;
+    let windows: Vec<serde_json::Value> = raw
+        .lines()
+        .filter_map(|line| {
+            let mut parts = line.split('\u{1}');
+            Some(serde_json::json!({
+                "index": parts.next()?.parse::<u32>().ok()?,
+                "name": parts.next()?,
+                "active": parts.next()? == "1",
+                "panes": parts.next()?.parse::<u32>().unwrap_or(1),
+            }))
+        })
+        .collect();
+    Ok(serde_json::to_string(&windows).unwrap_or_else(|_| "[]".into()))
+}
+
+/// Open another terminal in this session and focus it.
+pub fn new_window(session: &str, cwd: Option<&str>) -> Result<()> {
+    let mut args = vec!["new-window", "-t", session];
+    if let Some(dir) = cwd {
+        args.push("-c");
+        args.push(dir);
+    }
+    tmux(&args)?;
+    Ok(())
+}
+
+/// Split the active window, so two terminals are visible at once.
+pub fn split_window(session: &str, vertical: bool) -> Result<()> {
+    // tmux's -h splits into left/right; -v stacks top/bottom.
+    tmux(&["split-window", if vertical { "-v" } else { "-h" }, "-t", session])?;
+    Ok(())
+}
+
+pub fn select_window(session: &str, index: u32) -> Result<()> {
+    tmux(&["select-window", "-t", &format!("{session}:{index}")])?;
+    Ok(())
+}
+
+pub fn kill_window(session: &str, index: u32) -> Result<()> {
+    tmux(&["kill-window", "-t", &format!("{session}:{index}")])?;
+    Ok(())
+}
+
+pub fn rename_window(session: &str, index: u32, name: &str) -> Result<()> {
+    tmux(&["rename-window", "-t", &format!("{session}:{index}"), name])?;
+    Ok(())
+}

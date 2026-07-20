@@ -388,7 +388,7 @@ export interface paths {
         delete?: never;
         options?: never;
         head?: never;
-        patch?: never;
+        patch: operations["update_session"];
         trace?: never;
     };
     "/api/v1/sessions/{id}/kill": {
@@ -401,6 +401,27 @@ export interface paths {
         get?: never;
         put?: never;
         post: operations["kill_session"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/sessions/{id}/windows": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * The terminals inside a session — tmux windows. Listing, opening, splitting,
+         *     focusing, closing and renaming all go through here and always answer with
+         *     the resulting list.
+         */
+        post: operations["session_windows"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1135,6 +1156,18 @@ export interface components {
         };
         /** Format: uuid */
         SessionId: string;
+        /** @description One terminal inside a session (a tmux window). */
+        SessionWindow: {
+            active: boolean;
+            /** Format: int32 */
+            index: number;
+            name: string;
+            /**
+             * Format: int32
+             * @description Panes in this window — >1 means it's split.
+             */
+            panes?: number;
+        };
         /** @description Scope values: `tenant` | `user`. */
         Setting: {
             id: components["schemas"]["SettingId"];
@@ -1267,6 +1300,10 @@ export interface components {
             content_md?: string | null;
             title?: string | null;
         };
+        /** @description Renaming a session (tabs are named things people recognize). */
+        UpdateSessionRequest: {
+            name: string;
+        };
         UpdateSettingRequest: {
             /** @description `tenant` (default) or `user`. */
             scope?: string | null;
@@ -1295,6 +1332,35 @@ export interface components {
         };
         /** Format: uuid */
         UserId: string;
+        /** @description What to do with a session's terminals (tmux windows/panes). */
+        WindowAction: {
+            /** @enum {string} */
+            action: "list";
+        } | {
+            /** @enum {string} */
+            action: "new";
+            cwd?: string | null;
+        } | {
+            /** @enum {string} */
+            action: "split";
+            vertical: boolean;
+        } | {
+            /** @enum {string} */
+            action: "select";
+            /** Format: int32 */
+            index: number;
+        } | {
+            /** @enum {string} */
+            action: "close";
+            /** Format: int32 */
+            index: number;
+        } | {
+            /** @enum {string} */
+            action: "rename";
+            /** Format: int32 */
+            index: number;
+            name: string;
+        };
         Workspace: {
             /** Format: date-time */
             created_at: string;
@@ -2091,6 +2157,37 @@ export interface operations {
             };
         };
     };
+    update_session: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdateSessionRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Session"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
     kill_session: {
         parameters: {
             query?: never;
@@ -2107,6 +2204,37 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    session_windows: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WindowAction"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SessionWindow"][];
+                };
             };
             404: {
                 headers: {

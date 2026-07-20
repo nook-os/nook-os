@@ -75,6 +75,21 @@ pub enum NodeToControl {
     Pong,
 }
 
+/// What to do with a session's terminals (tmux windows/panes).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum WindowAction {
+    /// Just report the current terminals.
+    List,
+    /// Open another terminal in the session and focus it.
+    New { cwd: Option<String> },
+    /// Split the visible terminal so two are on screen at once.
+    Split { vertical: bool },
+    Select { index: u32 },
+    Close { index: u32 },
+    Rename { index: u32, name: String },
+}
+
 /// Messages the control plane sends to the node.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
@@ -146,6 +161,15 @@ pub enum ControlToNode {
     RemoveCheckout {
         request_id: uuid::Uuid,
         path: String,
+    },
+    /// Manage the terminals *inside* a session. One tmux session holds many
+    /// windows (and each window many panes), so this is how a session gets
+    /// more than one terminal. Replies via `OpResult` with the window list as
+    /// JSON in `message`.
+    SessionWindows {
+        request_id: uuid::Uuid,
+        tmux_session: String,
+        action: WindowAction,
     },
     /// Create a brand-new empty git project under the node's workspace root.
     InitProject {
