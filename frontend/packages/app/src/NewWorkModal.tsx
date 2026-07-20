@@ -149,9 +149,10 @@ function NewWorkModal() {
     throw new Error("created, but discovery hasn't surfaced it yet — check Workspaces");
   };
 
-  const cloneAndResolve = async (node: string): Promise<string> => {
-    // Background clone: the modal shouldn't hold you hostage while a large
-    // repo downloads. The HUD tracks it and the activity stream reports back.
+  /** Start a background clone and hand control straight back. Returns the
+   *  job id — there's no workspace to resolve yet, and waiting for one is
+   *  exactly what we're avoiding. */
+  const startBackgroundClone = async (node: string): Promise<string> => {
     const { data, error } = await api.POST("/api/v1/nodes/{id}/clone", {
       params: { path: { id: node } },
       body: { url: q, credential_id: credentialId || null, background: true },
@@ -159,14 +160,13 @@ function NewWorkModal() {
     if (error || !data?.ok) throw new Error(data?.message ?? "clone failed");
     if (data.path) {
       useJobs.getState().start({
-        id: data.path, // the job id
+        id: data.path,
         label: `Cloning ${repoLabel(q)}`,
         kind: "clone",
+        href: "/workspaces",
       });
     }
-    setStatus(data.message);
-    const want = q.replace(/\/$/, "").replace(/\.git$/, "").split(/[/:]/).pop();
-    return pollWorkspace(want ?? "");
+    return data.path ?? "";
   };
 
   const initAndResolve = async (node: string): Promise<string> => {
@@ -205,8 +205,14 @@ function NewWorkModal() {
     try {
       const node = await resolveNode();
       let ws = selectedWorkspace?.id ?? "";
-      if (tab === "new" && newIntent === "clone") ws = await cloneAndResolve(node);
-      else if (tab === "new" && newIntent === "project") ws = await initAndResolve(node);
+      // Cloning can take minutes. Kick it off, let the HUD follow it, and
+      // give the user their UI back — they're notified when it lands.
+      if (tab === "new" && newIntent === "clone") {
+        await startBackgroundClone(node);
+        hide();
+        return;
+      }
+      if (tab === "new" && newIntent === "project") ws = await initAndResolve(node);
 
       // Pasted .env goes into the encrypted vault and syncs to every online
       // checkout, so the session starts with the app already configured.
