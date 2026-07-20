@@ -78,10 +78,13 @@ async fn main() -> Result<()> {
         .init();
 
     match Cli::parse().command {
-        Command::Setup => {
-            let spec = setup_wizard()?;
-            join(spec).await
-        }
+        Command::Setup => match setup_wizard()? {
+            SetupPlan::Join(spec) => join(spec).await,
+            SetupPlan::LocalUpdate {
+                workspace_roots,
+                ssh_key_path,
+            } => apply_local_update(workspace_roots, ssh_key_path),
+        },
         Command::Join {
             server,
             token,
@@ -139,7 +142,10 @@ fn prompt(question: &str, default: Option<&str>) -> Result<String> {
     }
     std::io::stdout().flush()?;
     let mut line = String::new();
-    std::io::stdin().read_line(&mut line)?;
+    // EOF must abort, not loop forever on empty answers (piped/closed stdin).
+    if std::io::stdin().read_line(&mut line)? == 0 {
+        anyhow::bail!("input closed — setup aborted");
+    }
     let line = line.trim();
     if line.is_empty() {
         return Ok(default.unwrap_or_default().to_string());
@@ -147,46 +153,76 @@ fn prompt(question: &str, default: Option<&str>) -> Result<String> {
     Ok(line.to_string())
 }
 
-/// Interactive first-time setup. Collects everything `join` needs, including
-/// which SSH key the node should use for private git operations.
-fn setup_wizard() -> Result<JoinSpec> {
+/// What the wizard decided: a (re-)join, or a local settings update that
+/// keeps the existing registration.
+enum SetupPlan {
+    Join(JoinSpec),
+    LocalUpdate {
+        workspace_roots: Vec<String>,
+        ssh_key_path: Option<String>,
+    },
+}
+
+/// Interactive setup. Re-runnable: existing values become the defaults, and
+/// when the registration (server + name) is unchanged you can skip the token
+/// — settings update in place without re-joining.
+fn setup_wizard() -> Result<SetupPlan> {
     println!("◆ NookOS node setup");
     println!("  This machine becomes a node: workspaces live here, sessions run here.");
     println!();
 
-    if let Ok(existing) = NodeConfig::load() {
+    let existing = NodeConfig::load().ok();
+    if let Some(cfg) = &existing {
         println!(
-            "  Already joined as '{}' → {} (re-running setup overwrites it).",
-            existing.node_name, existing.server
+            "  Currently joined as '{}' → {} — press Enter to keep any value.",
+            cfg.node_name, cfg.server
         );
         println!();
     }
 
+    let server_default = existing
+        .as_ref()
+        .map(|c| c.server.clone())
+        .unwrap_or_else(|| "https://nook.example.com".into());
     let server = loop {
-        let s = prompt("Control plane URL", Some("https://nook.example.com"))?;
+        let s = prompt("Control plane URL", Some(&server_default))?;
         if s.starts_with("http://") || s.starts_with("https://") {
             break s;
         }
         println!("  Please enter a full URL (https://…).");
     };
-    let token = loop {
-        let t = prompt("Join token (UI → Nodes → new join token)", None)?;
-        if !t.is_empty() {
-            break t;
-        }
-    };
+
     let hostname = sysinfo::System::host_name().unwrap_or_else(|| "node".into());
-    let name = prompt("Node name", Some(&hostname))?;
+    let name_default = existing
+        .as_ref()
+        .map(|c| c.node_name.clone())
+        .unwrap_or(hostname);
+    let name = prompt("Node name", Some(&name_default))?;
+
+    let root_default = existing
+        .as_ref()
+        .and_then(|c| c.workspace_roots.first().cloned())
+        .unwrap_or_else(|| "~/.nook/workspace".into());
     let root = prompt(
         "Workspace root (repos live under this directory)",
-        Some("~/.nook/workspace"),
+        Some(&root_default),
     )?;
 
     // SSH key: the node's own generated key (private key never leaves this
     // machine — recommended) or an existing key the user already uses.
     println!();
     println!("SSH key for cloning private repositories:");
-    println!("  [1] Generate a dedicated key for this node (recommended)");
+    let current_key = existing.as_ref().and_then(|c| c.ssh_key_path.clone());
+    println!(
+        "  [1] Dedicated key for this node{}",
+        if current_key.is_none() && existing.is_some() {
+            " (current)"
+        } else if current_key.is_none() {
+            " (recommended)"
+        } else {
+            ""
+        }
+    );
     let mut choices: Vec<std::path::PathBuf> = Vec::new();
     if let Ok(home) = std::env::var("HOME") {
         if let Ok(entries) = std::fs::read_dir(format!("{home}/.ssh")) {
@@ -202,11 +238,19 @@ fn setup_wizard() -> Result<JoinSpec> {
         }
     }
     choices.sort();
+    let mut default_choice = "1".to_string();
     for (i, key) in choices.iter().enumerate() {
-        println!("  [{}] Use existing {}", i + 2, key.display());
+        let display = key.display().to_string();
+        let marker = if Some(&display) == current_key.as_ref() {
+            default_choice = (i + 2).to_string();
+            " (current)"
+        } else {
+            ""
+        };
+        println!("  [{}] Use existing {display}{marker}", i + 2);
     }
     let ssh_key_path = loop {
-        let pick = prompt("Choice", Some("1"))?;
+        let pick = prompt("Choice", Some(&default_choice))?;
         match pick.parse::<usize>() {
             Ok(1) => break None,
             Ok(n) if n >= 2 && n - 2 < choices.len() => {
@@ -217,13 +261,55 @@ fn setup_wizard() -> Result<JoinSpec> {
     };
     println!();
 
-    Ok(JoinSpec {
+    // Same registration → the token is optional; blank means "keep it" and
+    // only the local settings change. New/changed registration needs a token.
+    let same_registration = existing
+        .as_ref()
+        .is_some_and(|c| c.server == server && c.node_name == name);
+    let token = loop {
+        let hint = if same_registration {
+            "Join token (Enter = keep current registration)"
+        } else {
+            "Join token (UI → Nodes → new join token)"
+        };
+        let t = prompt(hint, None)?;
+        if !t.is_empty() || same_registration {
+            break t;
+        }
+        println!("  A token is required to register with {server} as '{name}'.");
+    };
+    println!();
+
+    if token.is_empty() {
+        return Ok(SetupPlan::LocalUpdate {
+            workspace_roots: vec![root],
+            ssh_key_path,
+        });
+    }
+    Ok(SetupPlan::Join(JoinSpec {
         server: Some(server),
         token: Some(token),
         name: Some(name),
         workspace_roots: vec![root],
         ssh_key_path,
-    })
+    }))
+}
+
+/// Apply a token-less reconfigure: keep the registration, update settings.
+fn apply_local_update(workspace_roots: Vec<String>, ssh_key_path: Option<String>) -> Result<()> {
+    let mut cfg = NodeConfig::load()?;
+    cfg.workspace_roots = workspace_roots;
+    cfg.ssh_key_path = ssh_key_path;
+    cfg.save()?;
+    ok("Settings updated (registration unchanged).");
+    if let Some(pubkey) = ssh::public_key_for(cfg.ssh_key_path.as_deref()) {
+        println!();
+        println!("SSH public key (add as a deploy key on your git host):");
+        println!("{pubkey}");
+    }
+    println!();
+    println!("Restart the agent to apply: sudo systemctl restart nook-node");
+    Ok(())
 }
 
 async fn join(spec: JoinSpec) -> Result<()> {
