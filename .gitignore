@@ -1,0 +1,30 @@
+# Rust
+/target
+**/*.rs.bk
+
+# Node
+node_modules/
+dist/
+.vite/
+
+# Env — never commit secrets
+.env
+.env.local
+
+# Tauri
+frontend/apps/desktop/src-tauri/target
+
+# Editor / OS
+.DS_Store
+*.swp
+.idea/
+.vscode/
+
+# Generated OpenAPI spec is committed intentionally (frontend/packages/api/openapi.json)
+.pnpm-store/
+# Tauri
+frontend/apps/desktop/src-tauri/gen/
+
+# In-container cargo target mount points
+/target-docker
+/target-docker-node
