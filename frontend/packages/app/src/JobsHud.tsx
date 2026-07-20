@@ -95,7 +95,13 @@ export function JobsHud() {
     drag.current = { dx: e.clientX - r.left, dy: e.clientY - r.top };
     // Capture on the element that owns the handlers, or the retargeted moves
     // never reach us and the drag "sticks" the moment you leave the header.
-    e.currentTarget.setPointerCapture(e.pointerId);
+    // Never let a capture failure abort the rest of the setup — the drag
+    // still works without it, just with a smaller tracking area.
+    try {
+      e.currentTarget.setPointerCapture(e.pointerId);
+    } catch {
+      // pointer already released, or a synthetic event
+    }
     // Anchor to left/top before moving; the default position uses right/bottom.
     el.style.left = `${r.left}px`;
     el.style.top = `${r.top}px`;
@@ -126,7 +132,11 @@ export function JobsHud() {
       const el = ref.current;
       if (!drag.current || !el) return;
       drag.current = null;
-      e.currentTarget.releasePointerCapture(e.pointerId);
+      try {
+        e.currentTarget.releasePointerCapture(e.pointerId);
+      } catch {
+        // never captured; nothing to release
+      }
       el.classList.remove("dragging");
       // One store write, one persist, at the end.
       const r = el.getBoundingClientRect();
