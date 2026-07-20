@@ -9,6 +9,78 @@ import {
   Pill,
   type ThemeTokens,
 } from "@nookos/ui";
+import {
+  desktopPermission,
+  playChime,
+  requestDesktopPermission,
+  useNotify,
+} from "../notify";
+
+/** Desktop notification + chime preferences (stored per browser). */
+function NotificationSettings() {
+  const { desktop, sound, everything, set } = useNotify();
+  const [permission, setPermission] = React.useState(desktopPermission());
+
+  const toggleDesktop = async () => {
+    if (!desktop) {
+      // Browsers require the permission prompt to come from a user gesture.
+      const granted = await requestDesktopPermission();
+      setPermission(desktopPermission());
+      if (!granted) return;
+    }
+    set({ desktop: !desktop });
+  };
+
+  return (
+    <div style={{ padding: 10, display: "grid", gap: 10 }} className="small">
+      <label className="check-row">
+        <input type="checkbox" checked={desktop} onChange={toggleDesktop} />
+        <span>Desktop notifications</span>
+        {permission === "denied" && (
+          <Pill tone="err">blocked in browser settings</Pill>
+        )}
+        {permission === "unsupported" && <Pill tone="warn">unsupported</Pill>}
+      </label>
+
+      <label className="check-row">
+        <input
+          type="checkbox"
+          checked={sound}
+          onChange={() => {
+            if (!sound) playChime("ok"); // preview when switching on
+            set({ sound: !sound });
+          }}
+        />
+        <span>Play a chime</span>
+        <button
+          type="button"
+          className="btn small"
+          onClick={(e) => {
+            e.preventDefault();
+            playChime("ok");
+          }}
+        >
+          test
+        </button>
+      </label>
+
+      <label className="check-row">
+        <input
+          type="checkbox"
+          checked={everything}
+          onChange={() => set({ everything: !everything })}
+        />
+        <span>Notify for every activity event (noisy)</span>
+      </label>
+
+      <p className="muted" style={{ marginTop: 2 }}>
+        By default you're notified when work reaches a milestone: clones and
+        worktrees finishing, sessions ending, nodes connecting or dropping,
+        tasks dispatched, PRs submitted.
+      </p>
+    </div>
+  );
+}
 
 export function SettingsPage() {
   const queryClient = useQueryClient();
@@ -64,6 +136,10 @@ export function SettingsPage() {
             </tbody>
           </table>
         )}
+      </Panel>
+
+      <Panel title="Notifications">
+        <NotificationSettings />
       </Panel>
 
       <Panel title="Instance">

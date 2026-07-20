@@ -1100,3 +1100,19 @@ table.nook-table tr.clickable { cursor: pointer; }
   );
   z-index: 9999;
 }
+
+/* Pasted .env in the New Work modal: monospace, resizable, never wider than
+   the field (long secret values must scroll, not stretch the modal). */
+textarea.env-paste {
+  height: auto;
+  min-height: 52px;
+  padding: 6px 8px;
+  font-family: var(--nook-font-mono);
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre;
+  overflow: auto;
+  resize: vertical;
+  width: 100%;
+  box-sizing: border-box;
+}

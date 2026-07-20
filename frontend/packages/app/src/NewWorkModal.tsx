@@ -40,6 +40,7 @@ function NewWorkModal() {
   const [branch, setBranch] = useState("");
   const [nodeId, setNodeId] = useState(seed.nodeId ?? AUTO);
   const [runtime, setRuntime] = useState("bash");
+  const [envText, setEnvText] = useState("");
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
 
@@ -183,6 +184,17 @@ function NewWorkModal() {
       let ws = selectedWorkspace?.id ?? "";
       if (tab === "new" && newIntent === "clone") ws = await cloneAndResolve(node);
       else if (tab === "new" && newIntent === "project") ws = await initAndResolve(node);
+
+      // Pasted .env goes into the encrypted vault and syncs to every online
+      // checkout, so the session starts with the app already configured.
+      if (envText.trim() && ws) {
+        setStatus("saving .env to the vault…");
+        const { error } = await api.PUT("/api/v1/workspaces/{id}/secrets/{name}", {
+          params: { path: { id: ws, name: ".env" } },
+          body: { content: envText },
+        });
+        if (error) throw new Error(`saving .env failed: ${JSON.stringify(error)}`);
+      }
 
       if (taskId) {
         const { data, error } = await api.POST("/api/v1/tasks/{id}/start-work", {
@@ -350,6 +362,29 @@ function NewWorkModal() {
           <div className="field">
             <label>Runtime — a session runs an AI agent or a shell, your pick</label>
             <RuntimePicker available={runtimes} value={runtime} onChange={setRuntime} />
+          </div>
+
+          <div className="field">
+            <label>
+              .env — paste it and the agent starts ready to run{" "}
+              <span className="faint">
+                (encrypted in the vault, synced to every checkout)
+              </span>
+            </label>
+            <textarea
+              className="input env-paste"
+              rows={envText ? 8 : 3}
+              spellCheck={false}
+              placeholder={"DATABASE_URL=postgres://…\nAPI_KEY=…"}
+              value={envText}
+              onChange={(e) => setEnvText(e.target.value)}
+            />
+            {envText.trim() && (
+              <div className="faint small" style={{ marginTop: 4 }}>
+                {envText.trim().split("\n").filter((l) => l.trim() && !l.trim().startsWith("#")).length}{" "}
+                variable(s) · saved as <span className="mono">.env</span>
+              </div>
+            )}
           </div>
         </div>
 

@@ -107,8 +107,50 @@ pub fn clone_repo(
             path: Some(dest.to_string_lossy().to_string()),
             message: format!("cloned into {}", dest.display()),
         },
-        Err(e) => fail(format!("clone failed: {e}")),
+        Err(e) => fail(explain_clone_error(&e, ssh_key_material.is_some())),
     }
+}
+
+/// Turn git's terse transport errors into something the operator can act on.
+/// Auth failures are the common case and the fix depends on which key the
+/// node is using, so say exactly which one was presented.
+fn explain_clone_error(stderr: &str, used_tenant_credential: bool) -> String {
+    let lower = stderr.to_lowercase();
+    let auth_failed = lower.contains("permission denied")
+        || lower.contains("could not read from remote repository")
+        || lower.contains("authentication failed");
+    if !auth_failed {
+        return format!("clone failed: {stderr}");
+    }
+
+    let which = if used_tenant_credential {
+        "the git credential from the vault".to_string()
+    } else if let Some(cfg) = crate::config::NodeConfig::load()
+        .ok()
+        .and_then(|c| c.ssh_key_path)
+    {
+        format!("this node's configured key ({cfg})")
+    } else {
+        "this node's own generated key".to_string()
+    };
+
+    let key_hint = crate::ssh::public_key_for(
+        crate::config::NodeConfig::load()
+            .ok()
+            .and_then(|c| c.ssh_key_path)
+            .as_deref(),
+    )
+    .map(|k| format!("\n\nPublic key presented:\n{k}"))
+    .unwrap_or_default();
+
+    format!(
+        "authentication rejected by the git host — {which} does not have access \
+         to this repository.\n\nFix it one of these ways:\n\
+         • Add the public key below as a deploy key (repo → Settings → Deploy keys)\n\
+         • Run `nook setup` on this node and choose an existing SSH key that has access\n\
+         • Add a git credential in NookOS (Settings → Git credentials) for this tenant\
+         {key_hint}\n\ngit said: {stderr}"
+    )
 }
 
 pub fn add_worktree(repo_path: &str, branch: &str) -> OpOutcome {

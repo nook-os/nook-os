@@ -3,6 +3,7 @@
 import { create } from "zustand";
 import type { QueryClient } from "@tanstack/react-query";
 import { connectUiSocket, type EventItem, type UiEvent } from "@nookos/api";
+import { notifyEvent } from "./notify";
 
 const ACTIVITY_BUFFER = 250;
 
@@ -69,6 +70,8 @@ export function startLive(queryClient: QueryClient) {
       if (kind.startsWith("workspace.") || kind.startsWith("git.")) {
         queryClient.invalidateQueries({ queryKey: ["workspaces"] });
       }
+      // Desktop notification + chime for things worth looking up for.
+      notifyEvent(event.data.event);
     }
   };
 
