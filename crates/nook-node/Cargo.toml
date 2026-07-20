@@ -1,0 +1,31 @@
+[package]
+name = "nook-node"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "nook"
+path = "src/main.rs"
+
+[dependencies]
+nook-types = { workspace = true }
+nook-proto = { workspace = true }
+tokio = { workspace = true }
+tokio-tungstenite = { workspace = true }
+futures-util = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+clap = { workspace = true }
+reqwest = { workspace = true }
+portable-pty = { workspace = true }
+sysinfo = { workspace = true }
+base64 = { workspace = true }
+rand = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+toml = { workspace = true }
+walkdir = { workspace = true }
