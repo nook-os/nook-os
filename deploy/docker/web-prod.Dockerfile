@@ -4,9 +4,9 @@
 FROM node:22-slim AS build
 RUN corepack enable
 WORKDIR /src/frontend
-COPY frontend/package.json frontend/pnpm-workspace.yaml frontend/pnpm-lock.yaml ./
-COPY frontend/packages ./packages
-COPY frontend/apps ./apps
+# The whole workspace (tsconfig.base.json et al.) — .dockerignore keeps
+# node_modules/dist out of the context.
+COPY frontend ./
 RUN pnpm install --frozen-lockfile && pnpm --filter @nookos/web build
 
 FROM nginx:1.27-alpine
