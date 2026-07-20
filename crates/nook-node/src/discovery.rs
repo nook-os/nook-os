@@ -19,6 +19,11 @@ fn git(dir: &Path, args: &[&str]) -> Option<String> {
     Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
+/// A checkout's origin remote, if it has one.
+pub fn remote_of(dir: &Path) -> Option<String> {
+    git(dir, &["config", "--get", "remote.origin.url"])
+}
+
 fn inspect(dir: &Path) -> Option<DiscoveredWorkspace> {
     let git_marker = dir.join(".git");
     if !git_marker.exists() {

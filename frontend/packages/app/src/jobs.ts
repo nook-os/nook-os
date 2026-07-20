@@ -76,3 +76,22 @@ export const useHudPosition = create<HudPosition>()(
     { name: "nookos-hud-position" },
   ),
 );
+
+/// What to do once a background job lands — e.g. start the session the user
+/// actually asked for after a clone finishes. Kept out of the store because
+/// these are closures, not state: they must not be persisted or serialized.
+const followUps = new Map<string, (ok: boolean) => void | Promise<void>>();
+
+export function onJobFinish(
+  id: string,
+  fn: (ok: boolean) => void | Promise<void>,
+): void {
+  followUps.set(id, fn);
+}
+
+/** Run and forget a job's follow-up. Safe to call for jobs that have none. */
+export function runJobFollowUp(id: string, ok: boolean): void {
+  const fn = followUps.get(id);
+  followUps.delete(id);
+  if (fn) void fn(ok);
+}

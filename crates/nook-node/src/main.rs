@@ -67,11 +67,16 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Adopt the git repository in the current directory (or --path) as a
-    /// workspace on this node.
+    /// Adopt a git repository as a workspace on this node. Works from
+    /// anywhere: a repo outside the workspace roots is placed at
+    /// <root>/<org>/<repo>, derived from its remote.
     Import {
         /// Repository directory (defaults to the current one).
         path: Option<String>,
+        /// Symlink it into place instead of moving it, so the working copy
+        /// stays exactly where it is.
+        #[arg(long)]
+        link: bool,
     },
     /// Delete a session, workspace or task by name.
     Delete {
@@ -161,7 +166,7 @@ async fn main() -> Result<()> {
             name,
             json,
         } => cli::get(&resource, name.as_deref(), json).await,
-        Command::Import { path } => cli::import(path.as_deref()).await,
+        Command::Import { path, link } => cli::import(path.as_deref(), link).await,
         Command::Delete { resource, name } => cli::delete(&resource, &name).await,
     }
 }

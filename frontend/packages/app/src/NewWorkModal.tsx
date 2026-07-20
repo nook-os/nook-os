@@ -11,7 +11,7 @@ import { FolderGit2, Sparkles, X } from "lucide-react";
 import { api, type NodeInfo } from "@nookos/api";
 import { defaultRuntime, RuntimePicker } from "@nookos/ui";
 import { useNewWork } from "./newwork";
-import { useJobs } from "./jobs";
+import { onJobFinish, useJobs } from "./jobs";
 import { WorkspaceLocations } from "./WorkspaceLocations";
 
 const AUTO = "";
@@ -206,9 +206,53 @@ function NewWorkModal() {
       const node = await resolveNode();
       let ws = selectedWorkspace?.id ?? "";
       // Cloning can take minutes. Kick it off, let the HUD follow it, and
-      // give the user their UI back — they're notified when it lands.
+      // give the user their UI back — but "start work" still means start
+      // work, so finish the job once the repo lands.
       if (tab === "new" && newIntent === "clone") {
-        await startBackgroundClone(node);
+        const jobId = await startBackgroundClone(node);
+        const want = q.replace(/\/$/, "").replace(/\.git$/, "").split(/[/:]/).pop() ?? "";
+        const wantWorktree = useWorktree;
+        const wantBranch = branch.trim();
+        const env = envText;
+        if (jobId) {
+          onJobFinish(jobId, async (ok) => {
+            if (!ok) return;
+            try {
+              const ws = await pollWorkspace(want);
+              if (env.trim()) {
+                await api.PUT("/api/v1/workspaces/{id}/secrets/{name}", {
+                  params: { path: { id: ws, name: ".env" } },
+                  body: { content: env },
+                });
+              }
+              let path: string | undefined;
+              if (wantWorktree) {
+                const { data } = await api.POST("/api/v1/workspaces/{id}/worktrees", {
+                  params: { path: { id: ws } },
+                  body: { node_id: node, branch: wantBranch || "work" },
+                });
+                path = data?.path ?? undefined;
+              }
+              const { data: session } = await api.POST("/api/v1/sessions", {
+                body: { workspace_id: ws, node_id: node, runtime, path: path ?? null },
+              });
+              queryClient.invalidateQueries();
+              // Don't yank focus minutes later — make it one click instead.
+              if (session) {
+                useJobs.getState().finish(
+                  jobId,
+                  true,
+                  `ready — open ${session.name}`,
+                  `/sessions/${session.id}`,
+                );
+              }
+            } catch {
+              // The repo landed even if the session didn't; the workspace is
+              // there to start one from.
+              queryClient.invalidateQueries();
+            }
+          });
+        }
         hide();
         return;
       }

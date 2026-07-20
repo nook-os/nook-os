@@ -223,7 +223,7 @@ fn print_table(resource: &str, rows: &[Value]) {
 ///
 /// The node reports repositories under its workspace roots, so importing is
 /// really "make sure this repo is somewhere the node scans, then rescan".
-pub async fn import(path: Option<&str>) -> Result<()> {
+pub async fn import(path: Option<&str>, link: bool) -> Result<()> {
     let dir = match path {
         Some(p) => std::path::PathBuf::from(crate::config::expand_path(p)),
         None => std::env::current_dir()?,
@@ -237,23 +237,71 @@ pub async fn import(path: Option<&str>) -> Result<()> {
     let roots: Vec<std::path::PathBuf> = cfg
         .workspace_roots
         .iter()
-        .filter_map(|r| std::path::Path::new(&crate::config::expand_path(r)).canonicalize().ok())
+        .filter_map(|r| {
+            std::path::Path::new(&crate::config::expand_path(r))
+                .canonicalize()
+                .ok()
+        })
         .collect();
-    let inside = roots.iter().any(|r| dir.starts_with(r));
-    if !inside {
-        let list = roots
-            .iter()
-            .map(|r| r.display().to_string())
-            .collect::<Vec<_>>()
-            .join(", ");
-        bail!(
-            "{} is outside this node's workspace roots ({list}).\n\
-             Move or symlink it under a root, or add one with `nook setup`.",
-            dir.display()
-        );
+
+    // Already somewhere the node scans: nothing to place, just rescan.
+    if roots.iter().any(|r| dir.starts_with(r)) {
+        return finish_import(&cfg, &dir).await;
     }
 
-    // The node rescans and reports; the control plane reconciles identity.
+    // Otherwise adopt it where it lies. The repo's own remote decides where it
+    // belongs — <root>/<org>/<repo> — so two orgs' same-named repos can't
+    // collide, and a symlink keeps the working copy exactly where the user has
+    // it (their editor, shell history and paths all keep working).
+    let Some(root) = roots.first() else {
+        bail!("this node has no workspace roots — run `nook setup`");
+    };
+    let remote = crate::discovery::remote_of(&dir);
+    let rel = remote
+        .as_deref()
+        .and_then(crate::gitops::repo_path_from_url)
+        .or_else(|| {
+            dir.file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .filter(|n| !n.is_empty())
+        })
+        .context("could not work out a name for this repository")?;
+    let dest = root.join(&rel);
+
+    if dest.exists() {
+        let same = dest.canonicalize().ok().is_some_and(|d| d == dir);
+        if same {
+            return finish_import(&cfg, &dir).await;
+        }
+        bail!(
+            "{} already exists — a different checkout of {rel} is already imported",
+            dest.display()
+        );
+    }
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("cannot create {}", parent.display()))?;
+    }
+
+    if link {
+        std::os::unix::fs::symlink(&dir, &dest)
+            .with_context(|| format!("cannot link {} → {}", dest.display(), dir.display()))?;
+        println!("✓ Linked {} → {}", dest.display(), dir.display());
+    } else {
+        std::fs::rename(&dir, &dest).with_context(|| {
+            format!(
+                "cannot move {} → {} (different filesystem? try --link)",
+                dir.display(),
+                dest.display()
+            )
+        })?;
+        println!("✓ Moved {} → {}", dir.display(), dest.display());
+    }
+    finish_import(&cfg, &dest).await
+}
+
+/// Tell the node to rescan so the control plane reconciles the repository.
+async fn finish_import(cfg: &NodeConfig, dir: &std::path::Path) -> Result<()> {
     let client = Client::from_config()?;
     client
         .post(

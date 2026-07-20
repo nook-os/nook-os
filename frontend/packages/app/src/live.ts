@@ -4,7 +4,7 @@ import { create } from "zustand";
 import type { QueryClient } from "@tanstack/react-query";
 import { connectUiSocket, type EventItem, type UiEvent } from "@nookos/api";
 import { notifyEvent } from "./notify";
-import { useJobs } from "./jobs";
+import { runJobFollowUp, useJobs } from "./jobs";
 import { resyncSealedSecrets, useSecretKeys } from "./secretkeys";
 import { api } from "@nookos/api";
 
@@ -76,13 +76,17 @@ export function startLive(queryClient: QueryClient) {
       // Background jobs report completion through activity events.
       const payload = (event.data.event.payload ?? {}) as Record<string, unknown>;
       if (kind === "git.clone_finished" && typeof payload.job_id === "string") {
+        const ok = payload.ok !== false;
         useJobs
           .getState()
           .finish(
             payload.job_id,
-            payload.ok !== false,
+            ok,
             typeof payload.message === "string" ? payload.message : undefined,
           );
+        // "Start work" on a clone still means start work — the session is
+        // created once the repo has actually landed.
+        runJobFollowUp(payload.job_id, ok);
       }
       // A new checkout can't receive sealed secrets from the server, so push
       // them from here while we still hold the passphrase.
