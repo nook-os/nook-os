@@ -1,0 +1,68 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/nook-types",
+    "crates/nook-proto",
+    "crates/nook-control",
+    "crates/nook-dispatcher",
+    "crates/nook-mcp",
+    "crates/nook-node",
+    "crates/nook-openapi-gen",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/nookos/nookos"
+
+[workspace.dependencies]
+nook-types = { path = "crates/nook-types" }
+nook-proto = { path = "crates/nook-proto" }
+nook-dispatcher = { path = "crates/nook-dispatcher" }
+nook-mcp = { path = "crates/nook-mcp" }
+nook-control = { path = "crates/nook-control" }
+
+tokio = { version = "1", features = ["full"] }
+axum = { version = "0.8", features = ["ws", "macros"] }
+axum-extra = { version = "0.10", features = ["cookie", "cookie-private"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["trace", "cors"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sqlx = { version = "0.8", features = ["runtime-tokio", "tls-rustls", "postgres", "uuid", "chrono", "json", "migrate"] }
+uuid = { version = "1", features = ["v7", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+utoipa = { version = "5", features = ["axum_extras", "uuid", "chrono"] }
+utoipa-swagger-ui = { version = "9", features = ["axum"] }
+openidconnect = "4"
+thiserror = "2"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+dashmap = "6"
+async-trait = "0.1"
+futures-util = "0.3"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+# Artifact storage. The S3 SDK also speaks MinIO and Google Cloud Storage's
+# S3-compatible endpoint, so one client covers every backend we ship.
+aws-config = { version = "1", default-features = false, features = ["rustls", "behavior-version-latest"] }
+aws-sdk-s3 = { version = "1", default-features = false, features = ["rustls", "rt-tokio"] }
+aws-credential-types = "1"
+aws-smithy-types = "1"
+tokio-tungstenite = { version = "0.26", features = ["rustls-tls-native-roots"] }
+clap = { version = "4", features = ["derive"] }
+portable-pty = "0.9"
+sysinfo = "0.33"
+base64 = "0.22"
+sha2 = "0.10"
+hmac = "0.12"
+aes-gcm = "0.10"
+rand = "0.9"
+dotenvy = "0.15"
+toml = "0.8"
+walkdir = "2"
+cookie = { version = "0.18", features = ["key-expansion"] }
+
+[profile.release]
+lto = "thin"

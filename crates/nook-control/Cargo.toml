@@ -1,0 +1,52 @@
+[package]
+name = "nook-control"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "nook_control"
+path = "src/lib.rs"
+
+[[bin]]
+name = "nook-control"
+path = "src/main.rs"
+
+[dependencies]
+nook-types = { workspace = true }
+nook-proto = { workspace = true }
+nook-dispatcher = { workspace = true }
+nook-mcp = { workspace = true }
+tokio = { workspace = true }
+axum = { workspace = true }
+axum-extra = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sqlx = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+utoipa = { workspace = true }
+utoipa-swagger-ui = { workspace = true }
+openidconnect = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+dashmap = { workspace = true }
+async-trait = { workspace = true }
+futures-util = { workspace = true }
+reqwest = { workspace = true }
+aws-config = { workspace = true }
+aws-sdk-s3 = { workspace = true }
+aws-credential-types = { workspace = true }
+aws-smithy-types = { workspace = true }
+clap = { workspace = true }
+base64 = { workspace = true }
+sha2 = { workspace = true }
+hmac = { workspace = true }
+aes-gcm = { workspace = true }
+rand = { workspace = true }
+dotenvy = { workspace = true }
+cookie = { workspace = true }

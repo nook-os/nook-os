@@ -1,0 +1,34 @@
+# Rust
+/target
+**/*.rs.bk
+
+# Node
+node_modules/
+dist/
+.vite/
+
+# Env — never commit secrets
+.env
+.env.local
+
+# Deployment-specific compose (reverse proxy, TLS, hostnames) is an operator
+# concern — keep it next to the checkout, out of the repo.
+/docker-compose.prod.yml
+
+# Tauri
+frontend/apps/desktop/src-tauri/target
+
+# Editor / OS
+.DS_Store
+*.swp
+.idea/
+.vscode/
+
+# Generated OpenAPI spec is committed intentionally (frontend/packages/api/openapi.json)
+.pnpm-store/
+# Tauri
+frontend/apps/desktop/src-tauri/gen/
+
+# In-container cargo target mount points
+/target-docker
+/target-docker-node

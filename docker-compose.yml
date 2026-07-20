@@ -1,0 +1,145 @@
+# NookOS dev stack — Docker FIRST. One command brings up everything; source
+# is bind-mounted and rebuilt by cargo watch / Vite INSIDE the containers.
+# `docker compose down -v` destroys everything; `./run.sh` recreates it.
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: nook
+      POSTGRES_PASSWORD: nook
+      POSTGRES_DB: nook
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U nook -d nook"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  # Object storage for node binaries, so the S3 backend is exercised locally
+  # exactly as it is in production. Credentials are dev-only by design.
+  minio:
+    image: quay.io/minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: nookdev
+      MINIO_ROOT_PASSWORD: nookdevsecret
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - miniodata:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+
+  # One-shot: make the bucket the control plane expects. Idempotent, so it is
+  # safe on every `up`.
+  minio-init:
+    image: quay.io/minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      sh -c "mc alias set local http://minio:9000 nookdev nookdevsecret &&
+             mc mb --ignore-existing local/nook-artifacts &&
+             echo 'bucket ready'"
+
+  control-plane:
+    build:
+      context: .
+      dockerfile: deploy/docker/dev-rust.Dockerfile
+    command: cargo watch --poll -w crates -w Cargo.toml -w Cargo.lock -x 'run -p nook-control'
+    working_dir: /app
+    env_file: .env
+    environment:
+      DATABASE_URL: postgres://nook:nook@postgres:5432/nook
+      CONTROL_PLANE_BIND: 0.0.0.0:8080
+      CARGO_TARGET_DIR: /app/target-docker
+      # Node binaries the "add node" modal offers. In production the control
+      # image ships the build it was compiled with; in dev, populate it with
+      #   cargo build --release -p nook-node \
+      #     && cp target/release/nook dist/nook-linux-$(uname -m)
+      NOOK_DIST_DIR: /app/dist
+      # Artifact storage. Dev points at the local MinIO so the S3 path is the
+      # one being exercised day to day — a backend only tested in production
+      # is a backend nobody has tested.
+      NOOK_ARTIFACT_STORE: ${NOOK_ARTIFACT_STORE:-s3}
+      NOOK_ARTIFACT_PREFIX: nook
+      NOOK_S3_BUCKET: nook-artifacts
+      NOOK_S3_ENDPOINT: http://minio:9000
+      NOOK_S3_REGION: us-east-1
+      NOOK_S3_ACCESS_KEY_ID: nookdev
+      NOOK_S3_SECRET_ACCESS_KEY: nookdevsecret
+      NOOK_S3_PATH_STYLE: "true"
+      # Hand out presigned URLs instead of streaming. Off by default so one
+      # hostname serves everything; flip to test the redirect path.
+      NOOK_ARTIFACT_REDIRECT: ${NOOK_ARTIFACT_REDIRECT:-false}
+    ports:
+      - "8080:8080"
+    volumes:
+      - .:/app
+      - cargo-registry:/usr/local/cargo/registry
+      - cargo-target:/app/target-docker
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/healthz"]
+      interval: 3s
+      timeout: 3s
+      retries: 100
+      start_period: 300s
+
+  node:
+    build:
+      context: .
+      dockerfile: deploy/docker/dev-rust.Dockerfile
+    entrypoint: ["bash", "deploy/docker/node-dev-entrypoint.sh"]
+    working_dir: /app
+    environment:
+      NOOK_SERVER: http://control-plane:8080
+      NOOK_DEV_JOIN_TOKEN: ${NOOK_DEV_JOIN_TOKEN:-}
+      NOOK_NODE_NAME: dev-node
+      CARGO_TARGET_DIR: /app/target-docker-node
+      RUST_LOG: nook=info
+    volumes:
+      - .:/app
+      - cargo-registry:/usr/local/cargo/registry
+      - cargo-target-node:/app/target-docker-node
+      - demo-workspaces:/workspace
+      - node-config:/root/.config/nook
+    depends_on:
+      control-plane:
+        condition: service_healthy
+
+  web:
+    image: node:22-slim
+    working_dir: /app/frontend
+    command: sh -c "corepack enable && pnpm install && pnpm --filter @nookos/web dev"
+    environment:
+      NOOK_API_PROXY: http://control-plane:8080
+    ports:
+      - "5173:5173"
+    volumes:
+      - ./frontend:/app/frontend
+      - web-node-modules:/app/frontend/node_modules
+    depends_on:
+      control-plane:
+        condition: service_healthy
+
+volumes:
+  pgdata:
+  miniodata:
+  cargo-registry:
+  cargo-target:
+  cargo-target-node:
+  demo-workspaces:
+  node-config:
+  web-node-modules:

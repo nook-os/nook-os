@@ -1,0 +1,5844 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "NookOS API",
+    "description": "The open workspace operating system for modern software teams.",
+    "license": {
+      "name": "Apache-2.0",
+      "identifier": "Apache-2.0"
+    },
+    "version": "0.1.0"
+  },
+  "paths": {
+    "/api/v1/auth/dev-login": {
+      "post": {
+        "tags": [
+          "crate::routes::auth"
+        ],
+        "summary": "POST /api/v1/auth/dev-login — dev/CI escape hatch. Compiled in, but\nhard-refused unless AUTH_DEV_MODE=true (and never in production).",
+        "operationId": "dev_login",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DevLoginRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MeResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "dev mode disabled"
+          }
+        }
+      }
+    },
+    "/api/v1/auth/logout": {
+      "post": {
+        "tags": [
+          "crate::routes::auth"
+        ],
+        "summary": "POST /api/v1/auth/logout",
+        "operationId": "logout",
+        "responses": {
+          "204": {
+            "description": ""
+          }
+        }
+      }
+    },
+    "/api/v1/auth/me": {
+      "get": {
+        "tags": [
+          "crate::routes::auth"
+        ],
+        "summary": "GET /api/v1/auth/me",
+        "operationId": "me",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MeResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "not signed in"
+          }
+        }
+      }
+    },
+    "/api/v1/auth/providers": {
+      "get": {
+        "tags": [
+          "crate::routes::auth"
+        ],
+        "summary": "GET /api/v1/auth/providers — unauthenticated: what sign-in methods exist,\nso the login screen never offers a dead button.",
+        "operationId": "auth_providers",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthProviders"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/boards": {
+      "get": {
+        "tags": [
+          "crate::routes::boards"
+        ],
+        "operationId": "list_boards",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Board"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "crate::routes::boards"
+        ],
+        "operationId": "create_board",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateBoardRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BoardDetail"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/boards/{id}": {
+      "get": {
+        "tags": [
+          "crate::routes::boards"
+        ],
+        "operationId": "get_board",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BoardDetail"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "crate::routes::boards"
+        ],
+        "operationId": "delete_board",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": ""
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "crate::routes::boards"
+        ],
+        "operationId": "update_board",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateBoardRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Board"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      }
+    },
+    "/api/v1/boards/{id}/columns": {
+      "post": {
+        "tags": [
+          "crate::routes::boards"
+        ],
+        "operationId": "add_column",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateColumnRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BoardColumn"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      }
+    },
+    "/api/v1/boards/{id}/tasks": {
+      "post": {
+        "tags": [
+          "crate::routes::boards"
+        ],
+        "operationId": "create_task",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateTaskRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TaskItem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/columns/{id}": {
+      "delete": {
+        "tags": [
+          "crate::routes::boards"
+        ],
+        "operationId": "delete_column",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": ""
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "crate::routes::boards"
+        ],
+        "operationId": "update_column",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateColumnRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BoardColumn"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      }
+    },
+    "/api/v1/dispatcher/suggest": {
+      "post": {
+        "tags": [
+          "crate::routes::dispatcher"
+        ],
+        "operationId": "dispatcher_suggest",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DispatchSuggestion"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/events": {
+      "get": {
+        "tags": [
+          "crate::routes::events"
+        ],
+        "operationId": "list_events",
+        "parameters": [
+          {
+            "name": "workspace_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "oneOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "$ref": "#/components/schemas/WorkspaceId"
+                }
+              ]
+            }
+          },
+          {
+            "name": "kind",
+            "in": "query",
+            "description": "Kind prefix filter, e.g. \"session.\" matches session.started/exited.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "before",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EventsPage"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/feedback": {
+      "get": {
+        "tags": [
+          "crate::routes::feedback"
+        ],
+        "operationId": "list_feedback",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/FeedbackItem"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "crate::routes::feedback"
+        ],
+        "summary": "Queue feedback. Picks up the configured workspace unless one is given, and\ndelivers into the named session — creating it if this is the first time.",
+        "operationId": "submit_feedback",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SubmitFeedbackRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FeedbackItem"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": ""
+          }
+        }
+      }
+    },
+    "/api/v1/feedback/target": {
+      "get": {
+        "tags": [
+          "crate::routes::feedback"
+        ],
+        "summary": "Where feedback is configured to go, if anywhere yet.",
+        "operationId": "feedback_target",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FeedbackTarget"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "crate::routes::feedback"
+        ],
+        "summary": "Point feedback at a repo and branch.",
+        "description": "Separate from submitting because the target has to be changeable: it was\npreviously only recorded on the first send, which meant the first repo you\never picked was the one you were stuck with.",
+        "operationId": "set_feedback_target",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetFeedbackTargetRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FeedbackTarget"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      }
+    },
+    "/api/v1/feedback/{id}": {
+      "patch": {
+        "tags": [
+          "crate::routes::feedback"
+        ],
+        "summary": "Record the pull request a piece of feedback turned into.",
+        "operationId": "update_feedback",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateFeedbackRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FeedbackItem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      }
+    },
+    "/api/v1/git-credentials": {
+      "get": {
+        "tags": [
+          "crate::routes::gitops"
+        ],
+        "operationId": "list_git_credentials",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/GitCredential"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "crate::routes::gitops"
+        ],
+        "operationId": "create_git_credential",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateGitCredentialRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GitCredential"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/git-credentials/{id}": {
+      "delete": {
+        "tags": [
+          "crate::routes::gitops"
+        ],
+        "operationId": "delete_git_credential",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": ""
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      }
+    },
+    "/api/v1/node/artifacts/{version}/{name}": {
+      "put": {
+        "tags": [
+          "crate::routes::dist"
+        ],
+        "summary": "Publish a build. This is how a macOS binary reaches a Linux-built server:\nsomeone compiles it on a Mac and uploads it here.",
+        "description": "Requires a *user* — publishing a binary that every machine in the fleet will\nexecute is the most consequential write in the system, and a node token is a\ncredential sitting on a box that runs other people's code.",
+        "operationId": "publish_artifact",
+        "parameters": [
+          {
+            "name": "version",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "description": "the binary, raw",
+          "content": {
+            "application/octet-stream": {
+              "schema": {
+                "type": "string"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OpResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": ""
+          },
+          "403": {
+            "description": ""
+          }
+        }
+      }
+    },
+    "/api/v1/node/releases": {
+      "get": {
+        "tags": [
+          "crate::routes::dist"
+        ],
+        "summary": "What this control plane can hand out, and how to ask for it.",
+        "operationId": "node_releases",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NodeReleases"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/nodes": {
+      "get": {
+        "tags": [
+          "crate::routes::nodes"
+        ],
+        "operationId": "list_nodes",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Node"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/nodes/join": {
+      "post": {
+        "tags": [
+          "crate::routes::join"
+        ],
+        "summary": "POST /api/v1/nodes/join — unauthenticated; the join token IS the\ncredential. Idempotent per (tenant, name): re-joining an existing node\nrotates its token instead of creating a duplicate, which keeps container\nreboots predictable. Join tokens stay valid until expiry (M1 simplicity);\n`used_at` records last use for audit.",
+        "operationId": "join",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/JoinRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JoinResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "bad token"
+          }
+        }
+      }
+    },
+    "/api/v1/nodes/join-tokens": {
+      "post": {
+        "tags": [
+          "crate::routes::join"
+        ],
+        "summary": "POST /api/v1/nodes/join-tokens — mint a token to enroll a new machine.",
+        "operationId": "create_join_token",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreateJoinTokenResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/nodes/{id}": {
+      "get": {
+        "tags": [
+          "crate::routes::nodes"
+        ],
+        "operationId": "get_node",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Node"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "crate::routes::nodes"
+        ],
+        "operationId": "delete_node",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": ""
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      }
+    },
+    "/api/v1/nodes/{id}/clone": {
+      "post": {
+        "tags": [
+          "crate::routes::gitops"
+        ],
+        "operationId": "clone_repo",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CloneRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OpResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/nodes/{id}/projects": {
+      "post": {
+        "tags": [
+          "crate::routes::gitops"
+        ],
+        "operationId": "init_project",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InitProjectRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OpResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/nodes/{id}/rescan": {
+      "post": {
+        "tags": [
+          "crate::routes::nodes"
+        ],
+        "summary": "Ask a node to rescan its workspace roots now, instead of waiting for the\nperiodic sweep. Backs `nook import`.",
+        "operationId": "rescan_node",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": ""
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      }
+    },
+    "/api/v1/notes/{id}": {
+      "patch": {
+        "tags": [
+          "crate::routes::notes"
+        ],
+        "operationId": "update_note",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateNoteRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Note"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      }
+    },
+    "/api/v1/schedule/node": {
+      "get": {
+        "tags": [
+          "crate::routes::schedule"
+        ],
+        "summary": "Resolve the \"Auto (best available)\" node the UI leaves selected by default.",
+        "operationId": "schedule_node",
+        "parameters": [
+          {
+            "name": "workspace_id",
+            "in": "query",
+            "description": "Prefer a node that already hosts this workspace.",
+            "required": false,
+            "schema": {
+              "oneOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "$ref": "#/components/schemas/WorkspaceId"
+                }
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScheduledNode"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "no online node"
+          }
+        }
+      }
+    },
+    "/api/v1/sessions": {
+      "get": {
+        "tags": [
+          "crate::routes::sessions"
+        ],
+        "operationId": "list_sessions",
+        "parameters": [
+          {
+            "name": "workspace_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "oneOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "$ref": "#/components/schemas/WorkspaceId"
+                }
+              ]
+            }
+          },
+          {
+            "name": "active",
+            "in": "query",
+            "description": "Only sessions that are starting/running/detached.",
+            "required": false,
+            "schema": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Session"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "crate::routes::sessions"
+        ],
+        "operationId": "create_session",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateSessionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Session"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": ""
+          }
+        }
+      }
+    },
+    "/api/v1/sessions/{id}": {
+      "get": {
+        "tags": [
+          "crate::routes::sessions"
+        ],
+        "operationId": "get_session",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Session"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "crate::routes::sessions"
+        ],
+        "summary": "Remove a session record. Kills the tmux session first when it's still\nalive, so \"delete\" never leaves an orphan running on a node.",
+        "operationId": "delete_session",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": ""
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "crate::routes::sessions"
+        ],
+        "operationId": "update_session",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateSessionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Session"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      }
+    },
+    "/api/v1/sessions/{id}/input": {
+      "post": {
+        "tags": [
+          "crate::routes::sessions"
+        ],
+        "summary": "Type into a session, as if a human were at the keyboard.",
+        "description": "This is what makes a session drivable from a script: no browser, no SSH,\nno tmux knowledge — the runtime on the other end (claude, hermes, bash)\nsees ordinary keystrokes. `enter` is on by default because a prompt left\nsitting unsubmitted is never what the caller meant.",
+        "operationId": "send_session_input",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SessionInputRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": ""
+          },
+          "400": {
+            "description": ""
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      }
+    },
+    "/api/v1/sessions/{id}/kill": {
+      "post": {
+        "tags": [
+          "crate::routes::sessions"
+        ],
+        "operationId": "kill_session",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": ""
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      }
+    },
+    "/api/v1/sessions/{id}/output": {
+      "post": {
+        "tags": [
+          "crate::routes::sessions"
+        ],
+        "summary": "Read back what a session is showing — the visible screen plus optional\nscrollback. The other half of driving a session from a script: send, then\nlook at what happened.",
+        "operationId": "read_session_output",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SessionOutputRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionOutputResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": ""
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      }
+    },
+    "/api/v1/sessions/{id}/restart": {
+      "post": {
+        "tags": [
+          "crate::routes::sessions"
+        ],
+        "summary": "Bring a dead session back: same record, same tabs, fresh tmux session.\nA terminal you closed (or a runtime that exited) shouldn't strand the\nsession — the node's `start` is idempotent, so this just re-issues it.",
+        "operationId": "restart_session",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Session"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      }
+    },
+    "/api/v1/sessions/{id}/windows": {
+      "post": {
+        "tags": [
+          "crate::routes::sessions"
+        ],
+        "summary": "The terminals inside a session — tmux windows. Listing, opening, splitting,\nfocusing, closing and renaming all go through here and always answer with\nthe resulting list.",
+        "operationId": "session_windows",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WindowAction"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/SessionWindow"
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      }
+    },
+    "/api/v1/settings": {
+      "get": {
+        "tags": [
+          "crate::routes::settings"
+        ],
+        "operationId": "list_settings",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Setting"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/settings/{key}": {
+      "put": {
+        "tags": [
+          "crate::routes::settings"
+        ],
+        "operationId": "put_setting",
+        "parameters": [
+          {
+            "name": "key",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateSettingRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Setting"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/tasks/{id}": {
+      "delete": {
+        "tags": [
+          "crate::routes::boards"
+        ],
+        "operationId": "delete_task",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": ""
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "crate::routes::boards"
+        ],
+        "operationId": "update_task",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateTaskRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TaskItem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      }
+    },
+    "/api/v1/tasks/{id}/dispatch": {
+      "post": {
+        "tags": [
+          "crate::routes::taskwork"
+        ],
+        "operationId": "task_dispatch",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TaskItem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/tasks/{id}/move": {
+      "post": {
+        "tags": [
+          "crate::routes::taskwork"
+        ],
+        "operationId": "task_move",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MoveTaskRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TaskItem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/tasks/{id}/prune-worktree": {
+      "post": {
+        "tags": [
+          "crate::routes::taskwork"
+        ],
+        "operationId": "task_prune_worktree",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TaskItem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/tasks/{id}/start-work": {
+      "post": {
+        "tags": [
+          "crate::routes::taskwork"
+        ],
+        "operationId": "task_start_work",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StartWorkRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StartWorkResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/tasks/{id}/submit-pr": {
+      "post": {
+        "tags": [
+          "crate::routes::taskwork"
+        ],
+        "operationId": "task_submit_pr",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SubmitPrRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TaskItem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/tenants": {
+      "get": {
+        "tags": [
+          "crate::routes::tenants"
+        ],
+        "summary": "Every tenant this user is a member of, with the role they hold in each.",
+        "operationId": "list_tenants",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/TenantMembership"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/themes": {
+      "get": {
+        "tags": [
+          "crate::routes::themes"
+        ],
+        "operationId": "list_themes",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Theme"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/themes/{slug}": {
+      "get": {
+        "tags": [
+          "crate::routes::themes"
+        ],
+        "operationId": "get_theme",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Theme"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      }
+    },
+    "/api/v1/tokens": {
+      "get": {
+        "tags": [
+          "crate::routes::tokens"
+        ],
+        "summary": "List this user's tokens. Never the tokens themselves — the point of the\nlist is deciding which one to revoke.",
+        "operationId": "list_user_tokens",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/UserToken"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "crate::routes::tokens"
+        ],
+        "summary": "Mint a token for the signed-in user.",
+        "description": "Requires a *user* — a node token minting user tokens would be a machine\npromoting itself to its owner, which is the one thing node confinement\nexists to prevent.",
+        "operationId": "create_user_token",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateUserTokenRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreateUserTokenResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": ""
+          }
+        }
+      }
+    },
+    "/api/v1/tokens/{id}": {
+      "delete": {
+        "tags": [
+          "crate::routes::tokens"
+        ],
+        "summary": "Revoke one. Immediate: the next request carrying it is unauthorized.",
+        "operationId": "revoke_user_token",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": ""
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      }
+    },
+    "/api/v1/vault/passkeys": {
+      "get": {
+        "tags": [
+          "crate::routes::vault"
+        ],
+        "summary": "Passkeys enrolled on this vault, with their wrapped secrets — the browser\nneeds the blob in hand before it can ask the authenticator to open it.",
+        "operationId": "list_passkeys",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/VaultPasskey"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "crate::routes::vault"
+        ],
+        "summary": "Enrol a passkey. Requires the app password, since that's what's being\nwrapped — you can't hand out a key to a vault you can't open.",
+        "operationId": "add_passkey",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AddPasskeyRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VaultPasskey"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      }
+    },
+    "/api/v1/vault/passkeys/{id}": {
+      "delete": {
+        "tags": [
+          "crate::routes::vault"
+        ],
+        "summary": "Forget a passkey. The vault is untouched — the app password still opens it.",
+        "operationId": "delete_passkey",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": ""
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      }
+    },
+    "/api/v1/vault/passkeys/{id}/used": {
+      "post": {
+        "tags": [
+          "crate::routes::vault"
+        ],
+        "summary": "Note that a passkey was just used, so the settings page can show it.",
+        "operationId": "touch_passkey",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": ""
+          }
+        }
+      }
+    },
+    "/api/v1/vault/passphrase": {
+      "post": {
+        "tags": [
+          "crate::routes::vault"
+        ],
+        "summary": "Set the app password. Once only — a second attempt is a conflict, not an\noverwrite, so a stray call can never orphan existing secrets.",
+        "operationId": "set_vault_passphrase",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetVaultPassphraseRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VaultStatus"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": ""
+          }
+        }
+      }
+    },
+    "/api/v1/vault/status": {
+      "get": {
+        "tags": [
+          "crate::routes::vault"
+        ],
+        "summary": "Has this user set an app password yet?",
+        "operationId": "vault_status",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VaultStatus"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/vault/verify": {
+      "post": {
+        "tags": [
+          "crate::routes::vault"
+        ],
+        "summary": "Check a password without decrypting anything — lets the UI unlock (and\nhold the password for syncing) with a clear yes/no.",
+        "operationId": "verify_vault_passphrase",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetVaultPassphraseRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": ""
+          },
+          "403": {
+            "description": ""
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      }
+    },
+    "/api/v1/workspaces": {
+      "get": {
+        "tags": [
+          "crate::routes::workspaces"
+        ],
+        "operationId": "list_workspaces",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/WorkspaceDetail"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "crate::routes::workspaces"
+        ],
+        "operationId": "create_workspace",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateWorkspaceRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Workspace"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/workspaces/{id}": {
+      "get": {
+        "tags": [
+          "crate::routes::workspaces"
+        ],
+        "operationId": "get_workspace",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkspaceDetail"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "crate::routes::workspaces"
+        ],
+        "operationId": "delete_workspace",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DeleteWorkspaceRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeleteWorkspaceResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": ""
+          },
+          "409": {
+            "description": "the workspace still has live sessions"
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "crate::routes::workspaces"
+        ],
+        "summary": "Rename a workspace — the label only.",
+        "description": "Deliberately does NOT touch the slug, the checkouts on disk, or the git\nremote: those are the workspace's identity, and rediscovery matches on\nthem. So calling a clone of `acme/services` \"the flaky one\" costs nothing\nand breaks nothing — no directory moves, no session loses its path, and\nthe next heartbeat won't create a duplicate workspace.",
+        "operationId": "rename_workspace",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RenameWorkspaceRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Workspace"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": ""
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      }
+    },
+    "/api/v1/workspaces/{id}/git": {
+      "get": {
+        "tags": [
+          "crate::routes::workspaces"
+        ],
+        "summary": "Live git status + working-tree diff, relayed from the node.",
+        "operationId": "workspace_git_status",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "node_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/NodeId"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GitStatusResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      }
+    },
+    "/api/v1/workspaces/{id}/git/commit": {
+      "post": {
+        "tags": [
+          "crate::routes::gitops"
+        ],
+        "summary": "Stage everything and commit, on the machine that holds the checkout.",
+        "description": "Finishing work shouldn't require dropping into a terminal to type the two\ncommands you were always going to type — you just read the diff in the panel\nabove the button.",
+        "operationId": "git_commit",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GitCommitRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OpResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      }
+    },
+    "/api/v1/workspaces/{id}/git/push": {
+      "post": {
+        "tags": [
+          "crate::routes::gitops"
+        ],
+        "summary": "Push the checkout's current branch.",
+        "operationId": "git_push",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GitPushRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OpResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      }
+    },
+    "/api/v1/workspaces/{id}/notes": {
+      "get": {
+        "tags": [
+          "crate::routes::notes"
+        ],
+        "operationId": "list_notes",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Note"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "crate::routes::notes"
+        ],
+        "operationId": "create_note",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateNoteRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Note"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/workspaces/{id}/secrets": {
+      "get": {
+        "tags": [
+          "crate::routes::gitops"
+        ],
+        "operationId": "list_secrets",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/WorkspaceSecret"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/workspaces/{id}/secrets/{name}": {
+      "get": {
+        "tags": [
+          "crate::routes::gitops"
+        ],
+        "operationId": "get_secret",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkspaceSecret"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "crate::routes::gitops"
+        ],
+        "operationId": "put_secret",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PutSecretRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OpResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/workspaces/{id}/secrets/{name}/import": {
+      "post": {
+        "tags": [
+          "crate::routes::gitops"
+        ],
+        "summary": "Adopt a checkout's existing `.env` into the vault, sealed with the app\npassword.",
+        "description": "Importing a repo that already carries a `.env` is the common case, and\nleaving that file outside the vault meant it never travelled to the user's\nother machines — and never got encrypted. This is the on-ramp: read it off\ndisk once, seal it, and from then on it syncs like any other secret.",
+        "operationId": "import_secret_from_checkout",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ImportSecretRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OpResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": ""
+          },
+          "428": {
+            "description": ""
+          }
+        }
+      }
+    },
+    "/api/v1/workspaces/{id}/secrets/{name}/on-disk": {
+      "get": {
+        "tags": [
+          "crate::routes::gitops"
+        ],
+        "summary": "Does this workspace have a `.env` sitting in a checkout that the vault\ndoesn't know about? Asked right after an import, so we only interrupt\nsomeone for their password when there's actually something to seal.",
+        "operationId": "secret_on_disk",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SecretOnDisk"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/workspaces/{id}/secrets/{name}/open": {
+      "post": {
+        "tags": [
+          "crate::routes::gitops"
+        ],
+        "summary": "Unlock a passphrase-sealed secret. The passphrase is never stored; a wrong\none is reported as such rather than as a decryption error.",
+        "operationId": "open_secret",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OpenSecretRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkspaceSecret"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": ""
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      }
+    },
+    "/api/v1/workspaces/{id}/worktrees": {
+      "post": {
+        "tags": [
+          "crate::routes::gitops"
+        ],
+        "operationId": "add_worktree",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WorktreeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OpResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/workspaces/{id}/worktrees/remove": {
+      "post": {
+        "tags": [
+          "crate::routes::gitops"
+        ],
+        "operationId": "remove_worktree",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RemoveWorktreeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OpResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/healthz": {
+      "get": {
+        "tags": [
+          "crate::routes::health"
+        ],
+        "operationId": "healthz",
+        "responses": {
+          "200": {
+            "description": "Service healthy"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "AddPasskeyRequest": {
+        "type": "object",
+        "description": "Enrolling a passkey. The wrapping happens in the browser; the server only\never sees the sealed blob.",
+        "required": [
+          "credential_id",
+          "wrapped_secret"
+        ],
+        "properties": {
+          "credential_id": {
+            "type": "string"
+          },
+          "label": {
+            "type": "string"
+          },
+          "wrapped_secret": {
+            "type": "string"
+          }
+        }
+      },
+      "AttachClientMessage": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "data",
+              "type"
+            ],
+            "properties": {
+              "data": {
+                "type": "object",
+                "required": [
+                  "data_b64"
+                ],
+                "properties": {
+                  "data_b64": {
+                    "type": "string"
+                  }
+                }
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "input"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "data",
+              "type"
+            ],
+            "properties": {
+              "data": {
+                "type": "object",
+                "required": [
+                  "cols",
+                  "rows"
+                ],
+                "properties": {
+                  "cols": {
+                    "type": "integer",
+                    "format": "int32",
+                    "minimum": 0
+                  },
+                  "rows": {
+                    "type": "integer",
+                    "format": "int32",
+                    "minimum": 0
+                  }
+                }
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "resize"
+                ]
+              }
+            }
+          }
+        ],
+        "description": "Terminal attach socket messages (browser → control plane)."
+      },
+      "AttachServerMessage": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "data",
+              "type"
+            ],
+            "properties": {
+              "data": {
+                "type": "object",
+                "required": [
+                  "data_b64"
+                ],
+                "properties": {
+                  "data_b64": {
+                    "type": "string"
+                  }
+                }
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "output"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "data",
+              "type"
+            ],
+            "properties": {
+              "data": {
+                "type": "object",
+                "required": [
+                  "status"
+                ],
+                "properties": {
+                  "status": {
+                    "type": "string"
+                  }
+                }
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "status"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "The agreed terminal grid: the PTY is sized to the LARGEST current\nviewer; every viewer renders this grid (scaling its font down if its\npanel is smaller), so a small window never shrinks the session for\neveryone else.",
+            "required": [
+              "data",
+              "type"
+            ],
+            "properties": {
+              "data": {
+                "type": "object",
+                "description": "The agreed terminal grid: the PTY is sized to the LARGEST current\nviewer; every viewer renders this grid (scaling its font down if its\npanel is smaller), so a small window never shrinks the session for\neveryone else.",
+                "required": [
+                  "cols",
+                  "rows"
+                ],
+                "properties": {
+                  "cols": {
+                    "type": "integer",
+                    "format": "int32",
+                    "minimum": 0
+                  },
+                  "rows": {
+                    "type": "integer",
+                    "format": "int32",
+                    "minimum": 0
+                  }
+                }
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "size"
+                ]
+              }
+            }
+          }
+        ],
+        "description": "Terminal attach socket messages (control plane → browser)."
+      },
+      "AuthProviders": {
+        "type": "object",
+        "description": "Unauthenticated sign-in capabilities, so the login screen only offers what\nthis instance actually supports.",
+        "required": [
+          "oidc",
+          "dev_login"
+        ],
+        "properties": {
+          "dev_login": {
+            "type": "boolean",
+            "description": "The dev/CI escape hatch is enabled (never in production)."
+          },
+          "oidc": {
+            "type": "boolean",
+            "description": "An OIDC identity provider is configured."
+          }
+        }
+      },
+      "Board": {
+        "type": "object",
+        "description": "Provider values: `local` | `jira` | `github` | `linear` | `trello`.\nExternal boards remain authoritative; NookOS federates.",
+        "required": [
+          "id",
+          "tenant_id",
+          "name",
+          "provider",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "id": {
+            "$ref": "#/components/schemas/BoardId"
+          },
+          "name": {
+            "type": "string"
+          },
+          "provider": {
+            "type": "string"
+          },
+          "tenant_id": {
+            "$ref": "#/components/schemas/TenantId"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "workspace_id": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/WorkspaceId"
+              }
+            ]
+          }
+        }
+      },
+      "BoardColumn": {
+        "type": "object",
+        "required": [
+          "id",
+          "board_id",
+          "name",
+          "position"
+        ],
+        "properties": {
+          "board_id": {
+            "$ref": "#/components/schemas/BoardId"
+          },
+          "id": {
+            "$ref": "#/components/schemas/ColumnId"
+          },
+          "name": {
+            "type": "string"
+          },
+          "position": {
+            "type": "integer",
+            "format": "int32"
+          }
+        }
+      },
+      "BoardDetail": {
+        "type": "object",
+        "required": [
+          "board",
+          "columns",
+          "tasks"
+        ],
+        "properties": {
+          "board": {
+            "$ref": "#/components/schemas/Board"
+          },
+          "columns": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/BoardColumn"
+            }
+          },
+          "tasks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TaskItem"
+            }
+          }
+        }
+      },
+      "BoardId": {
+        "type": "string",
+        "format": "uuid"
+      },
+      "Capabilities": {
+        "type": "object",
+        "description": "What a node reports about itself on registration. The control plane never\ninspects a machine — the node describes its own capabilities.",
+        "required": [
+          "hostname",
+          "platform",
+          "architecture",
+          "cpus",
+          "memory",
+          "docker",
+          "tmux"
+        ],
+        "properties": {
+          "architecture": {
+            "type": "string"
+          },
+          "cpus": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "docker": {
+            "type": "boolean"
+          },
+          "git": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "gpus": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/GpuInfo"
+            }
+          },
+          "hostname": {
+            "type": "string"
+          },
+          "memory": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "platform": {
+            "type": "string"
+          },
+          "runtimes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Detected runtime executables: \"claude\", \"hermes\", \"codex\", \"bash\", ..."
+          },
+          "ssh_public_key": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "This node's SSH public key (generated locally; the private half never\nleaves the machine). Add it as a deploy key to clone private repos."
+          },
+          "tmux": {
+            "type": "boolean"
+          }
+        }
+      },
+      "CloneRequest": {
+        "type": "object",
+        "required": [
+          "url"
+        ],
+        "properties": {
+          "background": {
+            "type": "boolean",
+            "description": "Return as soon as the node has been asked, instead of waiting for the\nclone to finish. Progress arrives as activity events carrying `job_id`."
+          },
+          "credential_id": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/GitCredentialId",
+                "description": "Tenant git credential to clone with (private repos over SSH)."
+              }
+            ]
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Directory name; derived from the URL when omitted."
+          },
+          "url": {
+            "type": "string"
+          }
+        }
+      },
+      "ColumnId": {
+        "type": "string",
+        "format": "uuid"
+      },
+      "CreateBoardRequest": {
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "workspace_id": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/WorkspaceId"
+              }
+            ]
+          }
+        }
+      },
+      "CreateColumnRequest": {
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          }
+        }
+      },
+      "CreateGitCredentialRequest": {
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "generate": {
+            "type": "boolean",
+            "description": "…or let the server generate an ed25519 keypair."
+          },
+          "name": {
+            "type": "string"
+          },
+          "private_key": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Paste an existing private key (OpenSSH PEM)…"
+          }
+        }
+      },
+      "CreateJoinTokenResponse": {
+        "type": "object",
+        "required": [
+          "token",
+          "expires_at"
+        ],
+        "properties": {
+          "expires_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "token": {
+            "type": "string",
+            "description": "Shown exactly once; only a hash is stored."
+          }
+        }
+      },
+      "CreateNoteRequest": {
+        "type": "object",
+        "required": [
+          "content_md"
+        ],
+        "properties": {
+          "content_md": {
+            "type": "string"
+          },
+          "kind": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "title": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "CreateSessionRequest": {
+        "type": "object",
+        "required": [
+          "workspace_id",
+          "node_id",
+          "runtime"
+        ],
+        "properties": {
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "node_id": {
+            "$ref": "#/components/schemas/NodeId"
+          },
+          "path": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Pin the session to a specific checkout path (e.g. a worktree). When\nomitted, the workspace's first checkout on the node is used."
+          },
+          "runtime": {
+            "type": "string"
+          },
+          "workspace_id": {
+            "$ref": "#/components/schemas/WorkspaceId"
+          }
+        }
+      },
+      "CreateTaskRequest": {
+        "type": "object",
+        "required": [
+          "title"
+        ],
+        "properties": {
+          "column_id": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ColumnId"
+              }
+            ]
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "title": {
+            "type": "string"
+          },
+          "workspace_id": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/WorkspaceId"
+              }
+            ]
+          }
+        }
+      },
+      "CreateUserTokenRequest": {
+        "type": "object",
+        "description": "Asking for a personal access token.",
+        "properties": {
+          "expires_in_days": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Expire it after this many days. Omit for a token that doesn't expire."
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "What it's for (\"laptop cli\", \"ci\"). Shown in the list you revoke from."
+          }
+        }
+      },
+      "CreateUserTokenResponse": {
+        "type": "object",
+        "description": "The one and only time the token itself is readable.",
+        "required": [
+          "token",
+          "id",
+          "name"
+        ],
+        "properties": {
+          "expires_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "token": {
+            "type": "string",
+            "description": "`nook_user_…` — store it now; the server keeps only its hash."
+          }
+        }
+      },
+      "CreateWorkspaceRequest": {
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "type": "string"
+          }
+        }
+      },
+      "DeleteWorkspaceRequest": {
+        "type": "object",
+        "description": "Deleting a workspace. Records always go; the checkouts on disk only go\nwhen explicitly asked for (and if they stay, discovery re-adds them).",
+        "properties": {
+          "delete_files": {
+            "type": "boolean",
+            "description": "Also delete the checkout directories on every online node."
+          }
+        }
+      },
+      "DeleteWorkspaceResponse": {
+        "type": "object",
+        "description": "What a workspace delete actually did.",
+        "required": [
+          "deleted",
+          "checkouts_removed",
+          "checkouts_remaining",
+          "message"
+        ],
+        "properties": {
+          "checkouts_remaining": {
+            "type": "integer",
+            "description": "Checkouts left behind (node offline, or removal failed) — these will\nbe rediscovered.",
+            "minimum": 0
+          },
+          "checkouts_removed": {
+            "type": "integer",
+            "description": "Checkouts removed from disk.",
+            "minimum": 0
+          },
+          "deleted": {
+            "type": "boolean"
+          },
+          "message": {
+            "type": "string"
+          }
+        }
+      },
+      "DevLoginRequest": {
+        "type": "object",
+        "properties": {
+          "display_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "email": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "DiscoveredWorkspace": {
+        "type": "object",
+        "description": "A git repository found under a node's workspace roots. Repositories are\nself-describing; the node reports, the control plane reconciles.",
+        "required": [
+          "path",
+          "name",
+          "dirty"
+        ],
+        "properties": {
+          "branch": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "dirty": {
+            "type": "boolean"
+          },
+          "git_remote_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "worktree": {
+            "type": "boolean",
+            "description": "True when this checkout is a linked git worktree (its `.git` is a file\npointing at the primary repo, not a directory)."
+          }
+        }
+      },
+      "DispatchItem": {
+        "type": "object",
+        "required": [
+          "title",
+          "rationale"
+        ],
+        "properties": {
+          "rationale": {
+            "type": "string"
+          },
+          "suggested_runtime": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "task_id": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/TaskId"
+              }
+            ]
+          },
+          "title": {
+            "type": "string"
+          },
+          "workspace_id": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/WorkspaceId"
+              }
+            ]
+          }
+        }
+      },
+      "DispatchSuggestion": {
+        "type": "object",
+        "description": "The dispatcher recommends; humans approve. It never codes, edits, or\ndeploys — suggestions are the entire output surface.",
+        "required": [
+          "headline",
+          "items"
+        ],
+        "properties": {
+          "headline": {
+            "type": "string"
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DispatchItem"
+            }
+          }
+        }
+      },
+      "Event": {
+        "type": "object",
+        "description": "Everything produces events. Kind is an open dotted string:\n\"node.connected\", \"session.started\", \"task.moved\", \"user.login\", ...",
+        "required": [
+          "id",
+          "tenant_id",
+          "occurred_at",
+          "kind",
+          "payload"
+        ],
+        "properties": {
+          "actor_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "actor_type": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "$ref": "#/components/schemas/EventId"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "node_id": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/NodeId"
+              }
+            ]
+          },
+          "occurred_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "payload": {},
+          "session_id": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/SessionId"
+              }
+            ]
+          },
+          "tenant_id": {
+            "$ref": "#/components/schemas/TenantId"
+          },
+          "workspace_id": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/WorkspaceId"
+              }
+            ]
+          }
+        }
+      },
+      "EventId": {
+        "type": "string",
+        "format": "uuid"
+      },
+      "EventsPage": {
+        "type": "object",
+        "required": [
+          "events"
+        ],
+        "properties": {
+          "events": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Event"
+            }
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "Pass as `before` to fetch the next (older) page."
+          }
+        }
+      },
+      "FeedbackItem": {
+        "type": "object",
+        "description": "One improvement someone asked for, and what became of it.",
+        "required": [
+          "id",
+          "tenant_id",
+          "body",
+          "status",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "body": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "created_by": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/UserId"
+              }
+            ]
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "pr_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "session_id": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/SessionId"
+              }
+            ]
+          },
+          "status": {
+            "type": "string",
+            "description": "queued | delivered | submitted | dropped"
+          },
+          "tenant_id": {
+            "$ref": "#/components/schemas/TenantId"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "workspace_id": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/WorkspaceId"
+              }
+            ]
+          }
+        }
+      },
+      "FeedbackTarget": {
+        "type": "object",
+        "description": "Where feedback goes — the first-run question this answers is \"which repo?\"",
+        "required": [
+          "configured",
+          "session_name",
+          "instructions_from_repo"
+        ],
+        "properties": {
+          "branch": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Branch the agent is told to work on, so improvements land somewhere\nisolated and deployable rather than on whatever was checked out."
+          },
+          "configured": {
+            "type": "boolean"
+          },
+          "git_remote": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "instructions": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "What the agent should do with the change once it works — reviewed,\npushed, PR'd, left uncommitted. Overrides the built-in wording."
+          },
+          "instructions_from_repo": {
+            "type": "boolean",
+            "description": "True when the instructions came from `.nook-feedback.md` in the repo\nrather than from this setting, so the UI can say where they live."
+          },
+          "session_name": {
+            "type": "string"
+          },
+          "workspace_id": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/WorkspaceId"
+              }
+            ]
+          },
+          "workspace_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "GitCommitRequest": {
+        "type": "object",
+        "description": "Commit everything in a checkout, from the git panel.",
+        "required": [
+          "node_id",
+          "message"
+        ],
+        "properties": {
+          "message": {
+            "type": "string"
+          },
+          "node_id": {
+            "$ref": "#/components/schemas/NodeId",
+            "description": "Which machine's checkout — a workspace can exist on several."
+          }
+        }
+      },
+      "GitCredential": {
+        "type": "object",
+        "description": "A tenant git credential — only the public half is ever returned.",
+        "required": [
+          "id",
+          "tenant_id",
+          "name",
+          "kind",
+          "public_key",
+          "created_at"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "id": {
+            "$ref": "#/components/schemas/GitCredentialId"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "public_key": {
+            "type": "string"
+          },
+          "tenant_id": {
+            "$ref": "#/components/schemas/TenantId"
+          }
+        }
+      },
+      "GitCredentialId": {
+        "type": "string",
+        "format": "uuid"
+      },
+      "GitFileStatus": {
+        "type": "object",
+        "required": [
+          "status",
+          "path"
+        ],
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "description": "Porcelain status code, e.g. \" M\", \"??\", \"A \"."
+          }
+        }
+      },
+      "GitPushRequest": {
+        "type": "object",
+        "description": "Push a checkout's current branch.",
+        "required": [
+          "node_id"
+        ],
+        "properties": {
+          "credential_id": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/GitCredentialId",
+                "description": "Tenant git credential to push with. Omit to use the node's own key."
+              }
+            ]
+          },
+          "node_id": {
+            "$ref": "#/components/schemas/NodeId"
+          }
+        }
+      },
+      "GitStatusResponse": {
+        "type": "object",
+        "required": [
+          "dirty",
+          "files",
+          "diff"
+        ],
+        "properties": {
+          "branch": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "diff": {
+            "type": "string",
+            "description": "Unified diff of the working tree (truncated by the node if huge)."
+          },
+          "dirty": {
+            "type": "boolean"
+          },
+          "files": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/GitFileStatus"
+            }
+          }
+        }
+      },
+      "GpuInfo": {
+        "type": "object",
+        "required": [
+          "vendor",
+          "model"
+        ],
+        "properties": {
+          "model": {
+            "type": "string"
+          },
+          "vendor": {
+            "type": "string"
+          }
+        }
+      },
+      "ImportSecretRequest": {
+        "type": "object",
+        "description": "Adopt a file that already exists in a checkout into the vault.",
+        "required": [
+          "passphrase"
+        ],
+        "properties": {
+          "ephemeral": {
+            "type": "boolean"
+          },
+          "passphrase": {
+            "type": "string",
+            "description": "The app password. Same rule as saving: nothing enters the vault\nunsealed."
+          }
+        }
+      },
+      "InitProjectRequest": {
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          }
+        }
+      },
+      "JoinRequest": {
+        "type": "object",
+        "description": "Sent by `nook join` (unauthenticated; the join token IS the credential).",
+        "required": [
+          "token",
+          "name",
+          "hostname",
+          "platform"
+        ],
+        "properties": {
+          "hostname": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "platform": {
+            "type": "string"
+          },
+          "token": {
+            "type": "string"
+          }
+        }
+      },
+      "JoinResponse": {
+        "type": "object",
+        "required": [
+          "node_id",
+          "node_name",
+          "node_token"
+        ],
+        "properties": {
+          "node_id": {
+            "$ref": "#/components/schemas/NodeId"
+          },
+          "node_name": {
+            "type": "string"
+          },
+          "node_token": {
+            "type": "string",
+            "description": "Long-lived node credential; shown once, stored hashed."
+          }
+        }
+      },
+      "MeResponse": {
+        "type": "object",
+        "description": "The signed-in caller with their tenant.",
+        "required": [
+          "user",
+          "tenant"
+        ],
+        "properties": {
+          "tenant": {
+            "$ref": "#/components/schemas/Tenant"
+          },
+          "user": {
+            "$ref": "#/components/schemas/User"
+          }
+        }
+      },
+      "MoveTaskRequest": {
+        "type": "object",
+        "required": [
+          "column"
+        ],
+        "properties": {
+          "column": {
+            "type": "string"
+          }
+        }
+      },
+      "Node": {
+        "type": "object",
+        "description": "Status values: `online` | `offline`.",
+        "required": [
+          "id",
+          "tenant_id",
+          "name",
+          "hostname",
+          "platform",
+          "capabilities",
+          "resources",
+          "status",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "capabilities": {},
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "hostname": {
+            "type": "string"
+          },
+          "id": {
+            "$ref": "#/components/schemas/NodeId"
+          },
+          "last_seen_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "name": {
+            "type": "string"
+          },
+          "platform": {
+            "type": "string"
+          },
+          "resources": {
+            "description": "Latest heartbeat resource sample (see `NodeResources`); `{}` until first."
+          },
+          "status": {
+            "type": "string"
+          },
+          "tenant_id": {
+            "$ref": "#/components/schemas/TenantId"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "NodeArtifact": {
+        "type": "object",
+        "description": "A node binary this control plane can hand out. One per platform it was\nbuilt with — the fleet stays on one version because the server only offers\nthe build it shipped with.",
+        "required": [
+          "os",
+          "arch",
+          "label",
+          "filename",
+          "size",
+          "sha256",
+          "url"
+        ],
+        "properties": {
+          "arch": {
+            "type": "string",
+            "description": "`x86_64` | `aarch64`, normalized from `uname -m`."
+          },
+          "filename": {
+            "type": "string"
+          },
+          "label": {
+            "type": "string",
+            "description": "Human label for the picker (\"macOS · Apple silicon\")."
+          },
+          "os": {
+            "type": "string",
+            "description": "`linux` | `darwin`, as `uname -s` lowercased."
+          },
+          "sha256": {
+            "type": "string"
+          },
+          "size": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "url": {
+            "type": "string"
+          }
+        }
+      },
+      "NodeId": {
+        "type": "string",
+        "format": "uuid"
+      },
+      "NodeReleases": {
+        "type": "object",
+        "description": "Everything the \"add node\" flow needs: what to download, and where the\none-shot installer lives.",
+        "required": [
+          "version",
+          "install_url",
+          "base_url",
+          "artifacts"
+        ],
+        "properties": {
+          "artifacts": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/NodeArtifact"
+            }
+          },
+          "base_url": {
+            "type": "string",
+            "description": "This instance as the caller reached it — what a new machine should use."
+          },
+          "install_url": {
+            "type": "string",
+            "description": "URL of the generated install script."
+          },
+          "version": {
+            "type": "string",
+            "description": "Version of the control plane, which is the version of these binaries."
+          }
+        }
+      },
+      "NodeResources": {
+        "type": "object",
+        "description": "Live resource sample a node reports on each heartbeat, so both humans and\nthe triage scheduler can see which machine can take the workload.",
+        "required": [
+          "cpu_percent",
+          "mem_used",
+          "mem_total",
+          "load_avg1",
+          "active_sessions"
+        ],
+        "properties": {
+          "active_sessions": {
+            "type": "integer",
+            "format": "int32",
+            "description": "NookOS-managed sessions currently alive on the node.",
+            "minimum": 0
+          },
+          "cpu_percent": {
+            "type": "number",
+            "format": "float",
+            "description": "Overall CPU utilization, 0–100."
+          },
+          "load_avg1": {
+            "type": "number",
+            "format": "double",
+            "description": "1-minute load average (0 on platforms without it)."
+          },
+          "mem_total": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "mem_used": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
+      "NodeWorkspace": {
+        "type": "object",
+        "description": "A workspace checked out at a path on a particular node — the join table\nthat lets one workspace exist on many machines.",
+        "required": [
+          "id",
+          "tenant_id",
+          "node_id",
+          "workspace_id",
+          "path",
+          "git_status",
+          "discovered_at",
+          "last_scanned_at"
+        ],
+        "properties": {
+          "discovered_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "git_branch": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "git_remote_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "git_status": {},
+          "id": {
+            "$ref": "#/components/schemas/NodeWorkspaceId"
+          },
+          "last_scanned_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "node_id": {
+            "$ref": "#/components/schemas/NodeId"
+          },
+          "path": {
+            "type": "string"
+          },
+          "tenant_id": {
+            "$ref": "#/components/schemas/TenantId"
+          },
+          "workspace_id": {
+            "$ref": "#/components/schemas/WorkspaceId"
+          }
+        }
+      },
+      "NodeWorkspaceId": {
+        "type": "string",
+        "format": "uuid"
+      },
+      "Note": {
+        "type": "object",
+        "description": "Kind values: `rolling` | `briefing` | `decision` | free-form.",
+        "required": [
+          "id",
+          "tenant_id",
+          "workspace_id",
+          "title",
+          "content_md",
+          "kind",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "content_md": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "id": {
+            "$ref": "#/components/schemas/NoteId"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "tenant_id": {
+            "$ref": "#/components/schemas/TenantId"
+          },
+          "title": {
+            "type": "string"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "workspace_id": {
+            "$ref": "#/components/schemas/WorkspaceId"
+          }
+        }
+      },
+      "NoteId": {
+        "type": "string",
+        "format": "uuid"
+      },
+      "OpResponse": {
+        "type": "object",
+        "description": "Outcome of a long-running git operation on a node.",
+        "required": [
+          "ok",
+          "message"
+        ],
+        "properties": {
+          "message": {
+            "type": "string"
+          },
+          "ok": {
+            "type": "boolean"
+          },
+          "path": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "OpenSecretRequest": {
+        "type": "object",
+        "description": "Unlocking a protected secret.",
+        "required": [
+          "passphrase"
+        ],
+        "properties": {
+          "passphrase": {
+            "type": "string"
+          }
+        }
+      },
+      "PutSecretRequest": {
+        "type": "object",
+        "required": [
+          "content",
+          "passphrase"
+        ],
+        "properties": {
+          "content": {
+            "type": "string"
+          },
+          "ephemeral": {
+            "type": "boolean",
+            "description": "Wipe the synced file from checkouts when the session ends."
+          },
+          "passphrase": {
+            "type": "string",
+            "description": "The app password. Required, not optional: a `.env` moves between\nmachines, so it is sealed with something the server never stores\nbefore the app key wraps it. A database dump plus `SECRETS_KEY` must\nnever be enough to read one."
+          }
+        }
+      },
+      "RemoveWorktreeRequest": {
+        "type": "object",
+        "required": [
+          "node_id",
+          "path"
+        ],
+        "properties": {
+          "node_id": {
+            "$ref": "#/components/schemas/NodeId"
+          },
+          "path": {
+            "type": "string"
+          }
+        }
+      },
+      "RenameWorkspaceRequest": {
+        "type": "object",
+        "description": "A new label for a workspace. The name is what people read; the slug, the\ncheckouts on disk and the git remote are its identity, and none of them\nmove — which is what makes this safe to do on a whim.",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          }
+        }
+      },
+      "ScheduledNode": {
+        "type": "object",
+        "description": "The node the resource-aware scheduler chose for \"Auto\" placement.",
+        "required": [
+          "node_id",
+          "node_name"
+        ],
+        "properties": {
+          "node_id": {
+            "$ref": "#/components/schemas/NodeId"
+          },
+          "node_name": {
+            "type": "string"
+          }
+        }
+      },
+      "SecretOnDisk": {
+        "type": "object",
+        "description": "Whether an import left a `.env` on disk that the vault hasn't adopted yet.",
+        "required": [
+          "found",
+          "in_vault"
+        ],
+        "properties": {
+          "checkout_path": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Which checkout it was found in."
+          },
+          "found": {
+            "type": "boolean"
+          },
+          "in_vault": {
+            "type": "boolean",
+            "description": "Already stored in the vault, so there's nothing to adopt."
+          }
+        }
+      },
+      "Session": {
+        "type": "object",
+        "description": "Status values: `starting` | `running` | `detached` | `exited` | `error`.\nRuntime is an open string: \"claude\", \"hermes\", \"codex\", \"bash\", \"zsh\", ...",
+        "required": [
+          "id",
+          "tenant_id",
+          "workspace_id",
+          "node_id",
+          "name",
+          "runtime",
+          "status",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "created_by": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/UserId"
+              }
+            ]
+          },
+          "ended_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why the session failed to start, when it did."
+          },
+          "id": {
+            "$ref": "#/components/schemas/SessionId"
+          },
+          "name": {
+            "type": "string"
+          },
+          "node_id": {
+            "$ref": "#/components/schemas/NodeId"
+          },
+          "runtime": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "tenant_id": {
+            "$ref": "#/components/schemas/TenantId"
+          },
+          "tmux_session": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "workspace_id": {
+            "$ref": "#/components/schemas/WorkspaceId"
+          }
+        }
+      },
+      "SessionId": {
+        "type": "string",
+        "format": "uuid"
+      },
+      "SessionInputRequest": {
+        "type": "object",
+        "description": "Keystrokes for a session. What a script sends instead of attaching a\nterminal.",
+        "required": [
+          "text"
+        ],
+        "properties": {
+          "enter": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Press Enter afterwards. Defaults to true: an unsubmitted prompt is\nalmost never what a caller wanted."
+          },
+          "text": {
+            "type": "string"
+          }
+        }
+      },
+      "SessionOutputRequest": {
+        "type": "object",
+        "description": "How much of a session's screen to read back.",
+        "properties": {
+          "history_lines": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Scrollback lines above the visible screen (0–2000). Default 0.",
+            "minimum": 0
+          }
+        }
+      },
+      "SessionOutputResponse": {
+        "type": "object",
+        "description": "A session's current screen, with enough context to know what you're\nlooking at — `runtime` is how a caller tells a claude shell from a bash one.",
+        "required": [
+          "runtime",
+          "status",
+          "text"
+        ],
+        "properties": {
+          "runtime": {
+            "type": "string",
+            "description": "\"claude\" | \"hermes\" | \"codex\" | \"bash\" | …"
+          },
+          "status": {
+            "type": "string",
+            "description": "`starting` | `running` | `detached` | `exited` | `error`."
+          },
+          "text": {
+            "type": "string"
+          }
+        }
+      },
+      "SessionWindow": {
+        "type": "object",
+        "description": "One terminal inside a session (a tmux window).",
+        "required": [
+          "index",
+          "name",
+          "active"
+        ],
+        "properties": {
+          "active": {
+            "type": "boolean"
+          },
+          "index": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "name": {
+            "type": "string"
+          },
+          "panes": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Panes in this window — >1 means it's split.",
+            "minimum": 0
+          }
+        }
+      },
+      "SetFeedbackTargetRequest": {
+        "type": "object",
+        "description": "Point feedback at a repo and a branch. Separate from submitting, so the\ntarget can be changed at any time rather than only on the first send.",
+        "required": [
+          "workspace_id"
+        ],
+        "properties": {
+          "branch": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Empty means \"leave the agent to pick\"; a name pins every change to it."
+          },
+          "instructions": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Empty falls back to `.nook-feedback.md` in the repo, then to the\nbuilt-in wording."
+          },
+          "workspace_id": {
+            "$ref": "#/components/schemas/WorkspaceId"
+          }
+        }
+      },
+      "SetVaultPassphraseRequest": {
+        "type": "object",
+        "description": "Setting or checking the app password.",
+        "required": [
+          "passphrase"
+        ],
+        "properties": {
+          "passphrase": {
+            "type": "string"
+          }
+        }
+      },
+      "Setting": {
+        "type": "object",
+        "description": "Scope values: `tenant` | `user`.",
+        "required": [
+          "id",
+          "tenant_id",
+          "scope",
+          "key",
+          "value"
+        ],
+        "properties": {
+          "id": {
+            "$ref": "#/components/schemas/SettingId"
+          },
+          "key": {
+            "type": "string"
+          },
+          "scope": {
+            "type": "string"
+          },
+          "tenant_id": {
+            "$ref": "#/components/schemas/TenantId"
+          },
+          "user_id": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/UserId"
+              }
+            ]
+          },
+          "value": {}
+        }
+      },
+      "SettingId": {
+        "type": "string",
+        "format": "uuid"
+      },
+      "StartWorkRequest": {
+        "type": "object",
+        "required": [
+          "runtime"
+        ],
+        "properties": {
+          "branch": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "node_id": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/NodeId"
+              }
+            ]
+          },
+          "runtime": {
+            "type": "string"
+          },
+          "workspace_id": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/WorkspaceId"
+              }
+            ]
+          }
+        }
+      },
+      "StartWorkResponse": {
+        "type": "object",
+        "required": [
+          "task",
+          "session"
+        ],
+        "properties": {
+          "session": {
+            "$ref": "#/components/schemas/Session"
+          },
+          "task": {
+            "$ref": "#/components/schemas/TaskItem"
+          }
+        }
+      },
+      "SubmitFeedbackRequest": {
+        "type": "object",
+        "required": [
+          "body"
+        ],
+        "properties": {
+          "body": {
+            "type": "string"
+          },
+          "runtime": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Runtime for the feedback session (defaults to claude)."
+          },
+          "workspace_id": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/WorkspaceId",
+                "description": "Where this feedback should be worked on. Remembered for next time;\nrequired only until one has been chosen."
+              }
+            ]
+          }
+        }
+      },
+      "SubmitPrRequest": {
+        "type": "object",
+        "properties": {
+          "pr_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "TaskId": {
+        "type": "string",
+        "format": "uuid"
+      },
+      "TaskItem": {
+        "type": "object",
+        "required": [
+          "id",
+          "tenant_id",
+          "board_id",
+          "column_id",
+          "title",
+          "position",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "assigned_node_id": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/NodeId",
+                "description": "Node the triage scheduler chose (or you forced) to run this work."
+              }
+            ]
+          },
+          "assignee_user_id": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/UserId"
+              }
+            ]
+          },
+          "board_id": {
+            "$ref": "#/components/schemas/BoardId"
+          },
+          "branch": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "column_id": {
+            "$ref": "#/components/schemas/ColumnId"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "external_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "external_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "$ref": "#/components/schemas/TaskId"
+          },
+          "position": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "pr_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "session_id": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/SessionId"
+              }
+            ]
+          },
+          "tenant_id": {
+            "$ref": "#/components/schemas/TenantId"
+          },
+          "title": {
+            "type": "string"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "workspace_id": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/WorkspaceId"
+              }
+            ]
+          },
+          "worktree_node_id": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/NodeId"
+              }
+            ]
+          },
+          "worktree_path": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "Tenant": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "slug",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "id": {
+            "$ref": "#/components/schemas/TenantId"
+          },
+          "name": {
+            "type": "string"
+          },
+          "slug": {
+            "type": "string"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "TenantId": {
+        "type": "string",
+        "format": "uuid"
+      },
+      "TenantMembership": {
+        "type": "object",
+        "description": "A tenant the caller belongs to, and the role they hold in it.\n\nMembership is deliberately its own concept: a user has one *current*\ntenant (`users.tenant_id`) and may reach several, which is what teams will\nbe — not a new mechanism, just more rows.",
+        "required": [
+          "id",
+          "name",
+          "slug",
+          "role",
+          "current",
+          "created_at"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "current": {
+            "type": "boolean",
+            "description": "The tenant this session is scoped to right now."
+          },
+          "id": {
+            "$ref": "#/components/schemas/TenantId"
+          },
+          "name": {
+            "type": "string"
+          },
+          "role": {
+            "type": "string",
+            "description": "`owner` | `admin` | `member`."
+          },
+          "slug": {
+            "type": "string"
+          }
+        }
+      },
+      "Theme": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "slug",
+          "tokens",
+          "created_at"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "id": {
+            "$ref": "#/components/schemas/ThemeId"
+          },
+          "name": {
+            "type": "string"
+          },
+          "slug": {
+            "type": "string"
+          },
+          "tenant_id": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/TenantId",
+                "description": "NULL = built-in theme shipped with NookOS."
+              }
+            ]
+          },
+          "tokens": {}
+        }
+      },
+      "ThemeId": {
+        "type": "string",
+        "format": "uuid"
+      },
+      "ThemeTokens": {
+        "type": "object",
+        "description": "Design tokens applied as CSS custom properties. Every visual aspect is\nconfigurable; unknown keys pass through untouched so theme packs can extend.",
+        "required": [
+          "colors"
+        ],
+        "properties": {
+          "colors": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "effects": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "fonts": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "spacing": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "UiEvent": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "data",
+              "type"
+            ],
+            "properties": {
+              "data": {
+                "type": "object",
+                "required": [
+                  "node_id",
+                  "name",
+                  "status"
+                ],
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  },
+                  "node_id": {
+                    "$ref": "#/components/schemas/NodeId"
+                  },
+                  "status": {
+                    "type": "string"
+                  }
+                }
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "node_status"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "data",
+              "type"
+            ],
+            "properties": {
+              "data": {
+                "type": "object",
+                "required": [
+                  "session_id",
+                  "status"
+                ],
+                "properties": {
+                  "session_id": {
+                    "$ref": "#/components/schemas/SessionId"
+                  },
+                  "status": {
+                    "type": "string"
+                  }
+                }
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "session_status"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "data",
+              "type"
+            ],
+            "properties": {
+              "data": {
+                "type": "object",
+                "required": [
+                  "node_id",
+                  "resources"
+                ],
+                "properties": {
+                  "node_id": {
+                    "$ref": "#/components/schemas/NodeId"
+                  },
+                  "resources": {}
+                }
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "node_resources"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "data",
+              "type"
+            ],
+            "properties": {
+              "data": {
+                "type": "object",
+                "required": [
+                  "event"
+                ],
+                "properties": {
+                  "event": {
+                    "$ref": "#/components/schemas/Event"
+                  }
+                }
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "activity"
+                ]
+              }
+            }
+          }
+        ],
+        "description": "Live events pushed to browsers over `/api/v1/ws/ui`."
+      },
+      "UpdateBoardRequest": {
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          }
+        }
+      },
+      "UpdateColumnRequest": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "position": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          }
+        }
+      },
+      "UpdateFeedbackRequest": {
+        "type": "object",
+        "properties": {
+          "pr_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "UpdateNoteRequest": {
+        "type": "object",
+        "properties": {
+          "content_md": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "title": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "UpdateSessionRequest": {
+        "type": "object",
+        "description": "Renaming a session (tabs are named things people recognize).",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          }
+        }
+      },
+      "UpdateSettingRequest": {
+        "type": "object",
+        "required": [
+          "value"
+        ],
+        "properties": {
+          "scope": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`tenant` (default) or `user`."
+          },
+          "value": {}
+        }
+      },
+      "UpdateTaskRequest": {
+        "type": "object",
+        "properties": {
+          "assignee_user_id": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/UserId"
+              }
+            ]
+          },
+          "column_id": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ColumnId"
+              }
+            ]
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "position": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "title": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "User": {
+        "type": "object",
+        "description": "Role values: `owner` | `admin` | `member` (TEXT CHECK in the schema).",
+        "required": [
+          "id",
+          "tenant_id",
+          "display_name",
+          "email",
+          "role",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "avatar_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "display_name": {
+            "type": "string"
+          },
+          "email": {
+            "type": "string"
+          },
+          "id": {
+            "$ref": "#/components/schemas/UserId"
+          },
+          "role": {
+            "type": "string"
+          },
+          "tenant_id": {
+            "$ref": "#/components/schemas/TenantId"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "UserId": {
+        "type": "string",
+        "format": "uuid"
+      },
+      "UserToken": {
+        "type": "object",
+        "description": "A personal access token as listed back — everything except the secret.",
+        "required": [
+          "id",
+          "name",
+          "created_at"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "expires_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "id": {
+            "type": "string"
+          },
+          "last_used_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "name": {
+            "type": "string"
+          }
+        }
+      },
+      "VaultPasskey": {
+        "type": "object",
+        "description": "A passkey enrolled to unlock the vault.",
+        "required": [
+          "id",
+          "credential_id",
+          "label",
+          "wrapped_secret",
+          "created_at"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "credential_id": {
+            "type": "string",
+            "description": "Base64url WebAuthn credential id, so the browser can ask for this\nspecific passkey."
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "label": {
+            "type": "string"
+          },
+          "last_used_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "wrapped_secret": {
+            "type": "string",
+            "description": "The app password sealed under the passkey-derived key, base64. Only\nthe browser that holds the passkey can open it."
+          }
+        }
+      },
+      "VaultStatus": {
+        "type": "object",
+        "description": "Whether this user has an app password (the key that seals their secrets).",
+        "required": [
+          "configured"
+        ],
+        "properties": {
+          "configured": {
+            "type": "boolean"
+          },
+          "created_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "passkeys": {
+            "type": "integer",
+            "format": "int64",
+            "description": "How many passkeys can unlock this vault. Non-zero means the UI should\nreach for a passkey before asking anyone to type a password."
+          }
+        }
+      },
+      "WindowAction": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "Just report the current terminals.",
+            "required": [
+              "action"
+            ],
+            "properties": {
+              "action": {
+                "type": "string",
+                "enum": [
+                  "list"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Open another terminal in the session and focus it.",
+            "required": [
+              "action"
+            ],
+            "properties": {
+              "action": {
+                "type": "string",
+                "enum": [
+                  "new"
+                ]
+              },
+              "cwd": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Split the visible terminal so two are on screen at once.",
+            "required": [
+              "vertical",
+              "action"
+            ],
+            "properties": {
+              "action": {
+                "type": "string",
+                "enum": [
+                  "split"
+                ]
+              },
+              "vertical": {
+                "type": "boolean"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "index",
+              "action"
+            ],
+            "properties": {
+              "action": {
+                "type": "string",
+                "enum": [
+                  "select"
+                ]
+              },
+              "index": {
+                "type": "integer",
+                "format": "int32",
+                "minimum": 0
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "index",
+              "action"
+            ],
+            "properties": {
+              "action": {
+                "type": "string",
+                "enum": [
+                  "close"
+                ]
+              },
+              "index": {
+                "type": "integer",
+                "format": "int32",
+                "minimum": 0
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "index",
+              "name",
+              "action"
+            ],
+            "properties": {
+              "action": {
+                "type": "string",
+                "enum": [
+                  "rename"
+                ]
+              },
+              "index": {
+                "type": "integer",
+                "format": "int32",
+                "minimum": 0
+              },
+              "name": {
+                "type": "string"
+              }
+            }
+          }
+        ],
+        "description": "What to do with a session's terminals (tmux windows/panes)."
+      },
+      "Workspace": {
+        "type": "object",
+        "required": [
+          "id",
+          "tenant_id",
+          "name",
+          "slug",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "$ref": "#/components/schemas/WorkspaceId"
+          },
+          "name": {
+            "type": "string"
+          },
+          "slug": {
+            "type": "string"
+          },
+          "tenant_id": {
+            "$ref": "#/components/schemas/TenantId"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "WorkspaceDetail": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/Workspace"
+          },
+          {
+            "type": "object",
+            "required": [
+              "locations"
+            ],
+            "properties": {
+              "locations": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/WorkspaceLocation"
+                }
+              }
+            }
+          }
+        ]
+      },
+      "WorkspaceId": {
+        "type": "string",
+        "format": "uuid"
+      },
+      "WorkspaceLocation": {
+        "type": "object",
+        "description": "A workspace location as presented to the UI (node join included).",
+        "required": [
+          "node_id",
+          "node_name",
+          "node_status",
+          "path",
+          "dirty"
+        ],
+        "properties": {
+          "dirty": {
+            "type": "boolean"
+          },
+          "git_branch": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "node_id": {
+            "$ref": "#/components/schemas/NodeId"
+          },
+          "node_name": {
+            "type": "string"
+          },
+          "node_status": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "worktree": {
+            "type": "boolean",
+            "description": "This checkout is a linked git worktree of the workspace's primary repo."
+          }
+        }
+      },
+      "WorkspaceSecret": {
+        "type": "object",
+        "description": "A workspace secret file (e.g. .env). Content only present on single-get.",
+        "required": [
+          "name",
+          "updated_at"
+        ],
+        "properties": {
+          "content": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "ephemeral": {
+            "type": "boolean",
+            "description": "Removed from checkouts when the session ends."
+          },
+          "name": {
+            "type": "string"
+          },
+          "protected": {
+            "type": "boolean",
+            "description": "Sealed with a passphrase — reading it needs that passphrase."
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "WorktreeRequest": {
+        "type": "object",
+        "required": [
+          "node_id",
+          "branch"
+        ],
+        "properties": {
+          "branch": {
+            "type": "string"
+          },
+          "node_id": {
+            "$ref": "#/components/schemas/NodeId"
+          }
+        }
+      }
+    }
+  }
+}

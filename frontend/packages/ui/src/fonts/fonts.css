@@ -1,0 +1,20 @@
+/* JuliaMono — bundled terminal font. Chosen for the widest glyph coverage of
+   any monospace face: box-drawing, block/shade, geometric shapes, arrows,
+   braille, powerline, and — crucially — the Miscellaneous-Technical / media
+   symbols Claude Code and other TUIs use for tree connectors and mode markers
+   (⎿ U+23BF, ⏵ U+23F5, ⏺ U+23FA) that JetBrains Mono / Cascadia / DejaVu all
+   lack. Subset to the ranges a terminal actually renders. OFL-1.1 licensed. */
+@font-face {
+  font-family: "JuliaMono";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("./JuliaMono-Regular.woff2") format("woff2");
+}
+@font-face {
+  font-family: "JuliaMono";
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("./JuliaMono-Bold.woff2") format("woff2");
+}
