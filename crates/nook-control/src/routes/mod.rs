@@ -47,6 +47,10 @@ pub fn build_router(state: AppState) -> Router {
             get(gitops::get_secret).put(gitops::put_secret),
         )
         .route(
+            "/workspaces/{id}/secrets/{name}/open",
+            post(gitops::open_secret),
+        )
+        .route(
             "/git-credentials",
             get(gitops::list_credentials).post(gitops::create_credential),
         )

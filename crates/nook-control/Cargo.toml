@@ -41,6 +41,7 @@ reqwest = { workspace = true }
 clap = { workspace = true }
 base64 = { workspace = true }
 sha2 = { workspace = true }
+hmac = { workspace = true }
 aes-gcm = { workspace = true }
 rand = { workspace = true }
 dotenvy = { workspace = true }

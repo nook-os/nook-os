@@ -621,11 +621,31 @@ pub struct WorkspaceSecret {
     pub name: String,
     pub updated_at: DateTime<Utc>,
     pub content: Option<String>,
+    /// Sealed with a passphrase — reading it needs that passphrase.
+    #[serde(default)]
+    pub protected: bool,
+    /// Removed from checkouts when the session ends.
+    #[serde(default)]
+    pub ephemeral: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, ToSchema)]
 pub struct PutSecretRequest {
     pub content: String,
+    /// Seal with a passphrase the server never stores. Once set, reading it
+    /// back requires the same passphrase — a database dump plus the app key
+    /// is not enough.
+    #[serde(default)]
+    pub passphrase: Option<String>,
+    /// Wipe the synced file from checkouts when the session ends.
+    #[serde(default)]
+    pub ephemeral: bool,
+}
+
+/// Unlocking a protected secret.
+#[derive(Debug, Clone, Deserialize, ToSchema)]
+pub struct OpenSecretRequest {
+    pub passphrase: String,
 }
 
 // ── Dispatcher ───────────────────────────────────────────────────────────────

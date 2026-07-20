@@ -326,6 +326,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/nodes/{id}/rescan": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Ask a node to rescan its workspace roots now, instead of waiting for the
+         *     periodic sweep. Backs `nook import`.
+         */
+        post: operations["rescan_node"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/notes/{id}": {
         parameters: {
             query?: never;
@@ -704,6 +724,26 @@ export interface paths {
         get: operations["get_secret"];
         put: operations["put_secret"];
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{id}/secrets/{name}/open": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Unlock a passphrase-sealed secret. The passphrase is never stored; a wrong
+         *     one is reported as such rather than as a decryption error.
+         */
+        post: operations["open_secret"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1146,8 +1186,20 @@ export interface components {
             ok: boolean;
             path?: string | null;
         };
+        /** @description Unlocking a protected secret. */
+        OpenSecretRequest: {
+            passphrase: string;
+        };
         PutSecretRequest: {
             content: string;
+            /** @description Wipe the synced file from checkouts when the session ends. */
+            ephemeral?: boolean;
+            /**
+             * @description Seal with a passphrase the server never stores. Once set, reading it
+             *     back requires the same passphrase — a database dump plus the app key
+             *     is not enough.
+             */
+            passphrase?: string | null;
         };
         RemoveWorktreeRequest: {
             node_id: components["schemas"]["NodeId"];
@@ -1416,7 +1468,11 @@ export interface components {
         /** @description A workspace secret file (e.g. .env). Content only present on single-get. */
         WorkspaceSecret: {
             content?: string | null;
+            /** @description Removed from checkouts when the session ends. */
+            ephemeral?: boolean;
             name: string;
+            /** @description Sealed with a passphrase — reading it needs that passphrase. */
+            protected?: boolean;
             /** Format: date-time */
             updated_at: string;
         };
@@ -2040,6 +2096,31 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["OpResponse"];
                 };
+            };
+        };
+    };
+    rescan_node: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
         };
     };
@@ -2838,6 +2919,44 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["OpResponse"];
                 };
+            };
+        };
+    };
+    open_secret: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["OpenSecretRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkspaceSecret"];
+                };
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
         };
     };

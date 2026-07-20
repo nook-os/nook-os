@@ -261,6 +261,15 @@ CREATE TABLE workspace_secrets (
     workspace_id  UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
     name          TEXT NOT NULL DEFAULT '.env',
     content_enc   BYTEA NOT NULL,
+    -- Passphrase protection. When `kdf_salt` is set the payload is sealed with
+    -- a key derived from a passphrase the server never stores, so a database
+    -- dump plus SECRETS_KEY is not enough to read it. `verifier` is a hash of
+    -- the derived key, used only to reject a wrong passphrase without
+    -- attempting decryption.
+    kdf_salt      BYTEA,
+    verifier      BYTEA,
+    -- Wipe the synced file from checkouts when the session ends.
+    ephemeral     BOOLEAN NOT NULL DEFAULT FALSE,
     created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
     UNIQUE (workspace_id, name)

@@ -787,6 +787,33 @@
         }
       }
     },
+    "/api/v1/nodes/{id}/rescan": {
+      "post": {
+        "tags": [
+          "crate::routes::nodes"
+        ],
+        "summary": "Ask a node to rescan its workspace roots now, instead of waiting for the\nperiodic sweep. Backs `nook import`.",
+        "operationId": "rescan_node",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": ""
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      }
+    },
     "/api/v1/notes/{id}": {
       "patch": {
         "tags": [
@@ -1884,6 +1911,61 @@
                 }
               }
             }
+          }
+        }
+      }
+    },
+    "/api/v1/workspaces/{id}/secrets/{name}/open": {
+      "post": {
+        "tags": [
+          "crate::routes::gitops"
+        ],
+        "summary": "Unlock a passphrase-sealed secret. The passphrase is never stored; a wrong\none is reported as such rather than as a decryption error.",
+        "operationId": "open_secret",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OpenSecretRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkspaceSecret"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": ""
+          },
+          "404": {
+            "description": ""
           }
         }
       }
@@ -3184,6 +3266,18 @@
           }
         }
       },
+      "OpenSecretRequest": {
+        "type": "object",
+        "description": "Unlocking a protected secret.",
+        "required": [
+          "passphrase"
+        ],
+        "properties": {
+          "passphrase": {
+            "type": "string"
+          }
+        }
+      },
       "PutSecretRequest": {
         "type": "object",
         "required": [
@@ -3192,6 +3286,17 @@
         "properties": {
           "content": {
             "type": "string"
+          },
+          "ephemeral": {
+            "type": "boolean",
+            "description": "Wipe the synced file from checkouts when the session ends."
+          },
+          "passphrase": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Seal with a passphrase the server never stores. Once set, reading it\nback requires the same passphrase — a database dump plus the app key\nis not enough."
           }
         }
       },
@@ -4211,8 +4316,16 @@
               "null"
             ]
           },
+          "ephemeral": {
+            "type": "boolean",
+            "description": "Removed from checkouts when the session ends."
+          },
           "name": {
             "type": "string"
+          },
+          "protected": {
+            "type": "boolean",
+            "description": "Sealed with a passphrase — reading it needs that passphrase."
           },
           "updated_at": {
             "type": "string",

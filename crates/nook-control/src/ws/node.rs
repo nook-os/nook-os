@@ -315,6 +315,9 @@ async fn handle_message(
             .bind(tenant)
             .execute(&state.db)
             .await?;
+            // Ephemeral secrets exist on disk only while a session is using
+            // them; the encrypted copy stays in the vault.
+            crate::services::secrets::wipe_ephemeral_for_session(state, tenant, session_id).await;
             state.registry.publish(
                 tenant,
                 UiEvent::SessionStatus {

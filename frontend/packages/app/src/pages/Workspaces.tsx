@@ -8,7 +8,7 @@ import { ActivityFeed } from "./Activity";
 import { NotesPanel } from "./Notes";
 import { useNewWork } from "../newwork";
 import { WorkspaceLocations } from "../WorkspaceLocations";
-import { askChoice, askConfirm, notify } from "../dialogs";
+import { askChoice, askConfirm, askForm, askText, notify } from "../dialogs";
 
 export function WorkspacesPage() {
   const showNewWork = useNewWork((s) => s.show);
@@ -73,51 +73,157 @@ function EnvPanel({ workspaceId }: { workspaceId: string }) {
   const [content, setContent] = useState<string | null>(null);
   const [status, setStatus] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [unlocked, setUnlocked] = useState(false);
 
-  const { data: loaded } = useQuery({
+  const { data: loaded, refetch } = useQuery({
     queryKey: ["secrets", workspaceId, ".env"],
     queryFn: async () => {
       const { data, response } = await api.GET(
         "/api/v1/workspaces/{id}/secrets/{name}",
         { params: { path: { id: workspaceId, name: ".env" } } },
       );
-      if (response.status === 404) return { content: "" };
-      return { content: data?.content ?? "" };
+      if (response.status === 404)
+        return { content: "", protected: false, ephemeral: false };
+      return {
+        content: data?.content ?? "",
+        protected: !!data?.protected,
+        ephemeral: !!data?.ephemeral,
+      };
     },
     retry: false,
   });
+
+  const isProtected = !!loaded?.protected;
+  const locked = isProtected && !unlocked;
   const value = content ?? loaded?.content ?? "";
 
+  const unlock = async () => {
+    const passphrase = await askText({
+      title: "Unlock .env",
+      description:
+        "This secret is sealed with a passphrase. NookOS cannot read it without one — not even with database access.",
+      label: "Passphrase",
+      confirmLabel: "unlock",
+    });
+    if (!passphrase) return;
+    setBusy(true);
+    const { data, error, response } = await api.POST(
+      "/api/v1/workspaces/{id}/secrets/{name}/open",
+      {
+        params: { path: { id: workspaceId, name: ".env" } },
+        body: { passphrase },
+      },
+    );
+    setBusy(false);
+    if (error || !response.ok) {
+      await notify(
+        response.status === 403 ? "Wrong passphrase" : "Unlock failed",
+        response.status === 403
+          ? "That passphrase doesn't open this secret."
+          : JSON.stringify(error),
+      );
+      return;
+    }
+    setContent(data?.content ?? "");
+    setUnlocked(true);
+    setStatus("unlocked · synced to checkouts");
+  };
+
   const save = async () => {
+    // Protecting a secret is a one-time decision per save, so ask plainly.
+    const choice = await askChoice({
+      title: "Save .env",
+      description: "How should this be stored?",
+      choices: [
+        {
+          value: "protected",
+          label: "Seal with a passphrase (recommended)",
+          description:
+            "NookOS cannot read it without the passphrase — a database dump plus the app key is not enough. It syncs to checkouts when you unlock it.",
+        },
+        {
+          value: "plain",
+          label: "App-key encryption only",
+          description:
+            "Encrypted at rest and synced automatically, but anyone with the database and the app key can read it.",
+        },
+      ],
+      confirmLabel: "continue",
+    });
+    if (!choice) return;
+
+    let passphrase: string | undefined;
+    let ephemeral = false;
+    if (choice === "protected") {
+      const out = await askForm({
+        title: "Passphrase",
+        description: "There is no recovery: lose it and this secret is gone.",
+        fields: [
+          { name: "passphrase", label: "Passphrase", required: true },
+          { name: "confirm", label: "Confirm passphrase", required: true },
+        ],
+        confirmLabel: "seal & save",
+      });
+      if (!out) return;
+      if (out.passphrase !== out.confirm) {
+        await notify("Passphrases don't match", "Nothing was saved.");
+        return;
+      }
+      passphrase = out.passphrase;
+      ephemeral = await askConfirm({
+        title: "Wipe from disk when sessions end?",
+        description:
+          "The encrypted copy stays in the vault; the file is removed from checkouts once no session is using the workspace.",
+        confirmLabel: "yes, ephemeral",
+      });
+    }
+
     setBusy(true);
     const { data, error } = await api.PUT(
       "/api/v1/workspaces/{id}/secrets/{name}",
       {
         params: { path: { id: workspaceId, name: ".env" } },
-        body: { content: value },
+        body: { content: value, passphrase: passphrase ?? null, ephemeral },
       },
     );
     setBusy(false);
     setStatus(error ? "save failed" : (data?.message ?? "saved"));
+    if (!error && passphrase) {
+      setUnlocked(true);
+      refetch();
+    }
   };
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
-      <textarea
-        className="input mono small"
-        style={{
-          flex: 1,
-          resize: "none",
-          border: "none",
-          borderRadius: 0,
-          background: "var(--nook-bg)",
-          padding: 10,
-        }}
-        placeholder={"# .env — encrypted at rest, synced to every checkout\nAPI_KEY=…"}
-        value={value}
-        onChange={(e) => setContent(e.target.value)}
-        spellCheck={false}
-      />
+      {locked ? (
+        <div className="session-dead" style={{ gap: 10 }}>
+          <div className="session-dead-title">🔒 .env is sealed</div>
+          <p className="muted small">
+            Stored with a passphrase NookOS never keeps. Unlock it to view or
+            edit, and it syncs to this workspace's checkouts.
+          </p>
+          <button className="btn primary" onClick={unlock} disabled={busy}>
+            unlock
+          </button>
+        </div>
+      ) : (
+        <textarea
+          className="input mono small"
+          style={{
+            flex: 1,
+            resize: "none",
+            border: "none",
+            borderRadius: 0,
+            background: "var(--nook-bg)",
+            padding: 10,
+          }}
+          placeholder={"# .env — encrypted at rest, synced to every checkout\nAPI_KEY=…"}
+          value={value}
+          onChange={(e) => setContent(e.target.value)}
+          spellCheck={false}
+        />
+      )}
       <div
         style={{
           display: "flex",
@@ -127,12 +233,14 @@ function EnvPanel({ workspaceId }: { workspaceId: string }) {
           borderTop: "1px solid var(--nook-border)",
         }}
       >
-        <button className="btn primary small" onClick={save} disabled={busy}>
+        <button className="btn primary small" onClick={save} disabled={busy || locked}>
           {busy ? "saving…" : "save & sync"}
         </button>
+        {isProtected && <Pill tone="ok">passphrase-sealed</Pill>}
+        {loaded?.ephemeral && <Pill tone="warn">ephemeral</Pill>}
         {status && <span className="muted small">{status}</span>}
         <span className="faint small" style={{ marginLeft: "auto" }}>
-          AES-256-GCM · pushed to online checkouts on save & on clone
+          AES-256-GCM · pushed to online checkouts
         </span>
       </div>
     </div>

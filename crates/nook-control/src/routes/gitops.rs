@@ -12,6 +12,18 @@ use crate::events::{self, EventDraft};
 use crate::services::secrets;
 use crate::state::AppState;
 
+/// Stored secret rows: (name/content, updated_at, kdf_salt, ephemeral) and the
+/// unlock variant that also carries the verifier.
+type SecretMetaRow = (String, chrono::DateTime<chrono::Utc>, Option<Vec<u8>>, bool);
+type SecretRow = (Vec<u8>, chrono::DateTime<chrono::Utc>, Option<Vec<u8>>, bool);
+type SealedSecretRow = (
+    Vec<u8>,
+    chrono::DateTime<chrono::Utc>,
+    Option<Vec<u8>>,
+    Option<Vec<u8>>,
+    bool,
+);
+
 // ── Tenant git credentials ──────────────────────────────────────────────────
 
 #[utoipa::path(get, path = "/api/v1/git-credentials",
@@ -446,8 +458,8 @@ pub async fn list_secrets(
     auth: AuthCtx,
     Path(workspace_id): Path<WorkspaceId>,
 ) -> ApiResult<Json<Vec<WorkspaceSecret>>> {
-    let rows: Vec<(String, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
-        "SELECT name, updated_at FROM workspace_secrets
+    let rows: Vec<SecretMetaRow> = sqlx::query_as(
+        "SELECT name, updated_at, kdf_salt, ephemeral FROM workspace_secrets
          WHERE tenant_id = $1 AND workspace_id = $2 ORDER BY name",
     )
     .bind(auth.tenant_id)
@@ -456,11 +468,13 @@ pub async fn list_secrets(
     .await?;
     Ok(Json(
         rows.into_iter()
-            .map(|(name, updated_at)| WorkspaceSecret {
-                name,
-                updated_at,
-                content: None,
-            })
+            .map(|(name, updated_at, salt, ephemeral)| WorkspaceSecret {
+            name,
+            updated_at,
+            content: None,
+            protected: salt.is_some(),
+            ephemeral,
+        })
             .collect(),
     ))
 }
@@ -474,16 +488,29 @@ pub async fn get_secret(
     auth: AuthCtx,
     Path((workspace_id, name)): Path<(WorkspaceId, String)>,
 ) -> ApiResult<Json<WorkspaceSecret>> {
-    let row: Option<(Vec<u8>, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
-        "SELECT content_enc, updated_at FROM workspace_secrets
-         WHERE tenant_id = $1 AND workspace_id = $2 AND name = $3",
-    )
-    .bind(auth.tenant_id)
-    .bind(workspace_id)
-    .bind(&name)
-    .fetch_optional(&state.db)
-    .await?;
-    let (enc, updated_at) = row.ok_or(ApiError::NotFound)?;
+    let row: Option<SecretRow> =
+        sqlx::query_as(
+            "SELECT content_enc, updated_at, kdf_salt, ephemeral FROM workspace_secrets
+             WHERE tenant_id = $1 AND workspace_id = $2 AND name = $3",
+        )
+        .bind(auth.tenant_id)
+        .bind(workspace_id)
+        .bind(&name)
+        .fetch_optional(&state.db)
+        .await?;
+    let (enc, updated_at, salt, ephemeral) = row.ok_or(ApiError::NotFound)?;
+
+    // Protected secrets are never returned by a plain GET — the passphrase
+    // arrives on the unlock endpoint instead.
+    if salt.is_some() {
+        return Ok(Json(WorkspaceSecret {
+            name,
+            updated_at,
+            content: None,
+            protected: true,
+            ephemeral,
+        }));
+    }
     let content = state
         .vault
         .decrypt_string(&enc)
@@ -492,6 +519,54 @@ pub async fn get_secret(
         name,
         updated_at,
         content: Some(content),
+        protected: false,
+        ephemeral,
+    }))
+}
+
+/// Unlock a passphrase-sealed secret. The passphrase is never stored; a wrong
+/// one is reported as such rather than as a decryption error.
+#[utoipa::path(post, path = "/api/v1/workspaces/{id}/secrets/{name}/open",
+    operation_id = "open_secret",
+    params(("id" = String, Path,), ("name" = String, Path,)),
+    request_body = OpenSecretRequest,
+    responses((status = 200, body = WorkspaceSecret), (status = 403), (status = 404)))]
+pub async fn open_secret(
+    State(state): State<AppState>,
+    auth: AuthCtx,
+    Path((workspace_id, name)): Path<(WorkspaceId, String)>,
+    Json(req): Json<OpenSecretRequest>,
+) -> ApiResult<Json<WorkspaceSecret>> {
+    let row: Option<SealedSecretRow> =
+        sqlx::query_as(
+            "SELECT content_enc, updated_at, kdf_salt, verifier, ephemeral
+             FROM workspace_secrets
+             WHERE tenant_id = $1 AND workspace_id = $2 AND name = $3",
+        )
+        .bind(auth.tenant_id)
+        .bind(workspace_id)
+        .bind(&name)
+        .fetch_optional(&state.db)
+        .await?;
+    let (enc, updated_at, salt, verifier, ephemeral) = row.ok_or(ApiError::NotFound)?;
+    let (Some(salt), Some(verifier)) = (salt, verifier) else {
+        return Err(ApiError::BadRequest(
+            "this secret is not passphrase-protected".into(),
+        ));
+    };
+    let sealed = state.vault.decrypt(&enc).map_err(ApiError::Internal)?;
+    let plain = crate::crypto::open_with_passphrase(&sealed, &salt, &verifier, &req.passphrase)
+        .map_err(|_| ApiError::Forbidden)?;
+    // Unlocking is also how a sealed secret reaches the checkouts — the
+    // automatic sync can't carry it, because the server can't read it.
+    let synced = secrets::push_one(&state, auth.tenant_id, workspace_id, &name, &plain).await;
+    tracing::debug!(name, synced, "unlocked secret synced to checkouts");
+    Ok(Json(WorkspaceSecret {
+        name,
+        updated_at,
+        content: Some(String::from_utf8_lossy(&plain).to_string()),
+        protected: true,
+        ephemeral,
     }))
 }
 
@@ -509,21 +584,36 @@ pub async fn put_secret(
     if name.contains('/') || name.contains("..") || name.is_empty() {
         return Err(ApiError::BadRequest("invalid secret file name".into()));
     }
-    let enc = state
-        .vault
-        .encrypt(req.content.as_bytes())
-        .map_err(ApiError::Internal)?;
+    // With a passphrase, seal first: the app key then wraps an already-sealed
+    // payload, so a database dump plus SECRETS_KEY still reveals nothing.
+    let (payload, salt, verifier) = match req.passphrase.as_deref().filter(|p| !p.is_empty()) {
+        Some(pass) => {
+            let sealed = crate::crypto::seal_with_passphrase(req.content.as_bytes(), pass)
+                .map_err(ApiError::Internal)?;
+            (sealed.ciphertext, Some(sealed.salt), Some(sealed.verifier))
+        }
+        None => (req.content.as_bytes().to_vec(), None, None),
+    };
+    let enc = state.vault.encrypt(&payload).map_err(ApiError::Internal)?;
     sqlx::query(
-        "INSERT INTO workspace_secrets (id, tenant_id, workspace_id, name, content_enc)
-         VALUES ($1, $2, $3, $4, $5)
+        "INSERT INTO workspace_secrets
+            (id, tenant_id, workspace_id, name, content_enc, kdf_salt, verifier, ephemeral)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
          ON CONFLICT (workspace_id, name)
-         DO UPDATE SET content_enc = EXCLUDED.content_enc, updated_at = now()",
+         DO UPDATE SET content_enc = EXCLUDED.content_enc,
+                       kdf_salt = EXCLUDED.kdf_salt,
+                       verifier = EXCLUDED.verifier,
+                       ephemeral = EXCLUDED.ephemeral,
+                       updated_at = now()",
     )
     .bind(nook_types::SettingId::new().0)
     .bind(auth.tenant_id)
     .bind(workspace_id)
     .bind(&name)
     .bind(&enc)
+    .bind(&salt)
+    .bind(&verifier)
+    .bind(req.ephemeral)
     .execute(&state.db)
     .await?;
 

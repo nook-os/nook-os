@@ -1687,6 +1687,7 @@ dependencies = [
  "dashmap",
  "dotenvy",
  "futures-util",
+ "hmac",
  "nook-dispatcher",
  "nook-mcp",
  "nook-proto",
