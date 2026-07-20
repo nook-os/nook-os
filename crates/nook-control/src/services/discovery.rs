@@ -52,15 +52,29 @@ pub async fn reconcile(
 
         // Find the workspace this checkout belongs to.
         let workspace_id: Option<WorkspaceId> = match &normalized {
-            Some(norm) => sqlx::query_as::<_, (WorkspaceId,)>(
-                "SELECT workspace_id FROM node_workspaces
+            // The remote on the workspace itself is authoritative; the
+            // node_workspaces lookup is the fallback for rows written before
+            // the identity was recorded there.
+            Some(norm) => match sqlx::query_as::<_, (WorkspaceId,)>(
+                "SELECT id FROM workspaces
                      WHERE tenant_id = $1 AND git_remote_normalized = $2 LIMIT 1",
             )
             .bind(tenant)
             .bind(norm)
             .fetch_optional(&state.db)
             .await?
-            .map(|(id,)| id),
+            {
+                Some((id,)) => Some(id),
+                None => sqlx::query_as::<_, (WorkspaceId,)>(
+                    "SELECT workspace_id FROM node_workspaces
+                         WHERE tenant_id = $1 AND git_remote_normalized = $2 LIMIT 1",
+                )
+                .bind(tenant)
+                .bind(norm)
+                .fetch_optional(&state.db)
+                .await?
+                .map(|(id,)| id),
+            },
             None => sqlx::query_as::<_, (WorkspaceId,)>(
                 "SELECT id FROM workspaces WHERE tenant_id = $1 AND slug = $2",
             )
@@ -77,6 +91,16 @@ pub async fn reconcile(
                 // "services" → "authava/services". Deliberately narrow — only
                 // when the discovered name is the same repo with an owner
                 // prefix, so a hand-picked name is never clobbered.
+                if let Some(norm) = &normalized {
+                    sqlx::query(
+                        "UPDATE workspaces SET git_remote_normalized = $2
+                         WHERE id = $1 AND git_remote_normalized IS DISTINCT FROM $2",
+                    )
+                    .bind(id)
+                    .bind(norm)
+                    .execute(&state.db)
+                    .await?;
+                }
                 if let Some((_, repo)) = d.name.split_once('/') {
                     sqlx::query(
                         "UPDATE workspaces SET name = $2, slug = $3, updated_at = now()
@@ -92,7 +116,9 @@ pub async fn reconcile(
                 id
             }
             None => {
-                let id = create_workspace_for(state, tenant, &d.name).await?;
+                let id =
+                    create_workspace_for(state, tenant, &d.name, normalized.as_deref())
+                        .await?;
                 let event = events::record(
                     state,
                     tenant,
@@ -184,6 +210,7 @@ async fn create_workspace_for(
     state: &AppState,
     tenant: TenantId,
     name: &str,
+    git_remote_normalized: Option<&str>,
 ) -> ApiResult<WorkspaceId> {
     let base_slug = slugify(name);
     for attempt in 0..3 {
@@ -198,12 +225,14 @@ async fn create_workspace_for(
             format!("{base_slug}-{}", suffix.to_lowercase())
         };
         let res: Result<(WorkspaceId,), sqlx::Error> = sqlx::query_as(
-            "INSERT INTO workspaces (id, tenant_id, name, slug) VALUES ($1, $2, $3, $4) RETURNING id",
+            "INSERT INTO workspaces (id, tenant_id, name, slug, git_remote_normalized)
+             VALUES ($1, $2, $3, $4, $5) RETURNING id",
         )
         .bind(WorkspaceId::new())
         .bind(tenant)
         .bind(name)
         .bind(&slug)
+        .bind(git_remote_normalized)
         .fetch_one(&state.db)
         .await;
         match res {

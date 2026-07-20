@@ -106,10 +106,17 @@ CREATE TABLE workspaces (
     name         TEXT NOT NULL,
     slug         TEXT NOT NULL,
     description  TEXT,
+    -- A repository's identity is its normalized remote. It lives here, on the
+    -- workspace itself, so removing every checkout doesn't orphan the identity
+    -- and make the next clone create a duplicate workspace.
+    git_remote_normalized TEXT,
     created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
     UNIQUE (tenant_id, slug)
 );
+CREATE UNIQUE INDEX workspaces_remote_idx
+    ON workspaces (tenant_id, git_remote_normalized)
+    WHERE git_remote_normalized IS NOT NULL;
 
 -- One workspace can exist on many nodes; nodes are infrastructure,
 -- workspaces are where people work.
