@@ -69,6 +69,11 @@ pub fn detect() -> Capabilities {
         tmux: detect_tmux().is_some(),
         git: detect_git(),
         runtimes: detect_runtimes(),
-        ssh_public_key: crate::ssh::ensure_key(),
+        ssh_public_key: crate::ssh::public_key_for(
+            crate::config::NodeConfig::load()
+                .ok()
+                .and_then(|c| c.ssh_key_path)
+                .as_deref(),
+        ),
     }
 }

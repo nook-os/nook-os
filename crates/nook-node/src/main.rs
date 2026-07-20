@@ -24,25 +24,47 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Register this machine with a NookOS control plane.
+    /// Interactive first-time setup: walks through server, token, workspace
+    /// root, and SSH key choice, then joins and prints service instructions.
+    Setup,
+    /// Register this machine non-interactively (flags and/or a config file —
+    /// the automation path; humans usually want `nook setup`).
     Join {
         /// Control plane URL, e.g. https://nook.example.com
         #[arg(long)]
-        server: String,
+        server: Option<String>,
         /// Join token from the NookOS UI (nook_join_…)
         #[arg(long)]
-        token: String,
+        token: Option<String>,
         /// Node name (defaults to this machine's hostname)
         #[arg(long)]
         name: Option<String>,
         /// Where to look for workspaces (repeatable)
         #[arg(long = "workspace-root")]
         workspace_roots: Vec<String>,
+        /// SSH private key for git operations (defaults to a generated key)
+        #[arg(long)]
+        ssh_key: Option<String>,
+        /// TOML file with the same fields (server, token, name,
+        /// workspace_roots, ssh_key_path); "-" reads stdin. Flags win.
+        #[arg(long)]
+        config: Option<String>,
     },
     /// Run the agent (persistent connection to the control plane).
     Run,
     /// Show this node's configuration and connectivity.
     Status,
+}
+
+/// Everything `join` needs, assembled from flags, a config file, or prompts.
+#[derive(Debug, Default, serde::Deserialize)]
+struct JoinSpec {
+    server: Option<String>,
+    token: Option<String>,
+    name: Option<String>,
+    #[serde(default)]
+    workspace_roots: Vec<String>,
+    ssh_key_path: Option<String>,
 }
 
 fn ok(line: &str) {
@@ -56,12 +78,49 @@ async fn main() -> Result<()> {
         .init();
 
     match Cli::parse().command {
+        Command::Setup => {
+            let spec = setup_wizard()?;
+            join(spec).await
+        }
         Command::Join {
             server,
             token,
             name,
             workspace_roots,
-        } => join(server, token, name, workspace_roots).await,
+            ssh_key,
+            config,
+        } => {
+            // Config file (or stdin) supplies defaults; flags win.
+            let mut spec = match config.as_deref() {
+                Some("-") => {
+                    let mut raw = String::new();
+                    std::io::Read::read_to_string(&mut std::io::stdin(), &mut raw)?;
+                    toml::from_str::<JoinSpec>(&raw).context("bad join config on stdin")?
+                }
+                Some(path) => {
+                    let raw = std::fs::read_to_string(path)
+                        .with_context(|| format!("cannot read {path}"))?;
+                    toml::from_str::<JoinSpec>(&raw).context("bad join config file")?
+                }
+                None => JoinSpec::default(),
+            };
+            if server.is_some() {
+                spec.server = server;
+            }
+            if token.is_some() {
+                spec.token = token;
+            }
+            if name.is_some() {
+                spec.name = name;
+            }
+            if !workspace_roots.is_empty() {
+                spec.workspace_roots = workspace_roots;
+            }
+            if ssh_key.is_some() {
+                spec.ssh_key_path = ssh_key;
+            }
+            join(spec).await
+        }
         Command::Run => {
             let cfg = NodeConfig::load()?;
             // Reaches sessions that already exist (mouse/scrollback/clipboard).
@@ -72,13 +131,110 @@ async fn main() -> Result<()> {
     }
 }
 
-async fn join(
-    server: String,
-    token: String,
-    name: Option<String>,
-    workspace_roots: Vec<String>,
-) -> Result<()> {
-    let server = server.trim_end_matches('/').to_string();
+fn prompt(question: &str, default: Option<&str>) -> Result<String> {
+    use std::io::Write;
+    match default {
+        Some(d) => print!("{question} [{d}]: "),
+        None => print!("{question}: "),
+    }
+    std::io::stdout().flush()?;
+    let mut line = String::new();
+    std::io::stdin().read_line(&mut line)?;
+    let line = line.trim();
+    if line.is_empty() {
+        return Ok(default.unwrap_or_default().to_string());
+    }
+    Ok(line.to_string())
+}
+
+/// Interactive first-time setup. Collects everything `join` needs, including
+/// which SSH key the node should use for private git operations.
+fn setup_wizard() -> Result<JoinSpec> {
+    println!("◆ NookOS node setup");
+    println!("  This machine becomes a node: workspaces live here, sessions run here.");
+    println!();
+
+    if let Ok(existing) = NodeConfig::load() {
+        println!(
+            "  Already joined as '{}' → {} (re-running setup overwrites it).",
+            existing.node_name, existing.server
+        );
+        println!();
+    }
+
+    let server = loop {
+        let s = prompt("Control plane URL", Some("https://nook.example.com"))?;
+        if s.starts_with("http://") || s.starts_with("https://") {
+            break s;
+        }
+        println!("  Please enter a full URL (https://…).");
+    };
+    let token = loop {
+        let t = prompt("Join token (UI → Nodes → new join token)", None)?;
+        if !t.is_empty() {
+            break t;
+        }
+    };
+    let hostname = sysinfo::System::host_name().unwrap_or_else(|| "node".into());
+    let name = prompt("Node name", Some(&hostname))?;
+    let root = prompt(
+        "Workspace root (repos live under this directory)",
+        Some("~/.nook/workspace"),
+    )?;
+
+    // SSH key: the node's own generated key (private key never leaves this
+    // machine — recommended) or an existing key the user already uses.
+    println!();
+    println!("SSH key for cloning private repositories:");
+    println!("  [1] Generate a dedicated key for this node (recommended)");
+    let mut choices: Vec<std::path::PathBuf> = Vec::new();
+    if let Ok(home) = std::env::var("HOME") {
+        if let Ok(entries) = std::fs::read_dir(format!("{home}/.ssh")) {
+            for e in entries.flatten() {
+                let p = e.path();
+                if p.extension().is_some_and(|x| x == "pub") {
+                    let private = p.with_extension("");
+                    if private.exists() {
+                        choices.push(private);
+                    }
+                }
+            }
+        }
+    }
+    choices.sort();
+    for (i, key) in choices.iter().enumerate() {
+        println!("  [{}] Use existing {}", i + 2, key.display());
+    }
+    let ssh_key_path = loop {
+        let pick = prompt("Choice", Some("1"))?;
+        match pick.parse::<usize>() {
+            Ok(1) => break None,
+            Ok(n) if n >= 2 && n - 2 < choices.len() => {
+                break Some(choices[n - 2].display().to_string())
+            }
+            _ => println!("  Enter a number from the list."),
+        }
+    };
+    println!();
+
+    Ok(JoinSpec {
+        server: Some(server),
+        token: Some(token),
+        name: Some(name),
+        workspace_roots: vec![root],
+        ssh_key_path,
+    })
+}
+
+async fn join(spec: JoinSpec) -> Result<()> {
+    let server = spec
+        .server
+        .context("server is required (--server, config file, or `nook setup`)")?
+        .trim_end_matches('/')
+        .to_string();
+    let token = spec
+        .token
+        .context("token is required (--token, config file, or `nook setup`)")?;
     let caps = capabilities::detect();
 
     ok("Validating token...");
@@ -87,7 +243,7 @@ async fn join(
         .post(format!("{server}/api/v1/nodes/join"))
         .json(&JoinRequest {
             token,
-            name: name.unwrap_or_else(|| caps.hostname.clone()),
+            name: spec.name.unwrap_or_else(|| caps.hostname.clone()),
             hostname: caps.hostname.clone(),
             platform: caps.platform.clone(),
         })
@@ -110,10 +266,10 @@ async fn join(
         anyhow::bail!("tmux is required — install tmux and re-run `nook join`");
     }
 
-    let workspace_roots = if workspace_roots.is_empty() {
+    let workspace_roots = if spec.workspace_roots.is_empty() {
         vec!["~/workspace".to_string()]
     } else {
-        workspace_roots
+        spec.workspace_roots
     };
     let cfg = NodeConfig {
         server,
@@ -121,8 +277,16 @@ async fn join(
         node_name: joined.node_name.clone(),
         node_token: joined.node_token.clone(),
         workspace_roots: workspace_roots.clone(),
+        ssh_key_path: spec.ssh_key_path.clone(),
     };
     cfg.save()?;
+
+    // Surface the deploy key so private clones can be authorized right away.
+    if let Some(pubkey) = ssh::public_key_for(cfg.ssh_key_path.as_deref()) {
+        println!();
+        println!("SSH public key (add as a deploy key on your git host):");
+        println!("{pubkey}");
+    }
 
     ok("Creating persistent connection...");
     // Prove the WebSocket path works, then hand off to `nook run`.

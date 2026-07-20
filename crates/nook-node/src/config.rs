@@ -11,6 +11,11 @@ pub struct NodeConfig {
     pub node_name: String,
     pub node_token: String,
     pub workspace_roots: Vec<String>,
+    /// Private key used for git operations (clones of private repos). When
+    /// unset, the node's own generated key (~/.config/nook/id_ed25519) is
+    /// used. Set by `nook setup` when you pick an existing ~/.ssh key.
+    #[serde(default)]
+    pub ssh_key_path: Option<String>,
 }
 
 pub fn config_path() -> Result<PathBuf> {
