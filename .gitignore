@@ -11,6 +11,10 @@ dist/
 .env
 .env.local
 
+# Deployment-specific compose (reverse proxy, TLS, hostnames) is an operator
+# concern — keep it next to the checkout, out of the repo.
+/docker-compose.prod.yml
+
 # Tauri
 frontend/apps/desktop/src-tauri/target
 

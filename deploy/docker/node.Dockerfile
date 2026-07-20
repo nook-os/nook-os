@@ -9,6 +9,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates curl git tmux bash procps \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=build /src/target/release/nook /usr/local/bin/nook
-COPY deploy/docker/node-entrypoint.sh /usr/local/bin/node-entrypoint.sh
+COPY deploy/docker/node-prod-entrypoint.sh /usr/local/bin/node-entrypoint.sh
 RUN chmod +x /usr/local/bin/node-entrypoint.sh
 ENTRYPOINT ["node-entrypoint.sh"]
