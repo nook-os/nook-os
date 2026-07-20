@@ -1,0 +1,248 @@
+//! Tenant provisioning: a new person gets their own tenant, and cannot see
+//! anyone else's.
+//!
+//! This is the rule that, when it breaks, breaks quietly — everything still
+//! works, there is just one more machine in your list than there should be.
+//! So it is tested against a real database through the real login path rather
+//! than by reading the code.
+//!
+//! Needs a running Postgres (the dev stack's works): set `DATABASE_URL`. The
+//! tests skip cleanly when it's absent so `cargo test` stays green anywhere.
+
+use nook_control::config::Config;
+use nook_control::services::identity::{login_identity, IdentityClaims};
+use nook_control::state::AppState;
+use nook_types::TenantId;
+use sqlx::PgPool;
+use tokio::sync::Mutex;
+use uuid::Uuid;
+
+/// These tests share one database and one piece of global state — "the oldest
+/// tenant on the instance" — so they run one at a time. Cargo runs tests in a
+/// thread pool by default, and two of these racing produces a failure that
+/// looks like a bug in provisioning rather than in the test.
+static SERIAL: Mutex<()> = Mutex::const_new(());
+
+async fn test_pool() -> Option<PgPool> {
+    let url = std::env::var("DATABASE_URL").ok()?;
+    PgPool::connect(&url).await.ok()
+}
+
+/// A config that does not touch the environment beyond what Config requires,
+/// with the two knobs these tests care about set explicitly.
+fn test_config(auto_join: bool) -> Config {
+    Config {
+        app_env: "test".into(),
+        bind: "127.0.0.1:0".into(),
+        public_base_url: "http://localhost:8080".into(),
+        web_origin: "http://localhost:5173".into(),
+        database_url: std::env::var("DATABASE_URL").unwrap_or_default(),
+        oidc_issuer_url: None,
+        oidc_client_id: None,
+        oidc_client_secret: None,
+        oidc_redirect_url: None,
+        oidc_scopes: "openid profile email".into(),
+        session_secret: "0".repeat(64),
+        session_ttl_hours: 168,
+        auto_join_default_tenant: auto_join,
+        default_tenant_name: "dev".into(),
+        auth_dev_mode: true,
+        mcp_token: None,
+        dev_join_token: None,
+        dist_dir: "/nonexistent".into(),
+    }
+}
+
+fn claims(subject: &str, name: &str) -> IdentityClaims {
+    IdentityClaims {
+        issuer: "test-idp".into(),
+        subject: subject.into(),
+        email: Some(format!("{subject}@example.test")),
+        display_name: Some(name.into()),
+        avatar_url: None,
+        raw_claims: serde_json::json!({}),
+    }
+}
+
+/// Remove tenants a test created — never the seeded one.
+///
+/// The first identity on a fresh instance *adopts* the seeded tenant rather
+/// than making its own, so a test can end up holding a tenant it did not
+/// create. Deleting that takes the dev instance's board, join token and node
+/// with it.
+async fn cleanup(pool: &PgPool, tenants: &[TenantId]) {
+    for t in tenants {
+        let _ = sqlx::query("DELETE FROM tenants WHERE id = $1 AND slug <> 'dev'")
+            .bind(t)
+            .execute(pool)
+            .await;
+    }
+}
+
+/// The whole point: two people signing in do not end up in one tenant.
+#[tokio::test]
+async fn each_new_user_gets_their_own_tenant() {
+    let _serial = SERIAL.lock().await;
+    let Some(pool) = test_pool().await else {
+        eprintln!("skipping: DATABASE_URL not set / postgres unreachable");
+        return;
+    };
+    let state = AppState::new(pool.clone(), test_config(false), None);
+
+    // Unique subjects so the test is re-runnable against a live dev database.
+    let a_sub = format!("alice-{}", Uuid::now_v7().simple());
+    let b_sub = format!("bob-{}", Uuid::now_v7().simple());
+
+    let (a_user, a_tenant) = login_identity(&state, claims(&a_sub, "Alice"))
+        .await
+        .expect("alice signs in");
+    let (b_user, b_tenant) = login_identity(&state, claims(&b_sub, "Bob"))
+        .await
+        .expect("bob signs in");
+
+    assert_ne!(
+        a_tenant.id, b_tenant.id,
+        "two new users landed in the same tenant — they would see each other's nodes"
+    );
+    assert_eq!(a_user.tenant_id, a_tenant.id);
+    assert_eq!(b_user.tenant_id, b_tenant.id);
+    assert_eq!(a_user.role, "owner", "you own the tenant made for you");
+    assert_eq!(b_user.role, "owner");
+
+    // Neither can see the other: scoping is by tenant, and the tenants differ.
+    let (shared,): (i64,) = sqlx::query_as(
+        "SELECT count(*) FROM tenant_members
+         WHERE principal_id IN ($1, $2) AND tenant_id IN ($3, $4)",
+    )
+    .bind(a_user.id.0)
+    .bind(b_user.id.0)
+    .bind(a_tenant.id)
+    .bind(b_tenant.id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        shared, 2,
+        "each user belongs to exactly one of the two tenants"
+    );
+
+    cleanup(&pool, &[a_tenant.id, b_tenant.id]).await;
+}
+
+/// Signing in again is not a new tenant — the identity is already known.
+#[tokio::test]
+async fn returning_user_keeps_their_tenant() {
+    let _serial = SERIAL.lock().await;
+    let Some(pool) = test_pool().await else {
+        eprintln!("skipping: DATABASE_URL not set / postgres unreachable");
+        return;
+    };
+    let state = AppState::new(pool.clone(), test_config(false), None);
+    let sub = format!("carol-{}", Uuid::now_v7().simple());
+
+    let (first_user, first_tenant) = login_identity(&state, claims(&sub, "Carol"))
+        .await
+        .expect("first sign-in");
+    let (again_user, again_tenant) = login_identity(&state, claims(&sub, "Carol"))
+        .await
+        .expect("second sign-in");
+
+    assert_eq!(first_tenant.id, again_tenant.id);
+    assert_eq!(first_user.id, again_user.id);
+
+    let (tenant_count,): (i64,) = sqlx::query_as("SELECT count(*) FROM tenants WHERE id = $1")
+        .bind(first_tenant.id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(tenant_count, 1);
+
+    cleanup(&pool, &[first_tenant.id]).await;
+}
+
+/// Membership is written alongside the user, because that table is what teams
+/// will read — if provisioning skips it, a user belongs to a tenant by one
+/// rule and not by the other.
+#[tokio::test]
+async fn membership_row_mirrors_the_personal_tenant() {
+    let _serial = SERIAL.lock().await;
+    let Some(pool) = test_pool().await else {
+        eprintln!("skipping: DATABASE_URL not set / postgres unreachable");
+        return;
+    };
+    let state = AppState::new(pool.clone(), test_config(false), None);
+    let sub = format!("dave-{}", Uuid::now_v7().simple());
+
+    let (user, tenant) = login_identity(&state, claims(&sub, "Dave"))
+        .await
+        .expect("dave signs in");
+
+    let row: Option<(String, String)> = sqlx::query_as(
+        "SELECT principal_type, role FROM tenant_members
+         WHERE tenant_id = $1 AND principal_id = $2",
+    )
+    .bind(tenant.id)
+    .bind(user.id.0)
+    .fetch_optional(&pool)
+    .await
+    .unwrap();
+
+    let (principal_type, role) = row.expect("membership row was not written");
+    assert_eq!(principal_type, "user");
+    assert_eq!(role, "owner");
+
+    cleanup(&pool, &[tenant.id]).await;
+}
+
+/// The shared-instance escape hatch still works, because turning it on is a
+/// deliberate choice some deployments want.
+#[tokio::test]
+async fn auto_join_puts_everyone_in_one_tenant() {
+    let _serial = SERIAL.lock().await;
+    let Some(pool) = test_pool().await else {
+        eprintln!("skipping: DATABASE_URL not set / postgres unreachable");
+        return;
+    };
+    let state = AppState::new(pool.clone(), test_config(true), None);
+
+    let a = format!("erin-{}", Uuid::now_v7().simple());
+    let b = format!("frank-{}", Uuid::now_v7().simple());
+    let (_, a_tenant) = login_identity(&state, claims(&a, "Erin")).await.unwrap();
+    let (_, b_tenant) = login_identity(&state, claims(&b, "Frank")).await.unwrap();
+
+    assert_eq!(
+        a_tenant.id, b_tenant.id,
+        "auto-join is supposed to share the oldest tenant"
+    );
+    // Deliberately not cleaned up: auto-join lands on a tenant that already
+    // existed, not one this test created.
+}
+
+/// A node token is a service credential, not the owner's password.
+///
+/// It authenticates every machine that joined, and it sits in a plain file on
+/// a box whose job is running other people's code. So it may do a node's work
+/// — read the tenant, drive sessions — but not the things that hand over
+/// lasting control: the vault, enrolling machines, evicting other nodes.
+#[tokio::test]
+async fn node_tokens_cannot_escalate() {
+    use nook_control::auth::{AuthCtx, Principal};
+    use nook_types::{AuthSessionId, NodeId, UserId};
+
+    let node = AuthCtx {
+        session_id: AuthSessionId(Uuid::nil()),
+        user_id: UserId(Uuid::nil()),
+        tenant_id: TenantId(Uuid::nil()),
+        principal: Principal::Node(NodeId(Uuid::now_v7())),
+    };
+    let human = AuthCtx {
+        principal: Principal::User,
+        ..node
+    };
+
+    assert!(
+        node.require_user().is_err(),
+        "a node token must be refused for owner-only operations"
+    );
+    assert!(human.require_user().is_ok(), "a signed-in user must not be");
+}

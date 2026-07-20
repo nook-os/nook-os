@@ -1,0 +1,38 @@
+# NookOS node agent, run as a system service.
+#
+# Install (as the user who owns the workspaces):
+#   sudo cp deploy/systemd/nook-node.service /etc/systemd/system/
+#   sudo sed -i "s/%NOOK_USER%/$USER/g" /etc/systemd/system/nook-node.service
+#   sudo systemctl daemon-reload && sudo systemctl enable --now nook-node
+#
+[Unit]
+Description=NookOS node agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=%NOOK_USER%
+Group=%NOOK_USER%
+ExecStart=/home/%NOOK_USER%/.local/bin/nook run
+Restart=always
+RestartSec=5
+Environment=RUST_LOG=nook=info
+Environment=HOME=/home/%NOOK_USER%
+WorkingDirectory=/home/%NOOK_USER%
+
+# THE important line. tmux is the buffer of record: sessions are meant to
+# survive the agent restarting, and `Restart=always` means it will restart —
+# on a network blip, a control-plane deploy, a crash. systemd's default
+# KillMode kills the whole control group, which includes the tmux server the
+# agent started, so every one of those restarts would silently take the
+# user's terminals with it. Stop the agent only; leave its tmux alone.
+KillMode=process
+
+# The node's whole job is spawning dev tooling — keep hardening light but real.
+NoNewPrivileges=yes
+ProtectSystem=full
+ReadWritePaths=/home/%NOOK_USER% /tmp
+
+[Install]
+WantedBy=multi-user.target
