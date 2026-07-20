@@ -125,10 +125,16 @@ function NewWorkModal() {
     return data.node_id;
   };
 
+  /** Wait for discovery to surface a workspace. Cloned repos are named
+   *  "owner/repo", so match the qualified name or its bare repo tail. */
   const pollWorkspace = async (name: string): Promise<string> => {
+    const wanted = name.toLowerCase();
+    const tail = (s: string) => s.toLowerCase().split("/").pop() ?? "";
     for (let i = 0; i < 20; i++) {
       const ws = (await api.GET("/api/v1/workspaces")).data ?? [];
-      const match = ws.find((w) => w.name === name);
+      const match =
+        ws.find((w) => w.name.toLowerCase() === wanted) ??
+        ws.find((w) => tail(w.name) === tail(wanted));
       if (match) return match.id;
       await new Promise((r) => setTimeout(r, 700));
     }
