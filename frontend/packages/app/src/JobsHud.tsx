@@ -3,7 +3,7 @@
 //
 // Deliberately generic — anything that calls `useJobs().start()` shows up
 // here, so cloning, worktrees and future long operations share one surface.
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Check, GitBranch, Loader, TriangleAlert, X } from "lucide-react";
 import { useHudPosition, useJobs, type Job } from "./jobs";
@@ -84,51 +84,81 @@ export function JobsHud() {
     return () => window.clearTimeout(id);
   }, [jobs, clearFinished]);
 
-  const onPointerDown = useCallback(
-    (e: React.PointerEvent) => {
-      const el = ref.current;
-      if (!el) return;
-      const r = el.getBoundingClientRect();
-      drag.current = { dx: e.clientX - r.left, dy: e.clientY - r.top };
-      el.setPointerCapture(e.pointerId);
-    },
-    [],
-  );
+  // Dragging writes to the DOM directly and only commits to the store on
+  // release. Going through React state (let alone the persisted store) on
+  // every pointermove meant a re-render and a localStorage write per pixel,
+  // which is what made this feel like sludge.
+  const onPointerDown = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    const el = ref.current;
+    if (!el || e.button !== 0) return;
+    const r = el.getBoundingClientRect();
+    drag.current = { dx: e.clientX - r.left, dy: e.clientY - r.top };
+    // Capture on the element that owns the handlers, or the retargeted moves
+    // never reach us and the drag "sticks" the moment you leave the header.
+    e.currentTarget.setPointerCapture(e.pointerId);
+    // Anchor to left/top before moving; the default position uses right/bottom.
+    el.style.left = `${r.left}px`;
+    el.style.top = `${r.top}px`;
+    el.style.right = "auto";
+    el.style.bottom = "auto";
+    el.classList.add("dragging");
+    e.preventDefault();
+  }, []);
 
-  const onPointerMove = useCallback(
-    (e: React.PointerEvent) => {
+  const onPointerMove = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    const el = ref.current;
+    if (!drag.current || !el) return;
+    // Keep it on screen no matter how enthusiastically it's flung.
+    const nx = Math.min(
+      Math.max(MARGIN, e.clientX - drag.current.dx),
+      window.innerWidth - el.offsetWidth - MARGIN,
+    );
+    const ny = Math.min(
+      Math.max(MARGIN, e.clientY - drag.current.dy),
+      window.innerHeight - el.offsetHeight - MARGIN,
+    );
+    el.style.left = `${nx}px`;
+    el.style.top = `${ny}px`;
+  }, []);
+
+  const endDrag = useCallback(
+    (e: React.PointerEvent<HTMLDivElement>) => {
       const el = ref.current;
       if (!drag.current || !el) return;
+      drag.current = null;
+      e.currentTarget.releasePointerCapture(e.pointerId);
+      el.classList.remove("dragging");
+      // One store write, one persist, at the end.
       const r = el.getBoundingClientRect();
-      // Keep it on screen no matter how enthusiastically it's flung.
-      const nx = Math.min(
-        Math.max(MARGIN, e.clientX - drag.current.dx),
-        window.innerWidth - r.width - MARGIN,
-      );
-      const ny = Math.min(
-        Math.max(MARGIN, e.clientY - drag.current.dy),
-        window.innerHeight - r.height - MARGIN,
-      );
-      set(nx, ny);
+      set(Math.round(r.left), Math.round(r.top));
     },
     [set],
   );
 
-  const endDrag = useCallback((e: React.PointerEvent) => {
-    drag.current = null;
-    ref.current?.releasePointerCapture(e.pointerId);
-  }, []);
+  // Position is applied imperatively and only when it actually changes. A
+  // `style` prop would be re-applied on every render — and the elapsed-time
+  // tick renders once a second, which would yank the panel back mid-drag.
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el || drag.current) return;
+    if (x === null || y === null) {
+      el.style.left = "auto";
+      el.style.top = "auto";
+      el.style.right = `${MARGIN}px`;
+      el.style.bottom = `${MARGIN}px`;
+    } else {
+      el.style.left = `${x}px`;
+      el.style.top = `${y}px`;
+      el.style.right = "auto";
+      el.style.bottom = "auto";
+    }
+  }, [x, y, jobs.length]);
 
   if (jobs.length === 0) return null;
   const running = jobs.filter((j) => j.state === "running").length;
 
-  const style: React.CSSProperties =
-    x === null || y === null
-      ? { right: MARGIN, bottom: MARGIN }
-      : { left: x, top: y };
-
   return (
-    <div ref={ref} className="jobs-hud" style={style}>
+    <div ref={ref} className="jobs-hud">
       <div
         className="jobs-hud-header"
         onPointerDown={onPointerDown}

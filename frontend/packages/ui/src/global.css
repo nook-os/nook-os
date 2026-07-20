@@ -1271,6 +1271,14 @@ table.nook-table tr.picked td {
   touch-action: none;
 }
 .jobs-hud-header:active { cursor: grabbing; }
+/* While dragging the panel lifts slightly, so it reads as "picked up".
+   Children keep their pointer events — the capture target is one of them, and
+   pointer-events:none on it would starve the drag of moves. */
+.jobs-hud.dragging {
+  cursor: grabbing;
+  box-shadow: 0 16px 44px rgba(0, 0, 0, 0.65);
+}
+.jobs-hud.dragging .job-row:hover { background: transparent; }
 .jobs-hud-header > span { flex: 1; }
 .jobs-hud-body { max-height: 240px; overflow-y: auto; }
 
