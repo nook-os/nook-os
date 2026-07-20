@@ -65,8 +65,45 @@ pub fn apply_server_defaults() {
 }
 
 /// Create a detached session running `command` in `cwd`.
+/// The user's shell, for launching sessions as login shells.
+pub fn login_shell() -> String {
+    std::env::var("SHELL")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| "/bin/bash".to_string())
+}
+
+/// Wrap a runtime so it runs inside a login+interactive shell.
+///
+/// A node started by systemd (or any service manager) has a bare PATH —
+/// nothing from ~/.profile, ~/.bashrc, asdf, nvm, ~/.local/bin. Terminals
+/// that don't see the user's own tools aren't terminals, so sessions start
+/// the way a desktop terminal emulator starts them: as a login shell.
+/// `-i` matters too, since most PATH setup lives in ~/.bashrc.
+pub fn login_command(runtime: &str) -> String {
+    let shell = login_shell();
+    let is_shell = matches!(
+        runtime,
+        "bash" | "zsh" | "sh" | "fish" | "pwsh" | "dash" | "ksh"
+    );
+    if is_shell {
+        // Login shells source the profile themselves.
+        match runtime {
+            "pwsh" => runtime.to_string(),
+            _ => format!("{runtime} -l"),
+        }
+    } else {
+        // Runtimes (claude/hermes/codex) inherit the sourced environment.
+        // exec keeps the pane bound to the runtime, so quitting it ends the
+        // window rather than dropping to a stray shell.
+        format!("{shell} -l -i -c 'exec {runtime}'")
+    }
+}
+
 pub fn new_session(name: &str, cwd: &str, cols: u16, rows: u16, command: &str) -> Result<()> {
     apply_server_defaults();
+    let launch = login_command(command);
+    let command = launch.as_str();
     tmux(&[
         "new-session",
         "-d",
@@ -95,6 +132,14 @@ pub fn new_session(name: &str, cwd: &str, cols: u16, rows: u16, command: &str) -
     // to it rather than to the smallest client — so a browser resize wins.
     let _ = tmux(&["set-option", "-t", name, "window-size", "latest"]);
     let _ = tmux(&["set-window-option", "-t", name, "aggressive-resize", "on"]);
+    // New terminals in this session (tmux windows) get a login shell too.
+    let _ = tmux(&[
+        "set-option",
+        "-t",
+        name,
+        "default-command",
+        &format!("{} -l", login_shell()),
+    ]);
     Ok(())
 }
 
