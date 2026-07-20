@@ -163,10 +163,21 @@ pub fn list_windows(session: &str) -> Result<String> {
     Ok(serde_json::to_string(&windows).unwrap_or_else(|_| "[]".into()))
 }
 
-/// Open another terminal in this session and focus it.
+/// Where the session is currently working — new terminals should open in the
+/// workspace, not the user's home directory.
+pub fn session_cwd(session: &str) -> Option<String> {
+    tmux(&["display-message", "-p", "-t", session, "#{pane_current_path}"])
+        .ok()
+        .filter(|p| !p.is_empty())
+}
+
+/// Open another terminal in this session and focus it. Without an explicit
+/// directory it inherits the session's current one (tmux would otherwise drop
+/// you in $HOME, which is never what you want in a workspace).
 pub fn new_window(session: &str, cwd: Option<&str>) -> Result<()> {
+    let inherited = cwd.map(str::to_string).or_else(|| session_cwd(session));
     let mut args = vec!["new-window", "-t", session];
-    if let Some(dir) = cwd {
+    if let Some(dir) = inherited.as_deref() {
         args.push("-c");
         args.push(dir);
     }
@@ -176,8 +187,14 @@ pub fn new_window(session: &str, cwd: Option<&str>) -> Result<()> {
 
 /// Split the active window, so two terminals are visible at once.
 pub fn split_window(session: &str, vertical: bool) -> Result<()> {
+    let cwd = session_cwd(session);
     // tmux's -h splits into left/right; -v stacks top/bottom.
-    tmux(&["split-window", if vertical { "-v" } else { "-h" }, "-t", session])?;
+    let mut args = vec!["split-window", if vertical { "-v" } else { "-h" }, "-t", session];
+    if let Some(dir) = cwd.as_deref() {
+        args.push("-c");
+        args.push(dir);
+    }
+    tmux(&args)?;
     Ok(())
 }
 

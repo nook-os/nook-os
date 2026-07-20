@@ -25,6 +25,9 @@ struct SessionHandle {
     /// With no viewers attached the PTY is still read (exit detection) but
     /// output frames are not forwarded — N idle sessions cost ~zero bandwidth.
     forward: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Cleared when the reader thread ends. A handle whose PTY has died must
+    /// not be reused: attaching to it would silently swallow input.
+    alive: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 pub struct Manager {
@@ -62,6 +65,8 @@ impl Manager {
             return self.error("start_session", format!("unknown runtime '{runtime}'"));
         }
         let tmux_name = format!("{}{}", tmux::SESSION_PREFIX, session_id.0.simple());
+        // Restart of an ended session: discard the old PTY before re-attaching.
+        self.sessions.remove(&session_id);
 
         if !tmux::session_exists(&tmux_name) {
             if let Err(e) = tmux::new_session(&tmux_name, workspace_path, cols, rows, runtime) {
@@ -135,6 +140,8 @@ impl Manager {
         let tmux_name_owned = tmux_name.to_string();
         let forward = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
         let forward_reader = forward.clone();
+        let alive = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let alive_reader = alive.clone();
         std::thread::spawn(move || {
             // 4KB chunks: base64 (~5.5KB) + envelope stays under the bus's
             // inline NOTIFY budget, so cross-instance frames never detour
@@ -157,6 +164,8 @@ impl Manager {
                     }
                 }
             }
+            // This PTY is finished either way — never let it be reused.
+            alive_reader.store(false, std::sync::atomic::Ordering::Relaxed);
             let _ = child.wait();
             let exited = !tmux::session_exists(&tmux_name_owned);
             if exited {
@@ -174,14 +183,29 @@ impl Manager {
                 master: pair.master,
                 input_tx,
                 forward,
+                alive,
             },
         );
         Ok(())
     }
 
+    /// Forget a session whose PTY has exited, so the next attach rebuilds it.
+    fn drop_if_dead(&mut self, session_id: SessionId) {
+        let dead = self
+            .sessions
+            .get(&session_id)
+            .is_some_and(|h| !h.alive.load(std::sync::atomic::Ordering::Relaxed));
+        if dead {
+            self.sessions.remove(&session_id);
+        }
+    }
+
     /// Browser (re)attached: replay the visible screen + recent scrollback.
     /// If the node itself restarted, re-establish the PTY first.
     pub fn attach(&mut self, session_id: SessionId, tmux_name_hint: Option<&str>) {
+        // A handle whose PTY died is worse than none: it accepts input into a
+        // closed pipe. Drop it so we re-establish below.
+        self.drop_if_dead(session_id);
         if !self.sessions.contains_key(&session_id) {
             let Some(name) = tmux_name_hint.map(str::to_string) else {
                 return self.error("attach", "session not running on this node".into());
@@ -223,6 +247,7 @@ impl Manager {
     }
 
     pub fn input(&mut self, session_id: SessionId, data_b64: &str) {
+        self.drop_if_dead(session_id);
         let Some(handle) = self.sessions.get(&session_id) else {
             return;
         };
