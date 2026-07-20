@@ -39,18 +39,6 @@ export function SessionWindows({ sessionId }: { sessionId: string }) {
   };
 
   const list = windows ?? [];
-  // One unsplit terminal is the normal case — don't clutter the UI for it.
-  if (list.length <= 1 && (list[0]?.panes ?? 1) <= 1) {
-    return (
-      <button
-        className="term-strip-add lonely"
-        title="new terminal in this session"
-        onClick={() => act({ action: "new", cwd: null })}
-      >
-        <Plus size={12} /> terminal
-      </button>
-    );
-  }
 
   return (
     <>
@@ -84,6 +72,7 @@ export function SessionWindows({ sessionId }: { sessionId: string }) {
           onClick={() => act({ action: "new", cwd: null })}
         >
           <Plus size={12} />
+          {list.length <= 1 && <span>terminal</span>}
         </button>
       </span>
 

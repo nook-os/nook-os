@@ -185,3 +185,84 @@ pub async fn windows(
         serde_json::from_str(&payload.message).unwrap_or_default();
     Ok(Json(windows))
 }
+
+/// Bring a dead session back: same record, same tabs, fresh tmux session.
+/// A terminal you closed (or a runtime that exited) shouldn't strand the
+/// session — the node's `start` is idempotent, so this just re-issues it.
+#[utoipa::path(post, path = "/api/v1/sessions/{id}/restart",
+    operation_id = "restart_session",
+    params(("id" = String, Path,)),
+    responses((status = 200, body = Session), (status = 404)))]
+pub async fn restart(
+    State(state): State<AppState>,
+    auth: AuthCtx,
+    Path(id): Path<SessionId>,
+) -> ApiResult<Json<Session>> {
+    let session: Option<Session> =
+        sqlx::query_as("SELECT * FROM sessions WHERE id = $1 AND tenant_id = $2")
+            .bind(id)
+            .bind(auth.tenant_id)
+            .fetch_optional(&state.db)
+            .await?;
+    let session = session.ok_or(ApiError::NotFound)?;
+
+    if !state.registry.node_online(session.node_id) {
+        return Err(ApiError::BadRequest("node is offline".into()));
+    }
+
+    // Reuse the checkout the session was started in; fall back to any checkout
+    // of its workspace on that node (the original may have been pruned).
+    let path: Option<(String,)> = sqlx::query_as(
+        "SELECT path FROM node_workspaces
+         WHERE workspace_id = $1 AND node_id = $2
+         ORDER BY discovered_at LIMIT 1",
+    )
+    .bind(session.workspace_id)
+    .bind(session.node_id)
+    .fetch_optional(&state.db)
+    .await?;
+    let Some((workspace_path,)) = path else {
+        return Err(ApiError::BadRequest(
+            "that workspace has no checkout on this node any more".into(),
+        ));
+    };
+
+    let sent = state.registry.send_to_node(
+        session.node_id,
+        ControlToNode::StartSession {
+            session_id: id,
+            runtime: session.runtime.clone(),
+            workspace_path,
+            cols: 120,
+            rows: 32,
+        },
+    );
+    if !sent {
+        return Err(ApiError::BadRequest("node went offline".into()));
+    }
+
+    let session: Session = sqlx::query_as(
+        "UPDATE sessions SET status = 'starting', ended_at = NULL, updated_at = now()
+         WHERE id = $1 RETURNING *",
+    )
+    .bind(id)
+    .fetch_one(&state.db)
+    .await?;
+    state.registry.publish(
+        auth.tenant_id,
+        UiEvent::SessionStatus {
+            session_id: id,
+            status: "starting".into(),
+        },
+    );
+    events::record(
+        &state,
+        auth.tenant_id,
+        EventDraft::new("session.restarted")
+            .actor("user", auth.user_id.0)
+            .session(id)
+            .node(session.node_id),
+    )
+    .await;
+    Ok(Json(session))
+}

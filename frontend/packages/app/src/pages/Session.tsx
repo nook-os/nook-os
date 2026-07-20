@@ -1,7 +1,13 @@
 import React, { useEffect, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate, useParams } from "react-router-dom";
-import { GitBranch, PanelRightClose, PanelRightOpen, RefreshCw } from "lucide-react";
+import {
+  GitBranch,
+  PanelRightClose,
+  PanelRightOpen,
+  RefreshCw,
+  RotateCw,
+} from "lucide-react";
 import { api, attachSession, type Session } from "@nookos/api";
 import { Empty, Panel, Pill, statusTone, TerminalView } from "@nookos/ui";
 import { useLive } from "../live";
@@ -10,7 +16,7 @@ import { ScopeChip } from "../layout";
 import { SessionTabs } from "../SessionTabs";
 import { SessionWindows, SplitButtons } from "../SessionWindows";
 import { useSessionTabs } from "../sessiontabs";
-import { askConfirm } from "../dialogs";
+import { askConfirm, notify } from "../dialogs";
 
 const DIFF_PANEL_KEY = "nookos-diff-panel-open";
 
@@ -135,7 +141,9 @@ function GitPanel({ session }: { session: Session }) {
 export function SessionPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
   const [liveStatus, setLiveStatus] = useState<string | null>(null);
+  const [attachKey, setAttachKey] = useState(0);
   const [gitOpen, setGitOpen] = useState(
     () => localStorage.getItem(DIFF_PANEL_KEY) !== "closed",
   );
@@ -200,6 +208,23 @@ export function SessionPage() {
     });
   };
 
+  const dead = status === "exited" || status === "error";
+
+  const restart = async () => {
+    setLiveStatus("starting");
+    const { error } = await api.POST("/api/v1/sessions/{id}/restart", {
+      params: { path: { id: session.id } },
+    });
+    if (error) {
+      setLiveStatus(null);
+      await notify("Restart failed", JSON.stringify(error));
+      return;
+    }
+    // Remount the terminal so it re-attaches to the fresh tmux session.
+    setAttachKey((k) => k + 1);
+    queryClient.invalidateQueries();
+  };
+
   const kill = async () => {
     const ok = await askConfirm({
       title: "Kill session",
@@ -238,10 +263,16 @@ export function SessionPage() {
           <span
             style={{ display: "inline-flex", alignItems: "center", gap: 6 }}
           >
-            <SessionWindows sessionId={session.id} />
+            {!dead && <SessionWindows sessionId={session.id} />}
             <Pill tone="accent">{session.runtime}</Pill>
             <Pill tone={statusTone(status)}>{status}</Pill>
-            <SplitButtons sessionId={session.id} />
+            {dead ? (
+              <button className="btn small" onClick={restart} title="restart session">
+                <RotateCw size={12} /> restart
+              </button>
+            ) : (
+              <SplitButtons sessionId={session.id} />
+            )}
             <button
               className="btn small icon"
               onClick={toggleGit}
@@ -255,11 +286,25 @@ export function SessionPage() {
           </span>
         }
       >
-          <TerminalView
-            key={session.id}
-            attach={(handlers) => attachSession(session.id, handlers)}
-            onStatus={setLiveStatus}
-          />
+          {dead ? (
+            <div className="session-dead">
+              <div className="session-dead-title">This session has ended</div>
+              <p className="muted small">
+                Its terminals are gone, but the tab, name and workspace are
+                kept. Restarting opens a fresh {session.runtime} session in the
+                same checkout.
+              </p>
+              <button className="btn primary" onClick={restart}>
+                <RotateCw size={13} /> restart session
+              </button>
+            </div>
+          ) : (
+            <TerminalView
+              key={`${session.id}:${attachKey}`}
+              attach={(handlers) => attachSession(session.id, handlers)}
+              onStatus={setLiveStatus}
+            />
+          )}
         </Panel>
         {gitOpen && <GitPanel session={session} />}
       </div>

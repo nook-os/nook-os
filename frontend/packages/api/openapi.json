@@ -1055,6 +1055,40 @@
         }
       }
     },
+    "/api/v1/sessions/{id}/restart": {
+      "post": {
+        "tags": [
+          "crate::routes::sessions"
+        ],
+        "summary": "Bring a dead session back: same record, same tabs, fresh tmux session.\nA terminal you closed (or a runtime that exited) shouldn't strand the\nsession — the node's `start` is idempotent, so this just re-issues it.",
+        "operationId": "restart_session",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Session"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      }
+    },
     "/api/v1/sessions/{id}/windows": {
       "post": {
         "tags": [

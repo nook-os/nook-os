@@ -100,6 +100,7 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route("/sessions/{id}/windows", post(sessions::windows))
         .route("/sessions/{id}/kill", post(sessions::kill))
+        .route("/sessions/{id}/restart", post(sessions::restart))
         .route(
             "/ws/sessions/{id}/attach",
             get(crate::ws::attach::attach_ws),

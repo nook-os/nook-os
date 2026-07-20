@@ -1215,3 +1215,23 @@ textarea.env-paste {
 .dialog-choice input { margin-top: 2px; flex: none; }
 .dialog-choice > span { display: flex; flex-direction: column; gap: 2px; }
 .dialog-choice-desc { line-height: 1.45; }
+
+/* Ended session: the terminal is gone but the tab and its context remain. */
+.session-dead {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 24px;
+  text-align: center;
+  background: var(--nook-terminal-bg);
+}
+.session-dead-title {
+  color: var(--nook-fg-bright);
+  font-size: 14px;
+  letter-spacing: 0.04em;
+}
+.session-dead p { max-width: 420px; margin: 0; line-height: 1.6; }
+.term-strip-add span { font-size: 11px; }
