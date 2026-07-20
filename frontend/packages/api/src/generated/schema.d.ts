@@ -58,6 +58,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/auth/providers": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * GET /api/v1/auth/providers — unauthenticated: what sign-in methods exist,
+         *     so the login screen never offers a dead button.
+         */
+        get: operations["auth_providers"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/boards": {
         parameters: {
             query?: never;
@@ -743,6 +763,16 @@ export interface components {
             type: "size";
         };
         /**
+         * @description Unauthenticated sign-in capabilities, so the login screen only offers what
+         *     this instance actually supports.
+         */
+        AuthProviders: {
+            /** @description The dev/CI escape hatch is enabled (never in production). */
+            dev_login: boolean;
+            /** @description An OIDC identity provider is configured. */
+            oidc: boolean;
+        };
+        /**
          * @description Provider values: `local` | `jira` | `github` | `linear` | `trello`.
          *     External boards remain authoritative; NookOS federates.
          */
@@ -1362,6 +1392,25 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+        };
+    };
+    auth_providers: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AuthProviders"];
+                };
             };
         };
     };

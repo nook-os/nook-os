@@ -13,6 +13,7 @@ use utoipa::OpenApi;
     paths(
         crate::routes::health::healthz,
         crate::routes::auth::me,
+        crate::routes::auth::providers,
         crate::routes::auth::dev_login,
         crate::routes::auth::logout,
         crate::routes::workspaces::list,
@@ -69,6 +70,7 @@ use utoipa::OpenApi;
         nook_types::Tenant,
         nook_types::User,
         nook_types::MeResponse,
+        nook_types::AuthProviders,
         nook_types::Capabilities,
         nook_types::GpuInfo,
         nook_types::Node,

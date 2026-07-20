@@ -94,6 +94,16 @@ pub struct MeResponse {
     pub tenant: Tenant,
 }
 
+/// Unauthenticated sign-in capabilities, so the login screen only offers what
+/// this instance actually supports.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct AuthProviders {
+    /// An OIDC identity provider is configured.
+    pub oidc: bool,
+    /// The dev/CI escape hatch is enabled (never in production).
+    pub dev_login: bool,
+}
+
 // ── Nodes ────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]

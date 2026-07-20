@@ -30,6 +30,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/auth/dev-login", post(auth::dev_login))
         .route("/auth/logout", post(auth::logout))
         .route("/auth/me", get(auth::me))
+        .route("/auth/providers", get(auth::providers))
         .route(
             "/workspaces",
             get(workspaces::list).post(workspaces::create),
