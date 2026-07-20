@@ -3,6 +3,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import {
   GitBranch,
+  Trash2,
   PanelRightClose,
   PanelRightOpen,
   RefreshCw,
@@ -136,6 +137,11 @@ function GitPanel({ session }: { session: Session }) {
       )}
     </Panel>
   );
+}
+
+/** Live means the node still holds a terminal for it. */
+function isLive(status: string): boolean {
+  return status === "starting" || status === "running" || status === "detached";
 }
 
 export function SessionPage() {
@@ -314,6 +320,12 @@ export function SessionPage() {
 
 export function SessionsPage() {
   const { selectedWorkspaceId } = useWorkspaceContext();
+  const queryClient = useQueryClient();
+  const closeTab = useSessionTabs((s) => s.close);
+  const [filter, setFilter] = useState("");
+  const [picked, setPicked] = useState<Set<string>>(new Set());
+  const [busy, setBusy] = useState(false);
+
   const { data: sessions } = useQuery({
     queryKey: ["sessions", "all", selectedWorkspaceId],
     queryFn: async () =>
@@ -327,6 +339,48 @@ export function SessionsPage() {
   });
   const sessionStatus = useLive((s) => s.sessionStatus);
 
+  const all = sessions ?? [];
+  const q = filter.trim().toLowerCase();
+  const shown = q
+    ? all.filter((s) =>
+        [s.name, s.runtime, sessionStatus[s.id] ?? s.status].some((v) =>
+          v.toLowerCase().includes(q),
+        ),
+      )
+    : all;
+  const dead = shown.filter(
+    (s) => !isLive(sessionStatus[s.id] ?? s.status),
+  );
+
+  const toggle = (id: string) =>
+    setPicked((p) => {
+      const next = new Set(p);
+      if (!next.delete(id)) next.add(id);
+      return next;
+    });
+
+  const removeMany = async (ids: string[], what: string) => {
+    if (ids.length === 0) return;
+    const ok = await askConfirm({
+      title: `Delete ${ids.length} ${what}`,
+      description:
+        "Records are removed and any still-running tmux sessions are killed on their node.",
+      confirmLabel: "delete",
+      danger: true,
+    });
+    if (!ok) return;
+    setBusy(true);
+    for (const id of ids) {
+      await api.DELETE("/api/v1/sessions/{id}", { params: { path: { id } } });
+      closeTab(id);
+    }
+    setBusy(false);
+    setPicked(new Set());
+    queryClient.invalidateQueries();
+  };
+
+  const allShownPicked = shown.length > 0 && shown.every((s) => picked.has(s.id));
+
   return (
     <div className="session-view">
       <SessionTabs />
@@ -335,26 +389,78 @@ export function SessionsPage() {
         style={{ gridTemplateColumns: "1fr", flex: 1, minHeight: 0 }}
       >
       <Panel
-        title={`Sessions (${(sessions ?? []).length})`}
-        actions={<ScopeChip />}
+        title={`Sessions (${shown.length}${shown.length !== all.length ? ` of ${all.length}` : ""})`}
+        actions={
+          <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+            <input
+              className="input small"
+              style={{ width: 190 }}
+              placeholder="search sessions…"
+              value={filter}
+              onChange={(e) => setFilter(e.target.value)}
+            />
+            {picked.size > 0 && (
+              <button
+                className="btn danger small"
+                disabled={busy}
+                onClick={() => removeMany([...picked], "session(s)")}
+              >
+                <Trash2 size={12} /> delete {picked.size}
+              </button>
+            )}
+            {picked.size === 0 && dead.length > 0 && (
+              <button
+                className="btn small"
+                disabled={busy}
+                title="delete every session that has already ended"
+                onClick={() => removeMany(dead.map((s) => s.id), "ended session(s)")}
+              >
+                <Trash2 size={12} /> clean up {dead.length} ended
+              </button>
+            )}
+            <ScopeChip />
+          </span>
+        }
       >
-        {(sessions ?? []).length === 0 ? (
+        {all.length === 0 ? (
           <Empty>No sessions yet — start one from a workspace.</Empty>
+        ) : shown.length === 0 ? (
+          <Empty>Nothing matches “{filter}”.</Empty>
         ) : (
           <table className="nook-table">
             <thead>
               <tr>
+                <th style={{ width: 28 }}>
+                  <input
+                    type="checkbox"
+                    title="select all"
+                    checked={allShownPicked}
+                    onChange={() =>
+                      setPicked(
+                        allShownPicked ? new Set() : new Set(shown.map((s) => s.id)),
+                      )
+                    }
+                  />
+                </th>
                 <th>Session</th>
                 <th>Runtime</th>
                 <th>Status</th>
                 <th>Created</th>
+                <th style={{ width: 40 }} />
               </tr>
             </thead>
             <tbody>
-              {(sessions ?? []).map((s) => {
+              {shown.map((s) => {
                 const status = sessionStatus[s.id] ?? s.status;
                 return (
-                  <tr key={s.id}>
+                  <tr key={s.id} className={picked.has(s.id) ? "picked" : undefined}>
+                    <td>
+                      <input
+                        type="checkbox"
+                        checked={picked.has(s.id)}
+                        onChange={() => toggle(s.id)}
+                      />
+                    </td>
                     <td>
                       <Link className="bright" to={`/sessions/${s.id}`}>
                         {s.name}
@@ -368,6 +474,16 @@ export function SessionsPage() {
                     </td>
                     <td className="muted small">
                       {new Date(s.created_at).toLocaleString()}
+                    </td>
+                    <td>
+                      <button
+                        className="btn danger small icon"
+                        title="delete session"
+                        disabled={busy}
+                        onClick={() => removeMany([s.id], "session")}
+                      >
+                        <Trash2 size={12} />
+                      </button>
                     </td>
                   </tr>
                 );

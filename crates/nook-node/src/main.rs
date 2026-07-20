@@ -1,4 +1,5 @@
 mod capabilities;
+mod cli;
 mod config;
 mod conn;
 mod discovery;
@@ -54,6 +55,30 @@ enum Command {
     Run,
     /// Show this node's configuration and connectivity.
     Status,
+
+    /// List resources from the control plane, kubectl-style:
+    /// `nook get nodes`, `nook get sessions`, `nook get secrets`.
+    Get {
+        /// nodes | sessions | workspaces | secrets | tasks | events | themes
+        resource: String,
+        /// Narrow to one by name (or, for secrets, one workspace).
+        name: Option<String>,
+        /// Print raw JSON instead of a table.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Adopt the git repository in the current directory (or --path) as a
+    /// workspace on this node.
+    Import {
+        /// Repository directory (defaults to the current one).
+        path: Option<String>,
+    },
+    /// Delete a session, workspace or task by name.
+    Delete {
+        /// sessions | workspaces | tasks
+        resource: String,
+        name: String,
+    },
 }
 
 /// Everything `join` needs, assembled from flags, a config file, or prompts.
@@ -131,6 +156,13 @@ async fn main() -> Result<()> {
             conn::run(cfg).await
         }
         Command::Status => status().await,
+        Command::Get {
+            resource,
+            name,
+            json,
+        } => cli::get(&resource, name.as_deref(), json).await,
+        Command::Import { path } => cli::import(path.as_deref()).await,
+        Command::Delete { resource, name } => cli::delete(&resource, &name).await,
     }
 }
 

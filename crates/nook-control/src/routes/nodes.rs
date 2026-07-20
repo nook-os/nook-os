@@ -53,3 +53,32 @@ pub async fn delete(
     }
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
+
+/// Ask a node to rescan its workspace roots now, instead of waiting for the
+/// periodic sweep. Backs `nook import`.
+#[utoipa::path(post, path = "/api/v1/nodes/{id}/rescan",
+    operation_id = "rescan_node",
+    params(("id" = String, Path,)),
+    responses((status = 202), (status = 404)))]
+pub async fn rescan(
+    State(state): State<AppState>,
+    auth: AuthCtx,
+    Path(id): Path<NodeId>,
+) -> ApiResult<axum::http::StatusCode> {
+    let owned: Option<(NodeId,)> =
+        sqlx::query_as("SELECT id FROM nodes WHERE id = $1 AND tenant_id = $2")
+            .bind(id)
+            .bind(auth.tenant_id)
+            .fetch_optional(&state.db)
+            .await?;
+    if owned.is_none() {
+        return Err(ApiError::NotFound);
+    }
+    if !state
+        .registry
+        .send_to_node(id, nook_proto::ControlToNode::RescanWorkspaces)
+    {
+        return Err(ApiError::BadRequest("node is offline".into()));
+    }
+    Ok(axum::http::StatusCode::ACCEPTED)
+}

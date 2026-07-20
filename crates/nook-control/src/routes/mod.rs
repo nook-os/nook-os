@@ -54,6 +54,7 @@ pub fn build_router(state: AppState) -> Router {
             "/git-credentials/{id}",
             axum::routing::delete(gitops::delete_credential),
         )
+        .route("/nodes/{id}/rescan", post(nodes::rescan))
         .route("/nodes/{id}/clone", post(gitops::clone_repo))
         .route("/nodes/{id}/projects", post(gitops::init_project))
         .route(
@@ -96,7 +97,9 @@ pub fn build_router(state: AppState) -> Router {
         .route("/sessions", get(sessions::list).post(sessions::create))
         .route(
             "/sessions/{id}",
-            get(sessions::get_one).patch(sessions::update),
+            get(sessions::get_one)
+                .patch(sessions::update)
+                .delete(sessions::delete),
         )
         .route("/sessions/{id}/windows", post(sessions::windows))
         .route("/sessions/{id}/kill", post(sessions::kill))

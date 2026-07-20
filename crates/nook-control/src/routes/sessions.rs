@@ -266,3 +266,43 @@ pub async fn restart(
     .await;
     Ok(Json(session))
 }
+
+/// Remove a session record. Kills the tmux session first when it's still
+/// alive, so "delete" never leaves an orphan running on a node.
+#[utoipa::path(delete, path = "/api/v1/sessions/{id}",
+    operation_id = "delete_session",
+    params(("id" = String, Path,)),
+    responses((status = 204), (status = 404)))]
+pub async fn delete(
+    State(state): State<AppState>,
+    auth: AuthCtx,
+    Path(id): Path<SessionId>,
+) -> ApiResult<axum::http::StatusCode> {
+    let session: Option<Session> =
+        sqlx::query_as("SELECT * FROM sessions WHERE id = $1 AND tenant_id = $2")
+            .bind(id)
+            .bind(auth.tenant_id)
+            .fetch_optional(&state.db)
+            .await?;
+    let session = session.ok_or(ApiError::NotFound)?;
+
+    if matches!(session.status.as_str(), "starting" | "running" | "detached") {
+        state
+            .registry
+            .send_to_node(session.node_id, ControlToNode::KillSession { session_id: id });
+    }
+    sqlx::query("DELETE FROM sessions WHERE id = $1 AND tenant_id = $2")
+        .bind(id)
+        .bind(auth.tenant_id)
+        .execute(&state.db)
+        .await?;
+    events::record(
+        &state,
+        auth.tenant_id,
+        EventDraft::new("session.deleted")
+            .actor("user", auth.user_id.0)
+            .node(session.node_id),
+    )
+    .await;
+    Ok(axum::http::StatusCode::NO_CONTENT)
+}

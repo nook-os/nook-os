@@ -1235,3 +1235,8 @@ textarea.env-paste {
 }
 .session-dead p { max-width: 420px; margin: 0; line-height: 1.6; }
 .term-strip-add span { font-size: 11px; }
+
+/* Selected rows in multi-select tables (sessions cleanup). */
+table.nook-table tr.picked td {
+  background: color-mix(in srgb, var(--nook-accent) 12%, transparent);
+}

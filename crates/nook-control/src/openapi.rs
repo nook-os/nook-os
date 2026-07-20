@@ -61,6 +61,8 @@ use utoipa::OpenApi;
         crate::routes::sessions::kill,
         crate::routes::sessions::update,
         crate::routes::sessions::restart,
+        crate::routes::sessions::delete,
+        crate::routes::nodes::rescan,
         crate::routes::sessions::windows,
         crate::routes::notes::list,
         crate::routes::notes::create,

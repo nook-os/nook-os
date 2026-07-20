@@ -62,6 +62,18 @@ impl FromRequestParts<AppState> for AuthCtx {
         parts: &mut Parts,
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
+        // Browsers authenticate with the session cookie; the `nook` CLI (and
+        // other local tooling) present a node token instead, which is already
+        // provisioned on every machine that joined.
+        if let Some(bearer) = parts
+            .headers
+            .get(axum::http::header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.strip_prefix("Bearer "))
+        {
+            return node_token_ctx(state, bearer).await;
+        }
+
         let jar = CookieJar::from_request_parts(parts, state)
             .await
             .map_err(|_| ApiError::Unauthorized)?;
@@ -84,6 +96,30 @@ impl FromRequestParts<AppState> for AuthCtx {
             tenant_id: TenantId(tenant_id),
         })
     }
+}
+
+/// Resolve a node token to its tenant. Acts as the tenant's owner so events
+/// stay attributable and every tenant-scoped query keeps working unchanged.
+async fn node_token_ctx(state: &AppState, token: &str) -> Result<AuthCtx, ApiError> {
+    let hash = crate::seed::hash_token(token);
+    let tenant: Option<(Uuid,)> =
+        sqlx::query_as("SELECT tenant_id FROM nodes WHERE node_token_hash = $1")
+            .bind(&hash)
+            .fetch_optional(&state.db)
+            .await?;
+    let (tenant_id,) = tenant.ok_or(ApiError::Unauthorized)?;
+    let owner: Option<(Uuid,)> = sqlx::query_as(
+        "SELECT id FROM users WHERE tenant_id = $1
+         ORDER BY (role = 'owner') DESC, created_at LIMIT 1",
+    )
+    .bind(tenant_id)
+    .fetch_optional(&state.db)
+    .await?;
+    Ok(AuthCtx {
+        session_id: AuthSessionId(Uuid::nil()),
+        user_id: UserId(owner.map(|(id,)| id).unwrap_or_else(Uuid::nil)),
+        tenant_id: TenantId(tenant_id),
+    })
 }
 
 pub fn session_cookie(state: &AppState, session_id: AuthSessionId) -> Cookie<'static> {

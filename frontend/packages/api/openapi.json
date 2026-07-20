@@ -987,6 +987,31 @@
           }
         }
       },
+      "delete": {
+        "tags": [
+          "crate::routes::sessions"
+        ],
+        "summary": "Remove a session record. Kills the tmux session first when it's still\nalive, so \"delete\" never leaves an orphan running on a node.",
+        "operationId": "delete_session",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": ""
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      },
       "patch": {
         "tags": [
           "crate::routes::sessions"

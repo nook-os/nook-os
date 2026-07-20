@@ -385,7 +385,11 @@ export interface paths {
         get: operations["get_session"];
         put?: never;
         post?: never;
-        delete?: never;
+        /**
+         * Remove a session record. Kills the tmux session first when it's still
+         *     alive, so "delete" never leaves an orphan running on a node.
+         */
+        delete: operations["delete_session"];
         options?: never;
         head?: never;
         patch: operations["update_session"];
@@ -2169,6 +2173,31 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["Session"];
                 };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    delete_session: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             404: {
                 headers: {
