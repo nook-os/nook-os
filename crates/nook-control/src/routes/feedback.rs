@@ -147,8 +147,8 @@ pub async fn submit(
     .fetch_optional(&state.db)
     .await?;
 
-    let (session_id, node_id) = match existing {
-        Some(pair) => pair,
+    let (session_id, node_id, freshly_started) = match existing {
+        Some((s, n)) => (s, n, false),
         None => {
             let node: Option<(NodeId,)> = sqlx::query_as(
                 "SELECT node_id FROM node_workspaces WHERE workspace_id = $1 LIMIT 1",
@@ -173,9 +173,29 @@ pub async fn submit(
                 },
             )
             .await?;
-            (session.id, session.node_id)
+            (session.id, session.node_id, true)
         }
     };
+
+    // A session that was just created has no PTY on the node yet, and input
+    // sent before it exists is dropped on the floor. Wait for the node to
+    // report the terminal before typing into it.
+    if freshly_started {
+        for _ in 0..40 {
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            let ready: Option<(Option<String>,)> =
+                sqlx::query_as("SELECT tmux_session FROM sessions WHERE id = $1")
+                    .bind(session_id)
+                    .fetch_optional(&state.db)
+                    .await?;
+            if ready.and_then(|(t,)| t).is_some() {
+                // The runtime still needs a moment to start reading stdin —
+                // an agent draws its UI first.
+                tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+                break;
+            }
+        }
+    }
 
     let item: FeedbackItem = sqlx::query_as(
         "INSERT INTO feedback (id, tenant_id, workspace_id, session_id, body, status, created_by)
