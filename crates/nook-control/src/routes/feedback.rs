@@ -80,6 +80,7 @@ async fn configured_workspace(
     let row: Option<(serde_json::Value,)> = sqlx::query_as(
         "SELECT value FROM settings
          WHERE tenant_id = $1 AND key = $2
+           AND (user_id = $3 OR user_id IS NULL)
          ORDER BY (user_id = $3) DESC LIMIT 1",
     )
     .bind(auth.tenant_id)
@@ -113,10 +114,10 @@ pub async fn submit(
         Some(id) => {
             // Remember the choice so the next one doesn't ask.
             sqlx::query(
-                "INSERT INTO settings (id, tenant_id, user_id, key, value)
-                 VALUES ($1, $2, $3, $4, $5)
-                 ON CONFLICT (tenant_id, user_id, key)
-                 DO UPDATE SET value = EXCLUDED.value, updated_at = now()",
+                "INSERT INTO settings (id, tenant_id, scope, user_id, key, value)
+                 VALUES ($1, $2, 'user', $3, $4, $5)
+                 ON CONFLICT (tenant_id, scope, user_id, key)
+                 DO UPDATE SET value = EXCLUDED.value",
             )
             .bind(SettingId::new().0)
             .bind(auth.tenant_id)
