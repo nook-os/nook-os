@@ -232,11 +232,24 @@ export function SessionPage() {
   };
 
   const kill = async () => {
+    // Say the blast radius out loud. Kill ends the whole tmux session, so a
+    // session holding four terminals loses four terminals — which is a
+    // surprise if you were only trying to get rid of the one in front of you.
+    // (Closing a single terminal is the × on its chip.)
+    const terminals =
+      queryClient.getQueryData<{ index: number }[]>([
+        "session-windows",
+        session.id,
+      ])?.length ?? 1;
     const ok = await askConfirm({
       title: "Kill session",
       description:
-        "The tmux session ends for real on the node — running processes are terminated.",
-      confirmLabel: "kill",
+        terminals > 1
+          ? `This session has ${terminals} terminals and ALL of them end — ` +
+            "running processes are terminated on the node.\n\n" +
+            "To close just one, use the × on its terminal chip."
+          : "The tmux session ends for real on the node — running processes are terminated.",
+      confirmLabel: terminals > 1 ? `kill all ${terminals}` : "kill",
       danger: true,
     });
     if (ok) {

@@ -67,6 +67,8 @@ pub async fn rescan(
     auth: AuthCtx,
     Path(id): Path<NodeId>,
 ) -> ApiResult<axum::http::StatusCode> {
+    // A node rescans itself; asking another to is an instruction, not a report.
+    auth.require_node_self(id)?;
     let owned: Option<(NodeId,)> =
         sqlx::query_as("SELECT id FROM nodes WHERE id = $1 AND tenant_id = $2")
             .bind(id)

@@ -118,25 +118,41 @@ pub async fn start(
                 .filter_map(|k| w.get(*k).and_then(Value::as_str))
                 .any(|v| v.eq_ignore_ascii_case(workspace))
         })
-        .with_context(|| {
-            format!("no workspace named '{workspace}' — try `nook get workspaces`")
-        })?;
+        .with_context(|| format!("no workspace named '{workspace}' — try `nook get workspaces`"))?;
 
     // A workspace can be checked out on several machines; a session has to
-    // name one. Prefer the requested node, else any online checkout.
+    // name one. Prefer the requested node; otherwise **this** machine, then
+    // any online checkout.
+    //
+    // This machine first because the node token authenticates a node, and the
+    // control plane confines it to itself — asking it to start a session
+    // somewhere else is refused. Picking the local checkout when there is one
+    // turns a 403 into the thing the user meant.
     let locations = ws
         .get("locations")
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
+    let self_node_id = NodeConfig::load().ok().map(|c| c.node_id);
+    let online = |l: &&Value| l.get("node_status").and_then(Value::as_str) == Some("online");
+    let named = |l: &&Value| {
+        node.is_none_or(|n| {
+            l.get("node_name")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                == n
+        })
+    };
     let location = locations
         .iter()
-        .filter(|l| l.get("node_status").and_then(Value::as_str) == Some("online"))
+        .filter(online)
+        .filter(named)
         .find(|l| {
-            node.is_none_or(|n| {
-                l.get("node_name").and_then(Value::as_str).unwrap_or_default() == n
-            })
+            self_node_id
+                .as_deref()
+                .is_some_and(|id| l.get("node_id").and_then(Value::as_str) == Some(id))
         })
+        .or_else(|| locations.iter().filter(online).find(named))
         .with_context(|| match node {
             Some(n) => format!("'{n}' has no online checkout of this workspace"),
             None => "no online node has this workspace checked out".to_string(),
@@ -149,7 +165,18 @@ pub async fn start(
         "name": name,
         "path": location.get("path"),
     });
-    let session = client.post("/api/v1/sessions", body).await?;
+    let session = client.post("/api/v1/sessions", body).await.map_err(|e| {
+        // The control plane confines a node token to its own machine. Say so
+        // in the terms the person typed, not as a bare 403.
+        if e.to_string().contains("own machine") {
+            anyhow::anyhow!(
+                "that checkout is on another machine. Run this from that node, \
+                 or start the session from the web UI."
+            )
+        } else {
+            e
+        }
+    })?;
     let sname = session
         .get("name")
         .and_then(Value::as_str)

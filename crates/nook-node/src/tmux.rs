@@ -208,23 +208,30 @@ pub fn repaint(session: &str) {
 /// can hold many, and the attached client renders whichever is active — so
 /// "more terminals in this session" is just window management.
 pub fn list_windows(session: &str) -> Result<String> {
-    // JSON so the control plane can hand it straight to the UI.
+    // The separator has to be PRINTABLE. tmux rewrites control characters in
+    // `-F` output — a \u{1} delimiter comes back as a literal "_", which made
+    // every line unparseable and this function silently return "[]". An empty
+    // window list looks like a session with no terminals, which is why the
+    // strip that closes one terminal never appeared.
+    //
+    // `name` goes last precisely because it's the one field a user controls:
+    // a window called "foo|bar" then lands in the name and parses fine.
     let raw = tmux(&[
         "list-windows",
         "-t",
         session,
         "-F",
-        "#{window_index}\u{1}#{window_name}\u{1}#{window_active}\u{1}#{window_panes}",
+        "#{window_index}|#{window_active}|#{window_panes}|#{window_name}",
     ])?;
     let windows: Vec<serde_json::Value> = raw
         .lines()
         .filter_map(|line| {
-            let mut parts = line.split('\u{1}');
+            let mut parts = line.splitn(4, '|');
             Some(serde_json::json!({
                 "index": parts.next()?.parse::<u32>().ok()?,
-                "name": parts.next()?,
                 "active": parts.next()? == "1",
                 "panes": parts.next()?.parse::<u32>().unwrap_or(1),
+                "name": parts.next().unwrap_or("shell"),
             }))
         })
         .collect();

@@ -18,6 +18,9 @@ pub async fn dispatch(
     auth: AuthCtx,
     Path(id): Path<TaskId>,
 ) -> ApiResult<Json<TaskItem>> {
+    // Placing work on a scheduler-chosen machine is an operator action; a node
+    // token cannot constrain it to itself, so it does not get to do it.
+    auth.require_user()?;
     Ok(Json(taskwork::dispatch(&state, auth.tenant_id, id).await?))
 }
 
@@ -32,6 +35,8 @@ pub async fn start_work(
     Path(id): Path<TaskId>,
     Json(req): Json<StartWorkRequest>,
 ) -> ApiResult<Json<StartWorkResponse>> {
+    // Creates a worktree and a session on whichever node the task names.
+    auth.require_user()?;
     let (task, session) = taskwork::start_work(
         &state,
         auth.tenant_id,

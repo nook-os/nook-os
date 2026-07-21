@@ -4,7 +4,7 @@
 // and re-render from the list tmux reports back.
 import React, { useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Columns2, Plus, Rows2 } from "lucide-react";
+import { Columns2, Plus, Rows2, X } from "lucide-react";
 import { api } from "@nookos/api";
 import { TabMenu } from "./SessionTabs";
 import { askText } from "./dialogs";
@@ -44,8 +44,10 @@ export function SessionWindows({ sessionId }: { sessionId: string }) {
     <>
       <span className="term-strip">
         {list.map((w) => (
-          <button
+          <div
             key={w.index}
+            role="button"
+            tabIndex={0}
             className={`term-chip${w.active ? " active" : ""}`}
             onClick={() => act({ action: "select", index: w.index })}
             onContextMenu={(e) => {
@@ -64,7 +66,24 @@ export function SessionWindows({ sessionId }: { sessionId: string }) {
           >
             {w.name}
             {(w.panes ?? 1) > 1 && <span className="faint"> ⋮{w.panes}</span>}
-          </button>
+            {/* Closing ONE terminal needs to be visible. It used to live only
+                in the right-click menu, which meant the only obvious way to
+                get rid of a terminal was `kill` — and that ends the whole
+                session, every terminal in it. Never on the last one: a
+                session with no terminals is just a dead session. */}
+            {list.length > 1 && (
+              <button
+                className="term-chip-close"
+                title="close this terminal"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  act({ action: "close", index: w.index });
+                }}
+              >
+                <X size={10} />
+              </button>
+            )}
+          </div>
         ))}
         <button
           className="term-strip-add"

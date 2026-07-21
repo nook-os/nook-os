@@ -246,3 +246,41 @@ async fn node_tokens_cannot_escalate() {
     );
     assert!(human.require_user().is_ok(), "a signed-in user must not be");
 }
+
+/// A node token is confined to its own machine.
+///
+/// This is the lateral-movement boundary: starting a session, cloning, or
+/// attaching a terminal all execute code on the node they name. One
+/// compromised machine must not become every machine.
+#[tokio::test]
+async fn node_tokens_are_confined_to_their_own_machine() {
+    use nook_control::auth::{AuthCtx, Principal};
+    use nook_types::{AuthSessionId, NodeId, UserId};
+
+    let self_id = NodeId(Uuid::now_v7());
+    let other_id = NodeId(Uuid::now_v7());
+
+    let node = AuthCtx {
+        session_id: AuthSessionId(Uuid::nil()),
+        user_id: UserId(Uuid::nil()),
+        tenant_id: TenantId(Uuid::nil()),
+        principal: Principal::Node(self_id),
+    };
+    let human = AuthCtx {
+        principal: Principal::User,
+        ..node
+    };
+
+    assert!(
+        node.require_node_self(self_id).is_ok(),
+        "a node must still be able to act on itself — that is the CLI"
+    );
+    assert!(
+        node.require_node_self(other_id).is_err(),
+        "a node token reached another machine: lateral movement is open"
+    );
+    assert!(
+        human.require_node_self(other_id).is_ok(),
+        "driving other nodes is what the control plane is for"
+    );
+}

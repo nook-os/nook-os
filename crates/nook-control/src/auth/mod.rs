@@ -72,6 +72,25 @@ pub struct AuthCtx {
 }
 
 impl AuthCtx {
+    /// Confine a machine credential to its own machine.
+    ///
+    /// A node token authenticates the machine it sits on. Letting it act on a
+    /// *different* node turns one compromised box into every box: starting a
+    /// session is running a command, and the fleet is exactly the set of
+    /// machines you did not want that to reach. Humans are unrestricted —
+    /// driving other nodes is the entire point of the control plane.
+    pub fn require_node_self(&self, node_id: nook_types::NodeId) -> Result<(), ApiError> {
+        match self.principal {
+            Principal::User => Ok(()),
+            Principal::Node(self_id) if self_id == node_id => Ok(()),
+            Principal::Node(_) => Err(ApiError::ForbiddenMsg(
+                "a node token can only act on its own machine — sign in as a user \
+                 to drive another node"
+                    .into(),
+            )),
+        }
+    }
+
     /// Refuse machine credentials.
     ///
     /// For operations that grant lasting power rather than doing today's work:

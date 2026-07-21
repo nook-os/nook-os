@@ -197,6 +197,8 @@ pub async fn clone_repo(
     Path(node_id): Path<NodeId>,
     Json(req): Json<CloneRequest>,
 ) -> ApiResult<Json<OpResponse>> {
+    // Cloning runs git on that machine, with its credentials.
+    auth.require_node_self(node_id)?;
     // Tenant must own the node.
     let owned: Option<(NodeId,)> =
         sqlx::query_as("SELECT id FROM nodes WHERE id = $1 AND tenant_id = $2")
@@ -334,6 +336,8 @@ pub async fn add_worktree(
     Path(workspace_id): Path<WorkspaceId>,
     Json(req): Json<WorktreeRequest>,
 ) -> ApiResult<Json<OpResponse>> {
+    // The worktree is created on the node named in the request.
+    auth.require_node_self(req.node_id)?;
     let row: Option<(String,)> = sqlx::query_as(
         "SELECT path FROM node_workspaces
          WHERE tenant_id = $1 AND workspace_id = $2 AND node_id = $3",
@@ -391,6 +395,8 @@ pub async fn remove_worktree(
     Path(workspace_id): Path<WorkspaceId>,
     Json(req): Json<RemoveWorktreeRequest>,
 ) -> ApiResult<Json<OpResponse>> {
+    // Removing a checkout deletes files on that machine.
+    auth.require_node_self(req.node_id)?;
     // The path must be a known checkout of this workspace on that node.
     let owned: Option<(String,)> = sqlx::query_as(
         "SELECT path FROM node_workspaces
@@ -450,6 +456,8 @@ pub async fn init_project(
     Path(node_id): Path<NodeId>,
     Json(req): Json<InitProjectRequest>,
 ) -> ApiResult<Json<OpResponse>> {
+    // Same: this writes to a workspace root on that machine.
+    auth.require_node_self(node_id)?;
     let owned: Option<(NodeId,)> =
         sqlx::query_as("SELECT id FROM nodes WHERE id = $1 AND tenant_id = $2")
             .bind(node_id)

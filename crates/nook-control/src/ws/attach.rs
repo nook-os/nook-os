@@ -33,6 +33,10 @@ pub async fn attach_ws(
     let Some(session) = session else {
         return ApiError::NotFound.into_response();
     };
+    // Attaching is a terminal on that machine: keystrokes in, output out.
+    if let Err(e) = auth.require_node_self(session.node_id) {
+        return e.into_response();
+    }
     ws.on_upgrade(move |socket| handle(state, socket, session))
 }
 

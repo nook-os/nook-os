@@ -64,6 +64,8 @@ pub async fn create(
     auth: AuthCtx,
     Json(req): Json<CreateSessionRequest>,
 ) -> ApiResult<Json<Session>> {
+    // Starting a session is running a program on that machine.
+    auth.require_node_self(req.node_id)?;
     let session = core::create_session(&state, auth.tenant_id, Some(auth.user_id), req).await?;
     Ok(Json(session))
 }
@@ -84,6 +86,8 @@ pub async fn kill(
             .fetch_optional(&state.db)
             .await?;
     let session = session.ok_or(ApiError::NotFound)?;
+    // A node may only touch sessions running on itself.
+    auth.require_node_self(session.node_id)?;
 
     state.registry.send_to_node(
         session.node_id,
@@ -128,6 +132,8 @@ pub async fn input(
             .fetch_optional(&state.db)
             .await?;
     let session = session.ok_or(ApiError::NotFound)?;
+    // A node may only touch sessions running on itself.
+    auth.require_node_self(session.node_id)?;
 
     // Ensure the node has a live PTY first: after a node restart its session
     // map is empty and raw input would be silently dropped. AttachSession is
@@ -140,19 +146,33 @@ pub async fn input(
         },
     );
 
-    let mut text = req.text;
-    if req.enter.unwrap_or(true) {
-        text.push('\r');
-    }
+    let encode = |s: &str| base64::engine::general_purpose::STANDARD.encode(s.as_bytes());
     let sent = state.registry.send_to_node(
         session.node_id,
         ControlToNode::SessionInput {
             session_id: id,
-            data_b64: base64::engine::general_purpose::STANDARD.encode(text.as_bytes()),
+            data_b64: encode(&req.text),
         },
     );
     if !sent {
         return Err(ApiError::BadRequest("session's node is offline".into()));
+    }
+
+    // Enter goes in a SEPARATE write, after a beat.
+    //
+    // TUI runtimes (Claude Code, codex) read a chunk that ends in \r as pasted
+    // text and put the newline *in the box* instead of submitting — the prompt
+    // just sits there looking typed but never sent. A shell doesn't care either
+    // way, so the delay costs nothing and makes agent runtimes actually answer.
+    if req.enter.unwrap_or(true) {
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        state.registry.send_to_node(
+            session.node_id,
+            ControlToNode::SessionInput {
+                session_id: id,
+                data_b64: encode("\r"),
+            },
+        );
     }
 
     events::record(
@@ -189,6 +209,8 @@ pub async fn output(
             .fetch_optional(&state.db)
             .await?;
     let session = session.ok_or(ApiError::NotFound)?;
+    // A node may only touch sessions running on itself.
+    auth.require_node_self(session.node_id)?;
     let tmux_session = session
         .tmux_session
         .clone()
@@ -197,10 +219,12 @@ pub async fn output(
     let history_lines = req.history_lines.unwrap_or(0).min(2000);
     let rx = state
         .registry
-        .request_op(session.node_id, |request_id| ControlToNode::CaptureSession {
-            request_id,
-            tmux_session,
-            history_lines,
+        .request_op(session.node_id, |request_id| {
+            ControlToNode::CaptureSession {
+                request_id,
+                tmux_session,
+                history_lines,
+            }
         })
         .ok_or_else(|| ApiError::BadRequest("node is offline".into()))?;
     let payload = tokio::time::timeout(std::time::Duration::from_secs(15), rx)
@@ -243,6 +267,8 @@ pub async fn update(
     .fetch_optional(&state.db)
     .await?;
     let session = session.ok_or(ApiError::NotFound)?;
+    // A node may only touch sessions running on itself.
+    auth.require_node_self(session.node_id)?;
     state.registry.publish(
         auth.tenant_id,
         UiEvent::SessionStatus {
@@ -275,6 +301,8 @@ pub async fn windows(
             .fetch_optional(&state.db)
             .await?;
     let session = session.ok_or(ApiError::NotFound)?;
+    // A node may only touch sessions running on itself.
+    auth.require_node_self(session.node_id)?;
     let tmux_session = session
         .tmux_session
         .clone()
@@ -297,7 +325,12 @@ pub async fn windows(
     if !payload.ok {
         return Err(ApiError::BadRequest(payload.message));
     }
-    let windows: Vec<SessionWindow> = serde_json::from_str(&payload.message).unwrap_or_default();
+    // Don't quietly turn a malformed answer into "this session has no
+    // terminals" — that reads as a working empty state and hides the fault.
+    let windows: Vec<SessionWindow> = serde_json::from_str(&payload.message).map_err(|e| {
+        tracing::error!(error = %e, answer = %payload.message, "node sent an unparseable window list");
+        ApiError::Internal(anyhow::anyhow!("node sent an unparseable window list"))
+    })?;
     Ok(Json(windows))
 }
 
@@ -320,6 +353,8 @@ pub async fn restart(
             .fetch_optional(&state.db)
             .await?;
     let session = session.ok_or(ApiError::NotFound)?;
+    // A node may only touch sessions running on itself.
+    auth.require_node_self(session.node_id)?;
 
     if !state.registry.node_online(session.node_id) {
         return Err(ApiError::BadRequest("node is offline".into()));
@@ -401,6 +436,8 @@ pub async fn delete(
             .fetch_optional(&state.db)
             .await?;
     let session = session.ok_or(ApiError::NotFound)?;
+    // A node may only touch sessions running on itself.
+    auth.require_node_self(session.node_id)?;
 
     if matches!(session.status.as_str(), "starting" | "running" | "detached") {
         state.registry.send_to_node(

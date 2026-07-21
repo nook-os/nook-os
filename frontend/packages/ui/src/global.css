@@ -1184,8 +1184,11 @@ textarea.env-paste {
 /* ── Terminals within a session (tmux windows) ───────────────────────────── */
 .term-strip { display: inline-flex; align-items: center; gap: 3px; }
 .term-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
   height: var(--nook-ctrl-sm);
-  padding: 0 8px;
+  padding: 0 6px 0 8px;
   border: 1px solid var(--nook-border-bright);
   border-radius: 999px;
   background: transparent;
@@ -1201,6 +1204,29 @@ textarea.env-paste {
   background: var(--nook-accent);
   border-color: var(--nook-accent);
 }
+/* The × that closes one terminal. Dim until the chip is hovered, like an
+   editor tab — present when you want it, quiet when you don't. */
+.term-chip-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: inherit;
+  opacity: 0;
+  cursor: pointer;
+}
+.term-chip:hover .term-chip-close { opacity: 0.65; }
+.term-chip-close:hover {
+  opacity: 1;
+  background: color-mix(in srgb, var(--nook-err) 65%, transparent);
+  color: var(--nook-fg-bright);
+}
+
 .term-strip-add,
 .term-strip-add.lonely {
   display: inline-flex;
