@@ -49,17 +49,26 @@ function DiffView({ diff }: { diff: string }) {
   );
 }
 
-function GitPanel({ session }: { session: Session }) {
+// Only rendered for sessions that have a workspace — an ad-hoc terminal has no
+// checkout to diff — so `workspaceId` is a plain string, not the nullable one
+// off `session`.
+function GitPanel({
+  session,
+  workspaceId,
+}: {
+  session: Session;
+  workspaceId: string;
+}) {
   const [tab, setTab] = useState<"diff" | "files">("diff");
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState<null | "commit" | "push">(null);
   const [note, setNote] = useState<string | null>(null);
   const { data, refetch, isFetching, error } = useQuery({
-    queryKey: ["git", session.workspace_id, session.node_id],
+    queryKey: ["git", workspaceId, session.node_id],
     queryFn: async () => {
       const { data, error } = await api.GET("/api/v1/workspaces/{id}/git", {
         params: {
-          path: { id: session.workspace_id },
+          path: { id: workspaceId },
           query: { node_id: session.node_id },
         },
       });
@@ -80,11 +89,11 @@ function GitPanel({ session }: { session: Session }) {
     const { data: result, error: err } =
       what === "commit"
         ? await api.POST("/api/v1/workspaces/{id}/git/commit", {
-            params: { path: { id: session.workspace_id } },
+            params: { path: { id: workspaceId } },
             body: { node_id: session.node_id, message },
           })
         : await api.POST("/api/v1/workspaces/{id}/git/push", {
-            params: { path: { id: session.workspace_id } },
+            params: { path: { id: workspaceId } },
             body: { node_id: session.node_id, credential_id: null },
           });
     setBusy(null);
@@ -241,11 +250,18 @@ export function SessionPage() {
     queryFn: async () =>
       (
         await api.GET("/api/v1/workspaces/{id}", {
-          params: { path: { id: session!.workspace_id } },
+          params: { path: { id: session!.workspace_id! } },
         })
       ).data,
-    enabled: !!session,
+    enabled: !!session?.workspace_id,
   });
+  // Ad-hoc terminals name their machine instead of a workspace.
+  const { data: nodes } = useQuery({
+    queryKey: ["nodes"],
+    queryFn: async () => (await api.GET("/api/v1/nodes")).data ?? [],
+    enabled: !!session && !session.workspace_id,
+  });
+  const nodeName = nodes?.find((n) => n.id === session?.node_id)?.name;
 
   // Visiting a session opens (or refreshes) its tab, tagged with its
   // workspace so the strip can scope tabs to the workspace context.
@@ -255,7 +271,7 @@ export function SessionPage() {
         id: session.id,
         name: session.name,
         runtime: session.runtime,
-        workspaceId: session.workspace_id,
+        workspaceId: session.workspace_id ?? undefined,
         workspaceName: ws?.name,
       });
     }
@@ -267,8 +283,9 @@ export function SessionPage() {
   const selectWorkspace = useWorkspaceContext((s) => s.select);
   const selectedWorkspaceId = useWorkspaceContext((s) => s.selectedWorkspaceId);
   useEffect(() => {
+    // An ad-hoc terminal has no workspace, so there is no context to follow to.
     if (
-      session &&
+      session?.workspace_id &&
       selectedWorkspaceId &&
       selectedWorkspaceId !== session.workspace_id
     ) {
@@ -343,9 +360,14 @@ export function SessionPage() {
         <Panel
         title={
           <>
-            <Link to={`/workspaces/${session.workspace_id}`} className="bright">
-              {ws?.name ?? "workspace"}
-            </Link>
+            {session.workspace_id ? (
+              <Link to={`/workspaces/${session.workspace_id}`} className="bright">
+                {ws?.name ?? "workspace"}
+              </Link>
+            ) : (
+              // Ad-hoc terminal: no workspace, so name the machine it's on.
+              <span className="bright">{nodeName ?? "terminal"}</span>
+            )}
             <span className="faint"> ▸ </span>
             {session.name}
           </>
@@ -364,13 +386,17 @@ export function SessionPage() {
             ) : (
               <SplitButtons sessionId={session.id} />
             )}
-            <button
-              className="btn small icon"
-              onClick={toggleGit}
-              title={gitOpen ? "hide git panel" : "show git panel"}
-            >
-              {gitOpen ? <PanelRightClose size={13} /> : <PanelRightOpen size={13} />}
-            </button>
+            {/* No workspace, nothing to diff — an ad-hoc terminal has no git
+                panel. */}
+            {session.workspace_id && (
+              <button
+                className="btn small icon"
+                onClick={toggleGit}
+                title={gitOpen ? "hide git panel" : "show git panel"}
+              >
+                {gitOpen ? <PanelRightClose size={13} /> : <PanelRightOpen size={13} />}
+              </button>
+            )}
             <button className="btn danger small" onClick={kill}>
               kill
             </button>
@@ -406,7 +432,9 @@ export function SessionPage() {
             />
           )}
         </Panel>
-        {gitOpen && <GitPanel session={session} />}
+        {gitOpen && session.workspace_id && (
+          <GitPanel session={session} workspaceId={session.workspace_id} />
+        )}
       </div>
     </div>
   );

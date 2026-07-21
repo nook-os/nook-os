@@ -1,20 +1,36 @@
 import React, { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Link, useParams } from "react-router-dom";
+import { Link, useNavigate, useParams } from "react-router-dom";
+import { SquareTerminal } from "lucide-react";
 import { api } from "@nookos/api";
 import { Empty, Panel, Pill, ResourceBars, StatusDot, statusTone } from "@nookos/ui";
-import { askConfirm } from "../dialogs";
+import { askConfirm, notify } from "../dialogs";
 import { useLive } from "../live";
 import { AddNodeModal } from "../AddNodeModal";
 
 export function NodesPage() {
   const [adding, setAdding] = useState(false);
+  const navigate = useNavigate();
   const nodeStatus = useLive((s) => s.nodeStatus);
   const nodeResources = useLive((s) => s.nodeResources);
   const { data: nodes, refetch } = useQuery({
     queryKey: ["nodes"],
     queryFn: async () => (await api.GET("/api/v1/nodes")).data ?? [],
   });
+
+  // A shell on the machine, no project required: opens a bash session in the
+  // node's home directory and drops you straight into it.
+  const openTerminal = async (nodeId: string) => {
+    const { data, error } = await api.POST("/api/v1/nodes/{id}/terminal", {
+      params: { path: { id: nodeId } },
+      body: {},
+    });
+    if (error || !data) {
+      await notify("Couldn't open a terminal", JSON.stringify(error));
+      return;
+    }
+    navigate(`/sessions/${data.id}`);
+  };
 
   return (
     <div className="nook-grid" style={{ gridTemplateColumns: "1fr" }}>
@@ -89,7 +105,16 @@ export function NodesPage() {
                           })
                         : "never"}
                     </td>
-                    <td>
+                    <td style={{ display: "flex", gap: 6, justifyContent: "flex-end" }}>
+                      {status === "online" && (
+                        <button
+                          className="btn small"
+                          title={`open a shell on ${n.name}`}
+                          onClick={() => openTerminal(n.id)}
+                        >
+                          <SquareTerminal size={12} /> terminal
+                        </button>
+                      )}
                       <button
                         className="btn danger small"
                         onClick={async () => {

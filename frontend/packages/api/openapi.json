@@ -1045,6 +1045,50 @@
         }
       }
     },
+    "/api/v1/nodes/{id}/terminal": {
+      "post": {
+        "tags": [
+          "crate::routes::sessions"
+        ],
+        "summary": "Open an ad-hoc terminal on a machine — a shell in the node's home directory,\nno workspace required. The \"just give me a prompt on that box\" path.",
+        "operationId": "open_terminal",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateTerminalRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Session"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": ""
+          }
+        }
+      }
+    },
     "/api/v1/notes/{id}": {
       "patch": {
         "tags": [
@@ -3473,6 +3517,26 @@
           }
         }
       },
+      "CreateTerminalRequest": {
+        "type": "object",
+        "description": "Open an ad-hoc terminal on a machine — a shell with no workspace, running in\nthe node's home directory. What you reach for when you just want a prompt on\na box, not to start work on a project.",
+        "properties": {
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Name the session; defaults to something like \"bash · <node>\"."
+          },
+          "runtime": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The runtime to run — `bash` by default, but any the node has installed."
+          }
+        }
+      },
       "CreateUserTokenRequest": {
         "type": "object",
         "description": "Asking for a personal access token.",
@@ -4548,7 +4612,6 @@
         "required": [
           "id",
           "tenant_id",
-          "workspace_id",
           "node_id",
           "name",
           "runtime",
@@ -4614,7 +4677,15 @@
             "format": "date-time"
           },
           "workspace_id": {
-            "$ref": "#/components/schemas/WorkspaceId"
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/WorkspaceId",
+                "description": "The workspace this session runs in, or `None` for an ad-hoc terminal —\na plain shell opened on a machine with no project behind it, running in\nthe node's home directory."
+              }
+            ]
           }
         }
       },

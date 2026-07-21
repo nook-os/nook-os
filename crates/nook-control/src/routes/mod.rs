@@ -77,6 +77,7 @@ pub fn build_router(state: AppState) -> Router {
             axum::routing::delete(gitops::delete_credential),
         )
         .route("/nodes/{id}/rescan", post(nodes::rescan))
+        .route("/nodes/{id}/terminal", post(sessions::open_terminal))
         .route("/nodes/{id}/clone", post(gitops::clone_repo))
         .route("/nodes/{id}/projects", post(gitops::init_project))
         .route(

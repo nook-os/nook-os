@@ -161,7 +161,17 @@ pub async fn connect_once(cfg: &NodeConfig) -> Result<()> {
                 workspace_path,
                 cols,
                 rows,
-            } => manager.start(session_id, &runtime, &workspace_path, cols, rows),
+            } => {
+                // An empty path is the control plane's signal for an ad-hoc
+                // terminal: a shell with no workspace, run in this machine's
+                // home directory.
+                let cwd = if workspace_path.is_empty() {
+                    std::env::var("HOME").unwrap_or_else(|_| "/".into())
+                } else {
+                    workspace_path
+                };
+                manager.start(session_id, &runtime, &cwd, cols, rows)
+            }
             ControlToNode::AttachSession {
                 session_id,
                 tmux_session,

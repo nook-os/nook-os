@@ -446,6 +446,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/nodes/{id}/terminal": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Open an ad-hoc terminal on a machine — a shell in the node's home directory,
+         *     no workspace required. The "just give me a prompt on that box" path.
+         */
+        post: operations["open_terminal"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/notes/{id}": {
         parameters: {
             query?: never;
@@ -1386,6 +1406,17 @@ export interface components {
             title: string;
             workspace_id?: null | components["schemas"]["WorkspaceId"];
         };
+        /**
+         * @description Open an ad-hoc terminal on a machine — a shell with no workspace, running in
+         *     the node's home directory. What you reach for when you just want a prompt on
+         *     a box, not to start work on a project.
+         */
+        CreateTerminalRequest: {
+            /** @description Name the session; defaults to something like "bash · <node>". */
+            name?: string | null;
+            /** @description The runtime to run — `bash` by default, but any the node has installed. */
+            runtime?: string | null;
+        };
         /** @description Asking for a personal access token. */
         CreateUserTokenRequest: {
             /**
@@ -1783,7 +1814,7 @@ export interface components {
             tmux_session?: string | null;
             /** Format: date-time */
             updated_at: string;
-            workspace_id: components["schemas"]["WorkspaceId"];
+            workspace_id?: null | components["schemas"]["WorkspaceId"];
         };
         /** Format: uuid */
         SessionId: string;
@@ -2976,6 +3007,37 @@ export interface operations {
                 content?: never;
             };
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    open_terminal: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateTerminalRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Session"];
+                };
+            };
+            400: {
                 headers: {
                     [name: string]: unknown;
                 };

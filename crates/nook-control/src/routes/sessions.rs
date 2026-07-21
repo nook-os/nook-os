@@ -70,6 +70,38 @@ pub async fn create(
     Ok(Json(session))
 }
 
+/// Open an ad-hoc terminal on a machine — a shell in the node's home directory,
+/// no workspace required. The "just give me a prompt on that box" path.
+#[utoipa::path(post, path = "/api/v1/nodes/{id}/terminal",
+    operation_id = "open_terminal",
+    params(("id" = String, Path,)),
+    request_body = CreateTerminalRequest,
+    responses((status = 200, body = Session), (status = 400)))]
+pub async fn open_terminal(
+    State(state): State<AppState>,
+    auth: AuthCtx,
+    Path(node_id): Path<NodeId>,
+    body: Option<Json<CreateTerminalRequest>>,
+) -> ApiResult<Json<Session>> {
+    // Same rule as any session: running a shell on a machine is acting on it.
+    auth.require_node_self(node_id)?;
+    let req = body.map(|Json(r)| r).unwrap_or(CreateTerminalRequest {
+        runtime: None,
+        name: None,
+    });
+    let runtime = req.runtime.unwrap_or_else(|| "bash".into());
+    let session = core::create_ad_hoc_session(
+        &state,
+        auth.tenant_id,
+        Some(auth.user_id),
+        node_id,
+        &runtime,
+        req.name,
+    )
+    .await?;
+    Ok(Json(session))
+}
+
 #[utoipa::path(post, path = "/api/v1/sessions/{id}/kill",
     operation_id = "kill_session",
     params(("id" = String, Path,)),
@@ -360,21 +392,32 @@ pub async fn restart(
         return Err(ApiError::BadRequest("node is offline".into()));
     }
 
-    // Reuse the checkout the session was started in; fall back to any checkout
-    // of its workspace on that node (the original may have been pruned).
-    let path: Option<(String,)> = sqlx::query_as(
-        "SELECT path FROM node_workspaces
-         WHERE workspace_id = $1 AND node_id = $2
-         ORDER BY discovered_at LIMIT 1",
-    )
-    .bind(session.workspace_id)
-    .bind(session.node_id)
-    .fetch_optional(&state.db)
-    .await?;
-    let Some((workspace_path,)) = path else {
-        return Err(ApiError::BadRequest(
-            "that workspace has no checkout on this node any more".into(),
-        ));
+    // An ad-hoc terminal has no workspace: restart it in the node's home
+    // directory, the same empty-path signal it was created with.
+    let workspace_path = match session.workspace_id {
+        None => String::new(),
+        Some(workspace_id) => {
+            // Reuse the checkout the session was started in; fall back to any
+            // checkout of its workspace on that node (the original may have
+            // been pruned).
+            let path: Option<(String,)> = sqlx::query_as(
+                "SELECT path FROM node_workspaces
+                 WHERE workspace_id = $1 AND node_id = $2
+                 ORDER BY discovered_at LIMIT 1",
+            )
+            .bind(workspace_id)
+            .bind(session.node_id)
+            .fetch_optional(&state.db)
+            .await?;
+            match path {
+                Some((p,)) => p,
+                None => {
+                    return Err(ApiError::BadRequest(
+                        "that workspace has no checkout on this node any more".into(),
+                    ))
+                }
+            }
+        }
     };
 
     let sent = state.registry.send_to_node(

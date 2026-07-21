@@ -282,6 +282,70 @@ pub async fn create_session_at(
     Ok(session)
 }
 
+/// Open an ad-hoc terminal: a session with no workspace, run in the node's home
+/// directory. An empty `workspace_path` is the wire signal for "home" — the node
+/// resolves it to `$HOME` before starting the shell.
+pub async fn create_ad_hoc_session(
+    state: &crate::state::AppState,
+    tenant: TenantId,
+    created_by: Option<UserId>,
+    node_id: NodeId,
+    runtime: &str,
+    name: Option<String>,
+) -> ApiResult<Session> {
+    use crate::error::ApiError;
+
+    if !state.registry.node_online(node_id) {
+        return Err(ApiError::BadRequest("node is offline".into()));
+    }
+    let name = name.unwrap_or_else(|| format!("{runtime} · terminal"));
+    let session: Session = sqlx::query_as(
+        "INSERT INTO sessions (id, tenant_id, workspace_id, node_id, name, runtime, status, created_by)
+         VALUES ($1, $2, NULL, $3, $4, $5, 'starting', $6) RETURNING *",
+    )
+    .bind(SessionId::new())
+    .bind(tenant)
+    .bind(node_id)
+    .bind(&name)
+    .bind(runtime)
+    .bind(created_by)
+    .fetch_one(&state.db)
+    .await?;
+
+    let sent = state.registry.send_to_node(
+        node_id,
+        nook_proto::ControlToNode::StartSession {
+            session_id: session.id,
+            runtime: runtime.to_string(),
+            // Empty = the node's home directory. See conn.rs StartSession.
+            workspace_path: String::new(),
+            cols: 120,
+            rows: 32,
+        },
+    );
+    if !sent {
+        sqlx::query("UPDATE sessions SET status = 'error', updated_at = now() WHERE id = $1")
+            .bind(session.id)
+            .execute(&state.db)
+            .await?;
+        return Err(ApiError::BadRequest("node went offline".into()));
+    }
+
+    // No `.workspace(...)`: there isn't one. The node is still recorded, so the
+    // activity feed reads "terminal opened on <node>".
+    crate::events::record(
+        state,
+        tenant,
+        crate::events::EventDraft::new("session.created")
+            .node(node_id)
+            .session(session.id)
+            .payload(serde_json::json!({ "runtime": runtime, "name": name, "ad_hoc": true })),
+    )
+    .await;
+
+    Ok(session)
+}
+
 pub async fn list_notes(
     db: &PgPool,
     tenant: TenantId,

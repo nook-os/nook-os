@@ -234,7 +234,10 @@ pub struct WorkspaceLocation {
 pub struct Session {
     pub id: SessionId,
     pub tenant_id: TenantId,
-    pub workspace_id: WorkspaceId,
+    /// The workspace this session runs in, or `None` for an ad-hoc terminal —
+    /// a plain shell opened on a machine with no project behind it, running in
+    /// the node's home directory.
+    pub workspace_id: Option<WorkspaceId>,
     pub node_id: NodeId,
     pub name: String,
     pub runtime: String,
@@ -465,6 +468,19 @@ pub struct CreateSessionRequest {
     /// Pin the session to a specific checkout path (e.g. a worktree). When
     /// omitted, the workspace's first checkout on the node is used.
     pub path: Option<String>,
+}
+
+/// Open an ad-hoc terminal on a machine — a shell with no workspace, running in
+/// the node's home directory. What you reach for when you just want a prompt on
+/// a box, not to start work on a project.
+#[derive(Debug, Clone, Deserialize, ToSchema)]
+pub struct CreateTerminalRequest {
+    /// The runtime to run — `bash` by default, but any the node has installed.
+    #[serde(default)]
+    pub runtime: Option<String>,
+    /// Name the session; defaults to something like "bash · <node>".
+    #[serde(default)]
+    pub name: Option<String>,
 }
 
 /// The node the resource-aware scheduler chose for "Auto" placement.
