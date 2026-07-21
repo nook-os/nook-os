@@ -54,6 +54,14 @@ pub enum NodeToControl {
         session_id: SessionId,
         exit_code: Option<i32>,
     },
+    /// A session could not be started at all — the checkout is gone, the
+    /// runtime isn't installed, tmux refused. Distinct from `Error` because it
+    /// names the session, so the control plane can fail that row instead of
+    /// leaving it "starting" forever with the reason buried in a log.
+    SessionFailed {
+        session_id: SessionId,
+        message: String,
+    },
     Error {
         context: String,
         message: String,
@@ -82,12 +90,23 @@ pub enum WindowAction {
     /// Just report the current terminals.
     List,
     /// Open another terminal in the session and focus it.
-    New { cwd: Option<String> },
+    New {
+        cwd: Option<String>,
+    },
     /// Split the visible terminal so two are on screen at once.
-    Split { vertical: bool },
-    Select { index: u32 },
-    Close { index: u32 },
-    Rename { index: u32, name: String },
+    Split {
+        vertical: bool,
+    },
+    Select {
+        index: u32,
+    },
+    Close {
+        index: u32,
+    },
+    Rename {
+        index: u32,
+        name: String,
+    },
 }
 
 /// Messages the control plane sends to the node.
@@ -191,6 +210,15 @@ pub enum ControlToNode {
         name: String,
         content_b64: String,
     },
+    /// Read a file back out of a checkout — how an imported repo's existing
+    /// `.env` gets adopted into the vault. Replies via `OpResult` with the
+    /// content base64-encoded in `message`; `ok: false` when there's no such
+    /// file, which is the common and uninteresting case.
+    ReadWorkspaceFile {
+        request_id: uuid::Uuid,
+        checkout_path: String,
+        name: String,
+    },
     Ping,
 }
 
@@ -228,11 +256,18 @@ pub enum AttachClientMessage {
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum AttachServerMessage {
-    Output { data_b64: String },
-    Status { status: String },
+    Output {
+        data_b64: String,
+    },
+    Status {
+        status: String,
+    },
     /// The agreed terminal grid: the PTY is sized to the LARGEST current
     /// viewer; every viewer renders this grid (scaling its font down if its
     /// panel is smaller), so a small window never shrinks the session for
     /// everyone else.
-    Size { cols: u16, rows: u16 },
+    Size {
+        cols: u16,
+        rows: u16,
+    },
 }

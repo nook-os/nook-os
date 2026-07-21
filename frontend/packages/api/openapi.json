@@ -1674,6 +1674,113 @@
         }
       }
     },
+    "/api/v1/vault/passkeys": {
+      "get": {
+        "tags": [
+          "crate::routes::vault"
+        ],
+        "summary": "Passkeys enrolled on this vault, with their wrapped secrets — the browser\nneeds the blob in hand before it can ask the authenticator to open it.",
+        "operationId": "list_passkeys",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/VaultPasskey"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "crate::routes::vault"
+        ],
+        "summary": "Enrol a passkey. Requires the app password, since that's what's being\nwrapped — you can't hand out a key to a vault you can't open.",
+        "operationId": "add_passkey",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AddPasskeyRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VaultPasskey"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      }
+    },
+    "/api/v1/vault/passkeys/{id}": {
+      "delete": {
+        "tags": [
+          "crate::routes::vault"
+        ],
+        "summary": "Forget a passkey. The vault is untouched — the app password still opens it.",
+        "operationId": "delete_passkey",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": ""
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      }
+    },
+    "/api/v1/vault/passkeys/{id}/used": {
+      "post": {
+        "tags": [
+          "crate::routes::vault"
+        ],
+        "summary": "Note that a passkey was just used, so the settings page can show it.",
+        "operationId": "touch_passkey",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": ""
+          }
+        }
+      }
+    },
     "/api/v1/vault/passphrase": {
       "post": {
         "tags": [
@@ -2120,6 +2227,101 @@
         }
       }
     },
+    "/api/v1/workspaces/{id}/secrets/{name}/import": {
+      "post": {
+        "tags": [
+          "crate::routes::gitops"
+        ],
+        "summary": "Adopt a checkout's existing `.env` into the vault, sealed with the app\npassword.",
+        "description": "Importing a repo that already carries a `.env` is the common case, and\nleaving that file outside the vault meant it never travelled to the user's\nother machines — and never got encrypted. This is the on-ramp: read it off\ndisk once, seal it, and from then on it syncs like any other secret.",
+        "operationId": "import_secret_from_checkout",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ImportSecretRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OpResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": ""
+          },
+          "428": {
+            "description": ""
+          }
+        }
+      }
+    },
+    "/api/v1/workspaces/{id}/secrets/{name}/on-disk": {
+      "get": {
+        "tags": [
+          "crate::routes::gitops"
+        ],
+        "summary": "Does this workspace have a `.env` sitting in a checkout that the vault\ndoesn't know about? Asked right after an import, so we only interrupt\nsomeone for their password when there's actually something to seal.",
+        "operationId": "secret_on_disk",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SecretOnDisk"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/workspaces/{id}/secrets/{name}/open": {
       "post": {
         "tags": [
@@ -2271,6 +2473,25 @@
   },
   "components": {
     "schemas": {
+      "AddPasskeyRequest": {
+        "type": "object",
+        "description": "Enrolling a passkey. The wrapping happens in the browser; the server only\never sees the sealed blob.",
+        "required": [
+          "credential_id",
+          "wrapped_secret"
+        ],
+        "properties": {
+          "credential_id": {
+            "type": "string"
+          },
+          "label": {
+            "type": "string"
+          },
+          "wrapped_secret": {
+            "type": "string"
+          }
+        }
+      },
       "AttachClientMessage": {
         "oneOf": [
           {
@@ -3281,6 +3502,22 @@
           }
         }
       },
+      "ImportSecretRequest": {
+        "type": "object",
+        "description": "Adopt a file that already exists in a checkout into the vault.",
+        "required": [
+          "passphrase"
+        ],
+        "properties": {
+          "ephemeral": {
+            "type": "boolean"
+          },
+          "passphrase": {
+            "type": "string",
+            "description": "The app password. Same rule as saving: nothing enters the vault\nunsealed."
+          }
+        }
+      },
       "InitProjectRequest": {
         "type": "object",
         "required": [
@@ -3600,7 +3837,8 @@
       "PutSecretRequest": {
         "type": "object",
         "required": [
-          "content"
+          "content",
+          "passphrase"
         ],
         "properties": {
           "content": {
@@ -3611,11 +3849,8 @@
             "description": "Wipe the synced file from checkouts when the session ends."
           },
           "passphrase": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "Seal with a passphrase the server never stores. Once set, reading it\nback requires the same passphrase — a database dump plus the app key\nis not enough."
+            "type": "string",
+            "description": "The app password. Required, not optional: a `.env` moves between\nmachines, so it is sealed with something the server never stores\nbefore the app key wraps it. A database dump plus `SECRETS_KEY` must\nnever be enough to read one."
           }
         }
       },
@@ -3647,6 +3882,30 @@
           },
           "node_name": {
             "type": "string"
+          }
+        }
+      },
+      "SecretOnDisk": {
+        "type": "object",
+        "description": "Whether an import left a `.env` on disk that the vault hasn't adopted yet.",
+        "required": [
+          "found",
+          "in_vault"
+        ],
+        "properties": {
+          "checkout_path": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Which checkout it was found in."
+          },
+          "found": {
+            "type": "boolean"
+          },
+          "in_vault": {
+            "type": "boolean",
+            "description": "Already stored in the vault, so there's nothing to adopt."
           }
         }
       },
@@ -3685,6 +3944,13 @@
               "null"
             ],
             "format": "date-time"
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why the session failed to start, when it did."
           },
           "id": {
             "$ref": "#/components/schemas/SessionId"
@@ -4453,6 +4719,45 @@
         "type": "string",
         "format": "uuid"
       },
+      "VaultPasskey": {
+        "type": "object",
+        "description": "A passkey enrolled to unlock the vault.",
+        "required": [
+          "id",
+          "credential_id",
+          "label",
+          "wrapped_secret",
+          "created_at"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "credential_id": {
+            "type": "string",
+            "description": "Base64url WebAuthn credential id, so the browser can ask for this\nspecific passkey."
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "label": {
+            "type": "string"
+          },
+          "last_used_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "wrapped_secret": {
+            "type": "string",
+            "description": "The app password sealed under the passkey-derived key, base64. Only\nthe browser that holds the passkey can open it."
+          }
+        }
+      },
       "VaultStatus": {
         "type": "object",
         "description": "Whether this user has an app password (the key that seals their secrets).",
@@ -4469,6 +4774,11 @@
               "null"
             ],
             "format": "date-time"
+          },
+          "passkeys": {
+            "type": "integer",
+            "format": "int64",
+            "description": "How many passkeys can unlock this vault. Non-zero means the UI should\nreach for a passkey before asking anyone to type a password."
           }
         }
       },

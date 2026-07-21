@@ -2,6 +2,7 @@ pub mod auth;
 pub mod boards;
 pub mod dispatcher;
 pub mod events;
+pub mod feedback;
 pub mod gitops;
 pub mod health;
 pub mod join;
@@ -12,12 +13,11 @@ pub mod sessions;
 pub mod settings;
 pub mod taskwork;
 pub mod themes;
-pub mod feedback;
 pub mod vault;
 pub mod workspaces;
 
 use axum::response::IntoResponse;
-use axum::routing::{get, patch, post, put};
+use axum::routing::{delete as delete_route, get, patch, post, put};
 use axum::{Json, Router};
 use tower_http::trace::TraceLayer;
 use utoipa::OpenApi;
@@ -51,6 +51,14 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/workspaces/{id}/secrets/{name}/open",
             post(gitops::open_secret),
+        )
+        .route(
+            "/workspaces/{id}/secrets/{name}/on-disk",
+            get(gitops::secret_on_disk),
+        )
+        .route(
+            "/workspaces/{id}/secrets/{name}/import",
+            post(gitops::import_secret),
         )
         .route(
             "/git-credentials",
@@ -125,6 +133,12 @@ pub fn build_router(state: AppState) -> Router {
         .route("/vault/status", get(vault::status))
         .route("/vault/passphrase", post(vault::set_passphrase))
         .route("/vault/verify", post(vault::verify))
+        .route(
+            "/vault/passkeys",
+            get(vault::list_passkeys).post(vault::add_passkey),
+        )
+        .route("/vault/passkeys/{id}", delete_route(vault::delete_passkey))
+        .route("/vault/passkeys/{id}/used", post(vault::touch_passkey))
         .route("/settings", get(settings::list))
         .route("/settings/{key}", put(settings::put));
 

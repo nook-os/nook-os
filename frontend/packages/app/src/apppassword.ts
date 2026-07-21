@@ -7,6 +7,7 @@
 import { create } from "zustand";
 import { api } from "@nookos/api";
 import { askConfirm, askForm, askText, notify } from "./dialogs";
+import { unlockWithPasskey } from "./passkey";
 
 interface AppPasswordState {
   passphrase: string | null;
@@ -23,6 +24,11 @@ export const useAppPassword = create<AppPasswordState>((set) => ({
 export async function vaultConfigured(): Promise<boolean> {
   const { data } = await api.GET("/api/v1/vault/status", {});
   return !!data?.configured;
+}
+
+async function vaultStatus(): Promise<{ configured: boolean; passkeys: number }> {
+  const { data } = await api.GET("/api/v1/vault/status", {});
+  return { configured: !!data?.configured, passkeys: data?.passkeys ?? 0 };
 }
 
 /** Set the app password for the first time, with the warning it deserves. */
@@ -93,12 +99,26 @@ async function promptForAppPassword(): Promise<string | null> {
 }
 
 /**
- * The app password, asking for it however is appropriate: prompting to unlock
- * when one exists, or walking through first-time setup when it doesn't.
- * Returns null if the user backs out.
+ * The app password, asking for it however is appropriate.
+ *
+ * Order matters: already unlocked → passkey → typed password → first-time
+ * setup. A passkey is both safer and less work than a password, so it goes
+ * first whenever one is enrolled; declining or cancelling it falls straight
+ * through to typing, because a lost phone must never mean a lost vault.
  */
 export async function requireAppPassword(): Promise<string | null> {
   const held = useAppPassword.getState().passphrase;
   if (held) return held;
-  return (await vaultConfigured()) ? promptForAppPassword() : createAppPassword();
+
+  const { configured, passkeys } = await vaultStatus();
+  if (!configured) return createAppPassword();
+
+  if (passkeys > 0) {
+    const viaPasskey = await unlockWithPasskey();
+    if (viaPasskey) {
+      useAppPassword.getState().set(viaPasskey);
+      return viaPasskey;
+    }
+  }
+  return promptForAppPassword();
 }

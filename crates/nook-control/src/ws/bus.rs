@@ -209,9 +209,11 @@ pub(crate) fn start(
         loop {
             tick.tick().await;
             registry.refresh_lease_cache(&pool).await;
-            let _ = sqlx::query("DELETE FROM bus_outbox WHERE created_at < now() - interval '60 seconds'")
-                .execute(&pool)
-                .await;
+            let _ = sqlx::query(
+                "DELETE FROM bus_outbox WHERE created_at < now() - interval '60 seconds'",
+            )
+            .execute(&pool)
+            .await;
         }
     });
 }

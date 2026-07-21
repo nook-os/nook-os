@@ -39,7 +39,12 @@ fn inspect(dir: &Path) -> Option<DiscoveredWorkspace> {
     let name = remote
         .as_deref()
         .and_then(crate::gitops::repo_path_from_url)
-        .unwrap_or_else(|| dir.file_name().unwrap_or_default().to_string_lossy().to_string());
+        .unwrap_or_else(|| {
+            dir.file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string()
+        });
     Some(DiscoveredWorkspace {
         path: dir.to_string_lossy().to_string(),
         name,

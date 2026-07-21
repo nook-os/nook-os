@@ -181,8 +181,7 @@ pub async fn windows(
     if !payload.ok {
         return Err(ApiError::BadRequest(payload.message));
     }
-    let windows: Vec<SessionWindow> =
-        serde_json::from_str(&payload.message).unwrap_or_default();
+    let windows: Vec<SessionWindow> = serde_json::from_str(&payload.message).unwrap_or_default();
     Ok(Json(windows))
 }
 
@@ -242,7 +241,8 @@ pub async fn restart(
     }
 
     let session: Session = sqlx::query_as(
-        "UPDATE sessions SET status = 'starting', ended_at = NULL, updated_at = now()
+        "UPDATE sessions SET status = 'starting', error = NULL, ended_at = NULL,
+                updated_at = now()
          WHERE id = $1 RETURNING *",
     )
     .bind(id)
@@ -287,9 +287,10 @@ pub async fn delete(
     let session = session.ok_or(ApiError::NotFound)?;
 
     if matches!(session.status.as_str(), "starting" | "running" | "detached") {
-        state
-            .registry
-            .send_to_node(session.node_id, ControlToNode::KillSession { session_id: id });
+        state.registry.send_to_node(
+            session.node_id,
+            ControlToNode::KillSession { session_id: id },
+        );
     }
     sqlx::query("DELETE FROM sessions WHERE id = $1 AND tenant_id = $2")
         .bind(id)

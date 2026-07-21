@@ -151,6 +151,9 @@ CREATE TABLE sessions (
     tmux_session  TEXT,
     status        TEXT NOT NULL DEFAULT 'starting'
                   CHECK (status IN ('starting', 'running', 'detached', 'exited', 'error')),
+    -- Why a session failed to start, in the user's words rather than a log's:
+    -- missing checkout, runtime not installed, tmux refused.
+    error         TEXT,
     created_by    UUID REFERENCES users(id) ON DELETE SET NULL,
     created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -306,6 +309,24 @@ CREATE TABLE user_vaults (
     verifier    BYTEA NOT NULL,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- A passkey that unlocks the vault, so the app password is something you keep
+-- rather than something you type. The browser derives a key from the passkey
+-- (WebAuthn PRF) and wraps the app password with it; only the wrapped blob is
+-- stored, so the server still can't unlock anything on its own.
+CREATE TABLE user_passkeys (
+    id             UUID PRIMARY KEY,
+    user_id        UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    tenant_id      UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    credential_id  TEXT NOT NULL,
+    label          TEXT NOT NULL DEFAULT '',
+    -- The app password, encrypted under the passkey-derived key.
+    wrapped_secret BYTEA NOT NULL,
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    last_used_at   TIMESTAMPTZ,
+    UNIQUE (user_id, credential_id)
+);
+CREATE INDEX idx_user_passkeys_user ON user_passkeys (user_id);
 
 -- ── Themes & settings ───────────────────────────────────────────────────────
 

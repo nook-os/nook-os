@@ -10,6 +10,7 @@ import { useNewWork } from "../newwork";
 import { WorkspaceLocations } from "../WorkspaceLocations";
 import { askChoice, askConfirm, askForm, askText, notify } from "../dialogs";
 import { requireAppPassword, useAppPassword } from "../apppassword";
+import { adoptEnvFromDisk, saveEnv } from "../envvault";
 
 export function WorkspacesPage() {
   const showNewWork = useNewWork((s) => s.show);
@@ -96,17 +97,41 @@ function EnvPanel({ workspaceId }: { workspaceId: string }) {
     retry: false,
   });
 
+  // A repo that arrived with its own .env: nothing in the vault yet, but a
+  // file sitting in a checkout waiting to be adopted.
+  const { data: onDisk, refetch: recheckDisk } = useQuery({
+    queryKey: ["secrets", workspaceId, ".env", "on-disk"],
+    queryFn: async () =>
+      (
+        await api.GET("/api/v1/workspaces/{id}/secrets/{name}/on-disk", {
+          params: { path: { id: workspaceId, name: ".env" } },
+        })
+      ).data,
+    retry: false,
+  });
+  const adoptable = !!onDisk?.found && !onDisk.in_vault;
+
   const isProtected = !!loaded?.protected;
   // Secrets stay hidden until deliberately revealed — a shoulder shouldn't be
   // enough to read them, and a sealed one genuinely isn't loaded yet.
   const hidden = !revealed;
   const value = content ?? loaded?.content ?? "";
 
-  const reveal = async () => {
-    if (!isProtected) {
-      setRevealed(true);
-      return;
+  const adopt = async () => {
+    setBusy(true);
+    const ok = await adoptEnvFromDisk(workspaceId);
+    setBusy(false);
+    if (ok) {
+      setStatus("imported · sealed & synced");
+      refetch();
+      recheckDisk();
     }
+  };
+
+  const reveal = async () => {
+    // Every read goes through unlock now, sealed or not: a row that predates
+    // sealing is re-sealed on the way past, so there's no second class of
+    // secret that opens without the password.
     const passphrase = held ?? (await requireAppPassword());
     if (!passphrase) return;
     setBusy(true);
@@ -133,11 +158,6 @@ function EnvPanel({ workspaceId }: { workspaceId: string }) {
   };
 
   const save = async () => {
-    // Every save is an app-password operation: it re-seals the secret and
-    // pushes it to the checkouts.
-    const passphrase = await requireAppPassword();
-    if (!passphrase) return;
-
     let ephemeral = loaded?.ephemeral ?? false;
     if (!loaded?.exists) {
       ephemeral = await askConfirm({
@@ -149,16 +169,12 @@ function EnvPanel({ workspaceId }: { workspaceId: string }) {
     }
 
     setBusy(true);
-    const { data, error } = await api.PUT(
-      "/api/v1/workspaces/{id}/secrets/{name}",
-      {
-        params: { path: { id: workspaceId, name: ".env" } },
-        body: { content: value, passphrase, ephemeral },
-      },
-    );
+    // saveEnv is the only way a .env enters the vault: it asks for the app
+    // password (setting one up first if there isn't one), seals, and syncs.
+    const ok = await saveEnv(workspaceId, value, { ephemeral });
     setBusy(false);
-    setStatus(error ? "save failed" : (data?.message ?? "saved · sealed & synced"));
-    if (!error) {
+    setStatus(ok ? "saved · sealed & synced" : "not saved");
+    if (ok) {
       setRevealed(true);
       refetch();
     }
@@ -179,16 +195,24 @@ function EnvPanel({ workspaceId }: { workspaceId: string }) {
           <div className="env-veil">
             <Lock size={18} />
             <div className="env-veil-title">
-              {isProtected ? ".env is sealed" : ".env is hidden"}
+              {adoptable && !loaded?.exists
+                ? "this repo came with a .env"
+                : ".env is sealed"}
             </div>
             <p className="muted small">
-              {isProtected
-                ? "Encrypted with your app password. NookOS cannot read it without you."
-                : "Click to show it."}
+              {adoptable && !loaded?.exists
+                ? `Found in ${onDisk?.checkout_path ?? "a checkout"}, outside the vault. Import it to encrypt it and carry it to your other machines.`
+                : "Encrypted with your app password. NookOS cannot read it without you."}
             </p>
-            <button className="btn primary" onClick={reveal} disabled={busy}>
-              <Eye size={13} /> {isProtected ? "unlock" : "show"}
-            </button>
+            {adoptable && !loaded?.exists ? (
+              <button className="btn primary" onClick={adopt} disabled={busy}>
+                <Lock size={13} /> encrypt & import
+              </button>
+            ) : (
+              <button className="btn primary" onClick={reveal} disabled={busy}>
+                <Eye size={13} /> unlock
+              </button>
+            )}
           </div>
         )}
       </div>

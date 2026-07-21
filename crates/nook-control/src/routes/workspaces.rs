@@ -6,8 +6,8 @@ use crate::auth::AuthCtx;
 use crate::error::{ApiError, ApiResult};
 use crate::events::{self, EventDraft};
 use crate::services::{core, identity::slugify};
-use nook_proto::ControlToNode;
 use crate::state::AppState;
+use nook_proto::ControlToNode;
 
 #[utoipa::path(get, path = "/api/v1/workspaces",
     operation_id = "list_workspaces",
@@ -165,12 +165,14 @@ pub async fn delete(
         ordered.sort_by_key(|(_, path)| path.matches('/').count());
         ordered.reverse();
         for (node_id, path) in ordered {
-            let Some(rx) = state.registry.request_op(node_id, |request_id| {
-                ControlToNode::RemoveCheckout {
-                    request_id,
-                    path: path.clone(),
-                }
-            }) else {
+            let Some(rx) =
+                state
+                    .registry
+                    .request_op(node_id, |request_id| ControlToNode::RemoveCheckout {
+                        request_id,
+                        path: path.clone(),
+                    })
+            else {
                 continue; // node offline — the checkout stays
             };
             if let Ok(Ok(payload)) =

@@ -9,7 +9,10 @@ import {
   Pill,
   type ThemeTokens,
 } from "@nookos/ui";
+import { KeyRound, Trash2 } from "lucide-react";
 import { requireAppPassword, useAppPassword } from "../apppassword";
+import { enrollPasskey, passkeysSupported } from "../passkey";
+import { askConfirm, askText, notify } from "../dialogs";
 import {
   desktopPermission,
   playChime,
@@ -75,6 +78,130 @@ function AppPasswordSettings() {
         Your app password encrypts secrets before they reach the database, so a
         database dump — even with the server's own key — cannot reveal them.
         NookOS never stores it, which also means nobody can reset it for you.
+      </p>
+
+      {vault?.configured && <PasskeySettings />}
+    </div>
+  );
+}
+
+/**
+ * Passkeys that unlock the vault. A passkey holds the app password rather
+ * than replacing it, so this is strictly a shortcut: remove them all and
+ * typing the password still works.
+ */
+function PasskeySettings() {
+  const queryClient = useQueryClient();
+  const [busy, setBusy] = React.useState(false);
+  const { data: passkeys } = useQuery({
+    queryKey: ["vault", "passkeys"],
+    queryFn: async () => (await api.GET("/api/v1/vault/passkeys", {})).data ?? [],
+  });
+  const { data: me } = useQuery({
+    queryKey: ["auth", "me"],
+    queryFn: async () => (await api.GET("/api/v1/auth/me")).data,
+  });
+
+  const add = async () => {
+    if (!passkeysSupported()) {
+      await notify(
+        "Passkeys aren't available here",
+        "They need a secure connection (https) and a device that supports them.",
+      );
+      return;
+    }
+    // Wrapping the app password requires holding it.
+    const passphrase = await requireAppPassword();
+    if (!passphrase) return;
+
+    const label = await askText({
+      title: "Name this passkey",
+      description: "So you can tell your devices apart later.",
+      label: "Name",
+      confirmLabel: "continue",
+    });
+    if (label === null) return;
+
+    setBusy(true);
+    try {
+      const ok = await enrollPasskey(
+        passphrase,
+        me?.user.email ?? "nookos user",
+        label || "passkey",
+      );
+      if (ok) queryClient.invalidateQueries({ queryKey: ["vault"] });
+    } catch (e) {
+      await notify("Couldn't add that passkey", String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const remove = async (id: string, label: string) => {
+    const ok = await askConfirm({
+      title: `Remove ${label}?`,
+      description:
+        "It stops unlocking this vault. Your app password still does — nothing encrypted is lost.",
+      confirmLabel: "remove",
+      danger: true,
+    });
+    if (!ok) return;
+    await api.DELETE("/api/v1/vault/passkeys/{id}", {
+      params: { path: { id } },
+    });
+    queryClient.invalidateQueries({ queryKey: ["vault"] });
+  };
+
+  return (
+    <div style={{ borderTop: "1px solid var(--nook-border)", paddingTop: 10 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <KeyRound size={13} />
+        <strong>Passkeys</strong>
+        {passkeys?.length ? (
+          <Pill tone="ok">unlocks without typing</Pill>
+        ) : (
+          <Pill tone="dim">none</Pill>
+        )}
+        <button
+          className="btn small"
+          onClick={add}
+          disabled={busy}
+          style={{ marginLeft: "auto" }}
+        >
+          add passkey
+        </button>
+      </div>
+
+      {!!passkeys?.length && (
+        <table className="nook-table small" style={{ marginTop: 8 }}>
+          <tbody>
+            {passkeys.map((p) => (
+              <tr key={p.id}>
+                <td>{p.label}</td>
+                <td className="muted">
+                  {p.last_used_at
+                    ? `used ${new Date(p.last_used_at).toLocaleDateString()}`
+                    : "never used"}
+                </td>
+                <td style={{ textAlign: "right" }}>
+                  <button
+                    className="btn small icon"
+                    title="remove"
+                    onClick={() => remove(p.id, p.label)}
+                  >
+                    <Trash2 size={12} />
+                  </button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+
+      <p className="muted" style={{ marginTop: 6 }}>
+        A passkey stores your app password encrypted with a key only your
+        device can produce. NookOS gains nothing it could decrypt — it just
+        stops asking you to type.
       </p>
     </div>
   );

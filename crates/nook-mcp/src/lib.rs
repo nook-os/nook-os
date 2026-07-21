@@ -37,8 +37,7 @@ pub trait NookBackend: Send + Sync + 'static {
     async fn send_to_session(&self, session_id: String, text: String) -> anyhow::Result<()>;
     /// Read a session's terminal screen (plus history tail) as plain text —
     /// the observe half of send_to_session, enabling send → read → act loops.
-    async fn read_session(&self, session_id: String, history_lines: u32)
-        -> anyhow::Result<String>;
+    async fn read_session(&self, session_id: String, history_lines: u32) -> anyhow::Result<String>;
     /// End a session for real (kills the tmux session on the node).
     async fn kill_session(&self, session_id: String) -> anyhow::Result<()>;
     async fn get_activity(

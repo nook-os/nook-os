@@ -6,75 +6,48 @@ use base64::Engine;
 use nook_proto::ControlToNode;
 use nook_types::{NodeId, SessionId, TenantId, WorkspaceId};
 
-use crate::error::ApiResult;
 use crate::state::AppState;
 
 fn b64(content: &[u8]) -> String {
     base64::engine::general_purpose::STANDARD.encode(content)
 }
 
-/// Push all of a workspace's secrets to one checkout (fire-and-forget).
-pub async fn push_to_location(
+/// Tell everyone watching that a workspace gained a checkout.
+///
+/// The control plane can't sync secrets to it: every secret is sealed with a
+/// password the server never sees, which is exactly the property we want. So
+/// it announces instead, and a browser that is already unlocked replays the
+/// unlock — that's what actually writes the file (see `push_one`). Nothing is
+/// delivered until a human has proved they hold the password.
+pub async fn announce_new_checkout(
     state: &AppState,
     tenant: TenantId,
     workspace: WorkspaceId,
     node_id: NodeId,
     checkout_path: &str,
-) -> ApiResult<usize> {
-    // Passphrase-sealed secrets are deliberately excluded: the control plane
-    // cannot read them, so it has nothing to push. They reach a checkout when
-    // someone unlocks them (see `push_one`).
-    let rows: Vec<(String, Vec<u8>)> = sqlx::query_as(
-        "SELECT name, content_enc FROM workspace_secrets
-         WHERE tenant_id = $1 AND workspace_id = $2 AND kdf_salt IS NULL",
+) {
+    let has_secrets: Option<(i64,)> = sqlx::query_as(
+        "SELECT count(*) FROM workspace_secrets WHERE tenant_id = $1 AND workspace_id = $2",
     )
     .bind(tenant)
     .bind(workspace)
-    .fetch_all(&state.db)
-    .await?;
-
-    let mut pushed = 0;
-    for (name, enc) in rows {
-        let Ok(content) = state.vault.decrypt(&enc) else {
-            tracing::error!(%workspace, name, "secret decryption failed — check SECRETS_KEY");
-            continue;
-        };
-        if state.registry.send_to_node(
-            node_id,
-            ControlToNode::WriteWorkspaceFile {
-                checkout_path: checkout_path.to_string(),
-                name,
-                content_b64: b64(&content),
-            },
-        ) {
-            pushed += 1;
-        }
+    .fetch_optional(&state.db)
+    .await
+    .ok()
+    .flatten();
+    if !has_secrets.is_some_and(|(n,)| n > 0) {
+        return;
     }
-    Ok(pushed)
-}
-
-/// Push all secrets of a workspace to every checkout on online nodes.
-pub async fn push_everywhere(
-    state: &AppState,
-    tenant: TenantId,
-    workspace: WorkspaceId,
-) -> ApiResult<usize> {
-    let locations: Vec<(NodeId, String)> = sqlx::query_as(
-        "SELECT node_id, path FROM node_workspaces
-         WHERE tenant_id = $1 AND workspace_id = $2",
+    crate::events::record(
+        state,
+        tenant,
+        crate::events::EventDraft::new("workspace.checkout_added")
+            .actor("node", node_id.0)
+            .workspace(workspace)
+            .node(node_id)
+            .payload(serde_json::json!({ "path": checkout_path })),
     )
-    .bind(tenant)
-    .bind(workspace)
-    .fetch_all(&state.db)
-    .await?;
-
-    let mut total = 0;
-    for (node_id, path) in locations {
-        if state.registry.node_online(node_id) {
-            total += push_to_location(state, tenant, workspace, node_id, &path).await?;
-        }
-    }
-    Ok(total)
+    .await;
 }
 
 /// Remove ephemeral secret files from a session's checkout once it ends.
@@ -83,11 +56,7 @@ pub async fn push_everywhere(
 /// while something is actually using it — the encrypted copy stays in the
 /// vault and comes back on the next sync. Other live sessions in the same
 /// checkout keep their files.
-pub async fn wipe_ephemeral_for_session(
-    state: &AppState,
-    tenant: TenantId,
-    session_id: SessionId,
-) {
+pub async fn wipe_ephemeral_for_session(state: &AppState, tenant: TenantId, session_id: SessionId) {
     let Ok(Some((workspace_id, node_id))) = sqlx::query_as::<_, (WorkspaceId, NodeId)>(
         "SELECT workspace_id, node_id FROM sessions WHERE id = $1 AND tenant_id = $2",
     )
@@ -115,25 +84,23 @@ pub async fn wipe_ephemeral_for_session(
         return;
     }
 
-    let names: Vec<(String,)> = sqlx::query_as(
-        "SELECT name FROM workspace_secrets WHERE workspace_id = $1 AND ephemeral",
-    )
-    .bind(workspace_id)
-    .fetch_all(&state.db)
-    .await
-    .unwrap_or_default();
+    let names: Vec<(String,)> =
+        sqlx::query_as("SELECT name FROM workspace_secrets WHERE workspace_id = $1 AND ephemeral")
+            .bind(workspace_id)
+            .fetch_all(&state.db)
+            .await
+            .unwrap_or_default();
     if names.is_empty() {
         return;
     }
 
-    let paths: Vec<(String,)> = sqlx::query_as(
-        "SELECT path FROM node_workspaces WHERE workspace_id = $1 AND node_id = $2",
-    )
-    .bind(workspace_id)
-    .bind(node_id)
-    .fetch_all(&state.db)
-    .await
-    .unwrap_or_default();
+    let paths: Vec<(String,)> =
+        sqlx::query_as("SELECT path FROM node_workspaces WHERE workspace_id = $1 AND node_id = $2")
+            .bind(workspace_id)
+            .bind(node_id)
+            .fetch_all(&state.db)
+            .await
+            .unwrap_or_default();
 
     for (path,) in &paths {
         for (name,) in &names {

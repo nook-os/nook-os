@@ -687,6 +687,64 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/vault/passkeys": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Passkeys enrolled on this vault, with their wrapped secrets — the browser
+         *     needs the blob in hand before it can ask the authenticator to open it.
+         */
+        get: operations["list_passkeys"];
+        put?: never;
+        /**
+         * Enrol a passkey. Requires the app password, since that's what's being
+         *     wrapped — you can't hand out a key to a vault you can't open.
+         */
+        post: operations["add_passkey"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/vault/passkeys/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** Forget a passkey. The vault is untouched — the app password still opens it. */
+        delete: operations["delete_passkey"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/vault/passkeys/{id}/used": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Note that a passkey was just used, so the settings page can show it. */
+        post: operations["touch_passkey"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/vault/passphrase": {
         parameters: {
             query?: never;
@@ -841,6 +899,51 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workspaces/{id}/secrets/{name}/import": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Adopt a checkout's existing `.env` into the vault, sealed with the app
+         *     password.
+         * @description Importing a repo that already carries a `.env` is the common case, and
+         *     leaving that file outside the vault meant it never travelled to the user's
+         *     other machines — and never got encrypted. This is the on-ramp: read it off
+         *     disk once, seal it, and from then on it syncs like any other secret.
+         */
+        post: operations["import_secret_from_checkout"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{id}/secrets/{name}/on-disk": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Does this workspace have a `.env` sitting in a checkout that the vault
+         *     doesn't know about? Asked right after an import, so we only interrupt
+         *     someone for their password when there's actually something to seal.
+         */
+        get: operations["secret_on_disk"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workspaces/{id}/secrets/{name}/open": {
         parameters: {
             query?: never;
@@ -913,6 +1016,15 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /**
+         * @description Enrolling a passkey. The wrapping happens in the browser; the server only
+         *     ever sees the sealed blob.
+         */
+        AddPasskeyRequest: {
+            credential_id: string;
+            label?: string;
+            wrapped_secret: string;
+        };
         /** @description Terminal attach socket messages (browser → control plane). */
         AttachClientMessage: {
             data: {
@@ -1217,6 +1329,15 @@ export interface components {
             model: string;
             vendor: string;
         };
+        /** @description Adopt a file that already exists in a checkout into the vault. */
+        ImportSecretRequest: {
+            ephemeral?: boolean;
+            /**
+             * @description The app password. Same rule as saving: nothing enters the vault
+             *     unsealed.
+             */
+            passphrase: string;
+        };
         InitProjectRequest: {
             name: string;
         };
@@ -1336,11 +1457,12 @@ export interface components {
             /** @description Wipe the synced file from checkouts when the session ends. */
             ephemeral?: boolean;
             /**
-             * @description Seal with a passphrase the server never stores. Once set, reading it
-             *     back requires the same passphrase — a database dump plus the app key
-             *     is not enough.
+             * @description The app password. Required, not optional: a `.env` moves between
+             *     machines, so it is sealed with something the server never stores
+             *     before the app key wraps it. A database dump plus `SECRETS_KEY` must
+             *     never be enough to read one.
              */
-            passphrase?: string | null;
+            passphrase: string;
         };
         RemoveWorktreeRequest: {
             node_id: components["schemas"]["NodeId"];
@@ -1350,6 +1472,14 @@ export interface components {
         ScheduledNode: {
             node_id: components["schemas"]["NodeId"];
             node_name: string;
+        };
+        /** @description Whether an import left a `.env` on disk that the vault hasn't adopted yet. */
+        SecretOnDisk: {
+            /** @description Which checkout it was found in. */
+            checkout_path?: string | null;
+            found: boolean;
+            /** @description Already stored in the vault, so there's nothing to adopt. */
+            in_vault: boolean;
         };
         /**
          * @description Status values: `starting` | `running` | `detached` | `exited` | `error`.
@@ -1361,6 +1491,8 @@ export interface components {
             created_by?: null | components["schemas"]["UserId"];
             /** Format: date-time */
             ended_at?: string | null;
+            /** @description Why the session failed to start, when it did. */
+            error?: string | null;
             id: components["schemas"]["SessionId"];
             name: string;
             node_id: components["schemas"]["NodeId"];
@@ -1564,11 +1696,37 @@ export interface components {
         };
         /** Format: uuid */
         UserId: string;
+        /** @description A passkey enrolled to unlock the vault. */
+        VaultPasskey: {
+            /** Format: date-time */
+            created_at: string;
+            /**
+             * @description Base64url WebAuthn credential id, so the browser can ask for this
+             *     specific passkey.
+             */
+            credential_id: string;
+            /** Format: uuid */
+            id: string;
+            label: string;
+            /** Format: date-time */
+            last_used_at?: string | null;
+            /**
+             * @description The app password sealed under the passkey-derived key, base64. Only
+             *     the browser that holds the passkey can open it.
+             */
+            wrapped_secret: string;
+        };
         /** @description Whether this user has an app password (the key that seals their secrets). */
         VaultStatus: {
             configured: boolean;
             /** Format: date-time */
             created_at?: string | null;
+            /**
+             * Format: int64
+             * @description How many passkeys can unlock this vault. Non-zero means the UI should
+             *     reach for a passkey before asking anyone to type a password.
+             */
+            passkeys?: number;
         };
         /** @description What to do with a session's terminals (tmux windows/panes). */
         WindowAction: {
@@ -2924,6 +3082,98 @@ export interface operations {
             };
         };
     };
+    list_passkeys: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["VaultPasskey"][];
+                };
+            };
+        };
+    };
+    add_passkey: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AddPasskeyRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["VaultPasskey"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    delete_passkey: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    touch_passkey: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
     set_vault_passphrase: {
         parameters: {
             query?: never;
@@ -3258,6 +3508,66 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["OpResponse"];
+                };
+            };
+        };
+    };
+    import_secret_from_checkout: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ImportSecretRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OpResponse"];
+                };
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            428: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    secret_on_disk: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SecretOnDisk"];
                 };
             };
         };

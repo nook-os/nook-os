@@ -132,7 +132,6 @@ pub async fn login_identity(state: &AppState, claims: IdentityClaims) -> ApiResu
     Ok((user, tenant))
 }
 
-
 pub fn slugify(s: &str) -> String {
     let slug: String = s
         .to_lowercase()

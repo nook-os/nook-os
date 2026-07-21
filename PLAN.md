@@ -371,7 +371,6 @@ Examples:
 - Google
 - GitHub
 - Auth0
-- Hein.Network
 - Generic OAuth2
 - Generic OpenID Connect
 
@@ -749,7 +748,7 @@ Realtime
 
 - WebSockets
 
-Authentication (we'll use ours .env should make this work -> auth.hein.network for our local development, but our could should never refeence what auth surface we're using)
+Authentication (.env points at whichever IdP you run — the code must never reference a specific auth provider)
 
 - OAuth2.1
 - OpenID Connect
@@ -786,7 +785,7 @@ NookOS becomes the workspace operating system that connects them all.
 curl -fsSL https://install.nookos.dev | sh
 
 nook join \
-  --server https://nook.hein.network \
+  --server https://nookos.dev \
   --token nook_join_7A9F...
 
 ✓ Validating token...

@@ -162,7 +162,7 @@ fn verifier_of(key: &[u8; 32]) -> Vec<u8> {
 
 /// Seal plaintext under a passphrase.
 pub fn seal_with_passphrase(plaintext: &[u8], passphrase: &str) -> Result<Sealed> {
-    use aes_gcm::aead::{Aead, KeyInit, OsRng, rand_core::RngCore};
+    use aes_gcm::aead::{rand_core::RngCore, Aead, KeyInit, OsRng};
 
     let mut salt = vec![0u8; 16];
     OsRng.fill_bytes(&mut salt);

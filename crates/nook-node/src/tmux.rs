@@ -100,7 +100,30 @@ pub fn login_command(runtime: &str) -> String {
     }
 }
 
+/// Can the login shell actually find this runtime?
+///
+/// `which` alone lies here: a node started by systemd has a bare PATH, so a
+/// runtime installed in ~/.local/bin looks missing while the login shell we
+/// launch it with finds it fine. Resolve it exactly the way we run it.
+pub fn runtime_available(runtime: &str) -> bool {
+    let shell = login_shell();
+    Command::new(&shell)
+        .args(["-l", "-i", "-c", &format!("command -v {runtime}")])
+        .output()
+        .is_ok_and(|o| o.status.success() && !o.stdout.is_empty())
+}
+
 pub fn new_session(name: &str, cwd: &str, cols: u16, rows: u16, command: &str) -> Result<()> {
+    // Preflight, so the failure names its own cause. tmux's own message for a
+    // missing -c directory is terse and arrives with no session attached, and
+    // a runtime that isn't installed dies so fast it just looks like the
+    // terminal never opened.
+    if !std::path::Path::new(cwd).is_dir() {
+        anyhow::bail!("checkout {cwd} does not exist on this node");
+    }
+    if !runtime_available(command) {
+        anyhow::bail!("runtime '{command}' is not installed on this node");
+    }
     apply_server_defaults();
     let launch = login_command(command);
     let command = launch.as_str();
@@ -211,9 +234,15 @@ pub fn list_windows(session: &str) -> Result<String> {
 /// Where the session is currently working — new terminals should open in the
 /// workspace, not the user's home directory.
 pub fn session_cwd(session: &str) -> Option<String> {
-    tmux(&["display-message", "-p", "-t", session, "#{pane_current_path}"])
-        .ok()
-        .filter(|p| !p.is_empty())
+    tmux(&[
+        "display-message",
+        "-p",
+        "-t",
+        session,
+        "#{pane_current_path}",
+    ])
+    .ok()
+    .filter(|p| !p.is_empty())
 }
 
 /// Open another terminal in this session and focus it. Without an explicit
@@ -234,7 +263,12 @@ pub fn new_window(session: &str, cwd: Option<&str>) -> Result<()> {
 pub fn split_window(session: &str, vertical: bool) -> Result<()> {
     let cwd = session_cwd(session);
     // tmux's -h splits into left/right; -v stacks top/bottom.
-    let mut args = vec!["split-window", if vertical { "-v" } else { "-h" }, "-t", session];
+    let mut args = vec![
+        "split-window",
+        if vertical { "-v" } else { "-h" },
+        "-t",
+        session,
+    ];
     if let Some(dir) = cwd.as_deref() {
         args.push("-c");
         args.push(dir);

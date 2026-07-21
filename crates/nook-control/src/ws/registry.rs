@@ -589,7 +589,10 @@ impl Registry {
         for (node, owner, ttl) in rows {
             self.lease_cache.insert(
                 NodeId(node),
-                (owner, now + std::time::Duration::from_secs_f64(ttl.max(0.0))),
+                (
+                    owner,
+                    now + std::time::Duration::from_secs_f64(ttl.max(0.0)),
+                ),
             );
         }
     }
@@ -631,7 +634,14 @@ impl Registry {
                 branch,
                 files,
                 diff,
-            } => self.complete_git_status(request_id, GitStatusPayload { branch, files, diff }),
+            } => self.complete_git_status(
+                request_id,
+                GitStatusPayload {
+                    branch,
+                    files,
+                    diff,
+                },
+            ),
             BusMessage::SessionFrame { session_id, frame } => {
                 if let Some(tx) = self.attachments.get(&session_id) {
                     let _ = tx.send(frame);
@@ -687,12 +697,7 @@ impl Registry {
                         .unwrap_or(0);
                     if local == 0 {
                         if let Some(node) = self.session_nodes.get(&session_id).map(|n| *n) {
-                            self.send_to_node(
-                                node,
-                                ControlToNode::DetachSession {
-                                    session_id,
-                                },
-                            );
+                            self.send_to_node(node, ControlToNode::DetachSession { session_id });
                         }
                     }
                 }
@@ -755,9 +760,7 @@ fn request_kind(msg: &ControlToNode) -> Option<(Uuid, RequestKind)> {
         | ControlToNode::AddWorktree { request_id, .. }
         | ControlToNode::RemoveWorktree { request_id, .. }
         | ControlToNode::InitProject { request_id, .. }
-        | ControlToNode::CaptureSession { request_id, .. } => {
-            Some((*request_id, RequestKind::Op))
-        }
+        | ControlToNode::CaptureSession { request_id, .. } => Some((*request_id, RequestKind::Op)),
         ControlToNode::GetGitStatus { request_id, .. } => Some((*request_id, RequestKind::Git)),
         _ => None,
     }

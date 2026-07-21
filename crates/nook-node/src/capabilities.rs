@@ -17,6 +17,13 @@ fn which(bin: &str) -> bool {
     run("which", &[bin]).is_some_and(|p| !p.is_empty())
 }
 
+/// Docker and git are found on any sane PATH; runtimes often aren't. Ask the
+/// login shell, since that's what actually launches them — see
+/// `tmux::runtime_available`.
+fn have_runtime(bin: &str) -> bool {
+    which(bin) || crate::tmux::runtime_available(bin)
+}
+
 pub fn detect_gpus() -> Vec<GpuInfo> {
     // NVIDIA first; other vendors are future work.
     run("nvidia-smi", &["--query-gpu=name", "--format=csv,noheader"])
@@ -50,7 +57,7 @@ pub const KNOWN_RUNTIMES: &[&str] = &["claude", "hermes", "codex", "bash", "zsh"
 pub fn detect_runtimes() -> Vec<String> {
     KNOWN_RUNTIMES
         .iter()
-        .filter(|r| which(r))
+        .filter(|r| have_runtime(r))
         .map(|r| r.to_string())
         .collect()
 }

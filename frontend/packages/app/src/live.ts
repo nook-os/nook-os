@@ -94,7 +94,8 @@ export function startLive(queryClient: QueryClient) {
       if (
         kind === "git.clone_finished" ||
         kind === "workspace.worktree_added" ||
-        kind === "workspace.discovered"
+        kind === "workspace.discovered" ||
+        kind === "workspace.checkout_added"
       ) {
         const wsId = event.data.event.workspace_id;
         if (wsId && useAppPassword.getState().passphrase) {

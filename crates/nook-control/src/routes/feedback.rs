@@ -73,10 +73,7 @@ pub async fn target(
     }))
 }
 
-async fn configured_workspace(
-    state: &AppState,
-    auth: &AuthCtx,
-) -> ApiResult<Option<WorkspaceId>> {
+async fn configured_workspace(state: &AppState, auth: &AuthCtx) -> ApiResult<Option<WorkspaceId>> {
     let row: Option<(serde_json::Value,)> = sqlx::query_as(
         "SELECT value FROM settings
          WHERE tenant_id = $1 AND key = $2
@@ -128,9 +125,9 @@ pub async fn submit(
             .await?;
             id
         }
-        None => configured_workspace(&state, &auth).await?.ok_or_else(|| {
-            ApiError::BadRequest("no feedback workspace configured".into())
-        })?,
+        None => configured_workspace(&state, &auth)
+            .await?
+            .ok_or_else(|| ApiError::BadRequest("no feedback workspace configured".into()))?,
     };
 
     // Reuse the standing feedback session; start one when there isn't a live

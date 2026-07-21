@@ -400,6 +400,30 @@ pub async fn connect_once(cfg: &NodeConfig) -> Result<()> {
                     tracing::info!(checkout = %checkout_path, file = %name, "workspace file synced");
                 }
             }
+            ControlToNode::ReadWorkspaceFile {
+                request_id,
+                checkout_path,
+                name,
+            } => {
+                use base64::Engine;
+                let (ok, message) = match crate::gitops::read_workspace_file(&checkout_path, &name)
+                {
+                    Ok(bytes) => (
+                        true,
+                        base64::engine::general_purpose::STANDARD.encode(&bytes),
+                    ),
+                    Err(e) => (false, e),
+                };
+                out_tx
+                    .send(NodeToControl::OpResult {
+                        request_id,
+                        ok,
+                        path: Some(checkout_path),
+                        message,
+                    })
+                    .await
+                    .ok();
+            }
             ControlToNode::RescanWorkspaces => {
                 let workspaces = discovery::scan(&cfg.workspace_roots);
                 out_tx

@@ -17,6 +17,11 @@ pub enum ApiError {
     BadRequest(String),
     #[error("{0}")]
     Conflict(String),
+    /// The caller has to set something up before this can work — today, an app
+    /// password before any secret can be stored. 428 rather than 400 so the UI
+    /// can tell "you must do X first" apart from "you sent nonsense".
+    #[error("{0}")]
+    SetupRequired(String),
     #[error(transparent)]
     Db(#[from] sqlx::Error),
     #[error(transparent)]
@@ -31,6 +36,7 @@ impl IntoResponse for ApiError {
             ApiError::NotFound => (StatusCode::NOT_FOUND, self.to_string()),
             ApiError::BadRequest(m) => (StatusCode::BAD_REQUEST, m.clone()),
             ApiError::Conflict(m) => (StatusCode::CONFLICT, m.clone()),
+            ApiError::SetupRequired(m) => (StatusCode::PRECONDITION_REQUIRED, m.clone()),
             ApiError::Db(sqlx::Error::RowNotFound) => (StatusCode::NOT_FOUND, "not found".into()),
             ApiError::Db(e) => {
                 tracing::error!(error = %e, "database error");

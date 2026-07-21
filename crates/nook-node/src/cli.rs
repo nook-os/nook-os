@@ -28,7 +28,12 @@ impl Client {
         })
     }
 
-    async fn send(&self, method: reqwest::Method, path: &str, body: Option<Value>) -> Result<Value> {
+    async fn send(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        body: Option<Value>,
+    ) -> Result<Value> {
         let url = format!("{}{path}", self.base);
         let mut req = self
             .http
@@ -46,7 +51,10 @@ impl Client {
         let text = resp.text().await.unwrap_or_default();
         if !status.is_success() {
             if status == reqwest::StatusCode::UNAUTHORIZED {
-                bail!("unauthorized — this node's token was rejected by {}", self.base);
+                bail!(
+                    "unauthorized — this node's token was rejected by {}",
+                    self.base
+                );
             }
             bail!("{} {}: {}", status.as_u16(), path, text.trim());
         }

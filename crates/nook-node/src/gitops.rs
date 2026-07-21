@@ -83,10 +83,7 @@ pub fn repo_path_from_url(url: &str) -> Option<String> {
         }
     };
 
-    let parts: Vec<&str> = after_host
-        .split('/')
-        .filter(|p| !p.is_empty())
-        .collect();
+    let parts: Vec<&str> = after_host.split('/').filter(|p| !p.is_empty()).collect();
     let repo = parts.last()?.trim();
     if !safe_segment(repo) {
         return None;
@@ -390,6 +387,20 @@ pub fn write_workspace_file(checkout_path: &str, name: &str, content: &[u8]) -> 
     Ok(())
 }
 
+/// Read a workspace file back out of a checkout, for adopting a repo's
+/// existing `.env` into the vault. Same name guard as the write path: only a
+/// plain file name directly inside the checkout.
+pub fn read_workspace_file(checkout_path: &str, name: &str) -> Result<Vec<u8>, String> {
+    if name.contains('/') || name.contains("..") {
+        return Err("invalid file name".into());
+    }
+    let path = Path::new(checkout_path).join(name);
+    if !path.is_file() {
+        return Err(format!("no {name} in {checkout_path}"));
+    }
+    std::fs::read(&path).map_err(|e| e.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{repo_name_from_url, repo_path_from_url};
@@ -430,8 +441,14 @@ mod tests {
 
     #[test]
     fn rejects_path_traversal_and_keeps_bare_name_fallback() {
-        assert_eq!(repo_path_from_url("git@github.com:owner/..").as_deref(), None);
+        assert_eq!(
+            repo_path_from_url("git@github.com:owner/..").as_deref(),
+            None
+        );
         // A local path with no owner segment still yields the repo name.
-        assert_eq!(repo_name_from_url("/srv/git/solo.git").as_deref(), Some("solo"));
+        assert_eq!(
+            repo_name_from_url("/srv/git/solo.git").as_deref(),
+            Some("solo")
+        );
     }
 }

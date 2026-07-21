@@ -134,7 +134,11 @@ async fn handle(state: AppState, socket: WebSocket, session: Session) {
     if let Some((cols, rows)) = state.registry.viewer_detached(session_id, viewer_id) {
         state.registry.send_to_node(
             session.node_id,
-            ControlToNode::ResizeSession { session_id, cols, rows },
+            ControlToNode::ResizeSession {
+                session_id,
+                cols,
+                rows,
+            },
         );
         state
             .registry
@@ -146,10 +150,9 @@ async fn handle(state: AppState, socket: WebSocket, session: Session) {
     // idle sessions cost no bandwidth at fleet scale).
     drop(rx);
     if sender.receiver_count() == 0 {
-        state.registry.send_to_node(
-            session.node_id,
-            ControlToNode::DetachSession { session_id },
-        );
+        state
+            .registry
+            .send_to_node(session.node_id, ControlToNode::DetachSession { session_id });
         let still_running: Option<(String,)> =
             sqlx::query_as("SELECT status FROM sessions WHERE id = $1")
                 .bind(session_id)

@@ -343,6 +343,47 @@ async fn handle_message(
             )
             .await;
         }
+        NodeToControl::SessionFailed {
+            session_id,
+            message,
+        } => {
+            // The session never opened. Record why on the row and tell both the
+            // dashboard and anyone already staring at the terminal, rather than
+            // leaving it stuck on "starting".
+            sqlx::query(
+                "UPDATE sessions SET status = 'error', error = $3, ended_at = now(),
+                        updated_at = now()
+                 WHERE id = $1 AND tenant_id = $2",
+            )
+            .bind(session_id)
+            .bind(tenant)
+            .bind(&message)
+            .execute(&state.db)
+            .await?;
+            state.registry.publish(
+                tenant,
+                UiEvent::SessionStatus {
+                    session_id,
+                    status: "error".into(),
+                },
+            );
+            state.registry.publish_session(
+                session_id,
+                nook_proto::AttachServerMessage::Status {
+                    status: format!("error: {message}"),
+                },
+            );
+            events::record(
+                state,
+                tenant,
+                EventDraft::new("session.failed")
+                    .actor("node", node_id.0)
+                    .session(session_id)
+                    .node(node_id)
+                    .payload(serde_json::json!({ "message": message })),
+            )
+            .await;
+        }
         NodeToControl::Error { context, message } => {
             tracing::warn!(%node_id, context, message, "node reported error");
             events::record(

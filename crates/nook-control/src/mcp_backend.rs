@@ -183,11 +183,7 @@ impl NookBackend for McpBackend {
         Ok(())
     }
 
-    async fn read_session(
-        &self,
-        session_id: String,
-        history_lines: u32,
-    ) -> anyhow::Result<String> {
+    async fn read_session(&self, session_id: String, history_lines: u32) -> anyhow::Result<String> {
         let tenant = self.tenant().await?;
         let id: SessionId = session_id
             .parse()

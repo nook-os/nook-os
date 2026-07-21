@@ -220,6 +220,16 @@ export function Shell({ me }: { me: MeResponse }) {
           ))}
         </nav>
         <div className="nook-topbar-right">
+          {/* Feedback lives here, spelled out, not just as one more unlabelled
+              icon in the rail — you can't tell us what's wrong with a thing
+              you can't find. */}
+          <NavLink
+            to="/feedback"
+            className={({ isActive }) => `nook-tab${isActive ? " active" : ""}`}
+            title="tell us what should be better"
+          >
+            <MessageSquare size={14} /> Feedback
+          </NavLink>
           <NavLink
             to="/help"
             className={({ isActive }) => `nook-tab${isActive ? " active" : ""}`}

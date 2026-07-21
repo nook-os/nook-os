@@ -223,6 +223,8 @@ pub struct Session {
     pub runtime: String,
     pub tmux_session: Option<String>,
     pub status: String,
+    /// Why the session failed to start, when it did.
+    pub error: Option<String>,
     pub created_by: Option<UserId>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -643,14 +645,34 @@ pub struct WorkspaceSecret {
 #[derive(Debug, Clone, Deserialize, ToSchema)]
 pub struct PutSecretRequest {
     pub content: String,
-    /// Seal with a passphrase the server never stores. Once set, reading it
-    /// back requires the same passphrase — a database dump plus the app key
-    /// is not enough.
-    #[serde(default)]
-    pub passphrase: Option<String>,
+    /// The app password. Required, not optional: a `.env` moves between
+    /// machines, so it is sealed with something the server never stores
+    /// before the app key wraps it. A database dump plus `SECRETS_KEY` must
+    /// never be enough to read one.
+    pub passphrase: String,
     /// Wipe the synced file from checkouts when the session ends.
     #[serde(default)]
     pub ephemeral: bool,
+}
+
+/// Adopt a file that already exists in a checkout into the vault.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ImportSecretRequest {
+    /// The app password. Same rule as saving: nothing enters the vault
+    /// unsealed.
+    pub passphrase: String,
+    #[serde(default)]
+    pub ephemeral: bool,
+}
+
+/// Whether an import left a `.env` on disk that the vault hasn't adopted yet.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct SecretOnDisk {
+    pub found: bool,
+    /// Which checkout it was found in.
+    pub checkout_path: Option<String>,
+    /// Already stored in the vault, so there's nothing to adopt.
+    pub in_vault: bool,
 }
 
 /// One improvement someone asked for, and what became of it.
@@ -700,6 +722,35 @@ pub struct FeedbackTarget {
 pub struct VaultStatus {
     pub configured: bool,
     pub created_at: Option<DateTime<Utc>>,
+    /// How many passkeys can unlock this vault. Non-zero means the UI should
+    /// reach for a passkey before asking anyone to type a password.
+    #[serde(default)]
+    pub passkeys: i64,
+}
+
+/// A passkey enrolled to unlock the vault.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct VaultPasskey {
+    pub id: uuid::Uuid,
+    /// Base64url WebAuthn credential id, so the browser can ask for this
+    /// specific passkey.
+    pub credential_id: String,
+    pub label: String,
+    /// The app password sealed under the passkey-derived key, base64. Only
+    /// the browser that holds the passkey can open it.
+    pub wrapped_secret: String,
+    pub created_at: DateTime<Utc>,
+    pub last_used_at: Option<DateTime<Utc>>,
+}
+
+/// Enrolling a passkey. The wrapping happens in the browser; the server only
+/// ever sees the sealed blob.
+#[derive(Debug, Clone, Deserialize, ToSchema)]
+pub struct AddPasskeyRequest {
+    pub credential_id: String,
+    #[serde(default)]
+    pub label: String,
+    pub wrapped_secret: String,
 }
 
 /// Setting or checking the app password.

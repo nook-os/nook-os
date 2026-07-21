@@ -43,10 +43,14 @@ impl Manager {
         }
     }
 
-    fn error(&self, context: &str, message: String) {
-        tracing::warn!(context, %message, "session error");
-        let _ = self.out.try_send(NodeToControl::Error {
-            context: context.to_string(),
+    /// A named session failed to start. Reported against the session id so the
+    /// control plane can mark that row errored — an unnamed `Error` only ever
+    /// reached the activity log, which left the terminal spinning on
+    /// "starting" with no way to learn why.
+    fn session_failed(&self, session_id: SessionId, message: String) {
+        tracing::warn!(%session_id, %message, "session failed to start");
+        let _ = self.out.try_send(NodeToControl::SessionFailed {
+            session_id,
             message,
         });
     }
@@ -62,7 +66,7 @@ impl Manager {
         // The runtime string is the executable to launch. Restrict to the
         // known set so the control plane can't run arbitrary commands.
         if !crate::capabilities::KNOWN_RUNTIMES.contains(&runtime) {
-            return self.error("start_session", format!("unknown runtime '{runtime}'"));
+            return self.session_failed(session_id, format!("unknown runtime '{runtime}'"));
         }
         let tmux_name = format!("{}{}", tmux::SESSION_PREFIX, session_id.0.simple());
         // Restart of an ended session: discard the old PTY before re-attaching.
@@ -70,7 +74,7 @@ impl Manager {
 
         if !tmux::session_exists(&tmux_name) {
             if let Err(e) = tmux::new_session(&tmux_name, workspace_path, cols, rows, runtime) {
-                return self.error("start_session", e.to_string());
+                return self.session_failed(session_id, e.to_string());
             }
         }
         match self.attach_pty(session_id, &tmux_name, cols, rows) {
@@ -80,7 +84,7 @@ impl Manager {
                     tmux_session: tmux_name,
                 });
             }
-            Err(e) => self.error("start_session", e.to_string()),
+            Err(e) => self.session_failed(session_id, e.to_string()),
         }
     }
 
@@ -208,7 +212,8 @@ impl Manager {
         self.drop_if_dead(session_id);
         if !self.sessions.contains_key(&session_id) {
             let Some(name) = tmux_name_hint.map(str::to_string) else {
-                return self.error("attach", "session not running on this node".into());
+                return self
+                    .session_failed(session_id, "session is not running on this node".into());
             };
             if !tmux::session_exists(&name) {
                 let _ = self.out.try_send(NodeToControl::SessionExited {
@@ -220,7 +225,7 @@ impl Manager {
             // Re-establish at the session's creation size; the browser's
             // FitAddon sends a ResizeSession moments later to correct it.
             if let Err(e) = self.attach_pty(session_id, &name, 120, 32) {
-                return self.error("attach", e.to_string());
+                return self.session_failed(session_id, e.to_string());
             }
         }
         let Some(handle) = self.sessions.get(&session_id) else {

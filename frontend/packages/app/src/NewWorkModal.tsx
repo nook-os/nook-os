@@ -13,6 +13,8 @@ import { defaultRuntime, RuntimePicker } from "@nookos/ui";
 import { useNewWork } from "./newwork";
 import { onJobFinish, useJobs } from "./jobs";
 import { WorkspaceLocations } from "./WorkspaceLocations";
+import { adoptEnvFromDisk, saveEnv } from "./envvault";
+import { requireAppPassword } from "./apppassword";
 
 const AUTO = "";
 type Tab = "new" | "existing";
@@ -47,7 +49,8 @@ function NewWorkModal() {
   const [worktree, setWorktree] = useState(seed.worktree ?? false);
   const [branch, setBranch] = useState("");
   const [nodeId, setNodeId] = useState(seed.nodeId ?? AUTO);
-  const [runtime, setRuntime] = useState("bash");
+  // Empty until the chosen node reports what it has; the effect below picks.
+  const [runtime, setRuntime] = useState("");
   const [envText, setEnvText] = useState("");
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
@@ -119,8 +122,14 @@ function NewWorkModal() {
     ((effectiveNode?.capabilities as Record<string, unknown>)?.runtimes as string[]) ??
     ["bash"];
 
+  // Starting work here means starting an agent on it: if the node has claude,
+  // that's what the session opens with. (A plain shell is one click away in
+  // the picker, and `defaultRuntime` still governs new terminals elsewhere,
+  // where a shell is the right answer.)
   useEffect(() => {
-    if (!runtimes.includes(runtime)) setRuntime(defaultRuntime(runtimes));
+    if (!runtimes.includes(runtime)) {
+      setRuntime(runtimes.includes("claude") ? "claude" : defaultRuntime(runtimes));
+    }
   }, [runtimes.join(",")]);
 
   const resolveNode = async (): Promise<string> => {
@@ -209,6 +218,13 @@ function NewWorkModal() {
       // give the user their UI back — but "start work" still means start
       // work, so finish the job once the repo lands.
       if (tab === "new" && newIntent === "clone") {
+        // Ask for the password now, while the user is still here. The clone
+        // runs in the background and its .env save happens on completion.
+        if (envText.trim() && !(await requireAppPassword())) {
+          setBusy(false);
+          setStatus("a .env needs your app password — nothing was started");
+          return;
+        }
         const jobId = await startBackgroundClone(node);
         const want = q.replace(/\/$/, "").replace(/\.git$/, "").split(/[/:]/).pop() ?? "";
         const wantWorktree = useWorktree;
@@ -219,12 +235,12 @@ function NewWorkModal() {
             if (!ok) return;
             try {
               const ws = await pollWorkspace(want);
-              if (env.trim()) {
-                await api.PUT("/api/v1/workspaces/{id}/secrets/{name}", {
-                  params: { path: { id: ws, name: ".env" } },
-                  body: { content: env },
-                });
-              }
+              // Sealed with the password captured before the clone started —
+              // this callback fires minutes later, and a password prompt
+              // arriving out of nowhere then is worse than useless.
+              if (env.trim()) await saveEnv(ws, env);
+              // The repo may have brought its own .env along.
+              else await adoptEnvFromDisk(ws);
               let path: string | undefined;
               if (wantWorktree) {
                 const { data } = await api.POST("/api/v1/workspaces/{id}/worktrees", {
@@ -258,15 +274,18 @@ function NewWorkModal() {
       }
       if (tab === "new" && newIntent === "project") ws = await initAndResolve(node);
 
-      // Pasted .env goes into the encrypted vault and syncs to every online
-      // checkout, so the session starts with the app already configured.
+      // Pasted .env is sealed with the app password, then synced to every
+      // online checkout, so the session starts with the app configured.
       if (envText.trim() && ws) {
-        setStatus("saving .env to the vault…");
-        const { error } = await api.PUT("/api/v1/workspaces/{id}/secrets/{name}", {
-          params: { path: { id: ws, name: ".env" } },
-          body: { content: envText },
-        });
-        if (error) throw new Error(`saving .env failed: ${JSON.stringify(error)}`);
+        setStatus("sealing .env with your app password…");
+        if (!(await saveEnv(ws, envText))) {
+          setBusy(false);
+          setStatus("a .env needs your app password — nothing was started");
+          return;
+        }
+      } else if (ws) {
+        // Existing workspace or fresh project: adopt a .env already on disk.
+        await adoptEnvFromDisk(ws);
       }
 
       if (taskId) {

@@ -16,7 +16,6 @@ use crate::events::{self, EventDraft};
 use crate::services::identity::slugify;
 use crate::state::AppState;
 
-
 pub fn normalize_remote(url: &str) -> String {
     let mut s = url.trim().to_lowercase();
     // scp-style: git@github.com:org/repo.git → github.com/org/repo
@@ -117,8 +116,7 @@ pub async fn reconcile(
             }
             None => {
                 let id =
-                    create_workspace_for(state, tenant, &d.name, normalized.as_deref())
-                        .await?;
+                    create_workspace_for(state, tenant, &d.name, normalized.as_deref()).await?;
                 let event = events::record(
                     state,
                     tenant,
@@ -171,20 +169,19 @@ pub async fn reconcile(
         .execute(&state.db)
         .await?;
 
-        // New checkout of a workspace that has vaulted secrets → bring its
-        // .env (and friends) along automatically.
+        // A new checkout wants the workspace's .env, but the control plane
+        // cannot read a sealed secret on its own — that's the whole point. So
+        // it announces the checkout instead, and an unlocked browser replays
+        // the unlock, which is what actually delivers the file.
         if is_new_checkout {
-            if let Err(e) = crate::services::secrets::push_to_location(
+            crate::services::secrets::announce_new_checkout(
                 state,
                 tenant,
                 workspace_id,
                 node_id,
                 &d.path,
             )
-            .await
-            {
-                tracing::warn!(error = %e, path = %d.path, "secret sync to new checkout failed");
-            }
+            .await;
         }
     }
 

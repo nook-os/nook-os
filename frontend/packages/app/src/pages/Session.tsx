@@ -294,12 +294,21 @@ export function SessionPage() {
       >
           {dead ? (
             <div className="session-dead">
-              <div className="session-dead-title">This session has ended</div>
-              <p className="muted small">
-                Its terminals are gone, but the tab, name and workspace are
-                kept. Restarting opens a fresh {session.runtime} session in the
-                same checkout.
-              </p>
+              <div className="session-dead-title">
+                {session.error ? "This session couldn't start" : "This session has ended"}
+              </div>
+              {/* A session that never opened has a reason, and the reason is
+                  usually the fix: a checkout that isn't there, a runtime that
+                  isn't installed on that node. */}
+              {session.error ? (
+                <p className="muted small mono">{session.error}</p>
+              ) : (
+                <p className="muted small">
+                  Its terminals are gone, but the tab, name and workspace are
+                  kept. Restarting opens a fresh {session.runtime} session in
+                  the same checkout.
+                </p>
+              )}
               <button className="btn primary" onClick={restart}>
                 <RotateCw size={13} /> restart session
               </button>

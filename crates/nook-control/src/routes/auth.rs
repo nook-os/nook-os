@@ -274,9 +274,7 @@ pub async fn dev_login(
     operation_id = "auth_providers",
     responses((status = 200, body = nook_types::AuthProviders))
 )]
-pub async fn providers(
-    State(state): State<AppState>,
-) -> Json<nook_types::AuthProviders> {
+pub async fn providers(State(state): State<AppState>) -> Json<nook_types::AuthProviders> {
     Json(nook_types::AuthProviders {
         oidc: state.oidc.is_some(),
         dev_login: state.cfg.auth_dev_mode && !state.cfg.is_production(),
