@@ -12,6 +12,7 @@ pub mod sessions;
 pub mod settings;
 pub mod taskwork;
 pub mod themes;
+pub mod vault;
 pub mod workspaces;
 
 use axum::response::IntoResponse;
@@ -117,6 +118,9 @@ pub fn build_router(state: AppState) -> Router {
         .route("/events", get(events::list))
         .route("/themes", get(themes::list))
         .route("/themes/{slug}", get(themes::get_one))
+        .route("/vault/status", get(vault::status))
+        .route("/vault/passphrase", post(vault::set_passphrase))
+        .route("/vault/verify", post(vault::verify))
         .route("/settings", get(settings::list))
         .route("/settings/{key}", put(settings::put));
 

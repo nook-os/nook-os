@@ -653,6 +653,19 @@ pub struct PutSecretRequest {
     pub ephemeral: bool,
 }
 
+/// Whether this user has an app password (the key that seals their secrets).
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct VaultStatus {
+    pub configured: bool,
+    pub created_at: Option<DateTime<Utc>>,
+}
+
+/// Setting or checking the app password.
+#[derive(Debug, Clone, Deserialize, ToSchema)]
+pub struct SetVaultPassphraseRequest {
+    pub passphrase: String,
+}
+
 /// Unlocking a protected secret.
 #[derive(Debug, Clone, Deserialize, ToSchema)]
 pub struct OpenSecretRequest {

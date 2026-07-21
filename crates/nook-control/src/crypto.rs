@@ -252,3 +252,17 @@ mod passphrase_tests {
         assert_ne!(a.ciphertext, b.ciphertext);
     }
 }
+
+/// Salt + verifier for an app password, so the server can reject a wrong one
+/// without ever holding the password or the key it derives.
+pub fn passphrase_verifier(passphrase: &str) -> (Vec<u8>, Vec<u8>) {
+    use aes_gcm::aead::{rand_core::RngCore, OsRng};
+    let mut salt = vec![0u8; 16];
+    OsRng.fill_bytes(&mut salt);
+    let key = derive(passphrase, &salt);
+    (salt, verifier_of(&key))
+}
+
+pub fn verify_passphrase(passphrase: &str, salt: &[u8], verifier: &[u8]) -> bool {
+    verifier_of(&derive(passphrase, salt)) == verifier
+}

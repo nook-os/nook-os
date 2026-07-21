@@ -275,6 +275,18 @@ CREATE TABLE workspace_secrets (
     UNIQUE (workspace_id, name)
 );
 
+-- One app password per user, set once and never changed: the key that seals
+-- their secrets. Only a salt and a verifier are stored — never the password,
+-- never the derived key. Losing it means losing the secrets, which is the
+-- point: the server cannot help you read them.
+CREATE TABLE user_vaults (
+    user_id     UUID PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    tenant_id   UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    kdf_salt    BYTEA NOT NULL,
+    verifier    BYTEA NOT NULL,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 -- ── Themes & settings ───────────────────────────────────────────────────────
 
 CREATE TABLE themes (

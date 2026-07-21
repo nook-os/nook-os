@@ -5,7 +5,8 @@ import type { QueryClient } from "@tanstack/react-query";
 import { connectUiSocket, type EventItem, type UiEvent } from "@nookos/api";
 import { notifyEvent } from "./notify";
 import { runJobFollowUp, useJobs } from "./jobs";
-import { resyncSealedSecrets, useSecretKeys } from "./secretkeys";
+import { resyncSealedSecrets } from "./secretkeys";
+import { useAppPassword } from "./apppassword";
 import { api } from "@nookos/api";
 
 const ACTIVITY_BUFFER = 250;
@@ -96,7 +97,7 @@ export function startLive(queryClient: QueryClient) {
         kind === "workspace.discovered"
       ) {
         const wsId = event.data.event.workspace_id;
-        if (wsId && useSecretKeys.getState().keys[wsId]) {
+        if (wsId && useAppPassword.getState().passphrase) {
           void resyncSealedSecrets(wsId, api as never);
         }
       }

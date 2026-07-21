@@ -1554,6 +1554,91 @@
         }
       }
     },
+    "/api/v1/vault/passphrase": {
+      "post": {
+        "tags": [
+          "crate::routes::vault"
+        ],
+        "summary": "Set the app password. Once only — a second attempt is a conflict, not an\noverwrite, so a stray call can never orphan existing secrets.",
+        "operationId": "set_vault_passphrase",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetVaultPassphraseRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VaultStatus"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": ""
+          }
+        }
+      }
+    },
+    "/api/v1/vault/status": {
+      "get": {
+        "tags": [
+          "crate::routes::vault"
+        ],
+        "summary": "Has this user set an app password yet?",
+        "operationId": "vault_status",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VaultStatus"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/vault/verify": {
+      "post": {
+        "tags": [
+          "crate::routes::vault"
+        ],
+        "summary": "Check a password without decrypting anything — lets the UI unlock (and\nhold the password for syncing) with a clear yes/no.",
+        "operationId": "verify_vault_passphrase",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetVaultPassphraseRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": ""
+          },
+          "403": {
+            "description": ""
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      }
+    },
     "/api/v1/workspaces": {
       "get": {
         "tags": [
@@ -3436,6 +3521,18 @@
           }
         }
       },
+      "SetVaultPassphraseRequest": {
+        "type": "object",
+        "description": "Setting or checking the app password.",
+        "required": [
+          "passphrase"
+        ],
+        "properties": {
+          "passphrase": {
+            "type": "string"
+          }
+        }
+      },
       "Setting": {
         "type": "object",
         "description": "Scope values: `tenant` | `user`.",
@@ -4079,6 +4176,25 @@
       "UserId": {
         "type": "string",
         "format": "uuid"
+      },
+      "VaultStatus": {
+        "type": "object",
+        "description": "Whether this user has an app password (the key that seals their secrets).",
+        "required": [
+          "configured"
+        ],
+        "properties": {
+          "configured": {
+            "type": "boolean"
+          },
+          "created_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          }
+        }
       },
       "WindowAction": {
         "oneOf": [

@@ -1354,3 +1354,40 @@ table.nook-table tr.picked td {
   0% { transform: translateX(-100%); }
   100% { transform: translateX(350%); }
 }
+
+/* ── Secrets: hidden until deliberately revealed ─────────────────────────── */
+.env-shell { position: relative; flex: 1; min-height: 0; display: flex; }
+textarea.env-area {
+  flex: 1;
+  resize: none;
+  border: none;
+  border-radius: 0;
+  background: var(--nook-bg);
+  padding: 10px;
+}
+/* Blurred, not merely hidden: you can see a secret is there, never read it.
+   select-none stops a drag-copy lifting the text out from under the veil. */
+textarea.env-area.blurred {
+  filter: blur(7px);
+  user-select: none;
+  pointer-events: none;
+}
+.env-veil {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 20px;
+  text-align: center;
+  background: color-mix(in srgb, var(--nook-bg) 55%, transparent);
+  color: var(--nook-fg-dim);
+}
+.env-veil-title {
+  color: var(--nook-fg-bright);
+  font-size: 13px;
+  letter-spacing: 0.04em;
+}
+.env-veil p { max-width: 340px; margin: 0; line-height: 1.55; }

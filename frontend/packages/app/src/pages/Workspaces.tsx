@@ -1,7 +1,7 @@
 import React, { useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useParams } from "react-router-dom";
-import { Plus, Trash2 } from "lucide-react";
+import { Eye, EyeOff, Lock, Plus, Trash2 } from "lucide-react";
 import { api } from "@nookos/api";
 import { Empty, Panel, Pill, StatusDot, statusTone } from "@nookos/ui";
 import { ActivityFeed } from "./Activity";
@@ -9,7 +9,7 @@ import { NotesPanel } from "./Notes";
 import { useNewWork } from "../newwork";
 import { WorkspaceLocations } from "../WorkspaceLocations";
 import { askChoice, askConfirm, askForm, askText, notify } from "../dialogs";
-import { useSecretKeys } from "../secretkeys";
+import { requireAppPassword, useAppPassword } from "../apppassword";
 
 export function WorkspacesPage() {
   const showNewWork = useNewWork((s) => s.show);
@@ -74,7 +74,8 @@ function EnvPanel({ workspaceId }: { workspaceId: string }) {
   const [content, setContent] = useState<string | null>(null);
   const [status, setStatus] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [unlocked, setUnlocked] = useState(false);
+  const [revealed, setRevealed] = useState(false);
+  const held = useAppPassword((s) => s.passphrase);
 
   const { data: loaded, refetch } = useQuery({
     queryKey: ["secrets", workspaceId, ".env"],
@@ -84,28 +85,29 @@ function EnvPanel({ workspaceId }: { workspaceId: string }) {
         { params: { path: { id: workspaceId, name: ".env" } } },
       );
       if (response.status === 404)
-        return { content: "", protected: false, ephemeral: false };
+        return { content: "", protected: false, ephemeral: false, exists: false };
       return {
         content: data?.content ?? "",
         protected: !!data?.protected,
         ephemeral: !!data?.ephemeral,
+        exists: true,
       };
     },
     retry: false,
   });
 
   const isProtected = !!loaded?.protected;
-  const locked = isProtected && !unlocked;
+  // Secrets stay hidden until deliberately revealed — a shoulder shouldn't be
+  // enough to read them, and a sealed one genuinely isn't loaded yet.
+  const hidden = !revealed;
   const value = content ?? loaded?.content ?? "";
 
-  const unlock = async () => {
-    const passphrase = await askText({
-      title: "Unlock .env",
-      description:
-        "This secret is sealed with a passphrase. NookOS cannot read it without one — not even with database access.",
-      label: "Passphrase",
-      confirmLabel: "unlock",
-    });
+  const reveal = async () => {
+    if (!isProtected) {
+      setRevealed(true);
+      return;
+    }
+    const passphrase = held ?? (await requireAppPassword());
     if (!passphrase) return;
     setBusy(true);
     const { data, error, response } = await api.POST(
@@ -118,61 +120,26 @@ function EnvPanel({ workspaceId }: { workspaceId: string }) {
     setBusy(false);
     if (error || !response.ok) {
       await notify(
-        response.status === 403 ? "Wrong passphrase" : "Unlock failed",
+        response.status === 403 ? "Wrong app password" : "Unlock failed",
         response.status === 403
-          ? "That passphrase doesn't open this secret."
+          ? "That password doesn't open this secret."
           : JSON.stringify(error),
       );
       return;
     }
     setContent(data?.content ?? "");
-    setUnlocked(true);
-    // Hold it for this browser session so new checkouts sync automatically.
-    useSecretKeys.getState().remember(workspaceId, passphrase);
-    setStatus("unlocked · auto-sync on for this session");
+    setRevealed(true);
+    setStatus("unlocked · synced to checkouts");
   };
 
   const save = async () => {
-    // Protecting a secret is a one-time decision per save, so ask plainly.
-    const choice = await askChoice({
-      title: "Save .env",
-      description: "How should this be stored?",
-      choices: [
-        {
-          value: "protected",
-          label: "Seal with a passphrase (recommended)",
-          description:
-            "NookOS cannot read it without the passphrase — a database dump plus the app key is not enough. It syncs to checkouts when you unlock it.",
-        },
-        {
-          value: "plain",
-          label: "App-key encryption only",
-          description:
-            "Encrypted at rest and synced automatically, but anyone with the database and the app key can read it.",
-        },
-      ],
-      confirmLabel: "continue",
-    });
-    if (!choice) return;
+    // Every save is an app-password operation: it re-seals the secret and
+    // pushes it to the checkouts.
+    const passphrase = await requireAppPassword();
+    if (!passphrase) return;
 
-    let passphrase: string | undefined;
-    let ephemeral = false;
-    if (choice === "protected") {
-      const out = await askForm({
-        title: "Passphrase",
-        description: "There is no recovery: lose it and this secret is gone.",
-        fields: [
-          { name: "passphrase", label: "Passphrase", required: true },
-          { name: "confirm", label: "Confirm passphrase", required: true },
-        ],
-        confirmLabel: "seal & save",
-      });
-      if (!out) return;
-      if (out.passphrase !== out.confirm) {
-        await notify("Passphrases don't match", "Nothing was saved.");
-        return;
-      }
-      passphrase = out.passphrase;
+    let ephemeral = loaded?.ephemeral ?? false;
+    if (!loaded?.exists) {
       ephemeral = await askConfirm({
         title: "Wipe from disk when sessions end?",
         description:
@@ -186,48 +153,45 @@ function EnvPanel({ workspaceId }: { workspaceId: string }) {
       "/api/v1/workspaces/{id}/secrets/{name}",
       {
         params: { path: { id: workspaceId, name: ".env" } },
-        body: { content: value, passphrase: passphrase ?? null, ephemeral },
+        body: { content: value, passphrase, ephemeral },
       },
     );
     setBusy(false);
-    setStatus(error ? "save failed" : (data?.message ?? "saved"));
-    if (!error && passphrase) {
-      setUnlocked(true);
-      useSecretKeys.getState().remember(workspaceId, passphrase);
+    setStatus(error ? "save failed" : (data?.message ?? "saved · sealed & synced"));
+    if (!error) {
+      setRevealed(true);
       refetch();
     }
   };
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
-      {locked ? (
-        <div className="session-dead" style={{ gap: 10 }}>
-          <div className="session-dead-title">🔒 .env is sealed</div>
-          <p className="muted small">
-            Stored with a passphrase NookOS never keeps. Unlock it to view or
-            edit, and it syncs to this workspace's checkouts.
-          </p>
-          <button className="btn primary" onClick={unlock} disabled={busy}>
-            unlock
-          </button>
-        </div>
-      ) : (
+      <div className="env-shell">
         <textarea
-          className="input mono small"
-          style={{
-            flex: 1,
-            resize: "none",
-            border: "none",
-            borderRadius: 0,
-            background: "var(--nook-bg)",
-            padding: 10,
-          }}
-          placeholder={"# .env — encrypted at rest, synced to every checkout\nAPI_KEY=…"}
-          value={value}
+          className={`input mono small env-area${hidden ? " blurred" : ""}`}
+          placeholder={"# .env — sealed with your app password\nAPI_KEY=…"}
+          value={hidden && isProtected ? PLACEHOLDER : value}
           onChange={(e) => setContent(e.target.value)}
           spellCheck={false}
+          readOnly={hidden}
         />
-      )}
+        {hidden && (
+          <div className="env-veil">
+            <Lock size={18} />
+            <div className="env-veil-title">
+              {isProtected ? ".env is sealed" : ".env is hidden"}
+            </div>
+            <p className="muted small">
+              {isProtected
+                ? "Encrypted with your app password. NookOS cannot read it without you."
+                : "Click to show it."}
+            </p>
+            <button className="btn primary" onClick={reveal} disabled={busy}>
+              <Eye size={13} /> {isProtected ? "unlock" : "show"}
+            </button>
+          </div>
+        )}
+      </div>
       <div
         style={{
           display: "flex",
@@ -237,19 +201,38 @@ function EnvPanel({ workspaceId }: { workspaceId: string }) {
           borderTop: "1px solid var(--nook-border)",
         }}
       >
-        <button className="btn primary small" onClick={save} disabled={busy || locked}>
+        <button className="btn primary small" onClick={save} disabled={busy || hidden}>
           {busy ? "saving…" : "save & sync"}
         </button>
-        {isProtected && <Pill tone="ok">passphrase-sealed</Pill>}
+        {revealed && (
+          <button
+            className="btn small"
+            onClick={() => {
+              setRevealed(false);
+              setContent(null);
+            }}
+          >
+            <EyeOff size={12} /> hide
+          </button>
+        )}
+        {isProtected && <Pill tone="ok">sealed</Pill>}
         {loaded?.ephemeral && <Pill tone="warn">ephemeral</Pill>}
         {status && <span className="muted small">{status}</span>}
         <span className="faint small" style={{ marginLeft: "auto" }}>
-          AES-256-GCM · pushed to online checkouts
+          AES-256-GCM · app password never leaves your browser
         </span>
       </div>
     </div>
   );
 }
+
+/** Shown behind the blur so the shape of a secret is suggested, not its text. */
+const PLACEHOLDER = [
+  "DATABASE_URL=postgres://xxxxxxxxxxxxxxxxxxxx",
+  "API_KEY=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+  "STRIPE_SECRET=xxxxxxxxxxxxxxxxxxxxxxxx",
+  "JWT_SECRET=xxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+].join("\n");
 
 export function WorkspaceDetail() {
   const { id } = useParams<{ id: string }>();

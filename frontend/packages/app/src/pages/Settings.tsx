@@ -9,12 +9,76 @@ import {
   Pill,
   type ThemeTokens,
 } from "@nookos/ui";
+import { requireAppPassword, useAppPassword } from "../apppassword";
 import {
   desktopPermission,
   playChime,
   requestDesktopPermission,
   useNotify,
 } from "../notify";
+
+/** The one password that seals this user's secrets. */
+function AppPasswordSettings() {
+  const queryClient = useQueryClient();
+  const held = useAppPassword((s) => s.passphrase);
+  const clear = useAppPassword((s) => s.clear);
+  const { data: vault } = useQuery({
+    queryKey: ["vault", "status"],
+    queryFn: async () => (await api.GET("/api/v1/vault/status", {})).data,
+  });
+
+  return (
+    <div style={{ padding: 10, display: "grid", gap: 10 }} className="small">
+      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        {vault?.configured ? (
+          <>
+            <Pill tone="ok">set</Pill>
+            <span className="muted">
+              Secrets are sealed with it. It cannot be changed.
+            </span>
+          </>
+        ) : (
+          <>
+            <Pill tone="warn">not set</Pill>
+            <span className="muted">
+              Set it the first time you save a secret, or here.
+            </span>
+          </>
+        )}
+      </div>
+
+      <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+        {!vault?.configured && (
+          <button
+            className="btn primary small"
+            onClick={async () => {
+              if (await requireAppPassword())
+                queryClient.invalidateQueries({ queryKey: ["vault"] });
+            }}
+          >
+            set app password
+          </button>
+        )}
+        {held ? (
+          <>
+            <Pill tone="ok">unlocked this session</Pill>
+            <button className="btn small" onClick={clear}>
+              lock
+            </button>
+          </>
+        ) : (
+          vault?.configured && <Pill tone="dim">locked</Pill>
+        )}
+      </div>
+
+      <p className="muted" style={{ marginTop: 2 }}>
+        Your app password encrypts secrets before they reach the database, so a
+        database dump — even with the server's own key — cannot reveal them.
+        NookOS never stores it, which also means nobody can reset it for you.
+      </p>
+    </div>
+  );
+}
 
 /** Desktop notification + chime preferences (stored per browser). */
 function NotificationSettings() {
@@ -136,6 +200,10 @@ export function SettingsPage() {
             </tbody>
           </table>
         )}
+      </Panel>
+
+      <Panel title="App password">
+        <AppPasswordSettings />
       </Panel>
 
       <Panel title="Notifications">

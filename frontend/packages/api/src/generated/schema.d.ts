@@ -633,6 +633,63 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/vault/passphrase": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Set the app password. Once only — a second attempt is a conflict, not an
+         *     overwrite, so a stray call can never orphan existing secrets.
+         */
+        post: operations["set_vault_passphrase"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/vault/status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Has this user set an app password yet? */
+        get: operations["vault_status"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/vault/verify": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Check a password without decrypting anything — lets the UI unlock (and
+         *     hold the password for syncing) with a clear yes/no.
+         */
+        post: operations["verify_vault_passphrase"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workspaces": {
         parameters: {
             query?: never;
@@ -1250,6 +1307,10 @@ export interface components {
              */
             panes?: number;
         };
+        /** @description Setting or checking the app password. */
+        SetVaultPassphraseRequest: {
+            passphrase: string;
+        };
         /** @description Scope values: `tenant` | `user`. */
         Setting: {
             id: components["schemas"]["SettingId"];
@@ -1414,6 +1475,12 @@ export interface components {
         };
         /** Format: uuid */
         UserId: string;
+        /** @description Whether this user has an app password (the key that seals their secrets). */
+        VaultStatus: {
+            configured: boolean;
+            /** Format: date-time */
+            created_at?: string | null;
+        };
         /** @description What to do with a session's terminals (tmux windows/panes). */
         WindowAction: {
             /** @enum {string} */
@@ -2661,6 +2728,87 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["Theme"];
                 };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    set_vault_passphrase: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SetVaultPassphraseRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["VaultStatus"];
+                };
+            };
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    vault_status: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["VaultStatus"];
+                };
+            };
+        };
+    };
+    verify_vault_passphrase: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SetVaultPassphraseRequest"];
+            };
+        };
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             404: {
                 headers: {

@@ -8,30 +8,9 @@
 //
 // Memory only: never localStorage, never sent anywhere except the unlock
 // endpoint that already required it.
-import { create } from "zustand";
+import { useAppPassword } from "./apppassword";
 
-interface SecretKeysState {
-  /** workspace id → passphrase, for this tab, until reload. */
-  keys: Record<string, string>;
-  remember(workspaceId: string, passphrase: string): void;
-  forget(workspaceId: string): void;
-  forgetAll(): void;
-}
-
-export const useSecretKeys = create<SecretKeysState>((set) => ({
-  keys: {},
-  remember: (workspaceId, passphrase) =>
-    set((s) => ({ keys: { ...s.keys, [workspaceId]: passphrase } })),
-  forget: (workspaceId) =>
-    set((s) => {
-      const keys = { ...s.keys };
-      delete keys[workspaceId];
-      return { keys };
-    }),
-  forgetAll: () => set({ keys: {} }),
-}));
-
-/** Re-push a workspace's sealed secrets to its checkouts, if we hold the key. */
+/** Re-push a workspace's sealed secrets to its checkouts, if we're unlocked. */
 export async function resyncSealedSecrets(
   workspaceId: string,
   api: {
@@ -39,7 +18,7 @@ export async function resyncSealedSecrets(
     POST: (path: string, opts: unknown) => Promise<{ error?: unknown }>;
   },
 ): Promise<number> {
-  const passphrase = useSecretKeys.getState().keys[workspaceId];
+  const passphrase = useAppPassword.getState().passphrase;
   if (!passphrase) return 0;
 
   const { data } = await api.GET("/api/v1/workspaces/{id}/secrets", {
