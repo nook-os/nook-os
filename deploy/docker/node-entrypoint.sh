@@ -18,9 +18,9 @@ seed_repo() {
     git -C "$dir" remote add origin "https://github.com/nookos-demo/$name.git"
   fi
 }
-seed_repo engrain
-seed_repo authava
-seed_repo atreus
+seed_repo globex
+seed_repo acme
+seed_repo widgets
 
 if [ ! -f "$HOME/.config/nook/node.toml" ]; then
   nook join \

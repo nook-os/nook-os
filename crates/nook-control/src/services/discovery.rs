@@ -88,7 +88,7 @@ pub async fn reconcile(
         let workspace_id = match workspace_id {
             Some(id) => {
                 // Qualify a bare name once the remote tells us the owner:
-                // "services" → "authava/services". Deliberately narrow — only
+                // "services" → "acme/services". Deliberately narrow — only
                 // when the discovered name is the same repo with an owner
                 // prefix, so a hand-picked name is never clobbered.
                 if let Some(norm) = &normalized {
@@ -253,13 +253,13 @@ mod tests {
     #[test]
     fn normalizes_equivalent_remotes_to_one_identity() {
         for url in [
-            "https://github.com/NookOS/Atreus.git",
-            "http://github.com/nookos/atreus",
-            "git@github.com:nookos/atreus.git",
-            "ssh://github.com/nookos/atreus/",
-            "https://user:pass@github.com/nookos/atreus.git",
+            "https://github.com/NookOS/Widgets.git",
+            "http://github.com/nookos/widgets",
+            "git@github.com:nookos/widgets.git",
+            "ssh://github.com/nookos/widgets/",
+            "https://user:pass@github.com/nookos/widgets.git",
         ] {
-            assert_eq!(normalize_remote(url), "github.com/nookos/atreus", "{url}");
+            assert_eq!(normalize_remote(url), "github.com/nookos/widgets", "{url}");
         }
     }
 

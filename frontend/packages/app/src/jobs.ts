@@ -11,7 +11,7 @@ export type JobState = "running" | "done" | "failed";
 
 export interface Job {
   id: string;
-  /** What's happening, e.g. "Cloning authava/services". */
+  /** What's happening, e.g. "Cloning acme/services". */
   label: string;
   /** Short kind for the icon: clone | worktree | project | generic. */
   kind: string;

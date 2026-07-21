@@ -653,6 +653,48 @@ pub struct PutSecretRequest {
     pub ephemeral: bool,
 }
 
+/// One improvement someone asked for, and what became of it.
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
+pub struct FeedbackItem {
+    pub id: Uuid,
+    pub tenant_id: TenantId,
+    pub workspace_id: Option<WorkspaceId>,
+    pub session_id: Option<SessionId>,
+    pub body: String,
+    /// queued | delivered | submitted | dropped
+    pub status: String,
+    pub pr_url: Option<String>,
+    pub created_by: Option<UserId>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Deserialize, ToSchema)]
+pub struct SubmitFeedbackRequest {
+    pub body: String,
+    /// Where this feedback should be worked on. Remembered for next time;
+    /// required only until one has been chosen.
+    pub workspace_id: Option<WorkspaceId>,
+    /// Runtime for the feedback session (defaults to claude).
+    pub runtime: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, ToSchema)]
+pub struct UpdateFeedbackRequest {
+    pub status: Option<String>,
+    pub pr_url: Option<String>,
+}
+
+/// Where feedback goes — the first-run question this answers is "which repo?"
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct FeedbackTarget {
+    pub configured: bool,
+    pub workspace_id: Option<WorkspaceId>,
+    pub workspace_name: Option<String>,
+    pub git_remote: Option<String>,
+    pub session_name: String,
+}
+
 /// Whether this user has an app password (the key that seals their secrets).
 #[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct VaultStatus {

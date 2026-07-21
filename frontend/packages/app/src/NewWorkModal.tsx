@@ -20,7 +20,7 @@ type Tab = "new" | "existing";
 const looksLikeGitUrl = (q: string) =>
   /^(https?:\/\/|git@|ssh:\/\/|git:\/\/)/.test(q.trim()) || /\.git$/.test(q.trim());
 
-/** "git@github.com:authava/services.git" → "authava/services" */
+/** "git@github.com:acme/services.git" → "acme/services" */
 function repoLabel(url: string): string {
   const tail = url.trim().replace(/\.git$/, "").replace(/\/$/, "");
   const parts = tail.split(/[/:]/).filter(Boolean);

@@ -16,9 +16,9 @@ seed_repo() {
     git -C "$dir" remote add origin "https://github.com/nookos-demo/$name.git"
   fi
 }
-seed_repo engrain
-seed_repo authava
-seed_repo atreus
+seed_repo workspace-1
+seed_repo workspace-2
+seed_repo workspace-3
 
 # Build once so `nook join` exists, join if this container has no identity
 # yet, then let cargo watch own the run loop (rebuild + restart on change).

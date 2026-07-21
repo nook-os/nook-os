@@ -54,7 +54,7 @@ fn safe_segment(s: &str) -> bool {
 }
 
 /// Derive the qualified checkout path "owner/repo" from a remote URL:
-/// `git@github.com:authava/services.git` → `authava/services`.
+/// `git@github.com:acme/services.git` → `acme/services`.
 ///
 /// Repos are cloned into `<root>/<owner>/<repo>` so two orgs can each own a
 /// "services" (or "api", or "web") without colliding — and so a workspace's
@@ -397,16 +397,16 @@ mod tests {
     #[test]
     fn derives_owner_and_repo_across_url_shapes() {
         for url in [
-            "git@github.com:authava/services.git",
-            "https://github.com/authava/services.git",
-            "https://github.com/authava/services",
-            "ssh://git@github.com/authava/services.git",
-            "https://user:pass@github.com/authava/services.git",
-            "git@github.com:authava/services/",
+            "git@github.com:acme/services.git",
+            "https://github.com/acme/services.git",
+            "https://github.com/acme/services",
+            "ssh://git@github.com/acme/services.git",
+            "https://user:pass@github.com/acme/services.git",
+            "git@github.com:acme/services/",
         ] {
             assert_eq!(
                 repo_path_from_url(url).as_deref(),
-                Some("authava/services"),
+                Some("acme/services"),
                 "{url}"
             );
         }
@@ -423,8 +423,8 @@ mod tests {
     #[test]
     fn same_repo_name_in_two_orgs_does_not_collide() {
         assert_ne!(
-            repo_path_from_url("git@github.com:authava/services.git"),
-            repo_path_from_url("git@github.com:engrain/services.git"),
+            repo_path_from_url("git@github.com:acme/services.git"),
+            repo_path_from_url("git@github.com:globex/services.git"),
         );
     }
 

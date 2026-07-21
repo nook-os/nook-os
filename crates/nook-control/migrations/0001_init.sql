@@ -275,6 +275,26 @@ CREATE TABLE workspace_secrets (
     UNIQUE (workspace_id, name)
 );
 
+-- A rolling log of improvements to make. Feedback is typed here, queued
+-- against a workspace, and delivered into a long-lived session where an agent
+-- works through it — so context accumulates in one place instead of being
+-- re-explained every time.
+CREATE TABLE feedback (
+    id           UUID PRIMARY KEY,
+    tenant_id    UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    workspace_id UUID REFERENCES workspaces(id) ON DELETE SET NULL,
+    session_id   UUID REFERENCES sessions(id) ON DELETE SET NULL,
+    body         TEXT NOT NULL,
+    -- queued → delivered (typed into the session) → submitted (PR opened)
+    status       TEXT NOT NULL DEFAULT 'queued'
+                 CHECK (status IN ('queued', 'delivered', 'submitted', 'dropped')),
+    pr_url       TEXT,
+    created_by   UUID REFERENCES users(id) ON DELETE SET NULL,
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX feedback_tenant_idx ON feedback (tenant_id, created_at DESC);
+
 -- One app password per user, set once and never changed: the key that seals
 -- their secrets. Only a salt and a verifier are stored — never the password,
 -- never the derived key. Losing it means losing the secrets, which is the

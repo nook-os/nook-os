@@ -12,6 +12,7 @@ pub mod sessions;
 pub mod settings;
 pub mod taskwork;
 pub mod themes;
+pub mod feedback;
 pub mod vault;
 pub mod workspaces;
 
@@ -118,6 +119,9 @@ pub fn build_router(state: AppState) -> Router {
         .route("/events", get(events::list))
         .route("/themes", get(themes::list))
         .route("/themes/{slug}", get(themes::get_one))
+        .route("/feedback", get(feedback::list).post(feedback::submit))
+        .route("/feedback/target", get(feedback::target))
+        .route("/feedback/{id}", patch(feedback::update))
         .route("/vault/status", get(vault::status))
         .route("/vault/passphrase", post(vault::set_passphrase))
         .route("/vault/verify", post(vault::verify))

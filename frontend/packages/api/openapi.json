@@ -495,6 +495,126 @@
         }
       }
     },
+    "/api/v1/feedback": {
+      "get": {
+        "tags": [
+          "crate::routes::feedback"
+        ],
+        "operationId": "list_feedback",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/FeedbackItem"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "crate::routes::feedback"
+        ],
+        "summary": "Queue feedback. Picks up the configured workspace unless one is given, and\ndelivers into the named session — creating it if this is the first time.",
+        "operationId": "submit_feedback",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SubmitFeedbackRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FeedbackItem"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": ""
+          }
+        }
+      }
+    },
+    "/api/v1/feedback/target": {
+      "get": {
+        "tags": [
+          "crate::routes::feedback"
+        ],
+        "summary": "Where feedback is configured to go, if anywhere yet.",
+        "operationId": "feedback_target",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FeedbackTarget"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/feedback/{id}": {
+      "patch": {
+        "tags": [
+          "crate::routes::feedback"
+        ],
+        "summary": "Record the pull request a piece of feedback turned into.",
+        "operationId": "update_feedback",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateFeedbackRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FeedbackItem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      }
+    },
     "/api/v1/git-credentials": {
       "get": {
         "tags": [
@@ -2954,6 +3074,116 @@
           }
         }
       },
+      "FeedbackItem": {
+        "type": "object",
+        "description": "One improvement someone asked for, and what became of it.",
+        "required": [
+          "id",
+          "tenant_id",
+          "body",
+          "status",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "body": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "created_by": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/UserId"
+              }
+            ]
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "pr_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "session_id": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/SessionId"
+              }
+            ]
+          },
+          "status": {
+            "type": "string",
+            "description": "queued | delivered | submitted | dropped"
+          },
+          "tenant_id": {
+            "$ref": "#/components/schemas/TenantId"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "workspace_id": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/WorkspaceId"
+              }
+            ]
+          }
+        }
+      },
+      "FeedbackTarget": {
+        "type": "object",
+        "description": "Where feedback goes — the first-run question this answers is \"which repo?\"",
+        "required": [
+          "configured",
+          "session_name"
+        ],
+        "properties": {
+          "configured": {
+            "type": "boolean"
+          },
+          "git_remote": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "session_name": {
+            "type": "string"
+          },
+          "workspace_id": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/WorkspaceId"
+              }
+            ]
+          },
+          "workspace_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
       "GitCredential": {
         "type": "object",
         "description": "A tenant git credential — only the public half is ever returned.",
@@ -3625,6 +3855,35 @@
           }
         }
       },
+      "SubmitFeedbackRequest": {
+        "type": "object",
+        "required": [
+          "body"
+        ],
+        "properties": {
+          "body": {
+            "type": "string"
+          },
+          "runtime": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Runtime for the feedback session (defaults to claude)."
+          },
+          "workspace_id": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/WorkspaceId",
+                "description": "Where this feedback should be worked on. Remembered for next time;\nrequired only until one has been chosen."
+              }
+            ]
+          }
+        }
+      },
       "SubmitPrRequest": {
         "type": "object",
         "properties": {
@@ -4037,6 +4296,23 @@
               "null"
             ],
             "format": "int32"
+          }
+        }
+      },
+      "UpdateFeedbackRequest": {
+        "type": "object",
+        "properties": {
+          "pr_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         }
       },

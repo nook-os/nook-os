@@ -190,6 +190,60 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/feedback": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["list_feedback"];
+        put?: never;
+        /**
+         * Queue feedback. Picks up the configured workspace unless one is given, and
+         *     delivers into the named session — creating it if this is the first time.
+         */
+        post: operations["submit_feedback"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/feedback/target": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Where feedback is configured to go, if anywhere yet. */
+        get: operations["feedback_target"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/feedback/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /** Record the pull request a piece of feedback turned into. */
+        patch: operations["update_feedback"];
+        trace?: never;
+    };
     "/api/v1/git-credentials": {
         parameters: {
             query?: never;
@@ -1110,6 +1164,31 @@ export interface components {
              */
             next_cursor?: string | null;
         };
+        /** @description One improvement someone asked for, and what became of it. */
+        FeedbackItem: {
+            body: string;
+            /** Format: date-time */
+            created_at: string;
+            created_by?: null | components["schemas"]["UserId"];
+            /** Format: uuid */
+            id: string;
+            pr_url?: string | null;
+            session_id?: null | components["schemas"]["SessionId"];
+            /** @description queued | delivered | submitted | dropped */
+            status: string;
+            tenant_id: components["schemas"]["TenantId"];
+            /** Format: date-time */
+            updated_at: string;
+            workspace_id?: null | components["schemas"]["WorkspaceId"];
+        };
+        /** @description Where feedback goes — the first-run question this answers is "which repo?" */
+        FeedbackTarget: {
+            configured: boolean;
+            git_remote?: string | null;
+            session_name: string;
+            workspace_id?: null | components["schemas"]["WorkspaceId"];
+            workspace_name?: string | null;
+        };
         /** @description A tenant git credential — only the public half is ever returned. */
         GitCredential: {
             /** Format: date-time */
@@ -1332,6 +1411,12 @@ export interface components {
             session: components["schemas"]["Session"];
             task: components["schemas"]["TaskItem"];
         };
+        SubmitFeedbackRequest: {
+            body: string;
+            /** @description Runtime for the feedback session (defaults to claude). */
+            runtime?: string | null;
+            workspace_id?: null | components["schemas"]["WorkspaceId"];
+        };
         SubmitPrRequest: {
             pr_url?: string | null;
         };
@@ -1438,6 +1523,10 @@ export interface components {
             name?: string | null;
             /** Format: int32 */
             position?: number | null;
+        };
+        UpdateFeedbackRequest: {
+            pr_url?: string | null;
+            status?: string | null;
         };
         UpdateNoteRequest: {
             content_md?: string | null;
@@ -1931,6 +2020,104 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["EventsPage"];
                 };
+            };
+        };
+    };
+    list_feedback: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FeedbackItem"][];
+                };
+            };
+        };
+    };
+    submit_feedback: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SubmitFeedbackRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FeedbackItem"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    feedback_target: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FeedbackTarget"];
+                };
+            };
+        };
+    };
+    update_feedback: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdateFeedbackRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FeedbackItem"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
         };
     };

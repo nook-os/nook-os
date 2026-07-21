@@ -867,9 +867,9 @@ workspace_roots:
 It discovers:
 
 workspace/
-    engrain/
-    authava/
-    atreus/
+    globex/
+    acme/
+    widgets/
 
 Git makes this easy because repositories are self-describing.
 
@@ -887,7 +887,7 @@ A workspace can exist on multiple nodes:
 
 Workspace
 
-Atreus
+Widgets
 
 Locations
 
@@ -909,8 +909,8 @@ AI generation
 
 Now Nook can answer:
 
-"I need Atreus."
+"I need Widgets."
 
 Instead of:
 
-"Which computer had Atreus checked out?" -> BUT WE could HAVE 2 computers with the same repo working on it. Can use git work trees AND other computers.
+"Which computer had Widgets checked out?" -> BUT WE could HAVE 2 computers with the same repo working on it. Can use git work trees AND other computers.

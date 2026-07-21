@@ -15,6 +15,7 @@ import {
   Server,
   Settings,
   SquareTerminal,
+  MessageSquare,
   Users,
 } from "lucide-react";
 import { Plus } from "lucide-react";
@@ -32,6 +33,7 @@ const SECTIONS = [
   { to: "/", label: "Dashboard", icon: LayoutDashboard, end: true },
   { to: "/workspaces", label: "Workspaces", icon: FolderGit2 },
   { to: "/sessions", label: "Sessions", icon: SquareTerminal },
+  { to: "/feedback", label: "Feedback", icon: MessageSquare },
   { to: "/board", label: "Board", icon: KanbanSquare },
   { to: "/activity", label: "Activity", icon: Activity },
   { to: "/nodes", label: "Nodes", icon: Server },

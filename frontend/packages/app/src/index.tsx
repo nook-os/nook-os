@@ -13,6 +13,7 @@ import { ActivityPage } from "./pages/Activity";
 import { BoardPage } from "./pages/Board";
 import { Dashboard } from "./pages/Dashboard";
 import { DocsPage } from "./pages/Docs";
+import { FeedbackPage } from "./pages/Feedback";
 import { Login } from "./pages/Login";
 import { NodeDetail, NodesPage } from "./pages/Nodes";
 import { SessionPage, SessionsPage } from "./pages/Session";
@@ -56,6 +57,7 @@ function AuthGate() {
         <Route path="nodes" element={<NodesPage />} />
         <Route path="nodes/:id" element={<NodeDetail />} />
         <Route path="settings" element={<SettingsPage />} />
+        <Route path="feedback" element={<FeedbackPage />} />
         <Route path="help" element={<DocsPage />} />
         <Route path="*" element={<Empty>Nothing here.</Empty>} />
       </Route>
