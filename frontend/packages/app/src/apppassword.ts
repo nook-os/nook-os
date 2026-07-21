@@ -49,8 +49,20 @@ async function createAppPassword(): Promise<string | null> {
     title: "App password",
     description: "At least 8 characters. There is no recovery and no reset.",
     fields: [
-      { name: "passphrase", label: "App password", required: true },
-      { name: "confirm", label: "Type it again", required: true },
+      {
+        name: "passphrase",
+        label: "App password",
+        required: true,
+        secret: true,
+        autoComplete: "new-password",
+      },
+      {
+        name: "confirm",
+        label: "Type it again",
+        required: true,
+        secret: true,
+        autoComplete: "new-password",
+      },
     ],
     confirmLabel: "set password",
   });
@@ -84,6 +96,8 @@ async function promptForAppPassword(): Promise<string | null> {
       "Your app password decrypts secrets for this browser session. NookOS cannot read them without it.",
     label: "App password",
     confirmLabel: "unlock",
+    secret: true,
+    autoComplete: "current-password",
   });
   if (!passphrase) return null;
 

@@ -17,6 +17,14 @@ export interface DialogField {
   multiline?: boolean;
   /** Block submit while empty. */
   required?: boolean;
+  /**
+   * Mask the value. For passwords — the app password is typed in rooms, on
+   * shared screens, and over screen shares, and it's the one thing that can't
+   * be rotated if it's seen.
+   */
+  secret?: boolean;
+  /** Autocomplete hint, e.g. "current-password" / "new-password". */
+  autoComplete?: string;
 }
 
 export interface DialogChoice {
@@ -64,7 +72,13 @@ function ask(
   return new Promise((resolve) => useDialogStore.getState().open({ ...req, resolve }));
 }
 
-/** One-field text prompt. Resolves to the trimmed value, or null if cancelled. */
+/**
+ * One-field text prompt. Resolves to the trimmed value, or null if cancelled.
+ *
+ * A secret is returned exactly as typed: trimming a password would quietly
+ * disagree with the form that set it (which doesn't trim), making a password
+ * with a leading or trailing space impossible to enter again.
+ */
 export async function askText(opts: {
   title: string;
   description?: string;
@@ -73,6 +87,8 @@ export async function askText(opts: {
   placeholder?: string;
   multiline?: boolean;
   confirmLabel?: string;
+  secret?: boolean;
+  autoComplete?: string;
 }): Promise<string | null> {
   const out = await ask({
     title: opts.title,
@@ -86,10 +102,14 @@ export async function askText(opts: {
         placeholder: opts.placeholder,
         multiline: opts.multiline,
         required: true,
+        secret: opts.secret,
+        autoComplete: opts.autoComplete,
       },
     ],
   });
-  return out ? (out.value ?? "").trim() || null : null;
+  if (!out) return null;
+  const value = out.value ?? "";
+  return (opts.secret ? value : value.trim()) || null;
 }
 
 /** Multi-field form. Resolves to values keyed by field name. */
@@ -221,6 +241,11 @@ export function DialogHost() {
                 <input
                   ref={i === 0 ? (firstRef as React.Ref<HTMLInputElement>) : undefined}
                   className="input"
+                  type={f.secret ? "password" : "text"}
+                  autoComplete={f.autoComplete ?? (f.secret ? "off" : undefined)}
+                  spellCheck={f.secret ? false : undefined}
+                  autoCorrect={f.secret ? "off" : undefined}
+                  autoCapitalize={f.secret ? "off" : undefined}
                   placeholder={f.placeholder}
                   value={values[f.name] ?? ""}
                   onChange={(e) =>
