@@ -221,3 +221,162 @@ async fn refuses_to_sign_without_an_active_ca() {
 
     cleanup(&pool, &[tenant]).await;
 }
+
+// ── Certificate verification ────────────────────────────────────────────────
+
+fn der_of(pem: &str) -> Vec<u8> {
+    use base64::Engine;
+    let body: String = pem
+        .lines()
+        .filter(|l| !l.starts_with("-----"))
+        .collect::<Vec<_>>()
+        .join("");
+    base64::engine::general_purpose::STANDARD
+        .decode(body.trim())
+        .unwrap()
+}
+
+/// A certificate this tenant's CA issued identifies its node.
+#[tokio::test]
+async fn a_valid_certificate_identifies_its_node() {
+    let Some(pool) = test_pool().await else {
+        return;
+    };
+    let v = vault();
+    let tenant = seed_tenant(&pool).await;
+    ca::generate(&pool, &v, tenant, true).await.unwrap();
+    let node = seed_node(&pool, tenant).await;
+
+    let (_k, csr) = node_csr("n");
+    let leaf = ca::sign_node_csr(&pool, &v, tenant, node, &csr)
+        .await
+        .unwrap();
+
+    let id = ca::verify_node_cert(&pool, &der_of(&leaf.cert_pem))
+        .await
+        .unwrap();
+    assert_eq!(id.node_id, node);
+    assert_eq!(id.tenant_id, tenant.0);
+
+    cleanup(&pool, &[tenant]).await;
+}
+
+/// THE isolation property: a certificate minted by tenant A's CA cannot be
+/// used to act as a node in tenant B, even though it is a perfectly valid
+/// certificate.
+#[tokio::test]
+async fn a_certificate_from_another_tenant_is_rejected() {
+    let Some(pool) = test_pool().await else {
+        return;
+    };
+    let v = vault();
+    let (a, b) = (seed_tenant(&pool).await, seed_tenant(&pool).await);
+    ca::generate(&pool, &v, a, true).await.unwrap();
+    ca::generate(&pool, &v, b, true).await.unwrap();
+
+    // A node that really belongs to tenant B...
+    let node_b = seed_node(&pool, b).await;
+    // ...but tenant A's CA signs a certificate naming it.
+    let (_k, csr) = node_csr("n");
+    let forged = ca::sign_node_csr(&pool, &v, a, node_b, &csr).await.unwrap();
+
+    let err = ca::verify_node_cert(&pool, &der_of(&forged.cert_pem))
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("claims tenant"),
+        "a cross-tenant certificate must be refused, got: {err}"
+    );
+
+    cleanup(&pool, &[a, b]).await;
+}
+
+/// A certificate signed by nobody we trust is not an identity.
+#[tokio::test]
+async fn a_self_signed_certificate_is_rejected() {
+    let Some(pool) = test_pool().await else {
+        return;
+    };
+    let v = vault();
+    let tenant = seed_tenant(&pool).await;
+    ca::generate(&pool, &v, tenant, true).await.unwrap();
+    let node = seed_node(&pool, tenant).await;
+
+    // Forge one with the right names but our own key.
+    use rcgen::{CertificateParams, DistinguishedName, DnType};
+    let key = rcgen::KeyPair::generate().unwrap();
+    let mut params = CertificateParams::new(Vec::<String>::new()).unwrap();
+    let mut dn = DistinguishedName::new();
+    dn.push(DnType::CommonName, node.to_string());
+    dn.push(DnType::OrganizationName, format!("nookos:tenant:{tenant}"));
+    params.distinguished_name = dn;
+    let forged = params.self_signed(&key).unwrap();
+
+    let err = ca::verify_node_cert(&pool, forged.der()).await.unwrap_err();
+    assert!(
+        err.to_string().contains("not signed by any CA"),
+        "self-signed must not authenticate, got: {err}"
+    );
+
+    cleanup(&pool, &[tenant]).await;
+}
+
+/// A revoked node is refused even holding a valid, unexpired certificate.
+#[tokio::test]
+async fn a_revoked_node_is_refused() {
+    let Some(pool) = test_pool().await else {
+        return;
+    };
+    let v = vault();
+    let tenant = seed_tenant(&pool).await;
+    ca::generate(&pool, &v, tenant, true).await.unwrap();
+    let node = seed_node(&pool, tenant).await;
+    let (_k, csr) = node_csr("n");
+    let leaf = ca::sign_node_csr(&pool, &v, tenant, node, &csr)
+        .await
+        .unwrap();
+
+    sqlx::query("UPDATE nodes SET revoked_at = now() WHERE id = $1")
+        .bind(node)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let err = ca::verify_node_cert(&pool, &der_of(&leaf.cert_pem))
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("revoked"), "got: {err}");
+
+    cleanup(&pool, &[tenant]).await;
+}
+
+/// A certificate issued by a now-retiring CA still authenticates while that CA
+/// remains in the bundle — that is what makes rotation seamless.
+#[tokio::test]
+async fn a_leaf_from_a_retiring_ca_still_authenticates() {
+    let Some(pool) = test_pool().await else {
+        return;
+    };
+    let v = vault();
+    let tenant = seed_tenant(&pool).await;
+    let old = ca::generate(&pool, &v, tenant, true).await.unwrap();
+    let node = seed_node(&pool, tenant).await;
+
+    let (_k, csr) = node_csr("n");
+    let leaf = ca::sign_node_csr(&pool, &v, tenant, node, &csr)
+        .await
+        .unwrap();
+    assert_eq!(leaf.ca_id, old.id);
+
+    // Rotate underneath it.
+    let new = ca::generate(&pool, &v, tenant, false).await.unwrap();
+    ca::promote(&pool, tenant, new.id).await.unwrap();
+
+    // The old leaf keeps working: the old CA is retiring, not gone.
+    let id = ca::verify_node_cert(&pool, &der_of(&leaf.cert_pem))
+        .await
+        .unwrap();
+    assert_eq!(id.node_id, node);
+
+    cleanup(&pool, &[tenant]).await;
+}

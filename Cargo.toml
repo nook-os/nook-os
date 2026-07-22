@@ -60,6 +60,10 @@ sha2 = "0.10"
 # typed rather than shelling out to openssl, so certificate handling is testable
 # and a missing binary can't become a runtime surprise on someone's machine.
 rcgen = { version = "0.13", features = ["pem", "x509-parser"] }
+# Parse and verify presented client certificates. The "verify" feature is the
+# point: a certificate is only an identity if its signature actually chains to
+# a CA we trust.
+x509-parser = { version = "0.16", features = ["verify"] }
 hmac = "0.12"
 aes-gcm = "0.10"
 rand = "0.9"

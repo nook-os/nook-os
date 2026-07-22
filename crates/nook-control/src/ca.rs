@@ -397,3 +397,112 @@ pub async fn retire(db: &PgPool, tenant: TenantId, ca_id: Uuid) -> Result<()> {
     }
     Ok(())
 }
+
+// ── Verifying a presented certificate ───────────────────────────────────────
+
+/// Who a validated client certificate says it is.
+#[derive(Debug, Clone, Copy)]
+pub struct NodeIdentity {
+    pub node_id: Uuid,
+    pub tenant_id: Uuid,
+}
+
+/// Establish identity from a client certificate.
+///
+/// This is the whole trust decision, so it is deliberately paranoid and every
+/// check earns its place:
+///
+/// 1. The certificate parses and is inside its validity window.
+/// 2. Its subject names a node and a tenant — identity we put there, not
+///    anything the requester asked for.
+/// 3. Its signature verifies against one of THAT TENANT's trusted CAs. Any CA
+///    in the bundle is acceptable, which is what lets a rotation proceed
+///    without an outage; a CA belonging to a different tenant is not, which is
+///    what keeps tenants isolated.
+/// 4. The node exists, is not revoked, and its recorded tenant matches the one
+///    in the certificate. A certificate that claims a node in someone else's
+///    tenant is rejected even if it is otherwise perfectly valid — the
+///    certificate proves *who*, the tenant check decides *what*.
+pub async fn verify_node_cert(db: &PgPool, cert_der: &[u8]) -> Result<NodeIdentity> {
+    use x509_parser::prelude::*;
+
+    let (_, cert) =
+        X509Certificate::from_der(cert_der).context("client certificate does not parse")?;
+
+    if !cert.validity().is_valid() {
+        bail!("client certificate is outside its validity window");
+    }
+
+    let claimed_node = subject_value(&cert, "CN").context("certificate has no node id")?;
+    let claimed_org = subject_value(&cert, "O").context("certificate names no tenant")?;
+    let claimed_tenant = claimed_org
+        .strip_prefix("nookos:tenant:")
+        .context("certificate is not a NookOS node certificate")?
+        .to_string();
+
+    let node_id: Uuid = claimed_node
+        .parse()
+        .context("certificate's node id is not a uuid")?;
+    let tenant_id: Uuid = claimed_tenant
+        .parse()
+        .context("certificate's tenant is not a uuid")?;
+
+    // The node record is the authority on which tenant a machine belongs to.
+    // Comparing it against the certificate is what stops a valid certificate
+    // from one tenant being used to act in another.
+    let row: Option<(Uuid, Option<DateTime<Utc>>)> =
+        sqlx::query_as("SELECT tenant_id, revoked_at FROM nodes WHERE id = $1")
+            .bind(node_id)
+            .fetch_optional(db)
+            .await?;
+    let Some((actual_tenant, revoked_at)) = row else {
+        bail!("certificate names node {node_id}, which does not exist");
+    };
+    if actual_tenant != tenant_id {
+        bail!(
+            "certificate claims tenant {tenant_id} for node {node_id}, which belongs to {actual_tenant}"
+        );
+    }
+    if revoked_at.is_some() {
+        bail!("node {node_id} has been revoked");
+    }
+
+    // Finally the signature, against that tenant's bundle only.
+    let bundle = trust_bundle(db, TenantId(tenant_id)).await?;
+    if bundle.is_empty() {
+        bail!("tenant {tenant_id} trusts no CA");
+    }
+    let mut chained = false;
+    for ca in &bundle {
+        // `self::` — x509_parser's prelude exports a pem_to_der of its own.
+        let der = self::pem_to_der(&ca.cert_pem)?;
+        let Ok((_, ca_cert)) = X509Certificate::from_der(&der) else {
+            continue;
+        };
+        if cert.verify_signature(Some(ca_cert.public_key())).is_ok() {
+            chained = true;
+            break;
+        }
+    }
+    if !chained {
+        bail!("client certificate is not signed by any CA this tenant trusts");
+    }
+
+    Ok(NodeIdentity { node_id, tenant_id })
+}
+
+fn subject_value(cert: &x509_parser::certificate::X509Certificate, key: &str) -> Option<String> {
+    cert.subject()
+        .iter_attributes()
+        .find(|a| a.attr_type().to_id_string() == oid_for(key))
+        .and_then(|a| a.as_str().ok())
+        .map(str::to_string)
+}
+
+fn oid_for(key: &str) -> &'static str {
+    match key {
+        "CN" => "2.5.4.3",
+        "O" => "2.5.4.10",
+        _ => "",
+    }
+}

@@ -57,7 +57,13 @@ pub struct FlowState {
 pub enum Principal {
     /// A signed-in person (session cookie).
     User,
-    /// A joined machine, authenticated by its node token.
+    /// A joined machine. Authenticated by its client CERTIFICATE where the
+    /// connection has one, and by its node token otherwise — the token path is
+    /// transitional and disappears once every machine has enrolled.
+    ///
+    /// Either way the confinement is the same, which is the point: rebasing
+    /// identity onto certificates must not change *what a machine may do*,
+    /// only how it proves who it is.
     Node(nook_types::NodeId),
 }
 
@@ -72,6 +78,37 @@ pub struct AuthCtx {
 }
 
 impl AuthCtx {
+    /// Build a caller from a verified client certificate.
+    ///
+    /// `verify_node_cert` has already checked the chain, validity, revocation
+    /// and — critically — that the certificate's tenant matches the node
+    /// record it names. This just carries that decision into the type the rest
+    /// of the API authorises against, so `require_node_self` keeps working
+    /// unchanged: the certificate proves *who*, tenant scoping decides *what*.
+    pub async fn from_node_cert(state: &AppState, cert_der: &[u8]) -> Result<Self, ApiError> {
+        let id = crate::ca::verify_node_cert(&state.db, cert_der)
+            .await
+            .map_err(|e| ApiError::ForbiddenMsg(e.to_string()))?;
+
+        // A node acts as the tenant's owner for attribution, exactly as the
+        // node-token path does — it is a machine credential, not a person, and
+        // `require_user` is what keeps it from becoming one.
+        let owner: Option<(Uuid,)> = sqlx::query_as(
+            "SELECT id FROM users WHERE tenant_id = $1
+             ORDER BY (role = 'owner') DESC, created_at LIMIT 1",
+        )
+        .bind(id.tenant_id)
+        .fetch_optional(&state.db)
+        .await?;
+
+        Ok(AuthCtx {
+            session_id: AuthSessionId(id.node_id),
+            user_id: UserId(owner.map(|(u,)| u).unwrap_or(id.node_id)),
+            tenant_id: TenantId(id.tenant_id),
+            principal: Principal::Node(nook_types::NodeId(id.node_id)),
+        })
+    }
+
     /// Confine a machine credential to its own machine.
     ///
     /// A node token authenticates the machine it sits on. Letting it act on a
