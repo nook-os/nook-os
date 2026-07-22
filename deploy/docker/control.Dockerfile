@@ -4,6 +4,10 @@ WORKDIR /src
 RUN apt-get update && apt-get install -y --no-install-recommends pkg-config libssl-dev curl ca-certificates && rm -rf /var/lib/apt/lists/*
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
+# The installer and the agent skill are embedded with include_str!, so they
+# are build inputs, not runtime files — the build fails without them.
+COPY install ./install
+COPY skills ./skills
 # The node agent ships *with* the control plane, not beside it. Serving the
 # binary it was built alongside is what keeps a self-hosted fleet on one
 # version: /install.sh can only ever hand out this build.

@@ -9,7 +9,7 @@ import { api } from "@nookos/api";
 import { useWorkspaceContext } from "./context";
 import { useLive } from "./live";
 import { useNewWork } from "./newwork";
-import { useSessionTabs } from "./sessiontabs";
+import { useSessionTabs } from "./sessionTabsStore";
 import { askText, notify } from "./dialogs";
 
 interface MenuState {

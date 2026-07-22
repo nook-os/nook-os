@@ -16,7 +16,7 @@ import { useWorkspaceContext } from "../context";
 import { ScopeChip } from "../layout";
 import { SessionTabs } from "../SessionTabs";
 import { SessionWindows, SplitButtons } from "../SessionWindows";
-import { useSessionTabs } from "../sessiontabs";
+import { useSessionTabs } from "../sessionTabsStore";
 import { askConfirm, notify } from "../dialogs";
 
 const DIFF_PANEL_KEY = "nookos-diff-panel-open";

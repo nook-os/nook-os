@@ -2,6 +2,9 @@ FROM rust:1-slim-bookworm AS build
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
+# The agent skill is embedded with include_str!: a build input, not a
+# runtime file.
+COPY skills ./skills
 RUN cargo build --release -p nook-node
 
 FROM debian:bookworm-slim

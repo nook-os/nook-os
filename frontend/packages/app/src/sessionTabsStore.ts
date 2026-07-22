@@ -1,3 +1,8 @@
+// Named `sessionTabsStore`, not `sessiontabs`, because `SessionTabs.tsx` sits
+// beside it. Two files whose names differ only in case are distinct on Linux
+// and the SAME FILE on macOS and Windows, where the import resolved to the
+// wrong one and the frontend would not build at all. CI on Linux was happy;
+// every Mac was not.
 // VS-Code-style session tabs: every session you visit opens a tab; tabs
 // persist across reloads (localStorage) and closing a tab only stops viewing —
 // the tmux session keeps running (like closing a file tab in VS Code).
