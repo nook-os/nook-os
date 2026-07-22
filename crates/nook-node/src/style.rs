@@ -16,11 +16,9 @@ use std::sync::OnceLock;
 /// 256-colour approximations of the theme:
 ///   accent  #f5b301 → 214
 ///   ok      #2dd4a7 → 43
-///   info    #58a6ff → 75
 ///   err     #ff5c5c → 203
 const ACCENT: &str = "\x1b[38;5;214m";
 const OK: &str = "\x1b[38;5;43m";
-const INFO: &str = "\x1b[38;5;75m";
 const ERR: &str = "\x1b[38;5;203m";
 const DIM: &str = "\x1b[2m";
 const BOLD: &str = "\x1b[1m";
@@ -54,9 +52,6 @@ pub fn accent(s: &str) -> String {
 pub fn ok_c(s: &str) -> String {
     wrap(OK, s)
 }
-pub fn info(s: &str) -> String {
-    wrap(INFO, s)
-}
 pub fn err(s: &str) -> String {
     wrap(ERR, s)
 }
@@ -70,16 +65,6 @@ pub fn bold(s: &str) -> String {
 /// `✓ <line>` — something finished.
 pub fn success(line: &str) -> String {
     format!("{} {line}", ok_c("✓"))
-}
-
-/// `▸ <line>` — something is happening.
-pub fn step(line: &str) -> String {
-    format!("{} {line}", accent("▸"))
-}
-
-/// `✗ <line>` — it did not work.
-pub fn failure(line: &str) -> String {
-    format!("{} {line}", err("✗"))
 }
 
 /// A follow-up command worth running next. Indented and dim, so it reads as a
@@ -116,8 +101,6 @@ mod tests {
     #[test]
     fn markers_are_stable() {
         assert!(success("a").starts_with('✓'));
-        assert!(step("a").starts_with('▸'));
-        assert!(failure("a").starts_with('✗'));
         assert!(prompt_echo("a").starts_with('❯'));
         assert!(reply("a").starts_with('●'));
     }

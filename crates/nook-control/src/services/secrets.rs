@@ -35,7 +35,7 @@ pub async fn announce_new_checkout(
     .await
     .ok()
     .flatten();
-    if !has_secrets.is_some_and(|(n,)| n > 0) {
+    if has_secrets.is_none_or(|(n,)| n == 0) {
         return;
     }
     crate::events::record(

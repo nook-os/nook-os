@@ -147,6 +147,22 @@ pub async fn trust_bundle(db: &PgPool, tenant: TenantId) -> Result<Vec<TenantCa>
 ///
 /// Returns the CA record plus the decrypted key PEM. Refuses — loudly — if the
 /// stored certificate does not match its recorded fingerprint, rather than
+/// The `tenant_cas` row as sqlx hands it back: the `TenantCa` columns in
+/// declaration order, followed by the encrypted private key.
+///
+/// Named because eight anonymous tuple elements at the use site say nothing
+/// about which is which, and the order has to match the SELECT exactly.
+type CaRow = (
+    Uuid,
+    Uuid,
+    String,
+    String,
+    String,
+    DateTime<Utc>,
+    DateTime<Utc>,
+    Vec<u8>,
+);
+
 /// signing with something that isn't what the tenant enrolled against.
 pub async fn load_signer(
     db: &PgPool,
@@ -161,31 +177,20 @@ pub async fn load_signer(
     .fetch_optional(db)
     .await
     .map(|o| {
-        o.map(
-            |r: (
-                Uuid,
-                Uuid,
-                String,
-                String,
-                String,
-                DateTime<Utc>,
-                DateTime<Utc>,
-                Vec<u8>,
-            )| {
-                (
-                    TenantCa {
-                        id: r.0,
-                        tenant_id: r.1,
-                        state: r.2,
-                        cert_pem: r.3,
-                        fingerprint: r.4,
-                        not_after: r.5,
-                        created_at: r.6,
-                    },
-                    r.7,
-                )
-            },
-        )
+        o.map(|r: CaRow| {
+            (
+                TenantCa {
+                    id: r.0,
+                    tenant_id: r.1,
+                    state: r.2,
+                    cert_pem: r.3,
+                    fingerprint: r.4,
+                    not_after: r.5,
+                    created_at: r.6,
+                },
+                r.7,
+            )
+        })
     })?;
 
     let Some((ca, key_enc)) = row else {

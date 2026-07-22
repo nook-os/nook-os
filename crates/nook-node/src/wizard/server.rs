@@ -17,7 +17,7 @@ use super::tty;
 fn secret() -> String {
     use rand::RngCore;
     let mut b = [0u8; 32];
-    rand::thread_rng().fill_bytes(&mut b);
+    rand::rng().fill_bytes(&mut b);
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
@@ -464,7 +464,7 @@ fn write_private(path: &Path, contents: &str) -> Result<()> {
             .open(path)
             .with_context(|| format!("cannot write {}", path.display()))?;
         f.write_all(contents.as_bytes())?;
-        return Ok(());
+        Ok(())
     }
     #[cfg(not(unix))]
     {

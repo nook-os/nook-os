@@ -37,13 +37,6 @@ fn run_git(args: &[&str], cwd: Option<&Path>, ssh_key: Option<&Path>) -> Result<
     }
 }
 
-/// Derive "repo" from ".../repo.git" or ".../repo".
-pub fn repo_name_from_url(url: &str) -> Option<String> {
-    let trimmed = url.trim_end_matches('/').trim_end_matches(".git");
-    let name = trimmed.rsplit(['/', ':']).next()?.trim().to_string();
-    (!name.is_empty()).then_some(name)
-}
-
 fn safe_segment(s: &str) -> bool {
     !s.is_empty()
         && s != "."
@@ -498,7 +491,7 @@ pub fn read_workspace_file(checkout_path: &str, name: &str) -> Result<Vec<u8>, S
 
 #[cfg(test)]
 mod tests {
-    use super::{repo_name_from_url, repo_path_from_url};
+    use super::repo_path_from_url;
 
     #[test]
     fn derives_owner_and_repo_across_url_shapes() {
@@ -540,10 +533,12 @@ mod tests {
             repo_path_from_url("git@github.com:owner/..").as_deref(),
             None
         );
-        // A local path with no owner segment still yields the repo name.
+        // A local path has no real owner, so the segment before the repo is
+        // taken as one. "git" is a directory here rather than an account —
+        // harmless, since this only ever names a checkout directory.
         assert_eq!(
-            repo_name_from_url("/srv/git/solo.git").as_deref(),
-            Some("solo")
+            repo_path_from_url("/srv/git/solo.git").as_deref(),
+            Some("git/solo")
         );
     }
 }
