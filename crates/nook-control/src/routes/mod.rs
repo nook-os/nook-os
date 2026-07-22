@@ -28,6 +28,37 @@ use utoipa::OpenApi;
 use crate::openapi::ApiDoc;
 use crate::state::AppState;
 
+/// The agent's own door: only what a machine needs, and nothing a browser does.
+///
+/// Deliberately tiny. This listener is the one that will require a client
+/// certificate once mTLS lands, and its TLS has to terminate here rather than
+/// at the edge proxy — only the control plane knows which tenant CA to verify
+/// against. Keeping it to two routes means that handshake guards a surface
+/// small enough to reason about:
+///
+/// - `/api/v1/nodes/join` — first contact. Unauthenticated by design: a machine
+///   that has not joined has only its join token, and this is where it trades
+///   that token for an identity.
+/// - `/api/v1/ws/node` — the single persistent outbound connection.
+///
+/// `/healthz` rides along so a load balancer can probe this port too.
+///
+/// These routes stay mounted on the main router as well for now, so the
+/// existing fleet keeps connecting while machines migrate to the agent port.
+/// That duplication is transitional and goes away with mTLS, at which point
+/// the main port stops accepting node connections entirely.
+pub fn build_agent_router(state: AppState) -> Router {
+    Router::new()
+        .route("/healthz", get(health::healthz))
+        .nest(
+            "/api/v1",
+            Router::new()
+                .route("/nodes/join", post(join::join))
+                .route("/ws/node", get(crate::ws::node::node_ws)),
+        )
+        .with_state(state)
+}
+
 pub fn build_router(state: AppState) -> Router {
     let api = Router::new()
         .route("/auth/login", get(auth::login))

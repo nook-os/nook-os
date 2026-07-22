@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use sqlx::postgres::PgPoolOptions;
 use tracing_subscriber::EnvFilter;
@@ -72,6 +72,7 @@ async fn serve(db: sqlx::PgPool, cfg: Config) -> Result<()> {
     };
 
     let bind = cfg.bind.clone();
+    let agent_bind = cfg.agent_bind.clone();
     let state = AppState::new(db, cfg, oidc).await;
     // Join the cross-instance bus (LISTEN/NOTIFY): makes N control-plane
     // replicas cooperate. On a single instance it's a no-op fast path.
@@ -80,7 +81,20 @@ async fn serve(db: sqlx::PgPool, cfg: Config) -> Result<()> {
     tracing::info!(%instance, "control plane instance");
 
     let shutdown_db = state.db.clone();
-    let router = routes::build_router(state);
+    let router = routes::build_router(state.clone());
+
+    // The agent gets its own listener. Bound first so a port clash fails the
+    // boot loudly rather than leaving the fleet with nowhere to connect.
+    let agent_listener = tokio::net::TcpListener::bind(&agent_bind)
+        .await
+        .with_context(|| format!("cannot bind the agent port {agent_bind}"))?;
+    tracing::info!(bind = %agent_bind, "agent listener");
+    let agent_router = routes::build_agent_router(state);
+    tokio::spawn(async move {
+        if let Err(e) = axum::serve(agent_listener, agent_router).await {
+            tracing::error!(error = %e, "agent listener stopped");
+        }
+    });
 
     let listener = tokio::net::TcpListener::bind(&bind).await?;
     tracing::info!(%bind, "control plane listening");

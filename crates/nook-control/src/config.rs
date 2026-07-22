@@ -30,6 +30,17 @@ pub struct Config {
     /// image drops the build it was compiled with here.
     pub dist_dir: String,
 
+    /// Where the node agent connects, separate from the browser/API port.
+    ///
+    /// Two reasons they are split. The agent connection is the one that will
+    /// carry mutual TLS: its handshake has to terminate at the control plane
+    /// (only it can pick the right tenant CA), which means the edge proxy must
+    /// pass it through rather than terminate it — a different rule than the
+    /// browser API wants. And it keeps a machine credential and a browser
+    /// session on separate doors, so a proxy misconfiguration on one cannot
+    /// quietly widen the other.
+    pub agent_bind: String,
+
     // ── Artifact storage ────────────────────────────────────────────────
     /// `disk` (default) or `s3`. See `crate::storage`.
     pub artifact_store: String,
@@ -82,6 +93,7 @@ impl Config {
                 .map(|v| v == "true" || v == "1")
                 .unwrap_or(false),
 
+            agent_bind: env_opt("NOOK_AGENT_BIND").unwrap_or_else(|| "0.0.0.0:8081".into()),
             dist_dir: env_opt("NOOK_DIST_DIR")
                 .unwrap_or_else(|| "/usr/local/share/nook/dist".into()),
 

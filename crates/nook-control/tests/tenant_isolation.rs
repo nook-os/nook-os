@@ -46,6 +46,8 @@ fn test_config() -> Config {
         mcp_token: None,
         dev_join_token: None,
         dist_dir: "/nonexistent".into(),
+        // Port 0 = let the OS pick; these tests never bind it.
+        agent_bind: "127.0.0.1:0".into(),
         // Artifact storage is irrelevant to tenant isolation; disk with a
         // nonexistent directory keeps these tests off the network.
         artifact_store: "disk".into(),

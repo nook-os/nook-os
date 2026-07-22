@@ -59,6 +59,9 @@ services:
     environment:
       DATABASE_URL: postgres://nook:nook@postgres:5432/nook
       CONTROL_PLANE_BIND: 0.0.0.0:8080
+      # The node agent's own door (see Config::agent_bind). Separate from the
+      # browser API so mTLS can terminate here rather than at the edge proxy.
+      NOOK_AGENT_BIND: 0.0.0.0:8081
       CARGO_TARGET_DIR: /app/target-docker
       # Node binaries the "add node" modal offers. In production the control
       # image ships the build it was compiled with; in dev, populate it with
@@ -81,6 +84,7 @@ services:
       NOOK_ARTIFACT_REDIRECT: ${NOOK_ARTIFACT_REDIRECT:-false}
     ports:
       - "8080:8080"
+      - "8081:8081"
     volumes:
       - .:/app
       - cargo-registry:/usr/local/cargo/registry

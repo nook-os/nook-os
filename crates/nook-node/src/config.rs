@@ -191,17 +191,11 @@ mod security_tests {
         let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear();
         // Not insecure, and no error: the ordinary path stays silent.
-        assert_eq!(
-            check_server_security("https://nook.example.com", false).unwrap(),
-            false
-        );
+        assert!(!check_server_security("https://nook.example.com", false).unwrap());
         // Even in production, and even with the hatch set — https is just fine.
         std::env::set_var("APP_ENV", "production");
         std::env::set_var("NOOK_INSECURE", "1");
-        assert_eq!(
-            check_server_security("https://nook.example.com", false).unwrap(),
-            false
-        );
+        assert!(!check_server_security("https://nook.example.com", false).unwrap());
         clear();
     }
 
