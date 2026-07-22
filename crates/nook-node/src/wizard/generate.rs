@@ -582,3 +582,26 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod plist_dump {
+    /// Writes the plist to `$NOOK_PLIST_OUT` so a real plist parser can check
+    /// it — no Rust dependency here understands the format, and a malformed
+    /// plist fails silently on macOS rather than loudly.
+    ///
+    ///   NOOK_PLIST_OUT=/tmp/n.plist cargo test -p nook-node dump_launchd_plist
+    ///   python3 -c "import plistlib;print(plistlib.load(open('/tmp/n.plist','rb')))"
+    ///
+    /// Skipped unless the variable is set, so a normal run pays nothing.
+    #[test]
+    fn dump_launchd_plist() {
+        if let Ok(path) = std::env::var("NOOK_PLIST_OUT") {
+            let p = super::node_launchd_plist(
+                "/Users/ryan/.local/bin/nook",
+                "/Users/ryan",
+                "dev.nookos.node",
+            );
+            std::fs::write(path, p).expect("write plist");
+        }
+    }
+}
