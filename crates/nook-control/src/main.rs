@@ -81,6 +81,7 @@ async fn serve(db: sqlx::PgPool, cfg: Config) -> Result<()> {
     let agent_bind = cfg.agent_bind.clone();
     let agent_tls_cert = cfg.agent_tls_cert.clone();
     let agent_tls_key = cfg.agent_tls_key.clone();
+    let is_production = cfg.is_production();
     let state = AppState::new(db, cfg, oidc).await;
     // Join the cross-instance bus (LISTEN/NOTIFY): makes N control-plane
     // replicas cooperate. On a single instance it's a no-op fast path.
@@ -111,6 +112,17 @@ async fn serve(db: sqlx::PgPool, cfg: Config) -> Result<()> {
                 agent_router,
                 tls,
             ));
+        }
+        (None, None) if is_production => {
+            // The agent port carries enrolment and every node's connection.
+            // Serving it in the clear in production would put join tokens and
+            // CSRs on the wire, and the warning below is too easy to miss in a
+            // log — this is a misconfiguration that should stop the process.
+            anyhow::bail!(
+                "the agent listener on {agent_bind} would be PLAINTEXT: set \
+                 NOOK_AGENT_TLS_CERT and NOOK_AGENT_TLS_KEY (see \
+                 deploy/enable-agent-mtls.sh)"
+            );
         }
         (None, None) => {
             tracing::warn!(

@@ -71,7 +71,7 @@ pub async fn enroll(
         .as_ref()
         .map(|c| c.node_name.clone())
         .or_else(|| name.map(str::to_string))
-        .unwrap_or_else(|| hostname_guess());
+        .unwrap_or_else(hostname_guess);
 
     println!("▸ generating a keypair for {hostname}");
     let (csr_pem, key_pem) = make_csr(&hostname)?;
