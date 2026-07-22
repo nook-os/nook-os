@@ -650,18 +650,32 @@ fn print_detections(caps: &Capabilities) {
             ok(&format!("Detecting GPU... {} {}", gpu.vendor, gpu.model));
         }
     }
-    ok(&format!(
-        "Detecting Docker... {}",
-        if caps.docker { "\u{2713}" } else { "\u{2717}" }
-    ));
-    ok(&format!(
-        "Detecting tmux... {}",
-        if caps.tmux { "\u{2713}" } else { "\u{2717}" }
-    ));
-    ok(&format!(
-        "Detecting git... {}",
-        caps.git.as_deref().unwrap_or("\u{2717}")
-    ));
+    // `ok()` prefixes a ✓ unconditionally, so using it for a detection RESULT
+    // printed "✓ Detecting tmux... ✗" — which reads as found. The marker has
+    // to carry the answer, not decorate the question.
+    fn found(label: &str, present: bool, detail: &str) {
+        let mark = if present {
+            style::ok_c("\u{2713}")
+        } else {
+            style::err("\u{2717}")
+        };
+        println!("{mark} {label} {}", style::dim(detail));
+    }
+    found(
+        "Docker",
+        caps.docker,
+        if caps.docker { "" } else { "not found" },
+    );
+    found(
+        "tmux",
+        caps.tmux,
+        &capabilities::detect_tmux().unwrap_or_else(|| "not found".into()),
+    );
+    found(
+        "git",
+        caps.git.is_some(),
+        caps.git.as_deref().unwrap_or("not found"),
+    );
     ok("Detecting installed runtimes...");
     println!();
     for (label, bin) in [

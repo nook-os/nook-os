@@ -105,7 +105,18 @@ export function NodesPage() {
                           })
                         : "never"}
                     </td>
-                    <td style={{ display: "flex", gap: 6, justifyContent: "flex-end" }}>
+                    {/* The flex box goes INSIDE the cell. Setting display:flex
+                        on a <td> removes it from table layout entirely, so it
+                        stops sharing the row's column widths and the buttons
+                        drift out of line with every other row. */}
+                    <td style={{ textAlign: "right", whiteSpace: "nowrap" }}>
+                      <span
+                        style={{
+                          display: "inline-flex",
+                          gap: 6,
+                          justifyContent: "flex-end",
+                        }}
+                      >
                       {status === "online" && (
                         <button
                           className="btn small"
@@ -135,6 +146,7 @@ export function NodesPage() {
                       >
                         remove
                       </button>
+                      </span>
                     </td>
                   </tr>
                 );

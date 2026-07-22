@@ -26,12 +26,24 @@ export function Connect({ onDone }: { onDone: () => void }) {
     setBusy(true);
 
     const url = server.trim().replace(/\/+$/, "");
+
+    // 8081 is the agent port: mutual TLS, for nodes. It serves /healthz, so a
+    // naive probe passes and then everything else 404s — which reads as "it
+    // connected and then broke". Say what to use instead.
+    if (/:8081(\/|$)/.test(url)) {
+      setBusy(false);
+      setError(
+        "That is the agent port, which only nodes use. Use the same address " +
+          "you open in a browser — usually without a port.",
+      );
+      return;
+    }
     // Address first, then credential: separating the two means "wrong host"
     // and "wrong token" arrive as different sentences.
     const reachable = await probeControlPlane(url);
     if (!reachable.ok) {
       setBusy(false);
-      setError(`Could not reach ${url} — ${reachable.detail}`);
+      setError(reachable.detail);
       return;
     }
 

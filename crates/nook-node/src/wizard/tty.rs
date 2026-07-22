@@ -87,7 +87,12 @@ impl Tty {
         self.say(question);
         for (i, (label, detail)) in options.iter().enumerate() {
             let marker = if i == default { " (recommended)" } else { "" };
-            self.say(&format!("  [{}] {label}{marker}", i + 1));
+            self.say(&format!(
+                "  [{}] {}{}",
+                i + 1,
+                crate::style::bold(label),
+                crate::style::dim(marker)
+            ));
             if !detail.is_empty() {
                 self.say(&format!("      {detail}"));
             }
@@ -102,7 +107,16 @@ impl Tty {
     }
 
     pub fn say(&mut self, line: &str) {
-        let _ = writeln!(self.writer, "{line}");
+        // Colour the markers the wizard emits, so a ✓ reads as done and a ✗ as
+        // not. `style` decides whether colour is wanted at all, and writing to
+        // /dev/tty means it always is when a person is watching.
+        let coloured = match line.trim_start().chars().next() {
+            Some(m @ ('\u{2713}' | '\u{2717}' | '\u{25B8}' | '\u{26A0}')) => {
+                line.replacen(m, &crate::style::forced(m), 1)
+            }
+            _ => line.to_string(),
+        };
+        let _ = writeln!(self.writer, "{coloured}");
     }
 }
 

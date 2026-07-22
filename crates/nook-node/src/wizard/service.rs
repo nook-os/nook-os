@@ -8,7 +8,7 @@
 
 use anyhow::{bail, Context, Result};
 
-use super::generate::node_unit;
+use super::generate::{node_launchd_plist, node_unit};
 use super::tty::Tty;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -17,6 +17,8 @@ pub enum Service {
     UserSystemd,
     /// `/etc/systemd/system`, running as a named user.
     SystemSystemd,
+    /// A launchd agent on macOS: runs as you, starts at login, restarts itself.
+    Launchd,
     /// The node in a container.
     Docker,
     /// Nothing installed; print the command.
@@ -34,9 +36,34 @@ fn have(cmd: &str) -> bool {
 
 /// Ask how the agent should be kept running.
 pub fn choose(t: &mut Tty) -> Result<Service> {
+    // macOS has no systemd; launchd is the equivalent and is what a Mac user
+    // expects when they ask for "always running". Offering only "run it
+    // yourself" there was a gap, not a design decision.
+    if have("launchctl") && !have("systemctl") {
+        let pick = t.choose(
+            "How should the agent stay running?",
+            &[
+                (
+                    "launchd agent",
+                    "Starts at login and restarts itself. No sudo — it runs as you.",
+                ),
+                (
+                    "Docker container",
+                    "Only sees tooling inside the container — good for CI, poor for a laptop.",
+                ),
+                ("Don't install a service", "Print the command and stop."),
+            ],
+            0,
+        )?;
+        return Ok(match pick {
+            0 => Service::Launchd,
+            1 => Service::Docker,
+            _ => Service::None,
+        });
+    }
+
     if !have("systemctl") {
-        // macOS, or a container. Offering systemd here would be offering
-        // something that cannot work.
+        // Neither init system: a container, or something unusual.
         let pick = t.choose(
             "How should the agent stay running?",
             &[
@@ -138,6 +165,27 @@ pub fn install(t: &mut Tty, service: Service, exec: &str) -> Result<()> {
             run(&["sudo", "systemctl", "enable", "--now", "nook-node"])?;
             t.say("✓ systemd system service enabled");
             t.say("  Logs:  sudo journalctl -u nook-node -f");
+            Ok(())
+        }
+
+        Service::Launchd => {
+            let label = "dev.nookos.node";
+            let dir = format!("{home}/Library/LaunchAgents");
+            std::fs::create_dir_all(&dir)?;
+            let path = format!("{dir}/{label}.plist");
+            std::fs::write(&path, node_launchd_plist(exec, &home, label))?;
+            t.say(&format!("✓ {path}"));
+
+            // Replace any previous copy first: `load` on an already-loaded
+            // label fails, and a re-run of setup is an ordinary thing to do.
+            let _ = run(&["launchctl", "unload", &path]);
+            run(&["launchctl", "load", "-w", &path])?;
+
+            t.say("✓ launchd agent loaded");
+            t.say(&format!(
+                "  Logs:  tail -f {home}/Library/Logs/nook-node.log"
+            ));
+            t.say(&format!("  Stop:  launchctl unload {path}"));
             Ok(())
         }
 

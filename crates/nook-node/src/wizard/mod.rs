@@ -10,4 +10,5 @@ pub mod node;
 pub mod server;
 pub mod service;
 pub mod skills;
+pub mod tmux_setup;
 pub mod tty;

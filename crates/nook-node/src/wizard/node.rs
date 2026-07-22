@@ -123,6 +123,12 @@ pub async fn setup(args: SetupArgs) -> Result<()> {
     cfg.workspace_roots = vec![workspace_root];
     cfg.save()?;
 
+    // ---- tmux, before anything that depends on it
+    //
+    // Checked here rather than at first use: a node that joins and then cannot
+    // open a terminal has failed in the least diagnosable way possible.
+    let has_tmux = super::tmux_setup::ensure(&mut t)?;
+
     // ---- keep it running
     let exec = std::env::current_exe()
         .map(|p| p.display().to_string())
@@ -142,6 +148,11 @@ pub async fn setup(args: SetupArgs) -> Result<()> {
     t.say("");
     t.say("────────────────────────────────────────────────────────────");
     t.say(&format!("  '{name}' is set up."));
+    if !has_tmux {
+        t.say("");
+        t.say("  ⚠ tmux is still missing — this node will appear online but");
+        t.say("    every session will fail to open until it is installed.");
+    }
     t.say("");
     t.say("  Open the control plane and it should be listed as online.");
     t.say("────────────────────────────────────────────────────────────");

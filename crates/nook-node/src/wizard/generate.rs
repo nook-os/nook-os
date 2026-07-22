@@ -326,6 +326,58 @@ pub fn node_unit(user_mode: bool, exec: &str, home: &str, unix_user: &str) -> St
     s
 }
 
+/// A launchd agent for macOS.
+///
+/// The equivalent of the systemd user unit: runs as the person, starts at
+/// login, and restarts on its own. `KeepAlive` is the counterpart of
+/// `Restart=always` — without it launchd starts the agent once and never
+/// again, which looks identical to working right up until the first network
+/// blip.
+///
+/// Unlike systemd there is no KillMode to worry about: launchd does not kill
+/// the process group by default, so the tmux server survives a restart of the
+/// agent without any special handling.
+pub fn node_launchd_plist(exec: &str, home: &str, label: &str) -> String {
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>{label}</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>{exec}</string>
+    <string>run</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>WorkingDirectory</key>
+  <string>{home}</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key>
+    <string>{home}</string>
+    <key>RUST_LOG</key>
+    <string>nook=info</string>
+    <!-- launchd gives an agent a minimal PATH. The node spawns the person's
+         own tooling, so it needs the paths a login shell would have —
+         Homebrew on both Apple silicon and Intel, plus the usual. -->
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+  <key>StandardOutPath</key>
+  <string>{home}/Library/Logs/nook-node.log</string>
+  <key>StandardErrorPath</key>
+  <string>{home}/Library/Logs/nook-node.log</string>
+</dict>
+</plist>
+"#
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -445,6 +497,22 @@ mod tests {
             cfg["OIDC_REDIRECT_URL"],
             "https://nook.example.com/api/v1/auth/callback"
         );
+    }
+
+    /// launchd starts a job once unless told otherwise. Without KeepAlive the
+    /// agent runs until the first disconnect and then quietly stays dead.
+    #[test]
+    fn the_launchd_agent_restarts_itself() {
+        let p = node_launchd_plist("/Users/x/.local/bin/nook", "/Users/x", "dev.nookos.node");
+        assert!(p.contains("<key>KeepAlive</key>"));
+        assert!(p.contains("<key>RunAtLoad</key>"));
+        // The node spawns the user's tooling; a minimal PATH breaks every
+        // runtime that lives in Homebrew.
+        assert!(
+            p.contains("/opt/homebrew/bin"),
+            "Apple silicon Homebrew missing"
+        );
+        assert!(p.contains("/usr/local/bin"), "Intel Homebrew missing");
     }
 
     /// Losing this is losing every terminal the user had open.

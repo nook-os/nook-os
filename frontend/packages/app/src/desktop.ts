@@ -77,9 +77,18 @@ export async function probeControlPlane(
     if (!res.ok) return { ok: false, detail: `answered ${res.status}` };
     return { ok: true, detail: "" };
   } catch (e) {
+    // A blocked cross-origin request and an unreachable host are the same
+    // TypeError here — the browser refuses to say which, deliberately. Naming
+    // only the second sent someone chasing DNS for a server that was answering
+    // perfectly well, so name both.
+    const why = e instanceof Error ? e.message : String(e);
     return {
       ok: false,
-      detail: e instanceof Error ? e.message : "could not reach it",
+      detail:
+        `Could not read a response from ${url}. Either it is unreachable, or ` +
+        `it is running a version from before desktop support and is refusing ` +
+        `the request. Opening ${url}/healthz in a browser tells you which: if ` +
+        `that works, the control plane needs updating. (${why})`,
     };
   }
 }

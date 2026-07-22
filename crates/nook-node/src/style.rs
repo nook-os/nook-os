@@ -83,6 +83,24 @@ pub fn reply(line: &str) -> String {
     format!("{} {line}", ok_c("●"))
 }
 
+/// Colour a marker unconditionally.
+///
+/// For writers that are a terminal by construction: the setup wizard holds
+/// /dev/tty open precisely so it works under `curl … | sh`, where stdout is a
+/// pipe while a person is very much watching. Deciding from stdout there would
+/// strip colour from the one output that always has a reader — but making
+/// `enabled()` itself lenient would put escape codes into `nook get … | grep`,
+/// which is worse. So the exception is explicit and local.
+pub fn forced(marker: char) -> String {
+    let code = match marker {
+        '\u{2713}' => OK,
+        '\u{2717}' | '\u{26A0}' => ERR,
+        '\u{25B8}' => ACCENT,
+        _ => return marker.to_string(),
+    };
+    format!("{code}{marker}{RESET}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -94,6 +112,18 @@ mod tests {
         assert_eq!(accent("x"), "x");
         assert_eq!(success("done"), "✓ done");
         assert!(!reply("hi").contains('\x1b'));
+    }
+
+    /// `forced` must colour even under a pipe — that is its whole reason to
+    /// exist — while `enabled()` stays strict for everything else.
+    #[test]
+    fn forced_colours_regardless_of_stdout() {
+        assert!(forced('\u{2713}').contains('\x1b'));
+        assert!(forced('\u{2717}').contains('\x1b'));
+        // Unknown markers pass through rather than gaining stray codes.
+        assert_eq!(forced('x'), "x");
+        // And the strict path is unaffected.
+        assert_eq!(accent("x"), "x");
     }
 
     /// The glyphs are part of the contract: the web demo and the docs show
