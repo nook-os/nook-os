@@ -1,23 +1,26 @@
-//! Node binary distribution: how `nook` gets onto another machine, and how it
-//! stays the same version as the control plane it talks to.
+//! Getting `nook` onto another machine.
 //!
-//! A self-hosted fleet drifts the moment installing the agent is a manual job,
-//! so the control plane ships the binary it was built alongside. One artifact
-//! directory, one install script, one command to run on the new machine — and
-//! the same command, without a token, is the updater.
+//! The control plane generates the install script but does NOT host the
+//! binaries: those come from the project's GitHub releases. Hosting them here
+//! was a mistake worth naming — a control plane could only ever serve what its
+//! own build host could compile, which meant no macOS build without shipping a
+//! second upload path, and it quietly made every deployment a binary mirror
+//! responsible for bytes it never built.
+//!
+//! The script is still generated rather than static, because the *server URL*
+//! genuinely has to be baked in: it is copied to a machine that has never
+//! heard of this instance. Binary bytes come from the tag; "which control
+//! plane do I join" comes from here.
 //!
 //! Artifacts are named `nook-<os>-<arch>` (`nook-linux-x86_64`,
-//! `nook-darwin-aarch64`). The name is the whole protocol: the install script
-//! derives it from `uname`, and anything dropped in the directory following
-//! that convention is offered without further configuration.
+//! `nook-darwin-aarch64`) — the install script derives that from `uname` and
+//! asks GitHub for it.
 
-use axum::body::Body;
-use axum::extract::{Path, State};
+use axum::extract::State;
 use axum::http::{header, HeaderMap, StatusCode};
-use axum::response::{IntoResponse, Redirect, Response};
+use axum::response::{IntoResponse, Response};
 use axum::Json;
 use nook_types::*;
-use sha2::{Digest, Sha256};
 
 use crate::error::ApiResult;
 use crate::state::AppState;
@@ -38,18 +41,6 @@ const KNOWN_PLATFORMS: &[(&str, &str, &str)] = &[
 
 fn artifact_name(os: &str, arch: &str) -> String {
     format!("nook-{os}-{arch}")
-}
-
-/// Reject anything that isn't a bare artifact name. The directory is served
-/// unauthenticated, so path traversal here would be a file-read primitive.
-fn safe_artifact(name: &str) -> bool {
-    !name.is_empty()
-        && name.len() <= 64
-        && !name.contains('/')
-        && !name.contains("..")
-        && name
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
 }
 
 /// Public URL of this instance as the *caller* reached it.
@@ -88,37 +79,25 @@ pub async fn releases(
 ) -> ApiResult<Json<NodeReleases>> {
     let base = request_base(&headers, &state);
     let version = VERSION.to_string();
+    let repo = state.cfg.releases_repo.clone();
 
-    // A HEAD per known platform rather than one listing: there are four of
-    // them, and head() is what carries the checksum a node needs to verify its
-    // download. Cheap enough, and correct for every backend.
-    let prefix = state.cfg.artifact_prefix.clone();
-    let mut artifacts = Vec::new();
-    for (os, arch, label) in KNOWN_PLATFORMS {
-        let filename = artifact_name(os, arch);
-        let key = crate::storage::artifact_key(&prefix, &version, &filename);
-
-        let (size, sha256) = match state.artifacts.head(&key).await.ok().flatten() {
-            Some(meta) => (meta.size, meta.sha256.unwrap_or_default()),
-            // Nothing published for that platform; fall back to the binary the
-            // container image shipped, which is the normal case for the
-            // platform the server itself was built on.
-            None => match legacy_meta(&state, &filename).await {
-                Some(pair) => pair,
-                None => continue,
-            },
-        };
-
-        artifacts.push(NodeArtifact {
-            os: (*os).to_string(),
-            arch: (*arch).to_string(),
-            label: (*label).to_string(),
-            filename: filename.clone(),
-            size,
-            sha256,
-            url: format!("{base}/dist/{filename}"),
-        });
-    }
+    // Every platform is offered, because GitHub — not this server's build host
+    // — decides what exists. A machine that asks for a platform with no asset
+    // published gets a 404 from GitHub, which is a clearer failure than this
+    // server pretending the platform is unsupported.
+    let artifacts = KNOWN_PLATFORMS
+        .iter()
+        .map(|(os, arch, label)| {
+            let filename = artifact_name(os, arch);
+            NodeArtifact {
+                os: (*os).to_string(),
+                arch: (*arch).to_string(),
+                label: (*label).to_string(),
+                url: release_asset_url(&repo, &filename),
+                filename,
+            }
+        })
+        .collect::<Vec<_>>();
 
     Ok(Json(NodeReleases {
         version,
@@ -128,140 +107,12 @@ pub async fn releases(
     }))
 }
 
-/// Size and digest of a pre-versioning artifact sitting directly in
-/// `dist_dir`, which is what the container image still produces for its own
-/// platform.
-async fn legacy_meta(state: &AppState, filename: &str) -> Option<(u64, String)> {
-    let path = crate::storage::disk::legacy_path(&state.cfg.dist_dir, filename)?;
-    let bytes = tokio::fs::read(&path).await.ok()?;
-    Some((bytes.len() as u64, format!("{:x}", Sha256::digest(&bytes))))
-}
-
-/// Serve an artifact. Unauthenticated on purpose: it is fetched by a machine
-/// that has no session yet and nothing but a join token, and the binary is the
-/// same one anyone can build from the public source.
-pub async fn download(State(state): State<AppState>, Path(name): Path<String>) -> Response {
-    serve_artifact(state, VERSION.to_string(), name).await
-}
-
-/// Pin a version: `/dist/0.1.0/nook-darwin-aarch64`. Same handler, explicit
-/// version — how a machine stays on a build while the server moves on.
-pub async fn download_versioned(
-    State(state): State<AppState>,
-    Path((version, name)): Path<(String, String)>,
-) -> Response {
-    serve_artifact(state, version, name).await
-}
-
-async fn serve_artifact(state: AppState, version: String, name: String) -> Response {
-    if !safe_artifact(&name) || !safe_artifact(&version) {
-        return (StatusCode::BAD_REQUEST, "bad artifact name").into_response();
-    }
-    let key = crate::storage::artifact_key(&state.cfg.artifact_prefix, &version, &name);
-
-    // Redirecting hands the download straight to the object store, which is
-    // faster and keeps large binaries out of this process — but it leaks the
-    // store's hostname into install instructions, so it's opt-in.
-    if state.cfg.artifact_redirect {
-        if let Ok(Some(url)) = state
-            .artifacts
-            .presign(&key, std::time::Duration::from_secs(300))
-            .await
-        {
-            return Redirect::temporary(&url).into_response();
-        }
-    }
-
-    let bytes = match state.artifacts.get(&key).await {
-        Ok(b) => Some(b),
-        // Fall back to the pre-versioning layout so an image that shipped its
-        // own binary keeps working after this upgrade.
-        Err(_) => match crate::storage::disk::legacy_path(&state.cfg.dist_dir, &name) {
-            Some(path) => tokio::fs::read(path).await.ok(),
-            None => None,
-        },
-    };
-
-    match bytes {
-        Some(bytes) => (
-            StatusCode::OK,
-            [
-                (header::CONTENT_TYPE, "application/octet-stream".to_string()),
-                (
-                    header::CONTENT_DISPOSITION,
-                    format!("attachment; filename=\"{name}\""),
-                ),
-            ],
-            Body::from(bytes),
-        )
-            .into_response(),
-        None => (
-            StatusCode::NOT_FOUND,
-            format!(
-                "no {name} for version {version} — nothing has been published for \
-                 that platform yet (see `nook publish`)"
-            ),
-        )
-            .into_response(),
-    }
-}
-
-/// Publish a build. This is how a macOS binary reaches a Linux-built server:
-/// someone compiles it on a Mac and uploads it here.
+/// The `latest` release asset for a platform.
 ///
-/// Requires a *user* — publishing a binary that every machine in the fleet will
-/// execute is the most consequential write in the system, and a node token is a
-/// credential sitting on a box that runs other people's code.
-#[utoipa::path(put, path = "/api/v1/node/artifacts/{version}/{name}",
-    operation_id = "publish_artifact",
-    params(("version" = String, Path,), ("name" = String, Path,)),
-    // The body is the binary itself, so it's described rather than typed:
-    // utoipa has no schema for raw bytes and inventing one would be a lie.
-    request_body(content = String, description = "the binary, raw", content_type = "application/octet-stream"),
-    responses((status = 200, body = OpResponse), (status = 400), (status = 403)))]
-pub async fn publish(
-    State(state): State<AppState>,
-    auth: crate::auth::AuthCtx,
-    Path((version, name)): Path<(String, String)>,
-    body: axum::body::Bytes,
-) -> ApiResult<Json<OpResponse>> {
-    auth.require_user()?;
-    if !safe_artifact(&name) || !safe_artifact(&version) {
-        return Err(crate::error::ApiError::BadRequest(
-            "artifact and version must be plain names".into(),
-        ));
-    }
-    if body.is_empty() {
-        return Err(crate::error::ApiError::BadRequest(
-            "refusing to publish an empty artifact".into(),
-        ));
-    }
-
-    let sha = format!("{:x}", Sha256::digest(&body));
-    let size = body.len() as u64;
-    let key = crate::storage::artifact_key(&state.cfg.artifact_prefix, &version, &name);
-    state
-        .artifacts
-        .put(&key, body.to_vec())
-        .await
-        .map_err(crate::error::ApiError::Internal)?;
-
-    crate::events::record(
-        &state,
-        auth.tenant_id,
-        crate::events::EventDraft::new("node.artifact_published")
-            .actor("user", auth.user_id.0)
-            .payload(serde_json::json!({
-                "artifact": name, "version": version, "size": size, "sha256": sha
-            })),
-    )
-    .await;
-
-    Ok(Json(OpResponse {
-        ok: true,
-        path: Some(key),
-        message: format!("published {name} {version} ({size} bytes, sha256 {sha})"),
-    }))
+/// `releases/latest/download/<asset>` always resolves to the newest published
+/// release, so the install script never has to know a version number.
+pub fn release_asset_url(repo: &str, filename: &str) -> String {
+    format!("https://github.com/{repo}/releases/latest/download/{filename}")
 }
 
 /// `curl -fLsS <server>/install.sh | sh -s -- --token nook_join_…`
@@ -274,6 +125,13 @@ pub async fn install_script(State(state): State<AppState>, headers: HeaderMap) -
     let base = request_base(&headers, &state);
     let script = INSTALL_SH
         .replace("@@SERVER@@", &base)
+        .replace(
+            "@@RELEASES@@",
+            &format!(
+                "https://github.com/{}/releases/latest/download",
+                state.cfg.releases_repo
+            ),
+        )
         .replace("@@VERSION@@", VERSION);
     (
         StatusCode::OK,
@@ -342,10 +200,10 @@ artifact="nook-$os-$arch"
 command -v curl >/dev/null 2>&1 || die "curl is required"
 
 # --- download ---------------------------------------------------------------
-say "Fetching $artifact from $SERVER"
+say "Fetching $artifact from @@RELEASES@@"
 tmp=$(mktemp)
 trap 'rm -f "$tmp"' EXIT
-curl -fLsS "$SERVER/dist/$artifact" -o "$tmp" \
+curl -fLsS "@@RELEASES@@/$artifact" -o "$tmp" \
   || die "no build for $os/$arch on this server (see Nodes → add node for what is available)"
 chmod +x "$tmp"
 

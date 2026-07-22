@@ -871,8 +871,10 @@ pub struct NodeArtifact {
     /// Human label for the picker ("macOS · Apple silicon").
     pub label: String,
     pub filename: String,
-    pub size: u64,
-    pub sha256: String,
+    /// Where to download it — a GitHub release asset. The control plane no
+    /// longer hosts binaries, so it deliberately reports neither size nor
+    /// checksum: it cannot attest to bytes it does not serve, and a stale
+    /// digest is worse than none.
     pub url: String,
 }
 

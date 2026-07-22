@@ -123,12 +123,6 @@ pub fn build_router(state: AppState) -> Router {
         .route("/nodes", get(nodes::list))
         .route("/nodes/{id}", get(nodes::get_one).delete(nodes::delete))
         .route("/node/releases", get(dist::releases))
-        .route(
-            "/node/artifacts/{version}/{name}",
-            // Node binaries are tens of megabytes; axum's default cap is 2MB,
-            // which turns a perfectly good upload into a bewildering 413.
-            put(dist::publish).layer(axum::extract::DefaultBodyLimit::max(512 * 1024 * 1024)),
-        )
         .route("/nodes/join-tokens", post(join::create_join_token))
         .route("/nodes/join", post(join::join))
         .route("/ws/ui", get(crate::ws::ui::ui_ws))
@@ -211,8 +205,6 @@ pub fn build_router(state: AppState) -> Router {
         // Both unauthenticated: they are fetched by a machine that has no
         // session yet, holding nothing but a join token.
         .route("/install.sh", get(dist::install_script))
-        .route("/dist/{name}", get(dist::download))
-        .route("/dist/{version}/{name}", get(dist::download_versioned))
         .route(
             "/.well-known/oauth-protected-resource",
             get(oauth_protected_resource),

@@ -21,7 +21,6 @@ use utoipa::OpenApi;
         crate::routes::workspaces::get_one,
         crate::routes::workspaces::create,
         crate::routes::dist::releases,
-        crate::routes::dist::publish,
         crate::routes::workspaces::rename,
         crate::routes::workspaces::delete,
         crate::routes::workspaces::git_status,

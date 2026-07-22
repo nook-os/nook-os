@@ -26,8 +26,6 @@ type Artifact = {
   arch: string;
   label: string;
   filename: string;
-  size: number;
-  sha256: string;
   url: string;
 };
 
@@ -119,7 +117,10 @@ export function AddNodeModal({ onClose }: { onClose: () => void }) {
   // its address is a fallback, because a proxy can rewrite Host to something
   // only the cluster can resolve.
   const server = window.location.origin || releases?.base_url || "";
-  const downloadUrl = (a: Artifact) => `${server}/dist/${a.filename}`;
+  // The control plane no longer hosts binaries — it reports where they live
+  // (a GitHub release asset), so use the URL it gives us rather than building
+  // one against this server.
+  const downloadUrl = (a: Artifact) => a.url;
   const current =
     artifacts.find((a) => a.os === picked.os && a.arch === picked.arch) ?? null;
 
@@ -205,8 +206,7 @@ export function AddNodeModal({ onClose }: { onClose: () => void }) {
                   <Download size={12} /> {current.filename}
                 </a>{" "}
                 <span className="faint small">
-                  {(current.size / 1_000_000).toFixed(1)} MB · sha256{" "}
-                  {current.sha256.slice(0, 12)}…
+                  from GitHub releases
                 </span>
                 <CopyLine
                   label="Or fetch it directly:"

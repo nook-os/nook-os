@@ -725,63 +725,6 @@
         }
       }
     },
-    "/api/v1/node/artifacts/{version}/{name}": {
-      "put": {
-        "tags": [
-          "crate::routes::dist"
-        ],
-        "summary": "Publish a build. This is how a macOS binary reaches a Linux-built server:\nsomeone compiles it on a Mac and uploads it here.",
-        "description": "Requires a *user* — publishing a binary that every machine in the fleet will\nexecute is the most consequential write in the system, and a node token is a\ncredential sitting on a box that runs other people's code.",
-        "operationId": "publish_artifact",
-        "parameters": [
-          {
-            "name": "version",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "name",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "description": "the binary, raw",
-          "content": {
-            "application/octet-stream": {
-              "schema": {
-                "type": "string"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "description": "",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/OpResponse"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": ""
-          },
-          "403": {
-            "description": ""
-          }
-        }
-      }
-    },
     "/api/v1/node/releases": {
       "get": {
         "tags": [
@@ -4277,8 +4220,6 @@
           "arch",
           "label",
           "filename",
-          "size",
-          "sha256",
           "url"
         ],
         "properties": {
@@ -4297,16 +4238,9 @@
             "type": "string",
             "description": "`linux` | `darwin`, as `uname -s` lowercased."
           },
-          "sha256": {
-            "type": "string"
-          },
-          "size": {
-            "type": "integer",
-            "format": "int64",
-            "minimum": 0
-          },
           "url": {
-            "type": "string"
+            "type": "string",
+            "description": "Where to download it — a GitHub release asset. The control plane no\nlonger hosts binaries, so it deliberately reports neither size nor\nchecksum: it cannot attest to bytes it does not serve, and a stale\ndigest is worse than none."
           }
         }
       },

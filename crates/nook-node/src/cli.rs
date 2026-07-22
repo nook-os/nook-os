@@ -101,27 +101,6 @@ impl Client {
     pub async fn delete(&self, path: &str) -> Result<Value> {
         self.send(reqwest::Method::DELETE, path, None).await
     }
-
-    /// PUT raw bytes — for publishing a binary, which is the one thing here
-    /// that isn't JSON.
-    pub async fn put_bytes(&self, path: &str, bytes: Vec<u8>) -> Result<Value> {
-        let url = format!("{}{path}", self.base);
-        let resp = self
-            .http
-            .put(&url)
-            .bearer_auth(&self.token)
-            .header("content-type", "application/octet-stream")
-            .body(bytes)
-            .send()
-            .await
-            .with_context(|| format!("could not reach {}", self.base))?;
-        let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
-        if !status.is_success() {
-            bail!("{} {}: {}", status.as_u16(), path, text.trim());
-        }
-        Ok(serde_json::from_str(&text).unwrap_or(Value::Null))
-    }
 }
 
 /// `nook login --token nook_user_…` — act as yourself, not as this machine.
@@ -164,78 +143,6 @@ pub async fn login(token: &str, server: Option<&str>) -> Result<()> {
         .unwrap_or("you");
     println!("✓ logged in to {base} as {who}");
     println!("  This CLI can now drive any machine in your fleet.");
-    Ok(())
-}
-
-/// `nook publish <file>` — upload a built binary so the fleet can install it.
-///
-/// This exists because macOS binaries cannot be produced by the Linux CI:
-/// Apple's SDK licence confines that build to Apple hardware. So you build on
-/// the Mac and push the result here, and every other machine — including the
-/// ARM Macs that couldn't build it themselves — installs it the usual way.
-pub async fn publish(file: &str, version: Option<&str>, artifact: Option<&str>) -> Result<()> {
-    let path = std::path::PathBuf::from(crate::config::expand_path(file));
-    let bytes = std::fs::read(&path).with_context(|| format!("cannot read {}", path.display()))?;
-    if bytes.is_empty() {
-        bail!("{} is empty", path.display());
-    }
-
-    // Default the artifact name to this machine's platform, since the usual
-    // case is publishing the build you just made here.
-    let name = match artifact {
-        Some(a) => a.to_string(),
-        None => {
-            let os = std::env::consts::OS; // "linux" | "macos"
-            let os = if os == "macos" { "darwin" } else { os };
-            let arch = match std::env::consts::ARCH {
-                "aarch64" => "aarch64",
-                "x86_64" => "x86_64",
-                other => other,
-            };
-            format!("nook-{os}-{arch}")
-        }
-    };
-
-    let client = Client::from_config()?;
-    if !client.is_user() {
-        bail!(
-            "publishing needs a user token — run `nook login`. A node token is \
-             confined to its own machine and cannot hand binaries to the fleet."
-        );
-    }
-
-    // Without a version, ask the server which one it is serving: the fleet
-    // invariant is that the agent matches the control plane.
-    let version = match version {
-        Some(v) => v.to_string(),
-        None => {
-            let releases = client.get("/api/v1/node/releases").await?;
-            releases
-                .get("version")
-                .and_then(Value::as_str)
-                .context("could not read the server's version")?
-                .to_string()
-        }
-    };
-
-    let size = bytes.len();
-    println!(
-        "▸ publishing {name} {version} ({size} bytes) to {}",
-        client.base
-    );
-    let out = client
-        .put_bytes(&format!("/api/v1/node/artifacts/{version}/{name}"), bytes)
-        .await?;
-    println!(
-        "✓ {}",
-        out.get("message")
-            .and_then(Value::as_str)
-            .unwrap_or("published")
-    );
-    println!(
-        "  install it elsewhere with: curl -fLsS {}/install.sh | sh",
-        client.base
-    );
     Ok(())
 }
 

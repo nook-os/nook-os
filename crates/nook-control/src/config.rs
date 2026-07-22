@@ -30,6 +30,14 @@ pub struct Config {
     /// image drops the build it was compiled with here.
     pub dist_dir: String,
 
+    /// `owner/repo` whose tagged releases carry the node binaries.
+    ///
+    /// The control plane used to host them itself. That was the wrong call: it
+    /// could only ever serve what its own build host could compile (no macOS),
+    /// and it made every deployment a binary mirror. Releases are a release
+    /// problem, so they live with the tags.
+    pub releases_repo: String,
+
     /// Where the node agent connects, separate from the browser/API port.
     ///
     /// Two reasons they are split. The agent connection is the one that will
@@ -93,6 +101,8 @@ impl Config {
                 .map(|v| v == "true" || v == "1")
                 .unwrap_or(false),
 
+            releases_repo: env_opt("NOOK_RELEASES_REPO")
+                .unwrap_or_else(|| "nook-os/nook-os".into()),
             agent_bind: env_opt("NOOK_AGENT_BIND").unwrap_or_else(|| "0.0.0.0:8081".into()),
             dist_dir: env_opt("NOOK_DIST_DIR")
                 .unwrap_or_else(|| "/usr/local/share/nook/dist".into()),

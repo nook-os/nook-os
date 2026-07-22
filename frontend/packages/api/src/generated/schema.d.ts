@@ -282,29 +282,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/node/artifacts/{version}/{name}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        /**
-         * Publish a build. This is how a macOS binary reaches a Linux-built server:
-         *     someone compiles it on a Mac and uploads it here.
-         * @description Requires a *user* — publishing a binary that every machine in the fleet will
-         *     execute is the most consequential write in the system, and a node token is a
-         *     credential sitting on a box that runs other people's code.
-         */
-        put: operations["publish_artifact"];
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/api/v1/node/releases": {
         parameters: {
             query?: never;
@@ -1666,9 +1643,12 @@ export interface components {
             label: string;
             /** @description `linux` | `darwin`, as `uname -s` lowercased. */
             os: string;
-            sha256: string;
-            /** Format: int64 */
-            size: number;
+            /**
+             * @description Where to download it — a GitHub release asset. The control plane no
+             *     longer hosts binaries, so it deliberately reports neither size nor
+             *     checksum: it cannot attest to bytes it does not serve, and a stale
+             *     digest is worse than none.
+             */
             url: string;
         };
         /** Format: uuid */
@@ -2754,45 +2734,6 @@ export interface operations {
                 content?: never;
             };
             404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-        };
-    };
-    publish_artifact: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                version: string;
-                name: string;
-            };
-            cookie?: never;
-        };
-        /** @description the binary, raw */
-        requestBody: {
-            content: {
-                "application/octet-stream": string;
-            };
-        };
-        responses: {
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["OpResponse"];
-                };
-            };
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            403: {
                 headers: {
                     [name: string]: unknown;
                 };

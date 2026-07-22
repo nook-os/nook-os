@@ -105,18 +105,6 @@ enum Command {
     },
     /// Which credential is this CLI using, and for whom?
     Whoami,
-    /// Upload a built binary so the fleet can install it — how a macOS build
-    /// made on a Mac reaches a Linux-built control plane.
-    Publish {
-        /// The binary to upload (e.g. target/release/nook).
-        file: String,
-        /// Version to publish under (defaults to the server's own).
-        #[arg(long)]
-        version: Option<String>,
-        /// Artifact name (defaults to this machine's platform, e.g. nook-darwin-aarch64).
-        #[arg(long)]
-        artifact: Option<String>,
-    },
     /// Forget the user token; fall back to this machine's node token.
     Logout,
 
@@ -262,11 +250,6 @@ async fn main() -> Result<()> {
         Command::Delete { resource, name } => cli::delete(&resource, &name).await,
         Command::Login { token, server } => cli::login(&token, server.as_deref()).await,
         Command::Whoami => cli::whoami().await,
-        Command::Publish {
-            file,
-            version,
-            artifact,
-        } => cli::publish(&file, version.as_deref(), artifact.as_deref()).await,
         Command::Logout => cli::logout(),
         Command::Start {
             workspace,
@@ -484,9 +467,23 @@ async fn update_binary() -> Result<()> {
     let server = cfg.server.trim_end_matches('/');
     let (os, arch) = target_platform()?;
     let artifact = format!("nook-{os}-{arch}");
-    let url = format!("{server}/dist/{artifact}");
 
-    println!("▸ fetching {artifact} from {server}");
+    // Ask the control plane which build to take, then fetch the bytes from
+    // where they actually live. It knows the version; GitHub serves the file.
+    let client = cli::Client::from_config()?;
+    let releases = client.get("/api/v1/node/releases").await?;
+    let url = releases
+        .get("artifacts")
+        .and_then(|a| a.as_array())
+        .and_then(|list| {
+            list.iter()
+                .find(|a| a.get("filename").and_then(|f| f.as_str()) == Some(artifact.as_str()))
+        })
+        .and_then(|a| a.get("url").and_then(|u| u.as_str()))
+        .map(str::to_string)
+        .with_context(|| format!("{server} lists no build for {os}/{arch}"))?;
+
+    println!("▸ fetching {artifact} from {url}");
     let resp = reqwest::Client::new()
         .get(&url)
         .send()
@@ -494,8 +491,9 @@ async fn update_binary() -> Result<()> {
         .with_context(|| format!("cannot reach {url}"))?;
     if !resp.status().is_success() {
         anyhow::bail!(
-            "{server} has no build for {os}/{arch} ({}). Build from source or \
-             add the artifact to the control plane's dist directory.",
+            "no published build for {os}/{arch} ({}). Releases live at {url} — \
+             either that platform has not been published yet, or build from \
+             source: cargo build --release -p nook-node",
             resp.status()
         );
     }
