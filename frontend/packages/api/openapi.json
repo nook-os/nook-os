@@ -44,6 +44,157 @@
         }
       }
     },
+    "/api/v1/auth/local/bootstrap": {
+      "post": {
+        "tags": [
+          "crate::routes::local_auth"
+        ],
+        "summary": "POST /api/v1/auth/local/bootstrap — claim an unclaimed instance.",
+        "description": "Open only while there are no users at all. After that it is closed\npermanently, so the window is \"between `docker compose up` and the first\nsign-in\" rather than something an operator has to remember to turn off.",
+        "operationId": "bootstrap",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LocalRegisterRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MeResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "already claimed"
+          }
+        }
+      }
+    },
+    "/api/v1/auth/local/login": {
+      "post": {
+        "tags": [
+          "crate::routes::local_auth"
+        ],
+        "summary": "POST /api/v1/auth/local/login",
+        "operationId": "login",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LocalLoginRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MeResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "bad credentials"
+          }
+        }
+      }
+    },
+    "/api/v1/auth/local/password": {
+      "post": {
+        "tags": [
+          "crate::routes::local_auth"
+        ],
+        "summary": "POST /api/v1/auth/local/password — change your own password.",
+        "operationId": "change_password",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ChangePasswordRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "changed"
+          },
+          "401": {
+            "description": "wrong password"
+          }
+        }
+      }
+    },
+    "/api/v1/auth/local/status": {
+      "get": {
+        "tags": [
+          "crate::routes::local_auth"
+        ],
+        "summary": "Extends `/auth/providers` with what local sign-in offers right now.",
+        "operationId": "status",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LocalAuthStatus"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/auth/local/users": {
+      "post": {
+        "tags": [
+          "crate::routes::local_auth"
+        ],
+        "summary": "POST /api/v1/auth/local/users — an admin creates an account.",
+        "operationId": "create_user",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LocalRegisterRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/User"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "not an admin"
+          }
+        }
+      }
+    },
     "/api/v1/auth/logout": {
       "post": {
         "tags": [
@@ -3479,6 +3630,21 @@
           }
         }
       },
+      "ChangePasswordRequest": {
+        "type": "object",
+        "required": [
+          "current",
+          "next"
+        ],
+        "properties": {
+          "current": {
+            "type": "string"
+          },
+          "next": {
+            "type": "string"
+          }
+        }
+      },
       "CloneRequest": {
         "type": "object",
         "required": [
@@ -4413,6 +4579,73 @@
           "node_token": {
             "type": "string",
             "description": "Long-lived node credential; shown once, stored hashed."
+          }
+        }
+      },
+      "LocalAuthStatus": {
+        "type": "object",
+        "description": "Unauthenticated sign-in capabilities, so the login screen only offers what\nthis instance actually supports.",
+        "required": [
+          "available",
+          "needs_bootstrap"
+        ],
+        "properties": {
+          "available": {
+            "type": "boolean",
+            "description": "Local sign-in is possible: the tenant is undecided, or already local."
+          },
+          "mode": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "\"oidc\" | \"local\" | null when nobody has signed in yet."
+          },
+          "needs_bootstrap": {
+            "type": "boolean",
+            "description": "No account exists yet, so the first visitor can claim this instance."
+          }
+        }
+      },
+      "LocalLoginRequest": {
+        "type": "object",
+        "required": [
+          "username",
+          "password"
+        ],
+        "properties": {
+          "password": {
+            "type": "string"
+          },
+          "username": {
+            "type": "string"
+          }
+        }
+      },
+      "LocalRegisterRequest": {
+        "type": "object",
+        "required": [
+          "username",
+          "password"
+        ],
+        "properties": {
+          "display_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "email": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "password": {
+            "type": "string"
+          },
+          "username": {
+            "type": "string"
           }
         }
       },

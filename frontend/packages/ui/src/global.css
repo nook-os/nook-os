@@ -1570,3 +1570,65 @@ textarea.env-area.blurred {
   color: var(--nook-fg-bright);
   box-shadow: inset 0 0 0 1px var(--nook-accent);
 }
+
+/* ── local sign-in form ──────────────────────────────────────────────────
+   The box centres its children, which is right for a column of buttons and
+   wrong for a form: labels and inputs need to be full width and left-aligned
+   or the fields end up narrower than the button below them. */
+.login-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: 100%;
+  min-width: 280px;
+}
+
+.login-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  text-align: left;
+}
+
+.login-field input {
+  font-family: var(--nook-font-mono);
+  font-size: 13px;
+  padding: 8px 10px;
+  background: var(--nook-bg);
+  color: var(--nook-fg-bright);
+  border: 1px solid var(--nook-border);
+  border-radius: var(--nook-radius);
+}
+
+.login-field input:focus {
+  outline: none;
+  border-color: var(--nook-accent);
+  box-shadow: var(--nook-glow);
+}
+
+.login-form .btn {
+  margin-top: 4px;
+}
+
+/* Why this account matters, or why the last attempt failed. */
+.login-claim {
+  text-align: left;
+  margin: 0;
+  line-height: 1.5;
+}
+
+.login-error {
+  color: var(--nook-err);
+  text-align: left;
+  line-height: 1.4;
+  /* Server messages explain the one-way auth-mode lock in full sentences;
+     let them wrap rather than clipping the explanation. */
+  white-space: pre-wrap;
+}
+
+.login-or {
+  font-size: 11px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--nook-fg-faint);
+}

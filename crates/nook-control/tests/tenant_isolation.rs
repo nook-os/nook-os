@@ -27,6 +27,14 @@ use uuid::Uuid;
 static SERIAL: Mutex<()> = Mutex::const_new(());
 
 /// A config that does not touch the environment beyond what Config requires.
+///
+/// The default tenant name is unique per call. Hard-coding "dev" made these
+/// tests inherit whatever the shared development database happened to hold —
+/// including, once local accounts landed, a default tenant already committed
+/// to password sign-in, which refuses OIDC identities by design. The tests
+/// were reporting that as a bug in provisioning. Provisioning their own tenant
+/// makes them independent of ambient state, which is what they were always
+/// assuming.
 fn test_config() -> Config {
     Config {
         app_env: "test".into(),
@@ -41,7 +49,7 @@ fn test_config() -> Config {
         oidc_scopes: "openid profile email".into(),
         session_secret: "0".repeat(64),
         session_ttl_hours: 168,
-        default_tenant_name: "dev".into(),
+        default_tenant_name: format!("test-{}", uuid::Uuid::now_v7().simple()),
         auth_dev_mode: true,
         mcp_token: None,
         dev_join_token: None,

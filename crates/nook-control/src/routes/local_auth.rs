@@ -55,6 +55,9 @@ async fn default_tenant(state: &AppState) -> ApiResult<Tenant> {
 /// Open only while there are no users at all. After that it is closed
 /// permanently, so the window is "between `docker compose up` and the first
 /// sign-in" rather than something an operator has to remember to turn off.
+#[utoipa::path(post, path = "/api/v1/auth/local/bootstrap",
+    request_body = LocalRegisterRequest,
+    responses((status = 200, body = MeResponse), (status = 403, description = "already claimed")))]
 pub async fn bootstrap(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -103,6 +106,9 @@ pub async fn bootstrap(
 }
 
 /// POST /api/v1/auth/local/login
+#[utoipa::path(post, path = "/api/v1/auth/local/login",
+    request_body = LocalLoginRequest,
+    responses((status = 200, body = MeResponse), (status = 401, description = "bad credentials")))]
 pub async fn login(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -129,6 +135,9 @@ pub async fn login(
 }
 
 /// POST /api/v1/auth/local/users — an admin creates an account.
+#[utoipa::path(post, path = "/api/v1/auth/local/users",
+    request_body = LocalRegisterRequest,
+    responses((status = 200, body = User), (status = 403, description = "not an admin")))]
 pub async fn create_user(
     State(state): State<AppState>,
     auth: AuthCtx,
@@ -164,6 +173,9 @@ pub async fn create_user(
 }
 
 /// POST /api/v1/auth/local/password — change your own password.
+#[utoipa::path(post, path = "/api/v1/auth/local/password",
+    request_body = ChangePasswordRequest,
+    responses((status = 200, description = "changed"), (status = 401, description = "wrong password")))]
 pub async fn change_password(
     State(state): State<AppState>,
     auth: AuthCtx,
@@ -184,6 +196,8 @@ pub async fn change_password(
 }
 
 /// Extends `/auth/providers` with what local sign-in offers right now.
+#[utoipa::path(get, path = "/api/v1/auth/local/status",
+    responses((status = 200, body = LocalAuthStatus)))]
 pub async fn status(State(state): State<AppState>) -> ApiResult<Json<LocalAuthStatus>> {
     let tenant = default_tenant(&state).await?;
     let mode = local_auth::mode_of(&state.db, tenant.id).await?;
