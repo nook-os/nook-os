@@ -101,8 +101,8 @@ jobs:
         run: |
           mkdir -p dist
           cp target/${{ matrix.target }}/release/nook dist/${{ matrix.asset }}
-          cp target/${{ matrix.target }}/release/nook-control \
-             dist/$(echo '${{ matrix.asset }}' | sed 's/^nook-/nook-control-/')
+          control_asset="$(echo '${{ matrix.asset }}' | sed 's/^nook-/nook-control-/')"
+          cp "target/${{ matrix.target }}/release/nook-control" "dist/$control_asset"
           cd dist
           # Checksums travel with the binaries so the install script can verify
           # what it downloaded instead of trusting the transport alone.
@@ -363,6 +363,10 @@ jobs:
           REPO: ${{ env.REGISTRY }}/${{ github.repository_owner }}/nook-${{ matrix.image }}
           VERSION: ${{ inputs.tag || github.ref_name }}
         run: |
+          # Word splitting is the point here: every digest has to arrive as a
+          # separate argument. The filenames are hex digests, so there is
+          # nothing to split on but the spaces we put there.
+          # shellcheck disable=SC2046
           docker buildx imagetools create \
             -t "$REPO:$VERSION" -t "$REPO:latest" \
             $(printf "${REPO}@sha256:%s " $(ls))

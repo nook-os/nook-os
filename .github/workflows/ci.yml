@@ -53,10 +53,7 @@ jobs:
       - name: Lint the workflows
         uses: docker://rhysd/actionlint:latest
         with:
-          # The two remaining SC2046 warnings are deliberate word-splitting:
-          # one passes several image digests as separate arguments, the other
-          # builds a filename. Neither involves a path that can contain spaces.
-          args: -color -ignore 'SC2046'
+          args: -color
 
   frontend:
     runs-on: ubuntu-latest
