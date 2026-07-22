@@ -21,6 +21,19 @@ unsuitable, it is not consulted at all.
 and does nothing for anyone else — a downloaded file carries the
 `com.apple.quarantine` attribute, and ad-hoc signatures do not satisfy it.
 
+**Signing and notarising are two separate things, and only both together
+remove the warning.** A signed but unnotarised app is refused by Gatekeeper on
+any Mac that has not seen it before, because the check is "did Apple see this
+build", not "is it signed". Our releases are signed today and not yet
+notarised, so the gesture below is still needed.
+
+**A trap worth recording**: leaving the notarisation variables in the build
+step's `env:` block does not disable notarisation. A missing GitHub secret
+becomes an empty string, and an empty string is still a variable that exists —
+Tauri read it, tried to notarise, and failed with `The value '' is invalid for
+'--issuer'`. They have to be genuinely absent, which means exporting them
+through `GITHUB_ENV` only when the key is present.
+
 **Until we buy in**, an unsigned build is still usable, and the site says how:
 right-click → **Open** the first time, or
 

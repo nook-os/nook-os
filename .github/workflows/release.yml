@@ -205,7 +205,15 @@ jobs:
       # notarytool wants the App Store Connect key as a file. Written outside
       # the workspace so no build step can sweep it into an artifact, and the
       # runner is destroyed afterwards.
-      - name: Stage the notarisation key
+      #
+      # All three notarisation variables are exported HERE rather than in the
+      # build step's `env:` block, and that placement is the point: a missing
+      # secret becomes an empty string, and an empty string is still a variable
+      # that exists. Tauri saw APPLE_API_ISSUER set, tried to notarise with it,
+      # and failed with "The value '' is invalid for '--issuer'". Setting them
+      # through GITHUB_ENV only when the key exists means they are genuinely
+      # absent otherwise, which is what makes Tauri sign and stop there.
+      - name: Stage the notarisation credentials
         if: runner.os == 'macOS' && env.HAS_NOTARY_KEY == 'true'
         env:
           KEY: ${{ secrets.APPLE_API_KEY_P8 }}
@@ -213,7 +221,11 @@ jobs:
           path="$RUNNER_TEMP/AuthKey.p8"
           printf '%s' "$KEY" > "$path"
           chmod 600 "$path"
-          echo "APPLE_API_KEY_PATH=$path" >> "$GITHUB_ENV"
+          {
+            echo "APPLE_API_KEY_PATH=$path"
+            echo "APPLE_API_KEY=${{ secrets.APPLE_API_KEY }}"
+            echo "APPLE_API_ISSUER=${{ secrets.APPLE_API_ISSUER }}"
+          } >> "$GITHUB_ENV"
 
       - name: Build the bundle
         working-directory: frontend/apps/desktop
