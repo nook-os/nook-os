@@ -2429,7 +2429,7 @@ dependencies = [
 
 [[package]]
 name = "nook-control"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -2482,7 +2482,7 @@ dependencies = [
 
 [[package]]
 name = "nook-dispatcher"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "async-trait",
  "nook-types",
@@ -2493,7 +2493,7 @@ dependencies = [
 
 [[package]]
 name = "nook-mcp"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2509,7 +2509,7 @@ dependencies = [
 
 [[package]]
 name = "nook-node"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -2541,7 +2541,7 @@ dependencies = [
 
 [[package]]
 name = "nook-openapi-gen"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "nook-control",
@@ -2551,7 +2551,7 @@ dependencies = [
 
 [[package]]
 name = "nook-proto"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "nook-types",
  "serde",
@@ -2562,7 +2562,7 @@ dependencies = [
 
 [[package]]
 name = "nook-types"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "chrono",
  "serde",
