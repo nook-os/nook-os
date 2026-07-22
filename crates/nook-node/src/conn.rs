@@ -106,7 +106,15 @@ pub async fn connect_once(cfg: &NodeConfig) -> Result<()> {
     if identity.is_some() {
         tracing::debug!("presenting this machine's client certificate");
     }
-    tracing::info!(server = %cfg.server, "connected to control plane");
+    // Report where we actually dialled and how we authenticated. Logging
+    // `cfg.server` here was actively misleading once the agent moved to its
+    // own endpoint: it named a host this connection never touched, so the log
+    // looked identical whether or not the migration had taken effect.
+    tracing::info!(
+        server = %cfg.agent_endpoint(),
+        auth = if identity.is_some() { "certificate" } else { "token" },
+        "connected to control plane"
+    );
     let (mut sink, mut stream) = socket.split();
 
     let (out_tx, mut out_rx) = mpsc::channel::<NodeToControl>(1024);
