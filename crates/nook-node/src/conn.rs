@@ -134,6 +134,7 @@ pub async fn connect_once(cfg: &NodeConfig) -> Result<()> {
     // Register: idempotent full resync on every connect.
     out_tx
         .send(NodeToControl::Register {
+            agent_version: Some(env!("CARGO_PKG_VERSION").to_string()),
             capabilities: capabilities::detect(),
             live_tmux_sessions: tmux::list_nook_sessions(),
         })
@@ -201,6 +202,12 @@ pub async fn connect_once(cfg: &NodeConfig) -> Result<()> {
             }
         };
         match parsed {
+            // Handled in a later change; acknowledged here so an older agent
+            // meeting a newer control plane ignores it rather than failing to
+            // parse the stream.
+            ControlToNode::UpdateAgent => {
+                tracing::info!("control plane asked this agent to update");
+            }
             ControlToNode::Ping => {
                 out_tx.send(NodeToControl::Pong).await.ok();
             }

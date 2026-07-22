@@ -31,6 +31,12 @@ pub struct DiscoveredWorkspace {
 pub enum NodeToControl {
     /// Idempotent full resync: sent on every (re)connect.
     Register {
+        /// The agent's own version, so the control plane can tell which
+        /// machines are behind without anyone opening a terminal on them.
+        /// Optional because an older agent does not send it, and a fleet
+        /// mid-upgrade is exactly when this has to keep working.
+        #[serde(default)]
+        agent_version: Option<String>,
         capabilities: Capabilities,
         /// tmux sessions (names) that are still alive on this node, so the
         /// control plane can reconcile session state after restarts.
@@ -116,7 +122,18 @@ pub enum ControlToNode {
     RegisterAck {
         node_id: NodeId,
         node_name: String,
+        /// The agent version this control plane expects. A node that differs
+        /// knows it is behind without having to ask anything else.
+        #[serde(default)]
+        expected_agent_version: Option<String>,
     },
+    /// Replace your binary and restart.
+    ///
+    /// Only ever obeyed by a node whose process will be restarted for it —
+    /// under a service manager. Told to update, a node run by hand would
+    /// replace its binary and exit, which is a fleet that goes dark on the
+    /// operator who least expected it.
+    UpdateAgent,
     StartSession {
         session_id: SessionId,
         runtime: String,

@@ -445,6 +445,44 @@ async fn update_binary() -> Result<()> {
     }
     let bytes = resp.bytes().await?;
 
+    // Verify against the checksum published beside the binary, exactly as
+    // install.sh does. Without this the update path — the one that would run
+    // unattended across a whole fleet — is the least checked way to get a
+    // binary onto a machine, which is precisely backwards. A missing checksum
+    // is fatal rather than skipped: an unverifiable update is one to refuse,
+    // not to shrug at.
+    let sum_url = format!("{url}.sha256");
+    let published = reqwest::Client::new()
+        .get(&sum_url)
+        .send()
+        .await
+        .with_context(|| format!("cannot reach {sum_url}"))?;
+    if !published.status().is_success() {
+        anyhow::bail!(
+            "no checksum published at {sum_url} ({}) — refusing to install a \
+             binary that cannot be verified",
+            published.status()
+        );
+    }
+    let expected = published
+        .text()
+        .await?
+        .split_whitespace()
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let actual = {
+        use sha2::{Digest, Sha256};
+        format!("{:x}", Sha256::digest(&bytes))
+    };
+    if actual != expected {
+        anyhow::bail!(
+            "checksum mismatch for {artifact}: expected {expected}, got {actual}. \
+             Refusing to install."
+        );
+    }
+    println!("✓ checksum verified");
+
     let current = std::env::current_exe().context("cannot locate the running binary")?;
     let dir = current
         .parent()
@@ -617,6 +655,7 @@ async fn probe_connection(cfg: &NodeConfig) -> bool {
         return false;
     };
     let register = NodeToControl::Register {
+            agent_version: Some(env!("CARGO_PKG_VERSION").to_string()),
         capabilities: capabilities::detect(),
         live_tmux_sessions: tmux::list_nook_sessions(),
     };

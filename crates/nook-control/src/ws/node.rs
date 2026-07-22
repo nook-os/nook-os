@@ -229,9 +229,18 @@ async fn handle_message(
 ) -> anyhow::Result<()> {
     match msg {
         NodeToControl::Register {
+            agent_version,
             capabilities,
             live_tmux_sessions,
         } => {
+            // Recorded on every register rather than once at join: the answer
+            // changes when a node updates, and a stale answer is worse than
+            // none because it reads as current.
+            let _ = sqlx::query("UPDATE nodes SET agent_version = $2 WHERE id = $1")
+                .bind(node_id)
+                .bind(agent_version.as_deref())
+                .execute(&state.db)
+                .await;
             sqlx::query(
                 "UPDATE nodes SET capabilities = $2, hostname = $3, platform = $4,
                         status = 'online', last_seen_at = now(), updated_at = now()
@@ -258,6 +267,7 @@ async fn handle_message(
             .await?;
 
             _tx.send(ControlToNode::RegisterAck {
+                expected_agent_version: Some(env!("CARGO_PKG_VERSION").to_string()),
                 node_id,
                 node_name: name.to_string(),
             })
