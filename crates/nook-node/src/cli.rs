@@ -107,6 +107,22 @@ impl Client {
 ///
 /// Verifies the token before writing it, because a credential that silently
 /// doesn't work is worse than one that obviously doesn't.
+/// `nook login` with no token: sign in through the identity provider.
+///
+/// The whole point is that nobody copies a credential by hand — and that this
+/// works on a machine with no web UI in front of it, which the paste-a-token
+/// path quietly assumed.
+pub async fn login_with_provider(server: Option<&str>) -> Result<()> {
+    let base = server
+        .map(str::to_string)
+        .or_else(|| NodeConfig::load().ok().map(|c| c.server))
+        .context("no --server given and this machine hasn't joined a control plane")?;
+    let base = base.trim_end_matches('/').to_string();
+
+    let token = crate::device_login::login(&base).await?;
+    login(&token, Some(&base)).await
+}
+
 pub async fn login(token: &str, server: Option<&str>) -> Result<()> {
     if !token.starts_with("nook_user_") {
         bail!(

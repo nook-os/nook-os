@@ -13,7 +13,7 @@ use crate::events::{self, EventDraft};
 use crate::seed::hash_token;
 use crate::state::AppState;
 
-fn random_token(prefix: &str, len: usize) -> String {
+pub fn random_token(prefix: &str, len: usize) -> String {
     let body: String = rand::rng()
         .sample_iter(&Alphanumeric)
         .take(len)

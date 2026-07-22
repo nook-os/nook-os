@@ -10,6 +10,7 @@ pub mod join;
 pub mod local_auth;
 pub mod nodes;
 pub mod notes;
+pub mod oidc_exchange;
 pub mod schedule;
 pub mod sessions;
 pub mod settings;
@@ -77,6 +78,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/auth/me", get(auth::me))
         .route("/auth/providers", get(auth::providers))
         .route("/auth/local/status", get(local_auth::status))
+        .route("/auth/oidc/exchange", post(oidc_exchange::exchange))
         .route("/auth/local/login", post(local_auth::login))
         .route("/auth/local/bootstrap", post(local_auth::bootstrap))
         .route("/auth/local/users", post(local_auth::create_user))

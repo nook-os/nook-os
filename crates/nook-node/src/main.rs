@@ -2,6 +2,7 @@ mod capabilities;
 mod cli;
 mod config;
 mod conn;
+mod device_login;
 mod discovery;
 mod enroll;
 mod gitops;
@@ -144,8 +145,11 @@ enum Command {
     /// whole fleet: `nook login --token nook_user_…`.
     Login {
         /// A user token from Settings → Access tokens.
+        ///
+        /// Omit it to sign in through your identity provider instead: the
+        /// browser opens, you approve, and no token is ever copied by hand.
         #[arg(long)]
-        token: String,
+        token: Option<String>,
         /// Control plane URL (defaults to the one this machine joined).
         #[arg(long)]
         server: Option<String>,
@@ -343,7 +347,10 @@ async fn main() -> Result<()> {
         } => cli::get(&resource, name.as_deref(), json).await,
         Command::Import { path, link } => cli::import(path.as_deref(), link).await,
         Command::Delete { resource, name } => cli::delete(&resource, &name).await,
-        Command::Login { token, server } => cli::login(&token, server.as_deref()).await,
+        Command::Login { token, server } => match token {
+            Some(t) => cli::login(&t, server.as_deref()).await,
+            None => cli::login_with_provider(server.as_deref()).await,
+        },
         Command::Whoami => cli::whoami().await,
         Command::Logout => cli::logout(),
         Command::Start {

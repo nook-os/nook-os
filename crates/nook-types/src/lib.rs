@@ -113,6 +113,23 @@ pub struct MeResponse {
 
 /// Unauthenticated sign-in capabilities, so the login screen only offers what
 /// this instance actually supports.
+/// Hand an identity provider's ID token to the control plane, get one of ours.
+#[derive(Debug, Clone, Default, Deserialize, ToSchema)]
+pub struct OidcExchangeRequest {
+    pub id_token: String,
+    /// Shown in the tokens list, so a person can tell which client to revoke.
+    #[serde(default)]
+    pub client_name: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct OidcExchangeResponse {
+    /// Shown once. Behaves like any other user token.
+    pub token: String,
+    pub user: User,
+    pub tenant: Tenant,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
 pub struct LocalAuthStatus {
     /// Local sign-in is possible: the tenant is undecided, or already local.
