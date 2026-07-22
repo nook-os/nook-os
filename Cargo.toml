@@ -56,6 +56,10 @@ portable-pty = "0.9"
 sysinfo = "0.33"
 base64 = "0.22"
 sha2 = "0.10"
+# X.509 for the per-tenant CA: generate a CA and sign node CSRs. In-process and
+# typed rather than shelling out to openssl, so certificate handling is testable
+# and a missing binary can't become a runtime surprise on someone's machine.
+rcgen = { version = "0.13", features = ["pem", "x509-parser"] }
 hmac = "0.12"
 aes-gcm = "0.10"
 rand = "0.9"

@@ -1,4 +1,5 @@
 pub mod auth;
+pub mod ca;
 pub mod config;
 pub mod crypto;
 pub mod error;
