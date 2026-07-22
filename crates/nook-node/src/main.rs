@@ -206,6 +206,13 @@ async fn main() -> Result<()> {
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
         .init();
 
+    // rustls refuses to guess when more than one provider is compiled in, and
+    // several dependencies pull it with different feature sets. Left unset it
+    // panics at the moment a TLS config is built — which is the moment the
+    // agent connects, so the failure only ever shows up at runtime on a real
+    // machine. Choose explicitly, at the top, before anything can need it.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     match Cli::parse().command {
         Command::Setup => match setup_wizard()? {
             SetupPlan::Join(spec) => join(spec).await,

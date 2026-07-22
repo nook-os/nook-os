@@ -72,9 +72,25 @@ jobs:
       # A binary that cannot run is worth catching here rather than in
       # someone's install script.
       # Only where the runner can actually execute what it built.
-      - name: It runs
+      #
+      # `--version` is not enough. rustls picks its crypto provider from
+      # whichever features are enabled, and `-p nook-node` resolves those
+      # differently from a workspace build — so a binary that passes every test
+      # can still panic the first time it constructs a TLS config, which is the
+      # first time the agent connects. Nothing but a release-shaped binary can
+      # show that, so force it to build one here.
+      - name: It runs, and can build a TLS config
         if: matrix.native != false
-        run: ./target/${{ matrix.target }}/release/nook --version
+        run: |
+          BIN=./target/${{ matrix.target }}/release/nook
+          $BIN --version
+          # Unreachable on purpose: we want the TLS setup, not a connection.
+          out=$($BIN enroll --server https://127.0.0.1:1 --token smoke \
+                  --server-fingerprint 00 2>&1 || true)
+          echo "$out"
+          case "$out" in
+            *panicked*) echo "::error::building a TLS config panicked"; exit 1 ;;
+          esac
 
       - name: Package
         run: |

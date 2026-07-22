@@ -113,8 +113,20 @@ impl ServerCertVerifier for PinnedServerCert {
     }
 }
 
+/// Make sure rustls has a provider before we ask it to build anything.
+///
+/// rustls refuses to guess when several providers are compiled in, and panics
+/// at the moment a config is built rather than at startup. Doing it here, in
+/// the two functions that build configs, means no future caller can reintroduce
+/// the panic by reaching TLS through a path that forgot to install one.
+/// Idempotent: a second install is an error we ignore, not a failure.
+fn ensure_provider() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+}
+
 /// A TLS client config that trusts only the pinned certificate.
 pub fn pinned_client_config(expected_fingerprint: &str) -> rustls::ClientConfig {
+    ensure_provider();
     rustls::ClientConfig::builder()
         .dangerous()
         .with_custom_certificate_verifier(Arc::new(PinnedServerCert::new(expected_fingerprint)))
@@ -135,6 +147,7 @@ pub fn mutual_client_config(
 ) -> anyhow::Result<rustls::ClientConfig> {
     use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 
+    ensure_provider();
     let certs: Vec<CertificateDer<'static>> =
         rustls_pemfile::certs(&mut cert_pem.as_bytes()).collect::<Result<_, _>>()?;
     if certs.is_empty() {
@@ -228,5 +241,29 @@ mod tests {
             .collect::<Vec<_>>()
             .join(":");
         assert!(verify(&PinnedServerCert::new(&pretty), &der).is_ok());
+    }
+}
+
+/// Building a client config must not panic.
+///
+/// Note what this test does *not* prove. The failure it guards against depends
+/// on which rustls provider features end up enabled, and that differs between a
+/// workspace build (where sqlx settles it) and the `-p nook-node` build the
+/// release uses. Under `cargo test` the ambiguity does not arise, so this
+/// passing means little on its own — the real guard is the smoke check in
+/// release.yml, which runs a binary built the way releases are built.
+#[cfg(test)]
+mod provider_tests {
+    #[test]
+    fn configs_build_without_a_preinstalled_provider() {
+        let key = rcgen::KeyPair::generate().unwrap();
+        let params = rcgen::CertificateParams::new(vec!["node.example.com".into()]).unwrap();
+        let cert = params.self_signed(&key).unwrap();
+
+        // Would panic with "Could not automatically determine the
+        // process-level CryptoProvider" if the helpers did not install one.
+        let _ = super::pinned_client_config("00");
+        super::mutual_client_config(Some("00"), &cert.pem(), &key.serialize_pem())
+            .expect("a well-formed certificate and key must build a config");
     }
 }
