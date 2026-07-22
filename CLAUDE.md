@@ -8,6 +8,24 @@
 - Host-side `cargo check` is fine for fast compile feedback; running the stack is not.
 - `nook join` from the host (against http://localhost:8080) is the "second node" demo path.
 
+## Running the tests
+
+`./test.sh` — no environment variables to remember.
+
+```
+./test.sh          fmt, clippy, tests, typecheck, actionlint, shellcheck
+./test.sh rust     just the Rust tests      ./test.sh rust ca   filtered
+./test.sh lint     linters only             ./test.sh web       tsc
+./test.sh --host   run Rust on the host instead of the container
+```
+
+Rust runs **inside the control-plane container** by default: it already holds
+`DATABASE_URL`, reaches Postgres by service name, and shares the cargo target
+volume with cargo-watch, so it is both correctly configured and already warm.
+
+`NOOK_REQUIRE_DB=1` is set for you. Without it, every test needing Postgres
+returns early and the suite reports success having executed almost nothing.
+
 ## Database workflow (bootstrap phase)
 
 - **Bootstrap is over: migrations are append-only.** `0001_init.sql` is frozen — it has been applied to databases that hold real data and cannot be recreated with `down -v`. Schema changes are NEW numbered files: `0002_user_tokens.sql`, `0003_…`.
