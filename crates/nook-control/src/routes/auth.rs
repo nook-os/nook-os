@@ -281,6 +281,9 @@ pub async fn providers(State(state): State<AppState>) -> Json<nook_types::AuthPr
         // Always offered: an instance with no identity provider still needs a
         // way in, and `/auth/local/status` says whether it is usable here.
         local: true,
+        oidc_issuer: state.cfg.oidc_issuer_url.clone(),
+        device_authorization_endpoint: state.cfg.oidc_device_authorization_endpoint.clone(),
+        device_client_id: state.cfg.oidc_device_client_id.clone(),
     })
 }
 

@@ -155,6 +155,27 @@ pub struct AuthProviders {
     /// Username and password held in this database.
     #[serde(default)]
     pub local: bool,
+    /// The identity provider itself, for clients that must talk to it
+    /// directly.
+    ///
+    /// A desktop app cannot receive the browser redirect this control plane
+    /// registered, so it uses the device authorization grant against the IdP.
+    /// It learns where to go from here rather than from its own configuration:
+    /// the operator sets the IdP up once, on the server, and every client
+    /// follows.
+    #[serde(default)]
+    pub oidc_issuer: Option<String>,
+    /// Where a native client starts a device authorization.
+    ///
+    /// Read from the IdP's discovery document. `None` means the provider does
+    /// not advertise one — in which case no compliant client can start the
+    /// flow, whatever else the provider supports.
+    #[serde(default)]
+    pub device_authorization_endpoint: Option<String>,
+    /// Public client id for native clients. Distinct from the control plane's
+    /// own client, which is confidential and must not ship inside an app.
+    #[serde(default)]
+    pub device_client_id: Option<String>,
 }
 
 // ── Nodes ────────────────────────────────────────────────────────────────────

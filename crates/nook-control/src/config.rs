@@ -14,6 +14,24 @@ pub struct Config {
 
     pub oidc_issuer_url: Option<String>,
     pub oidc_client_id: Option<String>,
+    /// A second, PUBLIC client registered at the IdP for native apps.
+    ///
+    /// The control plane's own client is confidential — it holds a secret, and
+    /// a secret shipped inside a desktop binary is not a secret. Native
+    /// clients need their own public client, which is what the device
+    /// authorization grant expects anyway.
+    pub oidc_device_client_id: Option<String>,
+    /// Where native clients start a device authorization.
+    ///
+    /// This belongs in the IdP's discovery document, and a compliant client
+    /// would find it there. Two things make it configuration instead: the
+    /// `openidconnect` crate's `CoreProviderMetadata` drops unrecognised
+    /// fields, and providers that support the grant do not always advertise
+    /// the endpoint — auth.hein.network lists `device_code` under
+    /// `grant_types_supported` while omitting `device_authorization_endpoint`,
+    /// so nothing can discover it. Setting it here unblocks that; fixing the
+    /// discovery document is the better repair.
+    pub oidc_device_authorization_endpoint: Option<String>,
     pub oidc_client_secret: Option<String>,
     pub oidc_redirect_url: Option<String>,
     pub oidc_scopes: String,
@@ -105,6 +123,8 @@ impl Config {
 
             oidc_issuer_url: env_opt("OIDC_ISSUER_URL"),
             oidc_client_id: env_opt("OIDC_CLIENT_ID"),
+            oidc_device_client_id: env_opt("OIDC_DEVICE_CLIENT_ID"),
+            oidc_device_authorization_endpoint: env_opt("OIDC_DEVICE_AUTHORIZATION_ENDPOINT"),
             oidc_client_secret: env_opt("OIDC_CLIENT_SECRET"),
             oidc_redirect_url: env_opt("OIDC_REDIRECT_URL"),
             oidc_scopes: env_opt("OIDC_SCOPES").unwrap_or_else(|| "openid profile email".into()),

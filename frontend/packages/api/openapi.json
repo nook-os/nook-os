@@ -3457,6 +3457,20 @@
             "type": "boolean",
             "description": "The dev/CI escape hatch is enabled (never in production)."
           },
+          "device_authorization_endpoint": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Where a native client starts a device authorization.\n\nRead from the IdP's discovery document. `None` means the provider does\nnot advertise one — in which case no compliant client can start the\nflow, whatever else the provider supports."
+          },
+          "device_client_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Public client id for native clients. Distinct from the control plane's\nown client, which is confidential and must not ship inside an app."
+          },
           "local": {
             "type": "boolean",
             "description": "Username and password held in this database."
@@ -3464,6 +3478,13 @@
           "oidc": {
             "type": "boolean",
             "description": "An OIDC identity provider is configured."
+          },
+          "oidc_issuer": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The identity provider itself, for clients that must talk to it\ndirectly.\n\nA desktop app cannot receive the browser redirect this control plane\nregistered, so it uses the device authorization grant against the IdP.\nIt learns where to go from here rather than from its own configuration:\nthe operator sets the IdP up once, on the server, and every client\nfollows."
           }
         }
       },

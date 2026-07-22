@@ -44,6 +44,8 @@ fn test_config() -> Config {
         database_url: std::env::var("DATABASE_URL").unwrap_or_default(),
         oidc_issuer_url: None,
         oidc_client_id: None,
+        oidc_device_client_id: None,
+        oidc_device_authorization_endpoint: None,
         oidc_client_secret: None,
         oidc_redirect_url: None,
         oidc_scopes: "openid profile email".into(),
