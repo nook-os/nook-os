@@ -113,12 +113,48 @@ pub struct MeResponse {
 
 /// Unauthenticated sign-in capabilities, so the login screen only offers what
 /// this instance actually supports.
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
+pub struct LocalAuthStatus {
+    /// Local sign-in is possible: the tenant is undecided, or already local.
+    pub available: bool,
+    /// No account exists yet, so the first visitor can claim this instance.
+    pub needs_bootstrap: bool,
+    /// "oidc" | "local" | null when nobody has signed in yet.
+    #[serde(default)]
+    pub mode: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, ToSchema)]
+pub struct LocalLoginRequest {
+    pub username: String,
+    pub password: String,
+}
+
+#[derive(Debug, Clone, Deserialize, ToSchema)]
+pub struct LocalRegisterRequest {
+    pub username: String,
+    pub password: String,
+    #[serde(default)]
+    pub email: Option<String>,
+    #[serde(default)]
+    pub display_name: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, ToSchema)]
+pub struct ChangePasswordRequest {
+    pub current: String,
+    pub next: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
 pub struct AuthProviders {
     /// An OIDC identity provider is configured.
     pub oidc: bool,
     /// The dev/CI escape hatch is enabled (never in production).
     pub dev_login: bool,
+    /// Username and password held in this database.
+    #[serde(default)]
+    pub local: bool,
 }
 
 // ── Nodes ────────────────────────────────────────────────────────────────────

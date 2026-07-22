@@ -56,6 +56,11 @@ portable-pty = "0.9"
 sysinfo = "0.33"
 base64 = "0.22"
 sha2 = "0.10"
+# Password hashing for local accounts. Argon2id is the current recommendation
+# for interactive logins: memory-hard, so a stolen database does not turn into
+# a GPU cracking exercise the way bcrypt-at-low-cost does.
+argon2 = "0.5"
+password-hash = "0.5"
 # X.509 for the per-tenant CA: generate a CA and sign node CSRs. In-process and
 # typed rather than shelling out to openssl, so certificate handling is testable
 # and a missing binary can't become a runtime surprise on someone's machine.

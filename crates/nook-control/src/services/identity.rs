@@ -49,6 +49,16 @@ pub async fn login_identity(state: &AppState, claims: IdentityClaims) -> ApiResu
             .bind(user.tenant_id)
             .fetch_one(&state.db)
             .await?;
+        // The lock has to bind both directions, or it is not a lock: a tenant
+        // running local accounts must not silently acquire OIDC identities
+        // beside them, which is exactly the duplicate-person problem the mode
+        // exists to prevent.
+        crate::services::local_auth::claim_mode(
+            &state.db,
+            tenant.id,
+            crate::services::local_auth::AuthMode::Oidc,
+        )
+        .await?;
         return Ok((user, tenant));
     }
 
@@ -106,6 +116,15 @@ pub async fn login_identity(state: &AppState, claims: IdentityClaims) -> ApiResu
             .bind(&email)
             .fetch_optional(&state.db)
             .await?;
+
+    // Commit the tenant to OIDC before creating anything. A tenant already on
+    // local accounts must be refused here, with nothing half-made left behind.
+    crate::services::local_auth::claim_mode(
+        &state.db,
+        tenant.id,
+        crate::services::local_auth::AuthMode::Oidc,
+    )
+    .await?;
 
     let user = match user {
         Some(u) => u,

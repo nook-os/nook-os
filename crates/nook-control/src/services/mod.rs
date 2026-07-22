@@ -5,6 +5,7 @@ pub mod core;
 pub mod discovery;
 pub mod identity;
 pub mod kanban;
+pub mod local_auth;
 pub mod schedule;
 pub mod secrets;
 pub mod taskwork;

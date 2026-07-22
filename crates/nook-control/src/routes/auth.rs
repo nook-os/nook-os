@@ -278,6 +278,9 @@ pub async fn providers(State(state): State<AppState>) -> Json<nook_types::AuthPr
     Json(nook_types::AuthProviders {
         oidc: state.oidc.is_some(),
         dev_login: state.cfg.auth_dev_mode && !state.cfg.is_production(),
+        // Always offered: an instance with no identity provider still needs a
+        // way in, and `/auth/local/status` says whether it is usable here.
+        local: true,
     })
 }
 

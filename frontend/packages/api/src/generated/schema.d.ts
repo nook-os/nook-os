@@ -1385,13 +1385,11 @@ export interface components {
             /** @enum {string} */
             type: "size";
         };
-        /**
-         * @description Unauthenticated sign-in capabilities, so the login screen only offers what
-         *     this instance actually supports.
-         */
         AuthProviders: {
             /** @description The dev/CI escape hatch is enabled (never in production). */
             dev_login: boolean;
+            /** @description Username and password held in this database. */
+            local?: boolean;
             /** @description An OIDC identity provider is configured. */
             oidc: boolean;
         };

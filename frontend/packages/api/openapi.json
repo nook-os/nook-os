@@ -3297,7 +3297,6 @@
       },
       "AuthProviders": {
         "type": "object",
-        "description": "Unauthenticated sign-in capabilities, so the login screen only offers what\nthis instance actually supports.",
         "required": [
           "oidc",
           "dev_login"
@@ -3306,6 +3305,10 @@
           "dev_login": {
             "type": "boolean",
             "description": "The dev/CI escape hatch is enabled (never in production)."
+          },
+          "local": {
+            "type": "boolean",
+            "description": "Username and password held in this database."
           },
           "oidc": {
             "type": "boolean",

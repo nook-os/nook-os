@@ -1,6 +1,8 @@
 //! Authentication: generic OIDC (any standards-compliant IdP) + opaque
 //! server-side sessions. Identity always belongs to the customer's IdP.
 
+pub mod password;
+
 use axum::extract::FromRequestParts;
 use axum::http::request::Parts;
 use axum_extra::extract::cookie::{Cookie, CookieJar, Key, SameSite};

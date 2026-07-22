@@ -45,6 +45,8 @@ aws-smithy-types = { workspace = true }
 clap = { workspace = true }
 base64 = { workspace = true }
 sha2 = { workspace = true }
+argon2 = { workspace = true }
+password-hash = { workspace = true }
 rcgen = { workspace = true }
 x509-parser = { workspace = true }
 rustls = { workspace = true }
