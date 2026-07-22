@@ -201,14 +201,20 @@ jobs:
         working-directory: frontend/apps/desktop
         run: pnpm tauri build ${{ matrix.target && format('--target {0}', matrix.target) || '' }}
 
-      # Bundle names and layout differ per platform, so collect by extension
-      # rather than by guessing paths.
+      # Bundle names and layout differ per platform, so collect by extension —
+      # but ONLY from under a `bundle/` directory. Searching all of `target/`
+      # for `*.exe` swept up every Rust build script on Windows and attached
+      # forty of them to a release, next to the unpackaged binary.
+      #
+      # The `bundle/` scoping is what makes `*.exe` safe to keep: the NSIS
+      # setup lives there and is a real installer people prefer, while the bare
+      # nookos_desktop.exe and every build script sit outside it.
       - name: Collect
         shell: bash
         run: |
           mkdir -p desktop-dist
           root=frontend/apps/desktop/src-tauri/target
-          find "$root" -type f \
+          find "$root" -type f -path '*/bundle/*' \
             \( -name '*.dmg' -o -name '*.AppImage' -o -name '*.deb' \
                -o -name '*.rpm' -o -name '*.msi' -o -name '*.exe' \) \
             -exec cp {} desktop-dist/ \;
