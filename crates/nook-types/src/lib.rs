@@ -596,6 +596,21 @@ pub struct GitPushRequest {
     pub credential_id: Option<GitCredentialId>,
 }
 
+/// A tenant CA as an admin sees it. Never the private key — it is not
+/// exportable, by design.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct TenantCaSummary {
+    pub id: String,
+    /// `staged` | `active` | `retiring`.
+    pub state: String,
+    pub fingerprint: String,
+    pub not_after: DateTime<Utc>,
+    pub created_at: DateTime<Utc>,
+    /// Machines still holding an unexpired leaf from this CA — the number that
+    /// says whether it can be retired yet.
+    pub nodes_holding_leaves: i64,
+}
+
 // ── Node enrolment (mTLS) ────────────────────────────────────────────────────
 
 /// First contact: trade a join token for a certificate.

@@ -462,6 +462,28 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/nodes/{id}/revoke": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Cut a machine off.
+         * @description Distinct from expiry on purpose: a certificate simply running out means
+         *     "renew me", while revocation means "never again". Collapsing the two would
+         *     let a compromised machine wait out its certificate and quietly come back.
+         */
+        post: operations["revoke_node"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/nodes/{id}/terminal": {
         parameters: {
             query?: never;
@@ -775,6 +797,65 @@ export interface paths {
         get?: never;
         put?: never;
         post: operations["task_submit_pr"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/tenant/cas": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** What this tenant trusts, what signs, and how the rotation is progressing. */
+        get: operations["list_tenant_cas"];
+        put?: never;
+        /**
+         * Stage a new CA: trusted immediately, signing nothing yet.
+         * @description Step one of a rotation — distribute before switching, so machines learn the
+         *     new CA on their next renewal and nothing breaks when it starts signing.
+         */
+        post: operations["stage_tenant_ca"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/tenant/cas/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** Drop a CA from the trust bundle. Refused while it still has live leaves. */
+        delete: operations["retire_tenant_ca"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/tenant/cas/{id}/promote": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Make a staged CA the signer. The previous signer becomes `retiring` —
+         *     still trusted, no longer issuing.
+         */
+        post: operations["promote_tenant_ca"];
         delete?: never;
         options?: never;
         head?: never;
@@ -2001,6 +2082,26 @@ export interface components {
             /** Format: date-time */
             updated_at: string;
         };
+        /**
+         * @description A tenant CA as an admin sees it. Never the private key — it is not
+         *     exportable, by design.
+         */
+        TenantCaSummary: {
+            /** Format: date-time */
+            created_at: string;
+            fingerprint: string;
+            id: string;
+            /**
+             * Format: int64
+             * @description Machines still holding an unexpired leaf from this CA — the number that
+             *     says whether it can be retired yet.
+             */
+            nodes_holding_leaves: number;
+            /** Format: date-time */
+            not_after: string;
+            /** @description `staged` | `active` | `retiring`. */
+            state: string;
+        };
         /** Format: uuid */
         TenantId: string;
         /**
@@ -3102,6 +3203,37 @@ export interface operations {
             };
         };
     };
+    revoke_node: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
     open_terminal: {
         parameters: {
             query?: never;
@@ -3697,6 +3829,118 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["TaskItem"];
                 };
+            };
+        };
+    };
+    list_tenant_cas: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TenantCaSummary"][];
+                };
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    stage_tenant_ca: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TenantCaSummary"];
+                };
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    retire_tenant_ca: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    promote_tenant_ca: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
         };
     };

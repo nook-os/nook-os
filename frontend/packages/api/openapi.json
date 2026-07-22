@@ -1063,6 +1063,37 @@
         }
       }
     },
+    "/api/v1/nodes/{id}/revoke": {
+      "post": {
+        "tags": [
+          "crate::routes::tenant_ca"
+        ],
+        "summary": "Cut a machine off.",
+        "description": "Distinct from expiry on purpose: a certificate simply running out means\n\"renew me\", while revocation means \"never again\". Collapsing the two would\nlet a compromised machine wait out its certificate and quietly come back.",
+        "operationId": "revoke_node",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": ""
+          },
+          "403": {
+            "description": ""
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      }
+    },
     "/api/v1/nodes/{id}/terminal": {
       "post": {
         "tags": [
@@ -1875,6 +1906,116 @@
                 }
               }
             }
+          }
+        }
+      }
+    },
+    "/api/v1/tenant/cas": {
+      "get": {
+        "tags": [
+          "crate::routes::tenant_ca"
+        ],
+        "summary": "What this tenant trusts, what signs, and how the rotation is progressing.",
+        "operationId": "list_tenant_cas",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/TenantCaSummary"
+                  }
+                }
+              }
+            }
+          },
+          "403": {
+            "description": ""
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "crate::routes::tenant_ca"
+        ],
+        "summary": "Stage a new CA: trusted immediately, signing nothing yet.",
+        "description": "Step one of a rotation — distribute before switching, so machines learn the\nnew CA on their next renewal and nothing breaks when it starts signing.",
+        "operationId": "stage_tenant_ca",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TenantCaSummary"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": ""
+          }
+        }
+      }
+    },
+    "/api/v1/tenant/cas/{id}": {
+      "delete": {
+        "tags": [
+          "crate::routes::tenant_ca"
+        ],
+        "summary": "Drop a CA from the trust bundle. Refused while it still has live leaves.",
+        "operationId": "retire_tenant_ca",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": ""
+          },
+          "403": {
+            "description": ""
+          },
+          "409": {
+            "description": ""
+          }
+        }
+      }
+    },
+    "/api/v1/tenant/cas/{id}/promote": {
+      "post": {
+        "tags": [
+          "crate::routes::tenant_ca"
+        ],
+        "summary": "Make a staged CA the signer. The previous signer becomes `retiring` —\nstill trusted, no longer issuing.",
+        "operationId": "promote_tenant_ca",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": ""
+          },
+          "400": {
+            "description": ""
+          },
+          "403": {
+            "description": ""
           }
         }
       }
@@ -5184,6 +5325,43 @@
           "updated_at": {
             "type": "string",
             "format": "date-time"
+          }
+        }
+      },
+      "TenantCaSummary": {
+        "type": "object",
+        "description": "A tenant CA as an admin sees it. Never the private key — it is not\nexportable, by design.",
+        "required": [
+          "id",
+          "state",
+          "fingerprint",
+          "not_after",
+          "created_at",
+          "nodes_holding_leaves"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "fingerprint": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "nodes_holding_leaves": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Machines still holding an unexpired leaf from this CA — the number that\nsays whether it can be retired yet."
+          },
+          "not_after": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "state": {
+            "type": "string",
+            "description": "`staged` | `active` | `retiring`."
           }
         }
       },

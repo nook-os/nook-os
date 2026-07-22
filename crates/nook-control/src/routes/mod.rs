@@ -13,6 +13,7 @@ pub mod schedule;
 pub mod sessions;
 pub mod settings;
 pub mod taskwork;
+pub mod tenant_ca;
 pub mod tenants;
 pub mod themes;
 pub mod tokens;
@@ -54,6 +55,10 @@ pub fn build_agent_router(state: AppState) -> Router {
             "/api/v1",
             Router::new()
                 .route("/nodes/join", post(join::join))
+                .route("/tenant/cas", get(tenant_ca::list).post(tenant_ca::stage))
+                .route("/tenant/cas/{id}", delete_route(tenant_ca::retire))
+                .route("/tenant/cas/{id}/promote", post(tenant_ca::promote))
+                .route("/nodes/{id}/revoke", post(tenant_ca::revoke_node))
                 .route("/nodes/enroll", post(join::enroll))
                 .route("/nodes/renew", post(join::renew))
                 .route("/ws/node", get(crate::ws::node::node_ws)),

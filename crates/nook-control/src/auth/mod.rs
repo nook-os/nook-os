@@ -128,6 +128,33 @@ impl AuthCtx {
         }
     }
 
+    /// Require a tenant owner or admin.
+    ///
+    /// CA lifecycle — generating, staging, promoting, retiring, revoking a node
+    /// — is authority over every machine in a tenant, so it is gated on role
+    /// rather than on merely being signed in. The role columns have existed
+    /// since 0001 with a CHECK constraint and have never been enforced; this is
+    /// where they start meaning something.
+    ///
+    /// Scoped to the caller's OWN tenant by construction: `tenant_id` comes
+    /// from the authenticated context, never from the request, so a tenant
+    /// admin has no way to name someone else's tenant.
+    pub async fn require_tenant_admin(&self, state: &AppState) -> Result<(), ApiError> {
+        self.require_user()?;
+        let role: Option<(String,)> =
+            sqlx::query_as("SELECT role FROM users WHERE id = $1 AND tenant_id = $2")
+                .bind(self.user_id)
+                .bind(self.tenant_id)
+                .fetch_optional(&state.db)
+                .await?;
+        match role.as_ref().map(|(r,)| r.as_str()) {
+            Some("owner") | Some("admin") => Ok(()),
+            _ => Err(ApiError::ForbiddenMsg(
+                "this needs tenant owner or admin".into(),
+            )),
+        }
+    }
+
     /// Refuse machine credentials.
     ///
     /// For operations that grant lasting power rather than doing today's work:

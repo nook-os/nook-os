@@ -203,3 +203,142 @@ async fn the_active_signer_cannot_be_retired() {
 
     cleanup(&pool, &[tenant]).await;
 }
+
+// ── Authorization ───────────────────────────────────────────────────────────
+
+use nook_control::auth::{AuthCtx, Principal};
+use nook_control::state::AppState;
+use nook_types::{AuthSessionId, UserId};
+
+async fn seed_user(pool: &PgPool, tenant: TenantId, role: &str) -> UserId {
+    let id = UserId::new();
+    sqlx::query(
+        "INSERT INTO users (id, tenant_id, display_name, email, role)
+         VALUES ($1, $2, $3, $4, $5)",
+    )
+    .bind(id)
+    .bind(tenant)
+    .bind(role)
+    .bind(format!("{}@example.test", Uuid::now_v7().simple()))
+    .bind(role)
+    .execute(pool)
+    .await
+    .expect("user");
+    id
+}
+
+fn ctx(user: UserId, tenant: TenantId) -> AuthCtx {
+    AuthCtx {
+        session_id: AuthSessionId::new(),
+        user_id: user,
+        tenant_id: tenant,
+        principal: Principal::User,
+    }
+}
+
+/// Owners and admins may run CA operations; a plain member may not.
+#[tokio::test]
+async fn ca_operations_need_owner_or_admin() {
+    let Some(pool) = test_pool().await else {
+        return;
+    };
+    let tenant = seed_tenant(&pool).await;
+    let state = AppState::new(pool.clone(), test_config(), None).await;
+
+    for role in ["owner", "admin"] {
+        let u = seed_user(&pool, tenant, role).await;
+        assert!(
+            ctx(u, tenant).require_tenant_admin(&state).await.is_ok(),
+            "{role} must be allowed"
+        );
+    }
+    let member = seed_user(&pool, tenant, "member").await;
+    assert!(
+        ctx(member, tenant)
+            .require_tenant_admin(&state)
+            .await
+            .is_err(),
+        "a member must not run CA operations"
+    );
+
+    cleanup(&pool, &[tenant]).await;
+}
+
+/// An admin of one tenant is not an admin of another. The role lookup is
+/// scoped by the authenticated tenant, so a forged context gets nothing.
+#[tokio::test]
+async fn a_tenant_admin_cannot_reach_another_tenant() {
+    let Some(pool) = test_pool().await else {
+        return;
+    };
+    let (a, b) = (seed_tenant(&pool).await, seed_tenant(&pool).await);
+    let state = AppState::new(pool.clone(), test_config(), None).await;
+
+    let admin_a = seed_user(&pool, a, "owner").await;
+    // Their own tenant: fine.
+    assert!(ctx(admin_a, a).require_tenant_admin(&state).await.is_ok());
+    // Someone else's: they hold no role there, so the lookup finds nothing.
+    assert!(
+        ctx(admin_a, b).require_tenant_admin(&state).await.is_err(),
+        "tenant A's owner must not be an admin of tenant B"
+    );
+
+    cleanup(&pool, &[a, b]).await;
+}
+
+/// A machine credential can never run CA operations, whatever the tenant's
+/// roles say — that is how a stolen node token stays confined.
+#[tokio::test]
+async fn a_node_credential_cannot_run_ca_operations() {
+    let Some(pool) = test_pool().await else {
+        return;
+    };
+    let tenant = seed_tenant(&pool).await;
+    let state = AppState::new(pool.clone(), test_config(), None).await;
+    let owner = seed_user(&pool, tenant, "owner").await;
+
+    let as_node = AuthCtx {
+        principal: Principal::Node(nook_types::NodeId::new()),
+        ..ctx(owner, tenant)
+    };
+    assert!(
+        as_node.require_tenant_admin(&state).await.is_err(),
+        "a node credential must never reach CA lifecycle actions"
+    );
+
+    cleanup(&pool, &[tenant]).await;
+}
+
+/// A config that touches nothing external.
+fn test_config() -> nook_control::config::Config {
+    nook_control::config::Config {
+        app_env: "test".into(),
+        bind: "127.0.0.1:0".into(),
+        agent_bind: "127.0.0.1:0".into(),
+        public_base_url: "http://localhost:8080".into(),
+        web_origin: "http://localhost:5173".into(),
+        database_url: std::env::var("DATABASE_URL").unwrap_or_default(),
+        oidc_issuer_url: None,
+        oidc_client_id: None,
+        oidc_client_secret: None,
+        oidc_redirect_url: None,
+        oidc_scopes: "openid profile email".into(),
+        session_secret: "0".repeat(64),
+        session_ttl_hours: 168,
+        default_tenant_name: "dev".into(),
+        auth_dev_mode: true,
+        mcp_token: None,
+        dev_join_token: None,
+        dist_dir: "/nonexistent".into(),
+        releases_repo: "nook-os/nook-os".into(),
+        artifact_store: "disk".into(),
+        artifact_prefix: "nook".into(),
+        artifact_redirect: false,
+        s3_bucket: None,
+        s3_endpoint: None,
+        s3_region: None,
+        s3_access_key_id: None,
+        s3_secret_access_key: None,
+        s3_path_style: true,
+    }
+}
