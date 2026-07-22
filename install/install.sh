@@ -12,6 +12,19 @@
 #   curl -fsSL https://nookos.dev/install.sh -o install.sh && less install.sh
 set -eu
 
+# Everything lives in main(), called on the last line, so the shell parses the
+# whole file before running any of it.
+#
+# Without this, `curl … | sh` is a race: the shell reads a chunk, starts
+# executing, and when we `exec` into the binary the rest of the script is still
+# in flight. curl finds the pipe closed and reports "(23) Failure writing output
+# to destination" — its error, about our success, and the reader concludes the
+# installer is broken.
+#
+# Left unindented on purpose: the heredoc terminators below have to stay at
+# column zero, and a body that is half-indented is worse than one that is not.
+main() {
+
 # @@SERVER@@ is substituted when the control plane serves this file, so a node
 # installer knows where to phone home. Served from nookos.dev the placeholder
 # survives verbatim, and the wizard asks instead.
@@ -195,3 +208,6 @@ set -- setup
 [ -n "$FINGERPRINT" ] && set -- "$@" --fingerprint "$FINGERPRINT"
 # shellcheck disable=SC2086
 exec "$PREFIX/nook" "$@" $PASSTHRU
+}
+
+main "$@"
