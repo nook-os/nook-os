@@ -4,6 +4,7 @@ mod config;
 mod conn;
 mod discovery;
 mod gitops;
+mod pinning;
 mod resources;
 mod sessions;
 mod ssh;
@@ -162,6 +163,9 @@ enum Command {
 #[derive(Debug, Default, serde::Deserialize)]
 struct JoinSpec {
     server: Option<String>,
+    /// SHA-256 of the control plane's certificate, pinned from here on.
+    #[serde(default)]
+    server_fingerprint: Option<String>,
     token: Option<String>,
     name: Option<String>,
     #[serde(default)]
@@ -429,6 +433,7 @@ fn setup_wizard() -> Result<SetupPlan> {
         });
     }
     Ok(SetupPlan::Join(JoinSpec {
+        server_fingerprint: None,
         server: Some(server),
         token: Some(token),
         name: Some(name),
@@ -596,6 +601,9 @@ async fn join(spec: JoinSpec) -> Result<()> {
         node_token: joined.node_token.clone(),
         workspace_roots: workspace_roots.clone(),
         ssh_key_path: spec.ssh_key_path.clone(),
+        // Set once the join flow carries a fingerprint; until then the node
+        // relies on ordinary web-PKI validation for https.
+        server_fingerprint: spec.server_fingerprint.clone(),
     };
     cfg.save()?;
 

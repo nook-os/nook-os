@@ -64,6 +64,10 @@ rcgen = { version = "0.13", features = ["pem", "x509-parser"] }
 # point: a certificate is only an identity if its signature actually chains to
 # a CA we trust.
 x509-parser = { version = "0.16", features = ["verify"] }
+# Pinning the server certificate on first contact needs a custom verifier, so
+# the node talks to rustls directly rather than only through a wrapper.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-pki-types = "1"
 hmac = "0.12"
 aes-gcm = "0.10"
 rand = "0.9"

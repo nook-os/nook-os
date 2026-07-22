@@ -67,7 +67,20 @@ pub async fn connect_once(cfg: &NodeConfig) -> Result<()> {
             .context("bad token")?,
     );
 
-    let (socket, _) = connect_async(request).await.context("websocket connect")?;
+    // A pinned fingerprint applies to EVERY connection, not just the enrolment
+    // that established it — pinning only at join would leave every later
+    // reconnect trusting whatever the web PKI vouches for.
+    let (socket, _) = match cfg.server_fingerprint.as_deref() {
+        Some(fp) => {
+            let tls = tokio_tungstenite::Connector::Rustls(std::sync::Arc::new(
+                crate::pinning::pinned_client_config(fp),
+            ));
+            tokio_tungstenite::connect_async_tls_with_config(request, None, false, Some(tls))
+                .await
+                .context("websocket connect (pinned)")?
+        }
+        None => connect_async(request).await.context("websocket connect")?,
+    };
     tracing::info!(server = %cfg.server, "connected to control plane");
     let (mut sink, mut stream) = socket.split();
 

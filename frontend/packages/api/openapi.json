@@ -3574,6 +3574,13 @@
           "expires_at"
         ],
         "properties": {
+          "ca_fingerprint": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "SHA-256 of the certificate the joining machine should expect to see,\nso it can pin the server before handing over anything. `None` when the\ncontrol plane does not terminate TLS itself (dev, or TLS at the edge),\nin which case there is nothing honest to pin to."
+          },
           "expires_at": {
             "type": "string",
             "format": "date-time"

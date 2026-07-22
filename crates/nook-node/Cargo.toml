@@ -13,6 +13,9 @@ nook-types = { workspace = true }
 nook-proto = { workspace = true }
 tokio = { workspace = true }
 tokio-tungstenite = { workspace = true }
+rustls = { workspace = true }
+rustls-pki-types = { workspace = true }
+sha2 = { workspace = true }
 futures-util = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -29,3 +32,7 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 toml = { workspace = true }
 walkdir = { workspace = true }
+
+[dev-dependencies]
+# Generate throwaway certificates to prove the pin refuses the wrong one.
+rcgen = { workspace = true }

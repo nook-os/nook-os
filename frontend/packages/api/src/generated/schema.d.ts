@@ -1476,6 +1476,13 @@ export interface components {
             private_key?: string | null;
         };
         CreateJoinTokenResponse: {
+            /**
+             * @description SHA-256 of the certificate the joining machine should expect to see,
+             *     so it can pin the server before handing over anything. `None` when the
+             *     control plane does not terminate TLS itself (dev, or TLS at the edge),
+             *     in which case there is nothing honest to pin to.
+             */
+            ca_fingerprint?: string | null;
             /** Format: date-time */
             expires_at: string;
             /** @description Shown exactly once; only a hash is stored. */

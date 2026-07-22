@@ -45,7 +45,19 @@ pub async fn create_join_token(
     .bind(expires_at)
     .execute(&state.db)
     .await?;
-    Ok(Json(CreateJoinTokenResponse { token, expires_at }))
+    // Read the serving certificate fresh rather than caching: an operator who
+    // renews it should not have to restart the control plane for join tokens
+    // to start naming the new one.
+    let ca_fingerprint = state.cfg.agent_tls_cert.as_deref().and_then(|path| {
+        let pem = std::fs::read_to_string(path).ok()?;
+        crate::ca::fingerprint_pem(&pem).ok()
+    });
+
+    Ok(Json(CreateJoinTokenResponse {
+        token,
+        expires_at,
+        ca_fingerprint,
+    }))
 }
 
 /// POST /api/v1/nodes/join — unauthenticated; the join token IS the

@@ -49,6 +49,13 @@ pub struct Config {
     /// quietly widen the other.
     pub agent_bind: String,
 
+    /// PEM certificate the agent listener serves, when the control plane
+    /// terminates TLS itself. Its SHA-256 goes into join tokens so a machine
+    /// can pin the server on first contact instead of trusting whatever the
+    /// web PKI vouches for — any public CA can issue for any hostname, so root
+    /// -store validation alone would not stop a mis-issued certificate.
+    pub agent_tls_cert: Option<String>,
+
     // ── Artifact storage ────────────────────────────────────────────────
     /// `disk` (default) or `s3`. See `crate::storage`.
     pub artifact_store: String,
@@ -103,6 +110,7 @@ impl Config {
 
             releases_repo: env_opt("NOOK_RELEASES_REPO")
                 .unwrap_or_else(|| "nook-os/nook-os".into()),
+            agent_tls_cert: env_opt("NOOK_AGENT_TLS_CERT"),
             agent_bind: env_opt("NOOK_AGENT_BIND").unwrap_or_else(|| "0.0.0.0:8081".into()),
             dist_dir: env_opt("NOOK_DIST_DIR")
                 .unwrap_or_else(|| "/usr/local/share/nook/dist".into()),

@@ -16,6 +16,13 @@ pub struct NodeConfig {
     /// used. Set by `nook setup` when you pick an existing ~/.ssh key.
     #[serde(default)]
     pub ssh_key_path: Option<String>,
+    /// SHA-256 of the control plane's certificate, from the join token.
+    ///
+    /// Once set, this machine talks to that certificate and nothing else. It
+    /// survives in node.toml so every later reconnect is pinned too, not just
+    /// the enrolment that established it.
+    #[serde(default)]
+    pub server_fingerprint: Option<String>,
 }
 
 pub fn config_path() -> Result<PathBuf> {
