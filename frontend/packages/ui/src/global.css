@@ -1632,3 +1632,17 @@ textarea.env-area.blurred {
   text-transform: uppercase;
   color: var(--nook-fg-faint);
 }
+
+/* Capacity cell: the same height whether a node is reporting or not.
+   Three .res-bar rows measure 16px each including margins, so 52px is the
+   populated height — measured, not guessed. Matching it when there is no
+   sample keeps every row identical, which is what makes the table read as a
+   table rather than a ragged list. */
+.res-bars,
+.res-empty {
+  min-height: 52px;
+}
+.res-empty {
+  display: flex;
+  align-items: center;
+}

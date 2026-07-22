@@ -77,14 +77,21 @@ export function ResourceBars({ resources }: { resources: unknown }) {
     load_avg1?: number;
     active_sessions?: number;
   };
+  // Offline nodes have no sample, and collapsing to a single line made their
+  // rows half the height of a reporting node's — which is what made the table
+  // look ragged rather than misaligned. Reserve the same space either way.
   if (r.mem_total === undefined && r.cpu_percent === undefined) {
-    return <span className="faint small">no sample yet</span>;
+    return (
+      <div className="res-empty">
+        <span className="faint small">no sample yet</span>
+      </div>
+    );
   }
   const cpu = Math.round(r.cpu_percent ?? 0);
   const memPct =
     r.mem_total && r.mem_used ? Math.round((r.mem_used / r.mem_total) * 100) : 0;
   return (
-    <div>
+    <div className="res-bars">
       <div className="res-bar">
         <span className="label">cpu</span>
         <span className="track">
