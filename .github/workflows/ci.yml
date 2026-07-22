@@ -11,6 +11,23 @@ env:
 jobs:
   rust:
     runs-on: ubuntu-latest
+    # Without a database the suite reports "ok" while executing almost nothing:
+    # every test that needs Postgres returns early. NOOK_REQUIRE_DB turns that
+    # silent skip into a failure, so a green tick means the tests actually ran.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: nook
+          POSTGRES_PASSWORD: nook
+          POSTGRES_DB: nook
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U nook"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      DATABASE_URL: postgres://nook:nook@localhost:5432/nook
+      NOOK_REQUIRE_DB: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

@@ -1,0 +1,197 @@
+name: Release
+
+# Tagging is the whole trigger: `git tag v0.2.0 && git push --tags` publishes
+# binaries and container images that all carry the same version. Nothing here
+# runs on a branch push, so main never produces something that looks released.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to build (must already exist)"
+        required: true
+
+permissions:
+  contents: write # create the release and upload assets
+  packages: write # push to ghcr.io
+
+env:
+  CARGO_TERM_COLOR: always
+  REGISTRY: ghcr.io
+
+jobs:
+  # ---------------------------------------------------------------- binaries
+  #
+  # Built on native runners rather than cross-compiled. Cross toolchains are
+  # the usual source of "builds fine, segfaults on the target", and GitHub
+  # gives us arm64 Linux and both macOS architectures for free.
+  #
+  # Ubuntu 22.04 deliberately, not latest: the binary links against the glibc
+  # it was built on, and 24.04's is too new for Debian 12 — the distro most
+  # self-hosters are actually running.
+  binaries:
+    name: nook (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            asset: nook-linux-x86_64
+          - runner: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+            asset: nook-linux-aarch64
+          - runner: macos-13
+            target: x86_64-apple-darwin
+            asset: nook-darwin-x86_64
+          - runner: macos-14
+            target: aarch64-apple-darwin
+            asset: nook-darwin-aarch64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build
+        run: cargo build --release --locked -p nook-node --target ${{ matrix.target }}
+
+      # A binary that cannot run is worth catching here rather than in
+      # someone's install script.
+      - name: It runs
+        run: ./target/${{ matrix.target }}/release/nook --version
+
+      - name: Package
+        run: |
+          mkdir -p dist
+          cp target/${{ matrix.target }}/release/nook dist/${{ matrix.asset }}
+          cd dist
+          # Checksums travel with the binaries so an install script can verify
+          # what it downloaded instead of trusting the transport alone.
+          shasum -a 256 ${{ matrix.asset }} > ${{ matrix.asset }}.sha256
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bin-${{ matrix.asset }}
+          path: dist/*
+          retention-days: 1
+
+  # -------------------------------------------------------------- containers
+  #
+  # Each architecture builds on its own native runner and pushes by digest;
+  # the merge job below stitches them into one multi-arch tag. The obvious
+  # alternative — buildx with QEMU — emulates the whole Rust compile and turns
+  # a five-minute build into forty.
+  images:
+    name: ${{ matrix.image }} (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        # An `include:` whose keys all match an existing axis fills in extra
+        # fields on the matching combinations — which is how `runner` and
+        # `dockerfile` attach here without inventing standalone jobs.
+        image: [control, node, web]
+        arch: [amd64, arm64]
+        include:
+          - arch: amd64
+            runner: ubuntu-22.04
+          - arch: arm64
+            runner: ubuntu-22.04-arm
+          - image: control
+            dockerfile: deploy/docker/control.Dockerfile
+          - image: node
+            dockerfile: deploy/docker/node.Dockerfile
+          - image: web
+            dockerfile: deploy/docker/web-prod.Dockerfile
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          platforms: linux/${{ matrix.arch }}
+          outputs: type=image,name=${{ env.REGISTRY }}/${{ github.repository_owner }}/nook-${{ matrix.image }},push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha,scope=${{ matrix.image }}-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.image }}-${{ matrix.arch }}
+
+      # Leave the digest as a filename for the merge job to pick up. The
+      # `sha256:` prefix is stripped here so the merge can rebuild the
+      # reference without parsing anything.
+      - name: Record the digest
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          mkdir -p /tmp/digests
+          touch "/tmp/digests/${DIGEST#sha256:}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: digest-${{ matrix.image }}-${{ matrix.arch }}
+          path: /tmp/digests/*
+          retention-days: 1
+
+  merge:
+    name: Multi-arch manifest
+    needs: images
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        image: [control, node, web]
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: digest-${{ matrix.image }}-*
+          path: /tmp/digests
+          merge-multiple: true
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Create the manifest
+        working-directory: /tmp/digests
+        env:
+          REPO: ${{ env.REGISTRY }}/${{ github.repository_owner }}/nook-${{ matrix.image }}
+          VERSION: ${{ inputs.tag || github.ref_name }}
+        run: |
+          docker buildx imagetools create \
+            -t "$REPO:$VERSION" -t "$REPO:latest" \
+            $(printf "${REPO}@sha256:%s " $(ls))
+          docker buildx imagetools inspect "$REPO:$VERSION"
+
+  # ---------------------------------------------------------------- release
+  release:
+    needs: [binaries, merge]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: bin-*
+          path: dist
+          merge-multiple: true
+      - name: Publish
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag || github.ref_name }}
+          files: dist/*
+          generate_release_notes: true
+          fail_on_unmatched_files: true
