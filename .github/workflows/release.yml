@@ -262,10 +262,25 @@ jobs:
             \( -name '*.dmg' -o -name '*.AppImage' -o -name '*.deb' \
                -o -name '*.rpm' -o -name '*.msi' -o -name '*.exe' \) \
             -exec cp {} desktop-dist/ \;
-          ls -la desktop-dist
           # An empty bundle directory means the build silently produced nothing,
           # which would otherwise surface as a release missing its downloads.
           [ -n "$(ls -A desktop-dist)" ] || { echo "::error::no bundle produced"; exit 1; }
+
+          # Version-less copies, so a download link can be written once and
+          # keep working. `releases/latest/download/<name>` resolves by exact
+          # filename, so a name carrying the version breaks every link the
+          # moment a release ships — which is why the CLI binaries have always
+          # been called `nook-linux-x86_64` rather than `nook-0.3.6-linux`.
+          for f in desktop-dist/*; do
+            case "$f" in *NookOS-${{ matrix.label }}*) continue ;; esac
+            case "$f" in
+              *-setup.exe) ext="-setup.exe" ;;
+              *.tar.gz)    ext=".tar.gz" ;;
+              *)           ext=".${f##*.}" ;;
+            esac
+            cp "$f" "desktop-dist/NookOS-${{ matrix.label }}$ext"
+          done
+          ls -la desktop-dist
 
       - uses: actions/upload-artifact@v4
         with:
