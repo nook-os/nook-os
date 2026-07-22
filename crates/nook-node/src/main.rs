@@ -9,6 +9,7 @@ mod pinning;
 mod resources;
 mod sessions;
 mod ssh;
+mod style;
 mod tmux;
 mod wizard;
 
@@ -219,7 +220,7 @@ struct JoinSpec {
 }
 
 fn ok(line: &str) {
-    println!("\u{2713} {line}");
+    println!("{}", style::success(line));
 }
 
 #[tokio::main]

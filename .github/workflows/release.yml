@@ -117,6 +117,104 @@ jobs:
           path: dist/*
           retention-days: 1
 
+
+  # ---------------------------------------------------------------- desktop
+  #
+  # The Tauri shell, which is the same web UI in a native window rather than a
+  # separate product. Its own job because it needs a system webview and, on
+  # Linux, a pile of GTK development packages that nothing else here wants.
+  #
+  # Not cross-compiled and not emulated: a desktop bundle is signed and linked
+  # against the platform it runs on, so each one is built on that platform.
+  desktop:
+    name: desktop (${{ matrix.label }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            label: linux-x86_64
+          - runner: macos-14
+            label: macos-aarch64
+          - runner: macos-13
+            label: macos-x86_64
+          - runner: windows-latest
+            label: windows-x86_64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: frontend/apps/desktop/src-tauri
+          key: desktop-${{ matrix.label }}
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      # webkit2gtk is the webview; the rest are what its bundler links against.
+      - name: Linux system dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev \
+            patchelf libgtk-3-dev
+
+      # The bundle carries a version of its own, and nothing keeps it in step
+      # with the tag — it sat at 0.1.0 while the workspace was at 0.2.3. Take
+      # it from the tag so "which build is this?" has one answer.
+      - name: Stamp the version from the tag
+        shell: bash
+        run: |
+          v="${{ inputs.tag || github.ref_name }}"
+          v="${v#v}"
+          f=frontend/apps/desktop/src-tauri/tauri.conf.json
+          node -e "
+            const fs=require('fs'), p='$f';
+            const j=JSON.parse(fs.readFileSync(p,'utf8'));
+            j.version='$v';
+            fs.writeFileSync(p, JSON.stringify(j,null,2)+'\n');
+            console.log('desktop version ->', j.version);
+          "
+
+      - name: Install
+        working-directory: frontend
+        run: pnpm install --frozen-lockfile
+
+      - name: Build the bundle
+        working-directory: frontend/apps/desktop
+        run: pnpm tauri build
+
+      # Bundle names and layout differ per platform, so collect by extension
+      # rather than by guessing paths.
+      - name: Collect
+        shell: bash
+        run: |
+          mkdir -p desktop-dist
+          root=frontend/apps/desktop/src-tauri/target/release/bundle
+          find "$root" -type f \
+            \( -name '*.dmg' -o -name '*.AppImage' -o -name '*.deb' \
+               -o -name '*.rpm' -o -name '*.msi' -o -name '*.exe' \) \
+            -exec cp {} desktop-dist/ \;
+          ls -la desktop-dist
+          # An empty bundle directory means the build silently produced nothing,
+          # which would otherwise surface as a release missing its downloads.
+          [ -n "$(ls -A desktop-dist)" ] || { echo "::error::no bundle produced"; exit 1; }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: desktop-${{ matrix.label }}
+          path: desktop-dist/*
+          retention-days: 1
+
   # -------------------------------------------------------------- containers
   #
   # Each architecture builds on its own native runner and pushes by digest;
@@ -214,7 +312,7 @@ jobs:
 
   # ---------------------------------------------------------------- release
   release:
-    needs: [binaries, merge]
+    needs: [binaries, desktop, merge]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -223,6 +321,11 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           pattern: bin-*
+          path: dist
+          merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: desktop-*
           path: dist
           merge-multiple: true
       # The installer ships as an asset too, so `curl` has a stable URL that

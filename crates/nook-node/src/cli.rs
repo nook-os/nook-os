@@ -292,15 +292,24 @@ pub async fn start(
         .get("name")
         .and_then(Value::as_str)
         .unwrap_or("session");
+    let node = location
+        .get("node_name")
+        .and_then(Value::as_str)
+        .unwrap_or("?");
     println!(
-        "✓ {sname} — {runtime} on {}",
-        location
-            .get("node_name")
-            .and_then(Value::as_str)
-            .unwrap_or("?")
+        "{}",
+        crate::style::success(&format!(
+            "{} — {} on {}",
+            crate::style::bold(sname),
+            crate::style::accent(runtime),
+            crate::style::accent(node)
+        ))
     );
-    println!("  nook send {sname} 'your prompt'");
-    println!("  nook read {sname}");
+    println!(
+        "{}",
+        crate::style::hint(&format!("nook exec {sname} 'your prompt'"))
+    );
+    println!("{}", crate::style::hint(&format!("nook read {sname}")));
     Ok(())
 }
 
@@ -390,8 +399,22 @@ pub async fn exec(session: &str, text: &str, timeout_secs: u64, lines: u32) -> R
         }
         last = snap;
     }
-    println!("── {session} · runtime={} · status={} ──", last.0, last.1);
-    println!("{}", last.2);
+    // Echo the prompt, then the reply. The old form dumped raw scrollback
+    // under a `──` header, which meant the answer arrived buried in whatever
+    // else happened to be on the runtime's screen — the prompt included, twice.
+    println!("{}", crate::style::prompt_echo(text));
+    let body = last.2.trim();
+    let mut lines = body.lines();
+    if let Some(first) = lines.next() {
+        println!("{}", crate::style::reply(first));
+        for l in lines {
+            println!("  {l}");
+        }
+    }
+    println!(
+        "{}",
+        crate::style::dim(&format!("  {} · {}", last.0, last.1))
+    );
     Ok(())
 }
 
@@ -519,6 +542,8 @@ fn cell(row: &Value, key: &str) -> String {
 }
 
 fn print_table(resource: &str, rows: &[Value]) {
+    use crate::style;
+
     let cols = columns(resource, &rows[0]);
     let headers: Vec<String> = cols.iter().map(|c| c.to_uppercase()).collect();
     let mut widths: Vec<usize> = headers.iter().map(|h| h.len()).collect();
@@ -531,20 +556,47 @@ fn print_table(resource: &str, rows: &[Value]) {
             widths[i] = widths[i].max(v.chars().count());
         }
     }
-    let line = |cells: &[String]| {
+
+    // Pad on the PLAIN text, then colour. Colouring first would count escape
+    // bytes as characters and every column after the first would drift.
+    let render = |cells: &[String], paint: &dyn Fn(usize, &str) -> String| {
         let mut out = String::new();
         for (i, v) in cells.iter().enumerate() {
-            let pad = widths[i] - v.chars().count();
-            out.push_str(v);
+            out.push_str(&paint(i, v));
             if i + 1 < cells.len() {
-                out.push_str(&" ".repeat(pad + 2));
+                out.push_str(&" ".repeat(widths[i] - v.chars().count() + 2));
             }
         }
         println!("{}", out.trim_end());
     };
-    line(&headers);
+
+    render(&headers, &|_, v| style::dim(v));
     for row in &body {
-        line(row);
+        render(row, &|i, v| {
+            // First column names the thing; the rest is detail about it.
+            if i == 0 {
+                return style::bold(v);
+            }
+            match cols[i] {
+                "status" => status_colour(v),
+                // Timestamps are the least interesting thing on the line and
+                // the widest — recede them so the eye goes to names and state.
+                c if c.ends_with("_at") => style::dim(v),
+                _ => v.to_string(),
+            }
+        });
+    }
+}
+
+/// Colour a status the way the UI does: green is live, red is broken,
+/// everything dormant recedes.
+fn status_colour(v: &str) -> String {
+    use crate::style;
+    match v {
+        "online" | "running" | "active" | "attached" => style::ok_c(v),
+        "error" | "failed" | "revoked" => style::err(v),
+        "offline" | "stopped" | "exited" | "-" => style::dim(v),
+        other => other.to_string(),
     }
 }
 
