@@ -55,8 +55,9 @@ export function TerminalView({
       theme: terminalTheme(tokens),
       cursorBlink: true,
       cursorStyle: "block",
-      // tmux owns ALL history (mouse wheel = copy-mode scroll). A local
-      // scrollback would only collect stale tmux frames — every resize or
+      // tmux owns ALL history, and the wheel reaches it: the node binds
+      // WheelUp/DownPane to copy-mode scrolling (see tmux.rs). A local
+      // scrollback here would only collect stale tmux frames — every resize or
       // reattach redraw pushed old rows up where they reflowed into garbage
       // (doubled status bars, text fragments). Pure viewport instead.
       scrollback: 0,

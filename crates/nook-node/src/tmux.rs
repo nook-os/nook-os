@@ -49,19 +49,48 @@ pub fn session_exists(name: &str) -> bool {
 
 /// Server-wide defaults, applied before every session create (idempotent;
 /// `set -g` also reaches existing sessions):
-/// - `mouse off` (explicit): mouse mode made tmux intercept wheel/clicks and
-///   its copy-mode redraws corrupted full-screen TUIs like Claude Code in the
-///   browser terminal. TUIs behave exactly like a plain native terminal with
-///   it off. (Scrollback access is a future feature — likely per-viewer tmux
-///   clients — not worth breaking TUI rendering for.)
-/// - `history-limit`: applies to panes created AFTER it's set, hence here;
-///   tmux retains history for when scrollback access lands.
+/// - `mouse on` + explicit wheel bindings: without mouse mode tmux ignores the
+///   wheel, and the browser terminal falls back to xterm's "alternate scroll"
+///   emulation — translating the wheel into arrow keys. In a shell that means
+///   scrolling silently walks your command history instead of scrolling.
+///   Turning mouse mode on alone is not enough either: bare `mouse on` makes
+///   the wheel yank a full-screen TUI away and drop you into copy-mode showing
+///   pre-app scrollback. So the wheel is bound by context (see below).
+/// - `history-limit`: applies to panes created AFTER it's set, hence here.
 /// - `set-clipboard on`: apps that emit OSC 52 copy into the real clipboard.
 pub fn apply_server_defaults() {
     let _ = tmux(&["start-server"]);
-    let _ = tmux(&["set-option", "-g", "mouse", "off"]);
+    let _ = tmux(&["set-option", "-g", "mouse", "on"]);
     let _ = tmux(&["set-option", "-g", "history-limit", "10000"]);
     let _ = tmux(&["set-option", "-s", "set-clipboard", "on"]);
+
+    // Wheel policy, in priority order:
+    //   1. the app asked for mouse reporting (Claude Code, `vim -c 'set
+    //      mouse=a'`) -> forward the event; the app scrolls itself.
+    //   2. otherwise a full-screen app on the alternate screen (less, vim)
+    //      -> arrow keys, which is what a native terminal sends and what the
+    //      app expects. Crucially NOT copy-mode, which would replace the TUI.
+    //   3. otherwise a normal shell -> enter copy-mode and scroll the real
+    //      scrollback, which is what "scroll up in my terminal" should mean.
+    for (key, arrow, down_fallback) in [
+        ("WheelUpPane", "Up", "copy-mode -e; send-keys -M"),
+        ("WheelDownPane", "Down", "send-keys -M"),
+    ] {
+        let alt_branch =
+            format!("if -Ft= \"#{{alternate_on}}\" \"send-keys -N 3 {arrow}\" \"{down_fallback}\"");
+        let _ = tmux(&[
+            "bind-key",
+            "-n",
+            key,
+            "if-shell",
+            "-F",
+            "-t",
+            "=",
+            "#{mouse_any_flag}",
+            "send-keys -M",
+            &alt_branch,
+        ]);
+    }
 }
 
 /// Create a detached session running `command` in `cwd`.
