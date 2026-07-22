@@ -23,9 +23,10 @@ env:
 jobs:
   # ---------------------------------------------------------------- binaries
   #
-  # Built on native runners rather than cross-compiled. Cross toolchains are
-  # the usual source of "builds fine, segfaults on the target", and GitHub
-  # gives us arm64 Linux and both macOS architectures for free.
+  # Built natively wherever a runner of that architecture exists — cross
+  # toolchains on Linux are the usual source of "builds fine, segfaults on the
+  # target", and GitHub gives us arm64 Linux for free. macOS is the exception
+  # noted below.
   #
   # Ubuntu 22.04 deliberately, not latest: the binary links against the glibc
   # it was built on, and 24.04's is too new for Debian 12 — the distro most
@@ -42,9 +43,14 @@ jobs:
           - runner: ubuntu-22.04-arm
             target: aarch64-unknown-linux-gnu
             asset: nook-linux-aarch64
-          - runner: macos-13
+          # Both macOS targets build on Apple silicon. macos-13 (Intel) is
+          # being retired, and unlike Linux, cross-targeting on macOS is
+          # routine — Xcode ships both SDKs, so this is a supported build
+          # rather than a cross-toolchain gamble.
+          - runner: macos-14
             target: x86_64-apple-darwin
             asset: nook-darwin-x86_64
+            native: false
           - runner: macos-14
             target: aarch64-apple-darwin
             asset: nook-darwin-aarch64
@@ -65,7 +71,9 @@ jobs:
 
       # A binary that cannot run is worth catching here rather than in
       # someone's install script.
+      # Only where the runner can actually execute what it built.
       - name: It runs
+        if: matrix.native != false
         run: ./target/${{ matrix.target }}/release/nook --version
 
       - name: Package
