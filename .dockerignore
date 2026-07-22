@@ -1,0 +1,12 @@
+# Keep build contexts small and deterministic.
+target
+target-docker
+target-docker-node
+**/node_modules
+frontend/apps/desktop/src-tauri/target
+frontend/**/dist
+.git
+.env
+.env.local
+docker-compose.prod.yml
+certs/

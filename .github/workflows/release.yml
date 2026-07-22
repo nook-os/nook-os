@@ -1,0 +1,418 @@
+name: Release
+
+# Tagging is the whole trigger: `git tag v0.2.0 && git push --tags` publishes
+# binaries and container images that all carry the same version. Nothing here
+# runs on a branch push, so main never produces something that looks released.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to build (must already exist)"
+        required: true
+
+permissions:
+  contents: write # create the release and upload assets
+  packages: write # push to ghcr.io
+
+env:
+  CARGO_TERM_COLOR: always
+  REGISTRY: ghcr.io
+
+jobs:
+  # ---------------------------------------------------------------- binaries
+  #
+  # Built natively wherever a runner of that architecture exists — cross
+  # toolchains on Linux are the usual source of "builds fine, segfaults on the
+  # target", and GitHub gives us arm64 Linux for free. macOS is the exception
+  # noted below.
+  #
+  # Ubuntu 22.04 deliberately, not latest: the binary links against the glibc
+  # it was built on, and 24.04's is too new for Debian 12 — the distro most
+  # self-hosters are actually running.
+  binaries:
+    name: nook (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            asset: nook-linux-x86_64
+          - runner: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+            asset: nook-linux-aarch64
+          # Both macOS targets build on Apple silicon. macos-13 (Intel) is
+          # being retired, and unlike Linux, cross-targeting on macOS is
+          # routine — Xcode ships both SDKs, so this is a supported build
+          # rather than a cross-toolchain gamble.
+          - runner: macos-14
+            target: x86_64-apple-darwin
+            asset: nook-darwin-x86_64
+            native: false
+          - runner: macos-14
+            target: aarch64-apple-darwin
+            asset: nook-darwin-aarch64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build
+        # nook-control too: the installer's "systemd, native binary" mode runs
+        # the control plane on the host rather than in a container, and it has
+        # to come from somewhere.
+        run: |
+          cargo build --release --locked -p nook-node --target ${{ matrix.target }}
+          cargo build --release --locked -p nook-control --target ${{ matrix.target }}
+
+      # A binary that cannot run is worth catching here rather than in
+      # someone's install script.
+      # Only where the runner can actually execute what it built.
+      #
+      # `--version` is not enough. rustls picks its crypto provider from
+      # whichever features are enabled, and `-p nook-node` resolves those
+      # differently from a workspace build — so a binary that passes every test
+      # can still panic the first time it constructs a TLS config, which is the
+      # first time the agent connects. Nothing but a release-shaped binary can
+      # show that, so force it to build one here.
+      - name: It runs, and can build a TLS config
+        if: matrix.native != false
+        run: |
+          BIN=./target/${{ matrix.target }}/release/nook
+          $BIN --version
+          # Unreachable on purpose: we want the TLS setup, not a connection.
+          out=$($BIN enroll --server https://127.0.0.1:1 --token smoke \
+                  --server-fingerprint 00 2>&1 || true)
+          echo "$out"
+          case "$out" in
+            *panicked*) echo "::error::building a TLS config panicked"; exit 1 ;;
+          esac
+
+      - name: Package
+        run: |
+          mkdir -p dist
+          cp target/${{ matrix.target }}/release/nook dist/${{ matrix.asset }}
+          control_asset="$(echo '${{ matrix.asset }}' | sed 's/^nook-/nook-control-/')"
+          cp "target/${{ matrix.target }}/release/nook-control" "dist/$control_asset"
+          cd dist
+          # Checksums travel with the binaries so the install script can verify
+          # what it downloaded instead of trusting the transport alone.
+          for f in nook-*; do
+            case "$f" in *.sha256) continue ;; esac
+            shasum -a 256 "$f" > "$f.sha256"
+          done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bin-${{ matrix.asset }}
+          path: dist/*
+          retention-days: 1
+
+
+  # ---------------------------------------------------------------- desktop
+  #
+  # The Tauri shell, which is the same web UI in a native window rather than a
+  # separate product. Its own job because it needs a system webview and, on
+  # Linux, a pile of GTK development packages that nothing else here wants.
+  #
+  # Not cross-compiled and not emulated: a desktop bundle is signed and linked
+  # against the platform it runs on, so each one is built on that platform.
+  desktop:
+    name: desktop (${{ matrix.label }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            label: linux-x86_64
+          - runner: macos-14
+            label: macos-aarch64
+          # macos-13 (Intel) is being retired and its queue never drains, so
+          # the Intel bundle is cross-targeted from Apple silicon — routine on
+          # macOS, where Xcode ships both SDKs.
+          - runner: macos-14
+            label: macos-x86_64
+            target: x86_64-apple-darwin
+          - runner: windows-latest
+            label: windows-x86_64
+    runs-on: ${{ matrix.runner }}
+    env:
+      # `secrets` is not a context a step-level `if` can read, but a job-level
+      # `env` can — so the presence check is hoisted here and the step tests a
+      # plain string. Without this the workflow fails to parse at all.
+      HAS_NOTARY_KEY: ${{ secrets.APPLE_API_KEY_P8 != '' && 'true' || 'false' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: frontend/apps/desktop/src-tauri
+          key: desktop-${{ matrix.label }}
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      # webkit2gtk is the webview; the rest are what its bundler links against.
+      - name: Linux system dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev \
+            patchelf libgtk-3-dev
+
+      # The bundle carries a version of its own, and nothing keeps it in step
+      # with the tag — it sat at 0.1.0 while the workspace was at 0.2.3. Take
+      # it from the tag so "which build is this?" has one answer.
+      - name: Stamp the version from the tag
+        shell: bash
+        run: |
+          v="${{ inputs.tag || github.ref_name }}"
+          v="${v#v}"
+          f=frontend/apps/desktop/src-tauri/tauri.conf.json
+          node -e "
+            const fs=require('fs'), p='$f';
+            const j=JSON.parse(fs.readFileSync(p,'utf8'));
+            j.version='$v';
+            fs.writeFileSync(p, JSON.stringify(j,null,2)+'\n');
+            console.log('desktop version ->', j.version);
+          "
+
+      - name: Install
+        working-directory: frontend
+        run: pnpm install --frozen-lockfile
+
+      - name: Add the cross target
+        if: matrix.target != ''
+        run: rustup target add ${{ matrix.target }}
+
+      # notarytool wants the App Store Connect key as a file. Written outside
+      # the workspace so no build step can sweep it into an artifact, and the
+      # runner is destroyed afterwards.
+      #
+      # All three notarisation variables are exported HERE rather than in the
+      # build step's `env:` block, and that placement is the point: a missing
+      # secret becomes an empty string, and an empty string is still a variable
+      # that exists. Tauri saw APPLE_API_ISSUER set, tried to notarise with it,
+      # and failed with "The value '' is invalid for '--issuer'". Setting them
+      # through GITHUB_ENV only when the key exists means they are genuinely
+      # absent otherwise, which is what makes Tauri sign and stop there.
+      - name: Stage the notarisation credentials
+        if: runner.os == 'macOS' && env.HAS_NOTARY_KEY == 'true'
+        env:
+          KEY: ${{ secrets.APPLE_API_KEY_P8 }}
+        run: |
+          path="$RUNNER_TEMP/AuthKey.p8"
+          printf '%s' "$KEY" > "$path"
+          chmod 600 "$path"
+          {
+            echo "APPLE_API_KEY_PATH=$path"
+            echo "APPLE_API_KEY=${{ secrets.APPLE_API_KEY }}"
+            echo "APPLE_API_ISSUER=${{ secrets.APPLE_API_ISSUER }}"
+          } >> "$GITHUB_ENV"
+
+      - name: Build the bundle
+        working-directory: frontend/apps/desktop
+        env:
+          # macOS signing. Tauri imports the certificate into a temporary
+          # keychain itself, so the private key never lands on disk in the
+          # workspace. Absent on other platforms, where these are ignored.
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          # Notarisation variables are deliberately NOT set here — the staging
+          # step above exports them through GITHUB_ENV, and only when the key
+          # exists. Listing them here sets them to the empty string when the
+          # secret is missing, and an empty string is still a variable that
+          # exists: Tauri reads it, tries to notarise, and fails with
+          # "The value '' is invalid for '--issuer'".
+        run: pnpm tauri build ${{ matrix.target && format('--target {0}', matrix.target) || '' }}
+
+      # Bundle names and layout differ per platform, so collect by extension —
+      # but ONLY from under a `bundle/` directory. Searching all of `target/`
+      # for `*.exe` swept up every Rust build script on Windows and attached
+      # forty of them to a release, next to the unpackaged binary.
+      #
+      # The `bundle/` scoping is what makes `*.exe` safe to keep: the NSIS
+      # setup lives there and is a real installer people prefer, while the bare
+      # nookos_desktop.exe and every build script sit outside it.
+      - name: Collect
+        shell: bash
+        run: |
+          mkdir -p desktop-dist
+          root=frontend/apps/desktop/src-tauri/target
+          find "$root" -type f -path '*/bundle/*' \
+            \( -name '*.dmg' -o -name '*.AppImage' -o -name '*.deb' \
+               -o -name '*.rpm' -o -name '*.msi' -o -name '*.exe' \) \
+            -exec cp {} desktop-dist/ \;
+          # An empty bundle directory means the build silently produced nothing,
+          # which would otherwise surface as a release missing its downloads.
+          [ -n "$(ls -A desktop-dist)" ] || { echo "::error::no bundle produced"; exit 1; }
+
+          # Version-less copies, so a download link can be written once and
+          # keep working. `releases/latest/download/<name>` resolves by exact
+          # filename, so a name carrying the version breaks every link the
+          # moment a release ships — which is why the CLI binaries have always
+          # been called `nook-linux-x86_64` rather than `nook-0.3.6-linux`.
+          for f in desktop-dist/*; do
+            case "$f" in *NookOS-${{ matrix.label }}*) continue ;; esac
+            case "$f" in
+              *-setup.exe) ext="-setup.exe" ;;
+              *.tar.gz)    ext=".tar.gz" ;;
+              *)           ext=".${f##*.}" ;;
+            esac
+            cp "$f" "desktop-dist/NookOS-${{ matrix.label }}$ext"
+          done
+          ls -la desktop-dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: desktop-${{ matrix.label }}
+          path: desktop-dist/*
+          retention-days: 1
+
+  # -------------------------------------------------------------- containers
+  #
+  # Each architecture builds on its own native runner and pushes by digest;
+  # the merge job below stitches them into one multi-arch tag. The obvious
+  # alternative — buildx with QEMU — emulates the whole Rust compile and turns
+  # a five-minute build into forty.
+  images:
+    name: ${{ matrix.image }} (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        # An `include:` whose keys all match an existing axis fills in extra
+        # fields on the matching combinations — which is how `runner` and
+        # `dockerfile` attach here without inventing standalone jobs.
+        image: [control, node, web]
+        arch: [amd64, arm64]
+        include:
+          - arch: amd64
+            runner: ubuntu-22.04
+          - arch: arm64
+            runner: ubuntu-22.04-arm
+          - image: control
+            dockerfile: deploy/docker/control.Dockerfile
+          - image: node
+            dockerfile: deploy/docker/node.Dockerfile
+          - image: web
+            dockerfile: deploy/docker/web-prod.Dockerfile
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          platforms: linux/${{ matrix.arch }}
+          outputs: type=image,name=${{ env.REGISTRY }}/${{ github.repository_owner }}/nook-${{ matrix.image }},push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha,scope=${{ matrix.image }}-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.image }}-${{ matrix.arch }}
+
+      # Leave the digest as a filename for the merge job to pick up. The
+      # `sha256:` prefix is stripped here so the merge can rebuild the
+      # reference without parsing anything.
+      - name: Record the digest
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          mkdir -p /tmp/digests
+          touch "/tmp/digests/${DIGEST#sha256:}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: digest-${{ matrix.image }}-${{ matrix.arch }}
+          path: /tmp/digests/*
+          retention-days: 1
+
+  merge:
+    name: Multi-arch manifest
+    needs: images
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        image: [control, node, web]
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: digest-${{ matrix.image }}-*
+          path: /tmp/digests
+          merge-multiple: true
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Create the manifest
+        working-directory: /tmp/digests
+        env:
+          REPO: ${{ env.REGISTRY }}/${{ github.repository_owner }}/nook-${{ matrix.image }}
+          VERSION: ${{ inputs.tag || github.ref_name }}
+        run: |
+          # Word splitting is the point here: every digest has to arrive as a
+          # separate argument. The filenames are hex digests, so there is
+          # nothing to split on but the spaces we put there.
+          # shellcheck disable=SC2046
+          docker buildx imagetools create \
+            -t "$REPO:$VERSION" -t "$REPO:latest" \
+            $(printf "${REPO}@sha256:%s " $(ls))
+          docker buildx imagetools inspect "$REPO:$VERSION"
+
+  # ---------------------------------------------------------------- release
+  release:
+    needs: [binaries, desktop, merge]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: bin-*
+          path: dist
+          merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: desktop-*
+          path: dist
+          merge-multiple: true
+      # The installer ships as an asset too, so `curl` has a stable URL that
+      # does not depend on a control plane already existing.
+      - name: Include the installer
+        run: cp install/install.sh dist/install.sh
+      - name: Publish
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag || github.ref_name }}
+          files: dist/*
+          generate_release_notes: true
+          fail_on_unmatched_files: true

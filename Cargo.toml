@@ -1,0 +1,92 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/nook-types",
+    "crates/nook-proto",
+    "crates/nook-control",
+    "crates/nook-dispatcher",
+    "crates/nook-mcp",
+    "crates/nook-node",
+    "crates/nook-openapi-gen",
+]
+
+[workspace.package]
+version = "0.3.0"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/nookos/nookos"
+
+[workspace.dependencies]
+nook-types = { path = "crates/nook-types" }
+nook-proto = { path = "crates/nook-proto" }
+nook-dispatcher = { path = "crates/nook-dispatcher" }
+nook-mcp = { path = "crates/nook-mcp" }
+nook-control = { path = "crates/nook-control" }
+
+tokio = { version = "1", features = ["full"] }
+axum = { version = "0.8", features = ["ws", "macros"] }
+axum-extra = { version = "0.10", features = ["cookie", "cookie-private"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["trace", "cors"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sqlx = { version = "0.8", features = ["runtime-tokio", "tls-rustls", "postgres", "uuid", "chrono", "json", "migrate"] }
+uuid = { version = "1", features = ["v7", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+utoipa = { version = "5", features = ["axum_extras", "uuid", "chrono"] }
+utoipa-swagger-ui = { version = "9", features = ["axum"] }
+openidconnect = "4"
+thiserror = "2"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+dashmap = "6"
+async-trait = "0.1"
+futures-util = "0.3"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+# Artifact storage. The S3 SDK also speaks MinIO and Google Cloud Storage's
+# S3-compatible endpoint, so one client covers every backend we ship.
+aws-config = { version = "1", default-features = false, features = ["rustls", "behavior-version-latest"] }
+aws-sdk-s3 = { version = "1", default-features = false, features = ["rustls", "rt-tokio"] }
+aws-credential-types = "1"
+aws-smithy-types = "1"
+tokio-tungstenite = { version = "0.26", features = ["rustls-tls-native-roots"] }
+clap = { version = "4", features = ["derive"] }
+portable-pty = "0.9"
+sysinfo = "0.33"
+base64 = "0.22"
+sha2 = "0.10"
+# Password hashing for local accounts. Argon2id is the current recommendation
+# for interactive logins: memory-hard, so a stolen database does not turn into
+# a GPU cracking exercise the way bcrypt-at-low-cost does.
+argon2 = "0.5"
+password-hash = "0.5"
+# X.509 for the per-tenant CA: generate a CA and sign node CSRs. In-process and
+# typed rather than shelling out to openssl, so certificate handling is testable
+# and a missing binary can't become a runtime surprise on someone's machine.
+rcgen = { version = "0.13", features = ["pem", "x509-parser"] }
+# Parse and verify presented client certificates. The "verify" feature is the
+# point: a certificate is only an identity if its signature actually chains to
+# a CA we trust.
+x509-parser = { version = "0.16", features = ["verify"] }
+# Pinning the server certificate on first contact needs a custom verifier, so
+# the node talks to rustls directly rather than only through a wrapper.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-pki-types = "1"
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+rustls-pemfile = "2"
+# The agent listener drives hyper directly: a WebSocket upgrade needs
+# serve_connection_with_upgrades, and axum::serve does not expose that once we
+# wrap the accepted stream in TLS ourselves.
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["server", "tokio"] }
+hmac = "0.12"
+aes-gcm = "0.10"
+rand = "0.9"
+dotenvy = "0.15"
+toml = "0.8"
+walkdir = "2"
+cookie = { version = "0.18", features = ["key-expansion"] }
+
+[profile.release]
+lto = "thin"
