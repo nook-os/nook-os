@@ -41,6 +41,23 @@ jobs:
       - name: Test
         run: cargo test --workspace
 
+  # A workflow with a bad expression does not fail a job — it fails to parse,
+  # so nothing runs and the error only appears when someone pushes a tag and
+  # waits. Exactly that happened with a `secrets` reference in a step-level
+  # `if`, which is not a context that exists there. actionlint catches it in
+  # seconds.
+  workflows:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Lint the workflows
+        uses: docker://rhysd/actionlint:latest
+        with:
+          # The two remaining SC2046 warnings are deliberate word-splitting:
+          # one passes several image digests as separate arguments, the other
+          # builds a filename. Neither involves a path that can contain spaces.
+          args: -color -ignore 'SC2046'
+
   frontend:
     runs-on: ubuntu-latest
     steps:

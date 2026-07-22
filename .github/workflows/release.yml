@@ -237,14 +237,12 @@ jobs:
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          # Notarisation. Signing alone stops the "unidentified developer"
-          # dialog only if Gatekeeper can also verify the app with Apple — an
-          # unnotarised signed app is still refused on a machine that has never
-          # seen it. Left unset until the credentials exist, in which case Tauri
-          # signs and skips notarising rather than failing the build.
-          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
-          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
-          APPLE_API_KEY_PATH: ${{ env.APPLE_API_KEY_PATH }}
+          # Notarisation variables are deliberately NOT set here — the staging
+          # step above exports them through GITHUB_ENV, and only when the key
+          # exists. Listing them here sets them to the empty string when the
+          # secret is missing, and an empty string is still a variable that
+          # exists: Tauri reads it, tries to notarise, and fails with
+          # "The value '' is invalid for '--issuer'".
         run: pnpm tauri build ${{ matrix.target && format('--target {0}', matrix.target) || '' }}
 
       # Bundle names and layout differ per platform, so collect by extension —
