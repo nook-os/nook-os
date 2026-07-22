@@ -121,6 +121,46 @@ pub fn pinned_client_config(expected_fingerprint: &str) -> rustls::ClientConfig 
         .with_no_client_auth()
 }
 
+/// The same pin, plus this machine's own certificate — the client half of
+/// mutual TLS.
+///
+/// Both directions matter and they are separate proofs: the pin is how the
+/// node knows it is talking to the right control plane, the client certificate
+/// is how the control plane knows which machine is calling. Neither substitutes
+/// for the other.
+pub fn mutual_client_config(
+    expected_fingerprint: Option<&str>,
+    cert_pem: &str,
+    key_pem: &str,
+) -> anyhow::Result<rustls::ClientConfig> {
+    use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+
+    let certs: Vec<CertificateDer<'static>> =
+        rustls_pemfile::certs(&mut cert_pem.as_bytes()).collect::<Result<_, _>>()?;
+    if certs.is_empty() {
+        anyhow::bail!("node certificate file contains no certificate");
+    }
+    let key: PrivateKeyDer<'static> = rustls_pemfile::private_key(&mut key_pem.as_bytes())?
+        .ok_or_else(|| anyhow::anyhow!("node key file contains no private key"))?;
+
+    let builder = rustls::ClientConfig::builder();
+    Ok(match expected_fingerprint {
+        Some(fp) => builder
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(PinnedServerCert::new(fp)))
+            .with_client_auth_cert(certs, key)?,
+        None => {
+            // No pin recorded: fall back to the OS roots. Weaker, and only
+            // reachable when the control plane never advertised a fingerprint.
+            let mut roots = rustls::RootCertStore::empty();
+            roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+            builder
+                .with_root_certificates(roots)
+                .with_client_auth_cert(certs, key)?
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

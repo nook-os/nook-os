@@ -178,6 +178,15 @@ impl FromRequestParts<AppState> for AuthCtx {
         parts: &mut Parts,
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
+        // A client certificate outranks everything else: it is the strongest
+        // credential on offer and the only one that cannot be replayed from a
+        // stolen file alone. Checked first so a machine that has enrolled is
+        // identified by what it proved in the handshake, not by a token it
+        // also happens to still carry.
+        if let Some(cert) = parts.extensions.get::<crate::agent_tls::PeerCertificate>() {
+            return AuthCtx::from_node_cert(state, &cert.0).await;
+        }
+
         // Browsers authenticate with the session cookie; everything else
         // presents a bearer token. The prefix says which kind, because the two
         // are not interchangeable: a user token IS the person (it can drive any

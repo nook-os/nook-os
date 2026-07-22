@@ -171,6 +171,23 @@ pub fn warn_if_insecure(insecure_in_use: bool, server: &str) {
     }
 }
 
+/// Where this machine's own certificate and key live — beside `node.toml`,
+/// `0600`. The key is generated locally and never leaves.
+pub fn cert_paths() -> Result<(PathBuf, PathBuf)> {
+    let base = config_path()?;
+    let dir = base.parent().context("no config directory")?.to_path_buf();
+    Ok((dir.join("node.crt"), dir.join("node.key")))
+}
+
+/// This machine's certificate and key, if it has enrolled.
+pub fn load_identity() -> Option<(String, String)> {
+    let (cert, key) = cert_paths().ok()?;
+    Some((
+        std::fs::read_to_string(cert).ok()?,
+        std::fs::read_to_string(key).ok()?,
+    ))
+}
+
 /// Expand a leading `~` against $HOME.
 pub fn expand_path(p: &str) -> String {
     if let Some(rest) = p.strip_prefix("~/") {

@@ -2427,6 +2427,8 @@ dependencies = [
  "dotenvy",
  "futures-util",
  "hmac 0.12.1",
+ "hyper 1.10.1",
+ "hyper-util",
  "nook-dispatcher",
  "nook-mcp",
  "nook-proto",
@@ -2435,12 +2437,16 @@ dependencies = [
  "rand 0.9.5",
  "rcgen",
  "reqwest",
+ "rustls 0.23.42",
+ "rustls-pemfile",
+ "rustls-pki-types",
  "serde",
  "serde_json",
  "sha2 0.10.9",
  "sqlx",
  "thiserror 2.0.19",
  "tokio",
+ "tokio-rustls 0.26.4",
  "tower",
  "tower-http",
  "tracing",
@@ -2493,6 +2499,7 @@ dependencies = [
  "rcgen",
  "reqwest",
  "rustls 0.23.42",
+ "rustls-pemfile",
  "rustls-pki-types",
  "serde",
  "serde_json",
@@ -2506,6 +2513,7 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
  "walkdir",
+ "webpki-roots 0.26.11",
 ]
 
 [[package]]
@@ -3414,6 +3422,15 @@ dependencies = [
  "rustls-pki-types",
  "schannel",
  "security-framework",
+]
+
+[[package]]
+name = "rustls-pemfile"
+version = "2.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dce314e5fee3f39953d46bb63bb8a46d40c2f8fb7cc5a3b6cab2bde9721d6e50"
+dependencies = [
+ "rustls-pki-types",
 ]
 
 [[package]]

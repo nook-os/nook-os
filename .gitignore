@@ -32,3 +32,4 @@ frontend/apps/desktop/src-tauri/gen/
 # In-container cargo target mount points
 /target-docker
 /target-docker-node
+deploy/dev-certs/agent.key

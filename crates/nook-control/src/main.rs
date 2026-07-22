@@ -50,6 +50,12 @@ async fn main() -> Result<()> {
 }
 
 async fn serve(db: sqlx::PgPool, cfg: Config) -> Result<()> {
+    // Pick the TLS backend explicitly. Several crates in the tree pull rustls
+    // with different providers (the AWS SDK among them), which leaves the
+    // process-wide default ambiguous — and rustls panics rather than guessing.
+    // Installing it here makes the choice ours and the failure impossible.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     // Discover the IdP once at startup. Failure is non-fatal so the stack
     // boots without the IdP reachable (dev-login still works).
     let oidc = match cfg.oidc_issuer_url.as_deref() {
@@ -73,6 +79,8 @@ async fn serve(db: sqlx::PgPool, cfg: Config) -> Result<()> {
 
     let bind = cfg.bind.clone();
     let agent_bind = cfg.agent_bind.clone();
+    let agent_tls_cert = cfg.agent_tls_cert.clone();
+    let agent_tls_key = cfg.agent_tls_key.clone();
     let state = AppState::new(db, cfg, oidc).await;
     // Join the cross-instance bus (LISTEN/NOTIFY): makes N control-plane
     // replicas cooperate. On a single instance it's a no-op fast path.
@@ -88,13 +96,38 @@ async fn serve(db: sqlx::PgPool, cfg: Config) -> Result<()> {
     let agent_listener = tokio::net::TcpListener::bind(&agent_bind)
         .await
         .with_context(|| format!("cannot bind the agent port {agent_bind}"))?;
-    tracing::info!(bind = %agent_bind, "agent listener");
     let agent_router = routes::build_agent_router(state);
-    tokio::spawn(async move {
-        if let Err(e) = axum::serve(agent_listener, agent_router).await {
-            tracing::error!(error = %e, "agent listener stopped");
+    match (
+        agent_tls_cert.as_deref().filter(|s| !s.is_empty()),
+        agent_tls_key.as_deref().filter(|s| !s.is_empty()),
+    ) {
+        (Some(cert), Some(key)) => {
+            // TLS terminates HERE, not at the proxy: only the control plane can
+            // judge a client certificate against the right tenant's CA.
+            let tls = nook_control::agent_tls::acceptor(cert, key)?;
+            tracing::info!(bind = %agent_bind, "agent listener (mTLS)");
+            tokio::spawn(nook_control::agent_tls::serve(
+                agent_listener,
+                agent_router,
+                tls,
+            ));
         }
-    });
+        (None, None) => {
+            tracing::warn!(
+                bind = %agent_bind,
+                "agent listener is PLAINTEXT — set NOOK_AGENT_TLS_CERT and \
+                 NOOK_AGENT_TLS_KEY so node connections are mutually authenticated"
+            );
+            tokio::spawn(async move {
+                if let Err(e) = axum::serve(agent_listener, agent_router).await {
+                    tracing::error!(error = %e, "agent listener stopped");
+                }
+            });
+        }
+        // Half-configured is a mistake worth failing on rather than quietly
+        // serving plaintext to a fleet the operator believes is encrypted.
+        _ => anyhow::bail!("NOOK_AGENT_TLS_CERT and NOOK_AGENT_TLS_KEY must be set together"),
+    }
 
     let listener = tokio::net::TcpListener::bind(&bind).await?;
     tracing::info!(%bind, "control plane listening");

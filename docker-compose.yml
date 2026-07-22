@@ -62,6 +62,11 @@ services:
       # The node agent's own door (see Config::agent_bind). Separate from the
       # browser API so mTLS can terminate here rather than at the edge proxy.
       NOOK_AGENT_BIND: 0.0.0.0:8081
+      # mTLS terminates at the control plane, not the proxy — only it knows
+      # which tenant CA to judge a client certificate against. Dev cert is
+      # self-signed; nodes pin it by fingerprint.
+      NOOK_AGENT_TLS_CERT: /app/deploy/dev-certs/agent.crt
+      NOOK_AGENT_TLS_KEY: /app/deploy/dev-certs/agent.key
       CARGO_TARGET_DIR: /app/target-docker
       # Node binaries the "add node" modal offers. In production the control
       # image ships the build it was compiled with; in dev, populate it with

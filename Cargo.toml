@@ -68,6 +68,13 @@ x509-parser = { version = "0.16", features = ["verify"] }
 # the node talks to rustls directly rather than only through a wrapper.
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 rustls-pki-types = "1"
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+rustls-pemfile = "2"
+# The agent listener drives hyper directly: a WebSocket upgrade needs
+# serve_connection_with_upgrades, and axum::serve does not expose that once we
+# wrap the accepted stream in TLS ourselves.
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["server", "tokio"] }
 hmac = "0.12"
 aes-gcm = "0.10"
 rand = "0.9"

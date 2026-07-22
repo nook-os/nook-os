@@ -55,6 +55,9 @@ pub struct Config {
     /// web PKI vouches for — any public CA can issue for any hostname, so root
     /// -store validation alone would not stop a mis-issued certificate.
     pub agent_tls_cert: Option<String>,
+    /// Private key for `agent_tls_cert`. Both must be set for the agent
+    /// listener to terminate TLS; either alone is a misconfiguration.
+    pub agent_tls_key: Option<String>,
 
     // ── Artifact storage ────────────────────────────────────────────────
     /// `disk` (default) or `s3`. See `crate::storage`.
@@ -111,6 +114,7 @@ impl Config {
             releases_repo: env_opt("NOOK_RELEASES_REPO")
                 .unwrap_or_else(|| "nook-os/nook-os".into()),
             agent_tls_cert: env_opt("NOOK_AGENT_TLS_CERT"),
+            agent_tls_key: env_opt("NOOK_AGENT_TLS_KEY"),
             agent_bind: env_opt("NOOK_AGENT_BIND").unwrap_or_else(|| "0.0.0.0:8081".into()),
             dist_dir: env_opt("NOOK_DIST_DIR")
                 .unwrap_or_else(|| "/usr/local/share/nook/dist".into()),

@@ -47,6 +47,12 @@ base64 = { workspace = true }
 sha2 = { workspace = true }
 rcgen = { workspace = true }
 x509-parser = { workspace = true }
+rustls = { workspace = true }
+rustls-pki-types = { workspace = true }
+tokio-rustls = { workspace = true }
+rustls-pemfile = { workspace = true }
+hyper = { workspace = true }
+hyper-util = { workspace = true }
 hmac = { workspace = true }
 aes-gcm = { workspace = true }
 rand = { workspace = true }

@@ -1,3 +1,4 @@
+pub mod agent_tls;
 pub mod auth;
 pub mod ca;
 pub mod config;
