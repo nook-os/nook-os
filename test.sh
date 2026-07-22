@@ -20,7 +20,10 @@ HOST=0
 [ "${1:-}" = "--host" ] && { HOST=1; shift; }
 
 if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
-  A='\033[38;5;214m'; G='\033[38;5;43m'; R='\033[31m'; Z='\033[0m'
+  # A real escape byte: `printf '%s'` does not interpret backslash escapes in
+  # its arguments, so a variable holding "\033[..." would print literally.
+  esc=$(printf '\033')
+  A="${esc}[38;5;214m"; G="${esc}[38;5;43m"; R="${esc}[31m"; Z="${esc}[0m"
 else
   A=''; G=''; R=''; Z=''
 fi

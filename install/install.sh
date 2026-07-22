@@ -77,7 +77,13 @@ done
 
 # ---------------------------------------------------------------- presentation
 if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
-  A='\033[38;5;214m'; D='\033[2m'; R='\033[0m'; B='\033[1m'
+  # A REAL escape byte, not the four characters \ 0 3 3. `printf '%s'` does not
+  # interpret backslash escapes in its ARGUMENTS — only in the format string —
+  # so a variable holding "\033[..." prints literally, which is what shipped
+  # and what you saw. Building the byte once here keeps every call site a
+  # plain, shellcheck-clean '%s'.
+  esc=$(printf '\033')
+  A="${esc}[38;5;214m"; D="${esc}[2m"; R="${esc}[0m"; B="${esc}[1m"
 else
   A=''; D=''; R=''; B=''
 fi
@@ -137,7 +143,7 @@ ask_role() {
   esac
 }
 
-banner "NookOS" "$os/$arch"
+banner "nook@os" "$os/$arch"
 [ -n "$ROLE" ] || ask_role
 
 if [ "$DRY" = "1" ]; then
