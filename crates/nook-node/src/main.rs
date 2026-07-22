@@ -3,6 +3,7 @@ mod cli;
 mod config;
 mod conn;
 mod discovery;
+mod enroll;
 mod gitops;
 mod pinning;
 mod resources;
@@ -52,6 +53,28 @@ enum Command {
         #[arg(long)]
         config: Option<String>,
     },
+    /// Trade a join token for this machine's own certificate (mutual TLS).
+    ///
+    /// The private key is generated here and never leaves — the control plane
+    /// only ever sees a signing request.
+    Enroll {
+        /// Join token from the NookOS UI (nook_join_…)
+        #[arg(long)]
+        token: String,
+        /// Control plane URL. Defaults to the one this machine already joined.
+        #[arg(long)]
+        server: Option<String>,
+        /// Node name for a machine enrolling for the first time.
+        #[arg(long)]
+        name: Option<String>,
+        /// SHA-256 of the control plane's certificate, from the join token.
+        /// Without it, enrolment trusts whatever the web PKI vouches for.
+        #[arg(long)]
+        server_fingerprint: Option<String>,
+    },
+    /// Renew this machine's certificate using the key it already holds.
+    /// No join token: a machine that has been offline renews itself.
+    Renew,
     /// Run the agent (persistent connection to the control plane).
     Run {
         /// LOCAL DEV ONLY: allow an unencrypted/unverified control plane.
@@ -230,6 +253,21 @@ async fn main() -> Result<()> {
             }
             join(spec).await
         }
+        Command::Enroll {
+            ref token,
+            ref server,
+            ref name,
+            ref server_fingerprint,
+        } => {
+            enroll::enroll(
+                token,
+                server.as_deref(),
+                name.as_deref(),
+                server_fingerprint.as_deref(),
+            )
+            .await
+        }
+        Command::Renew => enroll::renew().await,
         Command::Update => update_binary().await,
         Command::Run {
             insecure_skip_verify,
@@ -604,6 +642,8 @@ async fn join(spec: JoinSpec) -> Result<()> {
         // Set once the join flow carries a fingerprint; until then the node
         // relies on ordinary web-PKI validation for https.
         server_fingerprint: spec.server_fingerprint.clone(),
+        // Joining does not know about the agent port; `nook enroll` sets it.
+        agent_server: NodeConfig::load().ok().and_then(|c| c.agent_server),
     };
     cfg.save()?;
 

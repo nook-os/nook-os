@@ -1,5 +1,15 @@
 //! `/api/v1/ws/node` — the single persistent connection every node keeps to
-//! the control plane. Bearer-authed with the node token issued at join.
+//! the control plane.
+//!
+//! Authenticated by the node's **client certificate** when there is one, and by
+//! the join-time bearer token otherwise. The certificate is strictly stronger:
+//! a token is a shared secret that appears in headers, logs and process
+//! listings, whereas the certificate proves possession of a private key that
+//! never left the machine, and it can be revoked and rotated per node.
+//!
+//! Both are accepted because a fleet migrates one machine at a time. The token
+//! path is what goes away once every node has enrolled — not something to
+//! remove while nodes still depend on it.
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
@@ -22,10 +32,47 @@ const PING_INTERVAL: std::time::Duration = std::time::Duration::from_secs(20);
 
 pub async fn node_ws(
     State(state): State<AppState>,
+    peer_cert: Option<axum::Extension<crate::agent_tls::PeerCertificate>>,
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Response {
-    // Authenticate the upgrade request with the node bearer token.
+    // Certificate first, when the connection came in on the mTLS listener.
+    //
+    // `agent_tls` lifted this straight off the completed handshake into the
+    // request's extensions, which a client cannot write to — unlike a header,
+    // there is no way to inject one from the wire. `verify_node_cert` then does
+    // the real work: chain it against *that tenant's* live trust bundle, and
+    // refuse a node that has been revoked.
+    if let Some(axum::Extension(cert)) = peer_cert {
+        return match crate::ca::verify_node_cert(&state.db, &cert.0).await {
+            Ok(id) => {
+                let name: String = sqlx::query_scalar("SELECT name FROM nodes WHERE id = $1")
+                    .bind(id.node_id)
+                    .fetch_one(&state.db)
+                    .await
+                    .unwrap_or_else(|_| "node".into());
+                tracing::debug!(node_id = %id.node_id, "node authenticated by certificate");
+                ws.on_upgrade(move |socket| {
+                    handle(
+                        state,
+                        socket,
+                        NodeId(id.node_id),
+                        TenantId(id.tenant_id),
+                        name,
+                    )
+                })
+            }
+            Err(e) => {
+                // Presenting a certificate and having it rejected is not the
+                // same as presenting none — say so, rather than silently
+                // falling through to the token path and reporting a confusing
+                // "unauthorized" for what is really an expired or revoked cert.
+                tracing::warn!(error = %e, "node certificate rejected");
+                ApiError::Unauthorized.into_response()
+            }
+        };
+    }
+
     let token = headers
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())

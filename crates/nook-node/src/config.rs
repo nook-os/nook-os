@@ -23,6 +23,23 @@ pub struct NodeConfig {
     /// the enrolment that established it.
     #[serde(default)]
     pub server_fingerprint: Option<String>,
+    /// Where the *agent* connection goes, when that is not the same place as
+    /// the API.
+    ///
+    /// The agent port terminates mTLS in the control-plane process itself,
+    /// because only it can decide which tenant's CA a client certificate should
+    /// be judged against — so it cannot sit behind a proxy that terminates TLS
+    /// the way the API does. When unset the two are the same host, which is the
+    /// single-container case.
+    #[serde(default)]
+    pub agent_server: Option<String>,
+}
+
+impl NodeConfig {
+    /// The endpoint `nook run` dials. Falls back to `server`.
+    pub fn agent_endpoint(&self) -> &str {
+        self.agent_server.as_deref().unwrap_or(&self.server)
+    }
 }
 
 pub fn config_path() -> Result<PathBuf> {

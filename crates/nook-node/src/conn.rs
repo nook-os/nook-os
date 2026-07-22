@@ -43,7 +43,15 @@ pub async fn run(cfg: NodeConfig) -> Result<()> {
                 backoff_secs = 1;
             }
             Err(e) => {
-                tracing::warn!(error = %e, "connection failed");
+                // The whole chain, not just the top: "websocket connect
+                // (mTLS)" on its own cannot distinguish a revoked certificate
+                // from a wrong pin from a server that is simply down.
+                let cause = e
+                    .chain()
+                    .map(|c| c.to_string())
+                    .collect::<Vec<_>>()
+                    .join(": ");
+                tracing::warn!(error = %cause, "connection failed");
                 backoff_secs = (backoff_secs * 2).min(60);
             }
         }
@@ -57,7 +65,7 @@ pub async fn run(cfg: NodeConfig) -> Result<()> {
 
 /// One connection lifetime: register, resync, pump until the socket closes.
 pub async fn connect_once(cfg: &NodeConfig) -> Result<()> {
-    let mut request = ws_url(&cfg.server)
+    let mut request = ws_url(cfg.agent_endpoint())
         .into_client_request()
         .context("bad server URL")?;
     request.headers_mut().insert(
