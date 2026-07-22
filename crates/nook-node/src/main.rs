@@ -655,7 +655,7 @@ async fn probe_connection(cfg: &NodeConfig) -> bool {
         return false;
     };
     let register = NodeToControl::Register {
-            agent_version: Some(env!("CARGO_PKG_VERSION").to_string()),
+        agent_version: Some(env!("CARGO_PKG_VERSION").to_string()),
         capabilities: capabilities::detect(),
         live_tmux_sessions: tmux::list_nook_sessions(),
     };
