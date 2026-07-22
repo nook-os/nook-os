@@ -1,15 +1,11 @@
 // Typed WebSocket helpers for the two live channels: /ws/ui (events) and
 // /ws/sessions/:id/attach (terminal bytes).
 import type { components } from "./generated/schema";
+import { socketUrl } from "./endpoint";
 
 export type UiEvent = components["schemas"]["UiEvent"];
 export type AttachServerMessage = components["schemas"]["AttachServerMessage"];
 export type AttachClientMessage = components["schemas"]["AttachClientMessage"];
-
-function socketUrl(path: string): string {
-  const proto = window.location.protocol === "https:" ? "wss" : "ws";
-  return `${proto}://${window.location.host}${path}`;
-}
 
 /** Persistent UI event stream with automatic reconnect + backoff. */
 export function connectUiSocket(

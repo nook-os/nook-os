@@ -24,6 +24,7 @@ pub mod workspaces;
 use axum::response::IntoResponse;
 use axum::routing::{delete as delete_route, get, patch, post, put};
 use axum::{Json, Router};
+use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::trace::TraceLayer;
 use utoipa::OpenApi;
 
@@ -232,7 +233,10 @@ pub fn build_router(state: AppState) -> Router {
         );
     }
 
-    router.layer(TraceLayer::new_for_http()).with_state(state)
+    router
+        .layer(desktop_cors())
+        .layer(TraceLayer::new_for_http())
+        .with_state(state)
 }
 
 /// Bearer gate for the MCP endpoint. Two accepted credentials:
@@ -340,4 +344,33 @@ async fn oauth_protected_resource(
         "authorization_servers": servers,
         "bearer_methods_supported": ["header"],
     }))
+}
+
+/// Let the packaged desktop app talk to us.
+///
+/// The web UI is same-origin and needs none of this. A Tauri build is served
+/// from `tauri://localhost` (`http://tauri.localhost` on Windows), which is a
+/// different origin by every definition a browser engine has — so without an
+/// allowance every request from the desktop app fails before it is sent.
+///
+/// Credentials are deliberately NOT allowed. The desktop app authenticates
+/// with a bearer token rather than the session cookie, because a cookie set by
+/// one origin for another, from a custom scheme, is a fight with each
+/// platform's webview that has no upside. Refusing credentials here keeps that
+/// decision honest instead of half-working on one platform.
+fn desktop_cors() -> CorsLayer {
+    CorsLayer::new()
+        .allow_origin(AllowOrigin::predicate(|origin, _| {
+            origin
+                .to_str()
+                .map(|o| {
+                    o == "tauri://localhost"
+                        || o == "http://tauri.localhost"
+                        // Tauri's dev server, when running `tauri dev`.
+                        || o.starts_with("http://localhost:")
+                })
+                .unwrap_or(false)
+        }))
+        .allow_methods(tower_http::cors::Any)
+        .allow_headers(tower_http::cors::Any)
 }

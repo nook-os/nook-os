@@ -2,6 +2,7 @@
 // OpenAPI document — regenerate with `./scripts/gen-types.sh`.
 import createClient from "openapi-fetch";
 import type { paths, components } from "./generated/schema";
+import { apiUrl, authHeaders, isRemote, socketUrl } from "./endpoint";
 
 export type Schemas = components["schemas"];
 export type Tenant = Schemas["Tenant"];
@@ -22,16 +23,32 @@ export type DispatchSuggestion = Schemas["DispatchSuggestion"];
 
 export type { paths };
 export * from "./ws";
+export * from "./endpoint";
 
-// Same-origin in dev (Vite proxies /api to the control plane) and in
-// production (control plane serves or fronts the app).
+// Same-origin by default: dev (Vite proxies /api) and production (the control
+// plane fronts the app) both work with no configuration.
 export const api = createClient<paths>({
   baseUrl: "/",
   credentials: "include",
 });
 
-/** Open a WebSocket against the API origin, ws/wss chosen from the page. */
+// A desktop build is served from `tauri://localhost` and has no control plane
+// on its own origin, so it configures an endpoint at startup. Rewriting here
+// rather than at client construction keeps that decision runtime — the app
+// cannot know the address until someone types it.
+api.use({
+  onRequest({ request }) {
+    if (!isRemote()) return request;
+    const url = new URL(request.url);
+    const rewritten = new Request(apiUrl(url.pathname + url.search), request);
+    for (const [k, v] of Object.entries(authHeaders())) {
+      rewritten.headers.set(k, v);
+    }
+    return rewritten;
+  },
+});
+
+/** Open a WebSocket against the API origin. */
 export function apiSocket(path: string): WebSocket {
-  const proto = window.location.protocol === "https:" ? "wss" : "ws";
-  return new WebSocket(`${proto}://${window.location.host}${path}`);
+  return new WebSocket(socketUrl(path));
 }
