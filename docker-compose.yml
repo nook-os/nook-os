@@ -107,6 +107,10 @@ services:
       NOOK_SERVER: http://control-plane:8080
       NOOK_DEV_JOIN_TOKEN: ${NOOK_DEV_JOIN_TOKEN:-}
       NOOK_NODE_NAME: dev-node
+      # The dev control plane is plain http:// on the container network, so the
+      # node would (correctly) refuse to talk to it. This is the one case the
+      # insecure hatch exists for; it is refused outright when APP_ENV=production.
+      NOOK_INSECURE: "1"
       CARGO_TARGET_DIR: /app/target-docker-node
       RUST_LOG: nook=info
     volumes:

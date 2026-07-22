@@ -52,7 +52,12 @@ enum Command {
         config: Option<String>,
     },
     /// Run the agent (persistent connection to the control plane).
-    Run,
+    Run {
+        /// LOCAL DEV ONLY: allow an unencrypted/unverified control plane.
+        /// Refused when APP_ENV=production. Prefer an https:// server.
+        #[arg(long)]
+        insecure_skip_verify: bool,
+    },
     /// Replace this binary with the build the control plane is serving, so
     /// every machine in the fleet runs the same version as the server.
     Update,
@@ -234,7 +239,14 @@ async fn main() -> Result<()> {
             join(spec).await
         }
         Command::Update => update_binary().await,
-        Command::Run => {
+        Command::Run {
+            insecure_skip_verify,
+        } => {
+            if insecure_skip_verify {
+                // Flag and env var are equivalent; funnel to one place so the
+                // checks downstream only have to read the environment.
+                std::env::set_var("NOOK_INSECURE", "1");
+            }
             let cfg = NodeConfig::load()?;
             // Reaches sessions that already exist (mouse/scrollback/clipboard).
             tmux::apply_server_defaults();
@@ -539,6 +551,11 @@ async fn join(spec: JoinSpec) -> Result<()> {
         .token
         .context("token is required (--token, config file, or `nook setup`)")?;
     let caps = capabilities::detect();
+
+    // First contact is the worst moment to be unencrypted: this exchange hands
+    // the machine its credential.
+    let insecure = crate::config::check_server_security(&server, false)?;
+    crate::config::warn_if_insecure(insecure, &server);
 
     ok("Validating token...");
     let client = reqwest::Client::new();

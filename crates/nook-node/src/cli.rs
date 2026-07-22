@@ -39,8 +39,13 @@ impl Client {
         let cfg = node.context(
             "not connected — run `nook login` with a user token, or `nook setup` to join this machine",
         )?;
+        let base = cfg.server.trim_end_matches('/').to_string();
+        // Same rule as the agent connection: a CLI call carries the same
+        // credential, so it gets the same refusal.
+        let insecure = crate::config::check_server_security(&base, false)?;
+        crate::config::warn_if_insecure(insecure, &base);
         Ok(Self {
-            base: cfg.server.trim_end_matches('/').to_string(),
+            base,
             token: cfg.node_token,
             http: reqwest::Client::new(),
         })

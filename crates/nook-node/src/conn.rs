@@ -29,6 +29,12 @@ pub fn ws_url(server: &str) -> String {
 }
 
 pub async fn run(cfg: NodeConfig) -> Result<()> {
+    // Refuse plaintext before the first connection rather than after — a node
+    // that has already streamed a session over the clear has nothing left to
+    // protect. The hatch is checked once here and announced on every start.
+    let insecure = crate::config::check_server_security(&cfg.server, false)?;
+    crate::config::warn_if_insecure(insecure, &cfg.server);
+
     let mut backoff_secs: u64 = 1;
     loop {
         match connect_once(&cfg).await {
