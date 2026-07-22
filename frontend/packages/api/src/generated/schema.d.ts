@@ -1477,6 +1477,16 @@ export interface components {
         };
         CreateJoinTokenResponse: {
             /**
+             * @description Where the joining machine should point its **agent** connection.
+             *
+             *     Not always the API's address. The agent listener terminates TLS in the
+             *     control-plane process — only it can judge a client certificate against
+             *     the right tenant's CA — so it cannot sit behind the proxy that fronts
+             *     the API, and deployments routinely give it its own name. A node told
+             *     only the API address would enrol against a URL it must not use.
+             */
+            agent_url?: string | null;
+            /**
              * @description SHA-256 of the certificate the joining machine should expect to see,
              *     so it can pin the server before handing over anything. `None` when the
              *     control plane does not terminate TLS itself (dev, or TLS at the edge),

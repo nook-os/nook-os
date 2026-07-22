@@ -84,10 +84,13 @@ function CopyLine({ value, label }: { value: string; label?: string }) {
 
 export function AddNodeModal({ onClose }: { onClose: () => void }) {
   const [token, setToken] = useState<string | null>(null);
+  // The fingerprint the joining machine should pin, and where its agent
+  // connection goes — both decided by the control plane, not guessable here.
+  const [fingerprint, setFingerprint] = useState<string | null>(null);
+  const [agentUrl, setAgentUrl] = useState<string | null>(null);
   const [expiresAt, setExpiresAt] = useState<string | null>(null);
   const [picked, setPicked] = useState(detectPlatform);
   const [detected] = useState(detectPlatform);
-  const [withSystemd, setWithSystemd] = useState(true);
 
   const { data: releases } = useQuery({
     queryKey: ["node", "releases"],
@@ -104,6 +107,8 @@ export function AddNodeModal({ onClose }: { onClose: () => void }) {
       if (live && data) {
         setToken(data.token);
         setExpiresAt(data.expires_at);
+        setFingerprint(data.ca_fingerprint ?? null);
+        setAgentUrl(data.agent_url ?? null);
       }
     })();
     return () => {
@@ -124,12 +129,21 @@ export function AddNodeModal({ onClose }: { onClose: () => void }) {
   const current =
     artifacts.find((a) => a.os === picked.os && a.arch === picked.arch) ?? null;
 
+  // The installer served by THIS control plane already has the server, agent
+  // URL and fingerprint baked into it, so the command stays short. The flags
+  // are still emitted when we know them, because the command gets pasted into
+  // chat logs and runbooks where the served copy may not be the one used.
   const oneShot = token
-    ? `curl -fLsS ${server}/install.sh | sh -s -- --token ${token}${
-        withSystemd ? " --systemd" : ""
-      }`
+    ? [
+        `curl -fLsS ${server}/install.sh | sh -s --`,
+        `--token ${token}`,
+        fingerprint ? `--fingerprint ${fingerprint}` : "",
+        agentUrl && agentUrl !== server ? `--server ${agentUrl}` : "",
+      ]
+        .filter(Boolean)
+        .join(" ")
     : "…minting a join token…";
-  const updateCmd = `curl -fLsS ${server}/install.sh | sh`;
+  const updateCmd = `curl -fLsS ${server}/install.sh | sh -s -- --node`;
 
   return (
     <div className="modal-backdrop" onMouseDown={onClose}>
@@ -154,21 +168,26 @@ export function AddNodeModal({ onClose }: { onClose: () => void }) {
               <Terminal size={13} /> Run this on the new machine
             </div>
             <p className="muted small" style={{ margin: "2px 0 6px" }}>
-              Downloads the agent this server is running, joins it to your
-              fleet, and{withSystemd ? " installs a systemd service" : " leaves it to you to start"}.
+              Verifies the download, then walks through workspace root and how
+              to keep the agent running. The machine generates its own keypair —
+              only a signing request is sent.
               {expiresAt && (
                 <> Token expires {new Date(expiresAt).toLocaleString()}.</>
               )}
             </p>
             <CopyLine value={oneShot} />
-            <label className="small" style={{ display: "block", marginTop: 6 }}>
-              <input
-                type="checkbox"
-                checked={withSystemd}
-                onChange={(e) => setWithSystemd(e.target.checked)}
-              />{" "}
-              install a systemd service (Linux; asks for sudo)
-            </label>
+            {fingerprint ? (
+              <p className="muted small" style={{ margin: "6px 0 0" }}>
+                Pins this server's certificate on first contact, so the exchange
+                that hands the machine its identity cannot be intercepted.
+              </p>
+            ) : (
+              <p className="muted small" style={{ margin: "6px 0 0" }}>
+                This server does not terminate TLS for agents itself, so there is
+                no certificate to pin and the machine will authenticate with a
+                token instead.
+              </p>
+            )}
           </section>
 
           <section>

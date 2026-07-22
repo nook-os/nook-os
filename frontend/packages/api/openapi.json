@@ -3574,6 +3574,13 @@
           "expires_at"
         ],
         "properties": {
+          "agent_url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Where the joining machine should point its **agent** connection.\n\nNot always the API's address. The agent listener terminates TLS in the\ncontrol-plane process — only it can judge a client certificate against\nthe right tenant's CA — so it cannot sit behind the proxy that fronts\nthe API, and deployments routinely give it its own name. A node told\nonly the API address would enrol against a URL it must not use."
+          },
           "ca_fingerprint": {
             "type": [
               "string",

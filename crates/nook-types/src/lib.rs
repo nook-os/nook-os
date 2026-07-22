@@ -518,6 +518,15 @@ pub struct CreateJoinTokenResponse {
     /// in which case there is nothing honest to pin to.
     #[serde(default)]
     pub ca_fingerprint: Option<String>,
+    /// Where the joining machine should point its **agent** connection.
+    ///
+    /// Not always the API's address. The agent listener terminates TLS in the
+    /// control-plane process — only it can judge a client certificate against
+    /// the right tenant's CA — so it cannot sit behind the proxy that fronts
+    /// the API, and deployments routinely give it its own name. A node told
+    /// only the API address would enrol against a URL it must not use.
+    #[serde(default)]
+    pub agent_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, ToSchema)]

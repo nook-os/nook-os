@@ -123,8 +123,27 @@ pub fn release_asset_url(repo: &str, filename: &str) -> String {
 /// someone gets wrong at 1am.
 pub async fn install_script(State(state): State<AppState>, headers: HeaderMap) -> Response {
     let base = request_base(&headers, &state);
+    // Read the certificate fresh: an operator who renews it should not have to
+    // restart the control plane for new installs to pin the right one.
+    let fingerprint = state
+        .cfg
+        .agent_tls_cert
+        .as_deref()
+        .and_then(|path| {
+            let pem = std::fs::read_to_string(path).ok()?;
+            crate::ca::fingerprint_pem(&pem).ok()
+        })
+        .unwrap_or_default();
+    let agent_url = state
+        .cfg
+        .agent_public_url
+        .clone()
+        .unwrap_or_else(|| base.clone());
+
     let script = INSTALL_SH
         .replace("@@SERVER@@", &base)
+        .replace("@@AGENT_URL@@", &agent_url)
+        .replace("@@FINGERPRINT@@", &fingerprint)
         .replace(
             "@@RELEASES@@",
             &format!(
@@ -146,133 +165,7 @@ pub async fn install_script(State(state): State<AppState>, headers: HeaderMap) -
         .into_response()
 }
 
-/// The installer. POSIX sh, no dependencies beyond curl/uname/install.
-///
-/// Three jobs, in one file because three files is three chances to run the
-/// wrong one: install or update the binary, optionally join, optionally set up
-/// systemd. Run with no arguments it is purely an updater, which is what makes
-/// "keep the fleet on one version" a single command per machine.
-const INSTALL_SH: &str = r#"#!/bin/sh
-# NookOS node installer — from @@SERVER@@ (control plane @@VERSION@@)
-#
-#   curl -fLsS @@SERVER@@/install.sh | sh -s -- --token nook_join_xxx
-#   curl -fLsS @@SERVER@@/install.sh | sh                 # update in place
-#
-set -eu
-
-SERVER="@@SERVER@@"
-TOKEN=""
-NAME=""
-PREFIX="${NOOK_PREFIX:-$HOME/.local/bin}"
-SYSTEMD=0
-
-while [ $# -gt 0 ]; do
-  case "$1" in
-    --token) TOKEN="${2:-}"; shift 2 ;;
-    --name) NAME="${2:-}"; shift 2 ;;
-    --prefix) PREFIX="${2:-}"; shift 2 ;;
-    --server) SERVER="${2:-}"; shift 2 ;;
-    --systemd) SYSTEMD=1; shift ;;
-    -h|--help)
-      echo "usage: install.sh [--token TOKEN] [--name NAME] [--prefix DIR] [--systemd]"
-      exit 0 ;;
-    *) echo "unknown option: $1" >&2; exit 2 ;;
-  esac
-done
-
-say() { printf '\033[33m▸\033[0m %s\n' "$*"; }
-die() { printf '\033[31m✗\033[0m %s\n' "$*" >&2; exit 1; }
-
-# --- platform ---------------------------------------------------------------
-os=$(uname -s | tr '[:upper:]' '[:lower:]')
-arch=$(uname -m)
-case "$os" in
-  linux|darwin) ;;
-  *) die "unsupported OS '$os' — build from source: cargo build --release -p nook-node" ;;
-esac
-case "$arch" in
-  x86_64|amd64) arch=x86_64 ;;
-  aarch64|arm64) arch=aarch64 ;;
-  *) die "unsupported architecture '$arch'" ;;
-esac
-artifact="nook-$os-$arch"
-
-command -v curl >/dev/null 2>&1 || die "curl is required"
-
-# --- download ---------------------------------------------------------------
-say "Fetching $artifact from @@RELEASES@@"
-tmp=$(mktemp)
-trap 'rm -f "$tmp"' EXIT
-curl -fLsS "@@RELEASES@@/$artifact" -o "$tmp" \
-  || die "no build for $os/$arch on this server (see Nodes → add node for what is available)"
-chmod +x "$tmp"
-
-mkdir -p "$PREFIX"
-# Replace by rename: an in-place overwrite of a running binary fails with
-# ETXTBSY, which is exactly what an update on a live node would hit.
-mv -f "$tmp" "$PREFIX/nook"
-trap - EXIT
-say "Installed $PREFIX/nook"
-
-case ":$PATH:" in
-  *":$PREFIX:"*) ;;
-  *) say "Add it to your PATH:  export PATH=\"$PREFIX:\$PATH\"" ;;
-esac
-
-"$PREFIX/nook" --version || true
-
-# --- join -------------------------------------------------------------------
-if [ -n "$TOKEN" ]; then
-  say "Joining $SERVER"
-  if [ -n "$NAME" ]; then
-    "$PREFIX/nook" join --server "$SERVER" --token "$TOKEN" --name "$NAME"
-  else
-    "$PREFIX/nook" join --server "$SERVER" --token "$TOKEN"
-  fi
-else
-  say "No token given — binary updated, existing config untouched."
-fi
-
-# --- systemd ----------------------------------------------------------------
-if [ "$SYSTEMD" = "1" ]; then
-  command -v systemctl >/dev/null 2>&1 || die "systemd not available on this machine"
-  user=$(id -un)
-  unit=/etc/systemd/system/nook-node.service
-  say "Writing $unit (sudo)"
-  sudo tee "$unit" >/dev/null <<UNIT
-[Unit]
-Description=NookOS node agent
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-User=$user
-Group=$(id -gn)
-ExecStart=$PREFIX/nook run
-Restart=always
-RestartSec=5
-Environment=RUST_LOG=nook=info
-Environment=HOME=$HOME
-WorkingDirectory=$HOME
-
-# tmux is the buffer of record: sessions outlive the agent, and Restart=always
-# means it restarts. systemd's default KillMode would take the tmux server —
-# and every one of the user's terminals — down with it.
-KillMode=process
-
-NoNewPrivileges=yes
-ProtectSystem=full
-ReadWritePaths=$HOME /tmp
-
-[Install]
-WantedBy=multi-user.target
-UNIT
-  sudo systemctl daemon-reload
-  sudo systemctl enable --now nook-node
-  say "nook-node is running — systemctl status nook-node"
-elif [ -n "$TOKEN" ]; then
-  say "Start it now:        $PREFIX/nook run"
-  say "Or install a service: curl -fLsS $SERVER/install.sh | sh -s -- --systemd"
-fi
-"#;
+/// The installer, shared verbatim with the copy published on nookos.dev and as
+/// a release asset. One file, three places it can be fetched from — three files
+/// would be three chances to fetch a stale one.
+const INSTALL_SH: &str = include_str!("../../../../install/install.sh");

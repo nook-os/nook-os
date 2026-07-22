@@ -20,12 +20,12 @@ human.
 
 For Hermes, skills are directories under `~/.hermes/skills/<category>/<name>/`,
 and each agent profile keeps its own copy under
-`~/.hermes/profiles/<profile>/skills/`. `install.sh` puts the skill in the
+`~/.hermes/profiles/<profile>/skills/`. `nook skills install` puts the skill in the
 shared location and in every profile:
 
 ```bash
-./skills/install.sh                      # local machine
-./skills/install.sh --host crimson       # over ssh
+nook skills install            # every agent found on this machine
+nook skills install --dir DIR  # somewhere specific
 ```
 
 For any other agent, point it at the file — there's nothing machine-specific in

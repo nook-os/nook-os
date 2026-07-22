@@ -57,6 +57,13 @@ pub async fn create_join_token(
         token,
         expires_at,
         ca_fingerprint,
+        // Fall back to the API's address: on a single-host deployment they are
+        // the same, and a node that gets no answer at all cannot enrol.
+        agent_url: state
+            .cfg
+            .agent_public_url
+            .clone()
+            .or_else(|| Some(state.cfg.public_base_url.clone())),
     }))
 }
 

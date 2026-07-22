@@ -48,6 +48,13 @@ pub struct Config {
     /// session on separate doors, so a proxy misconfiguration on one cannot
     /// quietly widen the other.
     pub agent_bind: String,
+    /// Public URL of the agent listener, handed to joining machines.
+    ///
+    /// Defaults to the API's public URL, which is right for a single-host
+    /// deployment where both are the same name. Set it when the agent port has
+    /// its own hostname — a proxy that terminates TLS breaks mutual auth, so
+    /// that name usually resolves somewhere different on purpose.
+    pub agent_public_url: Option<String>,
 
     /// PEM certificate the agent listener serves, when the control plane
     /// terminates TLS itself. Its SHA-256 goes into join tokens so a machine
@@ -116,6 +123,7 @@ impl Config {
             agent_tls_cert: env_opt("NOOK_AGENT_TLS_CERT"),
             agent_tls_key: env_opt("NOOK_AGENT_TLS_KEY"),
             agent_bind: env_opt("NOOK_AGENT_BIND").unwrap_or_else(|| "0.0.0.0:8081".into()),
+            agent_public_url: env_opt("NOOK_AGENT_PUBLIC_URL"),
             dist_dir: env_opt("NOOK_DIST_DIR")
                 .unwrap_or_else(|| "/usr/local/share/nook/dist".into()),
 

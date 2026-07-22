@@ -48,6 +48,7 @@ fn test_config() -> Config {
         dist_dir: "/nonexistent".into(),
         // Port 0 = let the OS pick; these tests never bind it.
         agent_bind: "127.0.0.1:0".into(),
+        agent_public_url: None,
         agent_tls_cert: None,
         agent_tls_key: None,
         releases_repo: "nook-os/nook-os".into(),

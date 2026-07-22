@@ -10,6 +10,7 @@ mod resources;
 mod sessions;
 mod ssh;
 mod tmux;
+mod wizard;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -27,9 +28,27 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Interactive first-time setup: walks through server, token, workspace
-    /// root, and SSH key choice, then joins and prints service instructions.
-    Setup,
+    /// Interactive first-time setup: server, token, workspace root, SSH key
+    /// and how the agent should stay running. Re-runnable.
+    ///
+    /// Flags pre-answer questions; anything left out is prompted for.
+    Setup {
+        #[arg(long)]
+        server: Option<String>,
+        /// Where the agent connects, when that differs from the API.
+        #[arg(long)]
+        agent_url: Option<String>,
+        #[arg(long)]
+        token: Option<String>,
+        #[arg(long)]
+        name: Option<String>,
+        /// SHA-256 of the control plane's certificate, from the join token.
+        #[arg(long)]
+        fingerprint: Option<String>,
+    },
+    /// Install the NookOS skill so your agents can drive the fleet themselves.
+    #[command(subcommand)]
+    Skills(SkillsCommand),
     /// Register this machine non-interactively (flags and/or a config file —
     /// the automation path; humans usually want `nook setup`).
     Join {
@@ -75,6 +94,9 @@ enum Command {
     /// Renew this machine's certificate using the key it already holds.
     /// No join token: a machine that has been offline renews itself.
     Renew,
+    /// Control-plane administration.
+    #[command(subcommand)]
+    Server(ServerCommand),
     /// Run the agent (persistent connection to the control plane).
     Run {
         /// LOCAL DEV ONLY: allow an unencrypted/unverified control plane.
@@ -214,13 +236,25 @@ async fn main() -> Result<()> {
     let _ = rustls::crypto::ring::default_provider().install_default();
 
     match Cli::parse().command {
-        Command::Setup => match setup_wizard()? {
-            SetupPlan::Join(spec) => join(spec).await,
-            SetupPlan::LocalUpdate {
-                workspace_roots,
-                ssh_key_path,
-            } => apply_local_update(workspace_roots, ssh_key_path),
-        },
+        Command::Setup {
+            server,
+            agent_url,
+            token,
+            name,
+            fingerprint,
+        } => {
+            wizard::node::setup(wizard::node::SetupArgs {
+                server,
+                agent_url,
+                token,
+                name,
+                fingerprint,
+            })
+            .await
+        }
+        Command::Skills(SkillsCommand::Install { dir, quiet }) => {
+            wizard::skills::install(dir, quiet)
+        }
         Command::Join {
             server,
             token,
@@ -275,6 +309,17 @@ async fn main() -> Result<()> {
             .await
         }
         Command::Renew => enroll::renew().await,
+        Command::Server(ServerCommand::Init {
+            dir,
+            version,
+            dry_run,
+        }) => wizard::server::init(wizard::server::InitOptions {
+            dir,
+            // Pin to the version that generated it: the images and this binary
+            // come out of the same release, so they are known to agree.
+            version: version.unwrap_or_else(|| format!("v{}", env!("CARGO_PKG_VERSION"))),
+            dry_run,
+        }),
         Command::Update => update_binary().await,
         Command::Run {
             insecure_skip_verify,
@@ -325,183 +370,33 @@ async fn main() -> Result<()> {
     }
 }
 
-fn prompt(question: &str, default: Option<&str>) -> Result<String> {
-    use std::io::Write;
-    match default {
-        Some(d) => print!("{question} [{d}]: "),
-        None => print!("{question}: "),
-    }
-    std::io::stdout().flush()?;
-    let mut line = String::new();
-    // EOF must abort, not loop forever on empty answers (piped/closed stdin).
-    if std::io::stdin().read_line(&mut line)? == 0 {
-        anyhow::bail!("input closed — setup aborted");
-    }
-    let line = line.trim();
-    if line.is_empty() {
-        return Ok(default.unwrap_or_default().to_string());
-    }
-    Ok(line.to_string())
-}
-
-/// What the wizard decided: a (re-)join, or a local settings update that
-/// keeps the existing registration.
-enum SetupPlan {
-    Join(JoinSpec),
-    LocalUpdate {
-        workspace_roots: Vec<String>,
-        ssh_key_path: Option<String>,
+#[derive(clap::Subcommand)]
+enum SkillsCommand {
+    /// Write the skill into every agent installation found on this machine.
+    Install {
+        /// Install into this directory instead of auto-detecting.
+        #[arg(long)]
+        dir: Option<std::path::PathBuf>,
+        #[arg(long)]
+        quiet: bool,
     },
 }
 
-/// Interactive setup. Re-runnable: existing values become the defaults, and
-/// when the registration (server + name) is unchanged you can skip the token
-/// — settings update in place without re-joining.
-fn setup_wizard() -> Result<SetupPlan> {
-    println!("◆ NookOS node setup");
-    println!("  This machine becomes a node: workspaces live here, sessions run here.");
-    println!();
-
-    let existing = NodeConfig::load().ok();
-    if let Some(cfg) = &existing {
-        println!(
-            "  Currently joined as '{}' → {} — press Enter to keep any value.",
-            cfg.node_name, cfg.server
-        );
-        println!();
-    }
-
-    let server_default = existing
-        .as_ref()
-        .map(|c| c.server.clone())
-        .unwrap_or_else(|| "https://nook.example.com".into());
-    let server = loop {
-        let s = prompt("Control plane URL", Some(&server_default))?;
-        if s.starts_with("http://") || s.starts_with("https://") {
-            break s;
-        }
-        println!("  Please enter a full URL (https://…).");
-    };
-
-    let hostname = sysinfo::System::host_name().unwrap_or_else(|| "node".into());
-    let name_default = existing
-        .as_ref()
-        .map(|c| c.node_name.clone())
-        .unwrap_or(hostname);
-    let name = prompt("Node name", Some(&name_default))?;
-
-    let root_default = existing
-        .as_ref()
-        .and_then(|c| c.workspace_roots.first().cloned())
-        .unwrap_or_else(|| "~/.nook/workspace".into());
-    let root = prompt(
-        "Workspace root (repos live under this directory)",
-        Some(&root_default),
-    )?;
-
-    // SSH key: the node's own generated key (private key never leaves this
-    // machine — recommended) or an existing key the user already uses.
-    println!();
-    println!("SSH key for cloning private repositories:");
-    let current_key = existing.as_ref().and_then(|c| c.ssh_key_path.clone());
-    println!(
-        "  [1] Dedicated key for this node{}",
-        if current_key.is_none() && existing.is_some() {
-            " (current)"
-        } else if current_key.is_none() {
-            " (recommended)"
-        } else {
-            ""
-        }
-    );
-    let mut choices: Vec<std::path::PathBuf> = Vec::new();
-    if let Ok(home) = std::env::var("HOME") {
-        if let Ok(entries) = std::fs::read_dir(format!("{home}/.ssh")) {
-            for e in entries.flatten() {
-                let p = e.path();
-                if p.extension().is_some_and(|x| x == "pub") {
-                    let private = p.with_extension("");
-                    if private.exists() {
-                        choices.push(private);
-                    }
-                }
-            }
-        }
-    }
-    choices.sort();
-    let mut default_choice = "1".to_string();
-    for (i, key) in choices.iter().enumerate() {
-        let display = key.display().to_string();
-        let marker = if Some(&display) == current_key.as_ref() {
-            default_choice = (i + 2).to_string();
-            " (current)"
-        } else {
-            ""
-        };
-        println!("  [{}] Use existing {display}{marker}", i + 2);
-    }
-    let ssh_key_path = loop {
-        let pick = prompt("Choice", Some(&default_choice))?;
-        match pick.parse::<usize>() {
-            Ok(1) => break None,
-            Ok(n) if n >= 2 && n - 2 < choices.len() => {
-                break Some(choices[n - 2].display().to_string())
-            }
-            _ => println!("  Enter a number from the list."),
-        }
-    };
-    println!();
-
-    // Same registration → the token is optional; blank means "keep it" and
-    // only the local settings change. New/changed registration needs a token.
-    let same_registration = existing
-        .as_ref()
-        .is_some_and(|c| c.server == server && c.node_name == name);
-    let token = loop {
-        let hint = if same_registration {
-            "Join token (Enter = keep current registration)"
-        } else {
-            "Join token (UI → Nodes → new join token)"
-        };
-        let t = prompt(hint, None)?;
-        if !t.is_empty() || same_registration {
-            break t;
-        }
-        println!("  A token is required to register with {server} as '{name}'.");
-    };
-    println!();
-
-    if token.is_empty() {
-        return Ok(SetupPlan::LocalUpdate {
-            workspace_roots: vec![root],
-            ssh_key_path,
-        });
-    }
-    Ok(SetupPlan::Join(JoinSpec {
-        server_fingerprint: None,
-        server: Some(server),
-        token: Some(token),
-        name: Some(name),
-        workspace_roots: vec![root],
-        ssh_key_path,
-    }))
-}
-
-/// Apply a token-less reconfigure: keep the registration, update settings.
-fn apply_local_update(workspace_roots: Vec<String>, ssh_key_path: Option<String>) -> Result<()> {
-    let mut cfg = NodeConfig::load()?;
-    cfg.workspace_roots = workspace_roots;
-    cfg.ssh_key_path = ssh_key_path;
-    cfg.save()?;
-    ok("Settings updated (registration unchanged).");
-    if let Some(pubkey) = ssh::public_key_for(cfg.ssh_key_path.as_deref()) {
-        println!();
-        println!("SSH public key (add as a deploy key on your git host):");
-        println!("{pubkey}");
-    }
-    println!();
-    println!("Restart the agent to apply: sudo systemctl restart nook-node");
-    Ok(())
+#[derive(clap::Subcommand)]
+enum ServerCommand {
+    /// Stand up a control plane here: generates secrets, writes the deployment
+    /// files, and brings it up.
+    Init {
+        /// Where to write the deployment. Prompted for when omitted.
+        #[arg(long)]
+        dir: Option<std::path::PathBuf>,
+        /// Image tag to pin. Defaults to this binary's version.
+        #[arg(long)]
+        version: Option<String>,
+        /// Print what would be written and exit.
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 /// `nook update` — pull the binary this node's control plane is serving.
@@ -587,6 +482,20 @@ fn target_platform() -> Result<(&'static str, &'static str)> {
         other => anyhow::bail!("no published build for {other}"),
     };
     Ok((os, arch))
+}
+
+/// The pre-mTLS path, kept only as a fallback for a control plane that has no
+/// `/nodes/enroll`. Not reachable from a current install otherwise.
+pub(crate) async fn join_legacy(server: &str, token: &str, name: &str) -> Result<()> {
+    join(JoinSpec {
+        server: Some(server.to_string()),
+        server_fingerprint: None,
+        token: Some(token.to_string()),
+        name: Some(name.to_string()),
+        workspace_roots: Vec::new(),
+        ssh_key_path: None,
+    })
+    .await
 }
 
 async fn join(spec: JoinSpec) -> Result<()> {
