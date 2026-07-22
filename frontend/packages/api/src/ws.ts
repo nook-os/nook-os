@@ -1,7 +1,7 @@
 // Typed WebSocket helpers for the two live channels: /ws/ui (events) and
 // /ws/sessions/:id/attach (terminal bytes).
 import type { components } from "./generated/schema";
-import { socketUrl } from "./endpoint";
+import { socketProtocols, socketUrl } from "./endpoint";
 
 export type UiEvent = components["schemas"]["UiEvent"];
 export type AttachServerMessage = components["schemas"]["AttachServerMessage"];

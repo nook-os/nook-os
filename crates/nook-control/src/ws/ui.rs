@@ -10,7 +10,11 @@ use crate::auth::AuthCtx;
 use crate::state::AppState;
 
 pub async fn ui_ws(State(state): State<AppState>, auth: AuthCtx, ws: WebSocketUpgrade) -> Response {
-    ws.on_upgrade(move |socket| handle(state, auth, socket))
+    // Echo the subprotocol. A client that offered one and gets nothing back
+    // closes the connection itself, so omitting this breaks exactly the
+    // clients that need it.
+    ws.protocols([crate::auth::WS_BEARER_PROTOCOL])
+        .on_upgrade(move |socket| handle(state, auth, socket))
 }
 
 async fn handle(state: AppState, auth: AuthCtx, socket: WebSocket) {

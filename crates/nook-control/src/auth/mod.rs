@@ -206,6 +206,30 @@ impl FromRequestParts<AppState> for AuthCtx {
             };
         }
 
+        // WebSockets cannot carry an Authorization header — the browser API has
+        // no way to set one — and a cross-origin socket sends no cookie either.
+        // The subprotocol field is the one header a client controls, so a token
+        // rides there. Chosen over `?access_token=` deliberately: query strings
+        // end up in access logs and proxy traces, and this is a credential that
+        // can drive every machine its owner has.
+        if let Some(token) = parts
+            .headers
+            .get("sec-websocket-protocol")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| {
+                v.split(',')
+                    .map(str::trim)
+                    .skip_while(|p| *p != WS_BEARER_PROTOCOL)
+                    .nth(1)
+            })
+        {
+            return if token.starts_with(USER_TOKEN_PREFIX) {
+                user_token_ctx(state, token).await
+            } else {
+                node_token_ctx(state, token).await
+            };
+        }
+
         let jar = CookieJar::from_request_parts(parts, state)
             .await
             .map_err(|_| ApiError::Unauthorized)?;
@@ -234,6 +258,11 @@ impl FromRequestParts<AppState> for AuthCtx {
 /// User tokens are self-describing, so the server never has to guess which
 /// table to look in — and a leaked one is recognizable in a log or a paste.
 pub const USER_TOKEN_PREFIX: &str = "nook_user_";
+
+/// Names the WebSocket subprotocol that carries a bearer token. The client
+/// sends `[WS_BEARER_PROTOCOL, <token>]`; the server must echo the first back
+/// or the browser aborts the connection.
+pub const WS_BEARER_PROTOCOL: &str = "nook.bearer";
 
 /// Resolve a user token to the person who owns it.
 ///

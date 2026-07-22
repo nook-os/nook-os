@@ -2,7 +2,7 @@
 // OpenAPI document — regenerate with `./scripts/gen-types.sh`.
 import createClient from "openapi-fetch";
 import type { paths, components } from "./generated/schema";
-import { apiUrl, authHeaders, isRemote, socketUrl } from "./endpoint";
+import { apiUrl, authHeaders, isRemote, socketProtocols, socketUrl } from "./endpoint";
 
 export type Schemas = components["schemas"];
 export type Tenant = Schemas["Tenant"];
@@ -29,7 +29,15 @@ export * from "./endpoint";
 // plane fronts the app) both work with no configuration.
 export const api = createClient<paths>({
   baseUrl: "/",
-  credentials: "include",
+  // "same-origin", not "include". The web build is served by the control plane,
+  // so cookies still ride along there. The desktop build is cross-origin and
+  // authenticates with a bearer token — and a cross-origin request made with
+  // `include` requires `Access-Control-Allow-Credentials` on the response or
+  // the browser discards it entirely. We deliberately do not send that header,
+  // because the desktop client is not meant to use the cookie session, so
+  // `include` meant every desktop request failed after the connect screen had
+  // already reported success.
+  credentials: "same-origin",
 });
 
 // A desktop build is served from `tauri://localhost` and has no control plane
@@ -50,5 +58,5 @@ api.use({
 
 /** Open a WebSocket against the API origin. */
 export function apiSocket(path: string): WebSocket {
-  return new WebSocket(socketUrl(path));
+  return new WebSocket(socketUrl(path), socketProtocols());
 }

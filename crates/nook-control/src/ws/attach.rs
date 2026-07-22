@@ -37,7 +37,8 @@ pub async fn attach_ws(
     if let Err(e) = auth.require_node_self(session.node_id) {
         return e.into_response();
     }
-    ws.on_upgrade(move |socket| handle(state, socket, session))
+    ws.protocols([crate::auth::WS_BEARER_PROTOCOL])
+        .on_upgrade(move |socket| handle(state, socket, session))
 }
 
 async fn handle(state: AppState, socket: WebSocket, session: Session) {

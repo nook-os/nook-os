@@ -54,6 +54,18 @@ export function socketUrl(path: string): string {
   return `${proto}://${window.location.host}${path}`;
 }
 
+/**
+ * The subprotocol pair a WebSocket uses to authenticate.
+ *
+ * A browser WebSocket cannot set an Authorization header and, cross-origin,
+ * sends no cookie — so the token travels in the one field a client controls.
+ * Undefined when no token is configured, which is the same-origin case where
+ * the cookie already works.
+ */
+export function socketProtocols(): string[] | undefined {
+  return current.token ? ["nook.bearer", current.token] : undefined;
+}
+
 /** Headers that authenticate a request, when a token is configured. */
 export function authHeaders(): Record<string, string> {
   return current.token ? { Authorization: `Bearer ${current.token}` } : {};
