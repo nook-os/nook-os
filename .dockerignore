@@ -9,3 +9,4 @@ frontend/**/dist
 .env
 .env.local
 docker-compose.prod.yml
+certs/

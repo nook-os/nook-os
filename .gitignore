@@ -33,3 +33,5 @@ frontend/apps/desktop/src-tauri/gen/
 /target-docker
 /target-docker-node
 deploy/dev-certs/agent.key
+
+certs/

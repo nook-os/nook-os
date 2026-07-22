@@ -197,8 +197,39 @@ jobs:
         if: matrix.target != ''
         run: rustup target add ${{ matrix.target }}
 
+      # notarytool wants the App Store Connect key as a file. Written outside
+      # the workspace so no build step can sweep it into an artifact, and the
+      # runner is destroyed afterwards.
+      - name: Stage the notarisation key
+        # The secret is tested directly: a variable set in this step's own env
+        # block is not readable from its own `if`.
+        if: runner.os == 'macOS' && secrets.APPLE_API_KEY_P8 != ''
+        env:
+          KEY: ${{ secrets.APPLE_API_KEY_P8 }}
+        run: |
+          path="$RUNNER_TEMP/AuthKey.p8"
+          printf '%s' "$KEY" > "$path"
+          chmod 600 "$path"
+          echo "APPLE_API_KEY_PATH=$path" >> "$GITHUB_ENV"
+
       - name: Build the bundle
         working-directory: frontend/apps/desktop
+        env:
+          # macOS signing. Tauri imports the certificate into a temporary
+          # keychain itself, so the private key never lands on disk in the
+          # workspace. Absent on other platforms, where these are ignored.
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          # Notarisation. Signing alone stops the "unidentified developer"
+          # dialog only if Gatekeeper can also verify the app with Apple — an
+          # unnotarised signed app is still refused on a machine that has never
+          # seen it. Left unset until the credentials exist, in which case Tauri
+          # signs and skips notarising rather than failing the build.
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_PATH: ${{ env.APPLE_API_KEY_PATH }}
         run: pnpm tauri build ${{ matrix.target && format('--target {0}', matrix.target) || '' }}
 
       # Bundle names and layout differ per platform, so collect by extension —
