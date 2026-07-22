@@ -17,7 +17,7 @@ use dashmap::DashMap;
 use nook_proto::{AttachServerMessage, ControlToNode, UiEvent};
 use nook_types::{GitFileStatus, NodeId, SessionId, TenantId};
 use sqlx::PgPool;
-use tokio::sync::{broadcast, mpsc, oneshot};
+use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use uuid::Uuid;
 
 use super::bus::{self, BusMessage, Outbound, ViewerEvent};
@@ -79,6 +79,14 @@ pub struct Registry {
     /// Other instances with live viewers for sessions our nodes own.
     remote_viewers: DashMap<SessionId, HashSet<Uuid>>,
     bus_tx: OnceLock<mpsc::UnboundedSender<Outbound>>,
+    /// Flips to `true` once the Postgres LISTEN is actually established. Until
+    /// then a NOTIFY this instance sends can be dropped — Postgres only
+    /// delivers to sessions already listening — so anything that publishes
+    /// immediately after `start_bus` must `await bus_ready()` first. In
+    /// production the gap is invisible (instances start the bus long before
+    /// serving traffic); in a test that publishes within milliseconds it is
+    /// the whole ballgame.
+    bus_ready: watch::Sender<bool>,
 }
 
 impl Default for Registry {
@@ -105,6 +113,7 @@ impl Registry {
             remote_pending_git: DashMap::new(),
             remote_viewers: DashMap::new(),
             bus_tx: OnceLock::new(),
+            bus_ready: watch::channel(false).0,
         }
     }
 
@@ -118,6 +127,27 @@ impl Registry {
         let (tx, rx) = mpsc::unbounded_channel();
         if self.bus_tx.set(tx).is_ok() {
             bus::start(self.clone(), pool, rx);
+        }
+    }
+
+    /// The listener calls this once its Postgres `LISTEN` is live.
+    pub(crate) fn mark_bus_ready(&self) {
+        let _ = self.bus_ready.send(true);
+    }
+
+    /// Resolve once this instance's bus listener is actually listening, so a
+    /// message published straight after `start_bus` isn't dropped into the void.
+    /// Returns immediately if the bus was never started (single-instance mode)
+    /// or is already ready.
+    pub async fn bus_ready(&self) {
+        if self.bus_tx.get().is_none() || *self.bus_ready.borrow() {
+            return;
+        }
+        let mut rx = self.bus_ready.subscribe();
+        while rx.changed().await.is_ok() {
+            if *rx.borrow() {
+                return;
+            }
         }
     }
 

@@ -115,6 +115,10 @@ async fn send_to_node_routes_across_instances() {
     let b = Arc::new(Registry::new());
     a.start_bus(pool.clone());
     b.start_bus(pool.clone());
+    // Wait until both listeners are actually LISTENing. A NOTIFY sent before
+    // that is silently dropped by Postgres — the flake this test used to hit.
+    a.bus_ready().await;
+    b.bus_ready().await;
 
     // B holds the node's "socket" (a test channel).
     let (tx, mut node_rx) = tokio::sync::mpsc::channel::<ControlToNode>(16);
@@ -153,6 +157,10 @@ async fn op_reply_routes_back_to_requester() {
     let b = Arc::new(Registry::new());
     a.start_bus(pool.clone());
     b.start_bus(pool.clone());
+    // Wait until both listeners are actually LISTENing. A NOTIFY sent before
+    // that is silently dropped by Postgres — the flake this test used to hit.
+    a.bus_ready().await;
+    b.bus_ready().await;
 
     let (tx, mut node_rx) = tokio::sync::mpsc::channel::<ControlToNode>(16);
     b.register_node(

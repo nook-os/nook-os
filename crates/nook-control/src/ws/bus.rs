@@ -179,6 +179,10 @@ pub(crate) fn start(
                 tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                 continue;
             }
+            // LISTEN is live now — anything published from here on reaches us.
+            // Callers awaiting bus_ready() can proceed. (Signalled on every
+            // (re)connect; the watch collapses repeats.)
+            listen_registry.mark_bus_ready();
             loop {
                 match listener.recv().await {
                     Ok(n) => {
