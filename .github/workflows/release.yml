@@ -145,6 +145,11 @@ jobs:
           - runner: windows-latest
             label: windows-x86_64
     runs-on: ${{ matrix.runner }}
+    env:
+      # `secrets` is not a context a step-level `if` can read, but a job-level
+      # `env` can — so the presence check is hoisted here and the step tests a
+      # plain string. Without this the workflow fails to parse at all.
+      HAS_NOTARY_KEY: ${{ secrets.APPLE_API_KEY_P8 != '' && 'true' || 'false' }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -201,9 +206,7 @@ jobs:
       # the workspace so no build step can sweep it into an artifact, and the
       # runner is destroyed afterwards.
       - name: Stage the notarisation key
-        # The secret is tested directly: a variable set in this step's own env
-        # block is not readable from its own `if`.
-        if: runner.os == 'macOS' && secrets.APPLE_API_KEY_P8 != ''
+        if: runner.os == 'macOS' && env.HAS_NOTARY_KEY == 'true'
         env:
           KEY: ${{ secrets.APPLE_API_KEY_P8 }}
         run: |

@@ -34,16 +34,73 @@ opening cleanly and ours needing a gesture.
 
 ## Windows
 
-SmartScreen warns about executables without an Authenticode signature, and the
-warning fades as a certificate accumulates reputation. Certificates come from
-commercial CAs — roughly $100–400/year, and since June 2023 the private key
-must live on a hardware token or in an approved HSM, which complicates signing
-from CI.
+We already produce both installers — Tauri's WiX bundler emits
+`NookOS_<version>_x64_en-US.msi` and its NSIS bundler emits
+`NookOS_<version>_x64-setup.exe`. Neither is signed, so SmartScreen shows
+"Windows protected your PC" and hides the run button behind **More info**.
 
-**Worth investigating rather than asserting:** SignPath offers free code
-signing to open-source projects, and other CAs have run similar programmes.
-Whether NookOS qualifies, and what it requires of the build, is a question for
-whoever picks this up — I have not verified the current terms.
+### The one thing that changed, and why it matters
+
+Since **June 2023** the CA/Browser Forum requires code-signing private keys to
+live in certified hardware — a USB token or an approved HSM. You can no longer
+buy a certificate and download a `.pfx`.
+
+That single rule is what makes Windows signing awkward in CI: a USB token
+cannot be plugged into a GitHub runner. So the practical choice is not *which
+CA* but *which cloud signing service*, because the signing has to happen
+somewhere that already holds the key.
+
+### Two grades
+
+| | SmartScreen behaviour |
+| --- | --- |
+| **OV** (organisation validated) | Warns at first, and the warning fades as downloads accumulate reputation against that certificate |
+| **EV** (extended validation) | Trusted immediately, no reputation-building period |
+
+EV costs more and validates harder. For a project nobody has downloaded yet,
+OV means the warning persists for a while — which is worth knowing before
+paying for OV and finding the problem is still there.
+
+### Options worth comparing
+
+Prices are indicative and change; check current terms rather than trusting
+this table.
+
+| Route | Roughly | Notes |
+| --- | --- | --- |
+| **Azure Trusted Signing** | ~$10/month | Microsoft-run, built for CI, no token to hold. Requires a verified organisation, or an individual who can show ~3 years of verifiable history. Cheapest legitimate path if you qualify. |
+| **SignPath Foundation** | free for OSS | Aimed squarely at open-source projects. Has an approval process and constraints on how the build is wired. |
+| **Certum Open Source** | ~$30–100/year | Long-standing cheap option for open source; ships a physical token, which is fine locally and awkward in CI. |
+| **DigiCert / Sectigo / SSL.com** | ~$200–700/year | The traditional CAs. All now sell a cloud-signing add-on (KeyLocker, eSigner) precisely because of the hardware rule. |
+
+Given NookOS is Apache-2.0 and public, **SignPath Foundation and Azure Trusted
+Signing are the two to price out first.**
+
+### How VS Code does it
+
+It does not tell you anything reusable. Microsoft signs VS Code with their own
+internal signing infrastructure, using certificates they hold as the operating
+system vendor. There is no product to buy that reproduces it — the reason their
+download opens without a murmur is that they are Microsoft.
+
+The transferable part is smaller: VS Code ships a **signed** installer, and
+that is the whole difference. Nothing about their installer format matters
+here; ours is already an MSI and an NSIS setup, which is the same shape.
+
+### Wiring it up when a certificate exists
+
+Tauri signs Windows bundles two ways:
+
+- `bundle.windows.certificateThumbprint` — for a certificate already in the
+  machine's certificate store. Works on a self-hosted runner with a token
+  attached; not on a hosted runner.
+- `bundle.windows.signCommand` — an arbitrary command Tauri calls per artifact.
+  This is the hook every cloud signing service plugs into, and the one we will
+  use.
+
+The `timestampUrl` is already set in `tauri.conf.json`. Timestamping is not
+optional in practice: without it, every signature becomes invalid the day the
+certificate expires, including on copies people already downloaded.
 
 ## Linux
 
@@ -56,7 +113,7 @@ self-issued.
 | Platform | Requirement | Rough cost |
 | --- | --- | --- |
 | macOS | Apple Developer Program + notarisation | $99/year |
-| Windows | Authenticode cert (+ hardware token) | $100–400/year, or possibly free for OSS |
+| Windows | Cloud signing service (hardware key is mandatory) | ~$10/month via Azure, free via SignPath for OSS, or $200–700/year traditional |
 | Linux | none | — |
 
 Both would be CI secrets and a signing step in `release.yml`. Tauri supports
