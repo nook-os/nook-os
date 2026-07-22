@@ -211,6 +211,119 @@ pub async fn load_signer(
     Ok((ca, key_pem))
 }
 
+/// How long a node's certificate is good for.
+///
+/// Short and disposable, kubelet-style: the durable identity is the node's
+/// keypair, and the certificate is the expiring artifact renewed against it.
+/// Short leaves also bound how long a stolen one is useful and let a CA
+/// rotation drain in days rather than years.
+pub const LEAF_VALIDITY_DAYS: i64 = 30;
+
+/// A freshly issued node certificate.
+#[derive(Debug, Clone)]
+pub struct IssuedLeaf {
+    pub cert_pem: String,
+    pub not_after: DateTime<Utc>,
+    /// Which CA signed it — recorded on the node so the retirement guard can
+    /// answer "does this CA still have live leaves?".
+    pub ca_id: Uuid,
+    /// The CSR's public key, PEM. Stored as the node's durable identity so a
+    /// renewal can be matched to the machine that first enrolled.
+    pub public_key_pem: String,
+}
+
+/// Sign a node's CSR with the tenant's active CA.
+///
+/// The subject is overwritten rather than trusted: a CSR is attacker-supplied
+/// input, so the identity in the issued certificate is the one the control
+/// plane decided, not the one the requester asked for. Everything downstream
+/// reads identity off the certificate, which makes this the single point where
+/// "who is this machine" is established.
+pub async fn sign_node_csr(
+    db: &PgPool,
+    vault: &crate::crypto::Vault,
+    tenant: TenantId,
+    node_id: Uuid,
+    csr_pem: &str,
+) -> Result<IssuedLeaf> {
+    use rcgen::{
+        CertificateParams, CertificateSigningRequestParams, DistinguishedName, DnType, KeyPair,
+        PublicKeyData,
+    };
+
+    let (ca, ca_key_pem) = load_signer(db, vault, tenant).await?;
+
+    // Rebuild the issuer from what we stored. `from_ca_cert_pem` keeps the
+    // subject and key identifier, so issued certificates chain to the CA the
+    // tenant's nodes already trust.
+    let issuer_key = KeyPair::from_pem(&ca_key_pem).context("CA key is not a usable keypair")?;
+    let issuer_params =
+        CertificateParams::from_ca_cert_pem(&ca.cert_pem).context("CA certificate is unusable")?;
+    let issuer = issuer_params.self_signed(&issuer_key)?;
+
+    let mut csr = CertificateSigningRequestParams::from_pem(csr_pem)
+        .context("that is not a valid certificate signing request")?;
+
+    // Identity is asserted by us, not by the CSR. Both the node and its tenant
+    // go in the subject so a presented certificate answers "which machine" and
+    // "whose fleet" without a database round-trip.
+    let mut dn = DistinguishedName::new();
+    dn.push(DnType::CommonName, node_id.to_string());
+    dn.push(DnType::OrganizationName, format!("nookos:tenant:{tenant}"));
+    csr.params.distinguished_name = dn;
+    // A node certificate authenticates a client; it must never be able to act
+    // as a CA or as a server.
+    csr.params.is_ca = rcgen::IsCa::ExplicitNoCa;
+    csr.params.use_authority_key_identifier_extension = true;
+    csr.params.subject_alt_names = vec![rcgen::SanType::URI(
+        format!("nookos://node/{node_id}").try_into()?,
+    )];
+
+    let not_after = Utc::now() + Duration::days(LEAF_VALIDITY_DAYS);
+    {
+        use chrono::Datelike;
+        csr.params.not_after = rcgen::date_time_ymd(
+            not_after.year(),
+            not_after.month() as u8,
+            not_after.day() as u8,
+        );
+    }
+
+    let public_key_pem = pem_wrap("PUBLIC KEY", csr.public_key.der_bytes());
+    let leaf = csr.signed_by(&issuer, &issuer_key)?;
+
+    Ok(IssuedLeaf {
+        cert_pem: leaf.pem(),
+        not_after,
+        ca_id: ca.id,
+        public_key_pem,
+    })
+}
+
+/// The public key a CSR carries, PEM — what renewal compares against the key
+/// the node enrolled with.
+///
+/// Parsing the CSR also verifies its self-signature, so a match here means the
+/// requester holds the corresponding private key.
+pub fn csr_public_key_pem(csr_pem: &str) -> Result<String> {
+    use rcgen::{CertificateSigningRequestParams, PublicKeyData};
+    let csr = CertificateSigningRequestParams::from_pem(csr_pem)
+        .context("that is not a valid certificate signing request")?;
+    Ok(pem_wrap("PUBLIC KEY", csr.public_key.der_bytes()))
+}
+
+fn pem_wrap(label: &str, der: &[u8]) -> String {
+    use base64::Engine;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(der);
+    let body = b64
+        .as_bytes()
+        .chunks(64)
+        .map(|c| String::from_utf8_lossy(c).to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!("-----BEGIN {label}-----\n{body}\n-----END {label}-----\n")
+}
+
 /// Promote a staged CA to be the tenant's signer, demoting the current one to
 /// `retiring` — it stays trusted, it just stops issuing.
 pub async fn promote(db: &PgPool, tenant: TenantId, ca_id: Uuid) -> Result<()> {

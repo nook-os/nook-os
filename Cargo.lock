@@ -2448,6 +2448,7 @@ dependencies = [
  "utoipa",
  "utoipa-swagger-ui",
  "uuid",
+ "x509-parser",
 ]
 
 [[package]]

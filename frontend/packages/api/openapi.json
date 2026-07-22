@@ -769,6 +769,43 @@
         }
       }
     },
+    "/api/v1/nodes/enroll": {
+      "post": {
+        "tags": [
+          "crate::routes::join"
+        ],
+        "summary": "Trade a join token for a certificate signed by the tenant's CA.",
+        "operationId": "enroll_node",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EnrollRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EnrollResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": ""
+          },
+          "401": {
+            "description": ""
+          }
+        }
+      }
+    },
     "/api/v1/nodes/join": {
       "post": {
         "tags": [
@@ -820,6 +857,44 @@
                 }
               }
             }
+          }
+        }
+      }
+    },
+    "/api/v1/nodes/renew": {
+      "post": {
+        "tags": [
+          "crate::routes::join"
+        ],
+        "summary": "Renew on the strength of the key the node already holds.",
+        "description": "Works whether the certificate expired five minutes or five months ago, and\nwhether or not the tenant's CA rotated meanwhile — which is precisely why\nthe response carries the whole trust bundle rather than just a certificate.",
+        "operationId": "renew_node_cert",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RenewRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EnrollResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": ""
+          },
+          "404": {
+            "description": ""
           }
         }
       }
@@ -3697,6 +3772,59 @@
           }
         }
       },
+      "EnrollRequest": {
+        "type": "object",
+        "description": "First contact: trade a join token for a certificate.\n\nThe node generates its keypair locally and sends only a CSR — the private\nkey never leaves the machine, so the control plane cannot leak what it was\nnever given.",
+        "required": [
+          "token",
+          "csr_pem"
+        ],
+        "properties": {
+          "csr_pem": {
+            "type": "string"
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Name for a machine enrolling for the first time."
+          },
+          "token": {
+            "type": "string",
+            "description": "`nook_join_…`, which is what decides whose CA signs this."
+          }
+        }
+      },
+      "EnrollResponse": {
+        "type": "object",
+        "description": "A certificate plus the trust the node needs to verify its peer.",
+        "required": [
+          "node_id",
+          "cert_pem",
+          "ca_bundle",
+          "not_after"
+        ],
+        "properties": {
+          "ca_bundle": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "EVERY CA this tenant trusts, not just the signer. A node that refreshed\nonly its own certificate would stay pinned to a CA being retired, which\nis what turns a rotation into an outage."
+          },
+          "cert_pem": {
+            "type": "string"
+          },
+          "node_id": {
+            "$ref": "#/components/schemas/NodeId"
+          },
+          "not_after": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
       "Event": {
         "type": "object",
         "description": "Everything produces events. Kind is an open dotted string:\n\"node.connected\", \"session.started\", \"task.moved\", \"user.login\", ...",
@@ -4497,6 +4625,22 @@
         "properties": {
           "name": {
             "type": "string"
+          }
+        }
+      },
+      "RenewRequest": {
+        "type": "object",
+        "description": "Renewal: a node asks for a fresh certificate using the key it already has.\n\nDeliberately no join token. Tokens are for a machine with no key yet;\nrequiring one at renewal would mean expiry costs a manual re-join, which is\nexactly what must never happen to a laptop that was closed for a month.",
+        "required": [
+          "node_id",
+          "csr_pem"
+        ],
+        "properties": {
+          "csr_pem": {
+            "type": "string"
+          },
+          "node_id": {
+            "$ref": "#/components/schemas/NodeId"
           }
         }
       },

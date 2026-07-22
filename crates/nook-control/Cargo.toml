@@ -51,3 +51,6 @@ aes-gcm = { workspace = true }
 rand = { workspace = true }
 dotenvy = { workspace = true }
 cookie = { workspace = true }
+
+[dev-dependencies]
+x509-parser = "0.16"

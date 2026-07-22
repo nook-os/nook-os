@@ -54,6 +54,8 @@ pub fn build_agent_router(state: AppState) -> Router {
             "/api/v1",
             Router::new()
                 .route("/nodes/join", post(join::join))
+                .route("/nodes/enroll", post(join::enroll))
+                .route("/nodes/renew", post(join::renew))
                 .route("/ws/node", get(crate::ws::node::node_ws)),
         )
         .with_state(state)

@@ -315,6 +315,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/nodes/enroll": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Trade a join token for a certificate signed by the tenant's CA. */
+        post: operations["enroll_node"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/nodes/join": {
         parameters: {
             query?: never;
@@ -349,6 +366,28 @@ export interface paths {
         put?: never;
         /** POST /api/v1/nodes/join-tokens — mint a token to enroll a new machine. */
         post: operations["create_join_token"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/nodes/renew": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Renew on the strength of the key the node already holds.
+         * @description Works whether the certificate expired five minutes or five months ago, and
+         *     whether or not the tenant's CA rotated meanwhile — which is precisely why
+         *     the response carries the whole trust bundle rather than just a certificate.
+         */
+        post: operations["renew_node_cert"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1473,6 +1512,33 @@ export interface components {
             items: components["schemas"]["DispatchItem"][];
         };
         /**
+         * @description First contact: trade a join token for a certificate.
+         *
+         *     The node generates its keypair locally and sends only a CSR — the private
+         *     key never leaves the machine, so the control plane cannot leak what it was
+         *     never given.
+         */
+        EnrollRequest: {
+            csr_pem: string;
+            /** @description Name for a machine enrolling for the first time. */
+            name?: string | null;
+            /** @description `nook_join_…`, which is what decides whose CA signs this. */
+            token: string;
+        };
+        /** @description A certificate plus the trust the node needs to verify its peer. */
+        EnrollResponse: {
+            /**
+             * @description EVERY CA this tenant trusts, not just the signer. A node that refreshed
+             *     only its own certificate would stay pinned to a CA being retired, which
+             *     is what turns a rotation into an outage.
+             */
+            ca_bundle: string[];
+            cert_pem: string;
+            node_id: components["schemas"]["NodeId"];
+            /** Format: date-time */
+            not_after: string;
+        };
+        /**
          * @description Everything produces events. Kind is an open dotted string:
          *     "node.connected", "session.started", "task.moved", "user.login", ...
          */
@@ -1759,6 +1825,17 @@ export interface components {
          */
         RenameWorkspaceRequest: {
             name: string;
+        };
+        /**
+         * @description Renewal: a node asks for a fresh certificate using the key it already has.
+         *
+         *     Deliberately no join token. Tokens are for a machine with no key yet;
+         *     requiring one at renewal would mean expiry costs a manual re-join, which is
+         *     exactly what must never happen to a laptop that was closed for a month.
+         */
+        RenewRequest: {
+            csr_pem: string;
+            node_id: components["schemas"]["NodeId"];
         };
         /** @description The node the resource-aware scheduler chose for "Auto" placement. */
         ScheduledNode: {
@@ -2779,6 +2856,41 @@ export interface operations {
             };
         };
     };
+    enroll_node: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["EnrollRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EnrollResponse"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
     join: {
         parameters: {
             query?: never;
@@ -2825,6 +2937,41 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["CreateJoinTokenResponse"];
                 };
+            };
+        };
+    };
+    renew_node_cert: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RenewRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EnrollResponse"];
+                };
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
         };
     };

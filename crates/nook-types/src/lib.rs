@@ -596,6 +596,46 @@ pub struct GitPushRequest {
     pub credential_id: Option<GitCredentialId>,
 }
 
+// ── Node enrolment (mTLS) ────────────────────────────────────────────────────
+
+/// First contact: trade a join token for a certificate.
+///
+/// The node generates its keypair locally and sends only a CSR — the private
+/// key never leaves the machine, so the control plane cannot leak what it was
+/// never given.
+#[derive(Debug, Clone, Deserialize, ToSchema)]
+pub struct EnrollRequest {
+    /// `nook_join_…`, which is what decides whose CA signs this.
+    pub token: String,
+    pub csr_pem: String,
+    /// Name for a machine enrolling for the first time.
+    #[serde(default)]
+    pub name: Option<String>,
+}
+
+/// Renewal: a node asks for a fresh certificate using the key it already has.
+///
+/// Deliberately no join token. Tokens are for a machine with no key yet;
+/// requiring one at renewal would mean expiry costs a manual re-join, which is
+/// exactly what must never happen to a laptop that was closed for a month.
+#[derive(Debug, Clone, Deserialize, ToSchema)]
+pub struct RenewRequest {
+    pub node_id: NodeId,
+    pub csr_pem: String,
+}
+
+/// A certificate plus the trust the node needs to verify its peer.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct EnrollResponse {
+    pub node_id: NodeId,
+    pub cert_pem: String,
+    /// EVERY CA this tenant trusts, not just the signer. A node that refreshed
+    /// only its own certificate would stay pinned to a CA being retired, which
+    /// is what turns a rotation into an outage.
+    pub ca_bundle: Vec<String>,
+    pub not_after: DateTime<Utc>,
+}
+
 /// Asking for a personal access token.
 #[derive(Debug, Clone, Default, Deserialize, ToSchema)]
 pub struct CreateUserTokenRequest {
