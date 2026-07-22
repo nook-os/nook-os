@@ -136,8 +136,12 @@ jobs:
             label: linux-x86_64
           - runner: macos-14
             label: macos-aarch64
-          - runner: macos-13
+          # macos-13 (Intel) is being retired and its queue never drains, so
+          # the Intel bundle is cross-targeted from Apple silicon — routine on
+          # macOS, where Xcode ships both SDKs.
+          - runner: macos-14
             label: macos-x86_64
+            target: x86_64-apple-darwin
           - runner: windows-latest
             label: windows-x86_64
     runs-on: ${{ matrix.runner }}
@@ -189,9 +193,13 @@ jobs:
         working-directory: frontend
         run: pnpm install --frozen-lockfile
 
+      - name: Add the cross target
+        if: matrix.target != ''
+        run: rustup target add ${{ matrix.target }}
+
       - name: Build the bundle
         working-directory: frontend/apps/desktop
-        run: pnpm tauri build
+        run: pnpm tauri build ${{ matrix.target && format('--target {0}', matrix.target) || '' }}
 
       # Bundle names and layout differ per platform, so collect by extension
       # rather than by guessing paths.
@@ -199,7 +207,7 @@ jobs:
         shell: bash
         run: |
           mkdir -p desktop-dist
-          root=frontend/apps/desktop/src-tauri/target/release/bundle
+          root=frontend/apps/desktop/src-tauri/target
           find "$root" -type f \
             \( -name '*.dmg' -o -name '*.AppImage' -o -name '*.deb' \
                -o -name '*.rpm' -o -name '*.msi' -o -name '*.exe' \) \
