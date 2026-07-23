@@ -134,7 +134,6 @@ pub async fn connect_once(cfg: &NodeConfig) -> Result<()> {
     // Register: idempotent full resync on every connect.
     out_tx
         .send(NodeToControl::Register {
-            agent_version: Some(env!("CARGO_PKG_VERSION").to_string()),
             capabilities: capabilities::detect(),
             live_tmux_sessions: tmux::list_nook_sessions(),
         })

@@ -3598,6 +3598,13 @@
           "tmux"
         ],
         "properties": {
+          "agent_version": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The agent's own version. Reported like everything else here, so\n\"which machines are behind?\" needs no column of its own — this whole\nstruct is already stored as jsonb on the node."
+          },
           "architecture": {
             "type": "string"
           },
@@ -4605,7 +4612,6 @@
       },
       "LocalAuthStatus": {
         "type": "object",
-        "description": "Unauthenticated sign-in capabilities, so the login screen only offers what\nthis instance actually supports.",
         "required": [
           "available",
           "needs_bootstrap"

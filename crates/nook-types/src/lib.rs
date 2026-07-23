@@ -217,6 +217,11 @@ pub struct Capabilities {
     pub docker: bool,
     pub tmux: bool,
     pub git: Option<String>,
+    /// The agent's own version. Reported like everything else here, so
+    /// "which machines are behind?" needs no column of its own — this whole
+    /// struct is already stored as jsonb on the node.
+    #[serde(default)]
+    pub agent_version: Option<String>,
     /// Detected runtime executables: "claude", "hermes", "codex", "bash", ...
     #[serde(default)]
     pub runtimes: Vec<String>,

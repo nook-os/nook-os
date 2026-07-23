@@ -1541,6 +1541,12 @@ export interface components {
          *     inspects a machine — the node describes its own capabilities.
          */
         Capabilities: {
+            /**
+             * @description The agent's own version. Reported like everything else here, so
+             *     "which machines are behind?" needs no column of its own — this whole
+             *     struct is already stored as jsonb on the node.
+             */
+            agent_version?: string | null;
             architecture: string;
             /** Format: int32 */
             cpus: number;
@@ -1884,10 +1890,6 @@ export interface components {
             /** @description Long-lived node credential; shown once, stored hashed. */
             node_token: string;
         };
-        /**
-         * @description Unauthenticated sign-in capabilities, so the login screen only offers what
-         *     this instance actually supports.
-         */
         LocalAuthStatus: {
             /** @description Local sign-in is possible: the tenant is undecided, or already local. */
             available: boolean;
