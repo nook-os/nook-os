@@ -1,7 +1,7 @@
 // Typed WebSocket helpers for the two live channels: /ws/ui (events) and
 // /ws/sessions/:id/attach (terminal bytes).
 import type { components } from "./generated/schema";
-import { socketProtocols, socketUrl } from "./endpoint";
+import { openSocket } from "./endpoint";
 
 export type UiEvent = components["schemas"]["UiEvent"];
 export type AttachServerMessage = components["schemas"]["AttachServerMessage"];
@@ -10,7 +10,19 @@ export type AttachClientMessage = components["schemas"]["AttachClientMessage"];
 /** Persistent UI event stream with automatic reconnect + backoff. */
 export function connectUiSocket(
   onEvent: (event: UiEvent) => void,
-  onReconnect?: () => void,
+  handlers?: {
+    /** Fires every time the socket opens — the honest signal for a "live"
+     *  indicator. Keying that off the first EVENT instead left the dot red on
+     *  a quiet system, where the socket is connected and simply has nothing to
+     *  say yet, which reads as "disconnected" when it is the opposite. */
+    onOpen?: () => void;
+    /** Fires on re-open after a drop (not the first connect), for refetching
+     *  state that could have moved while the socket was down. */
+    onReconnect?: () => void;
+    /** Fires when the socket drops, so the indicator can go red promptly
+     *  rather than waiting for the next failed reconnect. */
+    onClose?: () => void;
+  },
 ): () => void {
   let closed = false;
   let socket: WebSocket | null = null;
@@ -19,10 +31,18 @@ export function connectUiSocket(
 
   const open = () => {
     if (closed) return;
-    socket = new WebSocket(socketUrl("/api/v1/ws/ui"));
+    // The subprotocol carries the bearer token, and omitting it is invisible
+    // in a browser — a same-origin socket authenticates by cookie, so the web
+    // app worked without it. The desktop app is served from `tauri://` and
+    // sends no cookie, so its socket connected anonymously, the server rejected
+    // the handshake, and "live" stayed red with no terminals ever attaching
+    // while REST (which sends the token as a header) worked fine. Same fix as
+    // `apiSocket` in index.ts.
+    socket = openSocket("/api/v1/ws/ui");
     socket.onopen = () => {
       backoff = 1000;
-      if (!first && onReconnect) onReconnect();
+      handlers?.onOpen?.();
+      if (!first) handlers?.onReconnect?.();
       first = false;
     };
     socket.onmessage = (e) => {
@@ -34,6 +54,7 @@ export function connectUiSocket(
     };
     socket.onclose = () => {
       if (closed) return;
+      handlers?.onClose?.();
       setTimeout(open, backoff);
       backoff = Math.min(backoff * 2, 15000);
     };
@@ -89,7 +110,9 @@ export function attachSession(
 
   const open = () => {
     if (closed) return;
-    socket = new WebSocket(socketUrl(`/api/v1/ws/sessions/${sessionId}/attach`));
+    // Same token-in-subprotocol as the UI socket above — without it, a desktop
+    // client attaches anonymously and the terminal never opens.
+    socket = openSocket(`/api/v1/ws/sessions/${sessionId}/attach`);
     socket.onmessage = (e) => {
       try {
         const msg: AttachServerMessage = JSON.parse(e.data);

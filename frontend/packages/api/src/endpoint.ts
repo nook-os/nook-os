@@ -55,6 +55,21 @@ export function socketUrl(path: string): string {
 }
 
 /**
+ * Open an authenticated WebSocket against the endpoint.
+ *
+ * The one place a socket is constructed, on purpose. The token rides in the
+ * subprotocol, and forgetting it is invisible in a browser — a same-origin
+ * socket authenticates by cookie — but silently anonymous from the desktop app,
+ * which sends no cookie. Two call sites once built their own sockets and
+ * omitted it, so the desktop app's live feed and terminals never connected
+ * while REST worked. Routing every socket through here makes that drift
+ * impossible rather than merely fixed.
+ */
+export function openSocket(path: string): WebSocket {
+  return new WebSocket(socketUrl(path), socketProtocols());
+}
+
+/**
  * The subprotocol pair a WebSocket uses to authenticate.
  *
  * A browser WebSocket cannot set an Authorization header and, cross-origin,

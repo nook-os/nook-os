@@ -2,7 +2,7 @@
 // OpenAPI document — regenerate with `./scripts/gen-types.sh`.
 import createClient from "openapi-fetch";
 import type { paths, components } from "./generated/schema";
-import { apiUrl, authHeaders, isRemote, socketProtocols, socketUrl } from "./endpoint";
+import { apiUrl, authHeaders, isRemote, openSocket } from "./endpoint";
 
 export type Schemas = components["schemas"];
 export type Tenant = Schemas["Tenant"];
@@ -63,7 +63,8 @@ api.use({
   },
 });
 
-/** Open a WebSocket against the API origin. */
+/** Open a WebSocket against the API origin. Delegates to the single socket
+ *  constructor so the auth subprotocol is never omitted. */
 export function apiSocket(path: string): WebSocket {
-  return new WebSocket(socketUrl(path), socketProtocols());
+  return openSocket(path);
 }

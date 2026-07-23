@@ -138,14 +138,14 @@ export function startLive(queryClient: QueryClient) {
     }
   };
 
-  connectUiSocket(
-    (event) => {
-      if (!useLive.getState().connected) useLive.setState({ connected: true });
-      handle(event);
-    },
-    () => {
+  connectUiSocket(handle, {
+    // "Live" means the socket is open, not that an event has arrived — a quiet
+    // fleet is still connected.
+    onOpen: () => useLive.setState({ connected: true }),
+    onClose: () => useLive.setState({ connected: false }),
+    onReconnect: () => {
       // Reconnected after a gap: refetch everything that could have moved.
       queryClient.invalidateQueries();
     },
-  );
+  });
 }
