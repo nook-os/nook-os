@@ -150,11 +150,12 @@ pub async fn setup(args: SetupArgs) -> Result<()> {
         super::skills::install(None, false)?;
     }
 
-    // ---- offer the finish hook
+    // ---- offer the Claude Code hooks
     //
     // Offered here rather than buried in documentation because it is the piece
     // that makes the rest of the fleet's notifications worth having: without
-    // it, "my agent finished" is something you find out by looking.
+    // it, "my agent finished" — or "my agent is stuck waiting on me" — is
+    // something you find out by looking.
     if std::path::Path::new(&format!(
         "{}/.claude",
         std::env::var("HOME").unwrap_or_default()
@@ -162,12 +163,13 @@ pub async fn setup(args: SetupArgs) -> Result<()> {
     .is_dir()
     {
         t.say("");
-        t.say("  Claude Code can tell the fleet when it finishes a turn — a");
-        t.say("  toast in the web UI, and anything else you've wired up");
-        t.say("  (Slack, Telegram, phone push). It runs `nook notify`, and it");
-        t.say("  can never fail your agent: output is discarded and errors are");
-        t.say("  ignored.");
-        if t.confirm("Install the finish hook for Claude Code?", true)? {
+        t.say("  Claude Code can tell the fleet what it is doing — a toast in");
+        t.say("  the web UI, and anything else you've wired up (Slack, Telegram,");
+        t.say("  phone push): when it finishes, when a subagent finishes, and —");
+        t.say("  the useful one — when it is BLOCKED waiting for your input. It");
+        t.say("  runs `nook notify`, and can never fail your agent: output is");
+        t.say("  discarded and errors are ignored.");
+        if t.confirm("Install the Claude Code hooks?", true)? {
             super::hooks::install(false)?;
         }
     }
