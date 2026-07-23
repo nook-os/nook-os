@@ -70,8 +70,79 @@ pub async fn record(
                 event: event.clone(),
             },
         );
+        // Some events are worth interrupting somebody for. Deciding that HERE,
+        // once, is what makes every notification channel work without any call
+        // site knowing they exist — recording an event is the only thing a
+        // feature has to do to be notifiable.
+        if let Some(draft) = notable(state, event) {
+            crate::services::notify::raise(state, tenant_id, draft).await;
+        }
     }
     event
+}
+
+/// Which events become notifications, and how to phrase them.
+///
+/// Curated rather than "everything": an inbox that receives every event is one
+/// nobody reads, and the whole value of a bell icon is that a number on it
+/// means something. Everything not listed still lands in the activity log,
+/// which is the complete record.
+fn notable(
+    state: &crate::state::AppState,
+    event: &Event,
+) -> Option<crate::services::notify::Draft> {
+    use crate::services::notify::Draft;
+
+    let base = state.cfg.public_base_url.trim_end_matches('/');
+    let text = |k: &str| -> Option<&str> { event.payload.get(k).and_then(|v| v.as_str()) };
+    let title = text("title").unwrap_or_default();
+
+    let d = match event.kind.as_str() {
+        "node.disconnected" => Draft::new("Node disconnected")
+            .level("warning")
+            .body(text("name").unwrap_or("a node").to_string()),
+        "node.connected" => Draft::new("Node connected")
+            .level("success")
+            .body(text("hostname").unwrap_or("a node").to_string()),
+        "node.error" => Draft::new("Node error")
+            .level("error")
+            .body(text("message").unwrap_or_default().to_string()),
+        "git.clone_finished" => Draft::new("Clone finished")
+            .level(
+                if event.payload.get("ok").and_then(|v| v.as_bool()) == Some(false) {
+                    "error"
+                } else {
+                    "success"
+                },
+            )
+            .body(text("message").unwrap_or_default().to_string()),
+        "session.exited" => Draft::new("Session ended").level("warning"),
+        "task.pr_submitted" => Draft::new("PR submitted")
+            .level("success")
+            .body(text("pr_url").unwrap_or_default().to_string()),
+        "task.work_started" => Draft::new("Work started")
+            .level("info")
+            .body(title.to_string()),
+        "task.claimed" => Draft::new("Task claimed")
+            .level("info")
+            .body(title.to_string()),
+        "skill.install_failed" => Draft::new("A node could not learn a skill")
+            .level("error")
+            .body(text("error").unwrap_or_default().to_string()),
+        _ => return None,
+    };
+
+    let d = d.kind(event.kind.clone()).payload(event.payload.clone());
+    // Somewhere to go. A notification you cannot act on is a notification you
+    // learn to ignore.
+    Some(match (event.session_id, event.payload.get("task_id")) {
+        (Some(sid), _) => d.link(format!("{base}/sessions/{sid}")),
+        (None, Some(t)) => d.link(format!(
+            "{base}/board?task={}",
+            t.as_str().unwrap_or_default()
+        )),
+        _ => d.link(format!("{base}/activity")),
+    })
 }
 
 /// Insert only (no live publish) — for contexts without an `AppState`, e.g.

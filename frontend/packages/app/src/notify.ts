@@ -142,3 +142,23 @@ export function notifyEvent(event: EventItem) {
     }
   }
 }
+
+/**
+ * The out-of-tab half of a notification: chime, and a desktop notification.
+ *
+ * A toast only reaches somebody looking at the tab. These reach somebody who
+ * is not — which, for "your agent finished", is the case that matters.
+ */
+export function chimeFor(level: string, title = "NookOS", body = "") {
+  const prefs = useNotify.getState();
+  const tone: Tone = level === "error" || level === "warning" ? "warn" : "ok";
+  if (prefs.sound) playChime(tone);
+  if (prefs.desktop && desktopPermission() === "granted") {
+    try {
+      new window.Notification(title, { body, tag: "nookos" });
+    } catch {
+      // Some browsers refuse the constructor outside a service worker. The
+      // toast and the inbox still carry it, so this is not worth reporting.
+    }
+  }
+}

@@ -26,6 +26,8 @@ pub struct AppState {
     /// Recently validated MCP bearer tokens (hash → validated-at), so OIDC
     /// access-token checks don't hit the IdP's userinfo endpoint per request.
     pub mcp_auth_cache: Arc<dashmap::DashMap<u64, std::time::Instant>>,
+    /// Per-tenant budget for `POST /notify`, which node tokens may call.
+    pub notify_limit: Arc<crate::services::notify::RateLimiter>,
     cookie_key: Key,
 }
 
@@ -45,6 +47,7 @@ impl AppState {
             cfg: Arc::new(cfg),
             oidc: oidc.map(Arc::new),
             mcp_auth_cache: Arc::new(dashmap::DashMap::new()),
+            notify_limit: Arc::new(Default::default()),
             cookie_key,
         }
     }

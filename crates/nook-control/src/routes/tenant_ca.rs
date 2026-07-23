@@ -38,11 +38,39 @@ async fn deny(state: &AppState, auth: &AuthCtx, action: &str, why: ApiError) -> 
     why
 }
 
-async fn gate(state: &AppState, auth: &AuthCtx, action: &str) -> Result<(), ApiError> {
-    match auth.require_tenant_admin(state).await {
+/// May this caller rotate `target`'s certificate authority?
+///
+/// `ca.rotate`, not tenant-admin. RBAC.md is explicit that tenant admins never
+/// get this: the CA is the deployment's trust root, and a tenant able to rotate
+/// it is a tenant reaching upward. The permission has been correctly withheld
+/// from `tenant_admin` since migration 0015 — this is the code catching up to
+/// the catalog it already had.
+///
+/// Takes the TARGET tenant rather than assuming the caller's, so an operator
+/// acting on somebody else's CA and a tenant acting on its own go through the
+/// same predicate. A tenant admin fails either way; an operator's deployment
+/// binding covers every tenant, which is the ancestor rule doing its job.
+pub(crate) async fn gate_tenant(
+    state: &AppState,
+    auth: &AuthCtx,
+    target: nook_types::TenantId,
+    action: &str,
+) -> Result<(), ApiError> {
+    match auth
+        .require(
+            state,
+            crate::auth::perm::Permission::CaRotate,
+            crate::auth::perm::Scope::Tenant(target),
+        )
+        .await
+    {
         Ok(()) => Ok(()),
         Err(e) => Err(deny(state, auth, action, e).await),
     }
+}
+
+async fn gate(state: &AppState, auth: &AuthCtx, action: &str) -> Result<(), ApiError> {
+    gate_tenant(state, auth, auth.tenant_id, action).await
 }
 
 /// What this tenant trusts, what signs, and how the rotation is progressing.
@@ -88,34 +116,84 @@ pub async fn stage(
     auth: AuthCtx,
 ) -> ApiResult<Json<TenantCaSummary>> {
     gate(&state, &auth, "stage").await?;
+    Ok(Json(stage_for(&state, &auth, auth.tenant_id).await?))
+}
+
+/// Stage a new CA for `tenant`. The mechanism, shared by the tenant-facing
+/// route and the operator one.
+///
+/// Callers authorize FIRST — this does not gate, so that every entry point has
+/// to have decided who may do it before arriving. Exactly one way a CA is
+/// created, because two would drift and one of them would be wrong.
+pub(crate) async fn stage_for(
+    state: &AppState,
+    auth: &AuthCtx,
+    tenant: nook_types::TenantId,
+) -> ApiResult<TenantCaSummary> {
     // Never implicitly active: an existing tenant already has a signer, and
-    // silently switching would strand every node that hasn't renewed.
-    let make_active = crate::ca::trust_bundle(&state.db, auth.tenant_id)
+    // silently switching would strand every node that hasn't renewed. This is
+    // also why there is no one-shot "rotate" — staging and promoting are two
+    // acts with machine renewals in between, and collapsing them would break
+    // the fleet it was meant to secure.
+    let make_active = crate::ca::trust_bundle(&state.db, tenant)
         .await
         .map_err(ApiError::Internal)?
         .is_empty();
 
-    let ca = crate::ca::generate(&state.db, &state.vault, auth.tenant_id, make_active)
+    let ca = crate::ca::generate(&state.db, &state.vault, tenant, make_active)
         .await
         .map_err(ApiError::Internal)?;
 
     events::record(
-        &state,
-        auth.tenant_id,
+        state,
+        tenant,
         EventDraft::new("tenant.ca_staged")
             .actor("user", auth.user_id.0)
             .payload(serde_json::json!({ "ca_id": ca.id, "fingerprint": ca.fingerprint })),
     )
     .await;
 
-    Ok(Json(TenantCaSummary {
+    // Tell every connected node in this tenant, now. Without it they learn on
+    // their next renewal — up to thirty days — and the operator cannot promote
+    // until they have. Pushing turns that wait into seconds.
+    announce_trust(state, tenant).await;
+
+    Ok(TenantCaSummary {
         id: ca.id.to_string(),
         state: ca.state,
         fingerprint: ca.fingerprint,
         not_after: ca.not_after,
         created_at: ca.created_at,
         nodes_holding_leaves: 0,
-    }))
+    })
+}
+
+/// Push the tenant's current trust bundle to its connected nodes.
+///
+/// Best effort: a node that is offline picks the same list up from
+/// `RegisterAck` when it reconnects, so nothing depends on this arriving.
+pub(crate) async fn announce_trust(state: &AppState, tenant: nook_types::TenantId) {
+    let fingerprints: Vec<String> = crate::ca::trust_bundle(&state.db, tenant)
+        .await
+        .map(|cas| cas.into_iter().map(|c| c.fingerprint).collect())
+        .unwrap_or_default();
+    if fingerprints.is_empty() {
+        return;
+    }
+    let nodes: Vec<(nook_types::NodeId,)> =
+        sqlx::query_as("SELECT id FROM nodes WHERE tenant_id = $1")
+            .bind(tenant)
+            .fetch_all(&state.db)
+            .await
+            .unwrap_or_default();
+    for (id,) in nodes {
+        state.registry.send_to_node(
+            id,
+            nook_proto::ControlToNode::TrustChanged {
+                ca_fingerprints: fingerprints.clone(),
+            },
+        );
+    }
 }
 
 /// Make a staged CA the signer. The previous signer becomes `retiring` —
@@ -130,23 +208,34 @@ pub async fn promote(
     Path(id): Path<String>,
 ) -> ApiResult<axum::http::StatusCode> {
     gate(&state, &auth, "promote").await?;
-    let ca_id: uuid::Uuid = id
+    promote_for(&state, &auth, auth.tenant_id, &id).await?;
+    Ok(axum::http::StatusCode::NO_CONTENT)
+}
+
+/// Make a staged CA the signer for `tenant`. Shared; does not gate.
+pub(crate) async fn promote_for(
+    state: &AppState,
+    auth: &AuthCtx,
+    tenant: nook_types::TenantId,
+    ca_id: &str,
+) -> ApiResult<()> {
+    let ca_id: uuid::Uuid = ca_id
         .parse()
         .map_err(|_| ApiError::BadRequest("not a CA id".into()))?;
 
-    crate::ca::promote(&state.db, auth.tenant_id, ca_id)
+    crate::ca::promote(&state.db, tenant, ca_id)
         .await
         .map_err(|e| ApiError::BadRequest(e.to_string()))?;
 
     events::record(
-        &state,
-        auth.tenant_id,
+        state,
+        tenant,
         EventDraft::new("tenant.ca_promoted")
             .actor("user", auth.user_id.0)
             .payload(serde_json::json!({ "ca_id": ca_id })),
     )
     .await;
-    Ok(axum::http::StatusCode::NO_CONTENT)
+    Ok(())
 }
 
 /// Drop a CA from the trust bundle. Refused while it still has live leaves.

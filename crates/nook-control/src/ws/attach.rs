@@ -20,19 +20,23 @@ pub async fn attach_ws(
     Path(id): Path<SessionId>,
     ws: WebSocketUpgrade,
 ) -> Response {
-    let session: Option<Session> =
-        match sqlx::query_as("SELECT * FROM sessions WHERE id = $1 AND tenant_id = $2")
-            .bind(id)
-            .bind(auth.tenant_id)
-            .fetch_optional(&state.db)
-            .await
-        {
-            Ok(s) => s,
-            Err(e) => return ApiError::from(e).into_response(),
-        };
+    let session: Option<Session> = match sqlx::query_as("SELECT * FROM sessions WHERE id = $1")
+        .bind(id)
+        .fetch_optional(&state.db)
+        .await
+    {
+        Ok(s) => s,
+        Err(e) => return ApiError::from(e).into_response(),
+    };
     let Some(session) = session else {
         return ApiError::NotFound.into_response();
     };
+    // THE session-content route: this socket carries the raw terminal stream —
+    // every keystroke and every byte of output. Membership only; no role at any
+    // scope reaches it. See auth/session_guard.rs.
+    if let Err(e) = auth.require_session_access(&state, session.tenant_id).await {
+        return e.into_response();
+    }
     // Attaching is a terminal on that machine: keystrokes in, output out.
     if let Err(e) = auth.require_node_self(session.node_id) {
         return e.into_response();

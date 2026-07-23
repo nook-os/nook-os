@@ -36,11 +36,35 @@ export function Login() {
   const claiming = local?.needs_bootstrap === true;
   const showLocal = local?.available === true;
 
-  const devLogin = async () => {
+  // Dev sign-in as ANY account, the way Hearth does it: the "credential" is
+  // the email you type. Testing an authorization model requires being
+  // different people, and a model you cannot switch between users to exercise
+  // is a model nobody exercises.
+  const { data: devAccounts } = useQuery({
+    queryKey: ["auth", "dev-accounts"],
+    queryFn: async () => (await api.GET("/api/v1/auth/dev-accounts")).data ?? [],
+    enabled: providers?.dev_login === true,
+    // Refused outright when dev mode is off; that is an answer, not a problem
+    // to keep retrying.
+    retry: false,
+  });
+  const [devEmail, setDevEmail] = useState("");
+  // The account list is a STEP, not the front page. "Sign in with Dev" sits
+  // beside the other providers as one option among several; who you sign in as
+  // is the question that comes after choosing it, the same way an IdP asks
+  // after you have been redirected to it.
+  const [devOpen, setDevOpen] = useState(false);
+
+  const devLogin = async (email?: string) => {
+    setError(null);
     const { error, response } = await api.POST("/api/v1/auth/dev-login", {
-      body: {},
+      body: email ? { email, display_name: email.split("@")[0] } : {},
     });
-    if (!error && response.ok) window.location.reload();
+    if (!error && response.ok) {
+      window.location.href = "/";
+      return;
+    }
+    setError(messageOf(error, "Dev sign-in failed"));
   };
 
   const submit = async (e: React.FormEvent) => {
@@ -149,10 +173,62 @@ export function Login() {
             Sign in with your identity provider
           </a>
         )}
-        {providers?.dev_login && (
-          <button className="btn" onClick={devLogin}>
-            Dev sign-in
+        {providers?.dev_login && !devOpen && (
+          <button className="btn" onClick={() => setDevOpen(true)}>
+            Sign in with Dev
           </button>
+        )}
+
+        {providers?.dev_login && devOpen && (
+          <div className="dev-signin">
+            <div className="dev-signin-head">
+              <span className="faint small">Choose an account — no password</span>
+              <button className="btn small" onClick={() => setDevOpen(false)}>
+                back
+              </button>
+            </div>
+
+            {/* Existing accounts first: switching between people you already
+                made is the common case, and retyping an address to do it is
+                the friction that stops anybody testing roles at all. */}
+            {(devAccounts ?? []).map((a) => (
+              <button
+                key={a.email}
+                className="btn dev-account"
+                onClick={() => devLogin(a.email)}
+                title={`sign in as ${a.email}`}
+              >
+                <span className="bright">{a.display_name || a.email}</span>
+                <span className="faint small mono">{a.email}</span>
+                <span className="dev-account-tags">
+                  <span className="faint small">{a.tenant_slug}</span>
+                  {(a.deployment_roles ?? []).map((r) => (
+                    <span key={r} className="dev-role">
+                      {r}
+                    </span>
+                  ))}
+                </span>
+              </button>
+            ))}
+
+            <form
+              className="dev-new"
+              onSubmit={(e) => {
+                e.preventDefault();
+                if (devEmail.trim()) void devLogin(devEmail.trim());
+              }}
+            >
+              <input
+                value={devEmail}
+                onChange={(e) => setDevEmail(e.target.value)}
+                placeholder="someone@localhost"
+                autoComplete="off"
+              />
+              <button className="btn" type="submit" disabled={!devEmail.trim()}>
+                sign in as new
+              </button>
+            </form>
+          </div>
         )}
 
         {nothingAvailable && (

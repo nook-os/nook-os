@@ -50,6 +50,10 @@ pub enum BusMessage {
     },
     GitReply {
         request_id: Uuid,
+        /// See `NodeToControl::GitStatusResult` — same default, same reason:
+        /// a peer that omits it is not asserting "not a repository".
+        #[serde(default = "crate::ws::bus::yes")]
+        is_repo: bool,
         branch: Option<String>,
         files: Vec<nook_types::GitFileStatus>,
         diff: String,
@@ -234,4 +238,10 @@ async fn fetch_outbox(pool: &PgPool, id: i64) -> Option<BusMessage> {
         Ok(Wire::Inline(msg)) => Some(*msg),
         _ => None,
     }
+}
+
+/// serde default for booleans that mean "assume yes when an older peer omits
+/// the field" — see `BusMessage::GitReply`.
+pub(crate) fn yes() -> bool {
+    true
 }

@@ -55,6 +55,7 @@ jobs:
             target: aarch64-apple-darwin
             asset: nook-darwin-aarch64
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
         with:
@@ -145,6 +146,7 @@ jobs:
           - runner: windows-latest
             label: windows-x86_64
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
     env:
       # `secrets` is not a context a step-level `if` can read, but a job-level
       # `env` can — so the presence check is hoisted here and the step tests a
@@ -237,6 +239,10 @@ jobs:
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          # Tauri's own update signature. Separate from notarisation, which says
+          # Apple scanned the build but nothing about who published the update.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
           # Notarisation variables are deliberately NOT set here — the staging
           # step above exports them through GITHUB_ENV, and only when the key
           # exists. Listing them here sets them to the empty string when the
@@ -258,9 +264,17 @@ jobs:
         run: |
           mkdir -p desktop-dist
           root=frontend/apps/desktop/src-tauri/target
+          # `control.tar.gz` and `data.tar.gz` are the INSIDES of a .deb — an ar
+          # archive containing exactly those two members, which the deb bundler
+          # leaves unpacked under `bundle/`. They are not artifacts. Sweeping
+          # them up published deb innards as release assets, and worse, one of
+          # them won the `.tar.gz` alias and shipped as `NookOS-<label>.tar.gz`
+          # — a "download" that is a fragment of a package.
           find "$root" -type f -path '*/bundle/*' \
+            ! -name 'control.tar.gz' ! -name 'data.tar.gz' \
             \( -name '*.dmg' -o -name '*.AppImage' -o -name '*.deb' \
-               -o -name '*.rpm' -o -name '*.msi' -o -name '*.exe' \) \
+               -o -name '*.rpm' -o -name '*.msi' -o -name '*.exe' \
+               -o -name '*.tar.gz' -o -name '*.zip' -o -name '*.sig' \) \
             -exec cp {} desktop-dist/ \;
           # An empty bundle directory means the build silently produced nothing,
           # which would otherwise surface as a release missing its downloads.
@@ -271,14 +285,31 @@ jobs:
           # filename, so a name carrying the version breaks every link the
           # moment a release ships — which is why the CLI binaries have always
           # been called `nook-linux-x86_64` rather than `nook-0.3.6-linux`.
+          #
+          # A `.sig` is named after the artifact it signs, NOT collapsed to one
+          # name per platform. It used to be: every signature became
+          # `NookOS-<label>.sig` and the last one written won, so on Linux the
+          # deb's signature ended up paired with the AppImage in latest.json and
+          # on Windows the msi's with the setup.exe. Both fail verification on
+          # the user's machine, silently, at update time. macOS was correct only
+          # because it produces exactly one signed artifact.
           for f in desktop-dist/*; do
             case "$f" in *NookOS-${{ matrix.label }}*) continue ;; esac
-            case "$f" in
+            base="$f"; sig=""
+            case "$f" in *.sig) base="${f%.sig}"; sig=".sig" ;; esac
+            case "$base" in
               *-setup.exe) ext="-setup.exe" ;;
               *.tar.gz)    ext=".tar.gz" ;;
-              *)           ext=".${f##*.}" ;;
+              *)           ext=".${base##*.}" ;;
             esac
-            cp "$f" "desktop-dist/NookOS-${{ matrix.label }}$ext"
+            alias="desktop-dist/NookOS-${{ matrix.label }}${ext}${sig}"
+            # Two different files claiming one alias is the bug above. Fail
+            # loudly rather than let the last one win.
+            if [ -e "$alias" ]; then
+              echo "::error::$alias would be written twice (from $f) — two artifacts are collapsing to one name"
+              exit 1
+            fi
+            cp "$f" "$alias"
           done
           ls -la desktop-dist
 
@@ -316,6 +347,7 @@ jobs:
           - image: web
             dockerfile: deploy/docker/web-prod.Dockerfile
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
         with:
@@ -357,6 +389,7 @@ jobs:
     name: Multi-arch manifest
     needs: images
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     strategy:
       matrix:
         image: [control, node, web]
@@ -391,6 +424,7 @@ jobs:
   release:
     needs: [binaries, desktop, merge]
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
         with:
@@ -409,6 +443,79 @@ jobs:
       # does not depend on a control plane already existing.
       - name: Include the installer
         run: cp install/install.sh dist/install.sh
+
+      # The manifest the desktop app polls. Built from the .sig files Tauri
+      # produced beside each bundle — the signature is what makes an update
+      # trustworthy, so a platform whose .sig is missing is LEFT OUT rather
+      # than published unsigned.
+      - name: Build the update manifest
+        env:
+          VERSION: ${{ inputs.tag || github.ref_name }}
+        run: |
+          python3 - <<'PY'
+          import json, os, pathlib
+          version = os.environ["VERSION"].lstrip("v")
+          base = f"https://github.com/${{ github.repository }}/releases/download/{os.environ['VERSION']}"
+          dist = pathlib.Path("dist")
+
+          # Tauri's platform keys, and the bundle each one updates from. The
+          # signature is `<artifact>.sig` — derived, not listed, so it cannot
+          # drift from the artifact the way a second column could.
+          wanted = {
+              "darwin-aarch64": "NookOS-macos-aarch64.tar.gz",
+              "darwin-x86_64":  "NookOS-macos-x86_64.tar.gz",
+              "linux-x86_64":   "NookOS-linux-x86_64.AppImage",
+              "windows-x86_64": "NookOS-windows-x86_64-setup.exe",
+          }
+          platforms = {}
+          for key, name in wanted.items():
+              sig = dist / f"{name}.sig"
+              if not (dist / name).exists() or not sig.exists():
+                  print(f"skip {key}: no signed {name}")
+                  continue
+
+              # minisign records what it signed in the trusted comment. Pairing
+              # a signature with the wrong file is the exact bug this replaced,
+              # and it is invisible until somebody's update fails, so check it
+              # here where it costs nothing.
+              try:
+                  import base64 as _b64
+                  comment = _b64.b64decode(sig.read_text()).decode()
+                  signed = [l for l in comment.splitlines() if "file:" in l]
+                  if signed and "file:" in signed[0]:
+                      signed_name = signed[0].split("file:")[1].strip()
+                      # The alias is a renamed copy, so compare suffixes rather
+                      # than names: `NookOS.app.tar.gz` aliases to
+                      # `NookOS-macos-aarch64.tar.gz`.
+                      ok = signed_name.endswith(name.split(".", 1)[-1]) or \
+                           name.endswith(signed_name.split(".", 1)[-1])
+                      if not ok:
+                          print(f"::error::{key}: signature is over {signed_name}, not {name}")
+                          raise SystemExit(1)
+                      print(f"{key}: signature verified over {signed_name}")
+              except SystemExit:
+                  raise
+              except Exception as e:  # noqa: BLE001 - a check, not the build
+                  print(f"::warning::{key}: could not read the signature comment ({e})")
+              platforms[key] = {
+                  "signature": sig.read_text().strip(),
+                  "url": f"{base}/{name}",
+              }
+
+          if not platforms:
+              # Not fatal: the release is still good, the app simply will not
+              # self-update from it. Saying so beats a manifest promising
+              # nothing.
+              print("::warning::no signed update artifacts — publishing no manifest")
+              raise SystemExit(0)
+
+          (dist / "latest.json").write_text(json.dumps({
+              "version": version,
+              "notes": f"NookOS {os.environ['VERSION']}",
+              "platforms": platforms,
+          }, indent=2))
+          print("manifest covers:", ", ".join(platforms))
+          PY
       - name: Publish
         uses: softprops/action-gh-release@v2
         with:

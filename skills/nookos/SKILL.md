@@ -1,7 +1,7 @@
 ---
 name: nookos
-description: "Run and drive coding agents on OTHER machines with `nook` — no ssh, no tmux. Start a Claude/Codex/bash session anywhere in the fleet, type into it, read its answer."
-version: 1.1.0
+description: "Run and drive coding agents on OTHER machines with `nook` — no ssh, no tmux. Start a Claude/Codex/bash session anywhere in the fleet, type into it, read its answer, and teach every agent in the fleet a skill at once."
+version: 1.4.0
 author: NookOS
 license: MIT
 platforms: [linux, macos]
@@ -247,7 +247,151 @@ nook read fe-work  --lines 200
 
 ---
 
-## 7. When to use this instead of running locally
+## 7. Teach the whole fleet a skill
+
+A skill you write on one machine is useless to the agents on the other nine.
+`nook teach` fixes that in one call: the control plane stores the document and
+pushes it to every node, and each node writes it into every agent it finds
+(Hermes — including each profile — and Claude Code).
+
+```bash
+nook teach ./SKILL.md          # name comes from the document's frontmatter
+nook taught                    # what the fleet already knows
+nook unteach code-review       # forget it, here and on every machine
+```
+
+```
+✓ taught code-review (4218 bytes)
+  delivered to: azul, crimson
+  offline: amber — will learn it on reconnect
+```
+
+**Offline machines are not a failure.** The skill is stored, so a node that was
+asleep — or one that joins next week — learns it when it connects. That is the
+difference between this and copying a file around, and it is why the output
+names the machines it did not reach rather than counting them.
+
+The name comes from the document's own frontmatter `name:`. A file called
+`SKILL.md` with no `name:` is refused rather than teaching your whole fleet a
+skill called "skill" — pass `--name` if you mean it.
+
+`nook skills install` is the local-only cousin: it writes the NookOS skill into
+this machine's agents and talks to nothing.
+
+---
+
+## 8. The board — finding work and taking it
+
+The kanban board is a real issue tracker: tasks have human keys (`NOOK-42`),
+labels, priorities, comments and blockers. This is how an agent finds work
+without being told what to do.
+
+**Find work.** One filter, one query:
+
+```bash
+nook tasks --label agent-ready --assignee none --unblocked
+```
+
+```
+KEY        PRI TITLE                        STATE      LABELS
+NOOK-42    !!  Fix the flaky CI job         free       agent-ready
+NOOK-38    ↑   Rework the settings form     free       agent-ready
+```
+
+Results come back in the order work should be taken: urgent first, tasks with
+**no** priority last (unset is not the same as unimportant), then oldest first.
+
+**`agent-ready` is a human's signal, not yours.** It means a person looked at
+the task and is willing for an agent to take it. You cannot apply it — the API
+refuses — and that is deliberate: an agent that could mark its own work ready
+would be approving itself. Removing it is fine; handing work back never needs
+approval.
+
+**Read the whole issue before starting.** The acceptance criteria live in the
+description:
+
+```bash
+nook task NOOK-42
+```
+
+**Take it.** Claiming is atomic, so two agents polling the same queue cannot
+both win:
+
+```bash
+nook claim NOOK-42 --column-type started
+```
+
+```
+· NOOK-42 was already taken — pick another
+```
+
+That is **not an error**. Someone else got there first; go back to
+`nook tasks` and take the next one.
+
+**Report what you found.** Comments are where reasoning belongs — a blocking
+question, a review verdict, why an approach was abandoned:
+
+```bash
+nook comment NOOK-42 'Blocked: the fixture DB has no migrations. Should I add one?'
+nook label NOOK-42 blocked
+nook label NOOK-42 blocked --remove
+```
+
+Column names are for people; **column types are for you**: `backlog`,
+`unstarted`, `started`, `completed`, `canceled`. Target the type and a human
+renaming "In Progress" to "Doing" cannot break you.
+
+---
+
+## 9. Tell the fleet you're done
+
+When something finishes, say so. It reaches every open NookOS window as a
+toast, lands in the notification bell, and goes out to whatever the operator
+has wired up — Slack, Telegram, phone push, SMS, a webhook.
+
+```bash
+nook notify "Migration finished" --level success
+nook notify "Blocked: need the staging DB password" --level warning \
+  --body "Tried the vault; no entry for staging." --link "https://nook.example.com/board?task=NOOK-42"
+```
+
+`--level` is `info` | `success` | `warning` | `error`. Errors stay on screen
+until dismissed; everything else fades. `--kind` is a dotted string channels
+filter on — use `agent.finished` when you finish a piece of work, so an
+operator can route just those to their phone.
+
+**Use it when a human would want to know**, which is roughly: you finished
+something long, you're blocked and stopped, or something failed that nobody
+else is watching. Not for progress — a notification per step is a notification
+nobody reads.
+
+**This works from any machine**, with a node token as well as a user token. A
+box that has joined the fleet can report on itself.
+
+### Doing it automatically
+
+`nook hooks install` wires this into Claude Code's `Stop` hook, so finishing a
+turn notifies the fleet without you remembering. The hook discards its own
+output and ends in `|| true`, so a control plane that is down can never make
+your turn look failed.
+
+---
+
+## 10. Workspaces, events and this machine
+
+```bash
+nook get events                # what the fleet has been doing
+nook import                    # adopt the repo you're standing in as a workspace
+nook import --link             # ...without moving it
+nook status                    # this machine's config and connectivity
+```
+
+`nook get` takes `nodes | sessions | workspaces | secrets | tasks | events |
+themes`, and `--json` for any of them when you want to parse rather than read.
+
+---
+
+## 11. When to use this instead of running locally
 
 | Situation | Do this |
 |---|---|
@@ -259,7 +403,7 @@ nook read fe-work  --lines 200
 
 ---
 
-## 8. Errors you will actually hit
+## 12. Errors you will actually hit
 
 All of these are real messages, not paraphrases.
 

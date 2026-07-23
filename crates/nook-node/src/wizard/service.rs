@@ -112,6 +112,20 @@ pub fn choose(t: &mut Tty) -> Result<Service> {
     })
 }
 
+impl Service {
+    /// The value stored in `node.toml`. `None` means nothing will restart this
+    /// agent, which is what makes self-update unsafe.
+    pub fn config_value(self) -> Option<&'static str> {
+        match self {
+            Service::UserSystemd => Some("systemd-user"),
+            Service::SystemSystemd => Some("systemd-system"),
+            Service::Launchd => Some("launchd"),
+            Service::Docker => Some("docker"),
+            Service::None => None,
+        }
+    }
+}
+
 /// Write, enable and start the unit.
 pub fn install(t: &mut Tty, service: Service, exec: &str) -> Result<()> {
     let home = std::env::var("HOME").context("HOME is not set")?;

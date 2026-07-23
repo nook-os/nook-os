@@ -207,6 +207,11 @@ impl Manager {
     /// Browser (re)attached: replay the visible screen + recent scrollback.
     /// If the node itself restarted, re-establish the PTY first.
     pub fn attach(&mut self, session_id: SessionId, tmux_name_hint: Option<&str>) {
+        // The tmux server may have been started by something other than this
+        // agent, or by a version of it that predates the wheel bindings — in
+        // which case scrolling types arrow keys. Cheap to re-check, and attach
+        // is the moment someone is about to notice.
+        tmux::ensure_server_defaults();
         // A handle whose PTY died is worse than none: it accepts input into a
         // closed pipe. Drop it so we re-establish below.
         self.drop_if_dead(session_id);

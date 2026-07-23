@@ -11,6 +11,7 @@ env:
 jobs:
   rust:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     # Without a database the suite reports "ok" while executing almost nothing:
     # every test that needs Postgres returns early. NOOK_REQUIRE_DB turns that
     # silent skip into a failure, so a green tick means the tests actually ran.
@@ -48,6 +49,7 @@ jobs:
   # seconds.
   workflows:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - name: Lint the workflows
@@ -57,6 +59,7 @@ jobs:
 
   frontend:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -76,6 +79,7 @@ jobs:
 
   type-gen-drift:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

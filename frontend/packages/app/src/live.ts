@@ -7,6 +7,9 @@ import { notifyEvent } from "./notify";
 import { runJobFollowUp, useJobs } from "./jobs";
 import { resyncSealedSecrets } from "./secretkeys";
 import { useAppPassword } from "./apppassword";
+import { useToasts } from "./Notifications";
+import { chimeFor } from "./notify";
+import type { Notification } from "@nookos/api";
 import { api } from "@nookos/api";
 
 const ACTIVITY_BUFFER = 250;
@@ -64,6 +67,27 @@ export function startLive(queryClient: QueryClient) {
         },
       }));
       queryClient.invalidateQueries({ queryKey: ["sessions"] });
+    } else if (event.type === "notification") {
+      // Toast it now, and refresh the inbox so the bell's count is right even
+      // if nobody looks until tomorrow.
+      const n = event.data.notification as Notification;
+      useToasts.getState().push(n);
+      queryClient.invalidateQueries({ queryKey: ["notifications"] });
+      // The chime and desktop notification stay: they reach you when the tab
+      // is not focused, which a toast cannot.
+      chimeFor(n.level, n.title, n.body);
+    } else if (event.type === "task_changed") {
+      // Agents change tasks constantly — claiming, commenting, moving — and a
+      // board that only refetched on a timer would show a human work that was
+      // taken seconds ago. Invalidating rather than patching state from the
+      // event keeps one source of truth: the event says "stale", the query
+      // says what is true.
+      queryClient.invalidateQueries({ queryKey: ["boards"] });
+      // The whole prefix, not one id: a task modal opened by human key is
+      // cached under `["task", "NOOK-42"]`, so invalidating by uuid would miss
+      // exactly the view somebody is looking at.
+      queryClient.invalidateQueries({ queryKey: ["task"] });
+      queryClient.invalidateQueries({ queryKey: ["tasks"] });
     } else if (event.type === "activity") {
       useLive.setState((s) => ({
         activity: [event.data.event, ...s.activity].slice(0, ACTIVITY_BUFFER),

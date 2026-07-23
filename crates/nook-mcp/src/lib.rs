@@ -80,6 +80,61 @@ pub trait NookBackend: Send + Sync + 'static {
     async fn move_task(&self, task_id: String, column: String) -> anyhow::Result<TaskItem>;
     /// Record a PR for a task and move it to Done.
     async fn submit_pr(&self, task_id: String, pr_url: Option<String>) -> anyhow::Result<TaskItem>;
+
+    // ── The agent loop's primitives ─────────────────────────────────────────
+    //
+    // Every one of these takes a task by human key (`NOOK-42`) as well as a
+    // uuid, because a key is what an agent is handed — in a PR body, in a
+    // branch name, in the reply to filing an issue.
+    /// Find work: the compound pick filter, as one query.
+    async fn list_tasks(&self, f: TaskQuery) -> anyhow::Result<Vec<TaskItem>>;
+    /// One whole issue: body, labels, comments, relations, blocked state.
+    async fn get_task(&self, task: String) -> anyhow::Result<serde_json::Value>;
+    /// Take a task, atomically. Fails if somebody else got there first.
+    async fn claim_task(
+        &self,
+        task: String,
+        column_type: Option<String>,
+    ) -> anyhow::Result<TaskItem>;
+    /// Give a task back so somebody else can pick it up.
+    async fn release_task(&self, task: String) -> anyhow::Result<TaskItem>;
+    async fn comment_task(
+        &self,
+        task: String,
+        body_md: String,
+        author_name: Option<String>,
+    ) -> anyhow::Result<serde_json::Value>;
+    async fn add_label(&self, task: String, label: String) -> anyhow::Result<serde_json::Value>;
+    async fn remove_label(&self, task: String, label: String) -> anyhow::Result<serde_json::Value>;
+    async fn set_priority(&self, task: String, priority: i32) -> anyhow::Result<TaskItem>;
+    async fn link_tasks(
+        &self,
+        from: String,
+        to: String,
+        kind: String,
+    ) -> anyhow::Result<serde_json::Value>;
+}
+
+/// The pick filter, mirroring `GET /api/v1/tasks`.
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+pub struct TaskQuery {
+    /// Board id or key. Omit to search every board.
+    pub board: Option<String>,
+    /// Labels that must ALL be present, e.g. ["agent-ready"].
+    #[serde(default)]
+    pub label: Vec<String>,
+    /// Labels that must NOT be present, e.g. ["blocked"].
+    #[serde(default)]
+    pub not_label: Vec<String>,
+    /// A user id, or "none" for unclaimed work.
+    pub assignee: Option<String>,
+    /// backlog | unstarted | started | completed | canceled
+    pub column_type: Option<String>,
+    /// 0 none, 1 urgent, 2 high, 3 medium, 4 low.
+    pub priority: Option<i32>,
+    /// false excludes anything with an unresolved blocker.
+    pub is_blocked: Option<bool>,
+    pub limit: Option<i64>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -190,6 +245,52 @@ pub struct MoveTaskParams {
     pub task_id: String,
     /// Column name: Triage / Todo / In Progress / Done.
     pub column: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct TaskRefParams {
+    /// Human key (NOOK-42) or uuid.
+    pub task: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct ClaimParams {
+    /// Human key (NOOK-42) or uuid.
+    pub task: String,
+    /// Move it here at the same time, by type — usually "started".
+    pub column_type: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct CommentParams {
+    pub task: String,
+    /// Markdown.
+    pub body_md: String,
+    /// Which tool is speaking, e.g. "loop-review on azul".
+    pub author_name: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct LabelParams {
+    pub task: String,
+    /// Label name, e.g. "blocked".
+    pub label: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct PriorityParams {
+    pub task: String,
+    /// 0 none, 1 urgent, 2 high, 3 medium, 4 low.
+    pub priority: i32,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct LinkParams {
+    /// The task doing the blocking/relating.
+    pub from: String,
+    pub to: String,
+    /// blocks | relates | duplicates
+    pub kind: String,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -453,6 +554,167 @@ impl NookMcp {
             &self
                 .backend
                 .submit_pr(p.task_id, p.pr_url)
+                .await
+                .map_err(backend_err)?,
+        )
+    }
+
+    // ── The agent loop ──────────────────────────────────────────────────────
+    //
+    // The descriptions carry the safety rule as well as the mechanics, so an
+    // agent reading the tool list learns that `agent-ready` is a human's to
+    // apply without having to be told separately — and there is deliberately
+    // no tool that could apply it.
+
+    #[tool(
+        description = "Find work. One compound filter, one query. The loop's pick step is \
+                       label=[\"agent-ready\"], not_label=[\"blocked\"], assignee=\"none\", \
+                       is_blocked=false. Results are ordered the way work should be taken: \
+                       urgent first, tasks with no priority last, then oldest first."
+    )]
+    async fn list_tasks(
+        &self,
+        Parameters(p): Parameters<TaskQuery>,
+    ) -> Result<CallToolResult, McpError> {
+        to_result(&self.backend.list_tasks(p).await.map_err(backend_err)?)
+    }
+
+    #[tool(
+        description = "Read one whole issue by key (NOOK-42) or id: description, labels, \
+                       comments, relations, and whether it is blocked. Read this before \
+                       starting work — the acceptance criteria live in the description."
+    )]
+    async fn get_task(
+        &self,
+        Parameters(p): Parameters<TaskRefParams>,
+    ) -> Result<CallToolResult, McpError> {
+        to_result(&self.backend.get_task(p.task).await.map_err(backend_err)?)
+    }
+
+    #[tool(
+        description = "Claim a task, atomically, and optionally move it to a column type \
+                       (usually \"started\"). Another agent may have taken it first: that \
+                       returns a conflict and is NORMAL, not a failure — pick the next task \
+                       and carry on."
+    )]
+    async fn claim_task(
+        &self,
+        Parameters(p): Parameters<ClaimParams>,
+    ) -> Result<CallToolResult, McpError> {
+        to_result(
+            &self
+                .backend
+                .claim_task(p.task, p.column_type)
+                .await
+                .map_err(backend_err)?,
+        )
+    }
+
+    #[tool(description = "Release a claimed task so somebody else can pick it up")]
+    async fn release_task(
+        &self,
+        Parameters(p): Parameters<TaskRefParams>,
+    ) -> Result<CallToolResult, McpError> {
+        to_result(
+            &self
+                .backend
+                .release_task(p.task)
+                .await
+                .map_err(backend_err)?,
+        )
+    }
+
+    #[tool(
+        description = "Comment on a task in markdown. This is where reasoning belongs: a \
+                       blocking question, a review verdict, why an approach was abandoned. \
+                       Set author_name to say which tool you are (e.g. \"loop-build on azul\")."
+    )]
+    async fn comment_task(
+        &self,
+        Parameters(p): Parameters<CommentParams>,
+    ) -> Result<CallToolResult, McpError> {
+        to_result(
+            &self
+                .backend
+                .comment_task(p.task, p.body_md, p.author_name)
+                .await
+                .map_err(backend_err)?,
+        )
+    }
+
+    #[tool(
+        description = "Add a label to a task. NOTE: `agent-ready` is applied by HUMANS only \
+                       — it is the approval gate that says an agent may take the work, and \
+                       an agent applying it to its own task would be approving itself. Use \
+                       this for labels like `blocked` or `needs-discussion`."
+    )]
+    async fn add_label(
+        &self,
+        Parameters(p): Parameters<LabelParams>,
+    ) -> Result<CallToolResult, McpError> {
+        // Enforced, not merely documented. A description is guidance; this is
+        // the property the whole human-in-the-loop design rests on, and
+        // guidance is not what you protect a safety gate with.
+        if p.label.trim().eq_ignore_ascii_case("agent-ready") {
+            return Err(McpError::invalid_params(
+                "`agent-ready` is the human approval gate and cannot be applied by an agent. \
+                 Ask a person to mark the task ready.",
+                None,
+            ));
+        }
+        to_result(
+            &self
+                .backend
+                .add_label(p.task, p.label)
+                .await
+                .map_err(backend_err)?,
+        )
+    }
+
+    #[tool(
+        description = "Remove a label from a task. Removing `agent-ready` is allowed — \
+                       handing work back is always permitted; taking it is what needs approval."
+    )]
+    async fn remove_label(
+        &self,
+        Parameters(p): Parameters<LabelParams>,
+    ) -> Result<CallToolResult, McpError> {
+        to_result(
+            &self
+                .backend
+                .remove_label(p.task, p.label)
+                .await
+                .map_err(backend_err)?,
+        )
+    }
+
+    #[tool(description = "Set a task's priority: 0 none, 1 urgent, 2 high, 3 medium, 4 low")]
+    async fn set_priority(
+        &self,
+        Parameters(p): Parameters<PriorityParams>,
+    ) -> Result<CallToolResult, McpError> {
+        to_result(
+            &self
+                .backend
+                .set_priority(p.task, p.priority)
+                .await
+                .map_err(backend_err)?,
+        )
+    }
+
+    #[tool(
+        description = "Link two tasks: kind is `blocks`, `relates` or `duplicates`. A \
+                       `blocks` link means `from` must reach a completed column before `to` \
+                       can be picked up."
+    )]
+    async fn link_tasks(
+        &self,
+        Parameters(p): Parameters<LinkParams>,
+    ) -> Result<CallToolResult, McpError> {
+        to_result(
+            &self
+                .backend
+                .link_tasks(p.from, p.to, p.kind)
                 .await
                 .map_err(backend_err)?,
         )

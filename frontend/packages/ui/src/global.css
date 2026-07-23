@@ -723,7 +723,166 @@ table.nook-table tr.clickable { cursor: pointer; }
 }
 
 .board-card:hover { border-color: var(--nook-accent); }
-.board-card .desc { color: var(--nook-fg-dim); font-size: 11.5px; margin-top: 3px; }
+.board-card .desc {
+  color: var(--nook-fg-dim);
+  font-size: 11.5px;
+  margin-top: 3px;
+  /* Two lines of description on a card, no more. The detail panel is where a
+     spec is read; a card is scanned, and one long task must not push the rest
+     of its column off screen. */
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.board-card.selected {
+  border-color: var(--nook-accent);
+  box-shadow: inset 2px 0 0 var(--nook-accent);
+}
+
+/* Blocked work is dimmed rather than hidden: it still occupies a place in the
+   queue, and seeing WHY the column is not moving is the point. */
+.board-card.blocked { opacity: 0.55; border-style: dashed; }
+.card-blocked { color: #f14668; margin-right: 4px; }
+
+.card-key {
+  color: var(--nook-fg-faint);
+  font-size: 10.5px;
+  margin-right: 6px;
+  letter-spacing: 0.02em;
+}
+
+.card-meta {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+  margin-top: 4px;
+}
+
+.card-prio { font-weight: 700; font-size: 11px; line-height: 1; }
+
+.card-label {
+  border: 1px solid var(--nook-border-bright);
+  border-radius: 2px;
+  padding: 0 4px;
+  font-size: 10px;
+  line-height: 15px;
+  white-space: nowrap;
+}
+
+.card-assignee { color: var(--nook-accent); font-size: 9px; margin-left: auto; }
+.col-type { font-size: 9.5px; text-transform: uppercase; letter-spacing: 0.04em; }
+
+/* ── Board layout: filter strip over a split of columns + detail ─────────── */
+
+.board-body { display: flex; flex-direction: column; height: 100%; min-height: 0; }
+
+.board-split {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  gap: var(--nook-panel-gap);
+  background: var(--nook-border);
+}
+
+.board-split > .board-columns { flex: 1; min-width: 0; }
+
+.board-filters {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex-wrap: wrap;
+  padding: 5px 8px;
+  background: var(--nook-bg-panel);
+  border-bottom: 1px solid var(--nook-border);
+  font-size: 11px;
+}
+
+.filter-sep {
+  width: 1px;
+  height: 14px;
+  background: var(--nook-border-bright);
+  margin: 0 3px;
+}
+
+.task-chip {
+  border: 1px solid var(--nook-border-bright);
+  background: transparent;
+  color: var(--nook-fg-dim);
+  border-radius: 2px;
+  padding: 1px 5px;
+  font-size: 10.5px;
+  cursor: pointer;
+  font-family: inherit;
+}
+.task-chip:hover { border-color: var(--nook-accent); }
+.task-chip.on { background: var(--nook-bg-raised); }
+/* Excluded reads as struck through, so "not this" is legible at a glance
+   rather than depending on a colour someone may not distinguish. */
+.task-chip.off { text-decoration: line-through; opacity: 0.6; }
+
+.task-select {
+  background: var(--nook-bg);
+  color: var(--nook-fg);
+  border: 1px solid var(--nook-border-bright);
+  border-radius: 2px;
+  font-size: 10.5px;
+  font-family: inherit;
+  padding: 1px 3px;
+}
+
+/* ── Task detail panel ──────────────────────────────────────────────────── */
+
+
+.task-blocked-banner {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  border: 1px solid #f14668;
+  color: #f14668;
+  border-radius: 2px;
+  padding: 3px 6px;
+  font-size: 11px;
+  margin-bottom: 6px;
+}
+
+.task-attrs {
+  display: grid;
+  grid-template-columns: 62px 1fr;
+  gap: 4px 8px;
+  align-items: center;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--nook-border);
+}
+
+.task-label-picker { display: flex; gap: 4px; flex-wrap: wrap; }
+
+.task-section { padding: 8px 0; border-bottom: 1px solid var(--nook-border); }
+.task-section-h {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--nook-fg-faint);
+  margin-bottom: 5px;
+}
+
+.task-exec { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+
+.task-rel-row { display: flex; gap: 6px; flex-wrap: wrap; align-items: baseline; margin-bottom: 3px; }
+.task-rel { display: inline-flex; align-items: center; gap: 3px; font-size: 11px; }
+
+.task-comment {
+  border-left: 2px solid var(--nook-border-bright);
+  padding: 3px 0 3px 7px;
+  margin-bottom: 7px;
+}
+.task-comment-head { margin-bottom: 2px; }
+
+
+
+
 
 /* ── Activity ───────────────────────────────────────────────────────────── */
 
@@ -1646,3 +1805,1023 @@ textarea.env-area.blurred {
   display: flex;
   align-items: center;
 }
+
+/* Device approval: the code is the thing to read across a room, so it gets
+   room to breathe and the tracking to be read a character at a time. */
+.device-code {
+  font-family: var(--nook-font-mono);
+  font-size: 26px;
+  letter-spacing: 0.28em;
+  /* The trailing letter-space would otherwise push it visibly off-centre. */
+  text-indent: 0.28em;
+  color: var(--nook-accent);
+  text-shadow: var(--nook-glow);
+  padding: 10px 0;
+}
+
+.device-link {
+  font-size: 12px;
+  color: var(--nook-fg-dim);
+  word-break: break-all;
+  text-align: center;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.device-link:hover {
+  color: var(--nook-accent);
+}
+
+/* Desktop update notice: a strip, not a modal. It is news, not a decision that
+   has to be made before anything else can happen. */
+.update-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 14px;
+  font-size: 12px;
+  background: var(--nook-bg-raised);
+  border-bottom: 1px solid var(--nook-accent);
+  color: var(--nook-fg-bright);
+}
+.update-bar .btn {
+  margin-left: 0;
+}
+.update-bar .btn:first-of-type {
+  margin-left: auto;
+}
+
+/* ── Markdown ───────────────────────────────────────────────────────────── */
+
+.md {
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--nook-fg);
+  overflow-wrap: anywhere;
+}
+
+.md > *:first-child { margin-top: 0; }
+.md > *:last-child { margin-bottom: 0; }
+
+.md h1, .md h2, .md h3, .md h4, .md h5, .md h6 {
+  color: var(--nook-fg-bright);
+  font-weight: 600;
+  line-height: 1.3;
+  margin: 12px 0 4px;
+}
+/* A compact scale. A task body is read in a 420px panel, so the browser
+   defaults (2em h1) would waste most of it on one word. */
+.md h1 { font-size: 15px; }
+.md h2 { font-size: 13.5px; }
+.md h3 { font-size: 12.5px; }
+.md h4, .md h5, .md h6 { font-size: 12px; color: var(--nook-fg-dim); }
+
+.md h1, .md h2 {
+  border-bottom: 1px solid var(--nook-border);
+  padding-bottom: 3px;
+}
+
+.md p { margin: 5px 0; }
+.md ul, .md ol { margin: 5px 0; padding-left: 18px; }
+.md li { margin: 2px 0; }
+.md li > ul, .md li > ol { margin: 2px 0; }
+
+/* GFM task lists: the AC-N contract, rendered as state. */
+.md li:has(> .md-check) { list-style: none; margin-left: -14px; }
+.md-check { margin-right: 4px; color: var(--nook-fg-faint); }
+.md-check.done { color: var(--nook-ok, #48c78e); }
+
+.md a { color: var(--nook-accent); text-decoration: underline; text-underline-offset: 2px; }
+.md a:hover { text-decoration-thickness: 2px; }
+
+.md code {
+  font-family: var(--nook-font-mono, ui-monospace, monospace);
+  font-size: 11px;
+  background: var(--nook-bg-raised);
+  border: 1px solid var(--nook-border);
+  border-radius: 2px;
+  padding: 0 3px;
+}
+
+.md pre {
+  background: var(--nook-bg-panel);
+  border: 1px solid var(--nook-border);
+  border-radius: 2px;
+  padding: 6px 8px;
+  margin: 6px 0;
+  overflow-x: auto;
+}
+/* Inside a fence the inline chrome would double up. */
+.md pre code { background: none; border: 0; padding: 0; font-size: 11px; }
+
+.md blockquote {
+  margin: 6px 0;
+  padding: 2px 0 2px 9px;
+  border-left: 2px solid var(--nook-accent);
+  color: var(--nook-fg-dim);
+}
+
+.md hr { border: 0; border-top: 1px solid var(--nook-border); margin: 10px 0; }
+
+/* Tables scroll inside the panel rather than widening it. */
+.md-table-wrap { overflow-x: auto; margin: 6px 0; }
+.md table { border-collapse: collapse; font-size: 11px; }
+.md th, .md td {
+  border: 1px solid var(--nook-border);
+  padding: 3px 6px;
+  text-align: left;
+}
+.md th { background: var(--nook-bg-raised); color: var(--nook-fg-bright); font-weight: 600; }
+
+.md img { max-width: 100%; }
+.md del { color: var(--nook-fg-faint); }
+
+/* ── Markdown editor ────────────────────────────────────────────────────── */
+
+.md-editor {
+  border: 1px solid var(--nook-border-bright);
+  border-radius: 2px;
+  background: var(--nook-bg-panel);
+  margin-top: 4px;
+}
+
+.md-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  padding: 3px 4px;
+  border-bottom: 1px solid var(--nook-border);
+}
+
+.md-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 2px;
+  color: var(--nook-fg-dim);
+  font-family: inherit;
+  font-size: 10.5px;
+  padding: 1px 6px;
+  cursor: pointer;
+}
+.md-tab:hover { color: var(--nook-fg); }
+.md-tab.on {
+  color: var(--nook-accent);
+  border-color: var(--nook-border-bright);
+  background: var(--nook-bg-raised);
+}
+
+.md-tools { display: inline-flex; gap: 1px; margin-left: 6px; }
+.md-tools button {
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 2px;
+  color: var(--nook-fg-faint);
+  font-family: inherit;
+  font-size: 10.5px;
+  min-width: 20px;
+  padding: 1px 3px;
+  cursor: pointer;
+}
+.md-tools button:hover { color: var(--nook-accent); border-color: var(--nook-border-bright); }
+
+.md-hint { margin-left: auto; padding-right: 3px; }
+
+.md-source {
+  display: block;
+  width: 100%;
+  background: transparent;
+  color: var(--nook-fg);
+  border: 0;
+  outline: none;
+  /* Monospace while writing: you are editing the literal characters an agent
+     will parse, and proportional text hides the alignment that matters. */
+  font-family: var(--nook-font-mono, ui-monospace, monospace);
+  font-size: 11.5px;
+  line-height: 1.5;
+  padding: 6px 8px;
+  resize: vertical;
+  tab-size: 2;
+}
+
+.md-preview { padding: 6px 8px; overflow-y: auto; }
+
+.md-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 5px;
+  margin-top: 5px;
+}
+
+.md-edit-btn { margin-left: auto; }
+.task-section-h { display: flex; align-items: center; }
+
+.md-empty {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: 1px dashed var(--nook-border-bright);
+  border-radius: 2px;
+  color: var(--nook-fg-faint);
+  font-family: inherit;
+  font-size: 11.5px;
+  padding: 7px 9px;
+  cursor: text;
+}
+.md-empty:hover { border-color: var(--nook-accent); color: var(--nook-fg-dim); }
+
+/* Double-click-to-edit prose. The affordance has to be discoverable without
+   being noisy: nothing until you hover, then a hint of an edit surface. */
+.md-editable {
+  border: 1px solid transparent;
+  border-radius: 2px;
+  margin: -2px -4px;
+  padding: 2px 4px;
+  cursor: text;
+}
+.md-editable:hover {
+  border-color: var(--nook-border-bright);
+  background: color-mix(in srgb, var(--nook-bg-raised) 45%, transparent);
+}
+.md-placeholder { color: var(--nook-fg-faint); font-size: 11.5px; }
+
+.task-assignee-row { display: flex; gap: 4px; align-items: center; }
+
+/* ── Card chrome: the ⋯ menu, revealed on hover ─────────────────────────── */
+
+.board-card { position: relative; }
+.card-title { cursor: grab; padding-right: 20px; }
+
+.card-menu-btn {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  background: var(--nook-bg-panel);
+  border: 1px solid transparent;
+  border-radius: 2px;
+  color: var(--nook-fg-faint);
+  cursor: pointer;
+  /* Hidden until wanted. A column of twenty cards should read as twenty
+     titles, not forty controls. */
+  opacity: 0;
+}
+.board-card:hover .card-menu-btn { opacity: 1; }
+.card-menu-btn:hover {
+  color: var(--nook-accent);
+  border-color: var(--nook-border-bright);
+  background: var(--nook-bg-raised);
+}
+/* Keyboard users never hover. */
+.card-menu-btn:focus-visible { opacity: 1; outline: 1px solid var(--nook-accent); }
+
+/* ── Context menu ───────────────────────────────────────────────────────── */
+
+.ctx-menu {
+  position: fixed;
+  z-index: 300;
+  min-width: 178px;
+  padding: 3px;
+  background: var(--nook-bg-panel);
+  border: 1px solid var(--nook-border-bright);
+  border-radius: var(--nook-radius);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.55);
+}
+
+.ctx-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  width: 100%;
+  padding: 4px 8px;
+  background: transparent;
+  border: 0;
+  border-radius: 3px;
+  color: var(--nook-fg);
+  font-family: inherit;
+  font-size: 11.5px;
+  text-align: left;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.ctx-item:hover { background: var(--nook-bg-raised); color: var(--nook-fg-bright); }
+.ctx-item.danger { color: var(--nook-err); }
+.ctx-item.danger:hover { background: color-mix(in srgb, var(--nook-err) 16%, transparent); }
+.ctx-arrow { color: var(--nook-fg-faint); }
+.ctx-sep { height: 1px; margin: 3px 4px; background: var(--nook-border); }
+
+.ctx-sub-host { position: relative; }
+.ctx-submenu {
+  position: absolute;
+  left: 100%;
+  top: -3px;
+  min-width: 150px;
+  padding: 3px;
+  background: var(--nook-bg-panel);
+  border: 1px solid var(--nook-border-bright);
+  border-radius: var(--nook-radius);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.55);
+}
+
+/* ── Inline composer ────────────────────────────────────────────────────── */
+
+.composer-open {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 7px 9px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--nook-radius);
+  color: var(--nook-fg-dim);
+  font-family: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.composer-open:hover {
+  background: var(--nook-bg-panel);
+  border-color: var(--nook-border-bright);
+  color: var(--nook-fg-bright);
+}
+
+/* Shaped like the card it is about to become. */
+.composer {
+  border: 1px solid var(--nook-accent);
+  border-radius: var(--nook-radius);
+  background: var(--nook-bg-panel);
+  padding: 7px 9px;
+  box-shadow: var(--nook-glow);
+}
+
+.composer-input {
+  width: 100%;
+  background: transparent;
+  border: 0;
+  outline: none;
+  color: var(--nook-fg-bright);
+  font-family: inherit;
+  font-size: 12px;
+  line-height: 1.4;
+  resize: none;
+}
+.composer-input::placeholder { color: var(--nook-fg-faint); }
+
+.composer-actions { display: flex; justify-content: flex-end; margin-top: 4px; }
+.composer-save { padding: 2px 7px; }
+
+/* ── Task modal ─────────────────────────────────────────────────────────── */
+
+.task-modal {
+  width: 860px;
+  max-width: 94vw;
+  max-height: 86vh;
+  display: flex;
+  flex-direction: column;
+}
+.task-modal-head { flex: none; }
+.task-modal-head-actions { display: inline-flex; gap: 4px; align-items: center; }
+
+.task-modal .task-detail-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px 16px 16px;
+  min-height: 0;
+}
+
+/* The title is the field people edit most; it should look like the heading it
+   is, and become an input only when focused. */
+.task-modal-title {
+  width: 100%;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 2px;
+  color: var(--nook-fg-bright);
+  font-family: inherit;
+  font-size: 16px;
+  padding: 3px 5px;
+  margin: 0 -5px 8px;
+}
+.task-modal-title:hover { border-color: var(--nook-border-bright); }
+.task-modal-title:focus {
+  outline: none;
+  border-color: var(--nook-accent);
+  background: var(--nook-bg);
+}
+
+/* Label/value pairs, for the stats blocks. */
+.task-stats {
+  display: grid;
+  grid-template-columns: 92px 1fr;
+  gap: 3px 10px;
+  align-items: baseline;
+}
+.task-stats > .small { overflow-wrap: anywhere; }
+
+.md-hint-inline { margin-left: auto; font-size: 10px; }
+.err { color: var(--nook-err); }
+
+/* ── Task modal: two panes ──────────────────────────────────────────────── */
+
+.task-modal { width: 1080px; }
+
+.task-panes {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 316px;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* Each pane scrolls on its own, so reading a long spec never pushes the
+   status control off screen — the one thing you came here to change. */
+.task-main {
+  overflow-y: auto;
+  padding: 12px 18px 18px;
+  min-width: 0;
+}
+
+.task-side {
+  overflow-y: auto;
+  padding: 12px 14px 18px;
+  border-left: 1px solid var(--nook-border);
+  background: color-mix(in srgb, var(--nook-bg) 55%, transparent);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.task-status-select {
+  width: 100%;
+  background: var(--nook-bg-raised);
+  color: var(--nook-fg-bright);
+  border: 1px solid var(--nook-border-bright);
+  border-radius: var(--nook-radius);
+  font-family: inherit;
+  font-size: 12px;
+  padding: 5px 7px;
+  cursor: pointer;
+}
+.task-status-select:hover { border-color: var(--nook-accent); }
+
+.side-card {
+  border: 1px solid var(--nook-border);
+  border-radius: var(--nook-radius);
+  background: var(--nook-bg-panel);
+  padding: 8px 10px;
+}
+.side-card-h {
+  color: var(--nook-fg-bright);
+  font-size: 11.5px;
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+.side-grid {
+  display: grid;
+  grid-template-columns: 74px minmax(0, 1fr);
+  gap: 5px 8px;
+  align-items: center;
+}
+.side-wrap { overflow-wrap: anywhere; }
+
+/* ── Labels field ───────────────────────────────────────────────────────── */
+
+.task-labels-row {
+  display: grid;
+  grid-template-columns: 56px 1fr;
+  gap: 8px;
+  align-items: start;
+  margin-bottom: 10px;
+}
+
+.task-labels-field {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  align-items: center;
+  border: 1px solid transparent;
+  border-radius: 2px;
+  padding: 2px;
+  min-height: 24px;
+}
+.task-labels-field:hover { border-color: var(--nook-border); }
+
+.label-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  border: 1px solid var(--nook-border-bright);
+  border-radius: 2px;
+  padding: 0 3px 0 5px;
+  font-size: 10.5px;
+  line-height: 17px;
+}
+.label-x {
+  background: transparent;
+  border: 0;
+  color: inherit;
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1;
+  opacity: 0.6;
+  padding: 0 1px;
+}
+.label-x:hover { opacity: 1; }
+
+.label-picker { position: relative; }
+.label-add {
+  background: transparent;
+  border: 1px dashed var(--nook-border-bright);
+  border-radius: 2px;
+  color: var(--nook-fg-faint);
+  font-family: inherit;
+  font-size: 10.5px;
+  line-height: 17px;
+  padding: 0 6px;
+  cursor: pointer;
+}
+.label-add:hover { color: var(--nook-accent); border-color: var(--nook-accent); }
+
+/* Portalled to <body> by useAnchoredMenu, which also positions it — see
+   that module for why an absolutely-positioned menu could not work here. */
+.label-menu {
+  position: fixed;
+  z-index: 500;
+  min-width: 170px;
+  max-height: 240px;
+  overflow-y: auto;
+  padding: 3px;
+  background: var(--nook-bg-panel);
+  border: 1px solid var(--nook-border-bright);
+  border-radius: var(--nook-radius);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.55);
+}
+
+/* The old single-column attribute grid is gone; the sidebar holds these now. */
+.task-attrs, .task-label-picker, .task-stats, .task-assignee-row { display: none; }
+
+@media (max-width: 900px) {
+  /* One column below this: the sidebar stacks under the work rather than
+     squeezing the prose it exists to describe. */
+  .task-panes { grid-template-columns: minmax(0, 1fr); }
+  .task-side { border-left: 0; border-top: 1px solid var(--nook-border); }
+}
+
+/* HTML the sanitiser allows through, styled so it reads as what it means. */
+.md kbd {
+  font-family: var(--nook-font-mono);
+  font-size: 10.5px;
+  line-height: 15px;
+  padding: 0 5px;
+  border: 1px solid var(--nook-border-bright);
+  border-bottom-width: 2px;
+  border-radius: 3px;
+  background: var(--nook-bg-raised);
+  color: var(--nook-fg-bright);
+}
+.md mark { background: color-mix(in srgb, var(--nook-accent) 30%, transparent); color: inherit; }
+.md sub, .md sup { font-size: 9px; }
+.md abbr { text-decoration: underline dotted; cursor: help; }
+.md details {
+  border: 1px solid var(--nook-border);
+  border-radius: 2px;
+  padding: 4px 8px;
+  margin: 5px 0;
+}
+.md summary { cursor: pointer; color: var(--nook-fg-bright); }
+
+/* ── Select ─────────────────────────────────────────────────────────────── */
+
+.sel { position: relative; }
+
+.sel-trigger {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  width: 100%;
+  background: var(--nook-bg);
+  border: 1px solid var(--nook-border-bright);
+  border-radius: 3px;
+  color: var(--nook-fg);
+  font-family: inherit;
+  font-size: 11.5px;
+  padding: 3px 6px;
+  cursor: pointer;
+  text-align: left;
+}
+.sel-trigger:hover { border-color: var(--nook-accent); }
+.sel-trigger.open {
+  border-color: var(--nook-accent);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--nook-accent) 35%, transparent);
+}
+.sel-label { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sel-caret { flex: none; color: var(--nook-fg-faint); }
+.sel-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 13px;
+  font-weight: 700;
+  font-size: 11px;
+}
+
+/* Portalled to <body> at `position: fixed`, so no scrolling ancestor can clip
+   it. `left`/`top`/`width` are set inline from the trigger's rect. */
+.sel-menu {
+  position: fixed;
+  z-index: 500;
+  max-height: 240px;
+  overflow-y: auto;
+  padding: 3px;
+  background: var(--nook-bg-panel);
+  border: 1px solid var(--nook-border-bright);
+  border-radius: var(--nook-radius);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.55);
+}
+
+.sel-option {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 3px 6px;
+  background: transparent;
+  border: 0;
+  border-radius: 3px;
+  color: var(--nook-fg);
+  font-family: inherit;
+  font-size: 11.5px;
+  text-align: left;
+  cursor: pointer;
+}
+/* Hover and keyboard focus are the SAME state, so arrowing through the list
+   highlights exactly what a mouse would. */
+.sel-option.active { background: var(--nook-bg-raised); }
+.sel-option-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sel-hint { margin-left: auto; flex: none; }
+.sel-check { flex: none; color: var(--nook-accent); margin-left: auto; }
+.sel-option .sel-hint + .sel-check { margin-left: 4px; }
+
+.task-status .sel-trigger {
+  background: var(--nook-bg-raised);
+  color: var(--nook-fg-bright);
+  font-size: 12px;
+  padding: 5px 7px;
+}
+
+/* ── Toasts ─────────────────────────────────────────────────────────────── */
+
+.toast-stack {
+  position: fixed;
+  right: 12px;
+  bottom: 34px;
+  z-index: 400;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  /* The stack must not swallow clicks on the app behind it. */
+  pointer-events: none;
+}
+
+.toast {
+  pointer-events: auto;
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  width: 320px;
+  padding: 8px 10px;
+  background: var(--nook-bg-panel);
+  border: 1px solid var(--nook-border-bright);
+  border-left-width: 3px;
+  border-radius: var(--nook-radius);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+  animation: toast-in 140ms ease-out;
+}
+@keyframes toast-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: none; }
+}
+.toast.ok { border-left-color: var(--nook-ok); }
+.toast.warn { border-left-color: var(--nook-warn); }
+.toast.err { border-left-color: var(--nook-err); }
+.toast.info { border-left-color: var(--nook-info); }
+
+.toast-main { flex: 1; min-width: 0; color: inherit; }
+a.toast-main:hover .toast-title { text-decoration: underline; }
+.toast-title { color: var(--nook-fg-bright); font-size: 12px; }
+.toast-body {
+  color: var(--nook-fg-dim);
+  font-size: 11px;
+  margin-top: 2px;
+  overflow-wrap: anywhere;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.toast-x {
+  flex: none;
+  background: transparent;
+  border: 0;
+  color: var(--nook-fg-faint);
+  cursor: pointer;
+  padding: 0;
+}
+.toast-x:hover { color: var(--nook-fg-bright); }
+
+/* ── Bell ───────────────────────────────────────────────────────────────── */
+
+.bell-host { position: relative; display: inline-flex; }
+
+.bell {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 28px;
+  width: 30px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--nook-radius);
+  color: var(--nook-fg-dim);
+  cursor: pointer;
+}
+.bell:hover { color: var(--nook-fg-bright); background: var(--nook-bg-raised); }
+.bell.has-unread { color: var(--nook-accent); }
+
+.bell-count {
+  position: absolute;
+  top: 1px;
+  right: 0;
+  min-width: 14px;
+  padding: 0 3px;
+  background: var(--nook-err);
+  color: #fff;
+  border-radius: 999px;
+  font-size: 9px;
+  line-height: 13px;
+  text-align: center;
+}
+
+.bell-scrim { position: fixed; inset: 0; z-index: 350; }
+
+.bell-panel {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 360;
+  width: 380px;
+  max-height: 70vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--nook-bg-panel);
+  border: 1px solid var(--nook-border-bright);
+  border-radius: var(--nook-radius);
+  box-shadow: 0 16px 44px rgba(0, 0, 0, 0.6);
+  overflow: hidden;
+}
+
+.bell-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 7px 10px;
+  border-bottom: 1px solid var(--nook-border);
+}
+
+.bell-list { overflow-y: auto; }
+
+.bell-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 7px 10px;
+  border-bottom: 1px solid var(--nook-border);
+  border-left: 2px solid transparent;
+}
+.bell-item.ok { border-left-color: var(--nook-ok); }
+.bell-item.warn { border-left-color: var(--nook-warn); }
+.bell-item.err { border-left-color: var(--nook-err); }
+.bell-item.info { border-left-color: var(--nook-info); }
+/* Read items recede rather than disappear — the history is the point. */
+.bell-item:not(.unread) { opacity: 0.55; }
+.bell-item.unread { background: color-mix(in srgb, var(--nook-bg-raised) 45%, transparent); }
+
+.bell-item-main { flex: 1; min-width: 0; }
+.bell-item-title { color: var(--nook-fg-bright); font-size: 12px; }
+.bell-item-title a { color: inherit; }
+.bell-item-title a:hover { text-decoration: underline; color: var(--nook-accent); }
+.bell-item-body {
+  color: var(--nook-fg-dim);
+  font-size: 11px;
+  margin: 1px 0 2px;
+  overflow-wrap: anywhere;
+}
+
+/* ── Notification channels ──────────────────────────────────────────────── */
+
+.chan-wrap { display: flex; flex-direction: column; gap: 8px; padding: 10px 12px; }
+.chan-intro { margin: 0 0 2px; max-width: 74ch; }
+
+.chan-form {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  border: 1px solid var(--nook-accent);
+  border-radius: var(--nook-radius);
+  background: var(--nook-bg-panel);
+  padding: 10px 12px;
+}
+
+.chan-row { display: grid; grid-template-columns: 96px minmax(0, 1fr); gap: 10px; align-items: center; }
+.chan-row > .sel { max-width: 260px; }
+
+.chan-input {
+  background: var(--nook-bg);
+  border: 1px solid var(--nook-border-bright);
+  border-radius: 3px;
+  color: var(--nook-fg);
+  font-family: inherit;
+  font-size: 11.5px;
+  padding: 4px 7px;
+  max-width: 420px;
+}
+.chan-input:focus { outline: none; border-color: var(--nook-accent); }
+
+.chan-levels { display: flex; gap: 4px; align-items: center; flex-wrap: wrap; }
+.chan-actions { display: flex; justify-content: flex-end; gap: 6px; }
+
+.chan-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  border: 1px solid var(--nook-border);
+  border-radius: var(--nook-radius);
+  background: var(--nook-bg-panel);
+  padding: 8px 10px;
+}
+/* Paused reads as paused, not as missing. */
+.chan-item.off { opacity: 0.5; }
+.chan-item-main { flex: 1; min-width: 0; }
+.chan-item-actions { display: flex; gap: 4px; flex: none; }
+
+.chan-error {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--nook-err);
+  margin-top: 3px;
+  overflow-wrap: anywhere;
+}
+
+.chan-empty { display: flex; align-items: center; gap: 6px; padding: 4px 0; }
+
+/* ── Operator surface ───────────────────────────────────────────────────── */
+
+.op-intro {
+  display: flex;
+  gap: 9px;
+  align-items: flex-start;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--nook-border);
+  color: var(--nook-ok);
+}
+.op-intro .muted { color: var(--nook-fg-dim); }
+
+.op-section-h {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--nook-fg-faint);
+  padding: 10px 12px 4px;
+}
+
+.op-table-wrap { overflow-x: auto; padding: 0 12px 12px; }
+.op-table { border-collapse: collapse; width: 100%; font-size: 11.5px; }
+.op-table th {
+  text-align: left;
+  font-weight: 600;
+  color: var(--nook-fg-faint);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 4px 8px 4px 0;
+  border-bottom: 1px solid var(--nook-border);
+  white-space: nowrap;
+}
+.op-table td { padding: 4px 8px 4px 0; border-bottom: 1px solid var(--nook-border); }
+.op-table tr:hover td { background: var(--nook-bg-raised); }
+
+.op-policy { display: flex; flex-direction: column; gap: 7px; padding: 10px 12px; }
+.op-policy-row { display: flex; gap: 9px; align-items: center; }
+.op-policy-row .task-chip { min-width: 78px; justify-content: center; gap: 4px; display: inline-flex; }
+
+.op-warn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--nook-warn);
+  font-size: 11.5px;
+  margin-top: 3px;
+}
+
+/* ── "What your organization can see" ───────────────────────────────────── */
+
+.vis-wrap { display: flex; flex-direction: column; gap: 10px; padding: 10px 12px; }
+
+.vis-block {
+  border: 1px solid var(--nook-border);
+  border-left-width: 3px;
+  border-radius: var(--nook-radius);
+  padding: 8px 10px;
+}
+/* The guarantee reads as a guarantee: green, first, and not adjacent to
+   anything that looks adjustable. */
+.vis-block.never { border-left-color: var(--nook-ok); }
+.vis-block.visible { border-left-color: var(--nook-warn); }
+
+.vis-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--nook-fg-bright);
+  font-size: 11.5px;
+  font-weight: 600;
+  margin-bottom: 5px;
+}
+.vis-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11.5px;
+  padding: 1px 0;
+}
+.vis-note { margin-top: 6px; }
+
+/* ── Dev sign-in: switching between people has to be one click ──────────── */
+
+.dev-signin { display: flex; flex-direction: column; gap: 5px; margin-top: 4px; }
+
+.dev-account {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
+  text-align: left;
+  padding: 6px 9px;
+  height: auto;
+}
+.dev-account-tags { display: flex; gap: 5px; align-items: center; flex-wrap: wrap; }
+
+.dev-role {
+  border: 1px solid var(--nook-ok);
+  color: var(--nook-ok);
+  border-radius: 2px;
+  padding: 0 4px;
+  font-size: 9.5px;
+  line-height: 14px;
+}
+
+.dev-new { display: flex; gap: 5px; margin-top: 2px; }
+.dev-new input {
+  flex: 1;
+  min-width: 0;
+  background: var(--nook-bg);
+  border: 1px solid var(--nook-border-bright);
+  border-radius: 3px;
+  color: var(--nook-fg);
+  font-family: inherit;
+  font-size: 11.5px;
+  padding: 4px 7px;
+}
+.dev-new input:focus { outline: none; border-color: var(--nook-accent); }
+
+.op-code {
+  background: var(--nook-bg);
+  border: 1px solid var(--nook-border-bright);
+  border-radius: 3px;
+  padding: 4px 7px;
+  margin-top: 5px;
+  font-size: 11px;
+  display: inline-block;
+  user-select: text;
+}
+
+.dev-signin-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.op-row-actions { display: inline-flex; gap: 4px; }
+.op-note { padding: 8px 12px 0; margin: 0; }
+.op-table td .sel { min-width: 120px; }
