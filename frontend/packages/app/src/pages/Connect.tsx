@@ -16,6 +16,44 @@ import {
  * copy it here" — and on an instance nobody browses, there was no way in at
  * all. Pasting a token stays as the fallback for instances with no provider.
  */
+/** A device authorization in progress, persisted so it survives the window
+ *  closing. Approval happens in a browser, and a person naturally alt-tabs or
+ *  closes the app while doing it — losing the flow to React state stranded them
+ *  at the URL screen with an approval nobody was waiting for. */
+interface Pending {
+  url: string;
+  start: DeviceStart;
+  /** Epoch ms after which the code is dead and the flow should be dropped. */
+  deadline: number;
+}
+
+const PENDING_KEY = "nookos-pending-device-login";
+
+function loadPending(): Pending | null {
+  try {
+    const p = JSON.parse(localStorage.getItem(PENDING_KEY) ?? "null") as Pending | null;
+    if (!p?.start?.device_code || !p.url || !(p.deadline > Date.now())) return null;
+    return p;
+  } catch {
+    return null;
+  }
+}
+function savePending(p: Pending) {
+  try {
+    localStorage.setItem(PENDING_KEY, JSON.stringify(p));
+  } catch {
+    // storage unavailable — the flow still works within this window, it just
+    // won't survive a reopen. Nothing to do but carry on.
+  }
+}
+function clearPending() {
+  try {
+    localStorage.removeItem(PENDING_KEY);
+  } catch {
+    // ignore
+  }
+}
+
 export function Connect({ onDone }: { onDone: () => void }) {
   const [server, setServer] = useState("https://");
   const [token, setToken] = useState("");
@@ -23,9 +61,68 @@ export function Connect({ onDone }: { onDone: () => void }) {
   const [error, setError] = useState<string | null>(null);
   const [device, setDevice] = useState<DeviceStart | null>(null);
   const [showToken, setShowToken] = useState(false);
-  const cancelled = useRef(false);
+  // The device_code of the poll loop that should be running, or null for none.
+  // A single ref, so a resumed flow supersedes any older loop instead of the
+  // two racing — the closure checks `active === myCode` every round.
+  const active = useRef<string | null>(null);
 
-  useEffect(() => () => { cancelled.current = true; }, []);
+  /** Poll the provider until approval, expiry, or supersession. Reusable by
+   *  the fresh sign-in and by the resume-on-reopen path. */
+  const poll = async (url: string, start: DeviceStart, deadline: number) => {
+    const myCode = start.device_code;
+    active.current = myCode;
+    setDevice(start);
+    setBusy(true);
+    setError(null);
+
+    let wait = start.interval_secs * 1000;
+    while (Date.now() < deadline && active.current === myCode) {
+      await new Promise((r) => setTimeout(r, wait));
+      if (active.current !== myCode) return; // superseded or cancelled
+      try {
+        const issued = await pollDeviceLogin(url, start);
+        if (issued) {
+          clearPending();
+          active.current = null;
+          await saveDesktopEndpoint({ base_url: url, token: issued });
+          setBusy(false);
+          onDone();
+          return;
+        }
+      } catch (e) {
+        clearPending();
+        active.current = null;
+        setBusy(false);
+        setDevice(null);
+        setError(e instanceof Error ? e.message : String(e));
+        return;
+      }
+      // Providers ask us to back off by answering slow_down; widening every
+      // round is simpler than tracking which answer we got and costs a person
+      // nothing they would notice.
+      wait += 1000;
+    }
+    if (active.current !== myCode) return; // a newer flow owns the screen now
+    clearPending();
+    active.current = null;
+    setBusy(false);
+    setDevice(null);
+    setError("That code expired before it was approved. Try again.");
+  };
+
+  // Reopened mid-approval? Pick the flow back up and keep polling, rather than
+  // showing the URL screen as if nothing had happened. This is the whole point
+  // of persisting it: approval you already gave completes on its own.
+  useEffect(() => {
+    const p = loadPending();
+    if (p) void poll(p.url, p.start, p.deadline);
+    // Stop polling when this screen goes away; the persisted flow lets a later
+    // mount resume, so this is a pause, not a cancel.
+    return () => {
+      active.current = null;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   /** Shared by both paths: the address has to be usable before anything else. */
   const checkedUrl = async (): Promise<string | null> => {
@@ -61,37 +158,13 @@ export function Connect({ onDone }: { onDone: () => void }) {
       setError(e instanceof Error ? e.message : String(e));
       return;
     }
-    setDevice(start);
 
-    // Poll here rather than in Rust so the code stays on screen and the window
-    // stays responsive — a command that blocked until approval would freeze it
-    // for up to ten minutes.
+    // Persist BEFORE polling, so an approval given after the window is closed
+    // is still claimed on the next open. Poll on the JS side (not a blocking
+    // Rust command) so the code stays on screen and the window stays live.
     const deadline = Date.now() + start.expires_in_secs * 1000;
-    let wait = start.interval_secs * 1000;
-    while (Date.now() < deadline && !cancelled.current) {
-      await new Promise((r) => setTimeout(r, wait));
-      try {
-        const issued = await pollDeviceLogin(url, start);
-        if (issued) {
-          await saveDesktopEndpoint({ base_url: url, token: issued });
-          setBusy(false);
-          onDone();
-          return;
-        }
-      } catch (e) {
-        setBusy(false);
-        setDevice(null);
-        setError(e instanceof Error ? e.message : String(e));
-        return;
-      }
-      // Providers ask us to back off by answering slow_down; widening every
-      // round is simpler than tracking which answer we got and costs a
-      // person nothing they would notice.
-      wait += 1000;
-    }
-    setBusy(false);
-    setDevice(null);
-    setError("That code expired before it was approved. Try again.");
+    savePending({ url, start, deadline });
+    await poll(url, start, deadline);
   };
 
   const useToken = async (e: React.FormEvent) => {
@@ -125,11 +198,15 @@ export function Connect({ onDone }: { onDone: () => void }) {
             {device.verification_uri}
           </a>
           <div className="device-code">{device.user_code}</div>
-          <p className="muted small login-claim">Waiting for approval…</p>
+          <p className="muted small login-claim">
+            Waiting for approval… once you approve in the browser, this window
+            signs you in on its own — you can leave it open or come back to it.
+          </p>
           <button
             className="btn"
             onClick={() => {
-              cancelled.current = true;
+              active.current = null;
+              clearPending();
               setDevice(null);
               setBusy(false);
             }}
