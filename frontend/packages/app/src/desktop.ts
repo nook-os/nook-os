@@ -115,3 +115,63 @@ export async function probeToken(
     };
   }
 }
+
+/** What the person must approve, and what `pollDeviceLogin` needs to continue. */
+export interface DeviceStart {
+  user_code: string;
+  verification_uri: string;
+  device_code: string;
+  token_endpoint: string;
+  client_id: string;
+  interval_secs: number;
+  expires_in_secs: number;
+}
+
+/**
+ * Ask the identity provider to start a device authorization.
+ *
+ * Runs in Rust, not here: a request from `tauri://localhost` to the provider is
+ * cross-origin, and no provider is going to add CORS for a desktop app's
+ * private scheme.
+ */
+export async function startDeviceLogin(server: string): Promise<DeviceStart> {
+  const call = invoke();
+  if (!call) throw new Error("not running in the desktop app");
+  return call<DeviceStart>("device_start", { server });
+}
+
+/** One poll. `null` means nobody has approved it yet. */
+export async function pollDeviceLogin(
+  server: string,
+  start: DeviceStart,
+): Promise<string | null> {
+  const call = invoke();
+  if (!call) throw new Error("not running in the desktop app");
+  return call<string | null>("device_poll", { server, start });
+}
+
+export interface AvailableUpdate {
+  version: string;
+  current: string;
+  notes: string;
+}
+
+/** Is a newer desktop release out? `null` when current, or not the app. */
+export async function checkForUpdate(): Promise<AvailableUpdate | null> {
+  const call = invoke();
+  if (!call) return null;
+  try {
+    return await call<AvailableUpdate | null>("update_check");
+  } catch {
+    // Being offline, or GitHub being unreachable, is not worth interrupting
+    // anyone over — the check runs again next launch.
+    return null;
+  }
+}
+
+/** Download, verify, install, restart. Does not return on success. */
+export async function installUpdate(): Promise<void> {
+  const call = invoke();
+  if (!call) return;
+  await call("update_install");
+}

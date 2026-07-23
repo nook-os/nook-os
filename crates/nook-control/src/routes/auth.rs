@@ -10,7 +10,7 @@ use openidconnect::{
 use serde::Deserialize;
 use utoipa::ToSchema;
 
-use nook_types::MeResponse;
+use nook_types::{DevAccount, MeResponse, TenantId, UserId};
 
 use crate::auth::{
     create_auth_session, removal_cookie, session_cookie, AuthCtx, FlowState, FLOW_COOKIE,
@@ -240,6 +240,53 @@ pub async fn dev_login(
         return Err(ApiError::Forbidden);
     }
     let email = req.email.unwrap_or_else(|| "dev@nookos.local".into());
+
+    // Become an EXISTING user when the email already belongs to one.
+    //
+    // Without this, "sign in as ryan@localhost" ran the new-identity path and
+    // produced a SECOND ryan in a fresh personal tenant — which is correct
+    // isolation (a dev identity is not a local account) and useless for the one
+    // thing this endpoint is for. Testing an authorization model means being
+    // the people who already exist; if switching to them silently creates
+    // someone new, nobody tests roles at all.
+    //
+    // Dev-only, behind the same gate as the rest of this handler: matching by
+    // email in production would let anybody who can reach an IdP become anybody
+    // who shares their address.
+    let existing: Option<(UserId, TenantId)> =
+        sqlx::query_as("SELECT id, tenant_id FROM users WHERE lower(email) = lower($1) LIMIT 1")
+            .bind(&email)
+            .fetch_optional(&state.db)
+            .await?;
+
+    if let Some((user_id, tenant_id)) = existing {
+        let session_id = create_auth_session(&state, user_id, tenant_id).await?;
+        let user: nook_types::User = sqlx::query_as("SELECT * FROM users WHERE id = $1")
+            .bind(user_id)
+            .fetch_one(&state.db)
+            .await?;
+        let tenant: nook_types::Tenant = sqlx::query_as("SELECT * FROM tenants WHERE id = $1")
+            .bind(tenant_id)
+            .fetch_one(&state.db)
+            .await?;
+        events::record(
+            &state,
+            tenant.id,
+            EventDraft::new("user.login")
+                .actor("user", user.id.0)
+                .payload(serde_json::json!({ "email": user.email, "via": "dev" })),
+        )
+        .await;
+        return Ok((
+            jar.add(session_cookie(&state, session_id)),
+            Json(MeResponse {
+                user,
+                tenant,
+                capability: Default::default(),
+            }),
+        ));
+    }
+
     let identity = IdentityClaims {
         issuer: "nookos-dev".into(),
         subject: email.clone(),
@@ -262,7 +309,11 @@ pub async fn dev_login(
 
     Ok((
         jar.add(session_cookie(&state, session_id)),
-        Json(MeResponse { user, tenant }),
+        Json(MeResponse {
+            user,
+            tenant,
+            capability: Default::default(),
+        }),
     ))
 }
 
@@ -302,7 +353,77 @@ pub async fn me(State(state): State<AppState>, auth: AuthCtx) -> ApiResult<Json<
         .bind(auth.tenant_id)
         .fetch_one(&state.db)
         .await?;
-    Ok(Json(MeResponse { user, tenant }))
+    Ok(Json(MeResponse {
+        capability: capability_of(&state, &auth).await,
+        user,
+        tenant,
+    }))
+}
+
+/// What this caller holds, for the UI.
+///
+/// Advisory only — every route re-checks. This exists so the operator section
+/// can be ABSENT rather than present-and-forbidden: a greyed-out door still
+/// tells you there is a room.
+async fn capability_of(state: &AppState, auth: &AuthCtx) -> nook_types::Capability {
+    use crate::auth::perm::{Permission, Scope};
+
+    let mut held = Vec::new();
+    for p in Permission::ALL {
+        if auth.can(state, p, Scope::Deployment).await {
+            held.push(p.key().to_string());
+        }
+    }
+    let org_id: Option<uuid::Uuid> =
+        sqlx::query_as::<_, (Option<uuid::Uuid>,)>("SELECT org_id FROM tenants WHERE id = $1")
+            .bind(auth.tenant_id)
+            .fetch_optional(&state.db)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|(o,)| o);
+
+    nook_types::Capability {
+        // "Operator" means holding anything at the deployment scope. Derived
+        // rather than stored, so a role rename cannot desynchronise the UI.
+        operator: !held.is_empty(),
+        deployment: held,
+        org_id,
+    }
+}
+
+/// GET /api/v1/auth/dev-accounts — who you can sign in as, in dev mode.
+///
+/// Dev only, and unauthenticated by necessity: it is what the login screen
+/// reads before anybody is signed in. It returns emails and display names of
+/// accounts that already exist — no credentials, no tokens — and it is refused
+/// outright unless `AUTH_DEV_MODE` is on and this is not production, which is
+/// the same gate `dev_login` itself uses.
+///
+/// It exists because testing authorization requires BEING different people, and
+/// a model you cannot switch between users to exercise is a model nobody
+/// exercises.
+#[utoipa::path(get, path = "/api/v1/auth/dev-accounts",
+    operation_id = "dev_accounts",
+    responses((status = 200, body = [DevAccount]), (status = 403)))]
+pub async fn dev_accounts(State(state): State<AppState>) -> ApiResult<Json<Vec<DevAccount>>> {
+    if !state.cfg.auth_dev_mode || state.cfg.is_production() {
+        return Err(ApiError::Forbidden);
+    }
+    let rows: Vec<DevAccount> = sqlx::query_as(
+        "SELECT u.email, u.display_name, t.slug AS tenant_slug,
+                COALESCE(
+                    (SELECT array_agg(b.role_key ORDER BY b.role_key)
+                     FROM role_bindings b
+                     WHERE b.subject_id = u.id AND b.scope_type = 'deployment'),
+                    '{}'
+                ) AS deployment_roles
+         FROM users u JOIN tenants t ON t.id = u.tenant_id
+         ORDER BY u.created_at",
+    )
+    .fetch_all(&state.db)
+    .await?;
+    Ok(Json(rows))
 }
 
 /// POST /api/v1/auth/logout

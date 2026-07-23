@@ -93,7 +93,7 @@ pub async fn releases(
                 os: (*os).to_string(),
                 arch: (*arch).to_string(),
                 label: (*label).to_string(),
-                url: release_asset_url(&repo, &filename),
+                url: release_asset_url(&repo, &version, &filename),
                 filename,
             }
         })
@@ -107,12 +107,30 @@ pub async fn releases(
     }))
 }
 
-/// The `latest` release asset for a platform.
+/// Where a platform's asset lives, for THIS control plane's version.
 ///
-/// `releases/latest/download/<asset>` always resolves to the newest published
-/// release, so the install script never has to know a version number.
-pub fn release_asset_url(repo: &str, filename: &str) -> String {
-    format!("https://github.com/{repo}/releases/latest/download/{filename}")
+/// Pinned rather than `releases/latest/download/…`, and the difference is a
+/// bug that was live: a node asks the control plane which version it should be
+/// and then downloads whatever GitHub's newest release happens to be. Those are
+/// only the same thing while nobody has published ahead of what is deployed.
+///
+/// The moment they diverge, every supervised node loops — fetch `latest`,
+/// restart, still not the version the control plane expects, fetch again — and
+/// it does so across the whole fleet at once, on reconnect, which is exactly
+/// when nobody is watching.
+///
+/// Pinning costs a 404 when a control plane runs a version that was never
+/// published (a local build, usually). That is the better failure: it names the
+/// version it wanted, it happens on one machine at a time, and it leaves the
+/// agent running.
+pub fn release_asset_url(repo: &str, version: &str, filename: &str) -> String {
+    format!("{}/{filename}", release_base_url(repo, version))
+}
+
+/// The download directory for a version's assets. GitHub tags are `v`-prefixed
+/// and `VERSION` is not, so exactly one place adds it.
+pub fn release_base_url(repo: &str, version: &str) -> String {
+    format!("https://github.com/{repo}/releases/download/v{version}")
 }
 
 /// `curl -fLsS <server>/install.sh | sh -s -- --token nook_join_…`
@@ -146,10 +164,11 @@ pub async fn install_script(State(state): State<AppState>, headers: HeaderMap) -
         .replace("@@FINGERPRINT@@", &fingerprint)
         .replace(
             "@@RELEASES@@",
-            &format!(
-                "https://github.com/{}/releases/latest/download",
-                state.cfg.releases_repo
-            ),
+            // Pinned for the same reason as `releases()`: a machine joining
+            // this control plane should install the version it expects, not
+            // whatever shipped most recently — otherwise a fresh install's
+            // first act is to update itself.
+            &release_base_url(&state.cfg.releases_repo, VERSION),
         )
         .replace("@@VERSION@@", VERSION);
     (
@@ -169,3 +188,69 @@ pub async fn install_script(State(state): State<AppState>, headers: HeaderMap) -
 /// a release asset. One file, three places it can be fetched from — three files
 /// would be three chances to fetch a stale one.
 const INSTALL_SH: &str = include_str!("../../../../install/install.sh");
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A node must download the version the control plane asked it to be.
+    ///
+    /// The self-update loop is: `RegisterAck` carries `expected_agent_version`,
+    /// the node compares it against its own, and if they differ it fetches from
+    /// here and restarts. That converges only if what it fetches IS the
+    /// expected version. Pointing at `latest` made the comparison and the
+    /// download answer two different questions, so a control plane one release
+    /// behind GitHub would put every supervised node into an update loop.
+    #[test]
+    fn the_download_url_is_pinned_to_this_control_planes_version() {
+        let url = release_asset_url("nook-os/nook-os", "0.4.3", "nook-linux-x86_64");
+        assert_eq!(
+            url,
+            "https://github.com/nook-os/nook-os/releases/download/v0.4.3/nook-linux-x86_64"
+        );
+        assert!(
+            !url.contains("/latest/"),
+            "`releases/latest/download` resolves to whatever shipped most \
+             recently, which is not what the node was told to become — see this \
+             function's docs for the loop that causes"
+        );
+    }
+
+    /// The tag carries a `v`; the crate version does not. Adding it twice, or
+    /// not at all, 404s every download — quietly, on machines nobody is
+    /// watching.
+    #[test]
+    fn the_tag_is_v_prefixed_exactly_once() {
+        let base = release_base_url("nook-os/nook-os", "1.2.3");
+        assert!(base.ends_with("/v1.2.3"), "got {base}");
+        assert!(!base.contains("/vv"), "double-prefixed: {base}");
+    }
+
+    /// The installer and the self-update path must agree. They are two ways to
+    /// put the same binary on a machine, and if only one is pinned then a
+    /// freshly installed node's first act is to update itself away from what it
+    /// just installed.
+    #[test]
+    fn the_installer_and_the_updater_point_at_the_same_place() {
+        let src = include_str!("dist.rs");
+        // Bound the scan to the handler: the file's own test text mentions the
+        // pattern it is looking for, and a scan running to EOF would match
+        // itself and pass for the wrong reason.
+        let body = src
+            .split("pub async fn install_script(")
+            .nth(1)
+            .expect("install_script handler")
+            .split("const INSTALL_SH")
+            .next()
+            .expect("handler body");
+        assert!(
+            body.contains("release_base_url("),
+            "the generated installer must build its RELEASES base with \
+             release_base_url so it is pinned like the updater is"
+        );
+        assert!(
+            !body.contains(concat!("releases/", "latest", "/download")),
+            "the generated installer still points at the floating release"
+        );
+    }
+}

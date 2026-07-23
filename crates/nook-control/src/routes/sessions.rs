@@ -4,6 +4,34 @@ use nook_proto::{ControlToNode, UiEvent, WindowAction};
 use nook_types::*;
 use serde::Deserialize;
 
+/// Load a session for a SESSION-CONTENT operation, checking membership.
+///
+/// Every route that reads or writes what is on a tenant's terminal goes through
+/// here, so the authorization decision exists in one place instead of being
+/// implied by a `WHERE tenant_id = …` in eight of them. Those clauses were
+/// already correct; what they could not do is say *why* — a reviewer could not
+/// tell a deliberate isolation boundary from an ordinary scoping habit, and a
+/// route added later would look consistent while checking nothing.
+///
+/// Deliberately 403 and not 404. The caller learns they may not have it, rather
+/// than that it does not exist — the refusal message is uniform (see
+/// `session_guard`), and session ids are v7 uuids, so this trades an
+/// unexploitable existence signal for an error somebody can act on.
+async fn session_for_content(
+    state: &AppState,
+    auth: &AuthCtx,
+    id: SessionId,
+) -> ApiResult<Session> {
+    let session: Option<Session> = sqlx::query_as("SELECT * FROM sessions WHERE id = $1")
+        .bind(id)
+        .fetch_optional(&state.db)
+        .await?;
+    let session = session.ok_or(ApiError::NotFound)?;
+    auth.require_session_access(state, session.tenant_id)
+        .await?;
+    Ok(session)
+}
+
 use crate::auth::AuthCtx;
 use crate::error::{ApiError, ApiResult};
 use crate::events::{self, EventDraft};
@@ -46,13 +74,8 @@ pub async fn get_one(
     auth: AuthCtx,
     Path(id): Path<SessionId>,
 ) -> ApiResult<Json<Session>> {
-    let session: Option<Session> =
-        sqlx::query_as("SELECT * FROM sessions WHERE id = $1 AND tenant_id = $2")
-            .bind(id)
-            .bind(auth.tenant_id)
-            .fetch_optional(&state.db)
-            .await?;
-    session.map(Json).ok_or(ApiError::NotFound)
+    let session = session_for_content(&state, &auth, id).await?;
+    Ok(Json(session))
 }
 
 #[utoipa::path(post, path = "/api/v1/sessions",
@@ -111,13 +134,7 @@ pub async fn kill(
     auth: AuthCtx,
     Path(id): Path<SessionId>,
 ) -> ApiResult<axum::http::StatusCode> {
-    let session: Option<Session> =
-        sqlx::query_as("SELECT * FROM sessions WHERE id = $1 AND tenant_id = $2")
-            .bind(id)
-            .bind(auth.tenant_id)
-            .fetch_optional(&state.db)
-            .await?;
-    let session = session.ok_or(ApiError::NotFound)?;
+    let session = session_for_content(&state, &auth, id).await?;
     // A node may only touch sessions running on itself.
     auth.require_node_self(session.node_id)?;
 
@@ -157,13 +174,7 @@ pub async fn input(
 ) -> ApiResult<axum::http::StatusCode> {
     use base64::Engine;
 
-    let session: Option<Session> =
-        sqlx::query_as("SELECT * FROM sessions WHERE id = $1 AND tenant_id = $2")
-            .bind(id)
-            .bind(auth.tenant_id)
-            .fetch_optional(&state.db)
-            .await?;
-    let session = session.ok_or(ApiError::NotFound)?;
+    let session = session_for_content(&state, &auth, id).await?;
     // A node may only touch sessions running on itself.
     auth.require_node_self(session.node_id)?;
 
@@ -234,13 +245,7 @@ pub async fn output(
     body: Option<Json<SessionOutputRequest>>,
 ) -> ApiResult<Json<SessionOutputResponse>> {
     let req = body.map(|Json(r)| r).unwrap_or_default();
-    let session: Option<Session> =
-        sqlx::query_as("SELECT * FROM sessions WHERE id = $1 AND tenant_id = $2")
-            .bind(id)
-            .bind(auth.tenant_id)
-            .fetch_optional(&state.db)
-            .await?;
-    let session = session.ok_or(ApiError::NotFound)?;
+    let session = session_for_content(&state, &auth, id).await?;
     // A node may only touch sessions running on itself.
     auth.require_node_self(session.node_id)?;
     let tmux_session = session
@@ -326,13 +331,7 @@ pub async fn windows(
     body: Option<Json<WindowAction>>,
 ) -> ApiResult<Json<Vec<SessionWindow>>> {
     let action = body.map(|Json(a)| a).unwrap_or(WindowAction::List);
-    let session: Option<Session> =
-        sqlx::query_as("SELECT * FROM sessions WHERE id = $1 AND tenant_id = $2")
-            .bind(id)
-            .bind(auth.tenant_id)
-            .fetch_optional(&state.db)
-            .await?;
-    let session = session.ok_or(ApiError::NotFound)?;
+    let session = session_for_content(&state, &auth, id).await?;
     // A node may only touch sessions running on itself.
     auth.require_node_self(session.node_id)?;
     let tmux_session = session
@@ -378,13 +377,7 @@ pub async fn restart(
     auth: AuthCtx,
     Path(id): Path<SessionId>,
 ) -> ApiResult<Json<Session>> {
-    let session: Option<Session> =
-        sqlx::query_as("SELECT * FROM sessions WHERE id = $1 AND tenant_id = $2")
-            .bind(id)
-            .bind(auth.tenant_id)
-            .fetch_optional(&state.db)
-            .await?;
-    let session = session.ok_or(ApiError::NotFound)?;
+    let session = session_for_content(&state, &auth, id).await?;
     // A node may only touch sessions running on itself.
     auth.require_node_self(session.node_id)?;
 
@@ -472,13 +465,7 @@ pub async fn delete(
     auth: AuthCtx,
     Path(id): Path<SessionId>,
 ) -> ApiResult<axum::http::StatusCode> {
-    let session: Option<Session> =
-        sqlx::query_as("SELECT * FROM sessions WHERE id = $1 AND tenant_id = $2")
-            .bind(id)
-            .bind(auth.tenant_id)
-            .fetch_optional(&state.db)
-            .await?;
-    let session = session.ok_or(ApiError::NotFound)?;
+    let session = session_for_content(&state, &auth, id).await?;
     // A node may only touch sessions running on itself.
     auth.require_node_self(session.node_id)?;
 

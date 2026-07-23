@@ -15,6 +15,13 @@ use crate::{capabilities, discovery, sessions, tmux};
 
 const HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15);
 const DISCOVERY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(300);
+/// How often to reconsider our certificate.
+///
+/// Six hours against a seven-day renewal window: a node that is asleep, or one
+/// whose control plane is briefly down, gets dozens of chances before anything
+/// expires. The staged-CA case does not wait for this at all — it arrives as a
+/// push.
+const CERT_CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(6 * 60 * 60);
 
 pub fn ws_url(server: &str) -> String {
     let base = server.trim_end_matches('/');
@@ -134,7 +141,6 @@ pub async fn connect_once(cfg: &NodeConfig) -> Result<()> {
     // Register: idempotent full resync on every connect.
     out_tx
         .send(NodeToControl::Register {
-            agent_version: Some(env!("CARGO_PKG_VERSION").to_string()),
             capabilities: capabilities::detect(),
             live_tmux_sessions: tmux::list_nook_sessions(),
         })
@@ -159,6 +165,22 @@ pub async fn connect_once(cfg: &NodeConfig) -> Result<()> {
             if hb_tx.send(NodeToControl::Heartbeat { load }).await.is_err() {
                 break;
             }
+        }
+    });
+
+    // Certificate upkeep.
+    //
+    // The push and the reconnect handle a staged rotation; this is the ordinary
+    // expiry case for a node that stays connected for weeks. It passes an empty
+    // server list because it has nothing newer to say about trust — the CA
+    // comparison is driven by messages, and this timer only ever asks "am I
+    // about to expire?".
+    let cert_check = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(CERT_CHECK_INTERVAL);
+        interval.tick().await; // the connect path already checked
+        loop {
+            interval.tick().await;
+            maybe_renew(&[]).await;
         }
     });
 
@@ -202,17 +224,66 @@ pub async fn connect_once(cfg: &NodeConfig) -> Result<()> {
             }
         };
         match parsed {
-            // Handled in a later change; acknowledged here so an older agent
-            // meeting a newer control plane ignores it rather than failing to
-            // parse the stream.
             ControlToNode::UpdateAgent => {
-                tracing::info!("control plane asked this agent to update");
+                // Asked directly, so no version comparison: somebody pressed a
+                // button and meant it.
+                match crate::selfupdate::run("asked by the control plane").await {
+                    Ok(()) => {}
+                    Err(e) => tracing::warn!(error = %e, "cannot update this agent"),
+                }
             }
             ControlToNode::Ping => {
                 out_tx.send(NodeToControl::Pong).await.ok();
             }
-            ControlToNode::RegisterAck { node_name, .. } => {
+            ControlToNode::TrustChanged { ca_fingerprints } => {
+                // A CA was staged. Renew now so the operator can promote it
+                // without waiting up to thirty days for this node's
+                // certificate to expire on its own.
+                maybe_renew(&ca_fingerprints).await;
+            }
+            ControlToNode::RegisterAck {
+                node_name,
+                expected_agent_version,
+                ca_fingerprints,
+                ..
+            } => {
                 tracing::info!(node = %node_name, "registered");
+
+                // Every reconnect is a chance to notice both a staged rotation
+                // and an approaching expiry, without waiting for the timer.
+                maybe_renew(&ca_fingerprints).await;
+
+                // Nothing polls. A node reconnects whenever the control plane
+                // restarts, which is exactly when a fleet needs updating — so
+                // a deploy carries the news without anyone asking for it.
+                let expected = expected_agent_version.as_deref();
+                let behind = expected.is_some_and(|e| e != env!("CARGO_PKG_VERSION"));
+
+                if crate::selfupdate::should_update(expected, cfg) {
+                    tracing::info!(
+                        expected = %expected.unwrap_or_default(),
+                        running = env!("CARGO_PKG_VERSION"),
+                        "control plane expects a different agent version"
+                    );
+                    if let Err(e) =
+                        crate::selfupdate::run("version differs from the control plane").await
+                    {
+                        tracing::warn!(error = %e, "cannot update this agent");
+                    }
+                } else if behind {
+                    // Being behind and saying nothing is the worst of the three
+                    // outcomes. Somebody deploys, watches the fleet stay on the
+                    // old version, and has no thread to pull — the node knew,
+                    // decided not to act, and kept it to itself. Say which
+                    // version, and say what would have to change.
+                    tracing::warn!(
+                        expected = %expected.unwrap_or_default(),
+                        running = env!("CARGO_PKG_VERSION"),
+                        why = %crate::selfupdate::refusal(cfg)
+                            .unwrap_or_else(|| "unknown reason".into()),
+                        "this agent is not the version the control plane expects, and will not update itself"
+                    );
+                }
             }
             ControlToNode::StartSession {
                 session_id,
@@ -252,12 +323,13 @@ pub async fn connect_once(cfg: &NodeConfig) -> Result<()> {
             } => {
                 let tx = out_tx.clone();
                 tokio::task::spawn_blocking(move || {
-                    let (branch, files, diff) = discovery::git_status(&workspace_path);
+                    let snap = discovery::git_status(&workspace_path);
                     let _ = tx.blocking_send(NodeToControl::GitStatusResult {
                         request_id,
-                        branch,
-                        files,
-                        diff,
+                        is_repo: snap.is_repo,
+                        branch: snap.branch,
+                        files: snap.files,
+                        diff: snap.diff,
                     });
                 });
             }
@@ -543,10 +615,53 @@ pub async fn connect_once(cfg: &NodeConfig) -> Result<()> {
                     .await
                     .ok();
             }
+            ControlToNode::InstallSkill {
+                name,
+                content,
+                sha256,
+            } => {
+                // Reported, never fatal. A machine where one agent's skills
+                // directory is unwritable is still a machine that should keep
+                // running sessions — and the operator needs to be told which
+                // one it was, not have the node disappear.
+                let report = match crate::wizard::skills::install_taught(&name, &content) {
+                    Ok(i) => {
+                        tracing::info!(
+                            skill = %name, sha = %&sha256[..sha256.len().min(8)],
+                            agents = i.agents.len(), "learned a skill"
+                        );
+                        NodeToControl::SkillInstalled {
+                            name,
+                            agents: i.agents,
+                            paths: i.paths,
+                            error: None,
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(skill = %name, error = %e, "cannot install skill");
+                        NodeToControl::SkillInstalled {
+                            name,
+                            agents: vec![],
+                            paths: vec![],
+                            error: Some(e.to_string()),
+                        }
+                    }
+                };
+                out_tx.send(report).await.ok();
+            }
+            ControlToNode::ForgetSkill { name } => {
+                match crate::wizard::skills::forget_taught(&name) {
+                    Ok(paths) => {
+                        tracing::info!(skill = %name, removed = paths.len(), "forgot a skill")
+                    }
+                    Err(e) => tracing::warn!(skill = %name, error = %e, "cannot forget skill"),
+                }
+            }
         }
     }
 
     writer.abort();
+    cert_check.abort();
     heartbeat.abort();
     discovery_task.abort();
     Ok(())
@@ -555,4 +670,38 @@ pub async fn connect_once(cfg: &NodeConfig) -> Result<()> {
 // tokio-tungstenite re-exports http via tungstenite.
 mod axum_http {
     pub use tokio_tungstenite::tungstenite::http::header::AUTHORIZATION;
+}
+
+/// Renew if the policy says to, and log why.
+///
+/// Never fatal: a node that cannot renew right now keeps running on the
+/// certificate it has and tries again on the next check. Failing the connection
+/// over it would turn a recoverable problem — control plane restarting — into
+/// an outage.
+async fn maybe_renew(server_fingerprints: &[String]) {
+    let held = crate::enroll::held_ca_fingerprints();
+    // A node authenticating by token has no certificate to renew. It is not
+    // broken; it simply has not enrolled.
+    if held.is_empty() && crate::config::load_identity().is_none() {
+        return;
+    }
+
+    let Some(reason) = crate::certs::should_renew(
+        chrono::Utc::now(),
+        crate::enroll::expiry(),
+        server_fingerprints,
+        &held,
+    ) else {
+        return;
+    };
+
+    tracing::info!(reason = reason.why(), "renewing this machine's certificate");
+    match crate::enroll::renew_now().await {
+        Ok(not_after) => {
+            tracing::info!(%not_after, "certificate renewed")
+        }
+        // Worth a warning rather than an error: the next check retries, and the
+        // seven-day window exists precisely so a few failures do not matter.
+        Err(e) => tracing::warn!(error = %e, "could not renew — will try again"),
+    }
 }

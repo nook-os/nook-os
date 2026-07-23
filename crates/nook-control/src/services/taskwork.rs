@@ -21,12 +21,38 @@ async fn load_task(state: &AppState, tenant: TenantId, id: TaskId) -> ApiResult<
 
 /// Resolve a column on the task's board by name (case-insensitive), falling
 /// back to a positional index when the name isn't found.
+/// Find the column this lifecycle step should move a task to.
+///
+/// Tries the semantic TYPE first, then the name, then a position. Type first
+/// is the point of having types at all: a board whose "Done" column somebody
+/// renamed to "Shipped" still completes work correctly, and the name lookup
+/// only remains as a fallback for a board whose types were never set.
 async fn column_id(
     state: &AppState,
     board_id: BoardId,
     name: &str,
     fallback_pos: i32,
 ) -> ApiResult<ColumnId> {
+    let wanted_type = match name.to_lowercase().as_str() {
+        "triage" => Some("backlog"),
+        "todo" => Some("unstarted"),
+        "in progress" => Some("started"),
+        "done" => Some("completed"),
+        _ => None,
+    };
+    if let Some(t) = wanted_type {
+        if let Some((id,)) = sqlx::query_as::<_, (ColumnId,)>(
+            "SELECT id FROM board_columns WHERE board_id = $1 AND type = $2
+             ORDER BY position LIMIT 1",
+        )
+        .bind(board_id)
+        .bind(t)
+        .fetch_optional(&state.db)
+        .await?
+        {
+            return Ok(id);
+        }
+    }
     if let Some((id,)) = sqlx::query_as::<_, (ColumnId,)>(
         "SELECT id FROM board_columns WHERE board_id = $1 AND lower(name) = lower($2)",
     )

@@ -10,6 +10,34 @@
     "version": "0.1.0"
   },
   "paths": {
+    "/api/v1/auth/dev-accounts": {
+      "get": {
+        "tags": [
+          "crate::routes::auth"
+        ],
+        "summary": "GET /api/v1/auth/dev-accounts — who you can sign in as, in dev mode.",
+        "description": "Dev only, and unauthenticated by necessity: it is what the login screen\nreads before anybody is signed in. It returns emails and display names of\naccounts that already exist — no credentials, no tokens — and it is refused\noutright unless `AUTH_DEV_MODE` is on and this is not production, which is\nthe same gate `dev_login` itself uses.\n\nIt exists because testing authorization requires BEING different people, and\na model you cannot switch between users to exercise is a model nobody\nexercises.",
+        "operationId": "dev_accounts",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/DevAccount"
+                  }
+                }
+              }
+            }
+          },
+          "403": {
+            "description": ""
+          }
+        }
+      }
+    },
     "/api/v1/auth/dev-login": {
       "post": {
         "tags": [
@@ -553,6 +581,79 @@
         }
       }
     },
+    "/api/v1/comments/{id}": {
+      "delete": {
+        "tags": [
+          "crate::routes::task_detail"
+        ],
+        "operationId": "delete_comment",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": ""
+          },
+          "403": {
+            "description": ""
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "crate::routes::task_detail"
+        ],
+        "operationId": "update_comment",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateCommentRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TaskComment"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": ""
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      }
+    },
     "/api/v1/dispatcher/suggest": {
       "post": {
         "tags": [
@@ -856,6 +957,85 @@
           "crate::routes::gitops"
         ],
         "operationId": "delete_git_credential",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": ""
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      }
+    },
+    "/api/v1/labels": {
+      "get": {
+        "tags": [
+          "crate::routes::labels"
+        ],
+        "operationId": "list_labels",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Label"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "crate::routes::labels"
+        ],
+        "summary": "Create, or return what is already there.",
+        "description": "`200` on an existing name rather than `409`: callers want the label to\nexist, not to be told who created it first.",
+        "operationId": "create_label",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateLabelRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Label"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/labels/{id}": {
+      "delete": {
+        "tags": [
+          "crate::routes::labels"
+        ],
+        "operationId": "delete_label",
         "parameters": [
           {
             "name": "id",
@@ -1289,6 +1469,34 @@
         }
       }
     },
+    "/api/v1/nodes/{id}/update": {
+      "post": {
+        "tags": [
+          "crate::routes::nodes"
+        ],
+        "summary": "POST /api/v1/nodes/{id}/update — tell a node to replace its agent and restart.",
+        "description": "A person asking, rather than the automatic path: a node already updates\nitself on reconnect when its version differs from what this control plane\nexpects. This is for the case where you do not want to wait for a\nreconnect, or where the automatic path declined and you want to see why.\n\nThe node decides whether it can. It knows whether anything would restart it\nand refuses if not, because an agent that replaces its binary and exits\nunsupervised simply goes offline — and doing that across a fleet takes every\nmachine at once.",
+        "operationId": "update_node_agent",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "asked"
+          },
+          "400": {
+            "description": "node is offline"
+          }
+        }
+      }
+    },
     "/api/v1/notes/{id}": {
       "patch": {
         "tags": [
@@ -1325,6 +1533,801 @@
                 }
               }
             }
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      }
+    },
+    "/api/v1/notification-channels": {
+      "get": {
+        "tags": [
+          "crate::routes::notifications"
+        ],
+        "operationId": "list_channels",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/NotificationChannel"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "crate::routes::notifications"
+        ],
+        "operationId": "create_channel",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateChannelRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NotificationChannel"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/notification-channels/kinds": {
+      "get": {
+        "tags": [
+          "crate::routes::notifications"
+        ],
+        "summary": "What providers exist and what each one needs, so the UI builds its forms\nfrom the server rather than from a copy of this list that drifts.",
+        "operationId": "list_channel_kinds",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ChannelKind"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/notification-channels/{id}": {
+      "delete": {
+        "tags": [
+          "crate::routes::notifications"
+        ],
+        "operationId": "delete_channel",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": ""
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "crate::routes::notifications"
+        ],
+        "operationId": "update_channel",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateChannelRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NotificationChannel"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      }
+    },
+    "/api/v1/notification-channels/{id}/test": {
+      "post": {
+        "tags": [
+          "crate::routes::notifications"
+        ],
+        "summary": "Send a sample through one channel and report what happened.",
+        "operationId": "test_channel",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": ""
+          },
+          "400": {
+            "description": "delivery failed"
+          }
+        }
+      }
+    },
+    "/api/v1/notifications": {
+      "get": {
+        "tags": [
+          "crate::routes::notifications"
+        ],
+        "operationId": "list_notifications",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "unread",
+            "in": "query",
+            "description": "Only what has not been read.",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NotificationPage"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "crate::routes::notifications"
+        ],
+        "operationId": "clear_notifications",
+        "responses": {
+          "204": {
+            "description": ""
+          }
+        }
+      }
+    },
+    "/api/v1/notifications/read": {
+      "post": {
+        "tags": [
+          "crate::routes::notifications"
+        ],
+        "summary": "Mark one read, or all of them when no id is given.",
+        "operationId": "mark_notifications_read",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {}
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NotificationPage"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/notify": {
+      "post": {
+        "tags": [
+          "crate::routes::notifications"
+        ],
+        "summary": "Raise a notification.",
+        "description": "Deliberately open to any authenticated caller INCLUDING a node token: the\nwhole point is that a machine finishing a job can say so. A node can already\nreport events about itself; this is the same trust, with a nicer surface.",
+        "operationId": "notify",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NotifyRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": ""
+          }
+        }
+      }
+    },
+    "/api/v1/operator/audit": {
+      "get": {
+        "tags": [
+          "crate::routes::operator"
+        ],
+        "summary": "The audit trail, including operator reads themselves.",
+        "operationId": "operator_audit",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/OperatorAuditEntry"
+                  }
+                }
+              }
+            }
+          },
+          "403": {
+            "description": ""
+          }
+        }
+      }
+    },
+    "/api/v1/operator/bindings": {
+      "get": {
+        "tags": [
+          "crate::routes::operator"
+        ],
+        "summary": "Who holds what. Needed before granting is meaningful — you cannot revoke a\nbinding you cannot see.",
+        "operationId": "operator_list_bindings",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/BindingRow"
+                  }
+                }
+              }
+            }
+          },
+          "403": {
+            "description": ""
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "crate::routes::operator"
+        ],
+        "summary": "Grant or revoke a role binding.",
+        "description": "The one write on this surface, and it is here rather than deferred with the\nothers because a deployment with exactly one operator and no way to make a\nsecond is a deployment one lost password away from being unadministrable.\n\nRequires `org.manage` — an operator can appoint another operator, which is\nthe same authority every root-shaped role has. A tenant admin cannot,\nbecause `org.manage` is not in their role.",
+        "operationId": "operator_grant",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GrantRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": ""
+          },
+          "403": {
+            "description": ""
+          }
+        }
+      }
+    },
+    "/api/v1/operator/nodes": {
+      "get": {
+        "tags": [
+          "crate::routes::operator"
+        ],
+        "summary": "Nodes, always visible. Names, status, resources, owner, session count.",
+        "operationId": "operator_list_nodes",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/OperatorNode"
+                  }
+                }
+              }
+            }
+          },
+          "403": {
+            "description": ""
+          }
+        }
+      }
+    },
+    "/api/v1/operator/nodes/{id}": {
+      "delete": {
+        "tags": [
+          "crate::routes::operator"
+        ],
+        "operationId": "operator_remove_node",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": ""
+          },
+          "403": {
+            "description": ""
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      }
+    },
+    "/api/v1/operator/nodes/{id}/revoke": {
+      "post": {
+        "tags": [
+          "crate::routes::operator"
+        ],
+        "operationId": "operator_revoke_node",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": ""
+          },
+          "403": {
+            "description": ""
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      }
+    },
+    "/api/v1/operator/orgs": {
+      "get": {
+        "tags": [
+          "crate::routes::operator"
+        ],
+        "operationId": "operator_list_orgs",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/OperatorOrg"
+                  }
+                }
+              }
+            }
+          },
+          "403": {
+            "description": ""
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "crate::routes::operator"
+        ],
+        "operationId": "operator_create_org",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateOrgRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OperatorOrg"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": ""
+          }
+        }
+      }
+    },
+    "/api/v1/operator/orgs/{id}": {
+      "patch": {
+        "tags": [
+          "crate::routes::operator"
+        ],
+        "operationId": "operator_rename_org",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RenameOrgRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OperatorOrg"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": ""
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      }
+    },
+    "/api/v1/operator/orgs/{id}/policy": {
+      "get": {
+        "tags": [
+          "crate::routes::operator"
+        ],
+        "summary": "The current policy for one org, for the operator who may change it.",
+        "operationId": "operator_get_policy",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/PolicyField"
+                  }
+                }
+              }
+            }
+          },
+          "403": {
+            "description": ""
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "crate::routes::operator"
+        ],
+        "summary": "Widen or narrow one field. Recorded, and announced to the people it affects.",
+        "operationId": "operator_set_policy",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetPolicyRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/PolicyField"
+                  }
+                }
+              }
+            }
+          },
+          "403": {
+            "description": ""
+          }
+        }
+      }
+    },
+    "/api/v1/operator/tenants": {
+      "get": {
+        "tags": [
+          "crate::routes::operator"
+        ],
+        "summary": "Tenants, at minimum visibility.",
+        "description": "Always visible, per the model: that a tenant exists, its member count, and\nhow many nodes and sessions it runs. Several machines working one task is an\naudit signal, and an operator who cannot see load cannot run the deployment.\n\nNever visible here: repository names, branches, worktree paths, task titles.\nThose are policy-gated and added by `enrich` below — they are not selected\nand then removed.",
+        "operationId": "operator_list_tenants",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/OperatorTenant"
+                  }
+                }
+              }
+            }
+          },
+          "403": {
+            "description": ""
+          }
+        }
+      }
+    },
+    "/api/v1/operator/tenants/{id}/ca": {
+      "post": {
+        "tags": [
+          "crate::routes::operator"
+        ],
+        "summary": "Stage a new CA for a tenant.",
+        "description": "Two steps, not one. Staging distributes the new authority so machines pick\nit up on their next renewal; promoting makes it sign. A single \"rotate\"\nbutton that did both would strand every node that had not renewed in\nbetween — which is the reason the tenant-facing route has always been two\ncalls, and not a limitation worth papering over here.\n\nDelegates to the same mechanism rather than reimplementing it: there must be\nexactly one way a CA is created, or the two drift and one is wrong.",
+        "operationId": "operator_stage_ca",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TenantCaSummary"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": ""
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      }
+    },
+    "/api/v1/operator/tenants/{id}/ca/{ca}/promote": {
+      "post": {
+        "tags": [
+          "crate::routes::operator"
+        ],
+        "summary": "Promote a staged CA to signer. The previous signer keeps being trusted.",
+        "operationId": "operator_promote_ca",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "ca",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": ""
+          },
+          "403": {
+            "description": ""
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      }
+    },
+    "/api/v1/operator/tenants/{id}/org": {
+      "post": {
+        "tags": [
+          "crate::routes::operator"
+        ],
+        "summary": "Move a tenant into another org.",
+        "description": "Requires `org.manage` at BOTH ends — the org losing it and the org gaining\nit. Checking only one would let somebody with authority over a single org\npull tenants into it from orgs they have no say over, or push their own\ntenants somewhere they cannot be followed.",
+        "operationId": "operator_move_tenant",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MoveTenantRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": ""
+          },
+          "403": {
+            "description": ""
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      }
+    },
+    "/api/v1/relations/{id}": {
+      "delete": {
+        "tags": [
+          "crate::routes::task_detail"
+        ],
+        "operationId": "delete_relation",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": ""
           },
           "404": {
             "description": ""
@@ -1814,7 +2817,281 @@
         }
       }
     },
+    "/api/v1/skills": {
+      "get": {
+        "tags": [
+          "crate::routes::skills"
+        ],
+        "operationId": "list_skills",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/SkillSummary"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "crate::routes::skills"
+        ],
+        "summary": "Teach the fleet. Re-teaching the same name replaces it, because \"I improved\nthe skill, push it everywhere\" is the common case and it has to be one verb.",
+        "operationId": "teach_skill",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TeachRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TeachResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": ""
+          }
+        }
+      }
+    },
+    "/api/v1/skills/{name}": {
+      "get": {
+        "tags": [
+          "crate::routes::skills"
+        ],
+        "operationId": "get_skill",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Skill"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "crate::routes::skills"
+        ],
+        "summary": "Unteach: forget it here, and tell every node to remove it.",
+        "operationId": "unteach_skill",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TeachResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      }
+    },
+    "/api/v1/tasks": {
+      "get": {
+        "tags": [
+          "crate::routes::task_query"
+        ],
+        "summary": "The pick query.",
+        "description": "Built as one statement with bound parameters rather than assembled from\nstrings — every filter here is caller-supplied, and a query builder that\ninterpolated any of them would be an injection with a board's worth of data\nbehind it. The cost is a slightly denser SQL body; the benefit is that no\nvalue ever reaches the parser.",
+        "operationId": "query_tasks",
+        "parameters": [
+          {
+            "name": "board",
+            "in": "query",
+            "description": "Board id or key (`ENG`). Omit to search the whole tenant.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "label",
+            "in": "query",
+            "description": "Repeatable. ALL must be present.",
+            "required": false,
+            "schema": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          {
+            "name": "not_label",
+            "in": "query",
+            "description": "Repeatable. NONE may be present.",
+            "required": false,
+            "schema": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          {
+            "name": "assignee",
+            "in": "query",
+            "description": "A user id, or the literal `none` for unassigned.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "column_type",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "priority",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          },
+          {
+            "name": "is_blocked",
+            "in": "query",
+            "description": "Filter on the derived blocker state.",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "Opaque: the `created_at` of the last row of the previous page.",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/TaskItem"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/tasks/{id}": {
+      "get": {
+        "tags": [
+          "crate::routes::task_detail"
+        ],
+        "operationId": "get_task",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TaskDetail"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      },
       "delete": {
         "tags": [
           "crate::routes::boards"
@@ -1881,6 +3158,128 @@
         }
       }
     },
+    "/api/v1/tasks/{id}/claim": {
+      "post": {
+        "tags": [
+          "crate::routes::task_query"
+        ],
+        "summary": "Take the work, atomically.",
+        "description": "The assignment and the move are one statement with the \"still unassigned\"\ntest in its WHERE clause, so two agents racing cannot both win: the second\nUPDATE matches zero rows and gets a 409 carrying the current state, which is\nenough for it to pick again without another round trip.",
+        "operationId": "claim_task",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ClaimTaskRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TaskItem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "already claimed"
+          }
+        }
+      }
+    },
+    "/api/v1/tasks/{id}/comments": {
+      "get": {
+        "tags": [
+          "crate::routes::task_detail"
+        ],
+        "operationId": "list_comments",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/TaskComment"
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "crate::routes::task_detail"
+        ],
+        "operationId": "create_comment",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateCommentRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TaskComment"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      }
+    },
     "/api/v1/tasks/{id}/dispatch": {
       "post": {
         "tags": [
@@ -1907,6 +3306,94 @@
                 }
               }
             }
+          }
+        }
+      }
+    },
+    "/api/v1/tasks/{id}/labels/{label}": {
+      "put": {
+        "tags": [
+          "crate::routes::labels"
+        ],
+        "summary": "Attach a label. Succeeds when it is already attached.",
+        "operationId": "add_task_label",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "label",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Label"
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "crate::routes::labels"
+        ],
+        "summary": "Detach a label. Succeeds when it is already absent.",
+        "operationId": "remove_task_label",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "label",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Label"
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": ""
           }
         }
       }
@@ -1977,6 +3464,83 @@
                 }
               }
             }
+          }
+        }
+      }
+    },
+    "/api/v1/tasks/{id}/relations": {
+      "post": {
+        "tags": [
+          "crate::routes::task_detail"
+        ],
+        "operationId": "create_relation",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateRelationRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TaskRelation"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": ""
+          }
+        }
+      }
+    },
+    "/api/v1/tasks/{id}/release": {
+      "post": {
+        "tags": [
+          "crate::routes::task_query"
+        ],
+        "summary": "Give the work back: clear the assignee so somebody else can pick it up.",
+        "operationId": "release_task",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TaskItem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": ""
           }
         }
       }
@@ -3488,6 +5052,54 @@
           }
         }
       },
+      "BindingRow": {
+        "type": "object",
+        "description": "Who holds what, for the roles table.",
+        "required": [
+          "id",
+          "email",
+          "display_name",
+          "role_key",
+          "scope_type",
+          "created_at"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "display_name": {
+            "type": "string"
+          },
+          "email": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "role_key": {
+            "type": "string"
+          },
+          "scope_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "scope_label": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The org or tenant slug the binding is scoped to, when it has one."
+          },
+          "scope_type": {
+            "type": "string"
+          }
+        }
+      },
       "Board": {
         "type": "object",
         "description": "Provider values: `local` | `jira` | `github` | `linear` | `trello`.\nExternal boards remain authoritative; NookOS federates.",
@@ -3506,6 +5118,13 @@
           },
           "id": {
             "$ref": "#/components/schemas/BoardId"
+          },
+          "key": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The prefix in `NOOK-42`. Unique per tenant, derived from the name when\nnot given, and immutable once assigned — it is written into PR bodies\nand branch names, which no rename can reach back and fix."
           },
           "name": {
             "type": "string"
@@ -3553,6 +5172,10 @@
           "position": {
             "type": "integer",
             "format": "int32"
+          },
+          "type": {
+            "type": "string",
+            "description": "What this column MEANS, independent of what it is called:\n`backlog` | `unstarted` | `started` | `completed` | `canceled`.\n\nAutomation targets the type so that renaming \"In Progress\" to \"Doing\"\nis a cosmetic change rather than a broken loop. The name is for people."
           }
         }
       },
@@ -3598,6 +5221,13 @@
           "tmux"
         ],
         "properties": {
+          "agent_version": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The agent's own version. Reported like everything else here, so\n\"which machines are behind?\" needs no column of its own — this whole\nstruct is already stored as jsonb on the node."
+          },
           "architecture": {
             "type": "string"
           },
@@ -3651,6 +5281,34 @@
           }
         }
       },
+      "Capability": {
+        "type": "object",
+        "description": "What the signed-in caller may do, so a UI can hide what it cannot offer.",
+        "required": [
+          "operator"
+        ],
+        "properties": {
+          "deployment": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Permission keys held at the deployment scope."
+          },
+          "operator": {
+            "type": "boolean",
+            "description": "Holds an operator binding somewhere — drives whether the operator\nsection appears at all."
+          },
+          "org_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The org this caller's tenant belongs to, for reading its policy."
+          }
+        }
+      },
       "ChangePasswordRequest": {
         "type": "object",
         "required": [
@@ -3663,6 +5321,85 @@
           },
           "next": {
             "type": "string"
+          }
+        }
+      },
+      "ChannelField": {
+        "type": "object",
+        "required": [
+          "name",
+          "label",
+          "placeholder",
+          "secret",
+          "required"
+        ],
+        "properties": {
+          "label": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "placeholder": {
+            "type": "string"
+          },
+          "required": {
+            "type": "boolean"
+          },
+          "secret": {
+            "type": "boolean",
+            "description": "Masked in the UI and never read back."
+          }
+        }
+      },
+      "ChannelKind": {
+        "type": "object",
+        "description": "What a channel kind needs, so the UI can build a form without hardcoding it.",
+        "required": [
+          "id",
+          "label",
+          "description",
+          "fields"
+        ],
+        "properties": {
+          "description": {
+            "type": "string"
+          },
+          "fields": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ChannelField"
+            }
+          },
+          "id": {
+            "type": "string"
+          },
+          "label": {
+            "type": "string"
+          }
+        }
+      },
+      "ClaimTaskRequest": {
+        "type": "object",
+        "description": "`POST /tasks/{id}/claim` — take the work without racing another agent.",
+        "properties": {
+          "assignee_user_id": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/UserId",
+                "description": "Claim on behalf of this user rather than the caller. For a human\nassigning work; agents omit it."
+              }
+            ]
+          },
+          "column_type": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Move the task here at the same time, by column TYPE. Omit to claim\nwithout moving."
           }
         }
       },
@@ -3709,6 +5446,13 @@
           "name"
         ],
         "properties": {
+          "key": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Omit to derive one from the name."
+          },
           "name": {
             "type": "string"
           },
@@ -3724,6 +5468,37 @@
           }
         }
       },
+      "CreateChannelRequest": {
+        "type": "object",
+        "required": [
+          "kind",
+          "name",
+          "config"
+        ],
+        "properties": {
+          "config": {
+            "description": "Provider-specific. Write-only: it is never read back."
+          },
+          "kind": {
+            "type": "string"
+          },
+          "kinds": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "levels": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "name": {
+            "type": "string"
+          }
+        }
+      },
       "CreateColumnRequest": {
         "type": "object",
         "required": [
@@ -3731,6 +5506,24 @@
         ],
         "properties": {
           "name": {
+            "type": "string"
+          }
+        }
+      },
+      "CreateCommentRequest": {
+        "type": "object",
+        "required": [
+          "body_md"
+        ],
+        "properties": {
+          "author_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "How an agent signs its work, e.g. `\"loop-build on azul\"`.\n\nNookOS has no separate agent identity — an agent acts under a person's\ntoken, so the honest record is \"this user's credential, used by this\ntool\". Supplying a name says which tool; it does not grant anything,\nand the underlying `author_id` remains the real user."
+          },
+          "body_md": {
             "type": "string"
           }
         }
@@ -3788,6 +5581,23 @@
           }
         }
       },
+      "CreateLabelRequest": {
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "color": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "type": "string"
+          }
+        }
+      },
       "CreateNoteRequest": {
         "type": "object",
         "required": [
@@ -3808,6 +5618,38 @@
               "string",
               "null"
             ]
+          }
+        }
+      },
+      "CreateOrgRequest": {
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "slug": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "CreateRelationRequest": {
+        "type": "object",
+        "required": [
+          "to_task",
+          "kind"
+        ],
+        "properties": {
+          "kind": {
+            "type": "string"
+          },
+          "to_task": {
+            "$ref": "#/components/schemas/TaskId"
           }
         }
       },
@@ -3859,11 +5701,32 @@
               }
             ]
           },
+          "column_type": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Place by semantic state instead of by id — what automation wants, since\nit knows \"the backlog\" but not which uuid that is today."
+          },
           "description": {
             "type": [
               "string",
               "null"
             ]
+          },
+          "labels": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Label NAMES, created for the tenant if new. Names rather than ids\nbecause a filer knows `agent-ready`, not its uuid."
+          },
+          "priority": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
           },
           "title": {
             "type": "string"
@@ -4000,6 +5863,33 @@
             "type": "boolean"
           },
           "message": {
+            "type": "string"
+          }
+        }
+      },
+      "DevAccount": {
+        "type": "object",
+        "description": "One account you can sign in as, in dev mode only.\n\nExists so a person can switch between users without inventing credentials —\ntesting \"what does an operator see that a member does not\" is impossible if\nbecoming the other person is hard.",
+        "required": [
+          "email",
+          "display_name",
+          "tenant_slug"
+        ],
+        "properties": {
+          "deployment_roles": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Role keys held at the deployment scope — so the picker can show which\nof these accounts is the operator without you having to remember."
+          },
+          "display_name": {
+            "type": "string"
+          },
+          "email": {
+            "type": "string"
+          },
+          "tenant_slug": {
             "type": "string"
           }
         }
@@ -4491,6 +6381,7 @@
       "GitStatusResponse": {
         "type": "object",
         "required": [
+          "is_repo",
           "dirty",
           "files",
           "diff"
@@ -4514,6 +6405,10 @@
             "items": {
               "$ref": "#/components/schemas/GitFileStatus"
             }
+          },
+          "is_repo": {
+            "type": "boolean",
+            "description": "`false` when the checkout is not a git repository — a \"+ New empty\nproject\" directory, say. Everything below is then empty for a reason\nthat is not \"nothing has changed\", and the UI hides the panel instead\nof reporting a clean tree."
           }
         }
       },
@@ -4529,6 +6424,26 @@
           },
           "vendor": {
             "type": "string"
+          }
+        }
+      },
+      "GrantRequest": {
+        "type": "object",
+        "description": "Grant (or revoke) a deployment-scoped role.",
+        "required": [
+          "email",
+          "role"
+        ],
+        "properties": {
+          "email": {
+            "type": "string"
+          },
+          "revoke": {
+            "type": "boolean"
+          },
+          "role": {
+            "type": "string",
+            "description": "`operator` | `org_admin` | …"
           }
         }
       },
@@ -4603,9 +6518,38 @@
           }
         }
       },
+      "Label": {
+        "type": "object",
+        "description": "A tenant-wide label. `agent-ready` is the human approval gate: the one\nsignal that says an agent may pick this up, and deliberately not something\nan agent can apply to itself.",
+        "required": [
+          "id",
+          "tenant_id",
+          "name",
+          "color",
+          "created_at"
+        ],
+        "properties": {
+          "color": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string"
+          },
+          "tenant_id": {
+            "$ref": "#/components/schemas/TenantId"
+          }
+        }
+      },
       "LocalAuthStatus": {
         "type": "object",
-        "description": "Unauthenticated sign-in capabilities, so the login screen only offers what\nthis instance actually supports.",
         "required": [
           "available",
           "needs_bootstrap"
@@ -4678,6 +6622,10 @@
           "tenant"
         ],
         "properties": {
+          "capability": {
+            "$ref": "#/components/schemas/Capability",
+            "description": "What this caller may do, so a UI can hide what it cannot offer rather\nthan rendering a button that 403s."
+          },
           "tenant": {
             "$ref": "#/components/schemas/Tenant"
           },
@@ -4694,6 +6642,18 @@
         "properties": {
           "column": {
             "type": "string"
+          }
+        }
+      },
+      "MoveTenantRequest": {
+        "type": "object",
+        "required": [
+          "org_id"
+        ],
+        "properties": {
+          "org_id": {
+            "type": "string",
+            "format": "uuid"
           }
         }
       },
@@ -4959,6 +6919,195 @@
         "type": "string",
         "format": "uuid"
       },
+      "Notification": {
+        "type": "object",
+        "description": "Something a person should see. Distinct from an `Event`, which is the\ncomplete record of what happened and is never marked read.",
+        "required": [
+          "id",
+          "tenant_id",
+          "level",
+          "title",
+          "body",
+          "kind",
+          "payload",
+          "created_at"
+        ],
+        "properties": {
+          "body": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "kind": {
+            "type": "string",
+            "description": "The dotted event kind that produced it, or `custom`."
+          },
+          "level": {
+            "type": "string",
+            "description": "`info` | `success` | `warning` | `error`."
+          },
+          "link": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Where clicking it should go."
+          },
+          "payload": {},
+          "read_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "tenant_id": {
+            "$ref": "#/components/schemas/TenantId"
+          },
+          "title": {
+            "type": "string"
+          },
+          "user_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "`None` means everyone in the tenant."
+          }
+        }
+      },
+      "NotificationChannel": {
+        "type": "object",
+        "description": "A configured delivery channel.\n\n`config` is deliberately absent: it holds bot tokens and webhook URLs, and\na channel list is the sort of thing a UI fetches often and logs freely.\nWhat a person needs to see is that it exists, whether it works, and what it\nis filtered to.",
+        "required": [
+          "id",
+          "tenant_id",
+          "kind",
+          "name",
+          "enabled",
+          "levels",
+          "kinds",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "kind": {
+            "type": "string",
+            "description": "`webhook` | `slack` | `discord` | `telegram` | `twilio` | `ntfy`."
+          },
+          "kinds": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "last_error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "last_ok_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "levels": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "name": {
+            "type": "string"
+          },
+          "tenant_id": {
+            "$ref": "#/components/schemas/TenantId"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "NotificationPage": {
+        "type": "object",
+        "required": [
+          "notifications",
+          "unread"
+        ],
+        "properties": {
+          "notifications": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Notification"
+            }
+          },
+          "unread": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "NotifyRequest": {
+        "type": "object",
+        "description": "Raise a notification by hand — what `nook notify` and an agent's finish\nhook both call.",
+        "required": [
+          "title"
+        ],
+        "properties": {
+          "body": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "kind": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Defaults to `custom`. Channels filter on this."
+          },
+          "level": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`info` | `success` | `warning` | `error`. Defaults to `info`."
+          },
+          "link": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "payload": {},
+          "title": {
+            "type": "string"
+          }
+        }
+      },
       "OpResponse": {
         "type": "object",
         "description": "Outcome of a long-running git operation on a node.",
@@ -4993,6 +7142,236 @@
           }
         }
       },
+      "OperatorAuditEntry": {
+        "type": "object",
+        "description": "An audit row. Kinds, actors and times — never payloads, which can carry the\nvery metadata policy exists to gate.",
+        "required": [
+          "id",
+          "kind",
+          "tenant_id",
+          "tenant_slug",
+          "occurred_at"
+        ],
+        "properties": {
+          "actor_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "actor_type": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "$ref": "#/components/schemas/EventId"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "occurred_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "tenant_id": {
+            "$ref": "#/components/schemas/TenantId"
+          },
+          "tenant_slug": {
+            "type": "string"
+          }
+        }
+      },
+      "OperatorNode": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "platform",
+          "status",
+          "resources",
+          "tenant_id",
+          "tenant_slug",
+          "active_sessions"
+        ],
+        "properties": {
+          "active_sessions": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "id": {
+            "$ref": "#/components/schemas/NodeId"
+          },
+          "last_seen_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "name": {
+            "type": "string"
+          },
+          "platform": {
+            "type": "string"
+          },
+          "resources": {},
+          "status": {
+            "type": "string"
+          },
+          "tenant_id": {
+            "$ref": "#/components/schemas/TenantId"
+          },
+          "tenant_slug": {
+            "type": "string"
+          }
+        }
+      },
+      "OperatorOrg": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "slug",
+          "created_at",
+          "tenants"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string"
+          },
+          "slug": {
+            "type": "string"
+          },
+          "tenants": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "OperatorTenant": {
+        "type": "object",
+        "description": "A tenant as an operator sees it.\n\nThe first block is always visible: existence, counts, load. Everything\nafter is `Option` and stays `None` unless the org opted in — policy ADDS\nthese fields rather than filtering them out, so forgetting to add one\nleaves it absent instead of leaking it.",
+        "required": [
+          "id",
+          "slug",
+          "created_at",
+          "members",
+          "nodes",
+          "active_sessions",
+          "workspaces"
+        ],
+        "properties": {
+          "active_sessions": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "id": {
+            "$ref": "#/components/schemas/TenantId"
+          },
+          "members": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "nodes": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "org_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "repositories": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            }
+          },
+          "slug": {
+            "type": "string"
+          },
+          "task_titles": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            }
+          },
+          "workspaces": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "Org": {
+        "type": "object",
+        "description": "An org: the layer between a deployment and its tenants.",
+        "required": [
+          "id",
+          "name",
+          "slug",
+          "created_at"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string"
+          },
+          "slug": {
+            "type": "string"
+          }
+        }
+      },
+      "PolicyField": {
+        "type": "object",
+        "description": "One policy-gated field with its current state and plain-language meaning.",
+        "required": [
+          "field",
+          "description",
+          "enabled"
+        ],
+        "properties": {
+          "description": {
+            "type": "string",
+            "description": "Written for a person, not a developer — every user is shown this."
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "field": {
+            "type": "string"
+          }
+        }
+      },
       "PutSecretRequest": {
         "type": "object",
         "required": [
@@ -5013,6 +7392,42 @@
           }
         }
       },
+      "RelatedTask": {
+        "type": "object",
+        "description": "The other end of a relation, with enough to render it without a second\nfetch.",
+        "required": [
+          "relation_id",
+          "id",
+          "title",
+          "kind",
+          "column_type"
+        ],
+        "properties": {
+          "column_type": {
+            "type": "string",
+            "description": "The column type of the other task — what makes a blocker resolved."
+          },
+          "id": {
+            "$ref": "#/components/schemas/TaskId"
+          },
+          "key": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "kind": {
+            "type": "string"
+          },
+          "relation_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "title": {
+            "type": "string"
+          }
+        }
+      },
       "RemoveWorktreeRequest": {
         "type": "object",
         "required": [
@@ -5024,6 +7439,17 @@
             "$ref": "#/components/schemas/NodeId"
           },
           "path": {
+            "type": "string"
+          }
+        }
+      },
+      "RenameOrgRequest": {
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "name": {
             "type": "string"
           }
         }
@@ -5293,6 +7719,21 @@
           }
         }
       },
+      "SetPolicyRequest": {
+        "type": "object",
+        "required": [
+          "field",
+          "enabled"
+        ],
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
+          "field": {
+            "type": "string"
+          }
+        }
+      },
       "SetVaultPassphraseRequest": {
         "type": "object",
         "description": "Setting or checking the app password.",
@@ -5344,6 +7785,81 @@
       "SettingId": {
         "type": "string",
         "format": "uuid"
+      },
+      "Skill": {
+        "type": "object",
+        "description": "A skill taught to the whole fleet.\n\nStored by the control plane rather than pushed and forgotten, so that a node\nwhich was offline when it was taught — or which joins next week — converges\non register instead of quietly being the one machine that never learned it.",
+        "required": [
+          "id",
+          "tenant_id",
+          "name",
+          "content",
+          "sha256",
+          "updated_at"
+        ],
+        "properties": {
+          "content": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string",
+            "description": "Becomes a path component on every machine: `<skills>/<name>/SKILL.md`."
+          },
+          "sha256": {
+            "type": "string",
+            "description": "Of `content`. Lets a node skip a write it already has, and lets an\noperator see whether two machines really do hold the same thing."
+          },
+          "tenant_id": {
+            "$ref": "#/components/schemas/TenantId"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updated_by": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          }
+        }
+      },
+      "SkillSummary": {
+        "type": "object",
+        "description": "The same thing without its body — a list of twenty skills should not ship\ntwenty documents to draw a table.",
+        "required": [
+          "id",
+          "name",
+          "sha256",
+          "size",
+          "updated_at"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string"
+          },
+          "sha256": {
+            "type": "string"
+          },
+          "size": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Bytes, so the UI can show a size without holding the content."
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
       },
       "StartWorkRequest": {
         "type": "object",
@@ -5437,6 +7953,106 @@
           }
         }
       },
+      "TaskComment": {
+        "type": "object",
+        "description": "Durable discussion on a task: the builder's blocking question, the\nreviewer's verdict, the human's answer.",
+        "required": [
+          "id",
+          "tenant_id",
+          "task_id",
+          "author_type",
+          "author_name",
+          "body_md",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "author_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "author_name": {
+            "type": "string",
+            "description": "Denormalised, so an agent with no users row — and a deleted user —\nstill render with attribution."
+          },
+          "author_type": {
+            "type": "string",
+            "description": "`user` | `agent` | `system`."
+          },
+          "body_md": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "task_id": {
+            "$ref": "#/components/schemas/TaskId"
+          },
+          "tenant_id": {
+            "$ref": "#/components/schemas/TenantId"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "TaskDetail": {
+        "type": "object",
+        "description": "One whole issue: what the loop reads before it starts work.",
+        "required": [
+          "task",
+          "comments",
+          "blocked_by",
+          "blocking",
+          "related",
+          "is_blocked"
+        ],
+        "properties": {
+          "blocked_by": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RelatedTask"
+            },
+            "description": "Tasks that must finish before this one can start."
+          },
+          "blocking": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RelatedTask"
+            },
+            "description": "Tasks waiting on this one."
+          },
+          "comments": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TaskComment"
+            }
+          },
+          "is_blocked": {
+            "type": "boolean",
+            "description": "Derived from the blockers' column types, never stored — a stored flag\nwould drift the moment a blocker moved."
+          },
+          "related": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RelatedTask"
+            },
+            "description": "Non-blocking links (`relates`, `duplicates`), both directions."
+          },
+          "task": {
+            "$ref": "#/components/schemas/TaskItem"
+          }
+        }
+      },
       "TaskId": {
         "type": "string",
         "format": "uuid"
@@ -5512,6 +8128,28 @@
           "id": {
             "$ref": "#/components/schemas/TaskId"
           },
+          "key": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`NOOK-42` — the board's key and this task's number. Computed, not\nstored: storing it would let it disagree with the two columns it is\nmade of."
+          },
+          "labels": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Label"
+            },
+            "description": "Every label on this task. Populated by one query for a whole board\nrather than one per task."
+          },
+          "number": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Per-board sequence behind the human key. `None` only for a task created\nbefore keys existed and not yet backfilled."
+          },
           "position": {
             "type": "integer",
             "format": "int32"
@@ -5521,6 +8159,11 @@
               "string",
               "null"
             ]
+          },
+          "priority": {
+            "type": "integer",
+            "format": "int32",
+            "description": "`0` none, `1` urgent, `2` high, `3` medium, `4` low — Linear's\nconvention, so values port cleanly. Note `0` sorts LAST: \"nobody set a\npriority\" is not a claim that the work is least important."
           },
           "session_id": {
             "oneOf": [
@@ -5541,6 +8184,13 @@
           "updated_at": {
             "type": "string",
             "format": "date-time"
+          },
+          "url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Absolute deep link into the web UI, so an agent reporting \"filed\nNOOK-42\" can give a human something to click."
           },
           "workspace_id": {
             "oneOf": [
@@ -5567,6 +8217,85 @@
               "string",
               "null"
             ]
+          }
+        }
+      },
+      "TaskRelation": {
+        "type": "object",
+        "required": [
+          "id",
+          "tenant_id",
+          "from_task",
+          "to_task",
+          "kind",
+          "created_at"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "from_task": {
+            "$ref": "#/components/schemas/TaskId"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "kind": {
+            "type": "string",
+            "description": "`blocks` | `relates` | `duplicates`."
+          },
+          "tenant_id": {
+            "$ref": "#/components/schemas/TenantId"
+          },
+          "to_task": {
+            "$ref": "#/components/schemas/TaskId"
+          }
+        }
+      },
+      "TeachRequest": {
+        "type": "object",
+        "required": [
+          "content"
+        ],
+        "properties": {
+          "content": {
+            "type": "string"
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Omitted means \"derive it\": from the document's own frontmatter `name:`,\nfalling back to the filename. Explicit wins, because a file called\nSKILL.md says nothing about what it teaches."
+          }
+        }
+      },
+      "TeachResponse": {
+        "type": "object",
+        "required": [
+          "skill",
+          "delivered_to",
+          "offline"
+        ],
+        "properties": {
+          "delivered_to": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Nodes the fan-out actually reached. The rest converge on reconnect."
+          },
+          "offline": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Nodes known to this tenant that were offline, named rather than\ncounted — \"3 nodes were offline\" is not something an operator can act\non, and silence about them would be worse."
+          },
+          "skill": {
+            "$ref": "#/components/schemas/SkillSummary"
           }
         }
       },
@@ -5880,6 +8609,60 @@
                 ]
               }
             }
+          },
+          {
+            "type": "object",
+            "description": "Something a person should see, right now.\n\nCarries the whole notification rather than an id, unlike `TaskChanged`.\nThe distinction is what the client does with it: a task id says \"refetch\nthat\", and the client already knows how. A notification has no canonical\nplace to be refetched from — it IS the message — and a toast that had to\nround-trip before it could be shown would arrive after the moment it was\nabout.",
+            "required": [
+              "data",
+              "type"
+            ],
+            "properties": {
+              "data": {
+                "type": "object",
+                "description": "Something a person should see, right now.\n\nCarries the whole notification rather than an id, unlike `TaskChanged`.\nThe distinction is what the client does with it: a task id says \"refetch\nthat\", and the client already knows how. A notification has no canonical\nplace to be refetched from — it IS the message — and a toast that had to\nround-trip before it could be shown would arrive after the moment it was\nabout.",
+                "required": [
+                  "notification"
+                ],
+                "properties": {
+                  "notification": {}
+                }
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "notification"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "A task changed — moved, relabelled, commented on, claimed.\n\nCarries only the id, not the task. Agents and other browsers change\ntasks constantly, and a payload would be a second copy of state that\narrives out of order with the fetch the viewer is already doing. The id\nsays \"what you have for this one is stale\"; the client refetches what it\nactually needs, which for a board is one card and for an open detail\npanel is the whole issue.",
+            "required": [
+              "data",
+              "type"
+            ],
+            "properties": {
+              "data": {
+                "type": "object",
+                "description": "A task changed — moved, relabelled, commented on, claimed.\n\nCarries only the id, not the task. Agents and other browsers change\ntasks constantly, and a payload would be a second copy of state that\narrives out of order with the fetch the viewer is already doing. The id\nsays \"what you have for this one is stale\"; the client refetches what it\nactually needs, which for a board is one card and for an open detail\npanel is the whole issue.",
+                "required": [
+                  "task_id"
+                ],
+                "properties": {
+                  "task_id": {
+                    "$ref": "#/components/schemas/TaskId"
+                  }
+                }
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "task_changed"
+                ]
+              }
+            }
           }
         ],
         "description": "Live events pushed to browsers over `/api/v1/ws/ui`."
@@ -5890,8 +8673,53 @@
           "name"
         ],
         "properties": {
+          "key": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Change the prefix in `NOOK-42`.\n\nNormally immutable — it is written into PR bodies and branch names that\nno rename can reach back and fix — but settable, because a key derived\nfrom a board name is sometimes just wrong (\"NookOS Bootstrap\" derives\n\"NOOKO\") and living with it forever is worse than an explicit change a\nperson chose."
+          },
           "name": {
             "type": "string"
+          }
+        }
+      },
+      "UpdateChannelRequest": {
+        "type": "object",
+        "properties": {
+          "config": {
+            "description": "Omit to keep the stored secrets untouched."
+          },
+          "enabled": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "kinds": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            }
+          },
+          "levels": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            }
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         }
       },
@@ -5910,6 +8738,17 @@
               "null"
             ],
             "format": "int32"
+          }
+        }
+      },
+      "UpdateCommentRequest": {
+        "type": "object",
+        "required": [
+          "body_md"
+        ],
+        "properties": {
+          "body_md": {
+            "type": "string"
           }
         }
       },
@@ -5998,6 +8837,12 @@
               }
             ]
           },
+          "column_type": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "description": {
             "type": [
               "string",
@@ -6005,6 +8850,13 @@
             ]
           },
           "position": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "priority": {
             "type": [
               "integer",
               "null"

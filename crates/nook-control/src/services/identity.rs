@@ -71,11 +71,20 @@ pub async fn login_identity(state: &AppState, claims: IdentityClaims) -> ApiResu
         .clone()
         .unwrap_or_else(|| email.split('@').next().unwrap_or("user").to_string());
 
-    let (identity_count,): (i64,) = sqlx::query_as("SELECT count(*) FROM identities")
+    // Count USERS, not identities.
+    //
+    // This asked `SELECT count(*) FROM identities`, which is zero on an
+    // instance bootstrapped with a LOCAL account — local sign-in creates a user
+    // with no `identities` row. The first person to sign in with OIDC therefore
+    // looked like the first person ever, adopted the existing default tenant,
+    // and was made its OWNER: full access to somebody else's nodes, workspaces
+    // and secrets. "Is this instance empty?" is a question about people, and
+    // there is only one table that knows.
+    let (user_count,): (i64,) = sqlx::query_as("SELECT count(*) FROM users")
         .fetch_one(&state.db)
         .await?;
 
-    let (tenant, role) = if identity_count == 0 {
+    let (tenant, role) = if user_count == 0 {
         // Fresh instance: adopt the seeded default tenant rather than creating
         // a duplicate beside it, and the first person owns it.
         let name = state.cfg.default_tenant_name.clone();
@@ -171,6 +180,16 @@ pub async fn login_identity(state: &AppState, claims: IdentityClaims) -> ApiResu
     .bind(&claims.raw_claims)
     .execute(&state.db)
     .await?;
+
+    // Somebody has to be able to run this deployment. Seeding cannot do it —
+    // it runs before anybody has signed in — and "the next boot will pick it
+    // up" is not true of a control plane nobody restarts, so a fresh instance
+    // would have had no operator and no way to grow one.
+    //
+    // Idempotent by "only when NO deployment binding exists", so calling it on
+    // every sign-in costs one indexed lookup and a second person can never
+    // become an operator by accident.
+    crate::seed::bootstrap_operator(&state.db).await;
 
     Ok((user, tenant))
 }

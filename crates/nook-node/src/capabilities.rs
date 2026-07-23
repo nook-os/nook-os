@@ -74,6 +74,7 @@ pub fn detect() -> Capabilities {
         gpus: detect_gpus(),
         docker: detect_docker(),
         tmux: detect_tmux().is_some(),
+        agent_version: Some(env!("CARGO_PKG_VERSION").to_string()),
         git: detect_git(),
         runtimes: detect_runtimes(),
         ssh_public_key: crate::ssh::public_key_for(

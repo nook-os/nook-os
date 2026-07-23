@@ -101,6 +101,12 @@ impl Client {
     pub async fn delete(&self, path: &str) -> Result<Value> {
         self.send(reqwest::Method::DELETE, path, None).await
     }
+
+    /// PUT is the idempotent-write verb the board uses for labels: "make this
+    /// true", safe to repeat, which is what a retrying agent needs.
+    pub async fn put(&self, path: &str, body: Value) -> Result<Value> {
+        self.send(reqwest::Method::PUT, path, Some(body)).await
+    }
 }
 
 /// `nook login --token nook_user_…` — act as yourself, not as this machine.
@@ -527,7 +533,20 @@ async fn secrets_across_workspaces(client: &Client, workspace: Option<&str>) -> 
 /// whatever scalar fields the first row has.
 fn columns(resource: &str, first: &Value) -> Vec<&'static str> {
     match resource {
-        "nodes" => vec!["name", "platform", "status", "last_seen_at"],
+        // `nook get nodes` is how you check a fleet without a browser, so it
+        // answers the questions you actually have about one: is it up, what is
+        // it, how big, and IS IT RUNNING WHAT I DEPLOYED. That last one lived
+        // only in the capabilities blob, which the table never reached into.
+        "nodes" => vec![
+            "name",
+            "status",
+            "platform",
+            "capabilities.agent_version",
+            "capabilities.cpus",
+            "capabilities.memory",
+            "capabilities.runtimes",
+            "last_seen_at",
+        ],
         "sessions" => vec!["name", "runtime", "status", "created_at"],
         "workspaces" => vec!["name", "slug", "git_remote_normalized"],
         "secrets" => vec!["workspace", "name", "updated_at"],
@@ -548,20 +567,58 @@ fn columns(resource: &str, first: &Value) -> Vec<&'static str> {
     }
 }
 
+/// One cell, by dotted path.
+///
+/// Dotted because the most useful things a node reports — its agent version,
+/// its core count — live under `capabilities`, and a table that could only
+/// read top-level keys could not show any of them.
 fn cell(row: &Value, key: &str) -> String {
-    match row.get(key) {
-        None | Some(Value::Null) => "-".into(),
-        Some(Value::String(s)) if s.is_empty() => "-".into(),
-        Some(Value::String(s)) => s.clone(),
-        Some(v) => v.to_string(),
+    let mut node = row;
+    for part in key.split('.') {
+        match node.get(part) {
+            Some(v) => node = v,
+            None => return "-".into(),
+        }
+    }
+    render_value(key, node)
+}
+
+fn render_value(key: &str, v: &Value) -> String {
+    match v {
+        Value::Null => "-".into(),
+        Value::String(s) if s.is_empty() => "-".into(),
+        Value::String(s) => s.clone(),
+        // Raw byte counts are unreadable at a glance and are always the widest
+        // column on the line.
+        Value::Number(n) if key.ends_with("memory") => n
+            .as_f64()
+            .filter(|b| *b > 0.0)
+            .map(|b| format!("{:.0}G", b / 1024.0_f64.powi(3)))
+            .unwrap_or_else(|| "-".into()),
+        Value::Array(a) if a.is_empty() => "-".into(),
+        // A JSON array of runtimes reads as `["bash","zsh"]`; the quotes and
+        // brackets are noise in a column that is already labelled.
+        Value::Array(a) => a
+            .iter()
+            .map(|x| {
+                x.as_str()
+                    .map(str::to_string)
+                    .unwrap_or_else(|| x.to_string())
+            })
+            .collect::<Vec<_>>()
+            .join(","),
+        v => v.to_string(),
     }
 }
 
 fn print_table(resource: &str, rows: &[Value]) {
-    use crate::style;
-
     let cols = columns(resource, &rows[0]);
-    let headers: Vec<String> = cols.iter().map(|c| c.to_uppercase()).collect();
+    // Header names the field, not its path: `CAPABILITIES.AGENT_VERSION` is a
+    // location, `AGENT_VERSION` is a column.
+    let headers: Vec<String> = cols
+        .iter()
+        .map(|c| c.rsplit('.').next().unwrap_or(c).to_uppercase())
+        .collect();
     let mut widths: Vec<usize> = headers.iter().map(|h| h.len()).collect();
     let body: Vec<Vec<String>> = rows
         .iter()
@@ -586,18 +643,18 @@ fn print_table(resource: &str, rows: &[Value]) {
         println!("{}", out.trim_end());
     };
 
-    render(&headers, &|_, v| style::dim(v));
+    render(&headers, &|_, v| crate::style::dim(v));
     for row in &body {
         render(row, &|i, v| {
             // First column names the thing; the rest is detail about it.
             if i == 0 {
-                return style::bold(v);
+                return crate::style::bold(v);
             }
             match cols[i] {
                 "status" => status_colour(v),
                 // Timestamps are the least interesting thing on the line and
                 // the widest — recede them so the eye goes to names and state.
-                c if c.ends_with("_at") => style::dim(v),
+                c if c.ends_with("_at") => crate::style::dim(v),
                 _ => v.to_string(),
             }
         });
@@ -609,9 +666,9 @@ fn print_table(resource: &str, rows: &[Value]) {
 fn status_colour(v: &str) -> String {
     use crate::style;
     match v {
-        "online" | "running" | "active" | "attached" => style::ok_c(v),
+        "online" | "running" | "active" | "attached" => crate::style::ok_c(v),
         "error" | "failed" | "revoked" => style::err(v),
-        "offline" | "stopped" | "exited" | "-" => style::dim(v),
+        "offline" | "stopped" | "exited" | "-" => crate::style::dim(v),
         other => other.to_string(),
     }
 }
@@ -740,4 +797,695 @@ pub async fn delete(kind: &str, name: &str) -> Result<()> {
     client.delete(&format!("/api/v1/{resource}/{id}")).await?;
     println!("✓ Deleted {} '{name}'", resource.trim_end_matches('s'));
     Ok(())
+}
+
+// ── teaching the fleet ───────────────────────────────────────────────────────
+
+/// `nook teach <file>` — one skill, every agent, every machine.
+///
+/// The file is read here and the control plane stores it, which is what makes
+/// this different from copying a file around: nodes that are asleep right now,
+/// and nodes that join next month, get it when they connect. So the summary
+/// printed below distinguishes what was DELIVERED from what will converge —
+/// reporting "taught 5 nodes" when two were offline would be a lie an operator
+/// only discovers when an agent does not know the skill.
+pub async fn teach(path: &str, name: Option<&str>) -> Result<()> {
+    let content = std::fs::read_to_string(path).with_context(|| format!("cannot read {path}"))?;
+    anyhow::ensure!(!content.trim().is_empty(), "{path} is empty");
+
+    // Explicit --name wins; then the document's own frontmatter; then the
+    // filename. A skill named after `SKILL.md` would be called "skill" on every
+    // machine in the fleet, so the filename is genuinely the last resort — and
+    // when it is a bare "skill" we say so rather than shipping it.
+    let derived = name.map(str::to_string).or_else(|| {
+        nook_proto::skill_name_from_frontmatter(&content).or_else(|| {
+            std::path::Path::new(path)
+                .file_stem()
+                .map(|s| s.to_string_lossy().to_lowercase().replace(' ', "-"))
+        })
+    });
+    let skill_name = match derived.as_deref() {
+        Some("skill") | Some("skill-md") => anyhow::bail!(
+            "this file has no frontmatter `name:`, so the only name left is the \
+             filename — which would teach your whole fleet a skill called \
+             \"skill\". Pass --name, or add a `name:` to the document."
+        ),
+        Some(n) => nook_proto::valid_skill_name(n).map_err(|e| anyhow::anyhow!(e))?,
+        None => anyhow::bail!("cannot tell what this skill is called — pass --name"),
+    };
+
+    let client = Client::from_config()?;
+    let resp = client
+        .post(
+            "/api/v1/skills",
+            serde_json::json!({ "name": skill_name, "content": content }),
+        )
+        .await?;
+
+    let delivered: Vec<String> = resp["delivered_to"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    let offline: Vec<String> = resp["offline"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    println!();
+    println!(
+        "{} taught {} ({} bytes)",
+        crate::style::ok_c("✓"),
+        crate::style::bold(skill_name),
+        content.len()
+    );
+    if !delivered.is_empty() {
+        println!("  delivered to: {}", delivered.join(", "));
+    }
+    if !offline.is_empty() {
+        // Named, not counted. "2 offline" is not something anyone can act on,
+        // and it matters that this is not a failure: the skill is stored, so
+        // these machines learn it the moment they reconnect.
+        println!(
+            "  {} {} — will learn it on reconnect",
+            crate::style::dim("offline:"),
+            offline.join(", ")
+        );
+    }
+    if delivered.is_empty() && offline.is_empty() {
+        println!(
+            "  {}",
+            crate::style::dim("no nodes have joined this control plane yet")
+        );
+    }
+    println!();
+    println!(
+        "{}",
+        crate::style::dim(
+            "Each node writes it into every agent it finds (Hermes, Claude Code, …)."
+        )
+    );
+    println!(
+        "{}",
+        crate::style::dim("See what landed where: nook get events")
+    );
+    Ok(())
+}
+
+/// `nook skills list` against the control plane — what the fleet has been taught.
+pub async fn taught(json: bool) -> Result<()> {
+    let client = Client::from_config()?;
+    let resp = client.get("/api/v1/skills").await?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&resp)?);
+        return Ok(());
+    }
+    let rows = resp.as_array().cloned().unwrap_or_default();
+    if rows.is_empty() {
+        println!("Nothing taught yet. Teach your fleet a skill:");
+        println!();
+        println!("    nook teach ./SKILL.md");
+        return Ok(());
+    }
+    println!("{:<24} {:>8}  UPDATED", "NAME", "SIZE");
+    for r in rows {
+        println!(
+            "{:<24} {:>8}  {}",
+            r["name"].as_str().unwrap_or("?"),
+            r["size"].as_i64().unwrap_or(0),
+            r["updated_at"].as_str().unwrap_or("")
+        );
+    }
+    Ok(())
+}
+
+/// `nook unteach <name>` — remove it here and from every machine.
+pub async fn unteach(name: &str) -> Result<()> {
+    let client = Client::from_config()?;
+    let resp = client.delete(&format!("/api/v1/skills/{name}")).await?;
+    let offline = resp["offline"].as_array().map(Vec::len).unwrap_or(0);
+    println!(
+        "{} removed {}",
+        crate::style::ok_c("✓"),
+        crate::style::bold(name)
+    );
+    if offline > 0 {
+        println!(
+            "  {}",
+            crate::style::dim(&format!(
+                "{offline} node(s) offline — they drop it when they reconnect"
+            ))
+        );
+    }
+    Ok(())
+}
+
+// ── the board ───────────────────────────────────────────────────────────────
+
+/// `nook tasks` — the pick query from a terminal.
+///
+/// The same filter an agent uses, so a human can see exactly what the loop
+/// will take next rather than inferring it from a board.
+pub async fn tasks(
+    board: Option<&str>,
+    labels: &[String],
+    not_labels: &[String],
+    assignee: Option<&str>,
+    column_type: Option<&str>,
+    unblocked: bool,
+    json: bool,
+) -> Result<()> {
+    let mut q: Vec<String> = Vec::new();
+    if let Some(b) = board {
+        q.push(format!("board={b}"));
+    }
+    for l in labels {
+        q.push(format!("label={l}"));
+    }
+    for l in not_labels {
+        q.push(format!("not_label={l}"));
+    }
+    if let Some(a) = assignee {
+        q.push(format!("assignee={a}"));
+    }
+    if let Some(c) = column_type {
+        q.push(format!("column_type={c}"));
+    }
+    if unblocked {
+        q.push("is_blocked=false".into());
+    }
+    let path = if q.is_empty() {
+        "/api/v1/tasks".to_string()
+    } else {
+        format!("/api/v1/tasks?{}", q.join("&"))
+    };
+
+    let client = Client::from_config()?;
+    let resp = client.get(&path).await?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&resp)?);
+        return Ok(());
+    }
+    let rows = resp.as_array().cloned().unwrap_or_default();
+    if rows.is_empty() {
+        println!("No tasks match.");
+        return Ok(());
+    }
+    println!(
+        "{:<10} {:<3} {:<28} {:<10} LABELS",
+        "KEY", "PRI", "TITLE", "STATE"
+    );
+    for r in rows {
+        let pri = match r["priority"].as_i64().unwrap_or(0) {
+            1 => "!!",
+            2 => "↑",
+            3 => "=",
+            4 => "↓",
+            _ => "·",
+        };
+        let title = r["title"].as_str().unwrap_or("");
+        let labels: Vec<&str> = r["labels"]
+            .as_array()
+            .map(|a| a.iter().filter_map(|l| l["name"].as_str()).collect())
+            .unwrap_or_default();
+        println!(
+            "{:<10} {:<3} {:<28} {:<10} {}",
+            r["key"].as_str().unwrap_or("—"),
+            pri,
+            if title.chars().count() > 28 {
+                format!("{}…", title.chars().take(27).collect::<String>())
+            } else {
+                title.to_string()
+            },
+            if r["assignee_user_id"].is_null() {
+                "free"
+            } else {
+                "claimed"
+            },
+            labels.join(","),
+        );
+    }
+    Ok(())
+}
+
+/// `nook task <key>` — one whole issue, the way an agent reads it.
+pub async fn task(key: &str, json: bool) -> Result<()> {
+    let client = Client::from_config()?;
+    let resp = client.get(&format!("/api/v1/tasks/{key}")).await?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&resp)?);
+        return Ok(());
+    }
+    let t = &resp["task"];
+    println!(
+        "{} {}",
+        crate::style::bold(t["key"].as_str().unwrap_or("—")),
+        t["title"].as_str().unwrap_or("")
+    );
+    let labels: Vec<&str> = t["labels"]
+        .as_array()
+        .map(|a| a.iter().filter_map(|l| l["name"].as_str()).collect())
+        .unwrap_or_default();
+    if !labels.is_empty() {
+        println!("  labels: {}", labels.join(", "));
+    }
+    if resp["is_blocked"].as_bool().unwrap_or(false) {
+        let by: Vec<&str> = resp["blocked_by"]
+            .as_array()
+            .map(|a| a.iter().filter_map(|r| r["key"].as_str()).collect())
+            .unwrap_or_default();
+        println!("  {} {}", crate::style::err("BLOCKED by"), by.join(", "));
+    }
+    if let Some(d) = t["description"].as_str().filter(|d| !d.is_empty()) {
+        println!();
+        println!("{d}");
+    }
+    let comments = resp["comments"].as_array().cloned().unwrap_or_default();
+    if !comments.is_empty() {
+        println!();
+        println!(
+            "{}",
+            crate::style::dim(&format!("── {} comment(s)", comments.len()))
+        );
+        for c in comments {
+            println!(
+                "\n{} {}",
+                crate::style::bold(c["author_name"].as_str().unwrap_or("?")),
+                crate::style::dim(c["created_at"].as_str().unwrap_or("")),
+            );
+            println!("{}", c["body_md"].as_str().unwrap_or(""));
+        }
+    }
+    Ok(())
+}
+
+/// `nook comment <key> <body>` — where the reasoning goes.
+pub async fn comment(key: &str, body: &str) -> Result<()> {
+    let client = Client::from_config()?;
+    let host = sysinfo::System::host_name().unwrap_or_else(|| "unknown".into());
+    client
+        .post(
+            &format!("/api/v1/tasks/{key}/comments"),
+            serde_json::json!({
+                "body_md": body,
+                "author_name": format!("nook cli on {host}"),
+            }),
+        )
+        .await?;
+    println!(
+        "{} commented on {}",
+        crate::style::ok_c("✓"),
+        crate::style::bold(key)
+    );
+    Ok(())
+}
+
+/// `nook label <key> <name> [--remove]`.
+pub async fn label(key: &str, name: &str, remove: bool) -> Result<()> {
+    let client = Client::from_config()?;
+    let path = format!("/api/v1/tasks/{key}/labels/{name}");
+    if remove {
+        client.delete(&path).await?;
+        println!("{} removed {name} from {key}", crate::style::ok_c("✓"));
+    } else {
+        client.put(&path, serde_json::json!({})).await?;
+        println!("{} added {name} to {key}", crate::style::ok_c("✓"));
+    }
+    Ok(())
+}
+
+/// `nook claim <key>` — take the work.
+pub async fn claim(key: &str, column_type: Option<&str>) -> Result<()> {
+    let client = Client::from_config()?;
+    let body = match column_type {
+        Some(c) => serde_json::json!({ "column_type": c }),
+        None => serde_json::json!({}),
+    };
+    match client
+        .post(&format!("/api/v1/tasks/{key}/claim"), body)
+        .await
+    {
+        Ok(_) => {
+            println!(
+                "{} claimed {}",
+                crate::style::ok_c("✓"),
+                crate::style::bold(key)
+            );
+            Ok(())
+        }
+        // Losing the race is the expected outcome for all but one caller, so
+        // it is reported as information rather than as a failure.
+        Err(e) if e.to_string().contains("claimed this first") => {
+            println!(
+                "{} {key} was already taken — pick another",
+                crate::style::dim("·")
+            );
+            Ok(())
+        }
+        Err(e) => Err(e),
+    }
+}
+
+// ── notifications ───────────────────────────────────────────────────────────
+
+/// `nook notify` — tell the fleet something happened.
+///
+/// One entry point for everything that wants to say something: an agent's
+/// finish hook, a CI step, a cron job, a human. The control plane fans it out
+/// to every connected UI and every configured channel, so the thing raising it
+/// never has to know whether you read Slack.
+///
+/// Works with a NODE token as well as a user token — a machine reporting that
+/// it finished is the whole point.
+pub async fn notify_fleet(
+    title: &str,
+    body: Option<&str>,
+    level: &str,
+    kind: Option<&str>,
+    link: Option<&str>,
+) -> Result<()> {
+    anyhow::ensure!(!title.trim().is_empty(), "a notification needs a title");
+    let client = Client::from_config()?;
+
+    // Say where it came from without being asked. "Finished" is not useful on
+    // a fleet; "finished on azul" is.
+    let host = sysinfo::System::host_name().unwrap_or_else(|| "unknown".into());
+    let mut payload = serde_json::json!({ "host": host });
+    if let Ok(cwd) = std::env::current_dir() {
+        payload["cwd"] = serde_json::json!(cwd.display().to_string());
+    }
+
+    client
+        .post(
+            "/api/v1/notify",
+            serde_json::json!({
+                "title": title,
+                "body": body,
+                "level": level,
+                "kind": kind.unwrap_or("cli"),
+                "link": link,
+                "payload": payload,
+            }),
+        )
+        .await?;
+    println!(
+        "{} notified: {}",
+        crate::style::ok_c("✓"),
+        crate::style::bold(title)
+    );
+    Ok(())
+}
+
+// ── operator roles ──────────────────────────────────────────────────────────
+
+/// `nook operator grant|revoke <email>` — who may run this deployment.
+///
+/// A deployment with one operator and no way to appoint another is one lost
+/// password from being unadministrable, so this exists from the start rather
+/// than waiting for a UI.
+pub async fn operator_role(email: &str, role: &str, revoke: bool) -> Result<()> {
+    let client = Client::from_config()?;
+    client
+        .post(
+            "/api/v1/operator/bindings",
+            serde_json::json!({ "email": email, "role": role, "revoke": revoke }),
+        )
+        .await?;
+    println!(
+        "{} {} {} @ deployment {} {}",
+        crate::style::ok_c("✓"),
+        if revoke { "revoked" } else { "granted" },
+        crate::style::bold(role),
+        if revoke { "from" } else { "to" },
+        crate::style::bold(email),
+    );
+    Ok(())
+}
+
+/// `nook operator who` — who holds what, so "why can't I see that" has an
+/// answer that does not require reading the database.
+pub async fn operator_who() -> Result<()> {
+    let client = Client::from_config()?;
+    let me = client.get("/api/v1/auth/me").await?;
+    let cap = &me["capability"];
+    println!(
+        "you:      {} ({})",
+        me["user"]["email"].as_str().unwrap_or("?"),
+        me["tenant"]["slug"].as_str().unwrap_or("?")
+    );
+    println!(
+        "operator: {}",
+        if cap["operator"].as_bool().unwrap_or(false) {
+            crate::style::ok_c("yes")
+        } else {
+            crate::style::dim("no")
+        }
+    );
+    let held: Vec<&str> = cap["deployment"]
+        .as_array()
+        .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
+        .unwrap_or_default();
+    if held.is_empty() {
+        println!(
+            "held:     {}",
+            crate::style::dim("nothing at deployment scope")
+        );
+    } else {
+        println!("held:     {}", held.join(", "));
+    }
+    Ok(())
+}
+
+/// `nook operator bindings` — who holds what.
+pub async fn operator_bindings(json: bool) -> Result<()> {
+    let client = Client::from_config()?;
+    let rows = client.get("/api/v1/operator/bindings").await?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&rows)?);
+        return Ok(());
+    }
+    let rows = rows.as_array().cloned().unwrap_or_default();
+    if rows.is_empty() {
+        println!("No role bindings.");
+        return Ok(());
+    }
+    println!("{:<26} {:<14} {:<12} WHERE", "WHO", "ROLE", "SCOPE");
+    for r in rows {
+        println!(
+            "{:<26} {:<14} {:<12} {}",
+            r["email"].as_str().unwrap_or("?"),
+            r["role_key"].as_str().unwrap_or("?"),
+            r["scope_type"].as_str().unwrap_or("?"),
+            r["scope_label"].as_str().unwrap_or("—"),
+        );
+    }
+    Ok(())
+}
+
+/// `nook operator orgs` and the writes that go with it.
+pub async fn operator_orgs(json: bool) -> Result<()> {
+    let client = Client::from_config()?;
+    let rows = client.get("/api/v1/operator/orgs").await?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&rows)?);
+        return Ok(());
+    }
+    println!("{:<24} {:<24} TENANTS", "NAME", "SLUG");
+    for r in rows.as_array().cloned().unwrap_or_default() {
+        println!(
+            "{:<24} {:<24} {}",
+            r["name"].as_str().unwrap_or("?"),
+            r["slug"].as_str().unwrap_or("?"),
+            r["tenants"].as_i64().unwrap_or(0),
+        );
+    }
+    Ok(())
+}
+
+pub async fn operator_org_create(name: &str, slug: Option<&str>) -> Result<()> {
+    let client = Client::from_config()?;
+    let r = client
+        .post(
+            "/api/v1/operator/orgs",
+            serde_json::json!({ "name": name, "slug": slug }),
+        )
+        .await?;
+    println!(
+        "{} created org {}",
+        crate::style::ok_c("✓"),
+        crate::style::bold(r["slug"].as_str().unwrap_or(name))
+    );
+    Ok(())
+}
+
+/// Stage a new certificate authority for a tenant.
+///
+/// Staging only, deliberately. Machines learn the new CA on their next renewal;
+/// promoting it before they have would strand every node that had not. Promote
+/// as a second, later act.
+pub async fn operator_ca_stage(tenant: &str) -> Result<()> {
+    let client = Client::from_config()?;
+    let r = client
+        .post(
+            &format!("/api/v1/operator/tenants/{tenant}/ca"),
+            serde_json::json!({}),
+        )
+        .await?;
+    println!(
+        "{} staged a CA for {}",
+        crate::style::ok_c("✓"),
+        crate::style::bold(tenant)
+    );
+    println!("  id:          {}", r["id"].as_str().unwrap_or("?"));
+    println!(
+        "  fingerprint: {}",
+        r["fingerprint"].as_str().unwrap_or("?")
+    );
+    println!();
+    println!(
+        "{}",
+        crate::style::dim("Nodes pick this up on their next renewal. Promote it once they have:")
+    );
+    println!(
+        "    nook operator ca promote {tenant} {}",
+        r["id"].as_str().unwrap_or("<id>")
+    );
+    Ok(())
+}
+
+pub async fn operator_ca_promote(tenant: &str, ca: &str) -> Result<()> {
+    let client = Client::from_config()?;
+    client
+        .post(
+            &format!("/api/v1/operator/tenants/{tenant}/ca/{ca}/promote"),
+            serde_json::json!({}),
+        )
+        .await?;
+    println!(
+        "{} {} now signs for {}",
+        crate::style::ok_c("✓"),
+        crate::style::bold(ca),
+        crate::style::bold(tenant)
+    );
+    Ok(())
+}
+
+/// Revoke a node's certificate, or remove it entirely.
+pub async fn operator_node(node: &str, remove: bool) -> Result<()> {
+    let client = Client::from_config()?;
+    if remove {
+        client
+            .delete(&format!("/api/v1/operator/nodes/{node}"))
+            .await?;
+        println!(
+            "{} removed node {}",
+            crate::style::ok_c("✓"),
+            crate::style::bold(node)
+        );
+    } else {
+        client
+            .post(
+                &format!("/api/v1/operator/nodes/{node}/revoke"),
+                serde_json::json!({}),
+            )
+            .await?;
+        println!(
+            "{} revoked {} — it can no longer connect",
+            crate::style::ok_c("✓"),
+            crate::style::bold(node)
+        );
+    }
+    Ok(())
+}
+
+/// Move a tenant into another org.
+pub async fn operator_move_tenant(tenant: &str, org: &str) -> Result<()> {
+    let client = Client::from_config()?;
+    client
+        .post(
+            &format!("/api/v1/operator/tenants/{tenant}/org"),
+            serde_json::json!({ "org_id": org }),
+        )
+        .await?;
+    println!(
+        "{} moved {} into org {}",
+        crate::style::ok_c("✓"),
+        crate::style::bold(tenant),
+        crate::style::bold(org)
+    );
+    Ok(())
+}
+
+#[cfg(test)]
+mod table_tests {
+    use super::*;
+    use serde_json::json;
+
+    /// The whole point of the dotted path: the fields worth showing about a
+    /// node live under `capabilities`, and a table that could only read
+    /// top-level keys showed none of them.
+    #[test]
+    fn a_dotted_path_reaches_into_nested_objects() {
+        let row = json!({
+            "name": "crimson",
+            "capabilities": { "agent_version": "0.4.3", "cpus": 32 }
+        });
+        assert_eq!(cell(&row, "name"), "crimson");
+        assert_eq!(cell(&row, "capabilities.agent_version"), "0.4.3");
+        assert_eq!(cell(&row, "capabilities.cpus"), "32");
+    }
+
+    /// A node too old to report its version, and one that reports nothing at
+    /// all, must both read as "-" rather than panicking or printing `null`.
+    #[test]
+    fn a_missing_path_is_a_dash_at_every_depth() {
+        let row = json!({ "name": "amber", "capabilities": { "agent_version": null } });
+        assert_eq!(cell(&row, "capabilities.agent_version"), "-");
+        assert_eq!(cell(&row, "capabilities.nope"), "-");
+        assert_eq!(cell(&row, "nope.nope.nope"), "-");
+        assert_eq!(cell(&json!({}), "capabilities.cpus"), "-");
+    }
+
+    /// Bytes and JSON arrays are the two things that made this table
+    /// unreadable: `51539607552` and `["bash","zsh"]` are both wider than the
+    /// column they sit in and neither is what a person wants to read.
+    #[test]
+    fn sizes_and_lists_are_rendered_for_people() {
+        let row = json!({
+            "capabilities": { "memory": 51539607552_i64, "runtimes": ["claude", "bash"] }
+        });
+        assert_eq!(cell(&row, "capabilities.memory"), "48G");
+        assert_eq!(cell(&row, "capabilities.runtimes"), "claude,bash");
+        // An empty list is nothing, not "[]".
+        assert_eq!(
+            cell(
+                &json!({"capabilities": {"runtimes": []}}),
+                "capabilities.runtimes"
+            ),
+            "-"
+        );
+    }
+
+    /// The header names the field, not where it is stored — a column headed
+    /// `CAPABILITIES.AGENT_VERSION` is a path, and paths are for the code.
+    #[test]
+    fn headers_drop_the_path() {
+        let cols = columns("nodes", &json!({}));
+        let headers: Vec<String> = cols
+            .iter()
+            .map(|c| c.rsplit('.').next().unwrap_or(c).to_uppercase())
+            .collect();
+        assert!(headers.contains(&"AGENT_VERSION".to_string()));
+        assert!(
+            !headers.iter().any(|h| h.contains('.')),
+            "no header should carry a dotted path: {headers:?}"
+        );
+    }
 }

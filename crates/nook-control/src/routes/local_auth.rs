@@ -99,9 +99,19 @@ pub async fn bootstrap(
     )
     .await;
 
+    // The person who claims an instance with a local account is its operator,
+    // for the same reason the OIDC path grants it: seeding runs before anybody
+    // exists, so without this a fresh deployment has no operator and no way to
+    // appoint one.
+    crate::seed::bootstrap_operator(&state.db).await;
+
     Ok((
         jar.add(session_cookie(&state, session_id)),
-        Json(MeResponse { user, tenant }),
+        Json(MeResponse {
+            user,
+            tenant,
+            capability: Default::default(),
+        }),
     ))
 }
 
@@ -130,7 +140,11 @@ pub async fn login(
 
     Ok((
         jar.add(session_cookie(&state, session_id)),
-        Json(MeResponse { user, tenant }),
+        Json(MeResponse {
+            user,
+            tenant,
+            capability: Default::default(),
+        }),
     ))
 }
 

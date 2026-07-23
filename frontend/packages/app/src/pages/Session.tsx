@@ -21,6 +21,33 @@ import { askConfirm, notify } from "../dialogs";
 
 const DIFF_PANEL_KEY = "nookos-diff-panel-open";
 
+/**
+ * Live git status for a checkout, or `null` when there is nothing to ask about.
+ *
+ * A hook rather than a query inside the panel, because the decision "is there a
+ * git panel at all" belongs to the page: it sizes the grid column, and a column
+ * sized for a panel that then declines to render is the blank space this fixes.
+ * React Query dedupes the two call sites by key, so asking twice costs nothing.
+ */
+function useGitStatus(workspaceId: string | null, nodeId: string | undefined) {
+  return useQuery({
+    queryKey: ["git", workspaceId, nodeId],
+    queryFn: async () => {
+      const { data, error } = await api.GET("/api/v1/workspaces/{id}/git", {
+        params: {
+          path: { id: workspaceId! },
+          query: { node_id: nodeId! },
+        },
+      });
+      if (error) throw new Error(JSON.stringify(error));
+      return data ?? null;
+    },
+    enabled: !!workspaceId && !!nodeId,
+    refetchInterval: 10000,
+    retry: false,
+  });
+}
+
 function DiffView({ diff }: { diff: string }) {
   if (!diff.trim()) {
     return <Empty>Working tree is clean — no diff.</Empty>;
@@ -49,9 +76,9 @@ function DiffView({ diff }: { diff: string }) {
   );
 }
 
-// Only rendered for sessions that have a workspace — an ad-hoc terminal has no
-// checkout to diff — so `workspaceId` is a plain string, not the nullable one
-// off `session`.
+// Only rendered when the session has a workspace AND that checkout is a git
+// repository — see `hasGitPanel` — so `workspaceId` is a plain string, not the
+// nullable one off `session`.
 function GitPanel({
   session,
   workspaceId,
@@ -63,21 +90,10 @@ function GitPanel({
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState<null | "commit" | "push">(null);
   const [note, setNote] = useState<string | null>(null);
-  const { data, refetch, isFetching, error } = useQuery({
-    queryKey: ["git", workspaceId, session.node_id],
-    queryFn: async () => {
-      const { data, error } = await api.GET("/api/v1/workspaces/{id}/git", {
-        params: {
-          path: { id: workspaceId },
-          query: { node_id: session.node_id },
-        },
-      });
-      if (error) throw new Error(JSON.stringify(error));
-      return data ?? null;
-    },
-    refetchInterval: 10000,
-    retry: false,
-  });
+  const { data, refetch, isFetching, error } = useGitStatus(
+    workspaceId,
+    session.node_id,
+  );
 
   // Commit and push run git on the machine that holds the checkout — the same
   // place the diff above came from. The point is not to reimplement git in a
@@ -262,6 +278,7 @@ export function SessionPage() {
     enabled: !!session && !session.workspace_id,
   });
   const nodeName = nodes?.find((n) => n.id === session?.node_id)?.name;
+  const git = useGitStatus(session?.workspace_id ?? null, session?.node_id);
 
   // Visiting a session opens (or refreshes) its tab, tagged with its
   // workspace so the strip can scope tabs to the workspace context.
@@ -295,6 +312,14 @@ export function SessionPage() {
 
   if (!session) return <Empty>Loading…</Empty>;
   const status = liveStatus ?? sessionStatus[session.id] ?? session.status;
+
+  // Two ways there is no git to show: an ad-hoc terminal, which has no
+  // workspace, and a checkout that is not a repository — "+ New empty project"
+  // makes one. `is_repo === false` is the only value that hides the panel:
+  // while the first request is in flight, and if the node cannot be reached,
+  // the answer is unknown, and guessing "no repo" would make the panel vanish
+  // and come back on every reconnect.
+  const hasGitPanel = !!session.workspace_id && git.data?.is_repo !== false;
 
   const toggleGit = () => {
     setGitOpen((open) => {
@@ -355,7 +380,11 @@ export function SessionPage() {
       <SessionTabs activeId={session.id} />
       <div
         className="nook-grid"
-        style={{ gridTemplateColumns: gitOpen ? "1fr 440px" : "1fr", flex: 1, minHeight: 0 }}
+        style={{
+          gridTemplateColumns: gitOpen && hasGitPanel ? "1fr 440px" : "1fr",
+          flex: 1,
+          minHeight: 0,
+        }}
       >
         <Panel
         title={
@@ -386,9 +415,10 @@ export function SessionPage() {
             ) : (
               <SplitButtons sessionId={session.id} />
             )}
-            {/* No workspace, nothing to diff — an ad-hoc terminal has no git
-                panel. */}
-            {session.workspace_id && (
+            {/* Nothing to diff — no workspace, or a checkout that is not a
+                repository. Hiding the toggle as well as the panel matters: a
+                button that opens an empty column is worse than no button. */}
+            {hasGitPanel && (
               <button
                 className="btn small icon"
                 onClick={toggleGit}
@@ -432,7 +462,7 @@ export function SessionPage() {
             />
           )}
         </Panel>
-        {gitOpen && session.workspace_id && (
+        {gitOpen && hasGitPanel && session.workspace_id && (
           <GitPanel session={session} workspaceId={session.workspace_id} />
         )}
       </div>

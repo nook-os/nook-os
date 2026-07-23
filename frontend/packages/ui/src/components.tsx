@@ -42,8 +42,22 @@ export function Panel({
  */
 export type Tone = "ok" | "warn" | "err" | "info" | "accent" | "dim";
 
-export function Pill({ tone, children }: { tone?: Tone; children: React.ReactNode }) {
-  return <span className={`pill ${tone ?? ""}`}>{children}</span>;
+export function Pill({
+  tone,
+  children,
+  title,
+}: {
+  tone?: Tone;
+  children: React.ReactNode;
+  /** Hover text. A pill compresses a state into a word; this is where the
+      sentence explaining it goes, without spending a row on it. */
+  title?: string;
+}) {
+  return (
+    <span className={`pill ${tone ?? ""}`} title={title}>
+      {children}
+    </span>
+  );
 }
 
 export function StatusDot({ status }: { status: string }) {

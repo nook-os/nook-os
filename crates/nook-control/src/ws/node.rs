@@ -229,18 +229,9 @@ async fn handle_message(
 ) -> anyhow::Result<()> {
     match msg {
         NodeToControl::Register {
-            agent_version,
             capabilities,
             live_tmux_sessions,
         } => {
-            // Recorded on every register rather than once at join: the answer
-            // changes when a node updates, and a stale answer is worse than
-            // none because it reads as current.
-            let _ = sqlx::query("UPDATE nodes SET agent_version = $2 WHERE id = $1")
-                .bind(node_id)
-                .bind(agent_version.as_deref())
-                .execute(&state.db)
-                .await;
             sqlx::query(
                 "UPDATE nodes SET capabilities = $2, hostname = $3, platform = $4,
                         status = 'online', last_seen_at = now(), updated_at = now()
@@ -266,13 +257,41 @@ async fn handle_message(
             .execute(&state.db)
             .await?;
 
+            // What this tenant trusts, so the node can tell whether a rotation
+            // is being staged and renew for it rather than waiting for expiry.
+            let ca_fingerprints = crate::ca::trust_bundle(&state.db, tenant)
+                .await
+                .map(|cas| cas.into_iter().map(|c| c.fingerprint).collect())
+                .unwrap_or_default();
+
             _tx.send(ControlToNode::RegisterAck {
                 expected_agent_version: Some(env!("CARGO_PKG_VERSION").to_string()),
                 node_id,
                 node_name: name.to_string(),
+                ca_fingerprints,
             })
             .await
             .ok();
+
+            // Convergence, and the reason skills are stored rather than only
+            // pushed. A node that was offline when something was taught — or
+            // one joining for the first time — learns the whole set here, so
+            // "my fleet knows this" stops depending on which machines happened
+            // to be awake when somebody ran `nook teach`. The node skips writes
+            // whose content it already has, so the steady state is free.
+            match crate::routes::skills::all_for_tenant(&state.db, tenant).await {
+                Ok(msgs) => {
+                    if !msgs.is_empty() {
+                        tracing::debug!(node = %name, count = msgs.len(), "syncing skills");
+                    }
+                    for m in msgs {
+                        _tx.send(m).await.ok();
+                    }
+                }
+                // Not fatal: a node that connects but misses a skill sync is
+                // far better than one that cannot connect at all.
+                Err(e) => tracing::warn!(node = %name, error = %e, "cannot sync skills"),
+            }
 
             state.registry.publish(
                 tenant,
@@ -320,6 +339,40 @@ async fn handle_message(
         }
         NodeToControl::WorkspacesDiscovered { workspaces } => {
             crate::services::discovery::reconcile(state, tenant, node_id, workspaces).await?;
+        }
+        NodeToControl::SkillInstalled {
+            name: skill,
+            agents,
+            paths,
+            error,
+        } => {
+            // Recorded as an event rather than kept in a table. What an
+            // operator needs to answer is "did this land, and where" at the
+            // moment they taught it — a question about an occurrence, which is
+            // what the activity log is for. A per-node skill-state table would
+            // have to be reconciled against machines that get reinstalled, and
+            // would then be one more thing that can be wrong.
+            if let Some(e) = &error {
+                tracing::warn!(node = %name, skill = %skill, error = %e, "node could not learn a skill");
+            }
+            events::record(
+                state,
+                tenant,
+                EventDraft::new(if error.is_some() {
+                    "skill.install_failed"
+                } else {
+                    "skill.installed"
+                })
+                .actor("node", node_id.0)
+                .node(node_id)
+                .payload(serde_json::json!({
+                    "skill": skill,
+                    "agents": agents,
+                    "paths": paths,
+                    "error": error,
+                })),
+            )
+            .await;
         }
         NodeToControl::SessionStarted {
             session_id,
@@ -455,6 +508,7 @@ async fn handle_message(
         }
         NodeToControl::GitStatusResult {
             request_id,
+            is_repo,
             branch,
             files,
             diff,
@@ -462,6 +516,7 @@ async fn handle_message(
             state.registry.complete_git_status(
                 request_id,
                 crate::ws::registry::GitStatusPayload {
+                    is_repo,
                     branch,
                     files,
                     diff,

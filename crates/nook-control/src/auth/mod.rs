@@ -3,6 +3,9 @@
 
 pub mod password;
 
+pub mod perm;
+pub mod session_guard;
+
 use axum::extract::FromRequestParts;
 use axum::http::request::Parts;
 use axum_extra::extract::cookie::{Cookie, CookieJar, Key, SameSite};

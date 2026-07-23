@@ -38,6 +38,18 @@
     "windows": {
       "digestAlgorithm": "sha256",
       "timestampUrl": "http://timestamp.digicert.com"
+    },
+    "createUpdaterArtifacts": true
+  },
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://github.com/nook-os/nook-os/releases/latest/download/latest.json"
+      ],
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDgwMkI1OUFGNUU1OTBGOTYKUldTV0QxbGVyMWtyZ1BJdnFpWW9NMzk0Q3hpeHNIdW1JbWhwKzRITmlaMUxrTlpiZnRjK2MySisK",
+      "windows": {
+        "installMode": "passive"
+      }
     }
   }
 }

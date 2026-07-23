@@ -4,6 +4,34 @@
  */
 
 export interface paths {
+    "/api/v1/auth/dev-accounts": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * GET /api/v1/auth/dev-accounts — who you can sign in as, in dev mode.
+         * @description Dev only, and unauthenticated by necessity: it is what the login screen
+         *     reads before anybody is signed in. It returns emails and display names of
+         *     accounts that already exist — no credentials, no tokens — and it is refused
+         *     outright unless `AUTH_DEV_MODE` is on and this is not production, which is
+         *     the same gate `dev_login` itself uses.
+         *
+         *     It exists because testing authorization requires BEING different people, and
+         *     a model you cannot switch between users to exercise is a model nobody
+         *     exercises.
+         */
+        get: operations["dev_accounts"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/auth/dev-login": {
         parameters: {
             query?: never;
@@ -248,6 +276,22 @@ export interface paths {
         patch: operations["update_column"];
         trace?: never;
     };
+    "/api/v1/comments/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete: operations["delete_comment"];
+        options?: never;
+        head?: never;
+        patch: operations["update_comment"];
+        trace?: never;
+    };
     "/api/v1/dispatcher/suggest": {
         parameters: {
             query?: never;
@@ -367,6 +411,43 @@ export interface paths {
         put?: never;
         post?: never;
         delete: operations["delete_git_credential"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/labels": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["list_labels"];
+        put?: never;
+        /**
+         * Create, or return what is already there.
+         * @description `200` on an existing name rather than `409`: callers want the label to
+         *     exist, not to be told who created it first.
+         */
+        post: operations["create_label"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/labels/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete: operations["delete_label"];
         options?: never;
         head?: never;
         patch?: never;
@@ -594,6 +675,34 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/nodes/{id}/update": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * POST /api/v1/nodes/{id}/update — tell a node to replace its agent and restart.
+         * @description A person asking, rather than the automatic path: a node already updates
+         *     itself on reconnect when its version differs from what this control plane
+         *     expects. This is for the case where you do not want to wait for a
+         *     reconnect, or where the automatic path declined and you want to see why.
+         *
+         *     The node decides whether it can. It knows whether anything would restart it
+         *     and refuses if not, because an agent that replaces its binary and exits
+         *     unsupervised simply goes offline — and doing that across a fleet takes every
+         *     machine at once.
+         */
+        post: operations["update_node_agent"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/notes/{id}": {
         parameters: {
             query?: never;
@@ -608,6 +717,385 @@ export interface paths {
         options?: never;
         head?: never;
         patch: operations["update_note"];
+        trace?: never;
+    };
+    "/api/v1/notification-channels": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["list_channels"];
+        put?: never;
+        post: operations["create_channel"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/notification-channels/kinds": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * What providers exist and what each one needs, so the UI builds its forms
+         *     from the server rather than from a copy of this list that drifts.
+         */
+        get: operations["list_channel_kinds"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/notification-channels/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete: operations["delete_channel"];
+        options?: never;
+        head?: never;
+        patch: operations["update_channel"];
+        trace?: never;
+    };
+    "/api/v1/notification-channels/{id}/test": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Send a sample through one channel and report what happened. */
+        post: operations["test_channel"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/notifications": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["list_notifications"];
+        put?: never;
+        post?: never;
+        delete: operations["clear_notifications"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/notifications/read": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Mark one read, or all of them when no id is given. */
+        post: operations["mark_notifications_read"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/notify": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Raise a notification.
+         * @description Deliberately open to any authenticated caller INCLUDING a node token: the
+         *     whole point is that a machine finishing a job can say so. A node can already
+         *     report events about itself; this is the same trust, with a nicer surface.
+         */
+        post: operations["notify"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/operator/audit": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The audit trail, including operator reads themselves. */
+        get: operations["operator_audit"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/operator/bindings": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Who holds what. Needed before granting is meaningful — you cannot revoke a
+         *     binding you cannot see.
+         */
+        get: operations["operator_list_bindings"];
+        put?: never;
+        /**
+         * Grant or revoke a role binding.
+         * @description The one write on this surface, and it is here rather than deferred with the
+         *     others because a deployment with exactly one operator and no way to make a
+         *     second is a deployment one lost password away from being unadministrable.
+         *
+         *     Requires `org.manage` — an operator can appoint another operator, which is
+         *     the same authority every root-shaped role has. A tenant admin cannot,
+         *     because `org.manage` is not in their role.
+         */
+        post: operations["operator_grant"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/operator/nodes": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Nodes, always visible. Names, status, resources, owner, session count. */
+        get: operations["operator_list_nodes"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/operator/nodes/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete: operations["operator_remove_node"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/operator/nodes/{id}/revoke": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["operator_revoke_node"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/operator/orgs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["operator_list_orgs"];
+        put?: never;
+        post: operations["operator_create_org"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/operator/orgs/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch: operations["operator_rename_org"];
+        trace?: never;
+    };
+    "/api/v1/operator/orgs/{id}/policy": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The current policy for one org, for the operator who may change it. */
+        get: operations["operator_get_policy"];
+        put?: never;
+        /** Widen or narrow one field. Recorded, and announced to the people it affects. */
+        post: operations["operator_set_policy"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/operator/tenants": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Tenants, at minimum visibility.
+         * @description Always visible, per the model: that a tenant exists, its member count, and
+         *     how many nodes and sessions it runs. Several machines working one task is an
+         *     audit signal, and an operator who cannot see load cannot run the deployment.
+         *
+         *     Never visible here: repository names, branches, worktree paths, task titles.
+         *     Those are policy-gated and added by `enrich` below — they are not selected
+         *     and then removed.
+         */
+        get: operations["operator_list_tenants"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/operator/tenants/{id}/ca": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Stage a new CA for a tenant.
+         * @description Two steps, not one. Staging distributes the new authority so machines pick
+         *     it up on their next renewal; promoting makes it sign. A single "rotate"
+         *     button that did both would strand every node that had not renewed in
+         *     between — which is the reason the tenant-facing route has always been two
+         *     calls, and not a limitation worth papering over here.
+         *
+         *     Delegates to the same mechanism rather than reimplementing it: there must be
+         *     exactly one way a CA is created, or the two drift and one is wrong.
+         */
+        post: operations["operator_stage_ca"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/operator/tenants/{id}/ca/{ca}/promote": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Promote a staged CA to signer. The previous signer keeps being trusted. */
+        post: operations["operator_promote_ca"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/operator/tenants/{id}/org": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Move a tenant into another org.
+         * @description Requires `org.manage` at BOTH ends — the org losing it and the org gaining
+         *     it. Checking only one would let somebody with authority over a single org
+         *     pull tenants into it from orgs they have no say over, or push their own
+         *     tenants somewhere they cannot be followed.
+         */
+        post: operations["operator_move_tenant"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/relations/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete: operations["delete_relation"];
+        options?: never;
+        head?: never;
+        patch?: never;
         trace?: never;
     };
     "/api/v1/schedule/node": {
@@ -797,7 +1285,84 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/skills": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["list_skills"];
+        put?: never;
+        /**
+         * Teach the fleet. Re-teaching the same name replaces it, because "I improved
+         *     the skill, push it everywhere" is the common case and it has to be one verb.
+         */
+        post: operations["teach_skill"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/skills/{name}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["get_skill"];
+        put?: never;
+        post?: never;
+        /** Unteach: forget it here, and tell every node to remove it. */
+        delete: operations["unteach_skill"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/tasks": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The pick query.
+         * @description Built as one statement with bound parameters rather than assembled from
+         *     strings — every filter here is caller-supplied, and a query builder that
+         *     interpolated any of them would be an injection with a board's worth of data
+         *     behind it. The cost is a slightly denser SQL body; the benefit is that no
+         *     value ever reaches the parser.
+         */
+        get: operations["query_tasks"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/tasks/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["get_task"];
+        put?: never;
+        post?: never;
+        delete: operations["delete_task"];
+        options?: never;
+        head?: never;
+        patch: operations["update_task"];
+        trace?: never;
+    };
+    "/api/v1/tasks/{id}/claim": {
         parameters: {
             query?: never;
             header?: never;
@@ -806,11 +1371,34 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        post?: never;
-        delete: operations["delete_task"];
+        /**
+         * Take the work, atomically.
+         * @description The assignment and the move are one statement with the "still unassigned"
+         *     test in its WHERE clause, so two agents racing cannot both win: the second
+         *     UPDATE matches zero rows and gets a 409 carrying the current state, which is
+         *     enough for it to pick again without another round trip.
+         */
+        post: operations["claim_task"];
+        delete?: never;
         options?: never;
         head?: never;
-        patch: operations["update_task"];
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/tasks/{id}/comments": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["list_comments"];
+        put?: never;
+        post: operations["create_comment"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
         trace?: never;
     };
     "/api/v1/tasks/{id}/dispatch": {
@@ -824,6 +1412,24 @@ export interface paths {
         put?: never;
         post: operations["task_dispatch"];
         delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/tasks/{id}/labels/{label}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /** Attach a label. Succeeds when it is already attached. */
+        put: operations["add_task_label"];
+        post?: never;
+        /** Detach a label. Succeeds when it is already absent. */
+        delete: operations["remove_task_label"];
         options?: never;
         head?: never;
         patch?: never;
@@ -855,6 +1461,39 @@ export interface paths {
         get?: never;
         put?: never;
         post: operations["task_prune_worktree"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/tasks/{id}/relations": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["create_relation"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/tasks/{id}/release": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Give the work back: clear the assignee so somebody else can pick it up. */
+        post: operations["release_task"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1507,6 +2146,21 @@ export interface components {
              */
             oidc_issuer?: string | null;
         };
+        /** @description Who holds what, for the roles table. */
+        BindingRow: {
+            /** Format: date-time */
+            created_at: string;
+            display_name: string;
+            email: string;
+            /** Format: uuid */
+            id: string;
+            role_key: string;
+            /** Format: uuid */
+            scope_id?: string | null;
+            /** @description The org or tenant slug the binding is scoped to, when it has one. */
+            scope_label?: string | null;
+            scope_type: string;
+        };
         /**
          * @description Provider values: `local` | `jira` | `github` | `linear` | `trello`.
          *     External boards remain authoritative; NookOS federates.
@@ -1515,6 +2169,12 @@ export interface components {
             /** Format: date-time */
             created_at: string;
             id: components["schemas"]["BoardId"];
+            /**
+             * @description The prefix in `NOOK-42`. Unique per tenant, derived from the name when
+             *     not given, and immutable once assigned — it is written into PR bodies
+             *     and branch names, which no rename can reach back and fix.
+             */
+            key?: string | null;
             name: string;
             provider: string;
             tenant_id: components["schemas"]["TenantId"];
@@ -1528,6 +2188,14 @@ export interface components {
             name: string;
             /** Format: int32 */
             position: number;
+            /**
+             * @description What this column MEANS, independent of what it is called:
+             *     `backlog` | `unstarted` | `started` | `completed` | `canceled`.
+             *
+             *     Automation targets the type so that renaming "In Progress" to "Doing"
+             *     is a cosmetic change rather than a broken loop. The name is for people.
+             */
+            type?: string;
         };
         BoardDetail: {
             board: components["schemas"]["Board"];
@@ -1541,6 +2209,12 @@ export interface components {
          *     inspects a machine — the node describes its own capabilities.
          */
         Capabilities: {
+            /**
+             * @description The agent's own version. Reported like everything else here, so
+             *     "which machines are behind?" needs no column of its own — this whole
+             *     struct is already stored as jsonb on the node.
+             */
+            agent_version?: string | null;
             architecture: string;
             /** Format: int32 */
             cpus: number;
@@ -1560,9 +2234,48 @@ export interface components {
             ssh_public_key?: string | null;
             tmux: boolean;
         };
+        /** @description What the signed-in caller may do, so a UI can hide what it cannot offer. */
+        Capability: {
+            /** @description Permission keys held at the deployment scope. */
+            deployment?: string[];
+            /**
+             * @description Holds an operator binding somewhere — drives whether the operator
+             *     section appears at all.
+             */
+            operator: boolean;
+            /**
+             * Format: uuid
+             * @description The org this caller's tenant belongs to, for reading its policy.
+             */
+            org_id?: string | null;
+        };
         ChangePasswordRequest: {
             current: string;
             next: string;
+        };
+        ChannelField: {
+            label: string;
+            name: string;
+            placeholder: string;
+            required: boolean;
+            /** @description Masked in the UI and never read back. */
+            secret: boolean;
+        };
+        /** @description What a channel kind needs, so the UI can build a form without hardcoding it. */
+        ChannelKind: {
+            description: string;
+            fields: components["schemas"]["ChannelField"][];
+            id: string;
+            label: string;
+        };
+        /** @description `POST /tasks/{id}/claim` — take the work without racing another agent. */
+        ClaimTaskRequest: {
+            assignee_user_id?: null | components["schemas"]["UserId"];
+            /**
+             * @description Move the task here at the same time, by column TYPE. Omit to claim
+             *     without moving.
+             */
+            column_type?: string | null;
         };
         CloneRequest: {
             /**
@@ -1578,11 +2291,33 @@ export interface components {
         /** Format: uuid */
         ColumnId: string;
         CreateBoardRequest: {
+            /** @description Omit to derive one from the name. */
+            key?: string | null;
             name: string;
             workspace_id?: null | components["schemas"]["WorkspaceId"];
         };
+        CreateChannelRequest: {
+            /** @description Provider-specific. Write-only: it is never read back. */
+            config: unknown;
+            kind: string;
+            kinds?: string[];
+            levels?: string[];
+            name: string;
+        };
         CreateColumnRequest: {
             name: string;
+        };
+        CreateCommentRequest: {
+            /**
+             * @description How an agent signs its work, e.g. `"loop-build on azul"`.
+             *
+             *     NookOS has no separate agent identity — an agent acts under a person's
+             *     token, so the honest record is "this user's credential, used by this
+             *     tool". Supplying a name says which tool; it does not grant anything,
+             *     and the underlying `author_id` remains the real user.
+             */
+            author_name?: string | null;
+            body_md: string;
         };
         CreateGitCredentialRequest: {
             /** @description …or let the server generate an ed25519 keypair. */
@@ -1614,10 +2349,22 @@ export interface components {
             /** @description Shown exactly once; only a hash is stored. */
             token: string;
         };
+        CreateLabelRequest: {
+            color?: string | null;
+            name: string;
+        };
         CreateNoteRequest: {
             content_md: string;
             kind?: string | null;
             title?: string | null;
+        };
+        CreateOrgRequest: {
+            name: string;
+            slug?: string | null;
+        };
+        CreateRelationRequest: {
+            kind: string;
+            to_task: components["schemas"]["TaskId"];
         };
         CreateSessionRequest: {
             name?: string | null;
@@ -1632,7 +2379,19 @@ export interface components {
         };
         CreateTaskRequest: {
             column_id?: null | components["schemas"]["ColumnId"];
+            /**
+             * @description Place by semantic state instead of by id — what automation wants, since
+             *     it knows "the backlog" but not which uuid that is today.
+             */
+            column_type?: string | null;
             description?: string | null;
+            /**
+             * @description Label NAMES, created for the tenant if new. Names rather than ids
+             *     because a filer knows `agent-ready`, not its uuid.
+             */
+            labels?: string[];
+            /** Format: int32 */
+            priority?: number | null;
             title: string;
             workspace_id?: null | components["schemas"]["WorkspaceId"];
         };
@@ -1689,6 +2448,23 @@ export interface components {
             checkouts_removed: number;
             deleted: boolean;
             message: string;
+        };
+        /**
+         * @description One account you can sign in as, in dev mode only.
+         *
+         *     Exists so a person can switch between users without inventing credentials —
+         *     testing "what does an operator see that a member does not" is impossible if
+         *     becoming the other person is hard.
+         */
+        DevAccount: {
+            /**
+             * @description Role keys held at the deployment scope — so the picker can show which
+             *     of these accounts is the operator without you having to remember.
+             */
+            deployment_roles?: string[];
+            display_name: string;
+            email: string;
+            tenant_slug: string;
         };
         DevLoginRequest: {
             display_name?: string | null;
@@ -1854,10 +2630,24 @@ export interface components {
             diff: string;
             dirty: boolean;
             files: components["schemas"]["GitFileStatus"][];
+            /**
+             * @description `false` when the checkout is not a git repository — a "+ New empty
+             *     project" directory, say. Everything below is then empty for a reason
+             *     that is not "nothing has changed", and the UI hides the panel instead
+             *     of reporting a clean tree.
+             */
+            is_repo: boolean;
         };
         GpuInfo: {
             model: string;
             vendor: string;
+        };
+        /** @description Grant (or revoke) a deployment-scoped role. */
+        GrantRequest: {
+            email: string;
+            revoke?: boolean;
+            /** @description `operator` | `org_admin` | … */
+            role: string;
         };
         /** @description Adopt a file that already exists in a checkout into the vault. */
         ImportSecretRequest: {
@@ -1885,9 +2675,19 @@ export interface components {
             node_token: string;
         };
         /**
-         * @description Unauthenticated sign-in capabilities, so the login screen only offers what
-         *     this instance actually supports.
+         * @description A tenant-wide label. `agent-ready` is the human approval gate: the one
+         *     signal that says an agent may pick this up, and deliberately not something
+         *     an agent can apply to itself.
          */
+        Label: {
+            color: string;
+            /** Format: date-time */
+            created_at: string;
+            /** Format: uuid */
+            id: string;
+            name: string;
+            tenant_id: components["schemas"]["TenantId"];
+        };
         LocalAuthStatus: {
             /** @description Local sign-in is possible: the tenant is undecided, or already local. */
             available: boolean;
@@ -1908,11 +2708,20 @@ export interface components {
         };
         /** @description The signed-in caller with their tenant. */
         MeResponse: {
+            /**
+             * @description What this caller may do, so a UI can hide what it cannot offer rather
+             *     than rendering a button that 403s.
+             */
+            capability?: components["schemas"]["Capability"];
             tenant: components["schemas"]["Tenant"];
             user: components["schemas"]["User"];
         };
         MoveTaskRequest: {
             column: string;
+        };
+        MoveTenantRequest: {
+            /** Format: uuid */
+            org_id: string;
         };
         /** @description Status values: `online` | `offline`. */
         Node: {
@@ -2028,6 +2837,78 @@ export interface components {
         };
         /** Format: uuid */
         NoteId: string;
+        /**
+         * @description Something a person should see. Distinct from an `Event`, which is the
+         *     complete record of what happened and is never marked read.
+         */
+        Notification: {
+            body: string;
+            /** Format: date-time */
+            created_at: string;
+            /** Format: uuid */
+            id: string;
+            /** @description The dotted event kind that produced it, or `custom`. */
+            kind: string;
+            /** @description `info` | `success` | `warning` | `error`. */
+            level: string;
+            /** @description Where clicking it should go. */
+            link?: string | null;
+            payload: unknown;
+            /** Format: date-time */
+            read_at?: string | null;
+            tenant_id: components["schemas"]["TenantId"];
+            title: string;
+            /**
+             * Format: uuid
+             * @description `None` means everyone in the tenant.
+             */
+            user_id?: string | null;
+        };
+        /**
+         * @description A configured delivery channel.
+         *
+         *     `config` is deliberately absent: it holds bot tokens and webhook URLs, and
+         *     a channel list is the sort of thing a UI fetches often and logs freely.
+         *     What a person needs to see is that it exists, whether it works, and what it
+         *     is filtered to.
+         */
+        NotificationChannel: {
+            /** Format: date-time */
+            created_at: string;
+            enabled: boolean;
+            /** Format: uuid */
+            id: string;
+            /** @description `webhook` | `slack` | `discord` | `telegram` | `twilio` | `ntfy`. */
+            kind: string;
+            kinds: string[];
+            last_error?: string | null;
+            /** Format: date-time */
+            last_ok_at?: string | null;
+            levels: string[];
+            name: string;
+            tenant_id: components["schemas"]["TenantId"];
+            /** Format: date-time */
+            updated_at: string;
+        };
+        NotificationPage: {
+            notifications: components["schemas"]["Notification"][];
+            /** Format: int64 */
+            unread: number;
+        };
+        /**
+         * @description Raise a notification by hand — what `nook notify` and an agent's finish
+         *     hook both call.
+         */
+        NotifyRequest: {
+            body?: string | null;
+            /** @description Defaults to `custom`. Channels filter on this. */
+            kind?: string | null;
+            /** @description `info` | `success` | `warning` | `error`. Defaults to `info`. */
+            level?: string | null;
+            link?: string | null;
+            payload?: unknown;
+            title: string;
+        };
         /** @description Outcome of a long-running git operation on a node. */
         OpResponse: {
             message: string;
@@ -2037,6 +2918,86 @@ export interface components {
         /** @description Unlocking a protected secret. */
         OpenSecretRequest: {
             passphrase: string;
+        };
+        /**
+         * @description An audit row. Kinds, actors and times — never payloads, which can carry the
+         *     very metadata policy exists to gate.
+         */
+        OperatorAuditEntry: {
+            /** Format: uuid */
+            actor_id?: string | null;
+            actor_type?: string | null;
+            id: components["schemas"]["EventId"];
+            kind: string;
+            /** Format: date-time */
+            occurred_at: string;
+            tenant_id: components["schemas"]["TenantId"];
+            tenant_slug: string;
+        };
+        OperatorNode: {
+            /** Format: int64 */
+            active_sessions: number;
+            id: components["schemas"]["NodeId"];
+            /** Format: date-time */
+            last_seen_at?: string | null;
+            name: string;
+            platform: string;
+            resources: unknown;
+            status: string;
+            tenant_id: components["schemas"]["TenantId"];
+            tenant_slug: string;
+        };
+        OperatorOrg: {
+            /** Format: date-time */
+            created_at: string;
+            /** Format: uuid */
+            id: string;
+            name: string;
+            slug: string;
+            /** Format: int64 */
+            tenants: number;
+        };
+        /**
+         * @description A tenant as an operator sees it.
+         *
+         *     The first block is always visible: existence, counts, load. Everything
+         *     after is `Option` and stays `None` unless the org opted in — policy ADDS
+         *     these fields rather than filtering them out, so forgetting to add one
+         *     leaves it absent instead of leaking it.
+         */
+        OperatorTenant: {
+            /** Format: int64 */
+            active_sessions: number;
+            /** Format: date-time */
+            created_at: string;
+            id: components["schemas"]["TenantId"];
+            /** Format: int64 */
+            members: number;
+            /** Format: int64 */
+            nodes: number;
+            /** Format: uuid */
+            org_id?: string | null;
+            repositories?: string[] | null;
+            slug: string;
+            task_titles?: string[] | null;
+            /** Format: int64 */
+            workspaces: number;
+        };
+        /** @description An org: the layer between a deployment and its tenants. */
+        Org: {
+            /** Format: date-time */
+            created_at: string;
+            /** Format: uuid */
+            id: string;
+            name: string;
+            slug: string;
+        };
+        /** @description One policy-gated field with its current state and plain-language meaning. */
+        PolicyField: {
+            /** @description Written for a person, not a developer — every user is shown this. */
+            description: string;
+            enabled: boolean;
+            field: string;
         };
         PutSecretRequest: {
             content: string;
@@ -2050,9 +3011,26 @@ export interface components {
              */
             passphrase: string;
         };
+        /**
+         * @description The other end of a relation, with enough to render it without a second
+         *     fetch.
+         */
+        RelatedTask: {
+            /** @description The column type of the other task — what makes a blocker resolved. */
+            column_type: string;
+            id: components["schemas"]["TaskId"];
+            key?: string | null;
+            kind: string;
+            /** Format: uuid */
+            relation_id: string;
+            title: string;
+        };
         RemoveWorktreeRequest: {
             node_id: components["schemas"]["NodeId"];
             path: string;
+        };
+        RenameOrgRequest: {
+            name: string;
         };
         /**
          * @description A new label for a workspace. The name is what people read; the slug, the
@@ -2168,6 +3146,10 @@ export interface components {
             instructions?: string | null;
             workspace_id: components["schemas"]["WorkspaceId"];
         };
+        SetPolicyRequest: {
+            enabled: boolean;
+            field: string;
+        };
         /** @description Setting or checking the app password. */
         SetVaultPassphraseRequest: {
             passphrase: string;
@@ -2183,6 +3165,47 @@ export interface components {
         };
         /** Format: uuid */
         SettingId: string;
+        /**
+         * @description A skill taught to the whole fleet.
+         *
+         *     Stored by the control plane rather than pushed and forgotten, so that a node
+         *     which was offline when it was taught — or which joins next week — converges
+         *     on register instead of quietly being the one machine that never learned it.
+         */
+        Skill: {
+            content: string;
+            /** Format: uuid */
+            id: string;
+            /** @description Becomes a path component on every machine: `<skills>/<name>/SKILL.md`. */
+            name: string;
+            /**
+             * @description Of `content`. Lets a node skip a write it already has, and lets an
+             *     operator see whether two machines really do hold the same thing.
+             */
+            sha256: string;
+            tenant_id: components["schemas"]["TenantId"];
+            /** Format: date-time */
+            updated_at: string;
+            /** Format: uuid */
+            updated_by?: string | null;
+        };
+        /**
+         * @description The same thing without its body — a list of twenty skills should not ship
+         *     twenty documents to draw a table.
+         */
+        SkillSummary: {
+            /** Format: uuid */
+            id: string;
+            name: string;
+            sha256: string;
+            /**
+             * Format: int64
+             * @description Bytes, so the UI can show a size without holding the content.
+             */
+            size: number;
+            /** Format: date-time */
+            updated_at: string;
+        };
         StartWorkRequest: {
             branch?: string | null;
             node_id?: null | components["schemas"]["NodeId"];
@@ -2202,6 +3225,46 @@ export interface components {
         SubmitPrRequest: {
             pr_url?: string | null;
         };
+        /**
+         * @description Durable discussion on a task: the builder's blocking question, the
+         *     reviewer's verdict, the human's answer.
+         */
+        TaskComment: {
+            /** Format: uuid */
+            author_id?: string | null;
+            /**
+             * @description Denormalised, so an agent with no users row — and a deleted user —
+             *     still render with attribution.
+             */
+            author_name: string;
+            /** @description `user` | `agent` | `system`. */
+            author_type: string;
+            body_md: string;
+            /** Format: date-time */
+            created_at: string;
+            /** Format: uuid */
+            id: string;
+            task_id: components["schemas"]["TaskId"];
+            tenant_id: components["schemas"]["TenantId"];
+            /** Format: date-time */
+            updated_at: string;
+        };
+        /** @description One whole issue: what the loop reads before it starts work. */
+        TaskDetail: {
+            /** @description Tasks that must finish before this one can start. */
+            blocked_by: components["schemas"]["RelatedTask"][];
+            /** @description Tasks waiting on this one. */
+            blocking: components["schemas"]["RelatedTask"][];
+            comments: components["schemas"]["TaskComment"][];
+            /**
+             * @description Derived from the blockers' column types, never stored — a stored flag
+             *     would drift the moment a blocker moved.
+             */
+            is_blocked: boolean;
+            /** @description Non-blocking links (`relates`, `duplicates`), both directions. */
+            related: components["schemas"]["RelatedTask"][];
+            task: components["schemas"]["TaskItem"];
+        };
         /** Format: uuid */
         TaskId: string;
         TaskItem: {
@@ -2216,17 +3279,77 @@ export interface components {
             external_id?: string | null;
             external_url?: string | null;
             id: components["schemas"]["TaskId"];
+            /**
+             * @description `NOOK-42` — the board's key and this task's number. Computed, not
+             *     stored: storing it would let it disagree with the two columns it is
+             *     made of.
+             */
+            key?: string | null;
+            /**
+             * @description Every label on this task. Populated by one query for a whole board
+             *     rather than one per task.
+             */
+            labels?: components["schemas"]["Label"][];
+            /**
+             * Format: int32
+             * @description Per-board sequence behind the human key. `None` only for a task created
+             *     before keys existed and not yet backfilled.
+             */
+            number?: number | null;
             /** Format: int32 */
             position: number;
             pr_url?: string | null;
+            /**
+             * Format: int32
+             * @description `0` none, `1` urgent, `2` high, `3` medium, `4` low — Linear's
+             *     convention, so values port cleanly. Note `0` sorts LAST: "nobody set a
+             *     priority" is not a claim that the work is least important.
+             */
+            priority?: number;
             session_id?: null | components["schemas"]["SessionId"];
             tenant_id: components["schemas"]["TenantId"];
             title: string;
             /** Format: date-time */
             updated_at: string;
+            /**
+             * @description Absolute deep link into the web UI, so an agent reporting "filed
+             *     NOOK-42" can give a human something to click.
+             */
+            url?: string | null;
             workspace_id?: null | components["schemas"]["WorkspaceId"];
             worktree_node_id?: null | components["schemas"]["NodeId"];
             worktree_path?: string | null;
+        };
+        TaskRelation: {
+            /** Format: date-time */
+            created_at: string;
+            from_task: components["schemas"]["TaskId"];
+            /** Format: uuid */
+            id: string;
+            /** @description `blocks` | `relates` | `duplicates`. */
+            kind: string;
+            tenant_id: components["schemas"]["TenantId"];
+            to_task: components["schemas"]["TaskId"];
+        };
+        TeachRequest: {
+            content: string;
+            /**
+             * @description Omitted means "derive it": from the document's own frontmatter `name:`,
+             *     falling back to the filename. Explicit wins, because a file called
+             *     SKILL.md says nothing about what it teaches.
+             */
+            name?: string | null;
+        };
+        TeachResponse: {
+            /** @description Nodes the fan-out actually reached. The rest converge on reconnect. */
+            delivered_to: string[];
+            /**
+             * @description Nodes known to this tenant that were offline, named rather than
+             *     counted — "3 nodes were offline" is not something an operator can act
+             *     on, and silence about them would be worse.
+             */
+            offline: string[];
+            skill: components["schemas"]["SkillSummary"];
         };
         Tenant: {
             /** Format: date-time */
@@ -2335,14 +3458,67 @@ export interface components {
             };
             /** @enum {string} */
             type: "activity";
+        } | {
+            /**
+             * @description Something a person should see, right now.
+             *
+             *     Carries the whole notification rather than an id, unlike `TaskChanged`.
+             *     The distinction is what the client does with it: a task id says "refetch
+             *     that", and the client already knows how. A notification has no canonical
+             *     place to be refetched from — it IS the message — and a toast that had to
+             *     round-trip before it could be shown would arrive after the moment it was
+             *     about.
+             */
+            data: {
+                notification: unknown;
+            };
+            /** @enum {string} */
+            type: "notification";
+        } | {
+            /**
+             * @description A task changed — moved, relabelled, commented on, claimed.
+             *
+             *     Carries only the id, not the task. Agents and other browsers change
+             *     tasks constantly, and a payload would be a second copy of state that
+             *     arrives out of order with the fetch the viewer is already doing. The id
+             *     says "what you have for this one is stale"; the client refetches what it
+             *     actually needs, which for a board is one card and for an open detail
+             *     panel is the whole issue.
+             */
+            data: {
+                task_id: components["schemas"]["TaskId"];
+            };
+            /** @enum {string} */
+            type: "task_changed";
         };
         UpdateBoardRequest: {
+            /**
+             * @description Change the prefix in `NOOK-42`.
+             *
+             *     Normally immutable — it is written into PR bodies and branch names that
+             *     no rename can reach back and fix — but settable, because a key derived
+             *     from a board name is sometimes just wrong ("NookOS Bootstrap" derives
+             *     "NOOKO") and living with it forever is worse than an explicit change a
+             *     person chose.
+             */
+            key?: string | null;
             name: string;
+        };
+        UpdateChannelRequest: {
+            /** @description Omit to keep the stored secrets untouched. */
+            config?: unknown;
+            enabled?: boolean | null;
+            kinds?: string[] | null;
+            levels?: string[] | null;
+            name?: string | null;
         };
         UpdateColumnRequest: {
             name?: string | null;
             /** Format: int32 */
             position?: number | null;
+        };
+        UpdateCommentRequest: {
+            body_md: string;
         };
         UpdateFeedbackRequest: {
             pr_url?: string | null;
@@ -2364,9 +3540,12 @@ export interface components {
         UpdateTaskRequest: {
             assignee_user_id?: null | components["schemas"]["UserId"];
             column_id?: null | components["schemas"]["ColumnId"];
+            column_type?: string | null;
             description?: string | null;
             /** Format: int32 */
             position?: number | null;
+            /** Format: int32 */
+            priority?: number | null;
             title?: string | null;
         };
         /** @description Role values: `owner` | `admin` | `member` (TEXT CHECK in the schema). */
@@ -2507,6 +3686,31 @@ export interface components {
 }
 export type $defs = Record<string, never>;
 export interface operations {
+    dev_accounts: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DevAccount"][];
+                };
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
     dev_login: {
         parameters: {
             query?: never;
@@ -2974,6 +4178,74 @@ export interface operations {
             };
         };
     };
+    delete_comment: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    update_comment: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdateCommentRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskComment"];
+                };
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
     dispatcher_suggest: {
         parameters: {
             query?: never;
@@ -3188,6 +4460,73 @@ export interface operations {
         };
     };
     delete_git_credential: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    list_labels: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Label"][];
+                };
+            };
+        };
+    };
+    create_label: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateLabelRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Label"];
+                };
+            };
+        };
+    };
+    delete_label: {
         parameters: {
             query?: never;
             header?: never;
@@ -3558,6 +4897,33 @@ export interface operations {
             };
         };
     };
+    update_node_agent: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description asked */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description node is offline */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
     update_note: {
         parameters: {
             query?: never;
@@ -3580,6 +4946,696 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["Note"];
                 };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    list_channels: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NotificationChannel"][];
+                };
+            };
+        };
+    };
+    create_channel: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateChannelRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NotificationChannel"];
+                };
+            };
+        };
+    };
+    list_channel_kinds: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ChannelKind"][];
+                };
+            };
+        };
+    };
+    delete_channel: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    update_channel: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdateChannelRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NotificationChannel"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    test_channel: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description delivery failed */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    list_notifications: {
+        parameters: {
+            query?: {
+                limit?: number;
+                /** @description Only what has not been read. */
+                unread?: boolean;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NotificationPage"];
+                };
+            };
+        };
+    };
+    clear_notifications: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    mark_notifications_read: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": unknown;
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NotificationPage"];
+                };
+            };
+        };
+    };
+    notify: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["NotifyRequest"];
+            };
+        };
+        responses: {
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    operator_audit: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OperatorAuditEntry"][];
+                };
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    operator_list_bindings: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BindingRow"][];
+                };
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    operator_grant: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["GrantRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    operator_list_nodes: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OperatorNode"][];
+                };
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    operator_remove_node: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    operator_revoke_node: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    operator_list_orgs: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OperatorOrg"][];
+                };
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    operator_create_org: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateOrgRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OperatorOrg"];
+                };
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    operator_rename_org: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RenameOrgRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OperatorOrg"];
+                };
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    operator_get_policy: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PolicyField"][];
+                };
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    operator_set_policy: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SetPolicyRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PolicyField"][];
+                };
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    operator_list_tenants: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OperatorTenant"][];
+                };
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    operator_stage_ca: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TenantCaSummary"];
+                };
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    operator_promote_ca: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+                ca: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    operator_move_tenant: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["MoveTenantRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    delete_relation: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             404: {
                 headers: {
@@ -3952,6 +6008,171 @@ export interface operations {
             };
         };
     };
+    list_skills: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SkillSummary"][];
+                };
+            };
+        };
+    };
+    teach_skill: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TeachRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TeachResponse"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    get_skill: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Skill"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    unteach_skill: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TeachResponse"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    query_tasks: {
+        parameters: {
+            query?: {
+                /** @description Board id or key (`ENG`). Omit to search the whole tenant. */
+                board?: string;
+                /** @description Repeatable. ALL must be present. */
+                label?: string[];
+                /** @description Repeatable. NONE may be present. */
+                not_label?: string[];
+                /** @description A user id, or the literal `none` for unassigned. */
+                assignee?: string;
+                column_type?: string;
+                priority?: number;
+                /** @description Filter on the derived blocker state. */
+                is_blocked?: boolean;
+                workspace?: string;
+                limit?: number;
+                /** @description Opaque: the `created_at` of the last row of the previous page. */
+                cursor?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskItem"][];
+                };
+            };
+        };
+    };
+    get_task: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskDetail"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
     delete_task: {
         parameters: {
             query?: never;
@@ -4008,6 +6229,96 @@ export interface operations {
             };
         };
     };
+    claim_task: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ClaimTaskRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskItem"];
+                };
+            };
+            /** @description already claimed */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    list_comments: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskComment"][];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    create_comment: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateCommentRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskComment"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
     task_dispatch: {
         parameters: {
             query?: never;
@@ -4026,6 +6337,62 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["TaskItem"];
                 };
+            };
+        };
+    };
+    add_task_label: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+                label: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Label"][];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    remove_task_label: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+                label: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Label"][];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
         };
     };
@@ -4072,6 +6439,64 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["TaskItem"];
                 };
+            };
+        };
+    };
+    create_relation: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateRelationRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskRelation"];
+                };
+            };
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    release_task: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskItem"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
         };
     };

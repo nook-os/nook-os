@@ -1,9 +1,10 @@
 import React, { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link, useNavigate, useParams } from "react-router-dom";
-import { SquareTerminal } from "lucide-react";
+import { ArrowUpCircle, SquareTerminal } from "lucide-react";
 import { api } from "@nookos/api";
 import { Empty, Panel, Pill, ResourceBars, StatusDot, statusTone } from "@nookos/ui";
+import { AgentVersion, NodeFacts, useControlPlaneVersion } from "../NodeFacts";
 import { askConfirm, notify } from "../dialogs";
 import { useLive } from "../live";
 import { AddNodeModal } from "../AddNodeModal";
@@ -17,6 +18,10 @@ export function NodesPage() {
     queryKey: ["nodes"],
     queryFn: async () => (await api.GET("/api/v1/nodes")).data ?? [],
   });
+  // What this control plane expects every agent to be — the same string it
+  // sends in `RegisterAck`, so the column shows the comparison the node makes
+  // rather than a second opinion about it.
+  const expected = useControlPlaneVersion();
 
   // A shell on the machine, no project required: opens a bash session in the
   // node's home directory and drops you straight into it.
@@ -59,6 +64,7 @@ export function NodesPage() {
                 <th>Node</th>
                 <th>Status</th>
                 <th>Platform</th>
+                <th>Agent</th>
                 <th>CPUs</th>
                 <th>GPUs</th>
                 <th>Capacity</th>
@@ -84,6 +90,12 @@ export function NodesPage() {
                       <Pill tone={statusTone(status)}>{status}</Pill>
                     </td>
                     <td className="muted">{n.platform}</td>
+                    <td>
+                      <AgentVersion
+                        reported={caps.agent_version as string | null}
+                        expected={expected}
+                      />
+                    </td>
                     <td className="muted">{(caps.cpus as number) ?? "—"}</td>
                     <td className="muted">
                       {((caps.gpus as { model: string }[]) ?? [])
@@ -124,6 +136,34 @@ export function NodesPage() {
                           onClick={() => openTerminal(n.id)}
                         >
                           <SquareTerminal size={12} /> terminal
+                        </button>
+                      )}
+                      {status === "online" && (
+                        <button
+                          className="btn small"
+                          title={
+                            (caps.agent_version as string)
+                              ? `agent ${caps.agent_version} — update and restart`
+                              : "update the agent and restart it"
+                          }
+                          onClick={async () => {
+                            const { error } = await api.POST(
+                              "/api/v1/nodes/{id}/update",
+                              { params: { path: { id: n.id } } },
+                            );
+                            // The node decides whether it can: unsupervised, it
+                            // refuses rather than taking itself offline. Say
+                            // what happened either way — silence after pressing
+                            // a button reads as nothing happening.
+                            await notify(
+                              error ? "Not updated" : "Updating",
+                              error
+                                ? `${n.name} could not be asked to update.`
+                                : `${n.name} is fetching the new agent. It will drop off for a moment and come back — sessions survive, because tmux outlives the agent.`,
+                            );
+                          }}
+                        >
+                          <ArrowUpCircle size={12} /> update
                         </button>
                       )}
                       <button
@@ -226,13 +266,11 @@ export function NodeDetail() {
           </Empty>
         )}
       </Panel>
-      <Panel title={`Capabilities`}>
+      <Panel title="This machine">
         <div style={{ padding: 10 }}>
           <ResourceBars resources={node.resources} />
         </div>
-        <pre className="mono small" style={{ padding: 10, whiteSpace: "pre-wrap" }}>
-          {JSON.stringify(node.capabilities, null, 2)}
-        </pre>
+        <NodeFacts node={node} />
       </Panel>
       <Panel title="Workspaces on this node">
         {here.length === 0 ? (

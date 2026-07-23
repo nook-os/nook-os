@@ -1,4 +1,6 @@
 import React from "react";
+import { OrgVisibility } from "../OrgVisibility";
+import { NotificationChannels } from "../NotificationChannels";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "@nookos/api";
 import {
@@ -440,6 +442,10 @@ export function SettingsPage() {
       <Panel title="Notifications">
         <NotificationSettings />
       </Panel>
+
+      <OrgVisibility />
+
+      <NotificationChannels />
 
       <Panel title="Instance">
         <div style={{ padding: 10 }} className="small">

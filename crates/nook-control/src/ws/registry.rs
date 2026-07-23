@@ -29,6 +29,7 @@ pub struct NodeHandle {
 
 /// Payload completing a `GetGitStatus` request.
 pub struct GitStatusPayload {
+    pub is_repo: bool,
     pub branch: Option<String>,
     pub files: Vec<GitFileStatus>,
     pub diff: String,
@@ -139,16 +140,37 @@ impl Registry {
     /// message published straight after `start_bus` isn't dropped into the void.
     /// Returns immediately if the bus was never started (single-instance mode)
     /// or is already ready.
-    pub async fn bus_ready(&self) {
+    /// Wait until the bus is listening, or give up.
+    ///
+    /// Bounded deliberately. The listener signals readiness from a spawned
+    /// task, and a task that *dies* closes the channel and wakes us — but one
+    /// that merely stalls, on a connection Postgres never completes, leaves
+    /// this waiting forever. That is not hypothetical: it burned two and a
+    /// half hours of CI on a single test, which is worse than failing, because
+    /// a failure at least says something.
+    ///
+    /// Returns whether the bus actually became ready, so a caller can decide.
+    /// Ten seconds is far longer than a local LISTEN takes and far shorter than
+    /// anyone's patience.
+    pub async fn bus_ready(&self) -> bool {
+        const LIMIT: std::time::Duration = std::time::Duration::from_secs(10);
+
         if self.bus_tx.get().is_none() || *self.bus_ready.borrow() {
-            return;
+            return *self.bus_ready.borrow();
         }
         let mut rx = self.bus_ready.subscribe();
-        while rx.changed().await.is_ok() {
-            if *rx.borrow() {
-                return;
+        tokio::time::timeout(LIMIT, async move {
+            while rx.changed().await.is_ok() {
+                if *rx.borrow() {
+                    return true;
+                }
             }
-        }
+            // The sender dropped: the listener task is gone and readiness will
+            // never arrive.
+            false
+        })
+        .await
+        .unwrap_or(false)
     }
 
     fn queue(&self, out: Outbound) {
@@ -319,6 +341,7 @@ impl Registry {
                 to: requester,
                 msg: BusMessage::GitReply {
                     request_id,
+                    is_repo: payload.is_repo,
                     branch: payload.branch,
                     files: payload.files,
                     diff: payload.diff,
@@ -661,12 +684,14 @@ impl Registry {
             } => self.complete_op(request_id, OpPayload { ok, path, message }),
             BusMessage::GitReply {
                 request_id,
+                is_repo,
                 branch,
                 files,
                 diff,
             } => self.complete_git_status(
                 request_id,
                 GitStatusPayload {
+                    is_repo,
                     branch,
                     files,
                     diff,

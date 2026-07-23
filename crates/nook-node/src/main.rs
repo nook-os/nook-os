@@ -1,13 +1,16 @@
 mod capabilities;
+mod certs;
 mod cli;
 mod config;
 mod conn;
+mod contexts;
 mod device_login;
 mod discovery;
 mod enroll;
 mod gitops;
 mod pinning;
 mod resources;
+mod selfupdate;
 mod sessions;
 mod ssh;
 mod style;
@@ -51,6 +54,115 @@ enum Command {
     /// Install the NookOS skill so your agents can drive the fleet themselves.
     #[command(subcommand)]
     Skills(SkillsCommand),
+    /// Teach a skill to every agent on every machine in the fleet.
+    ///
+    /// The control plane stores it and fans it out. Nodes that are offline —
+    /// and nodes that join later — learn it when they connect, so this is not
+    /// "copy a file to whoever happens to be awake".
+    Teach {
+        /// Path to a SKILL.md (or any markdown skill document).
+        path: String,
+        /// Override the name. Otherwise taken from the document's frontmatter
+        /// `name:`, then from the filename.
+        #[arg(long)]
+        name: Option<String>,
+    },
+    /// What the fleet has been taught.
+    Taught {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Remove a taught skill from the control plane and from every machine.
+    Unteach { name: String },
+    /// List board tasks with the same filter an agent's pick step uses.
+    ///
+    /// `nook tasks --label agent-ready --assignee none --unblocked` is exactly
+    /// what the loop asks for, so you can see what it will take next.
+    Tasks {
+        #[arg(long)]
+        board: Option<String>,
+        /// Require this label (repeatable).
+        #[arg(long = "label")]
+        labels: Vec<String>,
+        /// Exclude this label (repeatable).
+        #[arg(long = "not-label")]
+        not_labels: Vec<String>,
+        /// A user id, or `none` for unclaimed work.
+        #[arg(long)]
+        assignee: Option<String>,
+        /// backlog | unstarted | started | completed | canceled
+        #[arg(long = "column-type")]
+        column_type: Option<String>,
+        /// Hide anything with an unresolved blocker.
+        #[arg(long)]
+        unblocked: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Read one whole issue: body, labels, comments, blockers.
+    Task {
+        /// Human key (NOOK-42) or id.
+        key: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Comment on a task.
+    Comment {
+        key: String,
+        /// The comment body (markdown).
+        body: Vec<String>,
+    },
+    /// Add or remove a label.
+    Label {
+        key: String,
+        name: String,
+        #[arg(long)]
+        remove: bool,
+    },
+    /// Wire an agent's finish hook so it notifies the fleet when it is done.
+    #[command(subcommand)]
+    Hooks(HooksCommand),
+    /// Switch between control planes — dev and production, say.
+    ///
+    /// A named credential, one of them current, and a command that says which.
+    /// Without this, moving between two deployments meant re-running `nook
+    /// login` and retyping a token, so in practice people hand-edit
+    /// `auth.toml` — which is how production tooling ends up pointed at
+    /// localhost without anybody noticing.
+    #[command(subcommand)]
+    Context(ContextCommand),
+    /// Who may run this deployment.
+    #[command(subcommand)]
+    Operator(OperatorCommand),
+    /// Tell the fleet something happened.
+    ///
+    /// Fans out to every connected UI and every configured channel (Slack,
+    /// Telegram, push, webhooks…). Ideal as an agent's finish hook:
+    ///
+    ///     nook notify "Claude finished" --level success
+    Notify {
+        /// The headline.
+        title: Vec<String>,
+        /// Longer detail.
+        #[arg(long)]
+        body: Option<String>,
+        /// info | success | warning | error
+        #[arg(long, default_value = "info")]
+        level: String,
+        /// Dotted kind that channels filter on, e.g. `agent.finished`.
+        #[arg(long)]
+        kind: Option<String>,
+        /// Somewhere to go when clicked.
+        #[arg(long)]
+        link: Option<String>,
+    },
+    /// Claim a task so nobody else takes it.
+    Claim {
+        key: String,
+        /// Move it here at the same time, e.g. `started`.
+        #[arg(long = "column-type")]
+        column_type: Option<String>,
+    },
     /// Register this machine non-interactively (flags and/or a config file —
     /// the automation path; humans usually want `nook setup`).
     Join {
@@ -260,6 +372,82 @@ async fn main() -> Result<()> {
         Command::Skills(SkillsCommand::Install { dir, quiet }) => {
             wizard::skills::install(dir, quiet)
         }
+        Command::Teach { path, name } => cli::teach(&path, name.as_deref()).await,
+        Command::Taught { json } => cli::taught(json).await,
+        Command::Unteach { name } => cli::unteach(&name).await,
+        Command::Tasks {
+            board,
+            labels,
+            not_labels,
+            assignee,
+            column_type,
+            unblocked,
+            json,
+        } => {
+            cli::tasks(
+                board.as_deref(),
+                &labels,
+                &not_labels,
+                assignee.as_deref(),
+                column_type.as_deref(),
+                unblocked,
+                json,
+            )
+            .await
+        }
+        Command::Task { key, json } => cli::task(&key, json).await,
+        Command::Comment { key, body } => cli::comment(&key, &body.join(" ")).await,
+        Command::Label { key, name, remove } => cli::label(&key, &name, remove).await,
+        Command::Claim { key, column_type } => cli::claim(&key, column_type.as_deref()).await,
+        Command::Context(ContextCommand::List) => contexts::list(),
+        Command::Context(ContextCommand::Current) => contexts::current(),
+        Command::Context(ContextCommand::Save { name, server }) => contexts::save(&name, server),
+        Command::Context(ContextCommand::Use { name }) => contexts::use_context(&name),
+        Command::Context(ContextCommand::Remove { name }) => contexts::remove(&name),
+        Command::Hooks(HooksCommand::Install { dry_run }) => wizard::hooks::install(dry_run),
+        Command::Hooks(HooksCommand::Uninstall) => wizard::hooks::uninstall(),
+        Command::Operator(OperatorCommand::Grant { email, role }) => {
+            cli::operator_role(&email, &role, false).await
+        }
+        Command::Operator(OperatorCommand::Revoke { email, role }) => {
+            cli::operator_role(&email, &role, true).await
+        }
+        Command::Operator(OperatorCommand::Who) => cli::operator_who().await,
+        Command::Operator(OperatorCommand::Bindings { json }) => cli::operator_bindings(json).await,
+        Command::Operator(OperatorCommand::Org(OrgCommand::List { json })) => {
+            cli::operator_orgs(json).await
+        }
+        Command::Operator(OperatorCommand::Org(OrgCommand::Create { name, slug })) => {
+            cli::operator_org_create(&name, slug.as_deref()).await
+        }
+        Command::Operator(OperatorCommand::Org(OrgCommand::Move { tenant, org })) => {
+            cli::operator_move_tenant(&tenant, &org).await
+        }
+        Command::Operator(OperatorCommand::Ca(CaCommand::Stage { tenant })) => {
+            cli::operator_ca_stage(&tenant).await
+        }
+        Command::Operator(OperatorCommand::Ca(CaCommand::Promote { tenant, ca })) => {
+            cli::operator_ca_promote(&tenant, &ca).await
+        }
+        Command::Operator(OperatorCommand::Node { node, remove }) => {
+            cli::operator_node(&node, remove).await
+        }
+        Command::Notify {
+            title,
+            body,
+            level,
+            kind,
+            link,
+        } => {
+            cli::notify_fleet(
+                &title.join(" "),
+                body.as_deref(),
+                &level,
+                kind.as_deref(),
+                link.as_deref(),
+            )
+            .await
+        }
         Command::Join {
             server,
             token,
@@ -379,6 +567,116 @@ async fn main() -> Result<()> {
 }
 
 #[derive(clap::Subcommand)]
+enum OperatorCommand {
+    /// Grant a deployment-scoped role to a user, by email.
+    Grant {
+        email: String,
+        /// operator | org_admin
+        #[arg(long, default_value = "operator")]
+        role: String,
+    },
+    /// Take it away again.
+    Revoke {
+        email: String,
+        #[arg(long, default_value = "operator")]
+        role: String,
+    },
+    /// What does the CLI's current credential hold?
+    Who,
+    /// Who holds what, across the deployment.
+    Bindings {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Orgs: the layer between a deployment and its tenants.
+    #[command(subcommand)]
+    Org(OrgCommand),
+    /// Certificate authorities. Staging and promoting are two acts on purpose.
+    #[command(subcommand)]
+    Ca(CaCommand),
+    /// Stop a machine, or remove it.
+    Node {
+        /// Node id.
+        node: String,
+        /// Remove the record entirely rather than revoking its certificate.
+        #[arg(long)]
+        remove: bool,
+    },
+}
+
+#[derive(clap::Subcommand)]
+enum OrgCommand {
+    /// List orgs and how many tenants each holds.
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    Create {
+        name: String,
+        #[arg(long)]
+        slug: Option<String>,
+    },
+    /// Move a tenant into another org.
+    Move {
+        /// Tenant id.
+        tenant: String,
+        /// Org id.
+        org: String,
+    },
+}
+
+#[derive(clap::Subcommand)]
+enum CaCommand {
+    /// Stage a new CA for a tenant. Nodes pick it up on their next renewal.
+    ///
+    /// Deliberately does NOT promote: switching signer before machines have
+    /// renewed strands every one that has not.
+    Stage {
+        /// Tenant id.
+        tenant: String,
+    },
+    /// Make a staged CA the signer.
+    Promote {
+        tenant: String,
+        /// CA id from `stage`.
+        ca: String,
+    },
+}
+
+#[derive(clap::Subcommand)]
+enum ContextCommand {
+    /// Every saved control plane, with the current one marked.
+    #[command(alias = "ls")]
+    List,
+    /// Just the current one, tab-separated, for prompts and scripts.
+    Current,
+    /// Save the login you are using now under a name.
+    Save {
+        name: String,
+        /// Override the URL recorded, when the login did not carry one.
+        #[arg(long)]
+        server: Option<String>,
+    },
+    /// Point this machine at a saved control plane.
+    Use { name: String },
+    /// Forget a saved control plane. Does not log you out of it.
+    #[command(alias = "rm")]
+    Remove { name: String },
+}
+
+#[derive(Subcommand)]
+enum HooksCommand {
+    /// Add a Stop hook to Claude Code so finishing a turn notifies the fleet.
+    Install {
+        /// Print what would change instead of writing it.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Remove it again.
+    Uninstall,
+}
+
+#[derive(clap::Subcommand)]
 enum SkillsCommand {
     /// Write the skill into every agent installation found on this machine.
     Install {
@@ -415,7 +713,7 @@ enum ServerCommand {
 ///
 /// Written to a temp file and renamed into place, never overwritten: the
 /// running binary is this file, and writing over it fails with ETXTBSY.
-async fn update_binary() -> Result<()> {
+pub(crate) async fn update_binary() -> Result<()> {
     let cfg = NodeConfig::load()?;
     let server = cfg.server.trim_end_matches('/');
     let (os, arch) = target_platform()?;
@@ -606,6 +904,7 @@ async fn join(spec: JoinSpec) -> Result<()> {
         server_fingerprint: spec.server_fingerprint.clone(),
         // Joining does not know about the agent port; `nook enroll` sets it.
         agent_server: NodeConfig::load().ok().and_then(|c| c.agent_server),
+        service: NodeConfig::load().ok().and_then(|c| c.service),
     };
     cfg.save()?;
 
@@ -662,7 +961,6 @@ async fn probe_connection(cfg: &NodeConfig) -> bool {
         return false;
     };
     let register = NodeToControl::Register {
-        agent_version: Some(env!("CARGO_PKG_VERSION").to_string()),
         capabilities: capabilities::detect(),
         live_tmux_sessions: tmux::list_nook_sessions(),
     };

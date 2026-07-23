@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState } from "react";
+import { NotificationBell } from "./Notifications";
 import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
@@ -13,6 +14,7 @@ import {
   LogOut,
   Mic,
   Server,
+  ShieldCheck,
   Settings,
   SquareTerminal,
   MessageSquare,
@@ -22,6 +24,7 @@ import {
 import { Plus } from "lucide-react";
 import { api, type MeResponse } from "@nookos/api";
 import { useLive } from "./live";
+import { useControlPlaneVersion } from "./NodeFacts";
 import { useWorkspaceContext } from "./context";
 import { NewWorkHost } from "./NewWorkModal";
 import { askText, DialogHost, notify } from "./dialogs";
@@ -39,6 +42,17 @@ const SECTIONS = [
   { to: "/activity", label: "Activity", icon: Activity },
   { to: "/nodes", label: "Nodes", icon: Server },
 ];
+
+/// Shown only to somebody holding an operator binding.
+///
+/// Absent rather than disabled: a greyed-out door still tells you there is a
+/// room, and on this surface the room is other people's fleets.
+const OPERATOR_SECTION = {
+  to: "/operator",
+  label: "Operator",
+  icon: ShieldCheck,
+  end: false,
+};
 
 const COMING_SOON = [
   { label: "Team", icon: Users },
@@ -214,6 +228,7 @@ export function Shell({ me }: { me: MeResponse }) {
   });
 
   const online = (nodes ?? []).filter((n) => n.status === "online").length;
+  const cpVersion = useControlPlaneVersion();
   const activeSessions = (sessions ?? []).filter((s) =>
     ["running", "starting", "detached"].includes(s.status),
   );
@@ -230,6 +245,11 @@ export function Shell({ me }: { me: MeResponse }) {
     await api.POST("/api/v1/auth/logout");
     window.location.href = "/";
   };
+
+  // Absent unless held — see OPERATOR_SECTION.
+  const sections = me.capability?.operator
+    ? [...SECTIONS, OPERATOR_SECTION]
+    : SECTIONS;
 
   return (
     <div className="nook-app">
@@ -259,6 +279,7 @@ export function Shell({ me }: { me: MeResponse }) {
           ))}
         </nav>
         <div className="nook-topbar-right">
+          <NotificationBell />
           {/* Feedback lives here, spelled out, not just as one more unlabelled
               icon in the rail — you can't tell us what's wrong with a thing
               you can't find. */}
@@ -290,7 +311,7 @@ export function Shell({ me }: { me: MeResponse }) {
       </header>
 
       <aside className="nook-rail">
-        {SECTIONS.map((s) => (
+        {sections.map((s) => (
           <NavLink
             key={s.to}
             to={s.to}
@@ -343,7 +364,13 @@ export function Shell({ me }: { me: MeResponse }) {
         <span className="sep">│</span>
         <span className="faint">tenant: {me.tenant.name}</span>
         <span style={{ flex: 1 }} />
-        <span className="faint">NookOS 0.1.0</span>
+        {/* The control plane's real version, not a literal. This read
+            "NookOS 0.1.0" from a hardcoded string for every release since
+            0.1.0, so the one number on screen claiming to identify the build
+            never once did. */}
+        <span className="faint" title="control plane version">
+          NookOS {cpVersion ?? "…"}
+        </span>
       </footer>
     </div>
   );
