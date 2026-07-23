@@ -35,7 +35,13 @@ fn home() -> Result<PathBuf> {
 /// not read is litter, and creating `~/.something/skills` for a tool that is
 /// not installed is worse — it looks like configuration someone chose.
 fn detect() -> Result<Vec<Target>> {
-    let h = home()?;
+    Ok(detect_in(&home()?))
+}
+
+/// The detection, with home supplied rather than read from the environment, so
+/// it is testable without mutating a process-global `HOME` that parallel tests
+/// share.
+fn detect_in(h: &Path) -> Vec<Target> {
     let mut found = Vec::new();
 
     // Hermes keeps a global set AND a private copy per profile — profiles hold
@@ -63,6 +69,18 @@ fn detect() -> Result<Vec<Target>> {
         });
     }
 
+    // Codex uses the same `skills/<name>/SKILL.md` layout as Claude Code — its
+    // built-ins live under `~/.codex/skills/.system`, user skills directly
+    // under `~/.codex/skills`. It was simply never in this list, so a machine
+    // with codex installed had its skill quietly skipped while hermes and
+    // claude got theirs.
+    if h.join(".codex").is_dir() {
+        found.push(Target {
+            name: "Codex",
+            roots: vec![h.join(".codex/skills")],
+        });
+    }
+
     // OpenClaw: this is the conventional location, but it is unverified — I
     // could not find an installation to check against. Detect-only, so a wrong
     // guess costs nothing: if the directory is absent we simply say so and
@@ -74,7 +92,7 @@ fn detect() -> Result<Vec<Target>> {
         });
     }
 
-    Ok(found)
+    found
 }
 
 fn write_skill(root: &Path) -> Result<PathBuf> {
@@ -153,7 +171,7 @@ pub fn install(dir: Option<PathBuf>, quiet: bool) -> Result<()> {
     if targets.is_empty() {
         println!("No agent installations found.");
         println!();
-        println!("Looked for ~/.hermes, ~/.claude and ~/.openclaw. If your agent keeps");
+        println!("Looked for ~/.hermes, ~/.claude, ~/.codex and ~/.openclaw. If your agent keeps");
         println!("skills somewhere else, point at it directly:");
         println!();
         println!("    nook skills install --dir ~/path/to/skills");
@@ -215,6 +233,35 @@ mod tests {
             assert!(forget_taught(bad).is_err(), "must refuse {bad:?}");
         }
         assert_eq!(safe_name("code-review").unwrap(), "code-review");
+    }
+
+    /// Codex is detected and writes to `~/.codex/skills`, the same layout as
+    /// Claude Code. This is the regression the fix is for: codex was installed,
+    /// its directory present, and the skill was silently skipped because the
+    /// list never named it.
+    #[test]
+    fn codex_is_detected_alongside_the_others() {
+        let h = std::env::temp_dir().join(format!("nook-detect-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&h);
+        for d in [".claude", ".codex/skills/.system", ".hermes"] {
+            std::fs::create_dir_all(h.join(d)).unwrap();
+        }
+
+        let found = detect_in(&h);
+        let names: Vec<&str> = found.iter().map(|t| t.name).collect();
+        assert!(names.contains(&"Codex"), "codex not detected: {names:?}");
+        assert!(names.contains(&"Claude Code"), "{names:?}");
+        assert!(names.contains(&"Hermes"), "{names:?}");
+
+        let codex = found.iter().find(|t| t.name == "Codex").unwrap();
+        assert_eq!(codex.roots, vec![h.join(".codex/skills")]);
+
+        // Absent codex → not detected (no litter for a tool that isn't here).
+        let bare = h.join("bare");
+        std::fs::create_dir_all(bare.join(".claude")).unwrap();
+        assert!(!detect_in(&bare).iter().any(|t| t.name == "Codex"));
+
+        let _ = std::fs::remove_dir_all(&h);
     }
 
     #[test]
