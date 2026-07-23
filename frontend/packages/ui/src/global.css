@@ -1646,3 +1646,28 @@ textarea.env-area.blurred {
   display: flex;
   align-items: center;
 }
+
+/* Device approval: the code is the thing to read across a room, so it gets
+   room to breathe and the tracking to be read a character at a time. */
+.device-code {
+  font-family: var(--nook-font-mono);
+  font-size: 26px;
+  letter-spacing: 0.28em;
+  /* The trailing letter-space would otherwise push it visibly off-centre. */
+  text-indent: 0.28em;
+  color: var(--nook-accent);
+  text-shadow: var(--nook-glow);
+  padding: 10px 0;
+}
+
+.device-link {
+  font-size: 12px;
+  color: var(--nook-fg-dim);
+  word-break: break-all;
+  text-align: center;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.device-link:hover {
+  color: var(--nook-accent);
+}
