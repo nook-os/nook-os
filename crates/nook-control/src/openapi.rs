@@ -42,6 +42,7 @@ use utoipa::OpenApi;
         crate::routes::gitops::get_secret,
         crate::routes::gitops::put_secret,
         crate::routes::nodes::list,
+        crate::routes::nodes::update,
         crate::routes::nodes::get_one,
         crate::routes::nodes::delete,
         crate::routes::join::create_join_token,

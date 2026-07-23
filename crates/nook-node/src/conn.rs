@@ -201,17 +201,39 @@ pub async fn connect_once(cfg: &NodeConfig) -> Result<()> {
             }
         };
         match parsed {
-            // Handled in a later change; acknowledged here so an older agent
-            // meeting a newer control plane ignores it rather than failing to
-            // parse the stream.
             ControlToNode::UpdateAgent => {
-                tracing::info!("control plane asked this agent to update");
+                // Asked directly, so no version comparison: somebody pressed a
+                // button and meant it.
+                match crate::selfupdate::run("asked by the control plane").await {
+                    Ok(()) => {}
+                    Err(e) => tracing::warn!(error = %e, "cannot update this agent"),
+                }
             }
             ControlToNode::Ping => {
                 out_tx.send(NodeToControl::Pong).await.ok();
             }
-            ControlToNode::RegisterAck { node_name, .. } => {
+            ControlToNode::RegisterAck {
+                node_name,
+                expected_agent_version,
+                ..
+            } => {
                 tracing::info!(node = %node_name, "registered");
+
+                // Nothing polls. A node reconnects whenever the control plane
+                // restarts, which is exactly when a fleet needs updating — so
+                // a deploy carries the news without anyone asking for it.
+                if crate::selfupdate::should_update(expected_agent_version.as_deref(), cfg) {
+                    tracing::info!(
+                        expected = %expected_agent_version.unwrap_or_default(),
+                        running = env!("CARGO_PKG_VERSION"),
+                        "control plane expects a different agent version"
+                    );
+                    if let Err(e) =
+                        crate::selfupdate::run("version differs from the control plane").await
+                    {
+                        tracing::warn!(error = %e, "cannot update this agent");
+                    }
+                }
             }
             ControlToNode::StartSession {
                 session_id,

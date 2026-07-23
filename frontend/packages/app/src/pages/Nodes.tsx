@@ -1,7 +1,7 @@
 import React, { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link, useNavigate, useParams } from "react-router-dom";
-import { SquareTerminal } from "lucide-react";
+import { ArrowUpCircle, SquareTerminal } from "lucide-react";
 import { api } from "@nookos/api";
 import { Empty, Panel, Pill, ResourceBars, StatusDot, statusTone } from "@nookos/ui";
 import { askConfirm, notify } from "../dialogs";
@@ -124,6 +124,34 @@ export function NodesPage() {
                           onClick={() => openTerminal(n.id)}
                         >
                           <SquareTerminal size={12} /> terminal
+                        </button>
+                      )}
+                      {status === "online" && (
+                        <button
+                          className="btn small"
+                          title={
+                            (caps.agent_version as string)
+                              ? `agent ${caps.agent_version} — update and restart`
+                              : "update the agent and restart it"
+                          }
+                          onClick={async () => {
+                            const { error } = await api.POST(
+                              "/api/v1/nodes/{id}/update",
+                              { params: { path: { id: n.id } } },
+                            );
+                            // The node decides whether it can: unsupervised, it
+                            // refuses rather than taking itself offline. Say
+                            // what happened either way — silence after pressing
+                            // a button reads as nothing happening.
+                            await notify(
+                              error ? "Not updated" : "Updating",
+                              error
+                                ? `${n.name} could not be asked to update.`
+                                : `${n.name} is fetching the new agent. It will drop off for a moment and come back — sessions survive, because tmux outlives the agent.`,
+                            );
+                          }}
+                        >
+                          <ArrowUpCircle size={12} /> update
                         </button>
                       )}
                       <button

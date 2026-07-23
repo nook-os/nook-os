@@ -33,6 +33,15 @@ pub struct NodeConfig {
     /// single-container case.
     #[serde(default)]
     pub agent_server: Option<String>,
+    /// How this agent is kept running: "systemd-user", "systemd-system",
+    /// "launchd", "docker", or absent when nothing supervises it.
+    ///
+    /// Recorded because self-update is only safe when something will start the
+    /// process again. Told to update, an unsupervised agent would replace its
+    /// binary, exit, and never come back — and the fleet-wide version of that
+    /// mistake is every machine at once.
+    #[serde(default)]
+    pub service: Option<String>,
 }
 
 impl NodeConfig {

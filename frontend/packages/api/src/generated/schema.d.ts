@@ -594,6 +594,34 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/nodes/{id}/update": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * POST /api/v1/nodes/{id}/update — tell a node to replace its agent and restart.
+         * @description A person asking, rather than the automatic path: a node already updates
+         *     itself on reconnect when its version differs from what this control plane
+         *     expects. This is for the case where you do not want to wait for a
+         *     reconnect, or where the automatic path declined and you want to see why.
+         *
+         *     The node decides whether it can. It knows whether anything would restart it
+         *     and refuses if not, because an agent that replaces its binary and exits
+         *     unsupervised simply goes offline — and doing that across a fleet takes every
+         *     machine at once.
+         */
+        post: operations["update_node_agent"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/notes/{id}": {
         parameters: {
             query?: never;
@@ -3552,6 +3580,33 @@ export interface operations {
                     "application/json": components["schemas"]["Session"];
                 };
             };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    update_node_agent: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description asked */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description node is offline */
             400: {
                 headers: {
                     [name: string]: unknown;

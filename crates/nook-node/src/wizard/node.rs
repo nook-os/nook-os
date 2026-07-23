@@ -136,6 +136,11 @@ pub async fn setup(args: SetupArgs) -> Result<()> {
     let svc = service::choose(&mut t)?;
     service::install(&mut t, svc, &exec)?;
 
+    // Remembered so the agent knows whether anything would restart it.
+    let mut cfg = NodeConfig::load()?;
+    cfg.service = svc.config_value().map(str::to_string);
+    cfg.save()?;
+
     // ---- offer the skill
     t.say("");
     if t.confirm(

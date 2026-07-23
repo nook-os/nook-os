@@ -1289,6 +1289,34 @@
         }
       }
     },
+    "/api/v1/nodes/{id}/update": {
+      "post": {
+        "tags": [
+          "crate::routes::nodes"
+        ],
+        "summary": "POST /api/v1/nodes/{id}/update — tell a node to replace its agent and restart.",
+        "description": "A person asking, rather than the automatic path: a node already updates\nitself on reconnect when its version differs from what this control plane\nexpects. This is for the case where you do not want to wait for a\nreconnect, or where the automatic path declined and you want to see why.\n\nThe node decides whether it can. It knows whether anything would restart it\nand refuses if not, because an agent that replaces its binary and exits\nunsupervised simply goes offline — and doing that across a fleet takes every\nmachine at once.",
+        "operationId": "update_node_agent",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "asked"
+          },
+          "400": {
+            "description": "node is offline"
+          }
+        }
+      }
+    },
     "/api/v1/notes/{id}": {
       "patch": {
         "tags": [

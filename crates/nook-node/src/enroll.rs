@@ -109,6 +109,7 @@ pub async fn enroll(
         ssh_key_path: None,
         server_fingerprint: None,
         agent_server: None,
+        service: None,
     });
     // The agent endpoint is where the certificate is actually used; the API
     // may well live elsewhere, so record it separately rather than moving

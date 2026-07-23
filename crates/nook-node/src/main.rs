@@ -8,6 +8,7 @@ mod enroll;
 mod gitops;
 mod pinning;
 mod resources;
+mod selfupdate;
 mod sessions;
 mod ssh;
 mod style;
@@ -415,7 +416,7 @@ enum ServerCommand {
 ///
 /// Written to a temp file and renamed into place, never overwritten: the
 /// running binary is this file, and writing over it fails with ETXTBSY.
-async fn update_binary() -> Result<()> {
+pub(crate) async fn update_binary() -> Result<()> {
     let cfg = NodeConfig::load()?;
     let server = cfg.server.trim_end_matches('/');
     let (os, arch) = target_platform()?;
@@ -606,6 +607,7 @@ async fn join(spec: JoinSpec) -> Result<()> {
         server_fingerprint: spec.server_fingerprint.clone(),
         // Joining does not know about the agent port; `nook enroll` sets it.
         agent_server: NodeConfig::load().ok().and_then(|c| c.agent_server),
+        service: NodeConfig::load().ok().and_then(|c| c.service),
     };
     cfg.save()?;
 
