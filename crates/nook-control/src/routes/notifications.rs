@@ -152,11 +152,28 @@ pub async fn notify_now(
     if let Some(b) = req.body {
         draft = draft.body(b.chars().take(4000).collect::<String>());
     }
+
+    // A session turns into a deep link to the terminal. Validated as a uuid so
+    // a hook can pass `$NOOK_SESSION_ID` blindly without risking a junk path in
+    // the link. Built here, from the control plane's public URL, because the
+    // node that raised this has no idea what URL a browser reaches it on — and
+    // an absolute URL is what a Slack message or a phone push needs anyway.
+    let session = req
+        .session
+        .as_deref()
+        .filter(|s| uuid::Uuid::parse_str(s).is_ok());
     if let Some(l) = req.link {
         draft = draft.link(l);
+    } else if let Some(sid) = session {
+        draft = draft.link(format!(
+            "{}/sessions/{sid}",
+            state.cfg.public_base_url.trim_end_matches('/')
+        ));
     }
     if let Some(p) = req.payload {
         draft = draft.payload(p);
+    } else if let Some(sid) = session {
+        draft = draft.payload(serde_json::json!({ "session_id": sid }));
     }
     notify::raise(&state, auth.tenant_id, draft).await;
     Ok(axum::http::StatusCode::ACCEPTED)

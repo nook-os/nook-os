@@ -1304,6 +1304,7 @@ pub async fn notify_fleet(
     level: &str,
     kind: Option<&str>,
     link: Option<&str>,
+    session: Option<&str>,
 ) -> Result<()> {
     anyhow::ensure!(!title.trim().is_empty(), "a notification needs a title");
     let client = Client::from_config()?;
@@ -1315,6 +1316,12 @@ pub async fn notify_fleet(
     if let Ok(cwd) = std::env::current_dir() {
         payload["cwd"] = serde_json::json!(cwd.display().to_string());
     }
+    // The session (from `$NOOK_SESSION_ID` in an agent hook) rides in the
+    // payload too, so a client can act on it without re-parsing the link — the
+    // control plane turns it into the actual deep-link URL.
+    if let Some(s) = session.filter(|s| !s.is_empty()) {
+        payload["session_id"] = serde_json::json!(s);
+    }
 
     client
         .post(
@@ -1325,6 +1332,7 @@ pub async fn notify_fleet(
                 "level": level,
                 "kind": kind.unwrap_or("cli"),
                 "link": link,
+                "session": session.filter(|s| !s.is_empty()),
                 "payload": payload,
             }),
         )

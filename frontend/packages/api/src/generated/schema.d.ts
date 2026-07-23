@@ -2907,6 +2907,14 @@ export interface components {
             level?: string | null;
             link?: string | null;
             payload?: unknown;
+            /**
+             * @description The session this notification is about, when it comes from an agent hook.
+             *     The control plane turns it into a deep link to the terminal (using its
+             *     own public URL, which the node does not know), so clicking "an agent is
+             *     waiting on you" opens the session — and external channels get a real URL,
+             *     not a path. An explicit `link` still wins.
+             */
+            session?: string | null;
             title: string;
         };
         /** @description Outcome of a long-running git operation on a node. */

@@ -80,9 +80,16 @@ const HOOKS: &[Hook] = &[
 /// notification read `repo" on host`. Parameter expansion needs no quoting, no
 /// subshell, and cannot be mangled by whatever writes the settings file.
 fn command(h: &Hook) -> String {
+    // `${NOOK_SESSION_ID:+--session $NOOK_SESSION_ID}` expands to the two words
+    // `--session <uuid>` only when the var is set — i.e. when the agent runs
+    // inside a nook session — and to nothing otherwise. A session id has no
+    // spaces, so it needs no quoting; and `:+` means an agent running in a
+    // plain terminal (no NOOK_SESSION_ID) still notifies, just without a link.
+    // This is what makes "Claude needs you" open the actual terminal.
     format!(
         "nook notify \"{title}\" --level {level} --kind {kind} \
-         --body \"${{PWD##*/}} on $(hostname)\" >/dev/null 2>&1 || true",
+         --body \"${{PWD##*/}} on $(hostname)\" \
+         ${{NOOK_SESSION_ID:+--session $NOOK_SESSION_ID}} >/dev/null 2>&1 || true",
         title = h.title,
         level = h.level,
         kind = h.kind,
@@ -222,6 +229,21 @@ mod tests {
         kinds.sort_unstable();
         kinds.dedup();
         assert_eq!(kinds.len(), n, "two hooks share a --kind");
+    }
+
+    /// Every hook passes the session through, so a notification can deep-link
+    /// to the terminal. Guarded with `:+` so it only appears when set — an
+    /// agent outside a nook session still notifies, just without a link.
+    #[test]
+    fn every_command_links_to_its_session() {
+        for h in HOOKS {
+            let c = command(h);
+            assert!(
+                c.contains("${NOOK_SESSION_ID:+--session $NOOK_SESSION_ID}"),
+                "{}: no session link: {c}",
+                h.event
+            );
+        }
     }
 
     /// The blocked-waiting hook is the point of adding more than one, so it had

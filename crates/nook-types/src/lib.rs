@@ -805,6 +805,13 @@ pub struct NotifyRequest {
     pub kind: Option<String>,
     #[serde(default)]
     pub link: Option<String>,
+    /// The session this notification is about, when it comes from an agent hook.
+    /// The control plane turns it into a deep link to the terminal (using its
+    /// own public URL, which the node does not know), so clicking "an agent is
+    /// waiting on you" opens the session — and external channels get a real URL,
+    /// not a path. An explicit `link` still wins.
+    #[serde(default)]
+    pub session: Option<String>,
     #[serde(default)]
     pub payload: Option<serde_json::Value>,
 }

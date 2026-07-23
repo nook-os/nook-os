@@ -7103,6 +7103,13 @@
             ]
           },
           "payload": {},
+          "session": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The session this notification is about, when it comes from an agent hook.\nThe control plane turns it into a deep link to the terminal (using its\nown public URL, which the node does not know), so clicking \"an agent is\nwaiting on you\" opens the session — and external channels get a real URL,\nnot a path. An explicit `link` still wins."
+          },
           "title": {
             "type": "string"
           }

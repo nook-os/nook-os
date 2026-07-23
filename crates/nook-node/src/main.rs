@@ -162,6 +162,10 @@ enum Command {
         /// Somewhere to go when clicked.
         #[arg(long)]
         link: Option<String>,
+        /// The session this is about (usually `$NOOK_SESSION_ID`). The control
+        /// plane turns it into a deep link to that terminal.
+        #[arg(long)]
+        session: Option<String>,
     },
     /// Which workspace is the session you are in? (`nook workspace current`)
     #[command(subcommand)]
@@ -464,6 +468,7 @@ async fn main() -> Result<()> {
             level,
             kind,
             link,
+            session,
         } => {
             cli::notify_fleet(
                 &title.join(" "),
@@ -471,6 +476,7 @@ async fn main() -> Result<()> {
                 &level,
                 kind.as_deref(),
                 link.as_deref(),
+                session.as_deref(),
             )
             .await
         }
