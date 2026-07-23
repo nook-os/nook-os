@@ -96,6 +96,13 @@ enum Command {
         /// Hide anything with an unresolved blocker.
         #[arg(long)]
         unblocked: bool,
+        /// Only this workspace (uuid or name). Defaults to the workspace of the
+        /// session you are in, so an agent's pick stays inside its own repo.
+        #[arg(long)]
+        workspace: Option<String>,
+        /// Ignore the session's workspace and list across the whole tenant.
+        #[arg(long = "all-workspaces")]
+        all_workspaces: bool,
         #[arg(long)]
         json: bool,
     },
@@ -156,12 +163,20 @@ enum Command {
         #[arg(long)]
         link: Option<String>,
     },
+    /// Which workspace is the session you are in? (`nook workspace current`)
+    #[command(subcommand)]
+    Workspace(WorkspaceCommand),
     /// Claim a task so nobody else takes it.
     Claim {
         key: String,
         /// Move it here at the same time, e.g. `started`.
         #[arg(long = "column-type")]
         column_type: Option<String>,
+        /// Claim even if the task belongs to a different workspace than this
+        /// session's. Off by default: the guard is what keeps an agent from
+        /// building another repo's ticket.
+        #[arg(long = "any-workspace")]
+        any_workspace: bool,
     },
     /// Register this machine non-interactively (flags and/or a config file —
     /// the automation path; humans usually want `nook setup`).
@@ -382,6 +397,8 @@ async fn main() -> Result<()> {
             assignee,
             column_type,
             unblocked,
+            workspace,
+            all_workspaces,
             json,
         } => {
             cli::tasks(
@@ -391,6 +408,8 @@ async fn main() -> Result<()> {
                 assignee.as_deref(),
                 column_type.as_deref(),
                 unblocked,
+                workspace.as_deref(),
+                all_workspaces,
                 json,
             )
             .await
@@ -398,7 +417,14 @@ async fn main() -> Result<()> {
         Command::Task { key, json } => cli::task(&key, json).await,
         Command::Comment { key, body } => cli::comment(&key, &body.join(" ")).await,
         Command::Label { key, name, remove } => cli::label(&key, &name, remove).await,
-        Command::Claim { key, column_type } => cli::claim(&key, column_type.as_deref()).await,
+        Command::Workspace(WorkspaceCommand::Current { json }) => {
+            cli::workspace_current(json).await
+        }
+        Command::Claim {
+            key,
+            column_type,
+            any_workspace,
+        } => cli::claim(&key, column_type.as_deref(), any_workspace).await,
         Command::Context(ContextCommand::List) => contexts::list(),
         Command::Context(ContextCommand::Current) => contexts::current(),
         Command::Context(ContextCommand::Save { name, server }) => contexts::save(&name, server),
@@ -662,6 +688,16 @@ enum ContextCommand {
     /// Forget a saved control plane. Does not log you out of it.
     #[command(alias = "rm")]
     Remove { name: String },
+}
+
+#[derive(Subcommand)]
+enum WorkspaceCommand {
+    /// Print the workspace of the session this command runs in (name + id).
+    /// Empty when not in a workspace session. `--json` for `{id, name}` or null.
+    Current {
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]

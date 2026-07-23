@@ -953,6 +953,96 @@ pub async fn unteach(name: &str) -> Result<()> {
 ///
 /// The same filter an agent uses, so a human can see exactly what the loop
 /// will take next rather than inferring it from a board.
+/// The workspace of the nook session this command is running inside, if any.
+///
+/// The whole confinement scheme rests on this: a `nook` invocation inside a
+/// session reads `NOOK_SESSION_ID` (exported at session start), asks the control
+/// plane which workspace that session is in, and scopes to it. `None` means the
+/// var is unset (not in a nook session) or the session is ad-hoc (no
+/// workspace) — in which case there is nothing to confine to and callers fall
+/// back to acting across the whole tenant.
+pub struct SessionWorkspace {
+    /// Workspace uuid, as the API's `workspace=` filter and `workspace_id` want.
+    pub id: String,
+    pub name: String,
+}
+
+pub async fn current_session_workspace(client: &Client) -> Option<SessionWorkspace> {
+    let sid = std::env::var("NOOK_SESSION_ID")
+        .ok()
+        .filter(|s| !s.is_empty())?;
+    let session = client.get(&format!("/api/v1/sessions/{sid}")).await.ok()?;
+    let id = session.get("workspace_id")?.as_str()?.to_string();
+    // The name is for humans only; if the lookup fails, the id still confines.
+    let name = client
+        .get(&format!("/api/v1/workspaces/{id}"))
+        .await
+        .ok()
+        .and_then(|w| w.get("name").and_then(|v| v.as_str()).map(str::to_string))
+        .unwrap_or_else(|| "workspace".into());
+    Some(SessionWorkspace { id, name })
+}
+
+/// `nook workspace current` — which workspace is this session in?
+///
+/// The seam `/loop-spec` uses to stamp a new ticket with the workspace it was
+/// filed from. Prints nothing (and exits 0) outside a workspace session, so a
+/// caller can treat empty output as "unscoped" without special-casing an error.
+pub async fn workspace_current(json: bool) -> Result<()> {
+    let client = Client::from_config()?;
+    match current_session_workspace(&client).await {
+        Some(ws) if json => {
+            println!("{}", serde_json::json!({ "id": ws.id, "name": ws.name }));
+        }
+        Some(ws) => println!("{}\t{}", ws.name, ws.id),
+        None if json => println!("null"),
+        None => {
+            eprintln!("not in a workspace session (no NOOK_SESSION_ID, or an ad-hoc terminal)");
+        }
+    }
+    Ok(())
+}
+
+/// Should a claim be refused? Pure, so the confinement policy is tested without
+/// a control plane. Refuse when this session has a workspace and the task's is
+/// not the same one — including a task with no workspace at all, which a
+/// confined loop must not adopt. `--any-workspace` and "not in a workspace
+/// session" both mean no confinement.
+fn claim_blocked(session_ws: Option<&str>, task_ws: Option<&str>, any_workspace: bool) -> bool {
+    if any_workspace {
+        return false;
+    }
+    match session_ws {
+        None => false,
+        Some(here) => task_ws != Some(here),
+    }
+}
+
+/// Resolve a `--workspace` value (a uuid or a name) to a workspace uuid.
+async fn resolve_workspace(client: &Client, needle: &str) -> Result<String> {
+    // A uuid is already an id; only a name needs the lookup.
+    if uuid::Uuid::parse_str(needle).is_ok() {
+        return Ok(needle.to_string());
+    }
+    let list = client.get("/api/v1/workspaces").await?;
+    list.as_array()
+        .into_iter()
+        .flatten()
+        .find(|w| {
+            w.get("name")
+                .and_then(|v| v.as_str())
+                .is_some_and(|n| n.eq_ignore_ascii_case(needle))
+                || w.get("slug")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|s| s.eq_ignore_ascii_case(needle))
+        })
+        .and_then(|w| w.get("id").and_then(|v| v.as_str()).map(str::to_string))
+        .with_context(|| format!("no workspace named '{needle}' — try `nook get workspaces`"))
+}
+
+// One parameter per CLI flag by design — this is the dispatch seam for
+// `nook tasks`, and a struct would just move the same list one hop away.
+#[allow(clippy::too_many_arguments)]
 pub async fn tasks(
     board: Option<&str>,
     labels: &[String],
@@ -960,11 +1050,29 @@ pub async fn tasks(
     assignee: Option<&str>,
     column_type: Option<&str>,
     unblocked: bool,
+    workspace: Option<&str>,
+    all_workspaces: bool,
     json: bool,
 ) -> Result<()> {
+    let client = Client::from_config()?;
     let mut q: Vec<String> = Vec::new();
     if let Some(b) = board {
         q.push(format!("board={b}"));
+    }
+
+    // Confinement. An explicit `--workspace` wins; otherwise, unless the caller
+    // asked for `--all-workspaces`, a command running inside a workspace session
+    // scopes to that workspace by default — so a builder agent cannot see, and
+    // therefore cannot take, another repo's work just by forgetting a flag.
+    if let Some(w) = workspace {
+        q.push(format!(
+            "workspace={}",
+            resolve_workspace(&client, w).await?
+        ));
+    } else if !all_workspaces {
+        if let Some(ws) = current_session_workspace(&client).await {
+            q.push(format!("workspace={}", ws.id));
+        }
     }
     for l in labels {
         q.push(format!("label={l}"));
@@ -987,7 +1095,6 @@ pub async fn tasks(
         format!("/api/v1/tasks?{}", q.join("&"))
     };
 
-    let client = Client::from_config()?;
     let resp = client.get(&path).await?;
     if json {
         println!("{}", serde_json::to_string_pretty(&resp)?);
@@ -1122,8 +1229,35 @@ pub async fn label(key: &str, name: &str, remove: bool) -> Result<()> {
 }
 
 /// `nook claim <key>` — take the work.
-pub async fn claim(key: &str, column_type: Option<&str>) -> Result<()> {
+pub async fn claim(key: &str, column_type: Option<&str>, any_workspace: bool) -> Result<()> {
     let client = Client::from_config()?;
+
+    // The guard, and the reason it is here rather than only in the pick query:
+    // the pick can be wrong — a stale filter, a hand-typed key, a skill edit —
+    // and this is the last gate before an agent starts building. Inside a
+    // workspace session, refuse a task that belongs to a different workspace (or
+    // to none) unless the caller explicitly opts out. So even a mistaken pick
+    // cannot become a feature built in the wrong repo.
+    if !any_workspace {
+        if let Some(here) = current_session_workspace(&client).await {
+            let task = client.get(&format!("/api/v1/tasks/{key}")).await?;
+            let task = task.get("task").unwrap_or(&task);
+            let task_ws = task.get("workspace_id").and_then(|v| v.as_str());
+            if claim_blocked(Some(&here.id), task_ws, any_workspace) {
+                let theirs = match task_ws {
+                    Some(_) => "a different workspace",
+                    None => "no workspace",
+                };
+                bail!(
+                    "{key} belongs to {theirs}; this session is in '{}'. \
+                     Refusing so work isn't built in the wrong repo — pass \
+                     --any-workspace to override.",
+                    here.name
+                );
+            }
+        }
+    }
+
     let body = match column_type {
         Some(c) => serde_json::json!({ "column_type": c }),
         None => serde_json::json!({}),
@@ -1421,6 +1555,49 @@ pub async fn operator_move_tenant(tenant: &str, org: &str) -> Result<()> {
         crate::style::bold(org)
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod claim_guard_tests {
+    use super::*;
+
+    const NOOK: &str = "11111111-1111-1111-1111-111111111111";
+    const OTHER: &str = "22222222-2222-2222-2222-222222222222";
+
+    /// A task in this session's own workspace is claimable.
+    #[test]
+    fn same_workspace_is_allowed() {
+        assert!(!claim_blocked(Some(NOOK), Some(NOOK), false));
+    }
+
+    /// The whole point: a task in another repo is refused from a confined
+    /// session, so an agent cannot build another repo's ticket from this one.
+    #[test]
+    fn a_different_workspace_is_refused() {
+        assert!(claim_blocked(Some(NOOK), Some(OTHER), false));
+    }
+
+    /// An unscoped task is refused too — a confined loop must not adopt work
+    /// nobody assigned to a repo (decided: own workspace only).
+    #[test]
+    fn an_unscoped_task_is_refused() {
+        assert!(claim_blocked(Some(NOOK), None, false));
+    }
+
+    /// `--any-workspace` turns the guard off for every case.
+    #[test]
+    fn the_override_allows_anything() {
+        assert!(!claim_blocked(Some(NOOK), Some(OTHER), true));
+        assert!(!claim_blocked(Some(NOOK), None, true));
+    }
+
+    /// Outside a workspace session there is nothing to confine to, so a human
+    /// running `nook claim` by hand is never blocked.
+    #[test]
+    fn no_session_workspace_never_blocks() {
+        assert!(!claim_blocked(None, Some(OTHER), false));
+        assert!(!claim_blocked(None, None, false));
+    }
 }
 
 #[cfg(test)]

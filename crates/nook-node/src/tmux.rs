@@ -186,7 +186,14 @@ pub fn runtime_available(runtime: &str) -> bool {
         .is_ok_and(|o| o.status.success() && !o.stdout.is_empty())
 }
 
-pub fn new_session(name: &str, cwd: &str, cols: u16, rows: u16, command: &str) -> Result<()> {
+pub fn new_session(
+    name: &str,
+    cwd: &str,
+    cols: u16,
+    rows: u16,
+    command: &str,
+    session_id: &str,
+) -> Result<()> {
     // Preflight, so the failure names its own cause. tmux's own message for a
     // missing -c directory is terse and arrives with no session attached, and
     // a runtime that isn't installed dies so fast it just looks like the
@@ -215,6 +222,13 @@ pub fn new_session(name: &str, cwd: &str, cols: u16, rows: u16, command: &str) -
         "LANG=C.UTF-8",
         "-e",
         "LC_ALL=C.UTF-8",
+        // Who this session is, in the environment, so anything running inside
+        // it — `nook` in particular — can ask "which session am I, and
+        // therefore which workspace am I confined to" without a lookup by tmux
+        // name. Used to scope task claims to the checkout the agent is in, and
+        // by the UI's agent-state signal.
+        "-e",
+        &format!("NOOK_SESSION_ID={session_id}"),
         "-x",
         &cols.to_string(),
         "-y",

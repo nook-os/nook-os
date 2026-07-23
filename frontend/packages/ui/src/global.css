@@ -772,6 +772,18 @@ table.nook-table tr.clickable { cursor: pointer; }
   white-space: nowrap;
 }
 
+/* Which repo a card belongs to — the thing that tells you which loop builds it.
+   Dimmer than a label so it reads as context, not a tag you set. */
+.card-workspace {
+  border: 1px solid var(--nook-border);
+  border-radius: 2px;
+  padding: 0 4px;
+  font-size: 10px;
+  line-height: 15px;
+  color: var(--nook-fg-dim);
+  white-space: nowrap;
+}
+
 .card-assignee { color: var(--nook-accent); font-size: 9px; margin-left: auto; }
 .col-type { font-size: 9.5px; text-transform: uppercase; letter-spacing: 0.04em; }
 

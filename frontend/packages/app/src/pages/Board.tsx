@@ -32,12 +32,16 @@ import { priorityMeta, priorityRank, previewText, PRIORITIES } from "../taskmeta
 
 function Card({
   task,
+  workspaceName,
   onOpen,
   onMenu,
   selected,
   blocked,
 }: {
   task: TaskItem;
+  /** The task's workspace, resolved to a name. Shown so a busy board tells you
+   *  which repo each card belongs to — and which loop will build it. */
+  workspaceName?: string;
   onOpen: () => void;
   onMenu: (anchor: { x: number; y: number }) => void;
   selected: boolean;
@@ -93,8 +97,16 @@ function Card({
       {/* Priority, labels and assignee on one dense row. A card is scanned in a
           column of twenty; anything that needs a second line to say "urgent"
           costs more than it tells you. */}
-      {(task.priority || (task.labels ?? []).length > 0 || task.assignee_user_id) && (
+      {(task.priority ||
+        (task.labels ?? []).length > 0 ||
+        task.assignee_user_id ||
+        workspaceName) && (
         <div className="card-meta">
+          {workspaceName && (
+            <span className="card-workspace" title={`workspace: ${workspaceName}`}>
+              {workspaceName}
+            </span>
+          )}
           {!!task.priority && (
             <span
               className="card-prio"
@@ -139,6 +151,7 @@ function Column({
   onMenu,
   selectedId,
   blockedIds,
+  wsName,
 }: {
   id: string;
   name: string;
@@ -151,6 +164,8 @@ function Column({
   onMenu: (task: TaskItem, anchor: { x: number; y: number }) => void;
   selectedId: string | null;
   blockedIds: Set<string>;
+  /** workspace id → name, so cards can label their repo without each fetching. */
+  wsName: Map<string, string>;
 }) {
   const { setNodeRef, isOver } = useDroppable({ id });
   return (
@@ -209,6 +224,7 @@ function Column({
           <Card
             key={t.id}
             task={t}
+            workspaceName={t.workspace_id ? wsName.get(t.workspace_id) : undefined}
             onOpen={() => onOpen(t.key ?? t.id)}
             onMenu={(anchor) => onMenu(t, anchor)}
             selected={selectedId === t.key || selectedId === t.id}
@@ -302,10 +318,12 @@ function Composer({ onAdd }: { onAdd: (title: string) => void }) {
 /** The filter strip. Drives the same query an agent's pick step uses. */
 function Filters({
   labels,
+  workspaces,
   value,
   onChange,
 }: {
   labels: { id: string; name: string; color: string }[];
+  workspaces: { id: string; name: string }[];
   value: BoardFilter;
   onChange: (f: BoardFilter) => void;
 }) {
@@ -393,6 +411,27 @@ function Filters({
         {value.blocked === false ? "unblocked" : value.blocked === true ? "blocked" : "any block state"}
       </button>
 
+      {workspaces.length > 1 && (
+        <>
+          <span className="filter-sep" />
+          <span className="faint small">workspace</span>
+          <select
+            className="task-select"
+            value={value.workspace ?? ""}
+            onChange={(e) =>
+              onChange({ ...value, workspace: e.target.value === "" ? null : e.target.value })
+            }
+          >
+            <option value="">all</option>
+            {workspaces.map((w) => (
+              <option key={w.id} value={w.id}>
+                {w.name}
+              </option>
+            ))}
+          </select>
+        </>
+      )}
+
       {active && (
         <button className="btn small" onClick={() => onChange(EMPTY_FILTER)}>
           clear
@@ -408,6 +447,8 @@ export interface BoardFilter {
   assignee: "any" | "none" | "me";
   priority: number | null;
   blocked: boolean | null;
+  /** Workspace uuid, or null for all. Confines the board to one repo. */
+  workspace: string | null;
 }
 
 const EMPTY_FILTER: BoardFilter = {
@@ -416,6 +457,7 @@ const EMPTY_FILTER: BoardFilter = {
   assignee: "any",
   priority: null,
   blocked: null,
+  workspace: null,
 };
 
 export function BoardPage() {
@@ -474,6 +516,16 @@ export function BoardPage() {
     queryKey: ["labels"],
     queryFn: async () => (await api.GET("/api/v1/labels")).data ?? [],
   });
+  // Workspaces, to turn each task's `workspace_id` into a name — one fetch for
+  // the whole board rather than one per card.
+  const { data: workspaces } = useQuery({
+    queryKey: ["workspaces"],
+    queryFn: async () => (await api.GET("/api/v1/workspaces")).data ?? [],
+  });
+  const wsName = React.useMemo(
+    () => new Map((workspaces ?? []).map((w) => [w.id, w.name])),
+    [workspaces],
+  );
 
   // Blocked-ness is DERIVED from relations and column types, so the board
   // cannot work it out from the tasks it already holds — it would need every
@@ -498,7 +550,8 @@ export function BoardPage() {
     filter.not_label.length > 0 ||
     filter.assignee !== "any" ||
     filter.priority !== null ||
-    filter.blocked !== null;
+    filter.blocked !== null ||
+    filter.workspace !== null;
 
   const { data: filtered } = useQuery({
     queryKey: ["tasks", "filtered", board?.id, filter, me?.user?.id],
@@ -518,6 +571,7 @@ export function BoardPage() {
                   : {}),
               ...(filter.priority !== null ? { priority: filter.priority } : {}),
               ...(filter.blocked !== null ? { is_blocked: filter.blocked } : {}),
+              ...(filter.workspace ? { workspace: filter.workspace } : {}),
             },
           },
         })
@@ -685,7 +739,12 @@ export function BoardPage() {
         }
       >
         <div className="board-body">
-          <Filters labels={labels ?? []} value={filter} onChange={setFilter} />
+          <Filters
+            labels={labels ?? []}
+            workspaces={workspaces ?? []}
+            value={filter}
+            onChange={setFilter}
+          />
           <div className="board-split">
             <DndContext sensors={sensors} onDragEnd={onDragEnd}>
               <div className="board-columns">
@@ -703,6 +762,7 @@ export function BoardPage() {
                     onMenu={(t, anchor) => setMenu({ task: t, anchor })}
                     selectedId={openTask}
                     blockedIds={blockedIds}
+                    wsName={wsName}
                   />
                 ))}
               </div>

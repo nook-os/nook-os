@@ -73,7 +73,11 @@ impl Manager {
         self.sessions.remove(&session_id);
 
         if !tmux::session_exists(&tmux_name) {
-            if let Err(e) = tmux::new_session(&tmux_name, workspace_path, cols, rows, runtime) {
+            // The canonical (hyphenated) uuid, not the tmux name's simple form,
+            // so `GET /api/v1/sessions/{id}` inside the session resolves.
+            let sid = session_id.0.to_string();
+            if let Err(e) = tmux::new_session(&tmux_name, workspace_path, cols, rows, runtime, &sid)
+            {
                 return self.session_failed(session_id, e.to_string());
             }
         }
