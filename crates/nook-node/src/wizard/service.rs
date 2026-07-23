@@ -8,7 +8,7 @@
 
 use anyhow::{bail, Context, Result};
 
-use super::generate::{node_launchd_plist, node_unit};
+use super::generate::{node_launchd_plist, node_supervisord_conf, node_unit};
 use super::tty::Tty;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -19,6 +19,9 @@ pub enum Service {
     SystemSystemd,
     /// A launchd agent on macOS: runs as you, starts at login, restarts itself.
     Launchd,
+    /// A supervisord program. The fit for a box that already runs supervisord
+    /// or has no systemd — a WSL install, say.
+    Supervisord,
     /// The node in a container.
     Docker,
     /// Nothing installed; print the command.
@@ -35,81 +38,65 @@ fn have(cmd: &str) -> bool {
 }
 
 /// Ask how the agent should be kept running.
+///
+/// Built as a list rather than a fixed menu per platform, because the options
+/// are conditional — launchd only on a Mac, systemd only where it runs,
+/// supervisord only when it is installed — and a fixed menu with index matching
+/// is where a "supervisord" pick quietly maps to "docker" the day someone
+/// inserts a row above it.
 pub fn choose(t: &mut Tty) -> Result<Service> {
+    let has_systemd = have("systemctl");
+    let has_launchd = have("launchctl");
+    let has_supervisord = have("supervisorctl");
+
+    let mut opts: Vec<(Service, &str, &str)> = Vec::new();
+
     // macOS has no systemd; launchd is the equivalent and is what a Mac user
-    // expects when they ask for "always running". Offering only "run it
-    // yourself" there was a gap, not a design decision.
-    if have("launchctl") && !have("systemctl") {
-        let pick = t.choose(
-            "How should the agent stay running?",
-            &[
-                (
-                    "launchd agent",
-                    "Starts at login and restarts itself. No sudo — it runs as you.",
-                ),
-                (
-                    "Docker container",
-                    "Only sees tooling inside the container — good for CI, poor for a laptop.",
-                ),
-                ("Don't install a service", "Print the command and stop."),
-            ],
-            0,
-        )?;
-        return Ok(match pick {
-            0 => Service::Launchd,
-            1 => Service::Docker,
-            _ => Service::None,
-        });
+    // expects when they ask for "always running".
+    if has_launchd && !has_systemd {
+        opts.push((
+            Service::Launchd,
+            "launchd agent",
+            "Starts at login and restarts itself. No sudo — it runs as you.",
+        ));
+    } else if has_systemd {
+        opts.push((
+            Service::UserSystemd,
+            "systemd user service",
+            "No sudo. Runs as you, which is what it needs — it runs your tooling.",
+        ));
+        opts.push((
+            Service::SystemSystemd,
+            "systemd system service",
+            "Needs sudo. Right for a shared or headless machine.",
+        ));
     }
 
-    if !have("systemctl") {
-        // Neither init system: a container, or something unusual.
-        let pick = t.choose(
-            "How should the agent stay running?",
-            &[
-                (
-                    "Don't install a service",
-                    "Print the command; run it yourself or use your own supervisor.",
-                ),
-                (
-                    "Docker container",
-                    "Only sees tooling inside the container — good for CI, poor for a laptop.",
-                ),
-            ],
-            0,
-        )?;
-        return Ok(if pick == 0 {
-            Service::None
-        } else {
-            Service::Docker
-        });
+    // Offered whenever it is present, alongside whatever else fits — a box can
+    // have both systemd and supervisord, and on WSL supervisord is often the
+    // only thing that actually stays running.
+    if has_supervisord {
+        opts.push((
+            Service::Supervisord,
+            "supervisord program",
+            "Managed by supervisord. Restarts on exit and survives self-update.",
+        ));
     }
 
-    let pick = t.choose(
-        "How should the agent stay running?",
-        &[
-            (
-                "systemd user service",
-                "No sudo. Runs as you, which is what it needs — it runs your tooling.",
-            ),
-            (
-                "systemd system service",
-                "Needs sudo. Right for a shared or headless machine.",
-            ),
-            (
-                "Docker container",
-                "Only sees tooling inside the container — good for CI, poor for a laptop.",
-            ),
-            ("Don't install a service", "Print the command and stop."),
-        ],
-        0,
-    )?;
-    Ok(match pick {
-        0 => Service::UserSystemd,
-        1 => Service::SystemSystemd,
-        2 => Service::Docker,
-        _ => Service::None,
-    })
+    opts.push((
+        Service::Docker,
+        "Docker container",
+        "Only sees tooling inside the container — good for CI, poor for a laptop.",
+    ));
+    opts.push((
+        Service::None,
+        "Don't install a service",
+        "Print the command; run it yourself or use your own supervisor.",
+    ));
+
+    let menu: Vec<(&str, &str)> = opts.iter().map(|(_, l, d)| (*l, *d)).collect();
+    let pick = t.choose("How should the agent stay running?", &menu, 0)?;
+    Ok(opts[pick].0)
 }
 
 impl Service {
@@ -120,6 +107,7 @@ impl Service {
             Service::UserSystemd => Some("systemd-user"),
             Service::SystemSystemd => Some("systemd-system"),
             Service::Launchd => Some("launchd"),
+            Service::Supervisord => Some("supervisord"),
             Service::Docker => Some("docker"),
             Service::None => None,
         }
@@ -200,6 +188,47 @@ pub fn install(t: &mut Tty, service: Service, exec: &str) -> Result<()> {
                 "  Logs:  tail -f {home}/Library/Logs/nook-node.log"
             ));
             t.say(&format!("  Stop:  launchctl unload {path}"));
+            Ok(())
+        }
+
+        Service::Supervisord => {
+            let conf = node_supervisord_conf(exec, &home, &user);
+            // The Debian/Ubuntu `supervisor` package includes
+            // `/etc/supervisor/conf.d/*.conf`. When that directory is where we
+            // expect, install and activate it; otherwise print the config
+            // rather than guess at a layout — a supervisord started from a
+            // hand-written config could include from anywhere.
+            let conf_dir = "/etc/supervisor/conf.d";
+            if std::path::Path::new(conf_dir).is_dir() {
+                let tmp = std::env::temp_dir().join("nook-node.conf");
+                std::fs::write(&tmp, &conf)?;
+                t.say(&format!("Writing {conf_dir}/nook-node.conf (sudo)"));
+                run(&[
+                    "sudo",
+                    "install",
+                    "-m644",
+                    tmp.to_str().unwrap(),
+                    &format!("{conf_dir}/nook-node.conf"),
+                ])?;
+                let _ = std::fs::remove_file(&tmp);
+                // `reread` picks up the new file; `update` starts what changed.
+                run(&["sudo", "supervisorctl", "reread"])?;
+                run(&["sudo", "supervisorctl", "update"])?;
+                t.say("✓ supervisord program installed and started");
+                t.say("  Logs:  sudo supervisorctl tail -f nook-node");
+                t.say("  Stop:  sudo supervisorctl stop nook-node");
+            } else {
+                t.say("");
+                t.say(&format!(
+                    "  supervisord is installed but {conf_dir} was not found."
+                ));
+                t.say("  Add this to your supervisord include directory, then run");
+                t.say("  `supervisorctl reread && supervisorctl update`:");
+                t.say("");
+                for line in conf.lines() {
+                    t.say(&format!("    {line}"));
+                }
+            }
             Ok(())
         }
 

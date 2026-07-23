@@ -32,7 +32,7 @@ use crate::config::NodeConfig;
 fn supervised_with(cfg: &NodeConfig, supervisor_detected: bool) -> bool {
     if matches!(
         cfg.service.as_deref(),
-        Some("systemd-user") | Some("systemd-system") | Some("launchd")
+        Some("systemd-user") | Some("systemd-system") | Some("launchd") | Some("supervisord")
     ) {
         return true;
     }
@@ -164,7 +164,9 @@ mod tests {
 
     #[test]
     fn supervised_agents_are_allowed() {
-        for s in ["systemd-user", "systemd-system", "launchd"] {
+        // supervisord included: a config that names it must self-update without
+        // waiting on `INVOCATION_ID`, which supervisord does not set.
+        for s in ["systemd-user", "systemd-system", "launchd", "supervisord"] {
             assert!(supervised_with(&cfg(Some(s)), NO_SUPERVISOR), "{s}");
             assert!(refusal_with(&cfg(Some(s)), NO_SUPERVISOR).is_none(), "{s}");
         }
