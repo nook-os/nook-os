@@ -1103,7 +1103,19 @@ table.nook-table tr.clickable { cursor: pointer; }
   border-radius: 999px;
   overflow: hidden;
 }
-.res-bar .fill { height: 100%; background: var(--nook-ok); }
+/* `display: block` is load-bearing, not tidiness. The fill is a <span>, and an
+   inline box ignores both width and height — so the width React sets from the
+   live sample was applied and then discarded, and every bar rendered 0×0 no
+   matter what the machine reported. The colour and the track were visible, so
+   it read as "everything is idle" rather than as a broken element.
+   Width transitions because these update on every heartbeat; jumping is what
+   makes a live number look like a glitch. */
+.res-bar .fill {
+  display: block;
+  height: 100%;
+  background: var(--nook-ok);
+  transition: width 240ms ease-out;
+}
 .res-bar .fill.warn { background: var(--nook-warn); }
 .res-bar .fill.err { background: var(--nook-err); }
 .res-bar .val { color: var(--nook-fg); width: 66px; flex: none; text-align: right; }
