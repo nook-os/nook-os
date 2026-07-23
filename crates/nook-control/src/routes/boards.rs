@@ -142,9 +142,33 @@ pub async fn create_task(
         auth.tenant_id,
         nook_proto::UiEvent::TaskChanged { task_id: task.id },
     );
-    Ok(Json(
-        crate::services::tasks::enrich_one(&state.db, &state.cfg.public_base_url, task).await?,
-    ))
+
+    let enriched =
+        crate::services::tasks::enrich_one(&state.db, &state.cfg.public_base_url, task).await?;
+
+    // Tell the tenant a card landed. The activity event above feeds the
+    // Activity page — a place you go look — but a task appearing on the board
+    // (an import, an agent filing an issue, a teammate adding work) is exactly
+    // the kind of thing worth a toast and a phone buzz, which is the notify
+    // path, not the activity path. Carries the key and a deep link so the toast
+    // is actionable rather than just "something changed".
+    let mut draft = crate::services::notify::Draft::new(match enriched.key.as_deref() {
+        Some(k) => format!("New task: {k}"),
+        None => "New task".to_string(),
+    })
+    .level("info")
+    .kind("task.created")
+    .body(enriched.title.clone())
+    .payload(serde_json::json!({
+        "task_id": enriched.id,
+        "key": enriched.key,
+    }));
+    if let Some(url) = enriched.url.clone() {
+        draft = draft.link(url);
+    }
+    crate::services::notify::raise(&state, auth.tenant_id, draft).await;
+
+    Ok(Json(enriched))
 }
 
 #[utoipa::path(patch, path = "/api/v1/tasks/{id}",
@@ -317,6 +341,36 @@ async fn unique_key(state: &AppState, tenant: TenantId, name: &str) -> ApiResult
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Creating a task raises a notification, not only an activity event.
+    ///
+    /// The two are different surfaces: the activity event feeds the Activity
+    /// page you go and look at; the notification is the toast + phone buzz +
+    /// channel fan-out. A card landing on the board — an import, an agent
+    /// filing an issue — is worth the second, and for a long time got only the
+    /// first, so nobody was told. Asserted at the source because the failure is
+    /// silence, which no runtime test of the happy path would notice.
+    #[test]
+    fn create_task_raises_a_notification() {
+        let src = include_str!("boards.rs");
+        let body = src
+            .split("pub async fn create_task(")
+            .nth(1)
+            .expect("create_task handler")
+            .split("\npub ")
+            .next()
+            .expect("handler body");
+        assert!(
+            body.contains("notify::raise"),
+            "create_task must raise a notification so a new card reaches the \
+             inbox/toasts, not just the Activity feed"
+        );
+        assert!(
+            body.contains("\"task.created\""),
+            "the notification should carry the `task.created` kind so channels \
+             can route it"
+        );
+    }
 
     /// "NookOS Bootstrap" must become NOOK. The first implementation flattened
     /// the whole name and cut at five, producing NOOKO — a key nobody would
