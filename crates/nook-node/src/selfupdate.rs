@@ -21,7 +21,15 @@ use crate::config::NodeConfig;
 /// Told to update while unsupervised, an agent would replace its binary, exit,
 /// and never return — and doing that across a fleet takes every machine down at
 /// once. So the answer has to be recorded, not guessed.
-pub fn supervised(cfg: &NodeConfig) -> bool {
+///
+/// Pure on purpose: the runtime probe is supplied rather than read here. The
+/// probe reads a process-global environment variable, and a version that read
+/// it directly would depend on whatever started the test process — GitHub's
+/// runners run under systemd, so `INVOCATION_ID` is set there and every
+/// "unsupervised" assertion flipped on CI while passing in a bare container.
+/// Threading the probe through keeps the decision testable without touching the
+/// environment, and without one test's `set_var` racing another's `remove_var`.
+fn supervised_with(cfg: &NodeConfig, supervisor_detected: bool) -> bool {
     if matches!(
         cfg.service.as_deref(),
         Some("systemd-user") | Some("systemd-system") | Some("launchd")
@@ -40,7 +48,7 @@ pub fn supervised(cfg: &NodeConfig) -> bool {
     if cfg.service.as_deref() == Some("docker") {
         return false;
     }
-    supervisor_detected()
+    supervisor_detected
 }
 
 /// Did a service manager start this process?
@@ -56,7 +64,11 @@ fn supervisor_detected() -> bool {
 
 /// Why an update was refused, in words worth showing an operator.
 pub fn refusal(cfg: &NodeConfig) -> Option<String> {
-    if supervised(cfg) {
+    refusal_with(cfg, supervisor_detected())
+}
+
+fn refusal_with(cfg: &NodeConfig, supervisor_detected: bool) -> Option<String> {
+    if supervised_with(cfg, supervisor_detected) {
         return None;
     }
     Some(match cfg.service.as_deref() {
@@ -96,10 +108,14 @@ pub async fn run(reason: &str) -> Result<()> {
 /// plane expects", not "am I newer". A node downgraded deliberately should
 /// follow the downgrade.
 pub fn should_update(expected: Option<&str>, cfg: &NodeConfig) -> bool {
+    should_update_with(expected, cfg, supervisor_detected())
+}
+
+fn should_update_with(expected: Option<&str>, cfg: &NodeConfig, supervisor_detected: bool) -> bool {
     let Some(expected) = expected else {
         return false;
     };
-    expected != env!("CARGO_PKG_VERSION") && supervised(cfg)
+    expected != env!("CARGO_PKG_VERSION") && supervised_with(cfg, supervisor_detected)
 }
 
 #[cfg(test)]
@@ -120,29 +136,37 @@ mod tests {
         }
     }
 
-    /// The check that keeps a fleet from going dark. An agent nothing restarts
-    /// must refuse, and say why in terms an operator can act on.
+    // The probe result is passed in rather than read from the environment, so
+    // these are deterministic and cannot race each other's `set_var`. `false`
+    // means "no supervisor detected", `true` means systemd's `INVOCATION_ID`
+    // was present — the two real cases, named at every call.
+    const NO_SUPERVISOR: bool = false;
+    const DETECTED: bool = true;
+
+    /// The check that keeps a fleet from going dark. An agent nothing restarts,
+    /// with nothing detecting one either, must refuse — and say why in terms an
+    /// operator can act on.
     #[test]
     fn an_unsupervised_agent_refuses_to_update() {
         for s in [None, Some("none")] {
             let c = cfg(s);
-            assert!(!supervised(&c));
-            let why = refusal(&c).expect("must refuse");
+            assert!(!supervised_with(&c, NO_SUPERVISOR));
+            let why = refusal_with(&c, NO_SUPERVISOR).expect("must refuse");
             assert!(why.contains("nook setup"), "{why}");
         }
     }
 
     #[test]
     fn a_container_is_told_to_update_its_image() {
-        let why = refusal(&cfg(Some("docker"))).expect("must refuse");
+        let why = refusal_with(&cfg(Some("docker")), NO_SUPERVISOR).expect("must refuse");
         assert!(why.contains("image"), "{why}");
     }
 
     #[test]
     fn supervised_agents_are_allowed() {
         for s in ["systemd-user", "systemd-system", "launchd"] {
-            assert!(supervised(&cfg(Some(s))), "{s}");
-            assert!(refusal(&cfg(Some(s))).is_none(), "{s}");
+            assert!(supervised_with(&cfg(Some(s)), NO_SUPERVISOR), "{s}");
+            assert!(refusal_with(&cfg(Some(s)), NO_SUPERVISOR).is_none(), "{s}");
         }
     }
 
@@ -151,49 +175,56 @@ mod tests {
     #[test]
     fn it_follows_the_control_plane_in_either_direction() {
         let c = cfg(Some("systemd-user"));
-        assert!(should_update(Some("99.0.0"), &c), "behind");
-        assert!(should_update(Some("0.0.1"), &c), "ahead — still follow");
         assert!(
-            !should_update(Some(env!("CARGO_PKG_VERSION")), &c),
+            should_update_with(Some("99.0.0"), &c, NO_SUPERVISOR),
+            "behind"
+        );
+        assert!(
+            should_update_with(Some("0.0.1"), &c, NO_SUPERVISOR),
+            "ahead — still follow"
+        );
+        assert!(
+            !should_update_with(Some(env!("CARGO_PKG_VERSION")), &c, NO_SUPERVISOR),
             "already matching"
         );
         // An older control plane says nothing; silence is not an instruction.
-        assert!(!should_update(None, &c));
-        // And supervision still gates it.
-        assert!(!should_update(Some("99.0.0"), &cfg(None)));
+        assert!(!should_update_with(None, &c, NO_SUPERVISOR));
+        // And supervision still gates it: no service, nothing detected.
+        assert!(!should_update_with(
+            Some("99.0.0"),
+            &cfg(None),
+            NO_SUPERVISOR
+        ));
     }
 
     /// A node enrolled before `service` existed is supervised in fact and
     /// silent about it in config. Every node in the fleet was in that state,
-    /// so it sat one version behind forever — and said nothing.
+    /// so it sat one version behind forever — and said nothing. When a
+    /// supervisor IS detected, that node updates despite the empty config.
     #[test]
-    fn systemd_is_detected_when_the_config_does_not_say_so() {
+    fn a_detected_supervisor_overrides_empty_config() {
         let c = cfg(None);
-        // Nothing in the environment: the old behaviour, refuse.
-        std::env::remove_var("INVOCATION_ID");
-        assert!(!supervised(&c), "no evidence of a supervisor — must refuse");
-
-        // systemd sets this for every unit it starts, per invocation.
-        std::env::set_var("INVOCATION_ID", "b8f1c0de");
         assert!(
-            supervised(&c),
-            "started by systemd, so something WILL restart us"
+            !supervised_with(&c, NO_SUPERVISOR),
+            "no config and nothing detected — must refuse"
         );
-        std::env::remove_var("INVOCATION_ID");
+        assert!(
+            supervised_with(&c, DETECTED),
+            "detected a supervisor, so something WILL restart us"
+        );
     }
 
     /// Docker must never be second-guessed. A container is restarted by its
     /// runtime, so detection would say yes — and rewriting a binary inside a
-    /// layer that vanishes on the next `up` is exactly the wrong move.
+    /// layer that vanishes on the next `up` is exactly the wrong move. Config
+    /// beats inference in the one case inference is confidently wrong.
     #[test]
     fn docker_is_never_overridden_by_detection() {
         let c = cfg(Some("docker"));
-        std::env::set_var("INVOCATION_ID", "b8f1c0de");
         assert!(
-            !supervised(&c),
+            !supervised_with(&c, DETECTED),
             "a container updates by pulling an image, not by rewriting its binary"
         );
-        assert!(refusal(&c).is_some_and(|r| r.contains("image")));
-        std::env::remove_var("INVOCATION_ID");
+        assert!(refusal_with(&c, DETECTED).is_some_and(|r| r.contains("image")));
     }
 }
