@@ -97,6 +97,10 @@ pub async fn enroll(
 
     save_identity(&issued.cert_pem, &key_pem)?;
     save_bundle(&issued.ca_bundle)?;
+    // Recorded here as well as on renewal: a freshly enrolled node that did
+    // not know its own expiry would renew on its very first check, treating
+    // "I cannot tell" as "renew".
+    save_expiry(issued.not_after)?;
 
     // Record the identity so `nook run` finds it. Keep whatever else was
     // already configured — enrolling must not undo `nook setup`.
@@ -134,6 +138,17 @@ pub async fn enroll(
 /// No join token: that is the point. A machine offline for months comes back
 /// and renews itself.
 pub async fn renew() -> Result<()> {
+    let issued = renew_now().await?;
+    println!("✓ renewed — valid until {}", issued);
+    Ok(())
+}
+
+/// The renewal itself. Returns when the new certificate expires.
+///
+/// Split from the command so the agent's automatic check can call it without
+/// printing to a stdout nobody is reading — and so both paths renew in exactly
+/// one way.
+pub async fn renew_now() -> Result<chrono::DateTime<chrono::Utc>> {
     let cfg = NodeConfig::load().context("this machine has not joined")?;
     let (_, key_path) = cert_paths()?;
     let key_pem = std::fs::read_to_string(&key_path)
@@ -170,8 +185,51 @@ pub async fn renew() -> Result<()> {
     // Only the certificate changes; the key stays put.
     save_identity(&issued.cert_pem, &key_pem)?;
     save_bundle(&issued.ca_bundle)?;
-    println!("✓ renewed — valid until {}", issued.not_after);
+    save_expiry(issued.not_after)?;
+    Ok(issued.not_after)
+}
+
+/// Remember when our certificate expires.
+///
+/// Written beside the certificate rather than parsed back out of it: the node
+/// already has the answer from the server, and adding an X.509 parser to read
+/// a number we were just handed would be a dependency bought for nothing.
+fn save_expiry(not_after: chrono::DateTime<chrono::Utc>) -> Result<()> {
+    let (cert_path, _) = cert_paths()?;
+    let dir = cert_path.parent().context("no config directory")?;
+    std::fs::write(dir.join("cert-expiry"), not_after.to_rfc3339())?;
     Ok(())
+}
+
+/// When our certificate expires, if we know.
+///
+/// `None` on a node enrolled before this was recorded, which the renewal policy
+/// treats as "renew" — see `certs::Reason::Unknown`.
+pub fn expiry() -> Option<chrono::DateTime<chrono::Utc>> {
+    let (cert_path, _) = cert_paths().ok()?;
+    let raw = std::fs::read_to_string(cert_path.parent()?.join("cert-expiry")).ok()?;
+    chrono::DateTime::parse_from_rfc3339(raw.trim())
+        .ok()
+        .map(|d| d.with_timezone(&chrono::Utc))
+}
+
+/// Fingerprints of every CA in our trust bundle, for comparing against what
+/// the control plane says this tenant trusts.
+pub fn held_ca_fingerprints() -> Vec<String> {
+    let Ok((cert_path, _)) = cert_paths() else {
+        return vec![];
+    };
+    let Some(dir) = cert_path.parent() else {
+        return vec![];
+    };
+    let Ok(pem) = std::fs::read_to_string(dir.join("ca-bundle.crt")) else {
+        return vec![];
+    };
+    let mut reader = std::io::BufReader::new(pem.as_bytes());
+    rustls_pemfile::certs(&mut reader)
+        .filter_map(Result::ok)
+        .map(|der| crate::pinning::fingerprint(&der))
+        .collect()
 }
 
 /// Keep the tenant's whole trust bundle, not just our own certificate.

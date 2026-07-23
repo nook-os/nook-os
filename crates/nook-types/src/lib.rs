@@ -109,6 +109,10 @@ pub struct TenantMembership {
 pub struct MeResponse {
     pub user: User,
     pub tenant: Tenant,
+    /// What this caller may do, so a UI can hide what it cannot offer rather
+    /// than rendering a button that 403s.
+    #[serde(default)]
+    pub capability: Capability,
 }
 
 /// Unauthenticated sign-in capabilities, so the login screen only offers what
@@ -262,6 +266,61 @@ pub struct Node {
     pub updated_at: DateTime<Utc>,
 }
 
+// ── Skills ───────────────────────────────────────────────────────────────────
+
+/// A skill taught to the whole fleet.
+///
+/// Stored by the control plane rather than pushed and forgotten, so that a node
+/// which was offline when it was taught — or which joins next week — converges
+/// on register instead of quietly being the one machine that never learned it.
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
+pub struct Skill {
+    pub id: uuid::Uuid,
+    pub tenant_id: TenantId,
+    /// Becomes a path component on every machine: `<skills>/<name>/SKILL.md`.
+    pub name: String,
+    pub content: String,
+    /// Of `content`. Lets a node skip a write it already has, and lets an
+    /// operator see whether two machines really do hold the same thing.
+    pub sha256: String,
+    pub updated_at: DateTime<Utc>,
+    #[serde(default)]
+    pub updated_by: Option<uuid::Uuid>,
+}
+
+/// The same thing without its body — a list of twenty skills should not ship
+/// twenty documents to draw a table.
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
+pub struct SkillSummary {
+    pub id: uuid::Uuid,
+    pub name: String,
+    pub sha256: String,
+    /// Bytes, so the UI can show a size without holding the content.
+    pub size: i64,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct TeachRequest {
+    /// Omitted means "derive it": from the document's own frontmatter `name:`,
+    /// falling back to the filename. Explicit wins, because a file called
+    /// SKILL.md says nothing about what it teaches.
+    #[serde(default)]
+    pub name: Option<String>,
+    pub content: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct TeachResponse {
+    pub skill: SkillSummary,
+    /// Nodes the fan-out actually reached. The rest converge on reconnect.
+    pub delivered_to: Vec<String>,
+    /// Nodes known to this tenant that were offline, named rather than
+    /// counted — "3 nodes were offline" is not something an operator can act
+    /// on, and silence about them would be worse.
+    pub offline: Vec<String>,
+}
+
 // ── Workspaces ───────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
@@ -340,6 +399,11 @@ pub struct Board {
     pub tenant_id: TenantId,
     pub workspace_id: Option<WorkspaceId>,
     pub name: String,
+    /// The prefix in `NOOK-42`. Unique per tenant, derived from the name when
+    /// not given, and immutable once assigned — it is written into PR bodies
+    /// and branch names, which no rename can reach back and fix.
+    #[serde(default)]
+    pub key: Option<String>,
     pub provider: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -351,6 +415,17 @@ pub struct BoardColumn {
     pub board_id: BoardId,
     pub name: String,
     pub position: i32,
+    /// What this column MEANS, independent of what it is called:
+    /// `backlog` | `unstarted` | `started` | `completed` | `canceled`.
+    ///
+    /// Automation targets the type so that renaming "In Progress" to "Doing"
+    /// is a cosmetic change rather than a broken loop. The name is for people.
+    #[serde(default = "default_column_type")]
+    pub r#type: String,
+}
+
+fn default_column_type() -> String {
+    "unstarted".into()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
@@ -373,8 +448,435 @@ pub struct TaskItem {
     pub worktree_node_id: Option<NodeId>,
     pub session_id: Option<SessionId>,
     pub pr_url: Option<String>,
+    /// `0` none, `1` urgent, `2` high, `3` medium, `4` low — Linear's
+    /// convention, so values port cleanly. Note `0` sorts LAST: "nobody set a
+    /// priority" is not a claim that the work is least important.
+    #[serde(default)]
+    pub priority: i32,
+    /// Per-board sequence behind the human key. `None` only for a task created
+    /// before keys existed and not yet backfilled.
+    #[serde(default)]
+    pub number: Option<i32>,
+    /// `NOOK-42` — the board's key and this task's number. Computed, not
+    /// stored: storing it would let it disagree with the two columns it is
+    /// made of.
+    #[serde(default)]
+    #[sqlx(skip)]
+    pub key: Option<String>,
+    /// Absolute deep link into the web UI, so an agent reporting "filed
+    /// NOOK-42" can give a human something to click.
+    #[serde(default)]
+    #[sqlx(skip)]
+    pub url: Option<String>,
+    /// Every label on this task. Populated by one query for a whole board
+    /// rather than one per task.
+    #[serde(default)]
+    #[sqlx(skip)]
+    pub labels: Vec<Label>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+// ── Labels, comments, relations ─────────────────────────────────────────────
+
+/// A tenant-wide label. `agent-ready` is the human approval gate: the one
+/// signal that says an agent may pick this up, and deliberately not something
+/// an agent can apply to itself.
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
+pub struct Label {
+    pub id: Uuid,
+    pub tenant_id: TenantId,
+    pub name: String,
+    pub color: String,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Deserialize, ToSchema)]
+pub struct CreateLabelRequest {
+    pub name: String,
+    #[serde(default)]
+    pub color: Option<String>,
+}
+
+/// Durable discussion on a task: the builder's blocking question, the
+/// reviewer's verdict, the human's answer.
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
+pub struct TaskComment {
+    pub id: Uuid,
+    pub tenant_id: TenantId,
+    pub task_id: TaskId,
+    /// `user` | `agent` | `system`.
+    pub author_type: String,
+    #[serde(default)]
+    pub author_id: Option<Uuid>,
+    /// Denormalised, so an agent with no users row — and a deleted user —
+    /// still render with attribution.
+    pub author_name: String,
+    pub body_md: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Deserialize, ToSchema)]
+pub struct CreateCommentRequest {
+    pub body_md: String,
+    /// How an agent signs its work, e.g. `"loop-build on azul"`.
+    ///
+    /// NookOS has no separate agent identity — an agent acts under a person's
+    /// token, so the honest record is "this user's credential, used by this
+    /// tool". Supplying a name says which tool; it does not grant anything,
+    /// and the underlying `author_id` remains the real user.
+    #[serde(default)]
+    pub author_name: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, ToSchema)]
+pub struct UpdateCommentRequest {
+    pub body_md: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
+pub struct TaskRelation {
+    pub id: Uuid,
+    pub tenant_id: TenantId,
+    pub from_task: TaskId,
+    pub to_task: TaskId,
+    /// `blocks` | `relates` | `duplicates`.
+    pub kind: String,
+    pub created_at: DateTime<Utc>,
+}
+
+/// The other end of a relation, with enough to render it without a second
+/// fetch.
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
+pub struct RelatedTask {
+    pub relation_id: Uuid,
+    pub id: TaskId,
+    #[serde(default)]
+    pub key: Option<String>,
+    pub title: String,
+    pub kind: String,
+    /// The column type of the other task — what makes a blocker resolved.
+    pub column_type: String,
+}
+
+#[derive(Debug, Clone, Deserialize, ToSchema)]
+pub struct CreateRelationRequest {
+    pub to_task: TaskId,
+    pub kind: String,
+}
+
+/// One whole issue: what the loop reads before it starts work.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct TaskDetail {
+    pub task: TaskItem,
+    pub comments: Vec<TaskComment>,
+    /// Tasks that must finish before this one can start.
+    pub blocked_by: Vec<RelatedTask>,
+    /// Tasks waiting on this one.
+    pub blocking: Vec<RelatedTask>,
+    /// Non-blocking links (`relates`, `duplicates`), both directions.
+    pub related: Vec<RelatedTask>,
+    /// Derived from the blockers' column types, never stored — a stored flag
+    /// would drift the moment a blocker moved.
+    pub is_blocked: bool,
+}
+
+/// `POST /tasks/{id}/claim` — take the work without racing another agent.
+#[derive(Debug, Clone, Default, Deserialize, ToSchema)]
+pub struct ClaimTaskRequest {
+    /// Move the task here at the same time, by column TYPE. Omit to claim
+    /// without moving.
+    #[serde(default)]
+    pub column_type: Option<String>,
+    /// Claim on behalf of this user rather than the caller. For a human
+    /// assigning work; agents omit it.
+    #[serde(default)]
+    pub assignee_user_id: Option<UserId>,
+}
+
+/// One account you can sign in as, in dev mode only.
+///
+/// Exists so a person can switch between users without inventing credentials —
+/// testing "what does an operator see that a member does not" is impossible if
+/// becoming the other person is hard.
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
+pub struct DevAccount {
+    pub email: String,
+    pub display_name: String,
+    pub tenant_slug: String,
+    /// Role keys held at the deployment scope — so the picker can show which
+    /// of these accounts is the operator without you having to remember.
+    #[serde(default)]
+    pub deployment_roles: Vec<String>,
+}
+
+// ── Orgs, roles, and the operator surface ────────────────────────────────────
+
+/// An org: the layer between a deployment and its tenants.
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
+pub struct Org {
+    pub id: Uuid,
+    pub name: String,
+    pub slug: String,
+    pub created_at: DateTime<Utc>,
+}
+
+/// What the signed-in caller may do, so a UI can hide what it cannot offer.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
+pub struct Capability {
+    /// Holds an operator binding somewhere — drives whether the operator
+    /// section appears at all.
+    pub operator: bool,
+    /// Permission keys held at the deployment scope.
+    #[serde(default)]
+    pub deployment: Vec<String>,
+    /// The org this caller's tenant belongs to, for reading its policy.
+    #[serde(default)]
+    pub org_id: Option<Uuid>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
+pub struct OperatorOrg {
+    pub id: Uuid,
+    pub name: String,
+    pub slug: String,
+    pub created_at: DateTime<Utc>,
+    pub tenants: i64,
+}
+
+/// A tenant as an operator sees it.
+///
+/// The first block is always visible: existence, counts, load. Everything
+/// after is `Option` and stays `None` unless the org opted in — policy ADDS
+/// these fields rather than filtering them out, so forgetting to add one
+/// leaves it absent instead of leaking it.
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
+pub struct OperatorTenant {
+    pub id: TenantId,
+    pub slug: String,
+    #[serde(default)]
+    pub org_id: Option<Uuid>,
+    pub created_at: DateTime<Utc>,
+    pub members: i64,
+    pub nodes: i64,
+    pub active_sessions: i64,
+    pub workspaces: i64,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[sqlx(skip)]
+    pub repositories: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[sqlx(skip)]
+    pub task_titles: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
+pub struct OperatorNode {
+    pub id: NodeId,
+    pub name: String,
+    pub platform: String,
+    pub status: String,
+    #[serde(default)]
+    pub last_seen_at: Option<DateTime<Utc>>,
+    pub resources: serde_json::Value,
+    pub tenant_id: TenantId,
+    pub tenant_slug: String,
+    pub active_sessions: i64,
+}
+
+/// An audit row. Kinds, actors and times — never payloads, which can carry the
+/// very metadata policy exists to gate.
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
+pub struct OperatorAuditEntry {
+    pub id: EventId,
+    pub kind: String,
+    #[serde(default)]
+    pub actor_type: Option<String>,
+    #[serde(default)]
+    pub actor_id: Option<Uuid>,
+    pub tenant_id: TenantId,
+    pub tenant_slug: String,
+    pub occurred_at: DateTime<Utc>,
+}
+
+/// One policy-gated field with its current state and plain-language meaning.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct PolicyField {
+    pub field: String,
+    /// Written for a person, not a developer — every user is shown this.
+    pub description: String,
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, ToSchema)]
+pub struct CreateOrgRequest {
+    pub name: String,
+    #[serde(default)]
+    pub slug: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, ToSchema)]
+pub struct RenameOrgRequest {
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Deserialize, ToSchema)]
+pub struct MoveTenantRequest {
+    pub org_id: Uuid,
+}
+
+/// Who holds what, for the roles table.
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
+pub struct BindingRow {
+    pub id: Uuid,
+    pub email: String,
+    pub display_name: String,
+    pub role_key: String,
+    pub scope_type: String,
+    #[serde(default)]
+    pub scope_id: Option<Uuid>,
+    /// The org or tenant slug the binding is scoped to, when it has one.
+    #[serde(default)]
+    pub scope_label: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+/// Grant (or revoke) a deployment-scoped role.
+#[derive(Debug, Clone, Deserialize, ToSchema)]
+pub struct GrantRequest {
+    pub email: String,
+    /// `operator` | `org_admin` | …
+    pub role: String,
+    #[serde(default)]
+    pub revoke: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, ToSchema)]
+pub struct SetPolicyRequest {
+    pub field: String,
+    pub enabled: bool,
+}
+
+// ── Notifications ────────────────────────────────────────────────────────────
+
+/// Something a person should see. Distinct from an `Event`, which is the
+/// complete record of what happened and is never marked read.
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
+pub struct Notification {
+    pub id: Uuid,
+    pub tenant_id: TenantId,
+    /// `None` means everyone in the tenant.
+    #[serde(default)]
+    pub user_id: Option<Uuid>,
+    /// `info` | `success` | `warning` | `error`.
+    pub level: String,
+    pub title: String,
+    pub body: String,
+    /// The dotted event kind that produced it, or `custom`.
+    pub kind: String,
+    /// Where clicking it should go.
+    #[serde(default)]
+    pub link: Option<String>,
+    pub payload: serde_json::Value,
+    #[serde(default)]
+    pub read_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct NotificationPage {
+    pub notifications: Vec<Notification>,
+    pub unread: i64,
+}
+
+/// Raise a notification by hand — what `nook notify` and an agent's finish
+/// hook both call.
+#[derive(Debug, Clone, Deserialize, ToSchema)]
+pub struct NotifyRequest {
+    pub title: String,
+    #[serde(default)]
+    pub body: Option<String>,
+    /// `info` | `success` | `warning` | `error`. Defaults to `info`.
+    #[serde(default)]
+    pub level: Option<String>,
+    /// Defaults to `custom`. Channels filter on this.
+    #[serde(default)]
+    pub kind: Option<String>,
+    #[serde(default)]
+    pub link: Option<String>,
+    #[serde(default)]
+    pub payload: Option<serde_json::Value>,
+}
+
+/// A configured delivery channel.
+///
+/// `config` is deliberately absent: it holds bot tokens and webhook URLs, and
+/// a channel list is the sort of thing a UI fetches often and logs freely.
+/// What a person needs to see is that it exists, whether it works, and what it
+/// is filtered to.
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
+pub struct NotificationChannel {
+    pub id: Uuid,
+    pub tenant_id: TenantId,
+    /// `webhook` | `slack` | `discord` | `telegram` | `twilio` | `ntfy`.
+    pub kind: String,
+    pub name: String,
+    pub enabled: bool,
+    pub levels: Vec<String>,
+    pub kinds: Vec<String>,
+    #[serde(default)]
+    pub last_ok_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub last_error: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Deserialize, ToSchema)]
+pub struct CreateChannelRequest {
+    pub kind: String,
+    pub name: String,
+    /// Provider-specific. Write-only: it is never read back.
+    pub config: serde_json::Value,
+    #[serde(default)]
+    pub levels: Vec<String>,
+    #[serde(default)]
+    pub kinds: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, ToSchema)]
+pub struct UpdateChannelRequest {
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Omit to keep the stored secrets untouched.
+    #[serde(default)]
+    pub config: Option<serde_json::Value>,
+    #[serde(default)]
+    pub enabled: Option<bool>,
+    #[serde(default)]
+    pub levels: Option<Vec<String>>,
+    #[serde(default)]
+    pub kinds: Option<Vec<String>>,
+}
+
+/// What a channel kind needs, so the UI can build a form without hardcoding it.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ChannelKind {
+    pub id: String,
+    pub label: String,
+    pub description: String,
+    pub fields: Vec<ChannelField>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ChannelField {
+    pub name: String,
+    pub label: String,
+    pub placeholder: String,
+    /// Masked in the UI and never read back.
+    pub secret: bool,
+    pub required: bool,
 }
 
 // ── Activity ─────────────────────────────────────────────────────────────────
@@ -482,12 +984,24 @@ pub struct BoardDetail {
 #[derive(Debug, Clone, Deserialize, ToSchema)]
 pub struct CreateBoardRequest {
     pub name: String,
+    /// Omit to derive one from the name.
+    #[serde(default)]
+    pub key: Option<String>,
     pub workspace_id: Option<WorkspaceId>,
 }
 
 #[derive(Debug, Clone, Deserialize, ToSchema)]
 pub struct UpdateBoardRequest {
     pub name: String,
+    /// Change the prefix in `NOOK-42`.
+    ///
+    /// Normally immutable — it is written into PR bodies and branch names that
+    /// no rename can reach back and fix — but settable, because a key derived
+    /// from a board name is sometimes just wrong ("NookOS Bootstrap" derives
+    /// "NOOKO") and living with it forever is worse than an explicit change a
+    /// person chose.
+    #[serde(default)]
+    pub key: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, ToSchema)]
@@ -506,7 +1020,17 @@ pub struct CreateTaskRequest {
     pub title: String,
     pub description: Option<String>,
     pub column_id: Option<ColumnId>,
+    /// Place by semantic state instead of by id — what automation wants, since
+    /// it knows "the backlog" but not which uuid that is today.
+    #[serde(default)]
+    pub column_type: Option<String>,
     pub workspace_id: Option<WorkspaceId>,
+    #[serde(default)]
+    pub priority: Option<i32>,
+    /// Label NAMES, created for the tenant if new. Names rather than ids
+    /// because a filer knows `agent-ready`, not its uuid.
+    #[serde(default)]
+    pub labels: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, ToSchema)]
@@ -514,8 +1038,12 @@ pub struct UpdateTaskRequest {
     pub title: Option<String>,
     pub description: Option<String>,
     pub column_id: Option<ColumnId>,
+    #[serde(default)]
+    pub column_type: Option<String>,
     pub position: Option<i32>,
     pub assignee_user_id: Option<UserId>,
+    #[serde(default)]
+    pub priority: Option<i32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -626,6 +1154,11 @@ pub struct GitFileStatus {
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct GitStatusResponse {
+    /// `false` when the checkout is not a git repository — a "+ New empty
+    /// project" directory, say. Everything below is then empty for a reason
+    /// that is not "nothing has changed", and the UI hides the panel instead
+    /// of reporting a clean tree.
+    pub is_repo: bool,
     pub branch: Option<String>,
     pub dirty: bool,
     pub files: Vec<GitFileStatus>,

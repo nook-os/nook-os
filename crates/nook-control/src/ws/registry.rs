@@ -29,6 +29,7 @@ pub struct NodeHandle {
 
 /// Payload completing a `GetGitStatus` request.
 pub struct GitStatusPayload {
+    pub is_repo: bool,
     pub branch: Option<String>,
     pub files: Vec<GitFileStatus>,
     pub diff: String,
@@ -340,6 +341,7 @@ impl Registry {
                 to: requester,
                 msg: BusMessage::GitReply {
                     request_id,
+                    is_repo: payload.is_repo,
                     branch: payload.branch,
                     files: payload.files,
                     diff: payload.diff,
@@ -682,12 +684,14 @@ impl Registry {
             } => self.complete_op(request_id, OpPayload { ok, path, message }),
             BusMessage::GitReply {
                 request_id,
+                is_repo,
                 branch,
                 files,
                 diff,
             } => self.complete_git_status(
                 request_id,
                 GitStatusPayload {
+                    is_repo,
                     branch,
                     files,
                     diff,

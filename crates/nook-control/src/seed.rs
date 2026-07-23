@@ -327,6 +327,26 @@ pub async fn run(db: &PgPool, cfg: &Config) -> Result<()> {
         .await?;
     }
 
+    // The two labels the agent loop is built around, seeded per tenant.
+    //
+    // `agent-ready` is the human approval gate — the signal that a person has
+    // looked at a task and is willing for an agent to take it. It exists here
+    // rather than being created on first use so that the gate is present and
+    // visible from the very first board, instead of appearing only once
+    // somebody already needed it.
+    for (name, color) in [("agent-ready", "#48c78e"), ("blocked", "#f14668")] {
+        sqlx::query(
+            "INSERT INTO labels (id, tenant_id, name, color) VALUES ($1, $2, $3, $4)
+             ON CONFLICT (tenant_id, name) DO NOTHING",
+        )
+        .bind(uuid::Uuid::now_v7())
+        .bind(tenant.id)
+        .bind(name)
+        .bind(color)
+        .execute(db)
+        .await?;
+    }
+
     // Sample local board with a few tasks.
     let existing_board: Option<(BoardId,)> =
         sqlx::query_as("SELECT id FROM boards WHERE tenant_id = $1 AND name = 'NookOS Bootstrap'")
@@ -335,22 +355,37 @@ pub async fn run(db: &PgPool, cfg: &Config) -> Result<()> {
             .await?;
     if existing_board.is_none() {
         let board: Board = sqlx::query_as(
-            "INSERT INTO boards (id, tenant_id, name, provider) VALUES ($1, $2, 'NookOS Bootstrap', 'local') RETURNING *",
+            "INSERT INTO boards (id, tenant_id, name, key, provider)
+             VALUES ($1, $2, 'NookOS Bootstrap', 'NOOK', 'local') RETURNING *",
         )
         .bind(BoardId::new())
         .bind(tenant.id)
         .fetch_one(db)
         .await?;
 
+        // Name and TYPE together. The name is what a person reads and may
+        // rename freely; the type is what automation targets, and seeding it
+        // here is what stops the very first board from being one an agent
+        // cannot navigate.
         let mut column_ids = Vec::new();
-        for (i, name) in ["Triage", "Todo", "In Progress", "Done"].iter().enumerate() {
+        for (i, (name, kind)) in [
+            ("Triage", "backlog"),
+            ("Todo", "unstarted"),
+            ("In Progress", "started"),
+            ("Done", "completed"),
+        ]
+        .iter()
+        .enumerate()
+        {
             let (id,): (ColumnId,) = sqlx::query_as(
-                "INSERT INTO board_columns (id, board_id, name, position) VALUES ($1, $2, $3, $4) RETURNING id",
+                "INSERT INTO board_columns (id, board_id, name, position, type)
+                 VALUES ($1, $2, $3, $4, $5) RETURNING id",
             )
             .bind(ColumnId::new())
             .bind(board.id)
             .bind(name)
             .bind(i as i32)
+            .bind(kind)
             .fetch_one(db)
             .await?;
             column_ids.push(id);
@@ -430,6 +465,86 @@ pub async fn run(db: &PgPool, cfg: &Config) -> Result<()> {
         }
     }
 
+    bootstrap_operator(db).await;
+
     tracing::info!(tenant = %tenant.slug, "seed complete");
     Ok(())
+}
+
+/// Give the first user `operator @ deployment`, once.
+///
+/// Somebody has to be able to run the deployment, and on a self-hosted instance
+/// that is whoever set it up. Granted here rather than by a flag, so a fresh
+/// install is usable without anybody reading documentation about bindings.
+///
+/// Idempotent by "only when NO deployment binding exists" rather than by
+/// upsert. That distinction is the whole safety of it: an upsert keyed on the
+/// user would silently re-grant after a revocation, and would hand the role to
+/// whoever happened to be first if the users table were ever rebuilt. A second
+/// operator has to be a deliberate act.
+pub async fn bootstrap_operator(db: &PgPool) {
+    let existing: Result<Option<(uuid::Uuid,)>, _> =
+        sqlx::query_as("SELECT id FROM role_bindings WHERE scope_type = 'deployment' LIMIT 1")
+            .fetch_optional(db)
+            .await;
+    match existing {
+        Ok(Some(_)) => return,
+        Ok(None) => {}
+        Err(e) => {
+            tracing::warn!(error = %e, "could not check for a deployment operator");
+            return;
+        }
+    }
+
+    let first: Option<(uuid::Uuid, TenantId)> =
+        match sqlx::query_as("SELECT id, tenant_id FROM users ORDER BY created_at LIMIT 1")
+            .fetch_optional(db)
+            .await
+        {
+            Ok(u) => u,
+            Err(e) => {
+                tracing::warn!(error = %e, "could not find a first user");
+                return;
+            }
+        };
+    // No users yet. A fresh instance has nobody to appoint, which is why this
+    // is ALSO called when the first user is created — seeding runs before
+    // anybody has signed in, and "it will happen on the next boot" is not true
+    // of a control plane nobody restarts. A deployment with no operator has no
+    // way to grow one.
+    let Some((user_id, tenant_id)) = first else {
+        return;
+    };
+
+    let done = sqlx::query(
+        "INSERT INTO role_bindings (id, subject_type, subject_id, role_key, scope_type, scope_id)
+         VALUES ($1, 'user', $2, 'operator', 'deployment', NULL)
+         ON CONFLICT DO NOTHING",
+    )
+    .bind(uuid::Uuid::now_v7())
+    .bind(user_id)
+    .execute(db)
+    .await;
+
+    match done {
+        Ok(r) if r.rows_affected() > 0 => {
+            tracing::info!(user = %user_id, "granted operator @ deployment (bootstrap)");
+            // Recorded, because "who became the operator, and when" is the
+            // first question anybody audits.
+            crate::events::insert(
+                db,
+                tenant_id,
+                crate::events::EventDraft::new("rbac.bootstrap")
+                    .actor("user", user_id)
+                    .payload(serde_json::json!({
+                        "role": "operator",
+                        "scope": "deployment",
+                        "reason": "first user on a deployment with no operator",
+                    })),
+            )
+            .await;
+        }
+        Ok(_) => {}
+        Err(e) => tracing::warn!(error = %e, "could not grant the bootstrap operator"),
+    }
 }

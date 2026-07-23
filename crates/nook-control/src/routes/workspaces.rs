@@ -75,6 +75,7 @@ pub async fn git_status(
         .map_err(|_| ApiError::BadRequest("node disconnected".into()))?;
 
     Ok(Json(GitStatusResponse {
+        is_repo: payload.is_repo,
         branch: payload.branch,
         dirty: !payload.files.is_empty(),
         files: payload.files,

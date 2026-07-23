@@ -7,6 +7,20 @@ use crate::error::{ApiError, ApiResult};
 use crate::services::core;
 use crate::state::AppState;
 
+/// Which tenant owns a node.
+///
+/// Authorization for anything done TO a node is scoped to the node's tenant,
+/// not the caller's — otherwise an operator could only ever act on machines in
+/// their own tenant, which is the opposite of the job.
+pub(crate) async fn node_tenant(state: &AppState, id: NodeId) -> ApiResult<nook_types::TenantId> {
+    let row: Option<(nook_types::TenantId,)> =
+        sqlx::query_as("SELECT tenant_id FROM nodes WHERE id = $1")
+            .bind(id)
+            .fetch_optional(&state.db)
+            .await?;
+    row.map(|(t,)| t).ok_or(ApiError::NotFound)
+}
+
 #[utoipa::path(get, path = "/api/v1/nodes",
     operation_id = "list_nodes", responses((status = 200, body = [Node])))]
 pub async fn list(State(state): State<AppState>, auth: AuthCtx) -> ApiResult<Json<Vec<Node>>> {
@@ -43,10 +57,20 @@ pub async fn delete(
     auth: AuthCtx,
     Path(id): Path<NodeId>,
 ) -> ApiResult<axum::http::StatusCode> {
-    // One machine should not be able to evict another.
-    auth.require_user()?;
+    // `node.manage` on the node's OWN tenant, not merely "is a person".
+    // `require_user` let any signed-in account delete a node in its tenant,
+    // which was fine when a tenant was one person and is not a permission
+    // model. A tenant admin holds this for their own tenant; an operator holds
+    // it everywhere, which is how they can evict a machine they do not own.
+    let tenant = node_tenant(&state, id).await?;
+    auth.require(
+        &state,
+        crate::auth::perm::Permission::NodeManage,
+        crate::auth::perm::Scope::Tenant(tenant),
+    )
+    .await?;
     let res = sqlx::query("DELETE FROM nodes WHERE tenant_id = $1 AND id = $2")
-        .bind(auth.tenant_id)
+        .bind(tenant)
         .bind(id)
         .execute(&state.db)
         .await?;
@@ -107,13 +131,20 @@ pub async fn update(
     auth: AuthCtx,
     Path(id): Path<NodeId>,
 ) -> ApiResult<axum::http::StatusCode> {
-    // Updating somebody's machine is an act on the fleet, not a self-report,
-    // so a node token must not be able to trigger it on another node.
-    auth.require_user()?;
+    // Replacing a machine's binary is an act on the fleet, not a self-report:
+    // `node.manage` on the node's own tenant, so a node token cannot trigger it
+    // on a peer and an operator can trigger it anywhere.
+    let tenant = node_tenant(&state, id).await?;
+    auth.require(
+        &state,
+        crate::auth::perm::Permission::NodeManage,
+        crate::auth::perm::Scope::Tenant(tenant),
+    )
+    .await?;
     let owned: Option<(NodeId,)> =
         sqlx::query_as("SELECT id FROM nodes WHERE id = $1 AND tenant_id = $2")
             .bind(id)
-            .bind(auth.tenant_id)
+            .bind(tenant)
             .fetch_optional(&state.db)
             .await?;
     if owned.is_none() {

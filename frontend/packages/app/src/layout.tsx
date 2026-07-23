@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState } from "react";
+import { NotificationBell } from "./Notifications";
 import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
@@ -13,6 +14,7 @@ import {
   LogOut,
   Mic,
   Server,
+  ShieldCheck,
   Settings,
   SquareTerminal,
   MessageSquare,
@@ -39,6 +41,17 @@ const SECTIONS = [
   { to: "/activity", label: "Activity", icon: Activity },
   { to: "/nodes", label: "Nodes", icon: Server },
 ];
+
+/// Shown only to somebody holding an operator binding.
+///
+/// Absent rather than disabled: a greyed-out door still tells you there is a
+/// room, and on this surface the room is other people's fleets.
+const OPERATOR_SECTION = {
+  to: "/operator",
+  label: "Operator",
+  icon: ShieldCheck,
+  end: false,
+};
 
 const COMING_SOON = [
   { label: "Team", icon: Users },
@@ -231,6 +244,11 @@ export function Shell({ me }: { me: MeResponse }) {
     window.location.href = "/";
   };
 
+  // Absent unless held — see OPERATOR_SECTION.
+  const sections = me.capability?.operator
+    ? [...SECTIONS, OPERATOR_SECTION]
+    : SECTIONS;
+
   return (
     <div className="nook-app">
       <NewWorkHost />
@@ -259,6 +277,7 @@ export function Shell({ me }: { me: MeResponse }) {
           ))}
         </nav>
         <div className="nook-topbar-right">
+          <NotificationBell />
           {/* Feedback lives here, spelled out, not just as one more unlabelled
               icon in the rail — you can't tell us what's wrong with a thing
               you can't find. */}
@@ -290,7 +309,7 @@ export function Shell({ me }: { me: MeResponse }) {
       </header>
 
       <aside className="nook-rail">
-        {SECTIONS.map((s) => (
+        {sections.map((s) => (
           <NavLink
             key={s.to}
             to={s.to}

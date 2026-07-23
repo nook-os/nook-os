@@ -97,10 +97,12 @@ impl KanbanProvider for LocalBoardProvider {
         board: BoardId,
         req: CreateTaskRequest,
     ) -> ProviderResult<TaskItem> {
-        // Default to the board's first column.
-        let column_id: ColumnId = match req.column_id {
-            Some(c) => c,
-            None => {
+        // Explicit id wins; then a semantic type, which is what automation
+        // knows; then the board's first column.
+        let column_id: ColumnId = match (req.column_id, req.column_type.as_deref()) {
+            (Some(c), _) => c,
+            (None, Some(ct)) => crate::services::tasks::column_of_type(&self.db, board, ct).await?,
+            (None, None) => {
                 let (id,): (ColumnId,) = sqlx::query_as(
                     "SELECT id FROM board_columns WHERE board_id = $1 ORDER BY position LIMIT 1",
                 )
@@ -119,9 +121,27 @@ impl KanbanProvider for LocalBoardProvider {
                 .await
                 .map_err(ApiError::from)?;
 
-        let task = sqlx::query_as(
-            "INSERT INTO tasks (id, tenant_id, board_id, column_id, title, description, position, workspace_id)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *",
+        // Number allocation and the insert share one transaction, and the
+        // board row is locked while it happens. Without the lock two concurrent
+        // creates read the same `next_number` and one of them then violates the
+        // unique index — which is a 500 for something the caller did nothing
+        // wrong to cause. `FOR UPDATE` makes the second create wait rather than
+        // fail, so `NOOK-7` is allocated exactly once.
+        let mut tx = self.db.begin().await.map_err(ApiError::from)?;
+        let (number,): (i32,) = sqlx::query_as(
+            "UPDATE boards SET next_number = next_number + 1
+             WHERE id = (SELECT id FROM boards WHERE id = $1 FOR UPDATE)
+             RETURNING next_number - 1",
+        )
+        .bind(board)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(ApiError::from)?;
+
+        let task: TaskItem = sqlx::query_as(
+            "INSERT INTO tasks (id, tenant_id, board_id, column_id, title, description,
+                                position, workspace_id, priority, number)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING *",
         )
         .bind(TaskId::new())
         .bind(tenant)
@@ -131,9 +151,43 @@ impl KanbanProvider for LocalBoardProvider {
         .bind(&req.description)
         .bind(max_pos.unwrap_or(-1) + 1)
         .bind(req.workspace_id)
-        .fetch_one(&self.db)
+        .bind(req.priority.unwrap_or(0).clamp(0, 4))
+        .bind(number)
+        .fetch_one(&mut *tx)
         .await
         .map_err(ApiError::from)?;
+
+        // Labels by NAME, created if new: a filer knows `agent-ready`, not its
+        // uuid. Inside the transaction so a task never exists momentarily
+        // without the labels it was filed with — the pick query would otherwise
+        // have a window in which it sees unlabelled work.
+        for name in req.labels.iter().map(|l| l.trim().to_lowercase()) {
+            if name.is_empty() {
+                continue;
+            }
+            let (label_id,): (uuid::Uuid,) = sqlx::query_as(
+                "INSERT INTO labels (id, tenant_id, name) VALUES ($1, $2, $3)
+                 ON CONFLICT (tenant_id, name) DO UPDATE SET name = EXCLUDED.name
+                 RETURNING id",
+            )
+            .bind(uuid::Uuid::now_v7())
+            .bind(tenant)
+            .bind(&name)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(ApiError::from)?;
+            sqlx::query(
+                "INSERT INTO task_labels (task_id, label_id) VALUES ($1, $2)
+                 ON CONFLICT DO NOTHING",
+            )
+            .bind(task.id)
+            .bind(label_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(ApiError::from)?;
+        }
+
+        tx.commit().await.map_err(ApiError::from)?;
         Ok(task)
     }
 
@@ -143,6 +197,25 @@ impl KanbanProvider for LocalBoardProvider {
         task: TaskId,
         req: UpdateTaskRequest,
     ) -> ProviderResult<TaskItem> {
+        // A type given instead of an id is resolved against the task's OWN
+        // board — the caller knows "move it to started", not which board this
+        // task happens to live on.
+        let column_id = match (req.column_id, req.column_type.as_deref()) {
+            (Some(c), _) => Some(c),
+            (None, Some(ct)) => {
+                let (board,): (BoardId,) =
+                    sqlx::query_as("SELECT board_id FROM tasks WHERE id = $1 AND tenant_id = $2")
+                        .bind(task)
+                        .bind(tenant)
+                        .fetch_optional(&self.db)
+                        .await
+                        .map_err(ApiError::from)?
+                        .ok_or(ApiError::NotFound)?;
+                Some(crate::services::tasks::column_of_type(&self.db, board, ct).await?)
+            }
+            (None, None) => None,
+        };
+
         let updated = sqlx::query_as(
             "UPDATE tasks SET
                 title = COALESCE($3, title),
@@ -150,6 +223,7 @@ impl KanbanProvider for LocalBoardProvider {
                 column_id = COALESCE($5, column_id),
                 position = COALESCE($6, position),
                 assignee_user_id = COALESCE($7, assignee_user_id),
+                priority = COALESCE($8, priority),
                 updated_at = now()
              WHERE id = $1 AND tenant_id = $2
              RETURNING *",
@@ -158,9 +232,10 @@ impl KanbanProvider for LocalBoardProvider {
         .bind(tenant)
         .bind(&req.title)
         .bind(&req.description)
-        .bind(req.column_id)
+        .bind(column_id)
         .bind(req.position)
         .bind(req.assignee_user_id)
+        .bind(req.priority.map(|p| p.clamp(0, 4)))
         .fetch_optional(&self.db)
         .await
         .map_err(ApiError::from)?

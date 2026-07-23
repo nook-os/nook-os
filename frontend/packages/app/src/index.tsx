@@ -1,4 +1,6 @@
 import React, { useEffect, useState } from "react";
+import { OperatorPage } from "./pages/Operator";
+import { Toasts } from "./Notifications";
 import {
   QueryClient,
   QueryClientProvider,
@@ -105,6 +107,7 @@ function AuthGate() {
         <Route path="sessions" element={<SessionsPage />} />
         <Route path="sessions/:id" element={<SessionPage />} />
         <Route path="board" element={<BoardPage />} />
+        <Route path="operator" element={<OperatorPage />} />
         <Route path="activity" element={<ActivityPage />} />
         <Route path="nodes" element={<NodesPage />} />
         <Route path="nodes/:id" element={<NodeDetail />} />
@@ -124,6 +127,9 @@ export function NookApp() {
       <ThemeProvider>
         <BrowserRouter>
           <AuthGate />
+          {/* Outside the router so a toast survives navigation — the thing it
+              is telling you about often IS a navigation. */}
+          <Toasts />
         </BrowserRouter>
       </ThemeProvider>
     </QueryClientProvider>

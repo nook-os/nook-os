@@ -24,6 +24,21 @@ impl McpBackend {
         Ok(id)
     }
 
+    /// Who an MCP call acts as.
+    ///
+    /// There is no per-user MCP identity yet — the token maps to the instance,
+    /// so the honest answer is the tenant's owner. Recorded rather than left
+    /// null so a comment or a claim has an author that can be revoked.
+    async fn user(&self) -> anyhow::Result<UserId> {
+        let tenant = self.tenant().await?;
+        let (id,): (UserId,) =
+            sqlx::query_as("SELECT id FROM users WHERE tenant_id = $1 ORDER BY created_at LIMIT 1")
+                .bind(tenant)
+                .fetch_one(&self.state.db)
+                .await?;
+        Ok(id)
+    }
+
     async fn resolve_workspace(
         &self,
         tenant: TenantId,
@@ -325,7 +340,13 @@ impl NookBackend for McpBackend {
                     title,
                     description,
                     column_id: None,
+                    column_type: None,
                     workspace_id: None,
+                    priority: None,
+                    // Never `agent-ready`: an agent that could label its own
+                    // work ready would be approving it, and that gate is the
+                    // load-bearing safety property of the whole loop.
+                    labels: vec![],
                 },
             )
             .await
@@ -444,5 +465,195 @@ impl NookBackend for McpBackend {
             .parse()
             .map_err(|_| anyhow::anyhow!("bad task id"))?;
         Ok(crate::services::taskwork::submit_pr(&self.state, tenant, id, pr_url).await?)
+    }
+
+    // ── The agent loop ──────────────────────────────────────────────────────
+    //
+    // These delegate to the same services the HTTP routes use rather than
+    // reimplementing the queries. Two implementations of "which tasks are
+    // pickable" would drift, and the one an agent uses is the one that decides
+    // what work happens.
+
+    async fn list_tasks(&self, f: nook_mcp::TaskQuery) -> anyhow::Result<Vec<TaskItem>> {
+        let tenant = self.tenant().await?;
+        let rows = crate::routes::task_query::pick(
+            &self.state,
+            tenant,
+            crate::routes::task_query::TaskFilter {
+                board: f.board,
+                label: f.label,
+                not_label: f.not_label,
+                assignee: f.assignee,
+                column_type: f.column_type,
+                priority: f.priority,
+                is_blocked: f.is_blocked,
+                workspace: None,
+                limit: f.limit,
+                cursor: None,
+            },
+        )
+        .await?;
+        Ok(rows)
+    }
+
+    async fn get_task(&self, task: String) -> anyhow::Result<serde_json::Value> {
+        let tenant = self.tenant().await?;
+        let id = crate::services::tasks::resolve_id(&self.state.db, tenant, &task).await?;
+        let detail = crate::routes::task_detail::detail(&self.state, tenant, id).await?;
+        Ok(serde_json::to_value(detail)?)
+    }
+
+    async fn claim_task(
+        &self,
+        task: String,
+        column_type: Option<String>,
+    ) -> anyhow::Result<TaskItem> {
+        let tenant = self.tenant().await?;
+        let user = self.user().await?;
+        Ok(
+            crate::routes::task_query::claim_inner(&self.state, tenant, user, &task, column_type)
+                .await?,
+        )
+    }
+
+    async fn release_task(&self, task: String) -> anyhow::Result<TaskItem> {
+        let tenant = self.tenant().await?;
+        let id = crate::services::tasks::resolve_id(&self.state.db, tenant, &task).await?;
+        let t: TaskItem = sqlx::query_as(
+            "UPDATE tasks SET assignee_user_id = NULL, updated_at = now()
+             WHERE id = $1 AND tenant_id = $2 RETURNING *",
+        )
+        .bind(id)
+        .bind(tenant)
+        .fetch_one(&self.state.db)
+        .await?;
+        self.state
+            .registry
+            .publish(tenant, nook_proto::UiEvent::TaskChanged { task_id: id });
+        Ok(
+            crate::services::tasks::enrich_one(&self.state.db, &self.state.cfg.public_base_url, t)
+                .await?,
+        )
+    }
+
+    async fn comment_task(
+        &self,
+        task: String,
+        body_md: String,
+        author_name: Option<String>,
+    ) -> anyhow::Result<serde_json::Value> {
+        let tenant = self.tenant().await?;
+        let user = self.user().await?;
+        let id = crate::services::tasks::resolve_id(&self.state.db, tenant, &task).await?;
+        // `agent` here, not `user`: MCP is the one caller we DO know is a tool
+        // rather than a person typing. The author_id remains the real user
+        // whose token authorised it, so the record stays honest about both.
+        let name = author_name.unwrap_or_else(|| "agent (mcp)".into());
+        let row: TaskComment = sqlx::query_as(
+            "INSERT INTO task_comments (id, tenant_id, task_id, author_type, author_id, author_name, body_md)
+             VALUES ($1, $2, $3, 'agent', $4, $5, $6)
+             RETURNING id, tenant_id, task_id, author_type, author_id, author_name,
+                       body_md, created_at, updated_at",
+        )
+        .bind(uuid::Uuid::now_v7())
+        .bind(tenant)
+        .bind(id)
+        .bind(user.0)
+        .bind(&name)
+        .bind(&body_md)
+        .fetch_one(&self.state.db)
+        .await?;
+        self.state
+            .registry
+            .publish(tenant, nook_proto::UiEvent::TaskChanged { task_id: id });
+        Ok(serde_json::to_value(row)?)
+    }
+
+    async fn add_label(&self, task: String, label: String) -> anyhow::Result<serde_json::Value> {
+        let tenant = self.tenant().await?;
+        // Belt and braces with the tool-layer refusal. A backend that would
+        // happily apply `agent-ready` is one bug away from an agent approving
+        // its own work, and this is the property the whole design rests on.
+        if label.trim().eq_ignore_ascii_case("agent-ready") {
+            anyhow::bail!(
+                "`agent-ready` is the human approval gate and cannot be applied by an agent"
+            );
+        }
+        let id = crate::services::tasks::resolve_id(&self.state.db, tenant, &task).await?;
+        let name = label.trim().to_lowercase();
+        let (label_id,): (uuid::Uuid,) = sqlx::query_as(
+            "INSERT INTO labels (id, tenant_id, name) VALUES ($1, $2, $3)
+             ON CONFLICT (tenant_id, name) DO UPDATE SET name = EXCLUDED.name RETURNING id",
+        )
+        .bind(uuid::Uuid::now_v7())
+        .bind(tenant)
+        .bind(&name)
+        .fetch_one(&self.state.db)
+        .await?;
+        sqlx::query(
+            "INSERT INTO task_labels (task_id, label_id) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+        )
+        .bind(id)
+        .bind(label_id)
+        .execute(&self.state.db)
+        .await?;
+        self.state
+            .registry
+            .publish(tenant, nook_proto::UiEvent::TaskChanged { task_id: id });
+        Ok(serde_json::json!({ "task": task, "label": name, "added": true }))
+    }
+
+    async fn remove_label(&self, task: String, label: String) -> anyhow::Result<serde_json::Value> {
+        let tenant = self.tenant().await?;
+        let id = crate::services::tasks::resolve_id(&self.state.db, tenant, &task).await?;
+        let name = label.trim().to_lowercase();
+        sqlx::query(
+            "DELETE FROM task_labels tl USING labels l
+             WHERE tl.label_id = l.id AND tl.task_id = $1
+               AND l.tenant_id = $2 AND l.name = $3",
+        )
+        .bind(id)
+        .bind(tenant)
+        .bind(&name)
+        .execute(&self.state.db)
+        .await?;
+        self.state
+            .registry
+            .publish(tenant, nook_proto::UiEvent::TaskChanged { task_id: id });
+        Ok(serde_json::json!({ "task": task, "label": name, "removed": true }))
+    }
+
+    async fn set_priority(&self, task: String, priority: i32) -> anyhow::Result<TaskItem> {
+        let tenant = self.tenant().await?;
+        let id = crate::services::tasks::resolve_id(&self.state.db, tenant, &task).await?;
+        let t: TaskItem = sqlx::query_as(
+            "UPDATE tasks SET priority = $3, updated_at = now()
+             WHERE id = $1 AND tenant_id = $2 RETURNING *",
+        )
+        .bind(id)
+        .bind(tenant)
+        .bind(priority.clamp(0, 4))
+        .fetch_one(&self.state.db)
+        .await?;
+        self.state
+            .registry
+            .publish(tenant, nook_proto::UiEvent::TaskChanged { task_id: id });
+        Ok(
+            crate::services::tasks::enrich_one(&self.state.db, &self.state.cfg.public_base_url, t)
+                .await?,
+        )
+    }
+
+    async fn link_tasks(
+        &self,
+        from: String,
+        to: String,
+        kind: String,
+    ) -> anyhow::Result<serde_json::Value> {
+        let tenant = self.tenant().await?;
+        let f = crate::services::tasks::resolve_id(&self.state.db, tenant, &from).await?;
+        let t = crate::services::tasks::resolve_id(&self.state.db, tenant, &to).await?;
+        let row = crate::routes::task_detail::link(&self.state, tenant, f, t, &kind).await?;
+        Ok(serde_json::to_value(row)?)
     }
 }

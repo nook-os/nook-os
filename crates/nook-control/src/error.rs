@@ -21,6 +21,10 @@ pub enum ApiError {
     BadRequest(String),
     #[error("{0}")]
     Conflict(String),
+    /// Rate limited. A 429 rather than a 400: the request was fine, there were
+    /// just too many of them, and a client that retries later will succeed.
+    #[error("{0}")]
+    TooManyRequests(String),
     /// The caller has to set something up before this can work — today, an app
     /// password before any secret can be stored. 428 rather than 400 so the UI
     /// can tell "you must do X first" apart from "you sent nonsense".
@@ -41,6 +45,7 @@ impl IntoResponse for ApiError {
             ApiError::NotFound => (StatusCode::NOT_FOUND, self.to_string()),
             ApiError::BadRequest(m) => (StatusCode::BAD_REQUEST, m.clone()),
             ApiError::Conflict(m) => (StatusCode::CONFLICT, m.clone()),
+            ApiError::TooManyRequests(m) => (StatusCode::TOO_MANY_REQUESTS, m.clone()),
             ApiError::SetupRequired(m) => (StatusCode::PRECONDITION_REQUIRED, m.clone()),
             ApiError::Db(sqlx::Error::RowNotFound) => (StatusCode::NOT_FOUND, "not found".into()),
             ApiError::Db(e) => {

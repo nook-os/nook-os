@@ -1,4 +1,5 @@
 mod capabilities;
+mod certs;
 mod cli;
 mod config;
 mod conn;
@@ -52,6 +53,106 @@ enum Command {
     /// Install the NookOS skill so your agents can drive the fleet themselves.
     #[command(subcommand)]
     Skills(SkillsCommand),
+    /// Teach a skill to every agent on every machine in the fleet.
+    ///
+    /// The control plane stores it and fans it out. Nodes that are offline —
+    /// and nodes that join later — learn it when they connect, so this is not
+    /// "copy a file to whoever happens to be awake".
+    Teach {
+        /// Path to a SKILL.md (or any markdown skill document).
+        path: String,
+        /// Override the name. Otherwise taken from the document's frontmatter
+        /// `name:`, then from the filename.
+        #[arg(long)]
+        name: Option<String>,
+    },
+    /// What the fleet has been taught.
+    Taught {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Remove a taught skill from the control plane and from every machine.
+    Unteach { name: String },
+    /// List board tasks with the same filter an agent's pick step uses.
+    ///
+    /// `nook tasks --label agent-ready --assignee none --unblocked` is exactly
+    /// what the loop asks for, so you can see what it will take next.
+    Tasks {
+        #[arg(long)]
+        board: Option<String>,
+        /// Require this label (repeatable).
+        #[arg(long = "label")]
+        labels: Vec<String>,
+        /// Exclude this label (repeatable).
+        #[arg(long = "not-label")]
+        not_labels: Vec<String>,
+        /// A user id, or `none` for unclaimed work.
+        #[arg(long)]
+        assignee: Option<String>,
+        /// backlog | unstarted | started | completed | canceled
+        #[arg(long = "column-type")]
+        column_type: Option<String>,
+        /// Hide anything with an unresolved blocker.
+        #[arg(long)]
+        unblocked: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Read one whole issue: body, labels, comments, blockers.
+    Task {
+        /// Human key (NOOK-42) or id.
+        key: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Comment on a task.
+    Comment {
+        key: String,
+        /// The comment body (markdown).
+        body: Vec<String>,
+    },
+    /// Add or remove a label.
+    Label {
+        key: String,
+        name: String,
+        #[arg(long)]
+        remove: bool,
+    },
+    /// Wire an agent's finish hook so it notifies the fleet when it is done.
+    #[command(subcommand)]
+    Hooks(HooksCommand),
+    /// Who may run this deployment.
+    #[command(subcommand)]
+    Operator(OperatorCommand),
+    /// Tell the fleet something happened.
+    ///
+    /// Fans out to every connected UI and every configured channel (Slack,
+    /// Telegram, push, webhooks…). Ideal as an agent's finish hook:
+    ///
+    ///     nook notify "Claude finished" --level success
+    Notify {
+        /// The headline.
+        title: Vec<String>,
+        /// Longer detail.
+        #[arg(long)]
+        body: Option<String>,
+        /// info | success | warning | error
+        #[arg(long, default_value = "info")]
+        level: String,
+        /// Dotted kind that channels filter on, e.g. `agent.finished`.
+        #[arg(long)]
+        kind: Option<String>,
+        /// Somewhere to go when clicked.
+        #[arg(long)]
+        link: Option<String>,
+    },
+    /// Claim a task so nobody else takes it.
+    Claim {
+        key: String,
+        /// Move it here at the same time, e.g. `started`.
+        #[arg(long = "column-type")]
+        column_type: Option<String>,
+    },
     /// Register this machine non-interactively (flags and/or a config file —
     /// the automation path; humans usually want `nook setup`).
     Join {
@@ -261,6 +362,77 @@ async fn main() -> Result<()> {
         Command::Skills(SkillsCommand::Install { dir, quiet }) => {
             wizard::skills::install(dir, quiet)
         }
+        Command::Teach { path, name } => cli::teach(&path, name.as_deref()).await,
+        Command::Taught { json } => cli::taught(json).await,
+        Command::Unteach { name } => cli::unteach(&name).await,
+        Command::Tasks {
+            board,
+            labels,
+            not_labels,
+            assignee,
+            column_type,
+            unblocked,
+            json,
+        } => {
+            cli::tasks(
+                board.as_deref(),
+                &labels,
+                &not_labels,
+                assignee.as_deref(),
+                column_type.as_deref(),
+                unblocked,
+                json,
+            )
+            .await
+        }
+        Command::Task { key, json } => cli::task(&key, json).await,
+        Command::Comment { key, body } => cli::comment(&key, &body.join(" ")).await,
+        Command::Label { key, name, remove } => cli::label(&key, &name, remove).await,
+        Command::Claim { key, column_type } => cli::claim(&key, column_type.as_deref()).await,
+        Command::Hooks(HooksCommand::Install { dry_run }) => wizard::hooks::install(dry_run),
+        Command::Hooks(HooksCommand::Uninstall) => wizard::hooks::uninstall(),
+        Command::Operator(OperatorCommand::Grant { email, role }) => {
+            cli::operator_role(&email, &role, false).await
+        }
+        Command::Operator(OperatorCommand::Revoke { email, role }) => {
+            cli::operator_role(&email, &role, true).await
+        }
+        Command::Operator(OperatorCommand::Who) => cli::operator_who().await,
+        Command::Operator(OperatorCommand::Bindings { json }) => cli::operator_bindings(json).await,
+        Command::Operator(OperatorCommand::Org(OrgCommand::List { json })) => {
+            cli::operator_orgs(json).await
+        }
+        Command::Operator(OperatorCommand::Org(OrgCommand::Create { name, slug })) => {
+            cli::operator_org_create(&name, slug.as_deref()).await
+        }
+        Command::Operator(OperatorCommand::Org(OrgCommand::Move { tenant, org })) => {
+            cli::operator_move_tenant(&tenant, &org).await
+        }
+        Command::Operator(OperatorCommand::Ca(CaCommand::Stage { tenant })) => {
+            cli::operator_ca_stage(&tenant).await
+        }
+        Command::Operator(OperatorCommand::Ca(CaCommand::Promote { tenant, ca })) => {
+            cli::operator_ca_promote(&tenant, &ca).await
+        }
+        Command::Operator(OperatorCommand::Node { node, remove }) => {
+            cli::operator_node(&node, remove).await
+        }
+        Command::Notify {
+            title,
+            body,
+            level,
+            kind,
+            link,
+        } => {
+            cli::notify_fleet(
+                &title.join(" "),
+                body.as_deref(),
+                &level,
+                kind.as_deref(),
+                link.as_deref(),
+            )
+            .await
+        }
         Command::Join {
             server,
             token,
@@ -377,6 +549,95 @@ async fn main() -> Result<()> {
             lines,
         } => cli::exec(&session, &text.join(" "), timeout, lines).await,
     }
+}
+
+#[derive(clap::Subcommand)]
+enum OperatorCommand {
+    /// Grant a deployment-scoped role to a user, by email.
+    Grant {
+        email: String,
+        /// operator | org_admin
+        #[arg(long, default_value = "operator")]
+        role: String,
+    },
+    /// Take it away again.
+    Revoke {
+        email: String,
+        #[arg(long, default_value = "operator")]
+        role: String,
+    },
+    /// What does the CLI's current credential hold?
+    Who,
+    /// Who holds what, across the deployment.
+    Bindings {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Orgs: the layer between a deployment and its tenants.
+    #[command(subcommand)]
+    Org(OrgCommand),
+    /// Certificate authorities. Staging and promoting are two acts on purpose.
+    #[command(subcommand)]
+    Ca(CaCommand),
+    /// Stop a machine, or remove it.
+    Node {
+        /// Node id.
+        node: String,
+        /// Remove the record entirely rather than revoking its certificate.
+        #[arg(long)]
+        remove: bool,
+    },
+}
+
+#[derive(clap::Subcommand)]
+enum OrgCommand {
+    /// List orgs and how many tenants each holds.
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    Create {
+        name: String,
+        #[arg(long)]
+        slug: Option<String>,
+    },
+    /// Move a tenant into another org.
+    Move {
+        /// Tenant id.
+        tenant: String,
+        /// Org id.
+        org: String,
+    },
+}
+
+#[derive(clap::Subcommand)]
+enum CaCommand {
+    /// Stage a new CA for a tenant. Nodes pick it up on their next renewal.
+    ///
+    /// Deliberately does NOT promote: switching signer before machines have
+    /// renewed strands every one that has not.
+    Stage {
+        /// Tenant id.
+        tenant: String,
+    },
+    /// Make a staged CA the signer.
+    Promote {
+        tenant: String,
+        /// CA id from `stage`.
+        ca: String,
+    },
+}
+
+#[derive(clap::Subcommand)]
+enum HooksCommand {
+    /// Add a Stop hook to Claude Code so finishing a turn notifies the fleet.
+    Install {
+        /// Print what would change instead of writing it.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Remove it again.
+    Uninstall,
 }
 
 #[derive(clap::Subcommand)]

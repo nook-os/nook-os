@@ -7,13 +7,19 @@ pub mod feedback;
 pub mod gitops;
 pub mod health;
 pub mod join;
+pub mod labels;
 pub mod local_auth;
 pub mod nodes;
 pub mod notes;
+pub mod notifications;
 pub mod oidc_exchange;
+pub mod operator;
 pub mod schedule;
 pub mod sessions;
 pub mod settings;
+pub mod skills;
+pub mod task_detail;
+pub mod task_query;
 pub mod taskwork;
 pub mod tenant_ca;
 pub mod tenants;
@@ -74,6 +80,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/auth/login", get(auth::login))
         .route("/auth/callback", get(auth::callback))
         .route("/auth/dev-login", post(auth::dev_login))
+        .route("/auth/dev-accounts", get(auth::dev_accounts))
         .route("/auth/logout", post(auth::logout))
         .route("/auth/me", get(auth::me))
         .route("/auth/providers", get(auth::providers))
@@ -122,6 +129,83 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/git-credentials/{id}",
             axum::routing::delete(gitops::delete_credential),
+        )
+        // ── the operator surface ──
+        //
+        // One prefix, read-only, and deliberately containing ZERO session
+        // routes. A pull request adding one here is visible at a glance in a
+        // way the same route added to `sessions.rs` would not be — which is
+        // the entire reason these are grouped rather than scattered.
+        .route("/operator/tenants", get(operator::tenants))
+        .route("/operator/nodes", get(operator::nodes))
+        .route("/operator/audit", get(operator::audit_log))
+        .route(
+            "/operator/bindings",
+            get(operator::bindings).post(operator::grant),
+        )
+        .route(
+            "/operator/orgs",
+            get(operator::orgs).post(operator::create_org),
+        )
+        .route("/operator/orgs/{id}", patch(operator::rename_org))
+        .route("/operator/tenants/{id}/org", post(operator::move_tenant))
+        .route("/operator/tenants/{id}/ca", post(operator::stage_ca))
+        .route(
+            "/operator/tenants/{id}/ca/{ca}/promote",
+            post(operator::promote_ca),
+        )
+        .route("/operator/nodes/{id}/revoke", post(operator::revoke_node))
+        .route("/operator/nodes/{id}", delete_route(operator::remove_node))
+        .route(
+            "/operator/orgs/{id}/policy",
+            get(operator::get_policy).post(operator::set_policy),
+        )
+        .route("/notify", post(notifications::notify_now))
+        .route(
+            "/notifications",
+            get(notifications::list).delete(notifications::clear),
+        )
+        .route("/notifications/read", post(notifications::mark_read))
+        .route(
+            "/notification-channels",
+            get(notifications::list_channels).post(notifications::create_channel),
+        )
+        .route("/notification-channels/kinds", get(notifications::kinds))
+        .route(
+            "/notification-channels/{id}",
+            patch(notifications::update_channel).delete(notifications::delete_channel),
+        )
+        .route(
+            "/notification-channels/{id}/test",
+            post(notifications::test_channel),
+        )
+        .route("/labels", get(labels::list).post(labels::create))
+        .route("/labels/{id}", delete_route(labels::delete))
+        .route("/tasks", get(task_query::query))
+        .route("/tasks/{id}", get(task_detail::get_task))
+        .route("/tasks/{id}/claim", post(task_query::claim))
+        .route("/tasks/{id}/release", post(task_query::release))
+        .route(
+            "/tasks/{id}/labels/{label}",
+            put(labels::add).delete(labels::remove),
+        )
+        .route(
+            "/tasks/{id}/comments",
+            get(task_detail::list_comments).post(task_detail::create_comment),
+        )
+        .route(
+            "/comments/{id}",
+            patch(task_detail::update_comment).delete(task_detail::delete_comment),
+        )
+        .route("/tasks/{id}/relations", post(task_detail::create_relation))
+        .route(
+            "/relations/{id}",
+            delete_route(task_detail::delete_relation),
+        )
+        .route("/skills", get(skills::list).post(skills::teach))
+        .route(
+            "/skills/{name}",
+            get(skills::get_one).delete(skills::unteach),
         )
         .route("/nodes/{id}/rescan", post(nodes::rescan))
         .route("/nodes/{id}/update", post(nodes::update))

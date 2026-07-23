@@ -16,8 +16,9 @@ use crate::state::AppState;
 pub async fn dispatch(
     State(state): State<AppState>,
     auth: AuthCtx,
-    Path(id): Path<TaskId>,
+    Path(ident): Path<String>,
 ) -> ApiResult<Json<TaskItem>> {
+    let id = crate::services::tasks::resolve_id(&state.db, auth.tenant_id, &ident).await?;
     // Placing work on a scheduler-chosen machine is an operator action; a node
     // token cannot constrain it to itself, so it does not get to do it.
     auth.require_user()?;
@@ -32,9 +33,10 @@ pub async fn dispatch(
 pub async fn start_work(
     State(state): State<AppState>,
     auth: AuthCtx,
-    Path(id): Path<TaskId>,
+    Path(ident): Path<String>,
     Json(req): Json<StartWorkRequest>,
 ) -> ApiResult<Json<StartWorkResponse>> {
+    let id = crate::services::tasks::resolve_id(&state.db, auth.tenant_id, &ident).await?;
     // Creates a worktree and a session on whichever node the task names.
     auth.require_user()?;
     let (task, session) = taskwork::start_work(
@@ -61,9 +63,10 @@ pub async fn start_work(
 pub async fn submit_pr(
     State(state): State<AppState>,
     auth: AuthCtx,
-    Path(id): Path<TaskId>,
+    Path(ident): Path<String>,
     Json(req): Json<SubmitPrRequest>,
 ) -> ApiResult<Json<TaskItem>> {
+    let id = crate::services::tasks::resolve_id(&state.db, auth.tenant_id, &ident).await?;
     Ok(Json(
         taskwork::submit_pr(&state, auth.tenant_id, id, req.pr_url).await?,
     ))
@@ -76,8 +79,9 @@ pub async fn submit_pr(
 pub async fn prune_worktree(
     State(state): State<AppState>,
     auth: AuthCtx,
-    Path(id): Path<TaskId>,
+    Path(ident): Path<String>,
 ) -> ApiResult<Json<TaskItem>> {
+    let id = crate::services::tasks::resolve_id(&state.db, auth.tenant_id, &ident).await?;
     Ok(Json(
         taskwork::prune_worktree(&state, auth.tenant_id, id).await?,
     ))
@@ -91,9 +95,10 @@ pub async fn prune_worktree(
 pub async fn move_task(
     State(state): State<AppState>,
     auth: AuthCtx,
-    Path(id): Path<TaskId>,
+    Path(ident): Path<String>,
     Json(req): Json<MoveTaskRequest>,
 ) -> ApiResult<Json<TaskItem>> {
+    let id = crate::services::tasks::resolve_id(&state.db, auth.tenant_id, &ident).await?;
     Ok(Json(
         taskwork::move_task(&state, auth.tenant_id, id, &req.column).await?,
     ))

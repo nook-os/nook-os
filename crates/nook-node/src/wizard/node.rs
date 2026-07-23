@@ -150,6 +150,28 @@ pub async fn setup(args: SetupArgs) -> Result<()> {
         super::skills::install(None, false)?;
     }
 
+    // ---- offer the finish hook
+    //
+    // Offered here rather than buried in documentation because it is the piece
+    // that makes the rest of the fleet's notifications worth having: without
+    // it, "my agent finished" is something you find out by looking.
+    if std::path::Path::new(&format!(
+        "{}/.claude",
+        std::env::var("HOME").unwrap_or_default()
+    ))
+    .is_dir()
+    {
+        t.say("");
+        t.say("  Claude Code can tell the fleet when it finishes a turn — a");
+        t.say("  toast in the web UI, and anything else you've wired up");
+        t.say("  (Slack, Telegram, phone push). It runs `nook notify`, and it");
+        t.say("  can never fail your agent: output is discarded and errors are");
+        t.say("  ignored.");
+        if t.confirm("Install the finish hook for Claude Code?", true)? {
+            super::hooks::install(false)?;
+        }
+    }
+
     t.say("");
     t.say("────────────────────────────────────────────────────────────");
     t.say(&format!("  '{name}' is set up."));

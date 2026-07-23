@@ -18,6 +18,16 @@ fn vault() -> Vault {
 }
 
 async fn seed_tenant(pool: &PgPool) -> TenantId {
+    // Sweep anything a previous run left behind. `cleanup` below runs at the
+    // end of a test and is therefore skipped by any test that panics — which is
+    // how 35 `ca-*` tenants accumulated in the dev database. Cleaning on the
+    // way IN is the only cleanup a panic cannot skip.
+    let _ = sqlx::query(
+        "DELETE FROM tenants WHERE slug LIKE 'ca-%' AND created_at < now() - interval '1 hour'",
+    )
+    .execute(pool)
+    .await;
+
     let id = TenantId::new();
     sqlx::query("INSERT INTO tenants (id, slug, name) VALUES ($1, $2, $2)")
         .bind(id)

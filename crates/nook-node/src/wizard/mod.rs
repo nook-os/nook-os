@@ -6,6 +6,7 @@
 //! per platform, and drifts from the `nook setup` that already existed.
 
 pub mod generate;
+pub mod hooks;
 pub mod node;
 pub mod server;
 pub mod service;

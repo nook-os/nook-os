@@ -3,6 +3,11 @@
 //! The skill is embedded rather than read from the repo, because the whole
 //! point is that nobody had to clone anything. `skills/install.sh` needed the
 //! working tree; this needs the binary that is already on the machine.
+//!
+//! The same writer serves `nook teach`: the control plane sends a name and a
+//! document, and this end decides which agents are actually installed and
+//! writes into each. Detection lives here rather than there because only the
+//! machine knows what is on it.
 
 use std::path::{Path, PathBuf};
 
@@ -14,7 +19,7 @@ const SKILL: &str = include_str!("../../../../skills/nookos/SKILL.md");
 /// Where a given agent keeps its skills.
 struct Target {
     name: &'static str,
-    /// Directories to write `nookos/SKILL.md` under, relative to $HOME.
+    /// Directories to write `<name>/SKILL.md` under.
     roots: Vec<PathBuf>,
 }
 
@@ -73,11 +78,66 @@ fn detect() -> Result<Vec<Target>> {
 }
 
 fn write_skill(root: &Path) -> Result<PathBuf> {
-    let dir = root.join("nookos");
+    write_named(root, "nookos", SKILL)
+}
+
+fn write_named(root: &Path, name: &str, content: &str) -> Result<PathBuf> {
+    let dir = root.join(name);
     std::fs::create_dir_all(&dir).with_context(|| format!("cannot create {}", dir.display()))?;
     let path = dir.join("SKILL.md");
-    std::fs::write(&path, SKILL).with_context(|| format!("cannot write {}", path.display()))?;
+    std::fs::write(&path, content).with_context(|| format!("cannot write {}", path.display()))?;
     Ok(path)
+}
+
+/// What a node did with a skill the control plane taught it.
+#[derive(Debug, Default)]
+pub struct Installed {
+    pub agents: Vec<String>,
+    pub paths: Vec<String>,
+}
+
+/// Write a taught skill into every agent on this machine.
+///
+/// The name is re-validated here even though the control plane already checked
+/// it. This is the end that turns a wire string into a path, and it should not
+/// be relying on the other end having been careful.
+pub fn install_taught(name: &str, content: &str) -> Result<Installed> {
+    let name = safe_name(name)?;
+    let mut out = Installed::default();
+    for t in detect()? {
+        for root in &t.roots {
+            let p = write_named(root, name, content)?;
+            out.paths.push(p.display().to_string());
+        }
+        out.agents.push(t.name.to_string());
+    }
+    Ok(out)
+}
+
+/// Remove a taught skill from every agent on this machine.
+pub fn forget_taught(name: &str) -> Result<Vec<String>> {
+    let name = safe_name(name)?;
+    let mut removed = Vec::new();
+    for t in detect()? {
+        for root in &t.roots {
+            let dir = root.join(name);
+            // Only remove what looks like a skill directory. A `SKILL.md` is
+            // the thing we wrote; a directory of somebody's own work that
+            // happens to share the name is not ours to delete.
+            if dir.join("SKILL.md").is_file() && std::fs::remove_dir_all(&dir).is_ok() {
+                removed.push(dir.display().to_string());
+            }
+        }
+    }
+    Ok(removed)
+}
+
+/// The name check, borrowed from the crate that defines the message carrying
+/// it. Deliberately not a second implementation: a name the control plane
+/// accepts and this end refuses is a skill that reports as taught and exists on
+/// no machine, and that divergence would only ever show up in production.
+pub fn safe_name(name: &str) -> Result<&str> {
+    nook_proto::valid_skill_name(name).map_err(|e| anyhow::anyhow!(e))
 }
 
 /// `dir` overrides detection entirely — the escape hatch for an agent we have
@@ -136,8 +196,29 @@ mod tests {
         );
     }
 
+    /// The name RULES are tested in `nook-proto`, where they live. What this
+    /// pins is that the path-making end applies them at all — the check that
+    /// would be missing if someone inlined `root.join(name)` later.
     #[test]
-    fn writing_creates_the_nookos_subdirectory() {
+    fn a_name_that_would_escape_the_skills_directory_is_refused() {
+        for bad in [
+            "..",
+            ".",
+            "../../etc",
+            "a/b",
+            "/etc/passwd",
+            "",
+            "has space",
+        ] {
+            assert!(safe_name(bad).is_err(), "must refuse {bad:?}");
+            assert!(install_taught(bad, "x").is_err(), "must refuse {bad:?}");
+            assert!(forget_taught(bad).is_err(), "must refuse {bad:?}");
+        }
+        assert_eq!(safe_name("code-review").unwrap(), "code-review");
+    }
+
+    #[test]
+    fn writing_creates_the_named_subdirectory() {
         let dir = std::env::temp_dir().join(format!("nook-skills-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let p = write_skill(&dir).unwrap();
@@ -145,6 +226,31 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&p).unwrap(), SKILL);
         // Idempotent: installing twice must not fail or duplicate.
         assert_eq!(write_skill(&dir).unwrap(), p);
+
+        // A taught skill lands under its own name, so two skills cannot
+        // overwrite each other.
+        let a = write_named(&dir, "alpha", "A").unwrap();
+        let b = write_named(&dir, "beta", "B").unwrap();
+        assert_eq!(std::fs::read_to_string(&a).unwrap(), "A");
+        assert_eq!(std::fs::read_to_string(&b).unwrap(), "B");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Removing a taught skill must not remove somebody's own directory that
+    /// happens to share the name — the marker is the `SKILL.md` we wrote.
+    #[test]
+    fn forgetting_only_removes_directories_holding_a_skill() {
+        let base = std::env::temp_dir().join(format!("nook-forget-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let ours = base.join("taught");
+        std::fs::create_dir_all(&ours).unwrap();
+        std::fs::write(ours.join("SKILL.md"), "x").unwrap();
+        let theirs = base.join("handmade");
+        std::fs::create_dir_all(&theirs).unwrap();
+        std::fs::write(theirs.join("notes.txt"), "mine").unwrap();
+
+        assert!(ours.join("SKILL.md").is_file(), "ours is removable");
+        assert!(!theirs.join("SKILL.md").exists(), "no SKILL.md → not ours");
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

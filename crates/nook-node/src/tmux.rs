@@ -72,28 +72,72 @@ pub fn apply_server_defaults() {
     //      app expects. Crucially NOT copy-mode, which would replace the TUI.
     //   3. otherwise a normal shell -> enter copy-mode and scroll the real
     //      scrollback, which is what "scroll up in my terminal" should mean.
-    for (key, arrow, down_fallback) in [
-        ("WheelUpPane", "Up", "copy-mode -e; send-keys -M"),
-        ("WheelDownPane", "Down", "send-keys -M"),
-    ] {
-        let alt_branch =
-            format!("if -Ft= \"#{{alternate_on}}\" \"send-keys -N 3 {arrow}\" \"{down_fallback}\"");
-        let _ = tmux(&[
-            "bind-key",
-            "-n",
-            key,
-            "if-shell",
-            "-F",
-            "-t",
-            "=",
-            "#{mouse_any_flag}",
-            "send-keys -M",
-            &alt_branch,
-        ]);
+    for (key, arrow, down_fallback) in WHEEL_KEYS {
+        let args = wheel_binding(key, arrow, down_fallback);
+        let _ = tmux(&args.iter().map(String::as_str).collect::<Vec<_>>());
     }
 }
 
-/// Create a detached session running `command` in `cwd`.
+/// The two wheel directions and what each does when there is no full-screen app:
+/// scrolling up has to ENTER copy-mode first, scrolling down is already in it.
+const WHEEL_KEYS: [(&str, &str, &str); 2] = [
+    ("WheelUpPane", "Up", "copy-mode -e; send-keys -M"),
+    ("WheelDownPane", "Down", "send-keys -M"),
+];
+
+/// Build one wheel binding. Split out from the tmux call so the policy can be
+/// asserted without a running server — the ordering of these three branches is
+/// the whole fix, and it is not something you can check by reading it back.
+fn wheel_binding(key: &str, arrow: &str, no_app_fallback: &str) -> Vec<String> {
+    let alt_branch =
+        format!("if -Ft= \"#{{alternate_on}}\" \"send-keys -N 3 {arrow}\" \"{no_app_fallback}\"");
+    [
+        "bind-key",
+        "-n",
+        key,
+        "if-shell",
+        "-F",
+        "-t",
+        "=",
+        "#{mouse_any_flag}",
+        "send-keys -M",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .chain(std::iter::once(alt_branch))
+    .collect()
+}
+
+/// Apply the defaults unless this server already has them.
+///
+/// Startup and session-create are not enough on their own. `set -g` lives in
+/// the tmux SERVER, and a server can outlive — or predate — the agent that
+/// configured it: one started by the user's own `tmux`, or by an older agent
+/// from before the wheel bindings existed, keeps running with no mouse mode.
+/// Every symptom of that is the same one, "the wheel types arrow keys", because
+/// with mouse reporting off the browser terminal falls back to xterm's
+/// alternate-scroll emulation before tmux ever sees the event.
+///
+/// So it is re-checked whenever a viewer attaches. The check reads the BINDING
+/// rather than the `mouse` option: a server can have `mouse on` from someone's
+/// `.tmux.conf` and still lack the context-aware wheel policy, and that
+/// combination scrolls just as wrongly.
+///
+/// The marker has to be one only OUR binding contains. tmux ships its own
+/// default `WheelUpPane` that also consults `#{mouse_any_flag}`, so checking
+/// for that would match a stock server and this would never fire. `send-keys
+/// -N 3` is ours alone — stock tmux drops an alt-screen app into copy-mode
+/// instead, which is the behaviour being replaced.
+const WHEEL_MARKER: &str = "send-keys -N 3";
+
+pub fn ensure_server_defaults() {
+    let configured = tmux(&["list-keys", "-T", "root", "WheelUpPane"])
+        .is_ok_and(|out| out.contains(WHEEL_MARKER));
+    if !configured {
+        apply_server_defaults();
+    }
+}
+
 /// The user's shell, for launching sessions as login shells.
 pub fn login_shell() -> String {
     std::env::var("SHELL")
@@ -326,4 +370,64 @@ pub fn kill_window(session: &str, index: u32) -> Result<()> {
 pub fn rename_window(session: &str, index: u32, name: &str) -> Result<()> {
     tmux(&["rename-window", "-t", &format!("{session}:{index}"), name])?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The wheel policy, in the order that matters. Getting this order wrong
+    /// does not fail loudly — it just means scrolling types arrow keys into
+    /// someone's shell, which reads as "the terminal is broken".
+    #[test]
+    fn the_wheel_prefers_the_app_then_the_screen_then_scrollback() {
+        for (key, arrow, fallback) in WHEEL_KEYS {
+            let args = wheel_binding(key, arrow, fallback);
+            let joined = args.join(" ");
+
+            // 1. an app that asked for mouse reporting gets the raw event.
+            let mouse_at = joined.find("#{mouse_any_flag}").expect("checks mouse flag");
+            // 2. otherwise a full-screen app gets arrows, NOT copy-mode, which
+            //    would replace the TUI with pre-app scrollback.
+            let alt_at = joined
+                .find("#{alternate_on}")
+                .expect("checks alternate screen");
+            assert!(
+                mouse_at < alt_at,
+                "mouse reporting must win over alt-screen: {joined}"
+            );
+            assert!(
+                joined.contains(&format!("send-keys -N 3 {arrow}")),
+                "alt-screen branch sends {arrow}: {joined}"
+            );
+            // 3. and a plain shell scrolls its real history.
+            assert!(joined.ends_with(&format!("\"{fallback}\"")), "{joined}");
+        }
+        // Only scrolling UP enters copy-mode; binding it on the way down too
+        // would drop you into copy-mode when you scroll back to the bottom.
+        assert!(wheel_binding("WheelUpPane", "Up", WHEEL_KEYS[0].2)
+            .join(" ")
+            .contains("copy-mode"));
+        assert!(!wheel_binding("WheelDownPane", "Down", WHEEL_KEYS[1].2)
+            .join(" ")
+            .contains("copy-mode"));
+    }
+
+    /// `ensure_server_defaults` decides by reading the binding back, so the
+    /// marker must do two things: match what we write, and NOT match what tmux
+    /// ships. Only asserting the first is how the check silently became a
+    /// no-op — tmux's own default binding consults `#{mouse_any_flag}` too, so
+    /// a marker of that matched every stock server and never reapplied.
+    #[test]
+    fn the_marker_tells_our_binding_apart_from_tmuxs_own() {
+        let ours = wheel_binding("WheelUpPane", "Up", WHEEL_KEYS[0].2).join(" ");
+        assert!(ours.contains(WHEEL_MARKER), "must match ours: {ours}");
+
+        // Verbatim from `tmux list-keys -T root WheelUpPane` on a stock server.
+        let stock = r##"bind-key -T root WheelUpPane if-shell -F "#{||:#{pane_in_mode},#{mouse_any_flag}}" "send -M" "copy-mode -e""##;
+        assert!(
+            !stock.contains(WHEEL_MARKER),
+            "must NOT match tmux's default, or an unconfigured server looks configured"
+        );
+    }
 }
