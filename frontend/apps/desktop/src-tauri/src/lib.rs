@@ -77,12 +77,15 @@ fn clear_endpoint(app: tauri::AppHandle) -> Result<(), String> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
             load_endpoint,
             save_endpoint,
             clear_endpoint,
             device_start,
-            device_poll
+            device_poll,
+            update_check,
+            update_install
         ])
         .run(tauri::generate_context!())
         .expect("error while running NookOS desktop");
@@ -264,4 +267,67 @@ async fn device_poll(server: String, start: DeviceStart) -> Result<Option<String
         .map_err(|e| format!("unexpected reply from the control plane: {e}"))?;
 
     Ok(Some(exchanged.token))
+}
+
+// ── updates ──────────────────────────────────────────────────────────────
+//
+// GitHub is the right source here, and the distinction from nodes is the
+// point. A node speaks a private protocol with its control plane, so it takes
+// its version from the control plane or the two can drift apart. This app
+// speaks the public HTTP API and shares no protocol, so it can follow releases
+// on its own without being able to outrun anything.
+
+/// What an available update looks like to the UI.
+#[derive(Debug, Clone, Serialize)]
+pub struct Available {
+    pub version: String,
+    pub current: String,
+    pub notes: String,
+}
+
+/// Is there a newer release? `None` means this is current.
+///
+/// Checking and installing are separate on purpose: an app that updated itself
+/// the moment it found something would restart out from under whatever the
+/// person was reading.
+#[tauri::command]
+async fn update_check(app: tauri::AppHandle) -> Result<Option<Available>, String> {
+    use tauri_plugin_updater::UpdaterExt;
+    let current = app.package_info().version.to_string();
+    let update = app
+        .updater()
+        .map_err(|e| format!("updater unavailable: {e}"))?
+        .check()
+        .await
+        .map_err(|e| format!("cannot check for updates: {e}"))?;
+
+    Ok(update.map(|u| Available {
+        version: u.version.clone(),
+        current,
+        notes: u.body.clone().unwrap_or_default(),
+    }))
+}
+
+/// Download, verify and install, then restart.
+///
+/// The signature is checked by the plugin against the public key compiled into
+/// this build — that is what makes an update from GitHub trustworthy without
+/// trusting GitHub itself.
+#[tauri::command]
+async fn update_install(app: tauri::AppHandle) -> Result<(), String> {
+    use tauri_plugin_updater::UpdaterExt;
+    let update = app
+        .updater()
+        .map_err(|e| format!("updater unavailable: {e}"))?
+        .check()
+        .await
+        .map_err(|e| format!("cannot check for updates: {e}"))?
+        .ok_or("already up to date")?;
+
+    update
+        .download_and_install(|_, _| {}, || {})
+        .await
+        .map_err(|e| format!("update failed: {e}"))?;
+
+    app.restart();
 }

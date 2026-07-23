@@ -149,3 +149,29 @@ export async function pollDeviceLogin(
   if (!call) throw new Error("not running in the desktop app");
   return call<string | null>("device_poll", { server, start });
 }
+
+export interface AvailableUpdate {
+  version: string;
+  current: string;
+  notes: string;
+}
+
+/** Is a newer desktop release out? `null` when current, or not the app. */
+export async function checkForUpdate(): Promise<AvailableUpdate | null> {
+  const call = invoke();
+  if (!call) return null;
+  try {
+    return await call<AvailableUpdate | null>("update_check");
+  } catch {
+    // Being offline, or GitHub being unreachable, is not worth interrupting
+    // anyone over — the check runs again next launch.
+    return null;
+  }
+}
+
+/** Download, verify, install, restart. Does not return on success. */
+export async function installUpdate(): Promise<void> {
+  const call = invoke();
+  if (!call) return;
+  await call("update_install");
+}

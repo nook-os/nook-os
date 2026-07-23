@@ -1671,3 +1671,22 @@ textarea.env-area.blurred {
 .device-link:hover {
   color: var(--nook-accent);
 }
+
+/* Desktop update notice: a strip, not a modal. It is news, not a decision that
+   has to be made before anything else can happen. */
+.update-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 14px;
+  font-size: 12px;
+  background: var(--nook-bg-raised);
+  border-bottom: 1px solid var(--nook-accent);
+  color: var(--nook-fg-bright);
+}
+.update-bar .btn {
+  margin-left: 0;
+}
+.update-bar .btn:first-of-type {
+  margin-left: auto;
+}

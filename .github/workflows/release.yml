@@ -55,6 +55,7 @@ jobs:
             target: aarch64-apple-darwin
             asset: nook-darwin-aarch64
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
         with:
@@ -145,6 +146,7 @@ jobs:
           - runner: windows-latest
             label: windows-x86_64
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
     env:
       # `secrets` is not a context a step-level `if` can read, but a job-level
       # `env` can — so the presence check is hoisted here and the step tests a
@@ -237,6 +239,10 @@ jobs:
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          # Tauri's own update signature. Separate from notarisation, which says
+          # Apple scanned the build but nothing about who published the update.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
           # Notarisation variables are deliberately NOT set here — the staging
           # step above exports them through GITHUB_ENV, and only when the key
           # exists. Listing them here sets them to the empty string when the
@@ -260,7 +266,8 @@ jobs:
           root=frontend/apps/desktop/src-tauri/target
           find "$root" -type f -path '*/bundle/*' \
             \( -name '*.dmg' -o -name '*.AppImage' -o -name '*.deb' \
-               -o -name '*.rpm' -o -name '*.msi' -o -name '*.exe' \) \
+               -o -name '*.rpm' -o -name '*.msi' -o -name '*.exe' \
+               -o -name '*.tar.gz' -o -name '*.zip' -o -name '*.sig' \) \
             -exec cp {} desktop-dist/ \;
           # An empty bundle directory means the build silently produced nothing,
           # which would otherwise surface as a release missing its downloads.
@@ -316,6 +323,7 @@ jobs:
           - image: web
             dockerfile: deploy/docker/web-prod.Dockerfile
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
         with:
@@ -357,6 +365,7 @@ jobs:
     name: Multi-arch manifest
     needs: images
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     strategy:
       matrix:
         image: [control, node, web]
@@ -391,6 +400,7 @@ jobs:
   release:
     needs: [binaries, desktop, merge]
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
         with:
@@ -409,6 +419,56 @@ jobs:
       # does not depend on a control plane already existing.
       - name: Include the installer
         run: cp install/install.sh dist/install.sh
+
+      # The manifest the desktop app polls. Built from the .sig files Tauri
+      # produced beside each bundle — the signature is what makes an update
+      # trustworthy, so a platform whose .sig is missing is LEFT OUT rather
+      # than published unsigned.
+      - name: Build the update manifest
+        env:
+          VERSION: ${{ inputs.tag || github.ref_name }}
+        run: |
+          python3 - <<'PY'
+          import json, os, pathlib
+          version = os.environ["VERSION"].lstrip("v")
+          base = f"https://github.com/${{ github.repository }}/releases/download/{os.environ['VERSION']}"
+          dist = pathlib.Path("dist")
+
+          # Tauri's platform keys, and the bundle each one updates from.
+          # The alias step gives every artifact a version-less name and
+          # collapses `.app.tar.gz.sig` to `.sig`, so each platform has exactly
+          # one signature file and the pairing is by platform, not by filename.
+          wanted = {
+              "darwin-aarch64": ("NookOS-macos-aarch64.tar.gz", "NookOS-macos-aarch64.sig"),
+              "darwin-x86_64":  ("NookOS-macos-x86_64.tar.gz", "NookOS-macos-x86_64.sig"),
+              "linux-x86_64":   ("NookOS-linux-x86_64.AppImage", "NookOS-linux-x86_64.sig"),
+              "windows-x86_64": ("NookOS-windows-x86_64-setup.exe", "NookOS-windows-x86_64.sig"),
+          }
+          platforms = {}
+          for key, (name, sig_name) in wanted.items():
+              sig = dist / sig_name
+              if not (dist / name).exists() or not sig.exists():
+                  print(f"skip {key}: no signed {name}")
+                  continue
+              platforms[key] = {
+                  "signature": sig.read_text().strip(),
+                  "url": f"{base}/{name}",
+              }
+
+          if not platforms:
+              # Not fatal: the release is still good, the app simply will not
+              # self-update from it. Saying so beats a manifest promising
+              # nothing.
+              print("::warning::no signed update artifacts — publishing no manifest")
+              raise SystemExit(0)
+
+          (dist / "latest.json").write_text(json.dumps({
+              "version": version,
+              "notes": f"NookOS {os.environ['VERSION']}",
+              "platforms": platforms,
+          }, indent=2))
+          print("manifest covers:", ", ".join(platforms))
+          PY
       - name: Publish
         uses: softprops/action-gh-release@v2
         with:

@@ -16,7 +16,7 @@ import { DocsPage } from "./pages/Docs";
 import { FeedbackPage } from "./pages/Feedback";
 import { Login } from "./pages/Login";
 import { Connect } from "./pages/Connect";
-import { initDesktop, isDesktop } from "./desktop";
+import { checkForUpdate, initDesktop, installUpdate, isDesktop, type AvailableUpdate } from "./desktop";
 import { NodeDetail, NodesPage } from "./pages/Nodes";
 import { SessionPage, SessionsPage } from "./pages/Session";
 import { SettingsPage } from "./pages/Settings";
@@ -33,8 +33,20 @@ function AuthGate() {
   // endpoint has to be loaded and applied BEFORE the first request goes out —
   // otherwise /auth/me is sent to tauri://localhost and fails in a way that
   // looks like being signed out.
+  const [update, setUpdate] = useState<AvailableUpdate | null>(null);
   const [endpointReady, setEndpointReady] = useState(!isDesktop());
   const [needsConnect, setNeedsConnect] = useState(false);
+
+  // Checked once at startup and then hourly. Offered, never forced: an app
+  // that restarted itself the moment a release appeared would do it in the
+  // middle of whatever you were reading.
+  useEffect(() => {
+    if (!isDesktop()) return;
+    const check = () => checkForUpdate().then(setUpdate);
+    check();
+    const t = setInterval(check, 60 * 60 * 1000);
+    return () => clearInterval(t);
+  }, []);
 
   useEffect(() => {
     if (!isDesktop()) return;
@@ -73,6 +85,18 @@ function AuthGate() {
   if (isError || !me) return isDesktop() ? <Connect onDone={() => refetch()} /> : <Login />;
 
   return (
+    <>
+      {update && (
+        <div className="update-bar" role="status">
+          NookOS {update.version} is available — you are on {update.current}.
+          <button className="btn small primary" onClick={() => installUpdate()}>
+            update and restart
+          </button>
+          <button className="btn small" onClick={() => setUpdate(null)}>
+            later
+          </button>
+        </div>
+      )}
     <Routes>
       <Route element={<Shell me={me} />}>
         <Route index element={<Dashboard />} />
@@ -90,6 +114,7 @@ function AuthGate() {
         <Route path="*" element={<Empty>Nothing here.</Empty>} />
       </Route>
     </Routes>
+    </>
   );
 }
 
