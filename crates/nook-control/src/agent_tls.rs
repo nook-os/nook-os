@@ -124,14 +124,32 @@ pub fn acceptor(cert_path: &str, key_path: &str) -> Result<TlsAcceptor> {
 
 /// Serve the agent router over TLS, carrying each peer's certificate into the
 /// request so `AuthCtx` can establish identity from it.
-pub async fn serve(listener: tokio::net::TcpListener, router: Router, tls: TlsAcceptor) {
+///
+/// `shutdown` resolves on a termination signal: the accept loop then stops
+/// taking new connections and returns, so a rolling update drains this door
+/// alongside the browser one. Connections already accepted keep running as
+/// detached tasks until the process exits within its grace period.
+pub async fn serve(
+    listener: tokio::net::TcpListener,
+    router: Router,
+    tls: TlsAcceptor,
+    shutdown: impl std::future::Future<Output = ()> + Send,
+) {
     use hyper_util::rt::{TokioExecutor, TokioIo};
     use hyper_util::server::conn::auto::Builder;
     use tower::ServiceExt;
 
+    tokio::pin!(shutdown);
     loop {
-        let Ok((stream, peer)) = listener.accept().await else {
-            continue;
+        let (stream, peer) = tokio::select! {
+            _ = &mut shutdown => {
+                tracing::info!("agent listener draining — no longer accepting connections");
+                return;
+            }
+            accepted = listener.accept() => match accepted {
+                Ok(conn) => conn,
+                Err(_) => continue,
+            },
         };
         let tls = tls.clone();
         let router = router.clone();

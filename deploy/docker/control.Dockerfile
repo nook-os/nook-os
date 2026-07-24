@@ -20,5 +20,14 @@ COPY --from=build /src/target/release/nook-control /usr/local/bin/nook-control
 # Anything matching nook-<os>-<arch> here is offered by /api/v1/node/releases
 # and served at /dist/<name> — drop cross-built macOS binaries in to add them.
 COPY --from=build /dist/ /usr/local/share/nook/dist/
+# Run as a non-root, numeric UID so Kubernetes `runAsNonRoot` is satisfiable
+# (it checks the USER is not 0, and a name it cannot resolve fails that check —
+# hence the explicit 10001, not just a name). The binary and its read-only dist
+# assets are owned by root but world-readable, so the process needs no write
+# access to the image filesystem to run. Anything it does write (git checkouts,
+# artifacts) already goes to mounted volumes, never the image.
+RUN groupadd --system --gid 10001 nook \
+    && useradd --system --uid 10001 --gid 10001 --home-dir /home/nook --create-home nook
+USER 10001:10001
 EXPOSE 8080
 ENTRYPOINT ["nook-control"]

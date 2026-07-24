@@ -12,6 +12,7 @@ use utoipa::OpenApi;
     ),
     paths(
         crate::routes::health::healthz,
+        crate::routes::health::livez,
         crate::routes::auth::me,
         crate::routes::auth::my_tenants,
         crate::routes::auth::switch_tenant,
