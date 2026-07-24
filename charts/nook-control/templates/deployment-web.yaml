@@ -1,0 +1,94 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "nook-control.componentName" (dict "root" . "component" "web") }}
+  labels:
+    {{- include "nook-control.labels" . | nindent 4 }}
+    app.kubernetes.io/component: web
+spec:
+  replicas: {{ .Values.web.replicas }}
+  selector:
+    matchLabels:
+      {{- include "nook-control.componentSelectorLabels" (dict "root" . "component" "web") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "nook-control.componentSelectorLabels" (dict "root" . "component" "web") | nindent 8 }}
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "nook-control.serviceAccountName" . }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.web.podSecurityContext | nindent 8 }}
+      containers:
+        - name: web
+          image: {{ include "nook-control.webImage" . }}
+          imagePullPolicy: {{ .Values.web.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.web.securityContext | nindent 12 }}
+          ports:
+            - name: http
+              containerPort: 80
+              protocol: TCP
+          env:
+            # nginx proxies /api (and /mcp, /healthz, .well-known) here — the
+            # in-cluster control-plane Service (AC-6). WebSockets ride the same
+            # location, so terminals work through the proxy.
+            - name: CONTROL_PLANE_ORIGIN
+              value: http://{{ include "nook-control.componentName" (dict "root" . "component" "control") }}:{{ .Values.service.control.port }}
+            {{- with .Values.web.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          livenessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.web.resources | nindent 12 }}
+          # nginx must write its rendered config, pid, cache and temp paths. With
+          # a read-only root filesystem these are emptyDir mounts, which also lets
+          # the container run as a non-root user (AC-7).
+          volumeMounts:
+            - name: nginx-conf
+              mountPath: /etc/nginx/conf.d
+            - name: nginx-run
+              mountPath: /var/run
+            - name: nginx-cache
+              mountPath: /var/cache/nginx
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: nginx-conf
+          emptyDir: {}
+        - name: nginx-run
+          emptyDir: {}
+        - name: nginx-cache
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "nook-control.componentName" (dict "root" . "component" "control") }}
+  labels:
+    {{- include "nook-control.labels" . | nindent 4 }}
+    app.kubernetes.io/component: control
+spec:
+  type: {{ .Values.service.control.type }}
+  selector:
+    {{- include "nook-control.componentSelectorLabels" (dict "root" . "component" "control") | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.service.control.port }}
+      targetPort: http
+      protocol: TCP

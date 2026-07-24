@@ -1,0 +1,200 @@
+# Default values for nook-control.
+# The control plane and the nginx web front-end as Deployments, an HTTP Ingress
+# fronting web, external Postgres, and secrets by reference. No bundled deps.
+
+# -- Override the chart name portion of resource names.
+nameOverride: ""
+# -- Override the full resource name (otherwise <release>-<chart>).
+fullnameOverride: ""
+
+# -- Image pull secrets for private registries (list of {name}).
+imagePullSecrets: []
+
+# ── Control plane ────────────────────────────────────────────────────────────
+controlPlane:
+  image:
+    # -- Container registry for the control-plane image.
+    registry: ghcr.io
+    # -- Control-plane image repository.
+    repository: nook-os/nook-control
+    # -- Image tag. Empty ("") defaults to the chart's appVersion.
+    tag: ""
+    # -- Image pull policy.
+    pullPolicy: IfNotPresent
+  # -- Number of control-plane replicas. Migrations are advisory-locked, so >1 is safe.
+  replicas: 1
+  # -- Resource requests/limits for the control-plane container.
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: "1"
+      memory: 512Mi
+  # -- Extra environment (list of {name,value}) merged into the control-plane container.
+  extraEnv: []
+
+# ── Web front-end (nginx: SPA + /api proxy) ──────────────────────────────────
+web:
+  image:
+    # -- Container registry for the web image.
+    registry: ghcr.io
+    # -- Web image repository (nginx serving the SPA and proxying /api).
+    repository: nook-os/nook-web
+    # -- Image tag. Empty ("") defaults to the chart's appVersion.
+    tag: ""
+    # -- Image pull policy.
+    pullPolicy: IfNotPresent
+  # -- Number of web replicas.
+  replicas: 1
+  # -- Resource requests/limits for the web container.
+  resources:
+    requests:
+      cpu: 25m
+      memory: 32Mi
+    limits:
+      cpu: 250m
+      memory: 128Mi
+  # -- Extra environment (list of {name,value}) merged into the web container.
+  extraEnv: []
+  # -- Pod securityContext for web. nginx runs as its own unprivileged user (101);
+  #    the chart mounts emptyDir volumes over nginx's writable paths so the root
+  #    filesystem can stay read-only.
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 101
+    runAsGroup: 101
+    fsGroup: 101
+    seccompProfile:
+      type: RuntimeDefault
+  # -- Container securityContext for web. NET_BIND_SERVICE lets a non-root nginx
+  #    bind port 80; everything else is dropped.
+  securityContext:
+    runAsNonRoot: true
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop:
+        - ALL
+      add:
+        - NET_BIND_SERVICE
+
+# ── Secrets (BY REFERENCE — the chart creates no Secret) ─────────────────────
+# Name of a pre-existing Kubernetes Secret holding the values below. REQUIRED.
+# The chart wires env vars from it with secretKeyRef and never stores secret
+# material in rendered manifests.
+existingSecret: ""
+# Which keys inside existingSecret map to which env vars. DATABASE_URL and
+# SESSION_SECRET are always wired. For the optional ones, set the value to the
+# key name inside the Secret to wire it, or leave "" to omit that env var.
+secretKeys:
+  # -- Secret key holding the external Postgres URL (required). Env: DATABASE_URL.
+  databaseUrl: DATABASE_URL
+  # -- Secret key holding the 32+ char session secret (required). Env: SESSION_SECRET.
+  sessionSecret: SESSION_SECRET
+  # -- Secret key holding the vault key (64 hex chars). Env: SECRETS_KEY. "" to omit.
+  secretsKey: ""
+  # -- Secret key holding the OIDC client secret. Env: OIDC_CLIENT_SECRET. "" to omit.
+  oidcClientSecret: ""
+  # -- Secret key holding the S3 access key id. Env: NOOK_S3_ACCESS_KEY_ID. "" to omit.
+  s3AccessKeyId: ""
+  # -- Secret key holding the S3 secret access key. Env: NOOK_S3_SECRET_ACCESS_KEY. "" to omit.
+  s3SecretAccessKey: ""
+
+# ── Non-secret config (rendered into a ConfigMap) ────────────────────────────
+config:
+  # -- APP_ENV. Use "production" in real deployments (disables the dev-login hatch).
+  appEnv: production
+  # -- PUBLIC_BASE_URL: the external URL a person reaches the UI at (usually https://<ingress.host>).
+  publicBaseUrl: ""
+  # -- WEB_ORIGIN: allowed browser origin (usually the same as publicBaseUrl).
+  webOrigin: ""
+  oidc:
+    # -- OIDC_ISSUER_URL of your identity provider.
+    issuerUrl: ""
+    # -- OIDC_CLIENT_ID (the confidential client).
+    clientId: ""
+    # -- OIDC_REDIRECT_URL (usually <publicBaseUrl>/api/v1/auth/callback).
+    redirectUrl: ""
+    # -- OIDC_SCOPES requested at login.
+    scopes: "openid profile email"
+    # -- OIDC_DEVICE_CLIENT_ID (the public client for native/device sign-in).
+    deviceClientId: ""
+  # -- NOOK_ARTIFACT_STORE: "disk" or "s3".
+  artifactStore: disk
+  s3:
+    # -- NOOK_S3_BUCKET.
+    bucket: ""
+    # -- NOOK_S3_ENDPOINT (unset for AWS; set for MinIO/GCS).
+    endpoint: ""
+    # -- NOOK_S3_REGION.
+    region: ""
+    # -- NOOK_S3_PATH_STYLE.
+    pathStyle: true
+
+# ── Services ─────────────────────────────────────────────────────────────────
+service:
+  control:
+    # -- Control-plane Service type.
+    type: ClusterIP
+    # -- Control-plane Service port (the API/browser port; the pod also listens on 8081 for agents — a separate issue exposes that).
+    port: 8080
+  web:
+    # -- Web Service type.
+    type: ClusterIP
+    # -- Web Service port.
+    port: 80
+
+# ── Ingress (HTTP, fronting web) ─────────────────────────────────────────────
+ingress:
+  # -- Create an Ingress fronting the web Service.
+  enabled: true
+  # -- ingressClassName (e.g. "nginx"). "" leaves it unset (cluster default).
+  className: ""
+  # -- The external host that routes to this NookOS. REQUIRED for a real install.
+  host: ""
+  # -- Extra annotations (e.g. cert-manager.io/cluster-issuer, nginx tuning).
+  annotations: {}
+  tls:
+    # -- Terminate TLS at the Ingress.
+    enabled: false
+    # -- Name of a pre-existing TLS Secret. Leave "" to let cert-manager fill it via annotations.
+    secretName: ""
+
+# ── ServiceAccount ───────────────────────────────────────────────────────────
+serviceAccount:
+  # -- Create a dedicated ServiceAccount.
+  create: true
+  # -- Name to use; empty defaults to the fullname.
+  name: ""
+  # -- Annotations for the ServiceAccount (e.g. cloud IAM role bindings).
+  annotations: {}
+
+# ── Pod security & scheduling (hardened defaults, all overridable) ───────────
+# -- Pod-level securityContext. The images already run as uid 10001.
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  runAsGroup: 10001
+  fsGroup: 10001
+  seccompProfile:
+    type: RuntimeDefault
+# -- Container-level securityContext. readOnlyRootFilesystem stays false — the
+#    prep issue only guaranteed the process needs no writes for its OWN files;
+#    turning the root fs read-only is opt-in once volumes are mapped.
+securityContext:
+  runAsNonRoot: true
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: false
+  capabilities:
+    drop:
+      - ALL
+
+# -- Extra pod annotations.
+podAnnotations: {}
+# -- Node selector for scheduling.
+nodeSelector: {}
+# -- Tolerations for scheduling.
+tolerations: []
+# -- Affinity rules for scheduling.
+affinity: {}

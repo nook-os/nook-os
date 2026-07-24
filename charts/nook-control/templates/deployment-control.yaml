@@ -1,0 +1,133 @@
+{{- include "nook-control.requireSecret" . -}}
+{{- $sk := .Values.secretKeys -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "nook-control.componentName" (dict "root" . "component" "control") }}
+  labels:
+    {{- include "nook-control.labels" . | nindent 4 }}
+    app.kubernetes.io/component: control
+spec:
+  replicas: {{ .Values.controlPlane.replicas }}
+  selector:
+    matchLabels:
+      {{- include "nook-control.componentSelectorLabels" (dict "root" . "component" "control") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "nook-control.componentSelectorLabels" (dict "root" . "component" "control") | nindent 8 }}
+      annotations:
+        # Roll the pods when the non-secret config changes.
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "nook-control.serviceAccountName" . }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      # Give in-flight requests time to drain on SIGTERM (matches the control
+      # plane's own graceful-shutdown grace period).
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: control-plane
+          image: {{ include "nook-control.controlImage" . }}
+          imagePullPolicy: {{ .Values.controlPlane.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+            - name: agent
+              containerPort: 8081
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: {{ include "nook-control.fullname" . }}-config
+          env:
+            # Required secrets, by reference — never rendered into a manifest.
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.existingSecret }}
+                  key: {{ $sk.databaseUrl }}
+            - name: SESSION_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.existingSecret }}
+                  key: {{ $sk.sessionSecret }}
+            {{- if $sk.secretsKey }}
+            - name: SECRETS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.existingSecret }}
+                  key: {{ $sk.secretsKey }}
+            {{- end }}
+            {{- if $sk.oidcClientSecret }}
+            - name: OIDC_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.existingSecret }}
+                  key: {{ $sk.oidcClientSecret }}
+            {{- end }}
+            {{- if $sk.s3AccessKeyId }}
+            - name: NOOK_S3_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.existingSecret }}
+                  key: {{ $sk.s3AccessKeyId }}
+            {{- end }}
+            {{- if $sk.s3SecretAccessKey }}
+            - name: NOOK_S3_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.existingSecret }}
+                  key: {{ $sk.s3SecretAccessKey }}
+            {{- end }}
+            {{- with .Values.controlPlane.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          # Liveness: process is up (DB-free). A DB blip must not restart the pod.
+          livenessProbe:
+            httpGet:
+              path: /livez
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          # Readiness: DB reachable (SELECT 1). Fails → pulled from endpoints, not restarted.
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          # Startup: migrations run at boot; give them room before liveness bites.
+          startupProbe:
+            httpGet:
+              path: /livez
+              port: http
+            periodSeconds: 5
+            failureThreshold: 30
+          resources:
+            {{- toYaml .Values.controlPlane.resources | nindent 12 }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

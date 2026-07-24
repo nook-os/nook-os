@@ -1,0 +1,20 @@
+apiVersion: v2
+name: nook-control
+description: >-
+  NookOS control plane + web front-end for Kubernetes. External Postgres,
+  secrets by reference (existingSecret), HTTP Ingress. No bundled dependencies.
+type: application
+# Chart version — bump on chart changes. appVersion tracks the NookOS release
+# whose images this chart defaults to.
+version: 0.1.0
+appVersion: "0.4.10"
+kubeVersion: ">=1.23.0-0"
+home: https://github.com/nook-os/nook-os
+sources:
+  - https://github.com/nook-os/nook-os
+maintainers:
+  - name: NookOS
+keywords:
+  - nookos
+  - control-plane
+  - developer-platform
