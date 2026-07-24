@@ -129,6 +129,22 @@ for the hostname.
 
 ## Kubernetes (Helm)
 
+**Start here: `install.sh --k8s`.** The installer recognises a Kubernetes intent
+and hands off to Helm rather than putting a binary on disk — it prints the exact
+`helm install oci://…` command and writes a starter `nook-values.yaml` in the
+current directory, and needs neither `helm` nor `kubectl` present to do so:
+
+```bash
+curl -fsSL https://<your-nook>/install.sh | sh -s -- --k8s
+# or the no-argument menu → [3] Kubernetes
+```
+
+Served from a running control plane, the printed command is pinned to that
+control plane's chart version; from the generic domain it omits `--version` (helm
+pulls the latest). Fill in `nook-values.yaml` (host, URLs, the Secret name, the
+agent block — see the comments) and run the command. It installs nothing on the
+local machine; NookOS runs from the chart.
+
 To run the control plane and web front-end on a cluster — against a Postgres you
 already operate, with secrets from your own secret manager — use the Helm chart
 at [`charts/nook-control/`](../charts/nook-control/README.md). It deploys the
