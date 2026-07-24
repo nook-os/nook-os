@@ -797,6 +797,9 @@ table.nook-table tr.clickable { cursor: pointer; }
 /* Blocked work is dimmed rather than hidden: it still occupies a place in the
    queue, and seeing WHY the column is not moving is the point. */
 .board-card.blocked { opacity: 0.55; border-style: dashed; }
+/* Archived cards are shown (only with "show archived" on) but dimmed — present
+   for reference, plainly not live work. */
+.board-card.archived { opacity: 0.5; }
 .card-blocked { color: #f14668; margin-right: 4px; }
 
 .card-key {

@@ -222,6 +222,141 @@ pub async fn update_task(
     ))
 }
 
+/// Archive (`archive = true`) or unarchive a single task, resolved by key or
+/// uuid. Archiving hides it from the board and the pick query; unarchiving
+/// returns it to its column. Emits the usual TaskChanged so other viewers
+/// update live (AC-7). Archived tasks remain resolvable by id/key, so this can
+/// unarchive one that is no longer on the board.
+async fn set_archived(
+    state: &AppState,
+    auth: &AuthCtx,
+    ident: &str,
+    archive: bool,
+) -> ApiResult<TaskItem> {
+    let id = crate::services::tasks::resolve_id(&state.db, auth.tenant_id, ident).await?;
+    let task: TaskItem = sqlx::query_as(
+        "UPDATE tasks SET archived_at = CASE WHEN $3 THEN now() ELSE NULL END,
+                          updated_at = now()
+         WHERE id = $1 AND tenant_id = $2 RETURNING *",
+    )
+    .bind(id)
+    .bind(auth.tenant_id)
+    .bind(archive)
+    .fetch_optional(&state.db)
+    .await?
+    .ok_or(ApiError::NotFound)?;
+
+    events::record(
+        state,
+        auth.tenant_id,
+        EventDraft::new(if archive {
+            "task.archived"
+        } else {
+            "task.unarchived"
+        })
+        .actor("user", auth.user_id.0)
+        .payload(serde_json::json!({ "task_id": task.id, "title": task.title })),
+    )
+    .await;
+    state.registry.publish(
+        auth.tenant_id,
+        nook_proto::UiEvent::TaskChanged { task_id: task.id },
+    );
+    crate::services::tasks::enrich_one(&state.db, &state.cfg.public_base_url, task)
+        .await
+        .map_err(Into::into)
+}
+
+#[utoipa::path(post, path = "/api/v1/tasks/{id}/archive",
+    operation_id = "archive_task",
+    params(("id" = String, Path,)),
+    responses((status = 200, body = TaskItem), (status = 404)))]
+pub async fn archive_task(
+    State(state): State<AppState>,
+    auth: AuthCtx,
+    Path(ident): Path<String>,
+) -> ApiResult<Json<TaskItem>> {
+    auth.require_user()?;
+    Ok(Json(set_archived(&state, &auth, &ident, true).await?))
+}
+
+#[utoipa::path(post, path = "/api/v1/tasks/{id}/unarchive",
+    operation_id = "unarchive_task",
+    params(("id" = String, Path,)),
+    responses((status = 200, body = TaskItem), (status = 404)))]
+pub async fn unarchive_task(
+    State(state): State<AppState>,
+    auth: AuthCtx,
+    Path(ident): Path<String>,
+) -> ApiResult<Json<TaskItem>> {
+    auth.require_user()?;
+    Ok(Json(set_archived(&state, &auth, &ident, false).await?))
+}
+
+/// Archive every live task in one completed/canceled column at once (AC-4).
+/// Refused for any other column type — bulk archive is finished-work cleanup,
+/// not a way to sweep in-progress work off the board (NG-3).
+#[utoipa::path(post, path = "/api/v1/columns/{id}/archive-completed",
+    operation_id = "archive_completed_in_column",
+    params(("id" = String, Path,)),
+    responses((status = 200, body = nook_types::OpResponse), (status = 403), (status = 404)))]
+pub async fn archive_completed_in_column(
+    State(state): State<AppState>,
+    auth: AuthCtx,
+    Path(column_id): Path<ColumnId>,
+) -> ApiResult<Json<nook_types::OpResponse>> {
+    auth.require_user()?;
+    // board_columns has no tenant_id; scope through its board.
+    let col: Option<(String,)> = sqlx::query_as(
+        "SELECT c.type FROM board_columns c
+         JOIN boards b ON b.id = c.board_id
+         WHERE c.id = $1 AND b.tenant_id = $2",
+    )
+    .bind(column_id)
+    .bind(auth.tenant_id)
+    .fetch_optional(&state.db)
+    .await?;
+    let (col_type,) = col.ok_or(ApiError::NotFound)?;
+    if col_type != "completed" && col_type != "canceled" {
+        return Err(ApiError::ForbiddenMsg(
+            "bulk archive is only for completed or canceled columns".into(),
+        ));
+    }
+
+    let ids: Vec<(TaskId,)> = sqlx::query_as(
+        "UPDATE tasks SET archived_at = now(), updated_at = now()
+         WHERE column_id = $1 AND tenant_id = $2 AND archived_at IS NULL
+         RETURNING id",
+    )
+    .bind(column_id)
+    .bind(auth.tenant_id)
+    .fetch_all(&state.db)
+    .await?;
+
+    // One TaskChanged per card so each disappears live; the board query
+    // invalidation keys off any of them (AC-7).
+    for (id,) in &ids {
+        state.registry.publish(
+            auth.tenant_id,
+            nook_proto::UiEvent::TaskChanged { task_id: *id },
+        );
+    }
+    events::record(
+        &state,
+        auth.tenant_id,
+        EventDraft::new("task.archived_bulk")
+            .actor("user", auth.user_id.0)
+            .payload(serde_json::json!({ "column_id": column_id, "count": ids.len() })),
+    )
+    .await;
+
+    Ok(Json(nook_types::OpResponse {
+        ok: true,
+        path: None,
+        message: format!("archived {} task(s)", ids.len()),
+    }))
+}
+
 #[utoipa::path(delete, path = "/api/v1/tasks/{id}",
     operation_id = "delete_task",
     params(("id" = String, Path,)),

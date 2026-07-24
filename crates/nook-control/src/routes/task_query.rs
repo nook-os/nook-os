@@ -24,7 +24,7 @@ use crate::state::AppState;
 // `parameter_in = Query` is not the default — without it utoipa emits every
 // field as a PATH parameter, and the generated TypeScript then types the query
 // object as `undefined`, so no caller can pass a filter at all.
-#[derive(Debug, Default, Deserialize, utoipa::IntoParams)]
+#[derive(Debug, Clone, Default, Deserialize, utoipa::IntoParams)]
 #[into_params(parameter_in = Query)]
 pub struct TaskFilter {
     /// Board id or key (`ENG`). Omit to search the whole tenant.
@@ -42,6 +42,9 @@ pub struct TaskFilter {
     /// Filter on the derived blocker state.
     pub is_blocked: Option<bool>,
     pub workspace: Option<uuid::Uuid>,
+    /// Include archived tasks. Default (absent/false) excludes them, so the
+    /// agent pick can never claim archived work (MAIN-15 AC-2).
+    pub archived: Option<bool>,
     pub limit: Option<i64>,
     /// Opaque: the `created_at` of the last row of the previous page.
     pub cursor: Option<chrono::DateTime<chrono::Utc>>,
@@ -81,6 +84,7 @@ impl TaskFilter {
                 "priority" => f.priority = Some(num(&k, &v)?),
                 "limit" => f.limit = Some(num(&k, &v)?),
                 "is_blocked" => f.is_blocked = Some(flag(&k, &v)?),
+                "archived" => f.archived = Some(flag(&k, &v)?),
                 "workspace" => {
                     f.workspace = Some(v.parse().map_err(|_| {
                         ApiError::BadRequest(format!("workspace must be a uuid, got {v:?}"))
@@ -141,6 +145,20 @@ pub async fn query(
 /// pickable" would drift, and the one an agent uses decides what work happens
 /// while the one a human sees decides whether they believe it.
 pub async fn pick(state: &AppState, tenant: TenantId, f: TaskFilter) -> ApiResult<Vec<TaskItem>> {
+    let rows = query_rows(&state.db, tenant, &f).await?;
+    tasks::enrich(&state.db, &state.cfg.public_base_url, rows)
+        .await
+        .map_err(Into::into)
+}
+
+/// The pick SQL, before enrichment. Split out from `pick` so the archived
+/// exclusion (and the rest of the filter) can be tested against a real database
+/// without constructing an `AppState`.
+pub async fn query_rows(
+    db: &sqlx::PgPool,
+    tenant: TenantId,
+    f: &TaskFilter,
+) -> ApiResult<Vec<TaskItem>> {
     let limit = f.limit.unwrap_or(50).clamp(1, 200);
 
     // `assignee=none` means unassigned, which is a different question from "no
@@ -202,6 +220,8 @@ pub async fn pick(state: &AppState, tenant: TenantId, f: TaskFilter) -> ApiResul
                 WHERE r.to_task = t.id AND r.kind = 'blocks'
                   AND bc.type NOT IN ('completed', 'canceled')))
           AND ($11::timestamptz IS NULL OR t.created_at > $11)
+          -- archived work is off the board and NEVER pickable unless explicitly asked for
+          AND ($13::bool OR t.archived_at IS NULL)
         -- priority 0 means "unset", which sorts last rather than first
         ORDER BY CASE WHEN t.priority = 0 THEN 5 ELSE t.priority END, t.created_at
         LIMIT $12
@@ -219,12 +239,11 @@ pub async fn pick(state: &AppState, tenant: TenantId, f: TaskFilter) -> ApiResul
     .bind(f.is_blocked)
     .bind(f.cursor)
     .bind(limit)
-    .fetch_all(&state.db)
+    .bind(f.archived.unwrap_or(false))
+    .fetch_all(db)
     .await?;
 
-    tasks::enrich(&state.db, &state.cfg.public_base_url, rows)
-        .await
-        .map_err(Into::into)
+    Ok(rows)
 }
 
 /// Take the work, atomically.
@@ -387,6 +406,19 @@ mod tests {
         assert_eq!(f.limit, Some(10));
     }
 
+    #[test]
+    fn archived_flag_parses_and_defaults_to_absent() {
+        assert_eq!(TaskFilter::parse(Some("")).unwrap().archived, None);
+        assert_eq!(
+            TaskFilter::parse(Some("archived=true")).unwrap().archived,
+            Some(true)
+        );
+        assert_eq!(
+            TaskFilter::parse(Some("archived=false")).unwrap().archived,
+            Some(false)
+        );
+    }
+
     /// `is_blocked` absent, `false`, and `true` are three different questions.
     /// Collapsing absent into false would silently hide every blocked task
     /// from an unfiltered board.
@@ -423,5 +455,143 @@ mod tests {
     fn values_are_percent_decoded() {
         let f = TaskFilter::parse(Some("label=needs%20review")).unwrap();
         assert_eq!(f.label, vec!["needs review"]);
+    }
+}
+
+/// Behavioral tests for the archived exclusion (MAIN-15 AC-2), against a real
+/// database. They self-provision the schema and no-op without `NOOK_REQUIRE_DB`,
+/// like the identity DB tests.
+#[cfg(test)]
+mod db_tests {
+    use super::{query_rows, TaskFilter};
+    use nook_types::{TaskId, TenantId};
+    use sqlx::postgres::PgPoolOptions;
+    use sqlx::PgPool;
+    use uuid::Uuid;
+
+    async fn pool() -> Option<PgPool> {
+        if std::env::var("NOOK_REQUIRE_DB").ok().as_deref() != Some("1") {
+            return None;
+        }
+        let url = std::env::var("DATABASE_URL").ok()?;
+        let db = PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&url)
+            .await
+            .ok()?;
+        crate::MIGRATOR.run(&db).await.ok()?;
+        Some(db)
+    }
+
+    /// Insert a board + one column + a task (archived or not), returning the id.
+    async fn task(db: &PgPool, tenant: Uuid, board: Uuid, col: Uuid, archived: bool) -> TaskId {
+        let id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO tasks (id, tenant_id, board_id, column_id, title, archived_at)
+             VALUES ($1, $2, $3, $4, 't', CASE WHEN $5 THEN now() ELSE NULL END)",
+        )
+        .bind(id)
+        .bind(tenant)
+        .bind(board)
+        .bind(col)
+        .bind(archived)
+        .execute(db)
+        .await
+        .unwrap();
+        TaskId(id)
+    }
+
+    #[tokio::test]
+    async fn pick_excludes_archived_by_default_and_includes_when_asked() {
+        let Some(db) = pool().await else {
+            eprintln!("skipping — no DATABASE_URL");
+            return;
+        };
+        let tenant = Uuid::new_v4();
+        let board = Uuid::new_v4();
+        let col = Uuid::new_v4();
+        sqlx::query("INSERT INTO tenants (id, name, slug) VALUES ($1, 'A15', $2)")
+            .bind(tenant)
+            .bind(format!("a15-{tenant}"))
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO boards (id, tenant_id, name, key) VALUES ($1, $2, 'B', $3)")
+            .bind(board)
+            .bind(tenant)
+            .bind(format!("B{}", &board.simple().to_string()[..6]))
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO board_columns (id, board_id, name, type, position)
+             VALUES ($1, $2, 'Done', 'completed', 0)",
+        )
+        .bind(col)
+        .bind(board)
+        .execute(&db)
+        .await
+        .unwrap();
+
+        let live = task(&db, tenant, board, col, false).await;
+        let archived = task(&db, tenant, board, col, true).await;
+
+        let f = TaskFilter {
+            board: Some(board.to_string()),
+            ..Default::default()
+        };
+        let default_ids: Vec<TaskId> = query_rows(&db, TenantId(tenant), &f)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|t| t.id)
+            .collect();
+
+        let with_archived = TaskFilter {
+            archived: Some(true),
+            ..f.clone()
+        };
+        let all_ids: Vec<TaskId> = query_rows(&db, TenantId(tenant), &with_archived)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|t| t.id)
+            .collect();
+
+        // A direct id fetch still resolves the archived task (AC-6 / by-key).
+        let (by_id,): (i64,) = sqlx::query_as("SELECT count(*) FROM tasks WHERE id = $1")
+            .bind(archived.0)
+            .fetch_one(&db)
+            .await
+            .unwrap();
+
+        // cleanup
+        let _ = sqlx::query("DELETE FROM tasks WHERE board_id = $1")
+            .bind(board)
+            .execute(&db)
+            .await;
+        let _ = sqlx::query("DELETE FROM board_columns WHERE board_id = $1")
+            .bind(board)
+            .execute(&db)
+            .await;
+        let _ = sqlx::query("DELETE FROM boards WHERE id = $1")
+            .bind(board)
+            .execute(&db)
+            .await;
+        let _ = sqlx::query("DELETE FROM tenants WHERE id = $1")
+            .bind(tenant)
+            .execute(&db)
+            .await;
+
+        assert!(default_ids.contains(&live), "live task is picked");
+        assert!(
+            !default_ids.contains(&archived),
+            "archived task is NOT in the default pick — a loop can never claim it"
+        );
+        assert!(
+            all_ids.contains(&live) && all_ids.contains(&archived),
+            "archived=true returns both"
+        );
+        assert_eq!(by_id, 1, "an archived task is still resolvable by id");
     }
 }

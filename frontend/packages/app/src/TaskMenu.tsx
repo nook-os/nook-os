@@ -108,6 +108,16 @@ export function TaskMenu({
       }
     });
 
+  const archive = () =>
+    run(() =>
+      api.POST(
+        task.archived_at
+          ? "/api/v1/tasks/{id}/unarchive"
+          : "/api/v1/tasks/{id}/archive",
+        { params: { path: { id: task.id } } },
+      ),
+    );
+
   const submitPr = () =>
     run(async () => {
       const { error } = await api.POST("/api/v1/tasks/{id}/submit-pr", {
@@ -215,6 +225,7 @@ export function TaskMenu({
         )}
 
       <div className="ctx-sep" />
+      {item(task.archived_at ? "Unarchive" : "Archive", archive)}
       {item("Delete", del, { danger: true })}
     </div>
   );
