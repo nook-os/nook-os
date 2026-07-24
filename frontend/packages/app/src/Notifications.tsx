@@ -10,7 +10,7 @@ import React, { useEffect, useState } from "react";
 import { create } from "zustand";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Bell, Check, CheckCheck, Trash2, X } from "lucide-react";
-import { api, type Notification } from "@nookos/api";
+import { api, setWriteFailureHandler, type Notification } from "@nookos/api";
 
 /** Toasts currently on screen. Separate from the inbox: this is ephemeral. */
 interface ToastState {
@@ -31,6 +31,37 @@ export const useToasts = create<ToastState>((set) => ({
     ),
   dismiss: (id) => set((s) => ({ toasts: s.toasts.filter((t) => t.id !== id) })),
 }));
+
+/**
+ * Say so when a write does not happen.
+ *
+ * Installed once at startup. Nothing else in the app reports these: every call
+ * site reads `data` and drops `error`, so a failed save looked exactly like a
+ * button that did nothing — which is how the desktop app was able to lose
+ * every write it made on macOS without a single screen mentioning it.
+ *
+ * Local only: this never reaches the inbox, because the inbox lives on the
+ * control plane and the whole problem is that we cannot reach it.
+ */
+export function installWriteFailureToasts(): () => void {
+  let n = 0;
+  setWriteFailureHandler((f) => {
+    useToasts.getState().push({
+      // Not a server id — nothing on the server knows about this.
+      id: `write-failure-${++n}`,
+      tenant_id: "",
+      level: "error",
+      title: "That change was not saved",
+      // The path, because "a task" and "a setting" fail identically otherwise,
+      // and the message, because the server usually says something useful.
+      body: `${f.method} ${f.path} — ${f.message}`,
+      kind: "client.write_failed",
+      payload: null,
+      created_at: new Date().toISOString(),
+    } as Notification);
+  });
+  return () => setWriteFailureHandler(null);
+}
 
 const TONE: Record<string, string> = {
   info: "info",

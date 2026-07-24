@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { OperatorPage } from "./pages/Operator";
-import { Toasts } from "./Notifications";
+import { installWriteFailureToasts, Toasts } from "./Notifications";
 import {
   QueryClient,
   QueryClientProvider,
@@ -39,6 +39,9 @@ function AuthGate() {
   // Both builds: a clicked desktop notification has to reach the router from
   // outside React, and that is not a desktop-only need.
   useEffect(() => registerNavigator((path) => navigate(path)), [navigate]);
+  // Above the auth gate on purpose: a write that fails before you are through
+  // it — signing in with a password, say — is exactly as silent otherwise.
+  useEffect(() => installWriteFailureToasts(), []);
   useEffect(() => {
     if (!isDesktop()) return;
     return installLinkHandler((path) => navigate(path));

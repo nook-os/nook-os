@@ -97,6 +97,11 @@ describe("request rewriting for a configured endpoint", () => {
     expect(req.headers.get("Authorization")).toBe("Bearer nook_user_test");
   });
 
+  it("does not rewrite or report a read", async () => {
+    await api.GET("/api/v1/settings");
+    expect(seen[0].method).toBe("GET");
+  });
+
   it("stays same-origin when no endpoint is configured", async () => {
     setEndpoint({ baseUrl: "", token: "" });
     await api.GET("/api/v1/settings");

@@ -90,3 +90,82 @@ api.use({
 export function apiSocket(path: string): WebSocket {
   return openSocket(path);
 }
+
+/** A write that did not happen, and why — as much as we can say. */
+export interface WriteFailure {
+  method: string;
+  path: string;
+  /** Absent when the request never got a reply at all. */
+  status?: number;
+  message: string;
+}
+
+let onWriteFailure: ((f: WriteFailure) => void) | null = null;
+
+/**
+ * Be told when a write fails, so something can say so.
+ *
+ * `openapi-fetch` returns errors rather than throwing, and almost every call
+ * site here reads `data` and ignores `error`. That is survivable one call at a
+ * time and disastrous in aggregate: when a bug stopped the desktop app writing
+ * anything at all, not one screen said so — a total write outage looked like
+ * buttons that did nothing. Reporting centrally means a new call site cannot
+ * forget, because it never had to remember.
+ *
+ * Reads are left alone: those have a query layer with error states, whereas a
+ * failed write is a thing the person believes they just did.
+ */
+export function setWriteFailureHandler(
+  fn: ((f: WriteFailure) => void) | null,
+): void {
+  onWriteFailure = fn;
+}
+
+function isWrite(method: string): boolean {
+  return method !== "GET" && method !== "HEAD";
+}
+
+function pathOf(url: string): string {
+  try {
+    return new URL(url).pathname;
+  } catch {
+    return url;
+  }
+}
+
+api.use({
+  async onResponse({ request, response }) {
+    if (response.ok || !isWrite(request.method) || !onWriteFailure) return;
+    // 401 is the session expiring; the auth gate already handles that and a
+    // toast on top of being bounced to sign in is just noise.
+    if (response.status === 401) return;
+    let message = `${response.status} ${response.statusText}`.trim();
+    try {
+      const text = await response.clone().text();
+      if (text) {
+        const parsed = JSON.parse(text) as { message?: string; error?: string };
+        message = parsed.message ?? parsed.error ?? text.slice(0, 200);
+      }
+    } catch {
+      // A body we cannot read is not worth failing over; the status still says
+      // something useful.
+    }
+    onWriteFailure({
+      method: request.method,
+      path: pathOf(request.url),
+      status: response.status,
+      message,
+    });
+  },
+  onError({ request, error }) {
+    // The case that matters most, and the one a status check would miss: the
+    // request never left. That is what a WebKit webview does when handed a
+    // body it cannot upload, and it is what being offline looks like.
+    if (!isWrite(request.method) || !onWriteFailure) return;
+    onWriteFailure({
+      method: request.method,
+      path: pathOf(request.url),
+      message: error instanceof Error ? error.message : String(error),
+    });
+  },
+});
