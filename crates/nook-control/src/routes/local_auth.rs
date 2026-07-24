@@ -108,6 +108,8 @@ pub async fn bootstrap(
     Ok((
         jar.add(session_cookie(&state, session_id)),
         Json(MeResponse {
+            tenants: crate::services::identity::memberships_for(&state.db, user.id, tenant.id)
+                .await?,
             user,
             tenant,
             capability: Default::default(),
@@ -141,6 +143,8 @@ pub async fn login(
     Ok((
         jar.add(session_cookie(&state, session_id)),
         Json(MeResponse {
+            tenants: crate::services::identity::memberships_for(&state.db, user.id, tenant.id)
+                .await?,
             user,
             tenant,
             capability: Default::default(),

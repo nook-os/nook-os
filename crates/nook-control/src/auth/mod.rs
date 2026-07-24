@@ -249,6 +249,24 @@ impl FromRequestParts<AppState> for AuthCtx {
         .await?;
 
         let (user_id, tenant_id) = row.ok_or(ApiError::Unauthorized)?;
+
+        // AC-7: `tenant_members` is the single source of truth for the LIFE of a
+        // session, not just at switch time. A browser session scoped to a tenant
+        // whose grant has since been revoked must lose access on its very next
+        // request — not linger until logout. Cookie sessions only: node/user
+        // tokens are different principals (a node token borrows the owner's id
+        // and legitimately has no membership row), so this check lives on the
+        // sessions_auth path, the one a switch moves.
+        if !crate::services::identity::active_membership_exists(
+            &state.db,
+            UserId(user_id),
+            TenantId(tenant_id),
+        )
+        .await?
+        {
+            return Err(ApiError::Forbidden);
+        }
+
         Ok(AuthCtx {
             session_id: AuthSessionId(sid),
             user_id: UserId(user_id),

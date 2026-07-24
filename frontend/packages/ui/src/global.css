@@ -409,6 +409,55 @@ code,
 .ws-switcher-item:hover { background: var(--nook-bg-panel); color: var(--nook-fg-bright); }
 .ws-switcher-item.current { color: var(--nook-accent); }
 
+/* Tenant switcher in the status strip. Sits at the bottom of the window, so its
+   menu opens UPWARD. Reuses the amber-CRT menu look of the workspace switcher. */
+.tenant-switcher { position: relative; display: inline-flex; }
+.tenant-switcher-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  background: transparent;
+  border: none;
+  padding: 0;
+  color: var(--nook-fg-dim);
+  cursor: pointer;
+  font: inherit;
+}
+.tenant-switcher-btn:hover:not(:disabled) { color: var(--nook-fg-bright); }
+.tenant-switcher-btn:disabled { cursor: default; opacity: 0.6; }
+.tenant-switcher-menu {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 0;
+  min-width: 200px;
+  background: var(--nook-bg-raised);
+  border: 1px solid var(--nook-border-bright);
+  border-radius: var(--nook-radius);
+  box-shadow: 0 -8px 24px rgba(0, 0, 0, 0.5);
+  z-index: 100;
+  overflow: hidden;
+  padding: 4px;
+}
+.tenant-switcher-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 5px 8px;
+  background: transparent;
+  border: none;
+  border-radius: calc(var(--nook-radius) - 2px);
+  color: var(--nook-fg);
+  cursor: pointer;
+  text-align: left;
+  font: inherit;
+}
+.tenant-switcher-item:hover { background: var(--nook-bg-panel); color: var(--nook-fg-bright); }
+.tenant-switcher-item.current { color: var(--nook-accent); }
+.tenant-switcher-item .check { width: 12px; display: inline-flex; flex: none; }
+.tenant-switcher-item .name { flex: 1; }
+.tenant-switcher-item .role { margin-left: auto; text-transform: capitalize; }
+
 /* Scope chip shown on pages filtered by the workspace context */
 .scope-chip {
   display: inline-flex;

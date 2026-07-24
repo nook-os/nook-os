@@ -453,6 +453,55 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/me/tenant": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * POST /api/v1/me/tenant — switch the browser session's active tenant.
+         * @description Membership is enforced here (403 for a tenant the person does not belong
+         *     to), and the switch is a single UPDATE of `sessions_auth`: because
+         *     `AuthCtx` resolves BOTH `user_id` and `tenant_id` from that row on every
+         *     request, moving the row re-scopes every tenant-scoped surface at once. The
+         *     per-tenant `user_id` changes too, so attribution and role follow the tenant.
+         *
+         *     Browser sessions only (NG-5): a `nook_user_` token has no `sessions_auth`
+         *     row, so the UPDATE affects nothing and the endpoint says so rather than
+         *     pretending to switch a credential that stays bound to its tenant.
+         */
+        post: operations["switch_tenant"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/me/tenants": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * GET /api/v1/me/tenants — every tenant the signed-in person belongs to, with
+         *     the active one marked. The switcher reads it; `me` also carries it inline so
+         *     the first render needs no second request.
+         */
+        get: operations["my_tenants"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/node/releases": {
         parameters: {
             query?: never;
@@ -2766,6 +2815,13 @@ export interface components {
              */
             capability?: components["schemas"]["Capability"];
             tenant: components["schemas"]["Tenant"];
+            /**
+             * @description Every tenant this person belongs to (from `tenant_members`), with the
+             *     active one marked `current`. Carried on `me` so the UI can render a
+             *     tenant switcher without a second request. A person in exactly one tenant
+             *     gets a one-element list, and the UI shows a plain label for that case.
+             */
+            tenants?: components["schemas"]["TenantMembership"][];
             user: components["schemas"]["User"];
         };
         MoveTaskRequest: {
@@ -3294,6 +3350,13 @@ export interface components {
         };
         SubmitPrRequest: {
             pr_url?: string | null;
+        };
+        /**
+         * @description Switch the browser session's active tenant. The caller must be a member of
+         *     the target tenant, or the endpoint returns 403.
+         */
+        SwitchTenantRequest: {
+            tenant_id: components["schemas"]["TenantId"];
         };
         /**
          * @description Durable discussion on a task: the builder's blocking question, the
@@ -4643,6 +4706,66 @@ export interface operations {
                 content?: never;
             };
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    switch_tenant: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SwitchTenantRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MeResponse"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    my_tenants: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TenantMembership"][];
+                };
+            };
+            401: {
                 headers: {
                     [name: string]: unknown;
                 };

@@ -8,6 +8,7 @@ export type Schemas = components["schemas"];
 export type Tenant = Schemas["Tenant"];
 export type User = Schemas["User"];
 export type MeResponse = Schemas["MeResponse"];
+export type TenantMembership = Schemas["TenantMembership"];
 export type Capabilities = Schemas["Capabilities"];
 export type NodeInfo = Schemas["Node"];
 export type Workspace = Schemas["Workspace"];
