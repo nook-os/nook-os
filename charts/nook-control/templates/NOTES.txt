@@ -1,0 +1,33 @@
+NookOS is installing.
+
+  Release:   {{ .Release.Name }}
+  Namespace: {{ .Release.Namespace }}
+  Control:   {{ include "nook-control.controlImage" . }}
+  Web:       {{ include "nook-control.webImage" . }}
+
+1. Watch the pods come up (the control plane runs its migrations at startup):
+
+   kubectl -n {{ .Release.Namespace }} rollout status deploy/{{ include "nook-control.componentName" (dict "root" . "component" "control") }}
+   kubectl -n {{ .Release.Namespace }} rollout status deploy/{{ include "nook-control.componentName" (dict "root" . "component" "web") }}
+
+{{- if .Values.ingress.enabled }}
+
+2. Reach it at:
+
+   http{{ if .Values.ingress.tls.enabled }}s{{ end }}://{{ .Values.ingress.host }}
+{{- else }}
+
+2. Ingress is disabled — port-forward the web Service to try it:
+
+   kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "nook-control.componentName" (dict "root" . "component" "web") }} 8080:{{ .Values.service.web.port }}
+   # then open http://localhost:8080
+{{- end }}
+
+Secrets come from the Secret named {{ .Values.existingSecret | quote }} — the
+chart never stores secret material. Postgres is external ({{ .Values.secretKeys.databaseUrl }}
+in that Secret).
+{{- if eq .Values.config.appEnv "production" }}
+
+Reminder: SESSION_SECRET must be 32+ characters, and set SECRETS_KEY (64 hex)
+for the vault in production — wire it via secretKeys.secretsKey.
+{{- end }}

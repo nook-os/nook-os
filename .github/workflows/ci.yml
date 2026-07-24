@@ -143,3 +143,16 @@ jobs:
         run: ./scripts/gen-types.sh
       - name: Committed types must match Rust
         run: git diff --exit-code frontend/packages/api/openapi.json frontend/packages/api/src/generated/schema.d.ts
+
+  # The Helm chart must lint and render valid, secret-free manifests. Cheap and
+  # fast, so it runs on every PR rather than only when charts/ changes.
+  helm:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.17.0
+      - name: Lint and render the chart
+        run: ./charts/nook-control/ci/validate.sh

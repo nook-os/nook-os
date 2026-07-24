@@ -126,3 +126,13 @@ the proxy routes on SNI and never opens the stream.
 The certificate is self-signed on purpose. Nodes pin its fingerprint, which is
 strictly stronger than trusting any public CA that could be persuaded to issue
 for the hostname.
+
+## Kubernetes (Helm)
+
+To run the control plane and web front-end on a cluster — against a Postgres you
+already operate, with secrets from your own secret manager — use the Helm chart
+at [`charts/nook-control/`](../charts/nook-control/README.md). It deploys the
+control plane and the nginx `web` image, an HTTP Ingress, external Postgres only,
+and secrets by reference (`existingSecret`) — no bundled dependencies, no
+migration Job (the control plane migrates at startup, advisory-locked). See the
+chart README for a minimal `helm install`.
