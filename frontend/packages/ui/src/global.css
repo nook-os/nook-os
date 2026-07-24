@@ -1044,13 +1044,31 @@ table.nook-table tr.clickable { cursor: pointer; }
   background: var(--nook-accent);
 }
 
+/* The git panel scrolls in ONE place. Its body used to scroll (every panel
+   body does) while `.diff-view` inside it scrolled too, so a long diff showed
+   two vertical scrollbars side by side — and the commit bar scrolled away
+   with the diff, which is the opposite of useful. The body now just lays out;
+   `.git-panel-content` is the only scroller, and it covers both tabs. */
+.nook-panel.git-panel > .nook-panel-body {
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+.git-panel-content {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+
 .diff-view {
   font-family: var(--nook-font-mono);
   font-size: 12px;
   line-height: 1.5;
+  /* Long lines scroll horizontally in `.git-panel-content`, together with the
+     vertical scroll, rather than in a scroller of the diff's own. */
   white-space: pre;
-  overflow: auto;
-  height: 100%;
+  width: max-content;
+  min-width: 100%;
   padding: 8px 0;
 }
 

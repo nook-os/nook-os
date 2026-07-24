@@ -5,14 +5,19 @@ export function Panel({
   actions,
   children,
   style,
+  className = "",
 }: {
   title?: React.ReactNode;
   actions?: React.ReactNode;
   children: React.ReactNode;
   style?: React.CSSProperties;
+  /** For panels that manage their own scrolling — see `.git-panel`, whose
+   *  commit bar stays put while only the diff moves. The body scrolls by
+   *  default, which is right for nearly every panel. */
+  className?: string;
 }) {
   return (
-    <section className="nook-panel" style={style}>
+    <section className={`nook-panel ${className}`.trim()} style={style}>
       {title !== undefined && (
         <header className="nook-panel-title">
           <span>{title}</span>

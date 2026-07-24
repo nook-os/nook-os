@@ -126,6 +126,7 @@ function GitPanel({
 
   return (
     <Panel
+      className="git-panel"
       title={
         <>
           <GitBranch size={12} style={{ verticalAlign: "-2px" }} /> git ·{" "}
@@ -202,6 +203,11 @@ function GitPanel({
         </div>
       )}
 
+      {/* The one scroller in this panel. Both tabs live inside it, so the
+          commit bar and any note stay put while only the content moves —
+          and there is exactly one scrollbar rather than the panel body and
+          the diff each growing their own. */}
+      <div className="git-panel-content">
       {error ? (
         <Empty>git status unavailable: node offline?</Empty>
       ) : !data ? (
@@ -232,6 +238,7 @@ function GitPanel({
           </tbody>
         </table>
       )}
+      </div>
     </Panel>
   );
 }
