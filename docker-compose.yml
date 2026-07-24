@@ -126,6 +126,35 @@ services:
       retries: 100
       start_period: 300s
 
+  # Team chat — its own service/container (MAIN-48). Shares the Postgres but
+  # owns its tables in the `chat` schema, and validates NookOS sessions via the
+  # shared nook-auth crate. cargo-watch rebuilds it on save, like control-plane.
+  chat:
+    build:
+      context: .
+      dockerfile: deploy/docker/dev-rust.Dockerfile
+    command: cargo watch --poll -w crates -w Cargo.toml -w Cargo.lock -x 'run -p nook-chat'
+    working_dir: /app
+    environment:
+      DATABASE_URL: postgres://nook:nook@postgres:5432/nook
+      CHAT_BIND: 0.0.0.0:8082
+      CARGO_TARGET_DIR: /app/target-docker
+    ports:
+      - "8082:8082"
+    volumes:
+      - .:/app
+      - cargo-registry:/usr/local/cargo/registry
+      - cargo-target:/app/target-docker
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8082/healthz"]
+      interval: 3s
+      timeout: 3s
+      retries: 100
+      start_period: 300s
+
   node:
     build:
       context: .

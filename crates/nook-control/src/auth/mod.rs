@@ -249,44 +249,31 @@ impl FromRequestParts<AppState> for AuthCtx {
             .and_then(|c| c.value().parse().ok())
             .ok_or(ApiError::Unauthorized)?;
 
-        // One round-trip resolves the session AND its active-membership grant.
-        // The membership `EXISTS` is a SELECT column, not a WHERE clause, so the
-        // two failure modes stay distinct (folding it into WHERE would collapse
-        // them into a single 401):
-        //   - no row  → no valid `sessions_auth`           → 401 Unauthorized
-        //   - row, is_member = false → grant revoked       → 403 Forbidden
-        //
-        // AC-7: `tenant_members` is the single source of truth for the LIFE of a
-        // session, not just at switch time — a browser session scoped to a
-        // tenant whose grant has since been revoked loses access on its very
-        // next request. Cookie sessions only: node/user tokens are different
-        // principals (a node token borrows the owner's id and legitimately has
-        // no membership row), so this check lives on the sessions_auth path.
-        let row: Option<(Uuid, Uuid, bool)> = sqlx::query_as(
-            "SELECT sa.user_id, sa.tenant_id,
-                    EXISTS(SELECT 1 FROM tenant_members m
-                           WHERE m.tenant_id = sa.tenant_id
-                             AND m.principal_type = 'user'
-                             AND m.principal_id = sa.user_id) AS is_member
-             FROM sessions_auth sa
-             WHERE sa.id = $1 AND sa.expires_at > now()",
-        )
-        .bind(sid)
-        .fetch_optional(&state.db)
-        .await?;
-
-        let (user_id, tenant_id, is_member) = row.ok_or(ApiError::Unauthorized)?;
-        if !is_member {
-            return Err(ApiError::Forbidden);
-        }
-
+        // One round-trip resolves the session AND its active-membership grant,
+        // keeping 401 (no/expired session) distinct from 403 (grant revoked).
+        // The query lives in `nook-auth` so the control plane and chat validate
+        // sessions identically (MAIN-48 AC-4); see that crate for why the
+        // membership check is a SELECT column rather than a WHERE clause.
+        let r = nook_auth::resolve_session(&state.db, sid)
+            .await
+            .map_err(auth_err)?;
         Ok(AuthCtx {
-            session_id: AuthSessionId(sid),
-            user_id: UserId(user_id),
-            tenant_id: TenantId(tenant_id),
+            session_id: AuthSessionId(r.session_id),
+            user_id: UserId(r.user_id),
+            tenant_id: TenantId(r.tenant_id),
             principal: Principal::User,
             cookie_session: true,
         })
+    }
+}
+
+/// Map the shared crate's rejection to this service's error type, preserving
+/// the 401/403/500 split exactly.
+fn auth_err(e: nook_auth::AuthError) -> ApiError {
+    match e {
+        nook_auth::AuthError::Unauthorized => ApiError::Unauthorized,
+        nook_auth::AuthError::Forbidden => ApiError::Forbidden,
+        nook_auth::AuthError::Db(e) => ApiError::Db(e),
     }
 }
 
@@ -306,28 +293,17 @@ pub const WS_BEARER_PROTOCOL: &str = "nook.bearer";
 /// exists — a node token deliberately cannot, and scripts still need to.
 /// Revocation is a row delete, and expiry (if set) is enforced here.
 async fn user_token_ctx(state: &AppState, token: &str) -> Result<AuthCtx, ApiError> {
-    let hash = crate::seed::hash_token(token);
-    let row: Option<(Uuid, Uuid, Uuid)> = sqlx::query_as(
-        "SELECT id, user_id, tenant_id FROM user_tokens
-         WHERE token_hash = $1 AND (expires_at IS NULL OR expires_at > now())",
-    )
-    .bind(&hash)
-    .fetch_optional(&state.db)
-    .await?;
-    let (token_id, user_id, tenant_id) = row.ok_or(ApiError::Unauthorized)?;
-
-    // Best-effort: a token nobody can date is a token nobody dares revoke.
-    let _ = sqlx::query("UPDATE user_tokens SET last_used_at = now() WHERE id = $1")
-        .bind(token_id)
-        .execute(&state.db)
-        .await;
-
+    // Shared with chat via `nook-auth`: the token hash + lookup + last-used
+    // touch are one implementation, so the two services cannot drift.
+    let r = nook_auth::resolve_bearer(&state.db, token)
+        .await
+        .map_err(auth_err)?;
     Ok(AuthCtx {
-        // No browser session behind this; reuse the token id so anything
-        // keyed by session has something stable and unique to hold.
-        session_id: AuthSessionId(token_id),
-        user_id: UserId(user_id),
-        tenant_id: TenantId(tenant_id),
+        // No browser session behind this; the token id (in `session_id`) gives
+        // anything keyed by session something stable and unique to hold.
+        session_id: AuthSessionId(r.session_id),
+        user_id: UserId(r.user_id),
+        tenant_id: TenantId(r.tenant_id),
         principal: Principal::User,
         // A bearer token, not a sessions_auth row: a switch cannot move it.
         cookie_session: false,

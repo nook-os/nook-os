@@ -432,3 +432,56 @@ async fn reselecting_the_current_tenant_records_no_departure() {
         "and it is an arrival, not a departure"
     );
 }
+
+/// MAIN-48 AC-4: the shared `nook-auth` crate resolves a valid session and a
+/// valid bearer token to the RIGHT user+tenant, and refuses an unknown one —
+/// the same code chat uses, tested here where the schema is provisioned.
+#[tokio::test]
+async fn nook_auth_resolves_session_and_bearer() {
+    let Some(pool) = test_pool().await else {
+        return;
+    };
+    let t = seed_tenant(&pool).await;
+    let me = seed_member(&pool, t, Uuid::new_v4()).await;
+    let sid = seed_session(&pool, me, t).await;
+
+    // Session cookie → the right user + tenant, marked cookie_session.
+    let s = nook_auth::resolve_session(&pool, sid)
+        .await
+        .expect("valid session resolves");
+    assert_eq!(s.user_id, me.0);
+    assert_eq!(s.tenant_id, t.0);
+    assert!(s.cookie_session);
+
+    // A bearer token → the right user + tenant, NOT a cookie session.
+    let token = "nook_user_test_abc123";
+    sqlx::query(
+        "INSERT INTO user_tokens (id, tenant_id, user_id, token_hash, name)
+         VALUES ($1, $2, $3, $4, 'test')",
+    )
+    .bind(Uuid::new_v4())
+    .bind(t)
+    .bind(me)
+    .bind(nook_auth::hash_token(token))
+    .execute(&pool)
+    .await
+    .unwrap();
+    let b = nook_auth::resolve_bearer(&pool, token)
+        .await
+        .expect("valid token resolves");
+    assert_eq!(b.user_id, me.0);
+    assert_eq!(b.tenant_id, t.0);
+    assert!(!b.cookie_session);
+
+    // Unknown credentials are refused.
+    assert!(matches!(
+        nook_auth::resolve_session(&pool, Uuid::new_v4()).await,
+        Err(nook_auth::AuthError::Unauthorized)
+    ));
+    assert!(matches!(
+        nook_auth::resolve_bearer(&pool, "nook_user_nope").await,
+        Err(nook_auth::AuthError::Unauthorized)
+    ));
+
+    cleanup(&pool, &[t]).await;
+}
