@@ -6,6 +6,11 @@ description: >-
 type: application
 # Chart version — bump on chart changes. appVersion tracks the NookOS release
 # whose images this chart defaults to.
+#
+# On a `v*` release these are BOTH stamped to the tag (without the `v`) by the
+# release workflow's `chart` job, so a published chart's version equals the
+# image tags its defaults deploy — the values below are the dev/local default
+# used when installing straight from a clone.
 version: 0.2.0
 appVersion: "0.4.10"
 kubeVersion: ">=1.23.0-0"

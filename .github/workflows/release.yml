@@ -414,11 +414,65 @@ jobs:
           # Word splitting is the point here: every digest has to arrive as a
           # separate argument. The filenames are hex digests, so there is
           # nothing to split on but the spaces we put there.
+          #
+          # Three tags: the full tag (`v0.4.10`), the bare semver (`0.4.10`),
+          # and `latest`. The bare semver is what the Helm chart's appVersion
+          # resolves to — its default image tag has no `v` — so a chart
+          # installed with no override pulls exactly this release's images.
           # shellcheck disable=SC2046
           docker buildx imagetools create \
-            -t "$REPO:$VERSION" -t "$REPO:latest" \
+            -t "$REPO:$VERSION" -t "$REPO:${VERSION#v}" -t "$REPO:latest" \
             $(printf "${REPO}@sha256:%s " $(ls))
           docker buildx imagetools inspect "$REPO:$VERSION"
+
+  # ------------------------------------------------------------- helm chart
+  #
+  # Publish the chart as an OCI artifact next to the images, versioned from the
+  # same tag so `helm install … --version X.Y.Z` pulls a chart whose default
+  # images ARE that release. Gated on the chart's own lint/template checks
+  # (ci/validate.sh) — a tag that fails chart validation publishes no chart.
+  # Idempotent: re-running overwrites the same OCI tag. Runs after `merge` so a
+  # chart is never advertised for a release whose images failed to build.
+  chart:
+    needs: [merge]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.17.0
+      # AC-4 gate: the same lint + render the CI `helm` job runs. A failure here
+      # fails the job before anything is packaged or pushed.
+      - name: Validate the chart
+        run: ./charts/nook-control/ci/validate.sh
+      # AC-2/AC-3: stamp BOTH version and appVersion to the release version
+      # (without the `v`), so the chart version equals the image tags its
+      # defaults deploy — no manual bump that can drift.
+      - name: Stamp the chart version from the tag
+        env:
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          ver="${TAG#v}"
+          sed -i "s/^version:.*/version: ${ver}/" charts/nook-control/Chart.yaml
+          sed -i "s/^appVersion:.*/appVersion: \"${ver}\"/" charts/nook-control/Chart.yaml
+          grep -E '^(version|appVersion):' charts/nook-control/Chart.yaml
+      - name: Log in to ghcr for Helm
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: echo "$TOKEN" | helm registry login "$REGISTRY" -u "${{ github.actor }}" --password-stdin
+      - name: Package and push the chart
+        env:
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          ver="${TAG#v}"
+          helm package charts/nook-control --destination /tmp/chart
+          # Pushes to oci://ghcr.io/<owner>/charts/nook-control:<ver> — the chart
+          # name becomes the final path segment.
+          helm push "/tmp/chart/nook-control-${ver}.tgz" \
+            "oci://${REGISTRY}/${{ github.repository_owner }}/charts"
 
   # ---------------------------------------------------------------- release
   release:
@@ -516,6 +570,13 @@ jobs:
           }, indent=2))
           print("manifest covers:", ", ".join(platforms))
           PY
+      # AC-5: advertise the published chart coordinates and a one-line install in
+      # every release, so a new release surfaces the Kubernetes path.
+      - name: Chart coordinates for the notes
+        id: chart
+        env:
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
       - name: Publish
         uses: softprops/action-gh-release@v2
         with:
@@ -523,3 +584,18 @@ jobs:
           files: dist/*
           generate_release_notes: true
           fail_on_unmatched_files: true
+          body: |
+            ### Kubernetes (Helm)
+
+            The chart is published to ghcr as an OCI artifact, versioned in
+            lockstep with the images above:
+
+            ```bash
+            helm install nook oci://${{ env.REGISTRY }}/${{ github.repository_owner }}/charts/nook-control \
+              --version ${{ steps.chart.outputs.version }} \
+              --set existingSecret=nook-control-secrets \
+              --set ingress.host=nook.example.com \
+              --set config.publicBaseUrl=https://nook.example.com
+            ```
+
+            See [`docs/ci-deploy.md`](https://github.com/${{ github.repository }}/blob/${{ inputs.tag || github.ref_name }}/docs/ci-deploy.md) for the full values.

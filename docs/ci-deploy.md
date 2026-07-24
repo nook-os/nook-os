@@ -137,6 +137,25 @@ and secrets by reference (`existingSecret`) — no bundled dependencies, no
 migration Job (the control plane migrates at startup, advisory-locked). See the
 chart README for a minimal `helm install`.
 
+Every `v*` release **publishes the chart to ghcr as an OCI artifact**, versioned
+in lockstep with the images (chart `version` == `appVersion` == the release), so
+you can install it without cloning the repo:
+
+```bash
+helm install nook oci://ghcr.io/nook-os/charts/nook-control \
+  --version X.Y.Z \
+  --set existingSecret=nook-control-secrets \
+  --set ingress.host=nook.example.com \
+  --set config.publicBaseUrl=https://nook.example.com
+```
+
+`helm show values oci://ghcr.io/nook-os/charts/nook-control --version X.Y.Z`
+prints the tunables, and `helm pull` retrieves the package — both without the
+source tree. Because the chart version matches the image tags its defaults
+deploy, an install with no `--set …image.tag` runs exactly that release's
+control-plane and web images. The publish is gated on the chart's lint/template
+checks, so a tag that fails chart validation ships no chart.
+
 The **agent port** (above) has a Kubernetes path too: set `agent.enabled=true`
 with `agent.tlsSecret` (a TLS Secret holding the listener cert) and
 `agent.publicUrl`, and the chart renders a dedicated **L4 / passthrough
