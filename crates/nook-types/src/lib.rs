@@ -104,6 +104,27 @@ pub struct TenantMembership {
     pub created_at: DateTime<Utc>,
 }
 
+/// One member OF a tenant, for the members panel — distinct from
+/// `TenantMembership` (a tenant the caller belongs to). Keyed by
+/// `principal_id`, the `users.id`/`tenant_members.principal_id` used to change
+/// the role or remove them.
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
+pub struct TenantMemberItem {
+    pub principal_id: Uuid,
+    pub email: String,
+    pub display_name: String,
+    /// `owner` | `admin` | `member`.
+    pub role: String,
+    pub joined_at: DateTime<Utc>,
+}
+
+/// Change a member's role. `member` ↔ `admin` for any owner/admin; `owner`
+/// (a co-owner / transfer) is owner-only.
+#[derive(Debug, Clone, Deserialize, ToSchema)]
+pub struct ChangeMemberRoleRequest {
+    pub role: String,
+}
+
 /// The signed-in caller with their tenant.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct MeResponse {

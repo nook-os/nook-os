@@ -93,6 +93,12 @@ pub fn build_router(state: AppState) -> Router {
         .route("/auth/local/users", post(local_auth::create_user))
         .route("/auth/local/password", post(local_auth::change_password))
         .route("/tenants", get(tenants::list))
+        .route("/tenants/{id}/members", get(tenants::list_members))
+        .route(
+            "/tenants/{id}/members/{pid}",
+            patch(tenants::change_member_role).delete(tenants::remove_member),
+        )
+        .route("/tenants/{id}/leave", post(tenants::leave_tenant))
         .route(
             "/workspaces",
             get(workspaces::list).post(workspaces::create),
