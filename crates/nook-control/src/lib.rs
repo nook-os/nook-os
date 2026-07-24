@@ -5,6 +5,7 @@ pub mod config;
 pub mod crypto;
 pub mod error;
 pub mod events;
+pub mod mailer;
 pub mod mcp_backend;
 pub mod openapi;
 pub mod routes;

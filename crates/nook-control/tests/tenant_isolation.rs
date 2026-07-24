@@ -74,6 +74,12 @@ fn test_config() -> Config {
         s3_access_key_id: None,
         s3_secret_access_key: None,
         s3_path_style: true,
+        smtp_host: None,
+        smtp_port: 587,
+        smtp_tls: "starttls".into(),
+        smtp_from: "NookOS <no-reply@localhost>".into(),
+        smtp_username: None,
+        smtp_password: None,
     }
 }
 

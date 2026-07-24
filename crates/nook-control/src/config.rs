@@ -111,6 +111,23 @@ pub struct Config {
     /// Path-style addressing (`host/bucket/key`). Default true, because
     /// self-hosted gateways rarely have per-bucket DNS.
     pub s3_path_style: bool,
+
+    // ── Email (SMTP) ────────────────────────────────────────────────────
+    /// SMTP host. Present → mail is sent over SMTP; absent → the capture/log
+    /// mailer (dev without SMTP still boots). Dev points at Mailpit, prod at the
+    /// mail relay.
+    pub smtp_host: Option<String>,
+    /// SMTP port. 587 (submission/STARTTLS) by default; 1025 for Mailpit, 465
+    /// for implicit TLS.
+    pub smtp_port: u16,
+    /// Transport security: `starttls` (default), `implicit` (TLS from the
+    /// first byte, port 465), or `none` (plaintext, for Mailpit).
+    pub smtp_tls: String,
+    /// The envelope/from address, e.g. `NookOS <no-reply@example.com>`.
+    pub smtp_from: String,
+    /// Optional SMTP auth. Both set → credentials are sent; Mailpit needs none.
+    pub smtp_username: Option<String>,
+    pub smtp_password: Option<String>,
 }
 
 fn env_opt(key: &str) -> Option<String> {
@@ -171,6 +188,15 @@ impl Config {
                 .unwrap_or(true),
             mcp_token: env_opt("MCP_TOKEN"),
             dev_join_token: env_opt("NOOK_DEV_JOIN_TOKEN"),
+
+            smtp_host: env_opt("SMTP_HOST"),
+            smtp_port: env_opt("SMTP_PORT")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(587),
+            smtp_tls: env_opt("SMTP_TLS").unwrap_or_else(|| "starttls".into()),
+            smtp_from: env_opt("SMTP_FROM").unwrap_or_else(|| "NookOS <no-reply@localhost>".into()),
+            smtp_username: env_opt("SMTP_USERNAME"),
+            smtp_password: env_opt("SMTP_PASSWORD"),
         };
 
         if cfg.is_production() && cfg.auth_dev_mode {
@@ -190,5 +216,53 @@ impl Config {
         self.oidc_issuer_url.is_some()
             && self.oidc_client_id.is_some()
             && self.oidc_redirect_url.is_some()
+    }
+
+    /// A Config with everything defaulted, for unit tests that need one without
+    /// touching the process environment. Mirrors the `from_env` defaults.
+    #[cfg(test)]
+    pub(crate) fn for_test() -> Self {
+        Self {
+            app_env: "test".into(),
+            bind: "127.0.0.1:0".into(),
+            shutdown_grace_secs: 25,
+            public_base_url: "http://localhost:8080".into(),
+            web_origin: "http://localhost:5173".into(),
+            database_url: String::new(),
+            oidc_issuer_url: None,
+            oidc_client_id: None,
+            oidc_device_client_id: None,
+            oidc_device_authorization_endpoint: None,
+            oidc_client_secret: None,
+            oidc_redirect_url: None,
+            oidc_scopes: "openid profile email".into(),
+            session_secret: "0".repeat(64),
+            session_ttl_hours: 168,
+            default_tenant_name: "test".into(),
+            auth_dev_mode: true,
+            mcp_token: None,
+            dev_join_token: None,
+            dist_dir: "/tmp".into(),
+            releases_repo: "nook-os/nook-os".into(),
+            agent_bind: "127.0.0.1:0".into(),
+            agent_public_url: None,
+            agent_tls_cert: None,
+            agent_tls_key: None,
+            artifact_store: "disk".into(),
+            artifact_prefix: "nook".into(),
+            artifact_redirect: false,
+            s3_bucket: None,
+            s3_endpoint: None,
+            s3_region: None,
+            s3_access_key_id: None,
+            s3_secret_access_key: None,
+            s3_path_style: true,
+            smtp_host: None,
+            smtp_port: 587,
+            smtp_tls: "starttls".into(),
+            smtp_from: "NookOS <no-reply@localhost>".into(),
+            smtp_username: None,
+            smtp_password: None,
+        }
     }
 }
