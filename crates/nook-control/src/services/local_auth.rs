@@ -164,6 +164,24 @@ pub async fn create(
         }
         _ => ApiError::from(e),
     })?;
+
+    // Grant tenant membership, exactly as the OIDC path does in
+    // `login_identity`. `tenant_members` is the single source of truth for who
+    // can reach a tenant (AC-7); a local user missing this row would be listed
+    // in no tenant by `/me/tenants` and — now that `AuthCtx` enforces membership
+    // per request — locked out of their own tenant. Idempotent on conflict.
+    sqlx::query(
+        "INSERT INTO tenant_members (id, tenant_id, principal_type, principal_id, role)
+         VALUES ($1, $2, 'user', $3, $4)
+         ON CONFLICT (tenant_id, principal_type, principal_id) DO NOTHING",
+    )
+    .bind(uuid::Uuid::now_v7())
+    .bind(tenant)
+    .bind(user.id.0)
+    .bind(if is_first { "owner" } else { "member" })
+    .execute(db)
+    .await?;
+
     Ok(user)
 }
 

@@ -403,16 +403,15 @@ pub async fn switch_tenant(
 ) -> ApiResult<Json<MeResponse>> {
     auth.require_user()?;
 
-    // No-op switch to the tenant you are already in: return the current view.
-    // Cheaper than a round trip through the membership join for the common
-    // case of re-selecting the active tenant.
-    let target_user = if req.tenant_id == auth.tenant_id {
-        auth.user_id
-    } else {
-        member_user_in_tenant(&state.db, auth.user_id, req.tenant_id)
-            .await?
-            .ok_or_else(|| ApiError::ForbiddenMsg("you are not a member of that tenant".into()))?
-    };
+    // Membership is checked on EVERY switch, including re-selecting the tenant
+    // you are already in. The earlier shortcut (`req.tenant_id == auth.tenant_id
+    // => auth.user_id`) skipped the check, so switching into your current tenant
+    // returned 200 even after your grant there was revoked — AC-7 requires the
+    // switch endpoint to 403 for a membership that is gone, current tenant or
+    // not. One lookup on the hot-but-rare switch path is a fine price.
+    let target_user = member_user_in_tenant(&state.db, auth.user_id, req.tenant_id)
+        .await?
+        .ok_or_else(|| ApiError::ForbiddenMsg("you are not a member of that tenant".into()))?;
 
     let res = sqlx::query("UPDATE sessions_auth SET user_id = $1, tenant_id = $2 WHERE id = $3")
         .bind(target_user)

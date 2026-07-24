@@ -108,6 +108,31 @@ pub async fn member_user_in_tenant(
     Ok(row.map(|(id,)| id))
 }
 
+/// Does this user still have a live `tenant_members` grant in `tenant`?
+///
+/// `tenant_members` is the single source of truth for the LIFE of a session,
+/// not only at switch time (AC-7). `AuthCtx` calls this on every cookie-session
+/// request so that revoking a grant takes effect immediately — the session
+/// loses access on its next request rather than lingering until logout. One
+/// indexed lookup; the personal-tenant grant every user has (written in
+/// `login_identity`) means a legitimate session always passes.
+pub async fn active_membership_exists(
+    db: &PgPool,
+    user_id: UserId,
+    tenant: TenantId,
+) -> ApiResult<bool> {
+    let row: Option<(i32,)> = sqlx::query_as(
+        "SELECT 1 FROM tenant_members
+         WHERE tenant_id = $1 AND principal_type = 'user' AND principal_id = $2
+         LIMIT 1",
+    )
+    .bind(tenant)
+    .bind(user_id)
+    .fetch_optional(db)
+    .await?;
+    Ok(row.is_some())
+}
+
 pub struct IdentityClaims {
     pub issuer: String,
     pub subject: String,
@@ -402,7 +427,7 @@ mod tests {
 /// machine without Postgres still passes.
 #[cfg(test)]
 mod db_tests {
-    use super::{member_user_in_tenant, memberships_for};
+    use super::{active_membership_exists, member_user_in_tenant, memberships_for};
     use nook_types::{TenantId, UserId};
     use sqlx::postgres::PgPoolOptions;
     use sqlx::PgPool;
@@ -416,11 +441,19 @@ mod db_tests {
             return None;
         }
         let url = std::env::var("DATABASE_URL").ok()?;
-        PgPoolOptions::new()
+        let db = PgPoolOptions::new()
             .max_connections(2)
             .connect(&url)
             .await
-            .ok()
+            .ok()?;
+        // Self-provision: apply the migration set so these tests pass against a
+        // FRESH database, not only the container's already-migrated one. CI
+        // points DATABASE_URL at an empty Postgres; without this the first
+        // `INSERT INTO tenants` hit "relation does not exist" and the security
+        // regression errored out before it could assert anything. `MIGRATOR` is
+        // idempotent, so running it here is a no-op on an already-migrated DB.
+        crate::MIGRATOR.run(&db).await.ok()?;
+        Some(db)
     }
 
     async fn tenant(db: &PgPool, name: &str) -> TenantId {
@@ -607,6 +640,51 @@ mod db_tests {
             sorted.len(),
             3,
             "the default assigns each row a distinct person_id"
+        );
+    }
+
+    /// AC-7: revoking a `tenant_members` grant takes effect immediately.
+    /// `active_membership_exists` flips to false the moment the row is gone (the
+    /// per-request `AuthCtx` guard), and `member_user_in_tenant` then refuses a
+    /// switch INTO that same tenant — closing the same-tenant shortcut hole.
+    #[tokio::test]
+    async fn a_revoked_grant_stops_working_immediately() {
+        let Some(db) = pool().await else {
+            eprintln!("skipping a_revoked_grant_stops_working_immediately — no DATABASE_URL");
+            return;
+        };
+
+        let person = Uuid::new_v4();
+        let t = tenant(&db, "revoke").await;
+        let me = member(&db, t, "revoke@main12.test", person).await;
+
+        // While the grant is live: the session guard passes and re-selecting the
+        // current tenant resolves to this user.
+        let live_ok = active_membership_exists(&db, me, t).await.unwrap();
+        let switch_live = member_user_in_tenant(&db, me, t).await.unwrap();
+
+        // Revoke the grant (what member-management / a leave will do).
+        sqlx::query("DELETE FROM tenant_members WHERE tenant_id = $1 AND principal_id = $2")
+            .bind(t.0)
+            .bind(me.0)
+            .execute(&db)
+            .await
+            .unwrap();
+
+        let revoked_ok = active_membership_exists(&db, me, t).await.unwrap();
+        let switch_revoked = member_user_in_tenant(&db, me, t).await.unwrap();
+
+        cleanup(&db, &[t]).await;
+
+        assert!(live_ok, "a live grant passes the session guard");
+        assert_eq!(switch_live, Some(me), "a live grant resolves the switch");
+        assert!(
+            !revoked_ok,
+            "a revoked grant fails the AuthCtx session guard immediately, not at logout"
+        );
+        assert!(
+            switch_revoked.is_none(),
+            "a revoked grant refuses a switch into the same tenant (no same-tenant shortcut)"
         );
     }
 }
