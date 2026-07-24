@@ -49,6 +49,15 @@ services:
              mc mb --ignore-existing local/nook-artifacts &&
              echo 'bucket ready'"
 
+  # Mailpit — a live dev inbox. Outbound mail (email verification, invites) is
+  # sent over SMTP to :1025 and read in the web UI at http://localhost:8025.
+  # Ephemeral by design (NG-4): the inbox is not persisted across `down`.
+  mailpit:
+    image: axllent/mailpit:latest
+    ports:
+      - "1025:1025" # SMTP — the control plane sends here (mailpit:1025 on the net)
+      - "8025:8025" # Web UI — open http://localhost:8025 to read dev mail
+
   control-plane:
     build:
       context: .
@@ -87,6 +96,15 @@ services:
       # Hand out presigned URLs instead of streaming. Off by default so one
       # hostname serves everything; flip to test the redirect path.
       NOOK_ARTIFACT_REDIRECT: ${NOOK_ARTIFACT_REDIRECT:-false}
+      # Send outbound mail to Mailpit (above) instead of the capture provider,
+      # so verification/invite emails render into a real inbox at :8025. Dev
+      # only — the shipped default is MAIL_PROVIDER unset → capture (nothing is
+      # delivered), so this never makes another environment send mail.
+      MAIL_PROVIDER: smtp
+      SMTP_HOST: mailpit
+      SMTP_PORT: "1025"
+      SMTP_TLS: none
+      SMTP_FROM: "NookOS (dev) <no-reply@nook.local>"
     ports:
       - "8080:8080"
       - "8081:8081"
@@ -99,6 +117,8 @@ services:
         condition: service_healthy
       minio:
         condition: service_healthy
+      mailpit:
+        condition: service_started
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:8080/healthz"]
       interval: 3s
