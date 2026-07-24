@@ -2138,6 +2138,33 @@ textarea.env-area.blurred {
   outline: none;
 }
 
+/* Live-preview (MAIN-17): decorations that make the CodeMirror source look
+   rendered while the stored text stays byte-identical. The type treatment
+   mirrors `.md` so the editor and the read-only description read as one thing. */
+.cm-md-strong { font-weight: 700; color: var(--nook-fg-bright); }
+.cm-md-emph { font-style: italic; }
+.cm-md-strike { text-decoration: line-through; color: var(--nook-fg-dim); }
+.cm-md-link { color: var(--nook-accent); text-decoration: underline; text-underline-offset: 2px; }
+.cm-md-code {
+  font-family: var(--nook-font-mono, ui-monospace, monospace);
+  color: var(--nook-accent);
+  background: color-mix(in srgb, var(--nook-accent) 12%, transparent);
+  border-radius: 3px;
+  padding: 0 2px;
+}
+.cm-md-h1 { font-size: 15px; font-weight: 700; color: var(--nook-fg-bright); }
+.cm-md-h2 { font-size: 13.5px; font-weight: 700; color: var(--nook-fg-bright); }
+.cm-md-h3 { font-size: 12.5px; font-weight: 700; }
+.cm-md-h4, .cm-md-h5, .cm-md-h6 { font-weight: 700; }
+/* Fenced code renders as a plain mono block inline (NG-1). */
+.cm-md-codeblock {
+  background: color-mix(in srgb, var(--nook-accent) 6%, transparent);
+  border-left: 2px solid color-mix(in srgb, var(--nook-accent) 30%, transparent);
+}
+.cm-md-bullet { color: var(--nook-accent); }
+.cm-md-task { color: var(--nook-fg-dim); }
+.cm-md-task.done { color: var(--nook-accent); }
+
 .md-preview { padding: 6px 8px; overflow-y: auto; }
 
 .md-actions {
