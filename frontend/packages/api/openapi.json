@@ -2097,16 +2097,53 @@
         ],
         "summary": "Who holds what. Needed before granting is meaningful — you cannot revoke a\nbinding you cannot see.",
         "operationId": "operator_list_bindings",
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "description": "Case-insensitive substring; the searched fields differ per list.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "after",
+            "in": "query",
+            "description": "Keyset cursor: the last `id` already seen. Returns strictly older rows.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Page size (default 50, clamped 1..=200).",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "",
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "array",
-                  "items": {
-                    "$ref": "#/components/schemas/BindingRow"
-                  }
+                  "$ref": "#/components/schemas/OperatorBindingPage"
                 }
               }
             }
@@ -2150,16 +2187,53 @@
         ],
         "summary": "Nodes, always visible. Names, status, resources, owner, session count.",
         "operationId": "operator_list_nodes",
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "description": "Case-insensitive substring; the searched fields differ per list.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "after",
+            "in": "query",
+            "description": "Keyset cursor: the last `id` already seen. Returns strictly older rows.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Page size (default 50, clamped 1..=200).",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "",
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "array",
-                  "items": {
-                    "$ref": "#/components/schemas/OperatorNode"
-                  }
+                  "$ref": "#/components/schemas/OperatorNodePage"
                 }
               }
             }
@@ -2418,19 +2492,55 @@
         "tags": [
           "crate::routes::operator"
         ],
-        "summary": "Tenants, at minimum visibility.",
-        "description": "Always visible, per the model: that a tenant exists, its member count, and\nhow many nodes and sessions it runs. Several machines working one task is an\naudit signal, and an operator who cannot see load cannot run the deployment.\n\nNever visible here: repository names, branches, worktree paths, task titles.\nThose are policy-gated and added by `enrich` below — they are not selected\nand then removed.",
+        "summary": "Never visible here: repository names, branches, worktree paths, task titles.\nThose are policy-gated and added by `enrich` below — they are not selected\nand then removed.",
         "operationId": "operator_list_tenants",
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "description": "Case-insensitive substring; the searched fields differ per list.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "after",
+            "in": "query",
+            "description": "Keyset cursor: the last `id` already seen. Returns strictly older rows.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Page size (default 50, clamped 1..=200).",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "",
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "array",
-                  "items": {
-                    "$ref": "#/components/schemas/OperatorTenant"
-                  }
+                  "$ref": "#/components/schemas/OperatorTenantPage"
                 }
               }
             }
@@ -8125,6 +8235,27 @@
           }
         }
       },
+      "OperatorBindingPage": {
+        "type": "object",
+        "required": [
+          "rows"
+        ],
+        "properties": {
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "rows": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/BindingRow"
+            }
+          }
+        }
+      },
       "OperatorNode": {
         "type": "object",
         "required": [
@@ -8167,6 +8298,30 @@
           },
           "tenant_slug": {
             "type": "string"
+          }
+        }
+      },
+      "OperatorNodePage": {
+        "type": "object",
+        "required": [
+          "rows"
+        ],
+        "properties": {
+          "next_cursor": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/NodeId"
+              }
+            ]
+          },
+          "rows": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/OperatorNode"
+            }
           }
         }
       },
@@ -8263,6 +8418,31 @@
           "workspaces": {
             "type": "integer",
             "format": "int64"
+          }
+        }
+      },
+      "OperatorTenantPage": {
+        "type": "object",
+        "description": "A page of operator tenants + the keyset cursor to the next page. Same shape\nand mechanism as [`OperatorAuditPage`] (keyed on the row's UUID v7 `id`),\nfanned out to the tenants/nodes/bindings lists (MAIN-44).",
+        "required": [
+          "rows"
+        ],
+        "properties": {
+          "next_cursor": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/TenantId"
+              }
+            ]
+          },
+          "rows": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/OperatorTenant"
+            }
           }
         }
       },

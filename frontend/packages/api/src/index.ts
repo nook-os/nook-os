@@ -31,6 +31,9 @@ export type Theme = Schemas["Theme"];
 export type DispatchSuggestion = Schemas["DispatchSuggestion"];
 export type OperatorAuditEntry = Schemas["OperatorAuditEntry"];
 export type OperatorAuditPage = Schemas["OperatorAuditPage"];
+export type OperatorTenant = Schemas["OperatorTenant"];
+export type OperatorNode = Schemas["OperatorNode"];
+export type BindingRow = Schemas["BindingRow"];
 
 export type { paths };
 export * from "./ws";

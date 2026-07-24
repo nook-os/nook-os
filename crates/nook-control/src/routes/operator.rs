@@ -80,39 +80,44 @@ pub async fn orgs(
 /// how many nodes and sessions it runs. Several machines working one task is an
 /// audit signal, and an operator who cannot see load cannot run the deployment.
 ///
+/// Query for a paginated + searchable operator list. The cursor is the last
+/// `id` seen; all three list ids are uuids, so one struct serves every list.
+#[derive(Deserialize, utoipa::IntoParams)]
+pub struct OperatorListQuery {
+    /// Case-insensitive substring; the searched fields differ per list.
+    pub q: Option<String>,
+    /// Keyset cursor: the last `id` already seen. Returns strictly older rows.
+    pub after: Option<Uuid>,
+    /// Page size (default 50, clamped 1..=200).
+    pub limit: Option<i64>,
+}
+
 /// Never visible here: repository names, branches, worktree paths, task titles.
 /// Those are policy-gated and added by `enrich` below — they are not selected
 /// and then removed.
 #[utoipa::path(get, path = "/api/v1/operator/tenants",
     operation_id = "operator_list_tenants",
-    responses((status = 200, body = [OperatorTenant]), (status = 403)))]
+    params(OperatorListQuery),
+    responses((status = 200, body = OperatorTenantPage), (status = 403)))]
 pub async fn tenants(
     State(state): State<AppState>,
     auth: AuthCtx,
-) -> ApiResult<Json<Vec<OperatorTenant>>> {
+    Query(q): Query<OperatorListQuery>,
+) -> ApiResult<Json<OperatorTenantPage>> {
     auth.require(&state, Permission::TenantView, Scope::Deployment)
         .await?;
 
-    let mut rows: Vec<OperatorTenant> = sqlx::query_as(
-        "SELECT t.id, t.slug, t.org_id, t.created_at,
-                (SELECT count(*) FROM users u WHERE u.tenant_id = t.id)    AS members,
-                (SELECT count(*) FROM nodes n WHERE n.tenant_id = t.id)    AS nodes,
-                (SELECT count(*) FROM sessions s
-                  WHERE s.tenant_id = t.id
-                    AND s.status IN ('starting','running','detached'))     AS active_sessions,
-                (SELECT count(*) FROM workspaces w WHERE w.tenant_id = t.id) AS workspaces
-         FROM tenants t ORDER BY t.created_at",
-    )
-    .fetch_all(&state.db)
-    .await?;
+    let mut page =
+        core::operator_tenants_page(&state.db, q.q, q.after.map(TenantId), q.limit.unwrap_or(50))
+            .await?;
 
     // Policy ADDS. Absent unless an org has opted in, and absent by default.
-    for row in &mut rows {
+    for row in &mut page.rows {
         enrich(&state, row).await?;
     }
 
     audit(&state, &auth, "tenants", None).await;
-    Ok(Json(rows))
+    Ok(Json(page))
 }
 
 /// Add policy-gated fields, one opt-in at a time.
@@ -147,26 +152,20 @@ async fn enrich(state: &AppState, row: &mut OperatorTenant) -> ApiResult<()> {
 /// Nodes, always visible. Names, status, resources, owner, session count.
 #[utoipa::path(get, path = "/api/v1/operator/nodes",
     operation_id = "operator_list_nodes",
-    responses((status = 200, body = [OperatorNode]), (status = 403)))]
+    params(OperatorListQuery),
+    responses((status = 200, body = OperatorNodePage), (status = 403)))]
 pub async fn nodes(
     State(state): State<AppState>,
     auth: AuthCtx,
-) -> ApiResult<Json<Vec<OperatorNode>>> {
+    Query(q): Query<OperatorListQuery>,
+) -> ApiResult<Json<OperatorNodePage>> {
     auth.require(&state, Permission::NodeView, Scope::Deployment)
         .await?;
-    let rows: Vec<OperatorNode> = sqlx::query_as(
-        "SELECT n.id, n.name, n.platform, n.status, n.last_seen_at, n.resources,
-                n.tenant_id, t.slug AS tenant_slug,
-                (SELECT count(*) FROM sessions s
-                  WHERE s.node_id = n.id
-                    AND s.status IN ('starting','running','detached')) AS active_sessions
-         FROM nodes n JOIN tenants t ON t.id = n.tenant_id
-         ORDER BY n.name",
-    )
-    .fetch_all(&state.db)
-    .await?;
+    let page =
+        core::operator_nodes_page(&state.db, q.q, q.after.map(NodeId), q.limit.unwrap_or(50))
+            .await?;
     audit(&state, &auth, "nodes", None).await;
-    Ok(Json(rows))
+    Ok(Json(page))
 }
 
 /// Query for the audit trail: an optional server-side search and a keyset
@@ -560,26 +559,18 @@ pub async fn remove_node(
 /// binding you cannot see.
 #[utoipa::path(get, path = "/api/v1/operator/bindings",
     operation_id = "operator_list_bindings",
-    responses((status = 200, body = [BindingRow]), (status = 403)))]
+    params(OperatorListQuery),
+    responses((status = 200, body = OperatorBindingPage), (status = 403)))]
 pub async fn bindings(
     State(state): State<AppState>,
     auth: AuthCtx,
-) -> ApiResult<Json<Vec<BindingRow>>> {
+    Query(q): Query<OperatorListQuery>,
+) -> ApiResult<Json<OperatorBindingPage>> {
     auth.require(&state, Permission::RbacGrant, Scope::Deployment)
         .await?;
-    let rows: Vec<BindingRow> = sqlx::query_as(
-        "SELECT b.id, u.email, u.display_name, b.role_key, b.scope_type, b.scope_id,
-                COALESCE(o.slug, t.slug) AS scope_label, b.created_at
-         FROM role_bindings b
-         JOIN users u ON u.id = b.subject_id
-         LEFT JOIN orgs o    ON b.scope_type = 'org'    AND o.id = b.scope_id
-         LEFT JOIN tenants t ON b.scope_type = 'tenant' AND t.id = b.scope_id
-         ORDER BY b.scope_type, u.email",
-    )
-    .fetch_all(&state.db)
-    .await?;
+    let page = core::operator_bindings_page(&state.db, q.q, q.after, q.limit.unwrap_or(50)).await?;
     audit(&state, &auth, "bindings", None).await;
-    Ok(Json(rows))
+    Ok(Json(page))
 }
 
 fn slugify(name: &str) -> String {

@@ -214,6 +214,126 @@ pub async fn operator_audit_page(
     Ok(OperatorAuditPage { rows, next_cursor })
 }
 
+/// Normalize a search box value: whitespace-only is "no filter", not "match the
+/// empty string". Shared by the operator list queries (MAIN-44).
+fn search_filter(q: Option<String>) -> Option<String> {
+    q.map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+}
+
+/// Operator tenants, keyset-paginated + searched (slug/name), mirroring
+/// `operator_audit_page`. Rows come back WITHOUT the policy-gated fields
+/// (`repositories`/`task_titles`); the handler enriches them per opted-in org.
+pub async fn operator_tenants_page(
+    db: &PgPool,
+    q: Option<String>,
+    after: Option<TenantId>,
+    limit: i64,
+) -> ApiResult<OperatorTenantPage> {
+    let limit = limit.clamp(1, 200);
+    let q = search_filter(q);
+    let rows: Vec<OperatorTenant> = sqlx::query_as(
+        "SELECT t.id, t.slug, t.org_id, t.created_at,
+                (SELECT count(*) FROM users u WHERE u.tenant_id = t.id)    AS members,
+                (SELECT count(*) FROM nodes n WHERE n.tenant_id = t.id)    AS nodes,
+                (SELECT count(*) FROM sessions s
+                  WHERE s.tenant_id = t.id
+                    AND s.status IN ('starting','running','detached'))     AS active_sessions,
+                (SELECT count(*) FROM workspaces w WHERE w.tenant_id = t.id) AS workspaces
+         FROM tenants t
+         WHERE ($2::text IS NULL OR t.slug ILIKE '%' || $2 || '%' OR t.name ILIKE '%' || $2 || '%')
+           AND ($3::uuid IS NULL OR t.id < $3)
+         ORDER BY t.id DESC
+         LIMIT $1",
+    )
+    .bind(limit)
+    .bind(q)
+    .bind(after)
+    .fetch_all(db)
+    .await?;
+    let next_cursor = if rows.len() as i64 == limit {
+        rows.last().map(|r| r.id)
+    } else {
+        None
+    };
+    Ok(OperatorTenantPage { rows, next_cursor })
+}
+
+/// Operator nodes, keyset-paginated + searched (name/tenant slug/platform/status).
+pub async fn operator_nodes_page(
+    db: &PgPool,
+    q: Option<String>,
+    after: Option<NodeId>,
+    limit: i64,
+) -> ApiResult<OperatorNodePage> {
+    let limit = limit.clamp(1, 200);
+    let q = search_filter(q);
+    let rows: Vec<OperatorNode> = sqlx::query_as(
+        "SELECT n.id, n.name, n.platform, n.status, n.last_seen_at, n.resources,
+                n.tenant_id, t.slug AS tenant_slug,
+                (SELECT count(*) FROM sessions s
+                  WHERE s.node_id = n.id
+                    AND s.status IN ('starting','running','detached')) AS active_sessions
+         FROM nodes n JOIN tenants t ON t.id = n.tenant_id
+         WHERE ($2::text IS NULL OR (
+                    n.name ILIKE '%' || $2 || '%'
+                 OR t.slug ILIKE '%' || $2 || '%'
+                 OR n.platform ILIKE '%' || $2 || '%'
+                 OR n.status ILIKE '%' || $2 || '%'))
+           AND ($3::uuid IS NULL OR n.id < $3)
+         ORDER BY n.id DESC
+         LIMIT $1",
+    )
+    .bind(limit)
+    .bind(q)
+    .bind(after)
+    .fetch_all(db)
+    .await?;
+    let next_cursor = if rows.len() as i64 == limit {
+        rows.last().map(|r| r.id)
+    } else {
+        None
+    };
+    Ok(OperatorNodePage { rows, next_cursor })
+}
+
+/// Operator role bindings, keyset-paginated + searched (email/role/scope).
+pub async fn operator_bindings_page(
+    db: &PgPool,
+    q: Option<String>,
+    after: Option<uuid::Uuid>,
+    limit: i64,
+) -> ApiResult<OperatorBindingPage> {
+    let limit = limit.clamp(1, 200);
+    let q = search_filter(q);
+    let rows: Vec<BindingRow> = sqlx::query_as(
+        "SELECT b.id, u.email, u.display_name, b.role_key, b.scope_type, b.scope_id,
+                COALESCE(o.slug, t.slug) AS scope_label, b.created_at
+         FROM role_bindings b
+         JOIN users u ON u.id = b.subject_id
+         LEFT JOIN orgs o    ON b.scope_type = 'org'    AND o.id = b.scope_id
+         LEFT JOIN tenants t ON b.scope_type = 'tenant' AND t.id = b.scope_id
+         WHERE ($2::text IS NULL OR (
+                    u.email ILIKE '%' || $2 || '%'
+                 OR b.role_key ILIKE '%' || $2 || '%'
+                 OR b.scope_type ILIKE '%' || $2 || '%'
+                 OR COALESCE(o.slug, t.slug) ILIKE '%' || $2 || '%'))
+           AND ($3::uuid IS NULL OR b.id < $3)
+         ORDER BY b.id DESC
+         LIMIT $1",
+    )
+    .bind(limit)
+    .bind(q)
+    .bind(after)
+    .fetch_all(db)
+    .await?;
+    let next_cursor = if rows.len() as i64 == limit {
+        rows.last().map(|r| r.id)
+    } else {
+        None
+    };
+    Ok(OperatorBindingPage { rows, next_cursor })
+}
+
 /// Create a session and instruct the node to start it. Shared by the REST
 /// handler and the MCP backend. Resolves the checkout path from workspace +
 /// node (first match), then delegates to [`create_session_at`].
@@ -439,8 +559,10 @@ pub async fn create_note(
 /// schema and no-op without `NOOK_REQUIRE_DB=1`, matching the suite convention.
 #[cfg(test)]
 mod db_tests {
-    use super::operator_audit_page;
-    use nook_types::{EventId, TenantId};
+    use super::{
+        operator_audit_page, operator_bindings_page, operator_nodes_page, operator_tenants_page,
+    };
+    use nook_types::{EventId, NodeId, TenantId};
     use sqlx::postgres::PgPoolOptions;
     use sqlx::PgPool;
     use uuid::Uuid;
@@ -460,7 +582,9 @@ mod db_tests {
     }
 
     async fn tenant(db: &PgPool, slug: &str) -> TenantId {
-        let id = Uuid::new_v4();
+        // v7 (creation-ordered), matching production `TenantId::new()`, so the
+        // keyset `ORDER BY id DESC` walks newest-first as the real endpoints do.
+        let id = Uuid::now_v7();
         sqlx::query("INSERT INTO tenants (id, name, slug) VALUES ($1, $2, $3)")
             .bind(id)
             .bind(slug)
@@ -469,6 +593,54 @@ mod db_tests {
             .await
             .unwrap();
         TenantId(id)
+    }
+
+    async fn node(db: &PgPool, tenant: TenantId, name: &str, status: &str) -> Uuid {
+        let id = Uuid::now_v7();
+        sqlx::query(
+            "INSERT INTO nodes (id, tenant_id, name, node_token_hash, platform, status)
+             VALUES ($1, $2, $3, $4, 'linux', $5)",
+        )
+        .bind(id)
+        .bind(tenant.0)
+        .bind(name)
+        // Unique per node — node_token_hash is unique instance-wide.
+        .bind(id.to_string())
+        .bind(status)
+        .execute(db)
+        .await
+        .unwrap();
+        id
+    }
+
+    async fn user(db: &PgPool, tenant: TenantId, email: &str) -> Uuid {
+        let id = Uuid::now_v7();
+        sqlx::query(
+            "INSERT INTO users (id, tenant_id, display_name, email, role)
+             VALUES ($1, $2, 'U', $3, 'member')",
+        )
+        .bind(id)
+        .bind(tenant.0)
+        .bind(email)
+        .execute(db)
+        .await
+        .unwrap();
+        id
+    }
+
+    async fn binding(db: &PgPool, subject: Uuid, role_key: &str) -> Uuid {
+        let id = Uuid::now_v7();
+        sqlx::query(
+            "INSERT INTO role_bindings (id, subject_id, role_key, scope_type)
+             VALUES ($1, $2, $3, 'deployment')",
+        )
+        .bind(id)
+        .bind(subject)
+        .bind(role_key)
+        .execute(db)
+        .await
+        .unwrap();
+        id
     }
 
     /// Insert one audit-visible event and return its (v7, creation-ordered) id.
@@ -490,10 +662,19 @@ mod db_tests {
     }
 
     async fn cleanup(db: &PgPool, t: TenantId) {
-        let _ = sqlx::query("DELETE FROM events WHERE tenant_id = $1")
-            .bind(t.0)
-            .execute(db)
-            .await;
+        // role_bindings first (they reference users), then the tenant-scoped rows.
+        let _ = sqlx::query(
+            "DELETE FROM role_bindings WHERE subject_id IN (SELECT id FROM users WHERE tenant_id = $1)",
+        )
+        .bind(t.0)
+        .execute(db)
+        .await;
+        for tbl in ["events", "nodes", "users"] {
+            let _ = sqlx::query(&format!("DELETE FROM {tbl} WHERE tenant_id = $1"))
+                .bind(t.0)
+                .execute(db)
+                .await;
+        }
         let _ = sqlx::query("DELETE FROM tenants WHERE id = $1")
             .bind(t.0)
             .execute(db)
@@ -636,6 +817,107 @@ mod db_tests {
             !past.rows.iter().any(|r| r.id == only),
             "the cursor excludes the row it points at"
         );
+
+        cleanup(&db, t).await;
+    }
+
+    /// AC-1/AC-2 for tenants: a bounded page + a cursor that walks older rows,
+    /// and a slug/name search that reaches a match beyond the first page.
+    #[tokio::test]
+    async fn tenants_page_cursors_and_searches() {
+        let Some(db) = pool().await else {
+            eprintln!("skipping tenants_page_cursors_and_searches — no DATABASE_URL");
+            return;
+        };
+        // The needle is created FIRST (oldest, smallest v7 id → a later page).
+        let needle = tenant(&db, "zzneedle").await;
+        let mut all = vec![needle];
+        for i in 0..4 {
+            all.push(tenant(&db, &format!("filler{i}")).await);
+        }
+
+        // Page 1 is bounded and carries a cursor.
+        let p1 = operator_tenants_page(&db, None, None, 2).await.unwrap();
+        assert!(p1.rows.len() <= 2, "page is bounded");
+        assert!(p1.next_cursor.is_some(), "a full page carries a cursor");
+
+        // Search reaches the needle even though it is not on page 1.
+        let hit = operator_tenants_page(&db, Some("ZZNEEDLE".into()), None, 2)
+            .await
+            .unwrap();
+        assert!(
+            hit.rows.iter().any(|r| r.id == needle),
+            "case-insensitive search finds a later-page match"
+        );
+        assert!(
+            hit.rows.iter().all(|r| r.slug.contains("zzneedle")),
+            "non-matching tenants are excluded"
+        );
+
+        for t in all.drain(..) {
+            cleanup(&db, t).await;
+        }
+    }
+
+    /// AC-1/AC-2 for nodes: cursor + search on name/status.
+    #[tokio::test]
+    async fn nodes_page_cursors_and_searches() {
+        let Some(db) = pool().await else {
+            eprintln!("skipping nodes_page_cursors_and_searches — no DATABASE_URL");
+            return;
+        };
+        let t = tenant(&db, "nodes-host").await;
+        let needle = node(&db, t, "edge-oddball", "online").await;
+        for i in 0..4 {
+            node(&db, t, &format!("worker{i}"), "offline").await;
+        }
+
+        let p1 = operator_nodes_page(&db, None, None, 2).await.unwrap();
+        assert!(p1.rows.len() <= 2 && p1.next_cursor.is_some());
+
+        // Search by (distinctive) name reaches the needle on a later page.
+        let by_name = operator_nodes_page(&db, Some("ODDBALL".into()), None, 2)
+            .await
+            .unwrap();
+        assert!(by_name.rows.iter().any(|r| r.id == NodeId(needle)));
+        // Search by status matches the whole set of that status.
+        let online = operator_nodes_page(&db, Some("online".into()), None, 50)
+            .await
+            .unwrap();
+        assert!(online.rows.iter().all(|r| r.status == "online"));
+
+        cleanup(&db, t).await;
+    }
+
+    /// AC-1/AC-2 for bindings: cursor + search on email/role.
+    #[tokio::test]
+    async fn bindings_page_cursors_and_searches() {
+        let Some(db) = pool().await else {
+            eprintln!("skipping bindings_page_cursors_and_searches — no DATABASE_URL");
+            return;
+        };
+        let t = tenant(&db, "bind-host").await;
+        // The needle binding is created first (oldest id → later page).
+        let subj = user(&db, t, "needle@bind.test").await;
+        let needle = binding(&db, subj, "operator").await;
+        for i in 0..4 {
+            let u = user(&db, t, &format!("filler{i}@bind.test")).await;
+            binding(&db, u, "org_admin").await;
+        }
+
+        let p1 = operator_bindings_page(&db, None, None, 2).await.unwrap();
+        assert!(p1.rows.len() <= 2 && p1.next_cursor.is_some());
+
+        // Search by email reaches the needle beyond page 1.
+        let by_email = operator_bindings_page(&db, Some("NEEDLE@".into()), None, 2)
+            .await
+            .unwrap();
+        assert!(by_email.rows.iter().any(|r| r.id == needle));
+        // Search by role narrows to that role.
+        let operators = operator_bindings_page(&db, Some("operator".into()), None, 50)
+            .await
+            .unwrap();
+        assert!(operators.rows.iter().all(|r| r.role_key == "operator"));
 
         cleanup(&db, t).await;
     }
