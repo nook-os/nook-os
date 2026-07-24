@@ -19,7 +19,8 @@ use crate::auth::{
 use crate::error::{ApiError, ApiResult};
 use crate::events::{self, EventDraft};
 use crate::services::identity::{
-    login_identity, member_user_in_tenant, memberships_for, IdentityClaims,
+    cached_memberships_for, invalidate_person_tenants, login_identity, member_user_in_tenant,
+    memberships_for, IdentityClaims,
 };
 use crate::state::AppState;
 
@@ -363,7 +364,8 @@ pub async fn me(State(state): State<AppState>, auth: AuthCtx) -> ApiResult<Json<
         .await?;
     Ok(Json(MeResponse {
         capability: capability_of(&state, &auth).await,
-        tenants: memberships_for(&state.db, auth.user_id, auth.tenant_id).await?,
+        tenants: cached_memberships_for(&*state.cache, &state.db, auth.user_id, auth.tenant_id)
+            .await?,
         user,
         tenant,
     }))
@@ -381,7 +383,7 @@ pub async fn my_tenants(
 ) -> ApiResult<Json<Vec<nook_types::TenantMembership>>> {
     auth.require_user()?;
     Ok(Json(
-        memberships_for(&state.db, auth.user_id, auth.tenant_id).await?,
+        cached_memberships_for(&*state.cache, &state.db, auth.user_id, auth.tenant_id).await?,
     ))
 }
 
@@ -443,6 +445,11 @@ pub async fn switch_tenant(
         return Err(ApiError::Unauthorized);
     }
 
+    // The active tenant just changed, so the `current` marker on this person's
+    // cached list is now wrong for both the row they left and the one they
+    // moved to — drop it so `/auth/me` reflects the switch immediately (AC-4).
+    invalidate_person_tenants(&*state.cache, &state.db, target_user).await;
+
     // Arrival, recorded in the destination tenant. The payload names BOTH
     // tenants and its direction, so a consumer reads the whole switch from this
     // one row without inferring anything from which key happens to be present
@@ -496,7 +503,13 @@ pub async fn switch_tenant(
         .await?;
     Ok(Json(MeResponse {
         capability: capability_of(&state, &switched).await,
-        tenants: memberships_for(&state.db, switched.user_id, switched.tenant_id).await?,
+        tenants: cached_memberships_for(
+            &*state.cache,
+            &state.db,
+            switched.user_id,
+            switched.tenant_id,
+        )
+        .await?,
         user,
         tenant,
     }))

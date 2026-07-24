@@ -26,6 +26,9 @@ pub struct AppState {
     /// How outbound email leaves the control plane — a real SMTP relay, or the
     /// capture/log fallback when none is configured. Decided by config at boot.
     pub mailer: Arc<dyn crate::mailer::Mailer>,
+    /// A swappable key/value cache — in-memory today. First consumer: the
+    /// per-person tenants list `/auth/me` carries. Decided by config at boot.
+    pub cache: Arc<dyn crate::cache::Cache>,
     /// Recently validated MCP bearer tokens (hash → validated-at), so OIDC
     /// access-token checks don't hit the IdP's userinfo endpoint per request.
     pub mcp_auth_cache: Arc<dashmap::DashMap<u64, std::time::Instant>>,
@@ -48,9 +51,12 @@ impl AppState {
             db.clone(),
             &cfg,
         ));
+        // A swappable key/value cache; first consumer is the tenants list (MAIN-27).
+        let cache: Arc<dyn crate::cache::Cache> = Arc::from(crate::cache::from_config(&cfg));
         Self {
             artifacts,
             mailer,
+            cache,
             kanban: Arc::new(KanbanRegistry::new(db.clone())),
             registry: Arc::new(Registry::new()),
             dispatcher: Arc::new(RuleBasedDispatcher),

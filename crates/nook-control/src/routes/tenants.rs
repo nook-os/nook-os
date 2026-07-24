@@ -204,6 +204,11 @@ pub async fn change_member_role(
         .execute(&state.db)
         .await?;
 
+    // The role is part of the cached tenants list, so a change makes that
+    // person's cached entry stale — drop it across their sessions (MAIN-27 AC-4).
+    crate::services::identity::invalidate_person_tenants(&*state.cache, &state.db, UserId(pid))
+        .await;
+
     let member: TenantMemberItem = sqlx::query_as(
         "SELECT m.principal_id, u.email, u.display_name, m.role, m.created_at AS joined_at
          FROM tenant_members m JOIN users u ON u.id = m.principal_id
@@ -259,6 +264,12 @@ pub async fn remove_member(
     if res.rows_affected() == 0 {
         return Err(ApiError::NotFound);
     }
+    // The grant is gone: drop the tenant from that person's cached list now, so
+    // every one of their sessions reflects the removal immediately (AC-4). The
+    // access gate already reads the table directly, so access was refused the
+    // moment the row was deleted regardless of the cache (NG-2).
+    crate::services::identity::invalidate_person_tenants(&*state.cache, &state.db, UserId(pid))
+        .await;
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
 
@@ -288,6 +299,9 @@ pub async fn leave_tenant(
     .bind(auth.user_id.0)
     .execute(&state.db)
     .await?;
+    // You just left: drop the tenant from your own cached list immediately (AC-4).
+    crate::services::identity::invalidate_person_tenants(&*state.cache, &state.db, auth.user_id)
+        .await;
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
 
