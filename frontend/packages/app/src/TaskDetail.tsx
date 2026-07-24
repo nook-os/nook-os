@@ -88,6 +88,22 @@ export function TaskDetail({
     bust();
   };
 
+  // Create a brand-new label and put it on this task in one gesture. The old
+  // picker could only attach labels that already existed, so a tenant with no
+  // labels — or one that needed a new one like `agent-ready` — had no way to
+  // make one from the UI at all. POST is idempotent server-side (upsert on
+  // name), so racing two identical creates is safe.
+  const createLabel = async (name: string) => {
+    const label = name.trim();
+    if (!label) return;
+    await api.POST("/api/v1/labels", { body: { name: label } });
+    await api.PUT("/api/v1/tasks/{id}/labels/{label}", {
+      params: { path: { id: taskId, label } },
+    });
+    qc.invalidateQueries({ queryKey: ["labels"] });
+    bust();
+  };
+
   const saveDescription = async (description: string) => {
     await api.PATCH("/api/v1/tasks/{id}", {
       params: { path: { id: taskId } },
@@ -219,6 +235,7 @@ export function TaskDetail({
             all={allLabels ?? []}
             on={task.labels ?? []}
             onToggle={toggleLabel}
+            onCreate={createLabel}
           />
 
           <div className="task-section">
@@ -450,41 +467,97 @@ function LabelField({
   all,
   on,
   onToggle,
+  onCreate,
 }: {
   all: TaskLabel[];
   on: TaskLabel[];
   onToggle: (label: TaskLabel, add: boolean) => void;
+  onCreate: (name: string) => void;
 }) {
   const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
   const attached = new Set(on.map((l) => l.name));
   const available = all.filter((l) => !attached.has(l.name));
 
+  const q = query.trim();
+  const ql = q.toLowerCase();
+  const filtered = q ? available.filter((l) => l.name.toLowerCase().includes(ql)) : available;
+  // Offer "create" only when the typed name matches no existing label at all
+  // (attached or not) — otherwise you'd get a create button for a label that
+  // already exists and just needs attaching.
+  const canCreate = q.length > 0 && !all.some((l) => l.name.toLowerCase() === ql);
+
+  const reset = () => {
+    setQuery("");
+    setOpen(false);
+  };
+
   // Portalled for the same reason the selects are: this sits inside
   // `.task-main`, which scrolls, inside `.modal`, which hides its overflow.
-  const close = useCallback(() => setOpen(false), []);
+  const close = useCallback(() => {
+    setOpen(false);
+    setQuery("");
+  }, []);
   const { hostRef, portal } = useAnchoredMenu(open, close, {
-    height: Math.min(available.length * 24 + 8, 240),
+    height: Math.min((filtered.length + 2) * 26 + 8, 260),
   });
 
   const menu = portal(
-    available.length === 0 ? (
-      <div className="faint small" style={{ padding: "4px 8px" }}>
-        All labels are already on this task.
-      </div>
-    ) : (
-      available.map((l) => (
+    <>
+      <input
+        className="label-search"
+        autoFocus
+        placeholder="filter or type a new label…"
+        value={query}
+        onChange={(e) => setQuery(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Escape") {
+            e.stopPropagation();
+            reset();
+          } else if (e.key === "Enter") {
+            e.preventDefault();
+            // Enter takes the single obvious action: attach the one match, or
+            // create the new name. Ambiguous (several matches) does nothing —
+            // pick one with the mouse.
+            if (filtered.length === 1) {
+              onToggle(filtered[0], true);
+              reset();
+            } else if (canCreate) {
+              onCreate(q);
+              reset();
+            }
+          }
+        }}
+      />
+      {filtered.map((l) => (
         <button
           key={l.id}
           className="ctx-item"
           onClick={() => {
             onToggle(l, true);
-            setOpen(false);
+            reset();
           }}
         >
           <span style={{ color: l.color }}>{l.name}</span>
         </button>
-      ))
-    ),
+      ))}
+      {canCreate && (
+        <button
+          className="ctx-item label-create"
+          onClick={() => {
+            onCreate(q);
+            reset();
+          }}
+        >
+          ＋ Create “{q}”
+        </button>
+      )}
+      {filtered.length === 0 && !canCreate && (
+        <div className="faint small" style={{ padding: "4px 8px" }}>
+          {available.length === 0 ? "All labels are on this task." : "No match."}
+        </div>
+      )}
+    </>,
     "label-menu",
   );
 
