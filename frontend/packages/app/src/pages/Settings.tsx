@@ -504,6 +504,63 @@ function Members() {
   );
 }
 
+/**
+ * Email verification for local accounts (MAIN-30). OIDC users are verified by
+ * their IdP and see that state, with no action to take; a local user can request
+ * a verification link and see when it lands.
+ */
+function EmailVerification() {
+  const queryClient = useQueryClient();
+  const [busy, setBusy] = React.useState(false);
+  const { data: status } = useQuery({
+    queryKey: ["verify-email", "status"],
+    queryFn: async () =>
+      (await api.GET("/api/v1/auth/verify-email/status")).data ?? null,
+  });
+
+  const request = async () => {
+    setBusy(true);
+    const { data, error } = await api.POST("/api/v1/auth/verify-email/request", {});
+    setBusy(false);
+    if (error || !data) {
+      await notify("Could not request verification", JSON.stringify(error));
+      return;
+    }
+    // A best-effort send: `sent` tells apart "check your inbox" from a mail
+    // misconfiguration, which is a state to show rather than an error to hide.
+    await notify(data.sent ? "Verification email sent" : "Not sent", data.message);
+    queryClient.invalidateQueries({ queryKey: ["verify-email"] });
+  };
+
+  return (
+    <div style={{ padding: 10, display: "grid", gap: 10 }} className="small">
+      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <span className="muted">{status?.email}</span>
+        {status?.verified ? (
+          <Pill tone="ok">verified</Pill>
+        ) : (
+          <Pill tone="warn">unverified</Pill>
+        )}
+      </div>
+      {status && !status.verified && status.can_request && (
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <button className="btn primary small" onClick={request} disabled={busy}>
+            {busy ? "sending…" : "verify email"}
+          </button>
+          <span className="muted">
+            We’ll email a link. Open it to confirm this address.
+          </span>
+        </div>
+      )}
+      {status && !status.verified && !status.can_request && (
+        <p className="muted" style={{ margin: 0 }}>
+          Your email is verified by your identity provider, not here.
+        </p>
+      )}
+    </div>
+  );
+}
+
 export function SettingsPage() {
   const queryClient = useQueryClient();
   const { data: themes } = useQuery({
@@ -558,6 +615,10 @@ export function SettingsPage() {
             </tbody>
           </table>
         )}
+      </Panel>
+
+      <Panel title="Email">
+        <EmailVerification />
       </Panel>
 
       <Panel title="App password">

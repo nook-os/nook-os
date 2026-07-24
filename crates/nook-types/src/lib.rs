@@ -201,6 +201,36 @@ pub struct ChangePasswordRequest {
     pub next: String,
 }
 
+/// Whether the signed-in user's email is verified, and whether a local
+/// verification round-trip applies to them (MAIN-30).
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct EmailVerificationStatus {
+    pub email: String,
+    pub verified: bool,
+    /// True for a local account that can request a verification email. OIDC
+    /// users are verified upstream and cannot request one here (NG-1).
+    pub can_request: bool,
+}
+
+/// The outcome of requesting a verification email — best-effort send, so a
+/// mail-transport failure is reported here rather than failing the request.
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct RequestVerificationResult {
+    pub sent: bool,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Deserialize, ToSchema)]
+pub struct ConfirmVerificationRequest {
+    pub token: String,
+}
+
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct ConfirmVerificationResult {
+    pub verified: bool,
+    pub message: String,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
 pub struct AuthProviders {
     /// An OIDC identity provider is configured.

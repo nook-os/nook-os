@@ -196,6 +196,68 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/auth/verify-email/confirm": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * `POST /api/v1/auth/verify-email/confirm` — consume a token and mark the
+         *     address verified. Token-authenticated (works from any browser). A consumed
+         *     or expired token is refused (AC-2); re-confirming an already-verified address
+         *     is a no-op success (AC-5).
+         */
+        post: operations["confirm_email_verification"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/auth/verify-email/request": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * `POST /api/v1/auth/verify-email/request` — issue a token and email the link.
+         *     Best-effort: a mail-transport failure is reported, never a 500 (AC-5).
+         */
+        post: operations["request_email_verification"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/auth/verify-email/status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * `GET /api/v1/auth/verify-email/status` — is this user's email verified, and
+         *     can they request a local verification email? (AC-4)
+         */
+        get: operations["email_verification_status"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/boards": {
         parameters: {
             query?: never;
@@ -2547,6 +2609,13 @@ export interface components {
         };
         /** Format: uuid */
         ColumnId: string;
+        ConfirmVerificationRequest: {
+            token: string;
+        };
+        ConfirmVerificationResult: {
+            message: string;
+            verified: boolean;
+        };
         CreateBoardRequest: {
             /** @description Omit to derive one from the name. */
             key?: string | null;
@@ -2757,6 +2826,19 @@ export interface components {
         DispatchSuggestion: {
             headline: string;
             items: components["schemas"]["DispatchItem"][];
+        };
+        /**
+         * @description Whether the signed-in user's email is verified, and whether a local
+         *     verification round-trip applies to them (MAIN-30).
+         */
+        EmailVerificationStatus: {
+            /**
+             * @description True for a local account that can request a verification email. OIDC
+             *     users are verified upstream and cannot request one here (NG-1).
+             */
+            can_request: boolean;
+            email: string;
+            verified: boolean;
         };
         /**
          * @description First contact: trade a join token for a certificate.
@@ -3332,6 +3414,14 @@ export interface components {
              * @description The tmux window the agent runs in, so the right terminal chip lights up.
              */
             window?: number | null;
+        };
+        /**
+         * @description The outcome of requesting a verification email — best-effort send, so a
+         *     mail-transport failure is reported here rather than failing the request.
+         */
+        RequestVerificationResult: {
+            message: string;
+            sent: boolean;
         };
         /** @description The node the resource-aware scheduler chose for "Auto" placement. */
         ScheduledNode: {
@@ -4278,6 +4368,73 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["AuthProviders"];
+                };
+            };
+        };
+    };
+    confirm_email_verification: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ConfirmVerificationRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ConfirmVerificationResult"];
+                };
+            };
+        };
+    };
+    request_email_verification: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RequestVerificationResult"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    email_verification_status: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EmailVerificationStatus"];
                 };
             };
         };
