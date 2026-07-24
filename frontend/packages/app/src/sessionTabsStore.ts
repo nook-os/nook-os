@@ -7,6 +7,7 @@
 // persist across reloads (localStorage) and closing a tab only stops viewing —
 // the tmux session keeps running (like closing a file tab in VS Code).
 import { create } from "zustand";
+import { activeControlPlaneKey, sessionTabsKey } from "./desktop";
 
 export interface SessionTab {
   id: string;
@@ -21,7 +22,11 @@ export interface SessionTab {
   pinned?: boolean;
 }
 
-const KEY = "nook.session-tabs";
+// Tabs are namespaced per control plane (AC-8): each server keeps its own tab
+// set, and the webview reload that a switch triggers re-evaluates this at module
+// load so the strip swaps wholesale rather than showing another server's dead
+// session IDs. The web build (empty active key) keeps the original key.
+const KEY = sessionTabsKey(activeControlPlaneKey());
 
 /** Move `id` to just before/after `targetId`, but only WITHIN a pin group.
  *

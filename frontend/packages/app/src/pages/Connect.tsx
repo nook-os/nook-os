@@ -55,8 +55,22 @@ function clearPending() {
   }
 }
 
-export function Connect({ onDone }: { onDone: () => void }) {
-  const [server, setServer] = useState("https://");
+export function Connect({
+  onDone,
+  prefillUrl,
+  notice,
+  onCancel,
+}: {
+  onDone: () => void;
+  /** Start with this server filled in (re-connecting an expired one, or adding). */
+  prefillUrl?: string;
+  /** A line shown above the form — e.g. why a re-connect is being asked for. */
+  notice?: string;
+  /** When present, a way to back out (the "add another" overlay has somewhere
+   *  to return to; first-run does not). */
+  onCancel?: () => void;
+}) {
+  const [server, setServer] = useState(prefillUrl || "https://");
   const [token, setToken] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -230,6 +244,12 @@ export function Connect({ onDone }: { onDone: () => void }) {
         <div className="login-title">◆ nook@os</div>
         <div className="muted small">connect to a control plane</div>
 
+        {notice && (
+          <div className="small login-notice" role="status">
+            {notice}
+          </div>
+        )}
+
         <form className="login-form" onSubmit={(e) => { e.preventDefault(); signIn(); }}>
           <label className="login-field">
             <span className="small muted">Control plane URL</span>
@@ -283,6 +303,12 @@ export function Connect({ onDone }: { onDone: () => void }) {
             ? "Sign in with your identity provider instead"
             : "Use a token instead"}
         </button>
+
+        {onCancel && (
+          <button className="btn small" onClick={onCancel} disabled={busy}>
+            Cancel
+          </button>
+        )}
       </div>
     </div>
   );

@@ -19,7 +19,7 @@ import { DocsPage } from "./pages/Docs";
 import { FeedbackPage } from "./pages/Feedback";
 import { Login } from "./pages/Login";
 import { Connect } from "./pages/Connect";
-import { checkForUpdate, initDesktop, installUpdate, isDesktop, type AvailableUpdate } from "./desktop";
+import { checkForUpdate, initDesktop, installUpdate, isDesktop, setControlPlaneAccount, type AvailableUpdate } from "./desktop";
 import { installLinkHandler, registerNavigator } from "./links";
 import { NodeDetail, NodesPage } from "./pages/Nodes";
 import { SessionPage, SessionsPage } from "./pages/Session";
@@ -56,6 +56,9 @@ function AuthGate() {
   const [update, setUpdate] = useState<AvailableUpdate | null>(null);
   const [endpointReady, setEndpointReady] = useState(!isDesktop());
   const [needsConnect, setNeedsConnect] = useState(false);
+  // The active server's URL (desktop only) — prefills the Connect screen when a
+  // token expires (AC-6) and names the entry whose account we backfill (AC-1).
+  const [activeUrl, setActiveUrl] = useState<string>("");
 
   // Checked once at startup and then hourly. Offered, never forced: an app
   // that restarted itself the moment a release appeared would do it in the
@@ -72,6 +75,7 @@ function AuthGate() {
     if (!isDesktop()) return;
     initDesktop()
       .then((stored) => {
+        setActiveUrl(stored?.base_url ?? "");
         setNeedsConnect(!stored?.base_url);
         setEndpointReady(true);
       })
@@ -94,15 +98,31 @@ function AuthGate() {
 
   useEffect(() => {
     if (me) startLive(queryClient);
-  }, [me]);
+    // Record which account is signed in on the active server, so the switcher
+    // can show it on that row without switching to it (AC-1).
+    if (me && isDesktop() && activeUrl) {
+      void setControlPlaneAccount(activeUrl, me.user.email);
+    }
+  }, [me, activeUrl]);
 
   if (!endpointReady) return <Empty>Starting…</Empty>;
   if (needsConnect)
     return <Connect onDone={() => { setNeedsConnect(false); refetch(); }} />;
   if (isLoading) return <Empty>Connecting…</Empty>;
   // A desktop client with a rejected token needs its endpoint fixed, not a
-  // sign-in form it cannot use — there is no cookie session to establish.
-  if (isError || !me) return isDesktop() ? <Connect onDone={() => refetch()} /> : <Login />;
+  // sign-in form it cannot use — there is no cookie session to establish. The
+  // server's URL is prefilled and the reason named, so a successful sign-in
+  // replaces that entry's token and continues into the app (AC-6).
+  if (isError || !me)
+    return isDesktop() ? (
+      <Connect
+        prefillUrl={activeUrl}
+        notice="Your sign-in for this control plane expired. Sign in again to continue."
+        onDone={() => refetch()}
+      />
+    ) : (
+      <Login />
+    );
 
   return (
     <>
