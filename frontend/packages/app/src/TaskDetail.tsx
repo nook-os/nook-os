@@ -19,6 +19,10 @@ import {
 } from "@nookos/ui";
 import { PRIORITIES } from "./taskmeta";
 
+/** The "no workspace" option's value. `Select` needs a string, and an empty
+ *  one cannot collide with a uuid. */
+const NO_WORKSPACE = "";
+
 
 export function TaskDetail({
   taskId,
@@ -53,6 +57,10 @@ export function TaskDetail({
   const { data: allLabels } = useQuery({
     queryKey: ["labels"],
     queryFn: async () => (await api.GET("/api/v1/labels")).data ?? [],
+  });
+  const { data: workspaces } = useQuery({
+    queryKey: ["workspaces"],
+    queryFn: async () => (await api.GET("/api/v1/workspaces")).data ?? [],
   });
 
   const bust = () => {
@@ -120,6 +128,20 @@ export function TaskDetail({
       body: { priority },
     });
     bust();
+  };
+
+  /** Which repo this ticket is work on. `""` means none, sent as null. */
+  const setWorkspace = async (id: string) => {
+    await api.PATCH("/api/v1/tasks/{id}", {
+      params: { path: { id: taskId } },
+      // Null, not omitted: the field is absent-or-null-or-value on the wire,
+      // and omitting it is how you say "leave this alone".
+      body: { workspace_id: id === NO_WORKSPACE ? null : id },
+    });
+    bust();
+    // A task's workspace decides which board a confined agent sees it on, so
+    // the lists that filter by workspace are now wrong until they refetch.
+    qc.invalidateQueries({ queryKey: ["tasks"] });
   };
 
   if (isLoading || !data) {
@@ -307,6 +329,23 @@ export function TaskDetail({
               >
                 {task.assignee_user_id ? "claimed — release" : "unassigned — claim"}
               </button>
+
+              {/* Above priority, because it decides whether a confined agent
+                  can see this ticket at all — an unscoped task is one no
+                  `/loop-build` will ever claim. */}
+              <span className="faint small">Workspace</span>
+              <Select
+                ariaLabel="workspace"
+                value={task.workspace_id ?? NO_WORKSPACE}
+                onChange={setWorkspace}
+                options={[
+                  { value: NO_WORKSPACE, label: "— none —" },
+                  ...(workspaces ?? []).map((w) => ({
+                    value: w.id,
+                    label: w.name,
+                  })),
+                ]}
+              />
 
               <span className="faint small">Priority</span>
               <Select

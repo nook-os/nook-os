@@ -1051,6 +1051,33 @@ pub struct UpdateTaskRequest {
     pub assignee_user_id: Option<UserId>,
     #[serde(default)]
     pub priority: Option<i32>,
+    /// Which workspace this task belongs to. Absent leaves it alone, `null`
+    /// clears it, an id sets it.
+    ///
+    /// Nested because those are three cases, not two, and every other field
+    /// here only has two. A confined `/loop-build` agent claims only tasks in
+    /// its own workspace, so an unscoped task is one no loop will ever pick
+    /// up — and until this field existed there was no way to scope one after
+    /// filing it. Clearing has to be expressible too, or a wrong answer is
+    /// permanent.
+    #[serde(default, deserialize_with = "double_option")]
+    #[schema(value_type = Option<String>, nullable)]
+    pub workspace_id: Option<Option<WorkspaceId>>,
+}
+
+/// Deserialize a field that can be absent, null, or a value.
+///
+/// `Option<Option<T>>` on its own does not do this: serde applies a JSON
+/// `null` to the OUTER option, so "clear it" and "do not touch it" both
+/// arrive as `None` and the caller cannot tell them apart. Going through
+/// `Deserialize` for the inner option and wrapping the result in `Some`
+/// reserves the outer `None` for a field that was never sent.
+fn double_option<'de, T, D>(de: D) -> Result<Option<Option<T>>, D::Error>
+where
+    T: Deserialize<'de>,
+    D: serde::Deserializer<'de>,
+{
+    Deserialize::deserialize(de).map(Some)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]

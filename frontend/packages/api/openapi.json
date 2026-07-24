@@ -8875,6 +8875,13 @@
               "string",
               "null"
             ]
+          },
+          "workspace_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Which workspace this task belongs to. Absent leaves it alone, `null`\nclears it, an id sets it.\n\nNested because those are three cases, not two, and every other field\nhere only has two. A confined `/loop-build` agent claims only tasks in\nits own workspace, so an unscoped task is one no loop will ever pick\nup — and until this field existed there was no way to scope one after\nfiling it. Clearing has to be expressible too, or a wrong answer is\npermanent."
           }
         }
       },

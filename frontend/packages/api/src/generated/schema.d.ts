@@ -3555,6 +3555,18 @@ export interface components {
             /** Format: int32 */
             priority?: number | null;
             title?: string | null;
+            /**
+             * @description Which workspace this task belongs to. Absent leaves it alone, `null`
+             *     clears it, an id sets it.
+             *
+             *     Nested because those are three cases, not two, and every other field
+             *     here only has two. A confined `/loop-build` agent claims only tasks in
+             *     its own workspace, so an unscoped task is one no loop will ever pick
+             *     up — and until this field existed there was no way to scope one after
+             *     filing it. Clearing has to be expressible too, or a wrong answer is
+             *     permanent.
+             */
+            workspace_id?: string | null;
         };
         /** @description Role values: `owner` | `admin` | `member` (TEXT CHECK in the schema). */
         User: {

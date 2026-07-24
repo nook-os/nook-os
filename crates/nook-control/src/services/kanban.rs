@@ -217,6 +217,9 @@ impl KanbanProvider for LocalBoardProvider {
         };
 
         let updated = sqlx::query_as(
+            // Workspace cannot use COALESCE like the rest: COALESCE reads a
+            // NULL as "leave it", which is exactly the instruction to clear
+            // it. The flag says whether the caller mentioned the field at all.
             "UPDATE tasks SET
                 title = COALESCE($3, title),
                 description = COALESCE($4, description),
@@ -224,6 +227,7 @@ impl KanbanProvider for LocalBoardProvider {
                 position = COALESCE($6, position),
                 assignee_user_id = COALESCE($7, assignee_user_id),
                 priority = COALESCE($8, priority),
+                workspace_id = CASE WHEN $9 THEN $10 ELSE workspace_id END,
                 updated_at = now()
              WHERE id = $1 AND tenant_id = $2
              RETURNING *",
@@ -236,6 +240,8 @@ impl KanbanProvider for LocalBoardProvider {
         .bind(req.position)
         .bind(req.assignee_user_id)
         .bind(req.priority.map(|p| p.clamp(0, 4)))
+        .bind(req.workspace_id.is_some())
+        .bind(req.workspace_id.flatten())
         .fetch_optional(&self.db)
         .await
         .map_err(ApiError::from)?
