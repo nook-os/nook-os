@@ -214,6 +214,45 @@ pub async fn operator_audit_page(
     Ok(OperatorAuditPage { rows, next_cursor })
 }
 
+/// Tenant members, keyset-paginated + searched (email/name/role), mirroring
+/// `operator_audit_page` (MAIN-45 AC-2). Keyed on the member's UUID v7
+/// `principal_id`; searches only members of `tenant`.
+pub async fn tenant_members_page(
+    db: &PgPool,
+    tenant: TenantId,
+    q: Option<String>,
+    after: Option<uuid::Uuid>,
+    limit: i64,
+) -> ApiResult<TenantMemberPage> {
+    let limit = limit.clamp(1, 200);
+    let q = q.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+    let rows: Vec<TenantMemberItem> = sqlx::query_as(
+        "SELECT m.principal_id, u.email, u.display_name, m.role, m.created_at AS joined_at
+         FROM tenant_members m
+         JOIN users u ON u.id = m.principal_id
+         WHERE m.tenant_id = $1 AND m.principal_type = 'user'
+           AND ($3::text IS NULL OR (
+                    u.email ILIKE '%' || $3 || '%'
+                 OR u.display_name ILIKE '%' || $3 || '%'
+                 OR m.role ILIKE '%' || $3 || '%'))
+           AND ($4::uuid IS NULL OR m.principal_id < $4)
+         ORDER BY m.principal_id DESC
+         LIMIT $2",
+    )
+    .bind(tenant)
+    .bind(limit)
+    .bind(q)
+    .bind(after)
+    .fetch_all(db)
+    .await?;
+    let next_cursor = if rows.len() as i64 == limit {
+        rows.last().map(|r| r.principal_id)
+    } else {
+        None
+    };
+    Ok(TenantMemberPage { rows, next_cursor })
+}
+
 /// Create a session and instruct the node to start it. Shared by the REST
 /// handler and the MCP backend. Resolves the checkout path from workspace +
 /// node (first match), then delegates to [`create_session_at`].
@@ -439,7 +478,7 @@ pub async fn create_note(
 /// schema and no-op without `NOOK_REQUIRE_DB=1`, matching the suite convention.
 #[cfg(test)]
 mod db_tests {
-    use super::operator_audit_page;
+    use super::{operator_audit_page, tenant_members_page};
     use nook_types::{EventId, TenantId};
     use sqlx::postgres::PgPoolOptions;
     use sqlx::PgPool;
@@ -490,14 +529,100 @@ mod db_tests {
     }
 
     async fn cleanup(db: &PgPool, t: TenantId) {
-        let _ = sqlx::query("DELETE FROM events WHERE tenant_id = $1")
-            .bind(t.0)
-            .execute(db)
-            .await;
+        for tbl in ["events", "tenant_members", "users"] {
+            let _ = sqlx::query(&format!("DELETE FROM {tbl} WHERE tenant_id = $1"))
+                .bind(t.0)
+                .execute(db)
+                .await;
+        }
         let _ = sqlx::query("DELETE FROM tenants WHERE id = $1")
             .bind(t.0)
             .execute(db)
             .await;
+    }
+
+    /// A member: a v7 `users` row (the keyset id) + its `tenant_members` grant.
+    async fn member(db: &PgPool, tenant: TenantId, email: &str, name: &str, role: &str) -> Uuid {
+        let uid = Uuid::now_v7();
+        sqlx::query(
+            "INSERT INTO users (id, tenant_id, display_name, email, role)
+             VALUES ($1, $2, $3, $4, $5)",
+        )
+        .bind(uid)
+        .bind(tenant.0)
+        .bind(name)
+        .bind(email)
+        .bind(role)
+        .execute(db)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO tenant_members (id, tenant_id, principal_type, principal_id, role)
+             VALUES ($1, $2, 'user', $3, $4)",
+        )
+        .bind(Uuid::new_v4())
+        .bind(tenant.0)
+        .bind(uid)
+        .bind(role)
+        .execute(db)
+        .await
+        .unwrap();
+        uid
+    }
+
+    /// AC-2 for members: bounded page + a cursor that walks older rows, and a
+    /// search (email/name/role) that reaches a match beyond the first page.
+    #[tokio::test]
+    async fn member_page_cursors_and_searches() {
+        let Some(db) = pool().await else {
+            eprintln!("skipping member_page_cursors_and_searches — no DATABASE_URL");
+            return;
+        };
+        let t = tenant(&db, "mem-page").await;
+        // The needle is the OLDEST member (smallest v7 id → a later page).
+        let needle = member(&db, t, "needle@m.test", "Needle Person", "member").await;
+        for i in 0..4 {
+            member(
+                &db,
+                t,
+                &format!("f{i}@m.test"),
+                &format!("Filler {i}"),
+                "member",
+            )
+            .await;
+        }
+
+        let p1 = tenant_members_page(&db, t, None, None, 2).await.unwrap();
+        assert!(p1.rows.len() <= 2, "page is bounded");
+        assert!(p1.next_cursor.is_some(), "a full page carries a cursor");
+
+        // Search by (distinctive) email/name reaches the needle on a later page.
+        let hit = tenant_members_page(&db, t, Some("NEEDLE".into()), None, 2)
+            .await
+            .unwrap();
+        assert!(
+            hit.rows.iter().any(|r| r.principal_id == needle),
+            "case-insensitive search finds a later-page member"
+        );
+        assert!(
+            hit.rows
+                .iter()
+                .all(|r| r.email.to_lowercase().contains("needle")
+                    || r.display_name.to_lowercase().contains("needle")),
+            "non-matching members are excluded"
+        );
+
+        // No matches → empty.
+        assert!(
+            tenant_members_page(&db, t, Some("zzno".into()), None, 50)
+                .await
+                .unwrap()
+                .rows
+                .is_empty(),
+            "no matches is empty"
+        );
+
+        cleanup(&db, t).await;
     }
 
     /// AC-1/AC-2: pages are bounded, the cursor walks strictly older rows with

@@ -3925,6 +3925,16 @@ export interface components {
             role: string;
         };
         /**
+         * @description A page of tenant members + the keyset cursor to the next page. Same shape and
+         *     mechanism as the operator lists (keyed on the member's UUID v7 `principal_id`),
+         *     so a large tenant's members are searchable and paged (MAIN-45).
+         */
+        TenantMemberPage: {
+            /** Format: uuid */
+            next_cursor?: string | null;
+            rows: components["schemas"]["TenantMemberItem"][];
+        };
+        /**
          * @description A tenant the caller belongs to, and the role they hold in it.
          *
          *     Membership is deliberately its own concept: a user has one *current*
@@ -7712,7 +7722,14 @@ export interface operations {
     };
     list_members: {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description Case-insensitive substring across email, display name, and role. */
+                q?: string | null;
+                /** @description Keyset cursor: the last member `principal_id` seen. Returns older rows. */
+                after?: string | null;
+                /** @description Page size (default 50, clamped 1..=200). */
+                limit?: number | null;
+            };
             header?: never;
             path: {
                 id: string;
@@ -7726,7 +7743,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["TenantMemberItem"][];
+                    "application/json": components["schemas"]["TenantMemberPage"];
                 };
             };
             403: {

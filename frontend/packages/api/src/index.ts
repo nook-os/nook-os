@@ -31,6 +31,9 @@ export type Theme = Schemas["Theme"];
 export type DispatchSuggestion = Schemas["DispatchSuggestion"];
 export type OperatorAuditEntry = Schemas["OperatorAuditEntry"];
 export type OperatorAuditPage = Schemas["OperatorAuditPage"];
+export type UserToken = Schemas["UserToken"];
+export type VaultPasskey = Schemas["VaultPasskey"];
+export type TenantMemberItem = Schemas["TenantMemberItem"];
 
 export type { paths };
 export * from "./ws";
