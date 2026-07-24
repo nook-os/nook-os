@@ -744,7 +744,22 @@ code,
   font-family: var(--nook-font-mono);
 }
 
-.nook-panel-title > span:first-child::before {
+/* The title flexes to fill and truncates; the actions keep their natural width
+   and never shrink, so a long title (e.g. a long git branch) can never push the
+   diff/files/refresh controls off or overlap them (MAIN-47). `min-width: 0` is
+   what lets the flex child shrink below its content so the ellipsis engages. */
+.nook-panel-heading {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.nook-panel-actions {
+  flex: none;
+}
+
+.nook-panel-heading::before {
   content: "// ";
   color: var(--nook-fg-faint);
   letter-spacing: 0;
