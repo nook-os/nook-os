@@ -7,12 +7,17 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { CircleDot, Columns2, Loader2, Plus, Rows2, X } from "lucide-react";
 import { api } from "@nookos/api";
 import { TabMenu } from "./SessionTabs";
-import { useLive } from "./live";
+import { useLive, liveAgentMark } from "./live";
 import { askText } from "./dialogs";
 
 export function SessionWindows({ sessionId }: { sessionId: string }) {
   const queryClient = useQueryClient();
-  const agent = useLive((s) => s.agentState[sessionId]);
+  const agentRaw = useLive((s) => s.agentState[sessionId]);
+  const status = useLive((s) => s.sessionStatus[sessionId]);
+  // A dead session shows no agent mark, matching SessionTabs — the last state
+  // an agent reported before its session exited/errored/was killed must not
+  // linger as a spinner on the term-chip.
+  const agent = liveAgentMark(status, agentRaw);
   const [menu, setMenu] = useState<{ index: number; x: number; y: number } | null>(
     null,
   );

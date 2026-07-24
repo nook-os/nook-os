@@ -1015,9 +1015,18 @@ pub async fn agent_state(state: &str) -> Result<()> {
     if let Some(w) = window {
         body["window"] = serde_json::json!(w);
     }
-    let _ = client
+    // Best-effort: a failed report must never fail or block the agent's turn,
+    // so this always returns Ok(()). But discarding the error with `let _`
+    // meant a 403, a 404, or a bad NOOK_SESSION_ID looked exactly like
+    // everything working — no indicator, no clue why. Leave a breadcrumb at
+    // debug level so "why is my tab not spinning" is diagnosable via RUST_LOG
+    // without changing the contract.
+    if let Err(e) = client
         .post(&format!("/api/v1/sessions/{sid}/agent-state"), body)
-        .await;
+        .await
+    {
+        tracing::debug!(error = %e, session = %sid, state, "agent-state report failed");
+    }
     Ok(())
 }
 
