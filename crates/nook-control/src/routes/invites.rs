@@ -36,6 +36,94 @@ fn new_token() -> String {
     format!("inv_{body}")
 }
 
+/// Minimal HTML escaping for values dropped into the HTML body — a tenant name
+/// or a display name must never be able to inject markup into the email.
+fn esc(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
+/// Compose the invite email: subject, plain-text body, and a minimal HTML body
+/// (AC-4). Pure, so the content — the accept link, the tenant, and who invited
+/// them (AC-2) — is unit-testable without a mailer.
+fn invite_email(tenant: &str, inviter: &str, accept_url: &str) -> (String, String, String) {
+    let subject = format!("You're invited to {tenant} on NookOS");
+    let text = format!(
+        "{inviter} invited you to join {tenant} on NookOS.\n\n\
+         Accept the invitation:\n\n\
+         {accept_url}\n\n\
+         If you weren't expecting this, you can ignore this email. \
+         The invitation expires in 14 days."
+    );
+    let (t, i, u) = (esc(tenant), esc(inviter), esc(accept_url));
+    let html = format!(
+        "<div style=\"font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;\
+         font-size:15px;line-height:1.6;color:#111;max-width:520px\">\
+         <p><strong>{i}</strong> invited you to join <strong>{t}</strong> on NookOS.</p>\
+         <p style=\"margin:24px 0\">\
+         <a href=\"{u}\" style=\"background:#111;color:#fff;text-decoration:none;\
+         padding:10px 18px;border-radius:6px;display:inline-block\">Accept the invitation</a></p>\
+         <p style=\"color:#666;font-size:13px\">Or open this link:<br>\
+         <a href=\"{u}\">{u}</a><br><br>\
+         If you weren't expecting this, you can ignore this email. \
+         The invitation expires in 14 days.</p></div>"
+    );
+    (subject, text, html)
+}
+
+/// Email the accept link, best-effort: the send never fails the API call (AC-2),
+/// and the outcome is logged as sent / skipped-because-disabled / failed (AC-6).
+/// Takes the mailer and provider name (not `AppState`) so it is unit-testable.
+async fn send_invite_email(
+    mailer: &dyn crate::mailer::Mailer,
+    provider: &str,
+    to: &str,
+    tenant: &str,
+    inviter: &str,
+    accept_url: &str,
+) {
+    let (subject, text, html) = invite_email(tenant, inviter, accept_url);
+    // Hand it to the mailer regardless (the capture provider records it for a
+    // glance/test), then log the delivery outcome.
+    let outcome = mailer.send(to, &subject, &text, Some(&html)).await;
+    match (provider, outcome) {
+        ("capture", _) => tracing::info!(
+            to,
+            "invite email skipped — mail is disabled (MAIL_PROVIDER=capture); use the copy-link"
+        ),
+        (_, Ok(())) => tracing::info!(to, "invite email sent"),
+        (_, Err(e)) => tracing::error!(
+            error = %e,
+            to,
+            "invite email failed to send (best-effort; the invite still stands)"
+        ),
+    }
+}
+
+/// The tenant's display name for the email, with a neutral fallback.
+async fn tenant_display_name(state: &AppState, tenant: TenantId) -> String {
+    sqlx::query_scalar::<_, String>("SELECT name FROM tenants WHERE id = $1")
+        .bind(tenant)
+        .fetch_optional(&state.db)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| "a NookOS tenant".into())
+}
+
+/// The inviter's display name for the email, with a neutral fallback.
+async fn inviter_display_name(state: &AppState, user_id: uuid::Uuid) -> String {
+    sqlx::query_scalar::<_, String>("SELECT display_name FROM users WHERE id = $1")
+        .bind(user_id)
+        .fetch_optional(&state.db)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| "Someone".into())
+}
+
 fn validated_role(role: Option<&str>) -> ApiResult<&str> {
     match role.unwrap_or("member") {
         r @ ("member" | "admin") => Ok(r),
@@ -100,6 +188,21 @@ pub async fn create(
         "{}/accept?token={token}",
         state.cfg.web_origin.trim_end_matches('/')
     ));
+
+    // Email the accept link too (AC-2), best-effort — a mail failure never fails
+    // this call, and the invite is still returned for the copy-link path (AC-1).
+    let tenant_name = tenant_display_name(&state, tenant).await;
+    let inviter = inviter_display_name(&state, auth.user_id.0).await;
+    send_invite_email(
+        &*state.mailer,
+        &state.cfg.mail_provider,
+        email,
+        &tenant_name,
+        &inviter,
+        invite.accept_url.as_deref().unwrap_or_default(),
+    )
+    .await;
+
     Ok(Json(invite))
 }
 
@@ -150,6 +253,55 @@ pub async fn revoke(
         return Err(ApiError::NotFound);
     }
     Ok(axum::http::StatusCode::NO_CONTENT)
+}
+
+/// `POST /api/v1/tenants/{id}/invites/{invite}/resend` — re-email the pending
+/// invite's accept link (AC-5). owner/admin only.
+#[utoipa::path(post, path = "/api/v1/tenants/{id}/invites/{invite}/resend",
+    operation_id = "resend_invite",
+    params(("id" = String, Path,), ("invite" = String, Path,)),
+    responses((status = 200, body = Invite), (status = 403), (status = 404)))]
+pub async fn resend(
+    State(state): State<AppState>,
+    auth: AuthCtx,
+    Path((tenant, invite_id)): Path<(TenantId, uuid::Uuid)>,
+) -> ApiResult<Json<Invite>> {
+    require_admin_of(&state, &auth, tenant).await?;
+
+    // Only the token's hash is stored (AC-9 from MAIN-6), so the original
+    // plaintext is unrecoverable — a resend issues a FRESH token, invalidating
+    // the old link, and re-stamps the expiry before emailing the new link.
+    let token = new_token();
+    let mut invite: Invite = sqlx::query_as(
+        "UPDATE invites
+            SET token_hash = $1, expires_at = now() + interval '14 days'
+          WHERE id = $2 AND tenant_id = $3 AND status = 'pending'
+      RETURNING id, email, role, status, created_at, expires_at",
+    )
+    .bind(hash_token(&token))
+    .bind(invite_id)
+    .bind(tenant)
+    .fetch_optional(&state.db)
+    .await?
+    .ok_or(ApiError::NotFound)?;
+
+    invite.accept_url = Some(format!(
+        "{}/accept?token={token}",
+        state.cfg.web_origin.trim_end_matches('/')
+    ));
+    let tenant_name = tenant_display_name(&state, tenant).await;
+    let inviter = inviter_display_name(&state, auth.user_id.0).await;
+    send_invite_email(
+        &*state.mailer,
+        &state.cfg.mail_provider,
+        &invite.email,
+        &tenant_name,
+        &inviter,
+        invite.accept_url.as_deref().unwrap_or_default(),
+    )
+    .await;
+
+    Ok(Json(invite))
 }
 
 /// `POST /api/v1/invites/accept` — the signed-in person consumes a token. On a
@@ -325,7 +477,7 @@ mod tests {
     }
     #[test]
     fn management_is_admin_gated_and_owner_is_not_invitable() {
-        for f in ["create", "list", "revoke"] {
+        for f in ["create", "list", "revoke", "resend"] {
             assert!(
                 body(f).contains("require_admin_of"),
                 "{f} must be admin-gated"
@@ -337,6 +489,55 @@ mod tests {
         );
         assert!(super::validated_role(Some("admin")).is_ok());
         assert!(super::validated_role(None).is_ok(), "defaults to member");
+    }
+
+    use super::{invite_email, send_invite_email};
+
+    #[test]
+    fn invite_email_carries_the_link_tenant_inviter_and_escapes_html() {
+        let (subject, text, html) = invite_email(
+            "Acme <Web>",
+            "Dana \"D\" Lee",
+            "https://nook.example/accept?token=abc",
+        );
+        // Subject names the tenant; text names the inviter and carries the link.
+        assert!(subject.contains("Acme <Web>"));
+        assert!(text.contains("Dana \"D\" Lee invited you"));
+        assert!(text.contains("https://nook.example/accept?token=abc"));
+        // The HTML links the same token URL (AC-4).
+        assert!(html.contains("href=\"https://nook.example/accept?token=abc\""));
+        // Values dropped into HTML are escaped, so a name/tenant cannot inject
+        // markup.
+        assert!(html.contains("Acme &lt;Web&gt;"));
+        assert!(!html.contains("Acme <Web>"));
+        assert!(html.contains("&quot;D&quot;"));
+    }
+
+    struct FailingMailer;
+    #[async_trait::async_trait]
+    impl crate::mailer::Mailer for FailingMailer {
+        async fn send(&self, _: &str, _: &str, _: &str, _: Option<&str>) -> anyhow::Result<()> {
+            Err(anyhow::anyhow!("relay unreachable"))
+        }
+        fn describe(&self) -> String {
+            "failing (test)".into()
+        }
+    }
+
+    #[tokio::test]
+    async fn a_send_failure_is_swallowed_never_propagated() {
+        // send_invite_email returns () regardless of the transport result, so a
+        // mail failure can never fail the invite API call (AC-2). Reaching the
+        // end without a panic or a propagated error is the assertion.
+        send_invite_email(
+            &FailingMailer,
+            "smtp",
+            "invitee@i.test",
+            "Acme",
+            "Dana",
+            "https://nook.example/accept?token=abc",
+        )
+        .await;
     }
 }
 

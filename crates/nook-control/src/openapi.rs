@@ -33,6 +33,7 @@ use utoipa::OpenApi;
         crate::routes::invites::create,
         crate::routes::invites::list,
         crate::routes::invites::revoke,
+        crate::routes::invites::resend,
         crate::routes::invites::accept,
         crate::routes::auth::dev_login,
         crate::routes::auth::logout,
