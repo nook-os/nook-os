@@ -76,6 +76,50 @@ jobs:
       - name: Typecheck
         working-directory: frontend
         run: pnpm -r typecheck
+      - name: Test
+        working-directory: frontend
+        run: pnpm -r test
+
+  # The Tauri shell is deliberately outside the cargo workspace, so `rust`
+  # above cannot see it: `--workspace` excludes it and `fmt --all` walks the
+  # same members. That gap shipped a desktop app whose device sign-in could
+  # never complete, and CI was green throughout. This is the job that would
+  # have caught it.
+  desktop:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: frontend/apps/desktop/src-tauri
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: frontend/apps/desktop/src-tauri
+      # Tauri links against the system webview; without these the crate does
+      # not build at all.
+      - name: System dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev \
+            libayatana-appindicator3-dev librsvg2-dev patchelf libxdo-dev
+        working-directory: .
+      # `generate_context!` reads tauri.conf.json, whose frontendDist points at
+      # the built web app. Nothing here runs the UI, but the directory has to
+      # exist or the macro fails the build.
+      - name: Stub the frontend bundle
+        run: mkdir -p frontend/apps/web/dist && touch frontend/apps/web/dist/index.html
+        working-directory: .
+      - name: Format
+        run: cargo fmt --check
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Test
+        run: cargo test
 
   type-gen-drift:
     runs-on: ubuntu-latest

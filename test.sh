@@ -5,7 +5,8 @@
 #   ./test.sh rust         just the Rust tests
 #   ./test.sh rust ca      Rust tests matching "ca"
 #   ./test.sh lint         fmt + clippy + actionlint + shellcheck
-#   ./test.sh web          tsc across the frontend
+#   ./test.sh web          tsc + vitest across the frontend
+#   ./test.sh desktop      fmt, clippy and tests for the Tauri shell
 #   ./test.sh --host       run Rust on the host instead of in the container
 #
 # Runs inside the control-plane container by default. That container already
@@ -97,18 +98,55 @@ run_web() {
   say "tsc"
   (cd frontend && pnpm -r typecheck) || die "typecheck"
   pass "frontend typechecks"
+
+  say "vitest"
+  (cd frontend && pnpm -r test) || die "frontend tests"
+  pass "frontend tests passed"
+}
+
+# The desktop shell is deliberately OUTSIDE the cargo workspace — its toolchain
+# would slow every backend build — which also meant nothing ever checked it.
+# The Tauri app shipped a broken device sign-in and an unformatted source file
+# because `cargo fmt --all` and `cargo test --workspace` cannot see it. It gets
+# its own target rather than being folded into the workspace.
+desktop_deps_ok() {
+  case "$(uname -s)" in
+    # Tauri builds against the system WebKit; no pkg-config to consult.
+    Darwin) return 0 ;;
+    Linux) pkg-config --exists webkit2gtk-4.1 2>/dev/null ;;
+    *) return 1 ;;
+  esac
+}
+
+run_desktop() {
+  if ! desktop_deps_ok; then
+    # Loudly, and never as a pass: a check that quietly did not run is worse
+    # than one that fails, because it looks the same as one that succeeded.
+    say "webkit2gtk-4.1 not installed — SKIPPING the desktop shell (CI still checks it)"
+    return 0
+  fi
+  local d=frontend/apps/desktop/src-tauri
+  say "desktop: cargo fmt --check"
+  (cd "$d" && cargo fmt --check) || die "desktop formatting: run 'cargo fmt' in $d"
+  say "desktop: cargo clippy"
+  (cd "$d" && cargo clippy --all-targets -- -D warnings) || die "desktop clippy"
+  say "desktop: cargo test"
+  (cd "$d" && cargo test) || die "desktop tests"
+  pass "desktop shell passed"
 }
 
 case "${1:-all}" in
   rust) run_rust "${2:-}" ;;
   lint) run_lint ;;
   web)  run_web ;;
+  desktop) run_desktop ;;
   all)
     run_lint
     run_rust
     run_web
+    run_desktop
     printf '\n%s✓%s everything passed\n' "$G" "$Z"
     ;;
-  -h|--help) sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//' ;;
-  *) die "unknown target '$1' — try: all, rust, lint, web" ;;
+  -h|--help) sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//' ;;
+  *) die "unknown target '$1' — try: all, rust, lint, web, desktop" ;;
 esac
