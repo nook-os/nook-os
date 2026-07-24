@@ -7,6 +7,7 @@
 #   ./test.sh lint         fmt + clippy + actionlint + shellcheck
 #   ./test.sh web          tsc + vitest across the frontend
 #   ./test.sh desktop      fmt, clippy and tests for the Tauri shell
+#   ./test.sh k8s          live Helm chart bring-up on a kind cluster
 #   ./test.sh --host       run Rust on the host instead of in the container
 #
 # Runs inside the control-plane container by default. That container already
@@ -84,7 +85,7 @@ run_lint() {
 
   say "shellcheck"
   lint_in koalaman/shellcheck:stable install/install.sh deploy/enable-agent-mtls.sh test.sh \
-    charts/nook-control/ci/validate.sh \
+    charts/nook-control/ci/validate.sh scripts/k8s-e2e.sh \
     || die "shellcheck"
   pass "shell scripts clean"
 }
@@ -136,11 +137,26 @@ run_desktop() {
   pass "desktop shell passed"
 }
 
+# The live chart bring-up needs a real cluster toolchain. Absent kind/helm it
+# SKIPS loudly rather than failing — the same "never a silent pass" rule as the
+# desktop shell. CI runs it on charts/ changes regardless. It is NOT part of
+# `all`: nobody wants `./test.sh` spinning up kind on every run.
+run_k8s() {
+  if ! command -v kind >/dev/null 2>&1 || ! command -v helm >/dev/null 2>&1; then
+    say "kind/helm not installed — SKIPPING the k8s e2e (CI runs it on charts/ changes)"
+    return 0
+  fi
+  say "k8s: Helm chart end-to-end on kind"
+  ./scripts/k8s-e2e.sh "$@" || die "k8s e2e"
+  pass "k8s e2e passed"
+}
+
 case "${1:-all}" in
   rust) run_rust "${2:-}" ;;
   lint) run_lint ;;
   web)  run_web ;;
   desktop) run_desktop ;;
+  k8s)  shift; run_k8s "$@" ;;
   all)
     run_lint
     run_rust
@@ -148,6 +164,6 @@ case "${1:-all}" in
     run_desktop
     printf '\n%s✓%s everything passed\n' "$G" "$Z"
     ;;
-  -h|--help) sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//' ;;
-  *) die "unknown target '$1' — try: all, rust, lint, web, desktop" ;;
+  -h|--help) sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//' ;;
+  *) die "unknown target '$1' — try: all, rust, lint, web, desktop, k8s" ;;
 esac

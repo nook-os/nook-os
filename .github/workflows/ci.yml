@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
@@ -156,3 +157,38 @@ jobs:
           version: v3.17.0
       - name: Lint and render the chart
         run: ./charts/nook-control/ci/validate.sh
+
+  # A real (kind) bring-up of the chart on top of the lint/template job above:
+  # install against an in-cluster Postgres, assert both Deployments converge and
+  # the app answers, exercise `helm upgrade`, then tear down. It builds the
+  # images, so it is far heavier than `helm` — hence path-filtered to the chart,
+  # its images, and this workflow (plus workflow_dispatch for on-demand runs).
+  chart-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: changes
+        with:
+          filters: |
+            charts:
+              - 'charts/**'
+              - 'deploy/docker/**'
+              - 'scripts/k8s-e2e.sh'
+              - '.github/workflows/ci.yml'
+      - name: Set up Helm
+        if: steps.changes.outputs.charts == 'true' || github.event_name == 'workflow_dispatch'
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.17.0
+      # Install the kind binary only; the e2e script owns the cluster lifecycle
+      # (create, assert, delete) so it can be idempotent and self-cleaning.
+      - name: Set up kind
+        if: steps.changes.outputs.charts == 'true' || github.event_name == 'workflow_dispatch'
+        uses: helm/kind-action@v1
+        with:
+          install_only: true
+      - name: Chart end-to-end on kind
+        if: steps.changes.outputs.charts == 'true' || github.event_name == 'workflow_dispatch'
+        run: ./scripts/k8s-e2e.sh

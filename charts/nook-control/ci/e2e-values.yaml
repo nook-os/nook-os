@@ -1,0 +1,41 @@
+# Helm values for the local kind end-to-end run (scripts/k8s-e2e.sh).
+# NOT for real installs — this points at images loaded into kind and disables
+# the Ingress (kind has no ingress controller; the script port-forwards web).
+controlPlane:
+  image:
+    # The script builds these and `kind load`s them; IfNotPresent uses the
+    # loaded image and never reaches out to a registry. The tag is set per
+    # install by the script (to exercise helm upgrade across two tags).
+    registry: nook.local
+    repository: nook-control
+    pullPolicy: IfNotPresent
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      cpu: "1"
+      memory: 512Mi
+
+web:
+  image:
+    registry: nook.local
+    repository: nook-web
+    pullPolicy: IfNotPresent
+  resources:
+    requests:
+      cpu: 10m
+      memory: 16Mi
+    limits:
+      cpu: 250m
+      memory: 64Mi
+
+# kind has no cloud Ingress controller; the test reaches the app by
+# port-forwarding the web Service instead.
+ingress:
+  enabled: false
+
+config:
+  appEnv: production
+  publicBaseUrl: http://localhost:18080
+  webOrigin: http://localhost:18080
