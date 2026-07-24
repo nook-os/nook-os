@@ -3,6 +3,16 @@
 Status: **proposed** (not implemented). Supersedes the current server-side
 vault when accepted.
 
+> **Not the same "secrets" as deploying the control plane.** This doc is about
+> the **application sealed secrets** NookOS stores for tenants (the workspace
+> `.env` vault). The credentials that get the control plane *running* on
+> Kubernetes — `DATABASE_URL`, `SESSION_SECRET`, and `SECRETS_KEY` itself — are
+> **deployment credentials**, supplied via a referenced Kubernetes Secret and
+> optionally synced from Vault/GCP/AWS; see
+> [`charts/nook-control/examples/secrets/`](../charts/nook-control/examples/secrets/README.md).
+> `SECRETS_KEY` is the bridge: a deployment credential that unlocks the vault
+> described here.
+
 ## Why
 
 Today `.env` contents are encrypted at rest with `SECRETS_KEY` (AES-256-GCM,
