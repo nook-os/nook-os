@@ -811,6 +811,20 @@ pub struct OperatorAuditEntry {
     pub occurred_at: DateTime<Utc>,
 }
 
+/// A page of audit rows plus the keyset cursor to reach the next (older) page.
+///
+/// Mirrors [`EventsPage`]'s `{ items, next_cursor }` shape so the two feeds read
+/// the same way, but keys on the row's UUID v7 `id` rather than a timestamp:
+/// v7 ids are creation-ordered and unique, so `id < cursor` walks strictly
+/// older rows with no ties to break (and needs no new column). `next_cursor` is
+/// null at the end of the list.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct OperatorAuditPage {
+    pub rows: Vec<OperatorAuditEntry>,
+    /// Pass as `after` to fetch the next (older) page; null at end of list.
+    pub next_cursor: Option<EventId>,
+}
+
 /// One policy-gated field with its current state and plain-language meaning.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct PolicyField {

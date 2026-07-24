@@ -235,6 +235,7 @@ use utoipa::OpenApi;
         nook_types::OperatorTenant,
         nook_types::OperatorNode,
         nook_types::OperatorAuditEntry,
+        nook_types::OperatorAuditPage,
         nook_types::PolicyField,
         nook_types::SetPolicyRequest,
         nook_types::Notification,
