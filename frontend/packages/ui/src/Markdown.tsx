@@ -21,8 +21,8 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeRaw from "rehype-raw";
 import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
-import { Eye, Pencil } from "lucide-react";
-import { EditorState, Prec } from "@codemirror/state";
+import { Code2, Eye } from "lucide-react";
+import { Compartment, EditorState, Prec } from "@codemirror/state";
 import {
   EditorView,
   keymap,
@@ -34,6 +34,29 @@ import {
   insertNewline,
   standardKeymap,
 } from "@codemirror/commands";
+import { livePreview } from "./markdownPreview";
+
+/** Which editing surface the markdown editor shows. `live` renders markdown
+ *  inline (Obsidian-style); `source` is the raw CodeMirror text. Persisted so a
+ *  preference sticks across editor mounts (AC-4). */
+export type MarkdownMode = "live" | "source";
+const MODE_KEY = "nook.md-editor-mode";
+
+export function loadMarkdownMode(): MarkdownMode {
+  try {
+    return localStorage.getItem(MODE_KEY) === "source" ? "source" : "live";
+  } catch {
+    return "live";
+  }
+}
+
+function saveMarkdownMode(mode: MarkdownMode) {
+  try {
+    localStorage.setItem(MODE_KEY, mode);
+  } catch {
+    // storage unavailable — the preference just won't persist
+  }
+}
 
 /** Render markdown at panel density. */
 /**
@@ -222,9 +245,13 @@ export function MarkdownEditor({
   minHeight?: number;
   autoFocus?: boolean;
 }) {
-  const [tab, setTab] = useState<"write" | "preview">("write");
+  const [mode, setMode] = useState<MarkdownMode>(loadMarkdownMode);
   const boxRef = useRef<HTMLDivElement>(null);
   const viewRef = useRef<EditorView | null>(null);
+  // Holds the live-preview extension (or nothing, in source mode) so the two
+  // modes are the SAME editor reconfigured — never a teardown, never a second
+  // component. The document is untouched either way (AC-2).
+  const previewRef = useRef(new Compartment());
 
   // Callbacks change every render; the keymap and update listener read the
   // latest through refs so the editor never has to be rebuilt to see them.
@@ -292,6 +319,9 @@ export function MarkdownEditor({
           keymap.of([...historyKeymap, ...standardKeymap]),
           cmPlaceholder(placeholder ?? ""),
           EditorView.lineWrapping,
+          // Live-preview decorations, toggled via the compartment. The initial
+          // contents match the persisted mode so the first paint is right.
+          previewRef.current.of(loadMarkdownMode() === "live" ? livePreview() : []),
           EditorView.updateListener.of((u) => {
             if (u.docChanged) onChangeRef.current(u.state.doc.toString());
           }),
@@ -320,27 +350,38 @@ export function MarkdownEditor({
     }
   }, [value]);
 
-  // Focus when the write pane (re)appears, matching the textarea's autoFocus.
-  useEffect(() => {
-    if (autoFocus && tab === "write") viewRef.current?.focus();
-  }, [autoFocus, tab]);
+  // Switch the live-preview decorations on or off by reconfiguring the
+  // compartment — same editor, same document, only the display changes. Persist
+  // the choice so it survives the next mount (AC-4).
+  const switchMode = (next: MarkdownMode) => {
+    setMode(next);
+    saveMarkdownMode(next);
+    const view = viewRef.current;
+    if (!view) return;
+    view.dispatch({
+      effects: previewRef.current.reconfigure(next === "live" ? livePreview() : []),
+    });
+    if (autoFocus) view.focus();
+  };
 
   return (
     <div className="md-editor">
       <div className="md-toolbar">
         <button
-          className={`md-tab ${tab === "write" ? "on" : ""}`}
-          onClick={() => setTab("write")}
+          className={`md-tab ${mode === "live" ? "on" : ""}`}
+          onClick={() => switchMode("live")}
           type="button"
+          title="rendered markdown, edited inline"
         >
-          <Pencil size={10} /> write
+          <Eye size={10} /> live
         </button>
         <button
-          className={`md-tab ${tab === "preview" ? "on" : ""}`}
-          onClick={() => setTab("preview")}
+          className={`md-tab ${mode === "source" ? "on" : ""}`}
+          onClick={() => switchMode("source")}
           type="button"
+          title="raw markdown source"
         >
-          <Eye size={10} /> preview
+          <Code2 size={10} /> source
         </button>
         <span className="md-tools">
           <button type="button" onClick={() => surround("**")} title="bold (⌘B)">
@@ -365,23 +406,14 @@ export function MarkdownEditor({
         {onSave && <span className="faint small md-hint">⌘↵ to save</span>}
       </div>
 
-      {/* The CodeMirror host stays mounted across tab switches (just hidden) so
-          the editor is not torn down and rebuilt every time you peek at the
-          preview — which would drop the cursor and undo history. */}
+      {/* One CodeMirror surface for both modes — live-preview is a decoration
+          layer over it, so the caret moves through the rendered text and the
+          stored document is never re-serialized. */}
       <div
         ref={boxRef}
-        className="md-source"
-        style={{ minHeight, display: tab === "write" ? "block" : "none" }}
+        className={`md-source md-mode-${mode}`}
+        style={{ minHeight }}
       />
-      {tab === "preview" && (
-        <div className="md-preview" style={{ minHeight }}>
-          {value.trim() ? (
-            <Markdown src={value} />
-          ) : (
-            <span className="faint small">Nothing to preview yet.</span>
-          )}
-        </div>
-      )}
     </div>
   );
 }

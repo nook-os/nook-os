@@ -11,8 +11,11 @@
   },
   "dependencies": {
     "@codemirror/commands": "^6.8.1",
+    "@codemirror/lang-markdown": "^6.3.2",
+    "@codemirror/language": "^6.10.8",
     "@codemirror/state": "^6.5.2",
     "@codemirror/view": "^6.38.1",
+    "@lezer/markdown": "^1.4.2",
     "@fontsource-variable/jetbrains-mono": "^5.3.0",
     "@nookos/api": "workspace:*",
     "@xterm/addon-clipboard": "^0.1.0",
