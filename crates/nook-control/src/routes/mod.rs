@@ -113,6 +113,10 @@ pub fn build_router(state: AppState) -> Router {
             "/tenants/{id}/invites/{invite}",
             delete_route(invites::revoke),
         )
+        .route(
+            "/tenants/{id}/invites/{invite}/resend",
+            post(invites::resend),
+        )
         .route("/invites/accept", post(invites::accept))
         .route(
             "/workspaces",

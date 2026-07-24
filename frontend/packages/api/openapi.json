@@ -4227,6 +4227,51 @@
         }
       }
     },
+    "/api/v1/tenants/{id}/invites/{invite}/resend": {
+      "post": {
+        "tags": [
+          "crate::routes::invites"
+        ],
+        "summary": "`POST /api/v1/tenants/{id}/invites/{invite}/resend` — re-email the pending\ninvite's accept link (AC-5). owner/admin only.",
+        "operationId": "resend_invite",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "invite",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Invite"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": ""
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      }
+    },
     "/api/v1/tenants/{id}/leave": {
       "post": {
         "tags": [
