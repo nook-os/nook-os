@@ -1152,6 +1152,11 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
+        /**
+         * Never visible here: repository names, branches, worktree paths, task titles.
+         *     Those are policy-gated and added by `enrich` below — they are not selected
+         *     and then removed.
+         */
         get: operations["operator_list_tenants"];
         put?: never;
         post?: never;

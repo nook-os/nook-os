@@ -2492,6 +2492,7 @@
         "tags": [
           "crate::routes::operator"
         ],
+        "summary": "Never visible here: repository names, branches, worktree paths, task titles.\nThose are policy-gated and added by `enrich` below — they are not selected\nand then removed.",
         "operationId": "operator_list_tenants",
         "parameters": [
           {
