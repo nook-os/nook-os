@@ -16,11 +16,93 @@
 //! tenant, and `tenant_members` is what will let someone belong to a shared
 //! team tenant as well. Both are written here so the two never disagree.
 
-use nook_types::{IdentityId, Tenant, TenantId, User, UserId};
+use chrono::{DateTime, Utc};
+use nook_types::{IdentityId, Tenant, TenantId, TenantMembership, User, UserId};
 use serde_json::Value;
+use sqlx::PgPool;
 
 use crate::error::{ApiError, ApiResult};
 use crate::state::AppState;
+
+/// Every tenant this person belongs to, resolved from `tenant_members`.
+///
+/// A person is one `users` row PER tenant, keyed by email — the same email in
+/// two tenants is the same human, which is how membership in a shared tenant is
+/// represented (a `users` row with their email + a `tenant_members` grant). So
+/// "which tenants can this user reach" is: find every `users` row sharing this
+/// user's email, keep the ones with a live `tenant_members` grant, and return
+/// their tenants. `tenant_members` is the single source of truth (AC-7): a
+/// membership row that is gone drops the tenant from this list.
+///
+/// `active` is the tenant the session is scoped to right now, marked `current`.
+pub async fn memberships_for(
+    db: &PgPool,
+    user_id: UserId,
+    active: TenantId,
+) -> ApiResult<Vec<TenantMembership>> {
+    let rows: Vec<(TenantId, String, String, String, DateTime<Utc>)> = sqlx::query_as(
+        "SELECT t.id, t.name, t.slug, tm.role, t.created_at
+         FROM users me
+         JOIN users u ON lower(u.email) = lower(me.email)
+         JOIN tenant_members tm
+             ON tm.tenant_id = u.tenant_id
+            AND tm.principal_type = 'user'
+            AND tm.principal_id = u.id
+         JOIN tenants t ON t.id = u.tenant_id
+         WHERE me.id = $1
+         ORDER BY t.created_at",
+    )
+    .bind(user_id)
+    .fetch_all(db)
+    .await?;
+
+    Ok(to_memberships(rows, active))
+}
+
+/// Mark which tenant is active and shape the rows into `TenantMembership`s.
+/// Pure, so the "current" flag and the passthrough are testable without a DB.
+fn to_memberships(
+    rows: Vec<(TenantId, String, String, String, DateTime<Utc>)>,
+    active: TenantId,
+) -> Vec<TenantMembership> {
+    rows.into_iter()
+        .map(|(id, name, slug, role, created_at)| TenantMembership {
+            current: id == active,
+            id,
+            name,
+            slug,
+            role,
+            created_at,
+        })
+        .collect()
+}
+
+/// Resolve the per-tenant `users` row for this person in `target`, but only if
+/// they actually belong there. Returns `None` when there is no membership — the
+/// caller turns that into a 403. This is the guard behind tenant switching: the
+/// active tenant can only become one the person is a `tenant_members` of.
+pub async fn member_user_in_tenant(
+    db: &PgPool,
+    user_id: UserId,
+    target: TenantId,
+) -> ApiResult<Option<UserId>> {
+    let row: Option<(UserId,)> = sqlx::query_as(
+        "SELECT u.id
+         FROM users me
+         JOIN users u ON lower(u.email) = lower(me.email)
+         JOIN tenant_members tm
+             ON tm.tenant_id = u.tenant_id
+            AND tm.principal_type = 'user'
+            AND tm.principal_id = u.id
+         WHERE me.id = $1 AND u.tenant_id = $2
+         LIMIT 1",
+    )
+    .bind(user_id)
+    .bind(target)
+    .fetch_optional(db)
+    .await?;
+    Ok(row.map(|(id,)| id))
+}
 
 pub struct IdentityClaims {
     pub issuer: String,
@@ -260,7 +342,9 @@ pub fn slugify(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::slugify;
+    use super::{slugify, to_memberships};
+    use chrono::Utc;
+    use nook_types::TenantId;
 
     #[test]
     fn slugs_are_url_safe_and_stable() {
@@ -268,5 +352,41 @@ mod tests {
         assert_eq!(slugify("dev"), "dev");
         assert_eq!(slugify("  --  "), "tenant");
         assert_eq!(slugify("Ünïcode Nämé"), "n-code-n-m"); // ascii-only by design
+    }
+
+    #[test]
+    fn exactly_the_active_tenant_is_marked_current() {
+        let a = TenantId::new();
+        let b = TenantId::new();
+        let now = Utc::now();
+        let rows = vec![
+            (a, "Personal".into(), "personal".into(), "owner".into(), now),
+            (b, "Shared".into(), "shared".into(), "member".into(), now),
+        ];
+        let out = to_memberships(rows, b);
+        assert_eq!(out.len(), 2);
+        assert!(!out[0].current, "the non-active tenant is not current");
+        assert!(out[1].current, "the active tenant is current");
+        // The role and identity pass through untouched.
+        assert_eq!(out[1].role, "member");
+        assert_eq!(out[1].id, b);
+    }
+
+    #[test]
+    fn no_tenant_is_current_when_active_is_absent() {
+        // A session scoped to a tenant the person is no longer a member of: the
+        // list simply contains no `current`, which the UI renders as "none
+        // selected" rather than crashing.
+        let a = TenantId::new();
+        let orphan = TenantId::new();
+        let rows = vec![(
+            a,
+            "Personal".into(),
+            "personal".into(),
+            "owner".into(),
+            Utc::now(),
+        )];
+        let out = to_memberships(rows, orphan);
+        assert!(out.iter().all(|m| !m.current));
     }
 }

@@ -1056,6 +1056,71 @@
         }
       }
     },
+    "/api/v1/me/tenant": {
+      "post": {
+        "tags": [
+          "crate::routes::auth"
+        ],
+        "summary": "POST /api/v1/me/tenant — switch the browser session's active tenant.",
+        "description": "Membership is enforced here (403 for a tenant the person does not belong\nto), and the switch is a single UPDATE of `sessions_auth`: because\n`AuthCtx` resolves BOTH `user_id` and `tenant_id` from that row on every\nrequest, moving the row re-scopes every tenant-scoped surface at once. The\nper-tenant `user_id` changes too, so attribution and role follow the tenant.\n\nBrowser sessions only (NG-5): a `nook_user_` token has no `sessions_auth`\nrow, so the UPDATE affects nothing and the endpoint says so rather than\npretending to switch a credential that stays bound to its tenant.",
+        "operationId": "switch_tenant",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SwitchTenantRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MeResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": ""
+          },
+          "403": {
+            "description": ""
+          }
+        }
+      }
+    },
+    "/api/v1/me/tenants": {
+      "get": {
+        "tags": [
+          "crate::routes::auth"
+        ],
+        "summary": "GET /api/v1/me/tenants — every tenant the signed-in person belongs to, with\nthe active one marked. The switcher reads it; `me` also carries it inline so\nthe first render needs no second request.",
+        "operationId": "my_tenants",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/TenantMembership"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": ""
+          }
+        }
+      }
+    },
     "/api/v1/node/releases": {
       "get": {
         "tags": [
@@ -6629,6 +6694,13 @@
           "tenant": {
             "$ref": "#/components/schemas/Tenant"
           },
+          "tenants": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TenantMembership"
+            },
+            "description": "Every tenant this person belongs to (from `tenant_members`), with the\nactive one marked `current`. Carried on `me` so the UI can render a\ntenant switcher without a second request. A person in exactly one tenant\ngets a one-element list, and the UI shows a plain label for that case."
+          },
           "user": {
             "$ref": "#/components/schemas/User"
           }
@@ -7957,6 +8029,18 @@
               "string",
               "null"
             ]
+          }
+        }
+      },
+      "SwitchTenantRequest": {
+        "type": "object",
+        "description": "Switch the browser session's active tenant. The caller must be a member of\nthe target tenant, or the endpoint returns 403.",
+        "required": [
+          "tenant_id"
+        ],
+        "properties": {
+          "tenant_id": {
+            "$ref": "#/components/schemas/TenantId"
           }
         }
       },

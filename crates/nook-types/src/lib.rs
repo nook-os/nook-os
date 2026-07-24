@@ -109,10 +109,23 @@ pub struct TenantMembership {
 pub struct MeResponse {
     pub user: User,
     pub tenant: Tenant,
+    /// Every tenant this person belongs to (from `tenant_members`), with the
+    /// active one marked `current`. Carried on `me` so the UI can render a
+    /// tenant switcher without a second request. A person in exactly one tenant
+    /// gets a one-element list, and the UI shows a plain label for that case.
+    #[serde(default)]
+    pub tenants: Vec<TenantMembership>,
     /// What this caller may do, so a UI can hide what it cannot offer rather
     /// than rendering a button that 403s.
     #[serde(default)]
     pub capability: Capability,
+}
+
+/// Switch the browser session's active tenant. The caller must be a member of
+/// the target tenant, or the endpoint returns 403.
+#[derive(Debug, Clone, Deserialize, ToSchema)]
+pub struct SwitchTenantRequest {
+    pub tenant_id: TenantId,
 }
 
 /// Unauthenticated sign-in capabilities, so the login screen only offers what

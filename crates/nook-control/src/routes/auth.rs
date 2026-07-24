@@ -18,7 +18,9 @@ use crate::auth::{
 };
 use crate::error::{ApiError, ApiResult};
 use crate::events::{self, EventDraft};
-use crate::services::identity::{login_identity, IdentityClaims};
+use crate::services::identity::{
+    login_identity, member_user_in_tenant, memberships_for, IdentityClaims,
+};
 use crate::state::AppState;
 
 /// Build the OIDC client from cached discovery metadata. Constructed per
@@ -280,6 +282,7 @@ pub async fn dev_login(
         return Ok((
             jar.add(session_cookie(&state, session_id)),
             Json(MeResponse {
+                tenants: memberships_for(&state.db, user.id, tenant.id).await?,
                 user,
                 tenant,
                 capability: Default::default(),
@@ -310,6 +313,7 @@ pub async fn dev_login(
     Ok((
         jar.add(session_cookie(&state, session_id)),
         Json(MeResponse {
+            tenants: memberships_for(&state.db, user.id, tenant.id).await?,
             user,
             tenant,
             capability: Default::default(),
@@ -355,6 +359,102 @@ pub async fn me(State(state): State<AppState>, auth: AuthCtx) -> ApiResult<Json<
         .await?;
     Ok(Json(MeResponse {
         capability: capability_of(&state, &auth).await,
+        tenants: memberships_for(&state.db, auth.user_id, auth.tenant_id).await?,
+        user,
+        tenant,
+    }))
+}
+
+/// GET /api/v1/me/tenants — every tenant the signed-in person belongs to, with
+/// the active one marked. The switcher reads it; `me` also carries it inline so
+/// the first render needs no second request.
+#[utoipa::path(get, path = "/api/v1/me/tenants",
+    operation_id = "my_tenants",
+    responses((status = 200, body = [nook_types::TenantMembership]), (status = 401)))]
+pub async fn my_tenants(
+    State(state): State<AppState>,
+    auth: AuthCtx,
+) -> ApiResult<Json<Vec<nook_types::TenantMembership>>> {
+    auth.require_user()?;
+    Ok(Json(
+        memberships_for(&state.db, auth.user_id, auth.tenant_id).await?,
+    ))
+}
+
+/// POST /api/v1/me/tenant — switch the browser session's active tenant.
+///
+/// Membership is enforced here (403 for a tenant the person does not belong
+/// to), and the switch is a single UPDATE of `sessions_auth`: because
+/// `AuthCtx` resolves BOTH `user_id` and `tenant_id` from that row on every
+/// request, moving the row re-scopes every tenant-scoped surface at once. The
+/// per-tenant `user_id` changes too, so attribution and role follow the tenant.
+///
+/// Browser sessions only (NG-5): a `nook_user_` token has no `sessions_auth`
+/// row, so the UPDATE affects nothing and the endpoint says so rather than
+/// pretending to switch a credential that stays bound to its tenant.
+#[utoipa::path(post, path = "/api/v1/me/tenant",
+    operation_id = "switch_tenant",
+    request_body = nook_types::SwitchTenantRequest,
+    responses((status = 200, body = MeResponse), (status = 403), (status = 400)))]
+pub async fn switch_tenant(
+    State(state): State<AppState>,
+    auth: AuthCtx,
+    Json(req): Json<nook_types::SwitchTenantRequest>,
+) -> ApiResult<Json<MeResponse>> {
+    auth.require_user()?;
+
+    // No-op switch to the tenant you are already in: return the current view.
+    // Cheaper than a round trip through the membership join for the common
+    // case of re-selecting the active tenant.
+    let target_user = if req.tenant_id == auth.tenant_id {
+        auth.user_id
+    } else {
+        member_user_in_tenant(&state.db, auth.user_id, req.tenant_id)
+            .await?
+            .ok_or_else(|| ApiError::ForbiddenMsg("you are not a member of that tenant".into()))?
+    };
+
+    let res = sqlx::query("UPDATE sessions_auth SET user_id = $1, tenant_id = $2 WHERE id = $3")
+        .bind(target_user)
+        .bind(req.tenant_id)
+        .bind(auth.session_id)
+        .execute(&state.db)
+        .await?;
+    if res.rows_affected() == 0 {
+        return Err(ApiError::BadRequest(
+            "tenant switching is available on a browser session only — a user \
+             token stays bound to the tenant it was minted for"
+                .into(),
+        ));
+    }
+
+    events::record(
+        &state,
+        req.tenant_id,
+        EventDraft::new("user.tenant_switched")
+            .actor("user", target_user.0)
+            .payload(serde_json::json!({ "tenant_id": req.tenant_id })),
+    )
+    .await;
+
+    // Rebuild the caller against the tenant they just moved to, so the client
+    // updates in one round trip.
+    let switched = AuthCtx {
+        user_id: target_user,
+        tenant_id: req.tenant_id,
+        ..auth
+    };
+    let user: nook_types::User = sqlx::query_as("SELECT * FROM users WHERE id = $1")
+        .bind(switched.user_id)
+        .fetch_one(&state.db)
+        .await?;
+    let tenant: nook_types::Tenant = sqlx::query_as("SELECT * FROM tenants WHERE id = $1")
+        .bind(switched.tenant_id)
+        .fetch_one(&state.db)
+        .await?;
+    Ok(Json(MeResponse {
+        capability: capability_of(&state, &switched).await,
+        tenants: memberships_for(&state.db, switched.user_id, switched.tenant_id).await?,
         user,
         tenant,
     }))
@@ -442,4 +542,49 @@ pub async fn logout(State(state): State<AppState>, jar: CookieJar) -> ApiResult<
         jar.add(removal_cookie(SESSION_COOKIE)),
         axum::http::StatusCode::NO_CONTENT,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    /// Switching tenant must be gated on membership and confined to browser
+    /// sessions. Asserted at the source because both failures are silent in a
+    /// happy-path test: a missing membership check would let anyone name any
+    /// tenant id, and a missing browser-session guard would appear to switch a
+    /// `nook_user_` token that actually stays bound to its tenant (NG-5).
+    fn switch_handler() -> &'static str {
+        include_str!("auth.rs")
+            .split("pub async fn switch_tenant(")
+            .nth(1)
+            .expect("switch_tenant handler")
+            .split("\npub async fn ")
+            .next()
+            .expect("handler body")
+    }
+
+    #[test]
+    fn switch_refuses_a_non_member() {
+        let body = switch_handler();
+        assert!(
+            body.contains("member_user_in_tenant"),
+            "switch must resolve the target through the membership guard"
+        );
+        assert!(
+            body.contains("ForbiddenMsg"),
+            "a tenant the caller does not belong to must 403, not switch"
+        );
+    }
+
+    #[test]
+    fn switch_is_browser_session_only() {
+        let body = switch_handler();
+        assert!(
+            body.contains("UPDATE sessions_auth"),
+            "switching is a move of the browser session's active tenant"
+        );
+        assert!(
+            body.contains("rows_affected() == 0"),
+            "a credential with no sessions_auth row (a user token) must be told \
+             switching is browser-only, not silently no-op"
+        );
+    }
 }

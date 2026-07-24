@@ -83,6 +83,8 @@ pub fn build_router(state: AppState) -> Router {
         .route("/auth/dev-accounts", get(auth::dev_accounts))
         .route("/auth/logout", post(auth::logout))
         .route("/auth/me", get(auth::me))
+        .route("/me/tenants", get(auth::my_tenants))
+        .route("/me/tenant", post(auth::switch_tenant))
         .route("/auth/providers", get(auth::providers))
         .route("/auth/local/status", get(local_auth::status))
         .route("/auth/oidc/exchange", post(oidc_exchange::exchange))

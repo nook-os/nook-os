@@ -13,6 +13,8 @@ use utoipa::OpenApi;
     paths(
         crate::routes::health::healthz,
         crate::routes::auth::me,
+        crate::routes::auth::my_tenants,
+        crate::routes::auth::switch_tenant,
         crate::routes::auth::providers,
         crate::routes::local_auth::status,
         crate::routes::local_auth::login,
@@ -161,6 +163,7 @@ use utoipa::OpenApi;
         nook_types::User,
         nook_types::MeResponse,
         nook_types::TenantMembership,
+        nook_types::SwitchTenantRequest,
         nook_types::UpdateSessionRequest,
         nook_types::CreateTerminalRequest,
         nook_types::CreateUserTokenRequest,

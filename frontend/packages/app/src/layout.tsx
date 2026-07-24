@@ -24,6 +24,7 @@ import {
 import { Plus } from "lucide-react";
 import { api, type MeResponse } from "@nookos/api";
 import { useLive } from "./live";
+import { TenantSwitcher } from "./TenantSwitcher";
 import { useControlPlaneVersion } from "./NodeFacts";
 import { useWorkspaceContext } from "./context";
 import { NewWorkHost } from "./NewWorkModal";
@@ -362,7 +363,7 @@ export function Shell({ me }: { me: MeResponse }) {
         <span className="sep">│</span>
         <span>{activeSessions.length} active sessions</span>
         <span className="sep">│</span>
-        <span className="faint">tenant: {me.tenant.name}</span>
+        <TenantSwitcher me={me} />
         <span style={{ flex: 1 }} />
         {/* The control plane's real version, not a literal. This read
             "NookOS 0.1.0" from a hardcoded string for every release since
