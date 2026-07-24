@@ -3439,6 +3439,16 @@
           },
           "404": {
             "description": ""
+          },
+          "409": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TaskItem"
+                }
+              }
+            }
           }
         }
       }
@@ -9852,6 +9862,14 @@
               "string",
               "null"
             ]
+          },
+          "expected_updated_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "Optimistic-concurrency precondition. When set, the update applies only\nif the task's current `updated_at` still equals this; a mismatch makes\nNO change and returns `409 Conflict` (the body changed under the caller).\nThe body-editing surfaces send it; a move / other unguarded PATCH leaves\nit absent and behaves exactly as before (MAIN-36)."
           },
           "position": {
             "type": [

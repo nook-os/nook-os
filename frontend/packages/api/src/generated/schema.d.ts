@@ -4088,6 +4088,15 @@ export interface components {
             column_id?: null | components["schemas"]["ColumnId"];
             column_type?: string | null;
             description?: string | null;
+            /**
+             * Format: date-time
+             * @description Optimistic-concurrency precondition. When set, the update applies only
+             *     if the task's current `updated_at` still equals this; a mismatch makes
+             *     NO change and returns `409 Conflict` (the body changed under the caller).
+             *     The body-editing surfaces send it; a move / other unguarded PATCH leaves
+             *     it absent and behaves exactly as before (MAIN-36).
+             */
+            expected_updated_at?: string | null;
             /** Format: int32 */
             position?: number | null;
             /** Format: int32 */
@@ -7032,6 +7041,14 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskItem"];
+                };
             };
         };
     };

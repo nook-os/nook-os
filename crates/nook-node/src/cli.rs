@@ -107,6 +107,28 @@ impl Client {
     pub async fn put(&self, path: &str, body: Value) -> Result<Value> {
         self.send(reqwest::Method::PUT, path, Some(body)).await
     }
+
+    /// PATCH, returning the HTTP status alongside the body so a caller can react
+    /// to a 409 (optimistic-concurrency conflict) instead of only an error
+    /// string — the read-guard-retry the safe body edit needs (MAIN-36).
+    pub async fn patch_status(&self, path: &str, body: Value) -> Result<(u16, Value)> {
+        let url = format!("{}{path}", self.base);
+        let resp = self
+            .http
+            .patch(&url)
+            .bearer_auth(&self.token)
+            .header("accept", "application/json")
+            .json(&body)
+            .send()
+            .await
+            .with_context(|| format!("could not reach {}", self.base))?;
+        let status = resp.status().as_u16();
+        let text = resp.text().await.unwrap_or_default();
+        Ok((
+            status,
+            serde_json::from_str(&text).unwrap_or(Value::String(text)),
+        ))
+    }
 }
 
 /// `nook login --token nook_user_…` — act as yourself, not as this machine.
@@ -1259,6 +1281,55 @@ pub async fn comment(key: &str, body: &str) -> Result<()> {
         crate::style::bold(key)
     );
     Ok(())
+}
+
+/// `nook set-description <key> <body>` — replace a task's description safely.
+///
+/// Read the current version, PATCH with the optimistic-concurrency guard, and
+/// on a 409 (someone else edited it meanwhile) re-read and retry a bounded
+/// number of times. If it keeps conflicting, exit non-zero rather than silently
+/// losing the edit (AC-4).
+pub async fn set_description(key: &str, description: &str) -> Result<()> {
+    let client = Client::from_config()?;
+    for attempt in 1..=4 {
+        // The current version to guard against — from the whole-issue read.
+        let detail = client.get(&format!("/api/v1/tasks/{key}")).await?;
+        let version = detail
+            .get("task")
+            .and_then(|t| t.get("updated_at"))
+            .and_then(Value::as_str)
+            .context("the task response carried no version to guard against")?
+            .to_string();
+
+        let (status, body) = client
+            .patch_status(
+                &format!("/api/v1/tasks/{key}"),
+                serde_json::json!({
+                    "description": description,
+                    "expected_updated_at": version,
+                }),
+            )
+            .await?;
+        match status {
+            200 => {
+                println!(
+                    "{} updated {}",
+                    crate::style::ok_c("✓"),
+                    crate::style::bold(key)
+                );
+                return Ok(());
+            }
+            // Someone edited it between the read and the write — re-read the
+            // fresh version and try again.
+            409 => {
+                eprintln!("  {key} changed under this edit — re-reading (attempt {attempt})");
+                continue;
+            }
+            401 => bail!("unauthorized — this CLI's token was rejected"),
+            other => bail!("{other} setting the description on {key}: {body}"),
+        }
+    }
+    bail!("{key}: the body kept changing under concurrent edits — read it again and retry");
 }
 
 /// `nook label <key> <name> [--remove]`.
