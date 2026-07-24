@@ -47,6 +47,17 @@ async fn require_active_tenant(
     role_in(&state.db, auth.user_id.0, tenant).await
 }
 
+/// May `caller` (their role in the tenant) modify a member whose current role
+/// is `target`? The owner tier is reserved to owners (AC-2): an admin moves
+/// people between member and admin, but may not touch anyone who is already an
+/// owner — neither to demote/reassign nor to remove them. Only an owner can.
+/// This is the decision both `change_member_role` and `remove_member` enforce,
+/// factored out so it can be tested directly rather than only asserted at the
+/// source.
+fn may_modify_target(caller: &str, target: &str) -> bool {
+    target != "owner" || caller == "owner"
+}
+
 /// How many owners a tenant has — the guard that keeps a tenant from being left
 /// ownerless (AC-5).
 async fn owner_count(db: &sqlx::PgPool, tenant: TenantId) -> ApiResult<i64> {
@@ -161,6 +172,13 @@ pub async fn change_member_role(
         ));
     }
     let current = role_in(&state.db, pid, tenant).await?;
+    // The owner tier is owners-only (AC-2): an admin may not demote or reassign
+    // an existing owner.
+    if !may_modify_target(&caller, &current) {
+        return Err(ApiError::ForbiddenMsg(
+            "only an owner can change another owner's role".into(),
+        ));
+    }
     // Demoting/reassigning the last owner would orphan the tenant.
     if current == "owner" && new_role != "owner" && owner_count(&state.db, tenant).await? <= 1 {
         return Err(ApiError::ForbiddenMsg(
@@ -218,6 +236,13 @@ pub async fn remove_member(
         ));
     }
     let target = role_in(&state.db, pid, tenant).await?;
+    // Only an owner may remove another owner — the owner tier is reserved to
+    // owners (AC-2); an admin cannot eject one.
+    if !may_modify_target(&caller, &target) {
+        return Err(ApiError::ForbiddenMsg(
+            "only an owner can remove another owner".into(),
+        ));
+    }
     if target == "owner" && owner_count(&state.db, tenant).await? <= 1 {
         return Err(ApiError::ForbiddenMsg(
             "this is the last owner — a tenant cannot be left ownerless".into(),
@@ -281,11 +306,37 @@ mod tests {
             .expect("body")
     }
 
+    /// The owner tier is reserved to owners (AC-2): an admin manages
+    /// member↔admin but may not modify anyone who is already an owner. This
+    /// exercises the actual decision both mutating handlers make, rather than
+    /// only asserting it at the source.
+    #[test]
+    fn only_an_owner_may_modify_an_owner() {
+        use super::may_modify_target;
+        // An admin cannot demote/reassign or remove a sitting owner.
+        assert!(!may_modify_target("admin", "owner"));
+        // An owner can act on another owner (transfers, co-owner cleanup).
+        assert!(may_modify_target("owner", "owner"));
+        // The member/admin tier is open to both owner and admin callers.
+        for caller in ["owner", "admin"] {
+            for target in ["admin", "member"] {
+                assert!(
+                    may_modify_target(caller, target),
+                    "{caller} may manage a {target}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn role_changes_are_owner_admin_gated_and_owner_grant_is_owner_only() {
         let b = body("change_member_role");
         assert!(b.contains("changing roles needs owner or admin"));
         assert!(b.contains("only an owner can grant ownership"));
+        assert!(
+            b.contains("may_modify_target"),
+            "an admin cannot demote an existing owner (AC-2)"
+        );
         assert!(
             b.contains("owner_count") && b.contains("<= 1"),
             "last-owner demotion guard"
@@ -296,6 +347,10 @@ mod tests {
     fn removal_is_gated_and_last_owner_protected() {
         let b = body("remove_member");
         assert!(b.contains("removing members needs owner or admin"));
+        assert!(
+            b.contains("may_modify_target"),
+            "an admin cannot remove an existing owner (AC-2)"
+        );
         assert!(
             b.contains("owner_count") && b.contains("<= 1"),
             "last-owner removal guard"
