@@ -61,6 +61,88 @@ pub async fn memberships_for(
     Ok(to_memberships(rows, active))
 }
 
+/// How long a cached tenants list survives without explicit invalidation
+/// (MAIN-27 AC-4). Short by design: it is the ONLY freshness guarantee across
+/// processes (the in-memory cache is per-instance, NG-4), so a grant revoked on
+/// one replica is reflected on the others within this window even though its
+/// explicit invalidation never reaches them.
+const TENANTS_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// The cache key for a user's reachable-tenant list.
+///
+/// Keyed by the per-tenant `users` row id. For a browser session `user_id` and
+/// the active `tenant_id` move together (`sessions_auth` holds both, and a
+/// switch updates the row), so `user_id` alone determines which tenant is
+/// `current` — the cached `Vec<TenantMembership>` is correct for that key with
+/// no risk of a cross-user or cross-tenant mix-up (AC-3).
+fn tenants_cache_key(user_id: UserId) -> String {
+    format!("tenants:user:{}", user_id.0)
+}
+
+/// `memberships_for`, served through the cache (AC-3).
+///
+/// A hit returns the stored list and skips the four-table join; a miss runs the
+/// join and populates with a TTL backstop. The `current` flag is re-derived
+/// from `active` on every read, so a cached list is safe to serve even in the
+/// (unused today) case where the same `user_id` is queried against a different
+/// active tenant.
+///
+/// NOTE: only the *display* list flows through here. The access gate
+/// (`active_membership_exists`) never does — a stale grant must never grant
+/// access (NG-2), so authorization always reads the table directly.
+pub async fn cached_memberships_for(
+    cache: &dyn crate::cache::Cache,
+    db: &PgPool,
+    user_id: UserId,
+    active: TenantId,
+) -> ApiResult<Vec<TenantMembership>> {
+    let key = tenants_cache_key(user_id);
+    if let Ok(Some(bytes)) = cache.get(&key).await {
+        if let Ok(mut list) = serde_json::from_slice::<Vec<TenantMembership>>(&bytes) {
+            for m in &mut list {
+                m.current = m.id == active;
+            }
+            return Ok(list);
+        }
+    }
+    let list = memberships_for(db, user_id, active).await?;
+    if let Ok(bytes) = serde_json::to_vec(&list) {
+        let _ = cache.set(&key, bytes, TENANTS_CACHE_TTL).await;
+    }
+    Ok(list)
+}
+
+/// Drop the cached tenants list for every `users` row of the person behind
+/// `user_id` (AC-4).
+///
+/// A grant change or a tenant switch affects the whole person, and a person is
+/// several `users` rows (one per tenant) correlated by `person_id` — the same
+/// correlation `memberships_for` joins on. Invalidating only the row that was
+/// touched would leave that person's OTHER sessions serving a stale list until
+/// the TTL. Best-effort: a delete that fails (or a person we cannot resolve)
+/// falls back to the TTL, and must never fail the write path that called it.
+pub async fn invalidate_person_tenants(
+    cache: &dyn crate::cache::Cache,
+    db: &PgPool,
+    user_id: UserId,
+) {
+    let ids: Vec<UserId> = sqlx::query_scalar(
+        "SELECT u.id FROM users me JOIN users u ON u.person_id = me.person_id WHERE me.id = $1",
+    )
+    .bind(user_id)
+    .fetch_all(db)
+    .await
+    .unwrap_or_default();
+    // The join includes `me`, so an empty result means the row is gone; delete
+    // its own key anyway as a floor.
+    if ids.is_empty() {
+        let _ = cache.delete(&tenants_cache_key(user_id)).await;
+    }
+    for id in ids {
+        let _ = cache.delete(&tenants_cache_key(id)).await;
+    }
+}
+
 /// Mark which tenant is active and shape the rows into `TenantMembership`s.
 /// Pure, so the "current" flag and the passthrough are testable without a DB.
 fn to_memberships(
@@ -493,8 +575,10 @@ mod tests {
 #[cfg(test)]
 mod db_tests {
     use super::{
-        active_membership_exists, email_is_verified, member_user_in_tenant, memberships_for,
+        active_membership_exists, cached_memberships_for, email_is_verified,
+        invalidate_person_tenants, member_user_in_tenant, memberships_for,
     };
+    use crate::cache::memory::MemoryCache;
     use nook_types::{TenantId, UserId};
     use sqlx::postgres::PgPoolOptions;
     use sqlx::PgPool;
@@ -810,5 +894,142 @@ mod db_tests {
             !local_after,
             "sharing an email with a verified user does NOT verify you (never an email join)"
         );
+    }
+
+    /// AC-3/AC-4: a second read is a cache hit (skips the join), and an explicit
+    /// invalidation drops the entry so the next read reflects the DB.
+    #[tokio::test]
+    async fn tenants_list_is_cached_then_dropped_on_invalidation() {
+        let Some(db) = pool().await else {
+            eprintln!(
+                "skipping tenants_list_is_cached_then_dropped_on_invalidation — no DATABASE_URL"
+            );
+            return;
+        };
+        let person = Uuid::new_v4();
+        let a = tenant(&db, "cache-hit").await;
+        let uid = member(&db, a, "cache-me@main27.test", person).await;
+        let cache = MemoryCache::new();
+
+        // Miss → populates from the join.
+        let first = cached_memberships_for(&cache, &db, uid, a).await.unwrap();
+        assert_eq!(first.len(), 1, "the live membership is returned and cached");
+
+        // Revoke the grant in the DB WITHOUT invalidating the cache.
+        sqlx::query("DELETE FROM tenant_members WHERE principal_id = $1")
+            .bind(uid.0)
+            .execute(&db)
+            .await
+            .unwrap();
+
+        // A hit: the stale list is served, proving the join was skipped.
+        let hit = cached_memberships_for(&cache, &db, uid, a).await.unwrap();
+        assert_eq!(hit.len(), 1, "served the cached list — the read was a hit");
+
+        // Explicit invalidation → the next read re-queries and sees the revoke.
+        invalidate_person_tenants(&cache, &db, uid).await;
+        let fresh = cached_memberships_for(&cache, &db, uid, a).await.unwrap();
+        assert!(
+            fresh.is_empty(),
+            "after invalidation the revoked grant is gone"
+        );
+
+        cleanup(&db, &[a]).await;
+    }
+
+    /// AC-4: a grant change / switch touching ONE of a person's tenant rows
+    /// invalidates the whole person, so their other sessions refresh too.
+    #[tokio::test]
+    async fn invalidation_spans_every_tenant_row_of_the_person() {
+        let Some(db) = pool().await else {
+            eprintln!(
+                "skipping invalidation_spans_every_tenant_row_of_the_person — no DATABASE_URL"
+            );
+            return;
+        };
+        let person = Uuid::new_v4();
+        let a = tenant(&db, "multi-a").await;
+        let b = tenant(&db, "multi-b").await;
+        let uid_a = member(&db, a, "multi-a@main27.test", person).await;
+        let uid_b = member(&db, b, "multi-b@main27.test", person).await;
+        let cache = MemoryCache::new();
+
+        // Both per-tenant rows see the same two-tenant set, and both get cached.
+        assert_eq!(
+            cached_memberships_for(&cache, &db, uid_a, a)
+                .await
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(
+            cached_memberships_for(&cache, &db, uid_b, b)
+                .await
+                .unwrap()
+                .len(),
+            2
+        );
+
+        // A change on row B, invalidated via row B, must refresh row A too.
+        sqlx::query("DELETE FROM tenant_members WHERE principal_id = $1")
+            .bind(uid_b.0)
+            .execute(&db)
+            .await
+            .unwrap();
+        invalidate_person_tenants(&cache, &db, uid_b).await;
+
+        let a_fresh = cached_memberships_for(&cache, &db, uid_a, a).await.unwrap();
+        assert_eq!(a_fresh.len(), 1, "invalidating via row B refreshed row A");
+
+        cleanup(&db, &[a, b]).await;
+    }
+
+    /// NG-2, the load-bearing boundary: the access gate never reads the cache,
+    /// so a revoked grant is refused immediately even while the DISPLAY list is
+    /// still cached stale.
+    #[tokio::test]
+    async fn the_access_gate_is_never_served_from_cache() {
+        let Some(db) = pool().await else {
+            eprintln!("skipping the_access_gate_is_never_served_from_cache — no DATABASE_URL");
+            return;
+        };
+        let person = Uuid::new_v4();
+        let a = tenant(&db, "gate").await;
+        let uid = member(&db, a, "gate-me@main27.test", person).await;
+        let cache = MemoryCache::new();
+
+        // Warm the display cache and confirm the gate agrees while the grant lives.
+        assert_eq!(
+            cached_memberships_for(&cache, &db, uid, a)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(active_membership_exists(&db, uid, a).await.unwrap());
+
+        // Revoke, but do NOT invalidate: the display cache stays stale on purpose.
+        sqlx::query("DELETE FROM tenant_members WHERE principal_id = $1")
+            .bind(uid.0)
+            .execute(&db)
+            .await
+            .unwrap();
+        assert_eq!(
+            cached_memberships_for(&cache, &db, uid, a)
+                .await
+                .unwrap()
+                .len(),
+            1,
+            "the display list is still a stale hit"
+        );
+
+        // The gate reads the table directly, so access is refused the instant
+        // the grant is gone — the cache never gates.
+        assert!(
+            !active_membership_exists(&db, uid, a).await.unwrap(),
+            "a stale display cache must never keep access alive"
+        );
+
+        cleanup(&db, &[a]).await;
     }
 }

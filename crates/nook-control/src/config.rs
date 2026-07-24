@@ -112,6 +112,13 @@ pub struct Config {
     /// self-hosted gateways rarely have per-bucket DNS.
     pub s3_path_style: bool,
 
+    // ── Cache provider ──────────────────────────────────────────────────
+    /// Which cache backend to use, chosen by name — `memory` (default) or the
+    /// reserved-but-unbuilt `redis`. Explicit, like `NOOK_ARTIFACT_STORE`: a
+    /// cache is a deployment decision, and a hosted redis later means a new
+    /// name here, not inference. See `crate::cache`.
+    pub cache_provider: String,
+
     // ── Email (mail provider) ───────────────────────────────────────────
     /// Which mail transport to use, chosen by name — `smtp` or `capture`.
     /// Explicit, like `NOOK_ARTIFACT_STORE`, rather than inferred from whether
@@ -194,6 +201,8 @@ impl Config {
             mcp_token: env_opt("MCP_TOKEN"),
             dev_join_token: env_opt("NOOK_DEV_JOIN_TOKEN"),
 
+            cache_provider: env_opt("NOOK_CACHE_PROVIDER").unwrap_or_else(|| "memory".into()),
+
             mail_provider: env_opt("MAIL_PROVIDER").unwrap_or_else(|| "capture".into()),
             smtp_host: env_opt("SMTP_HOST"),
             smtp_port: env_opt("SMTP_PORT")
@@ -208,6 +217,10 @@ impl Config {
         if cfg.is_production() && cfg.auth_dev_mode {
             anyhow::bail!("AUTH_DEV_MODE must not be enabled when APP_ENV=production");
         }
+        // A cache provider is selected the same way, and `redis` is reserved
+        // but unbuilt — refuse it at boot with a pointed message rather than
+        // silently handing back a per-process cache someone asked to be shared.
+        crate::cache::validate_provider(&cfg.cache_provider)?;
         // An unknown mail provider is a misconfiguration worth stopping for,
         // rather than silently falling through to some default and dropping mail.
         if !crate::mailer::is_known_provider(&cfg.mail_provider) {
@@ -272,6 +285,7 @@ impl Config {
             s3_access_key_id: None,
             s3_secret_access_key: None,
             s3_path_style: true,
+            cache_provider: "memory".into(),
             mail_provider: "capture".into(),
             smtp_host: None,
             smtp_port: 587,
