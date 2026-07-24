@@ -89,6 +89,10 @@ dotenvy = "0.15"
 toml = "0.8"
 walkdir = "2"
 cookie = { version = "0.18", features = ["key-expansion"] }
+# Outbound SMTP. rustls, not native-tls, to match the rest of the tree (no
+# OpenSSL). Async through tokio; builder for composing the message; no pooling
+# (a send is best-effort and one-shot).
+lettre = { version = "0.11", default-features = false, features = ["builder", "smtp-transport", "tokio1", "tokio1-rustls-tls", "hostname"] }
 
 [profile.release]
 lto = "thin"
