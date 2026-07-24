@@ -87,6 +87,8 @@ pub async fn exchange(
         issuer: claims.issuer().to_string(),
         subject: claims.subject().to_string(),
         email: claims.email().map(|e| e.to_string()),
+        // Only the IdP's assertion verifies the address; absent/false is unverified.
+        email_verified: claims.email_verified().unwrap_or(false),
         display_name: claims
             .name()
             .and_then(|n| n.get(None))
