@@ -15,7 +15,9 @@
 # Idempotent and self-cleaning: it deletes any stale cluster of the same name
 # before starting, and removes the cluster on exit unless --keep is given.
 #
-#   scripts/k8s-e2e.sh              build images, run the full cycle, tear down
+#   scripts/k8s-e2e.sh              build images from source, run cycle, tear down
+#   scripts/k8s-e2e.sh --pull       use PUBLISHED images (no in-job compile) — CI default
+#   scripts/k8s-e2e.sh --pull-tag T published tag to pull (default: latest)
 #   scripts/k8s-e2e.sh --keep       leave the cluster up for debugging
 #   scripts/k8s-e2e.sh --no-build   reuse images already tagged + loaded
 #   scripts/k8s-e2e.sh --cluster X  use a differently named kind cluster
@@ -31,15 +33,26 @@ IMG_REPO=nook.local
 PF_PORT=18080
 CHART=charts/nook-control
 KEEP=0
-NO_BUILD=0
+# How the app images get into kind: build (from source), pull (published), or
+# reuse (already loaded). Building the control-plane image is a full Rust
+# release compile — on a small CI runner it starves the kind node and the
+# in-cluster Postgres cannot become Ready, so CI pulls published images instead
+# (AC-4 explicitly allows "the images the release pipeline publishes").
+MODE=build
+PULL_CONTROL=${PULL_CONTROL:-ghcr.io/nook-os/nook-control}
+PULL_WEB=${PULL_WEB:-ghcr.io/nook-os/nook-web}
+PULL_TAG=${PULL_TAG:-latest}
 PF_PID=""
 
-usage() { sed -n '18,21p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '18,23p' "$0" | sed 's/^# \{0,1\}//'; }
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --keep) KEEP=1 ;;
-    --no-build) NO_BUILD=1 ;;
+    --build) MODE=build ;;
+    --pull) MODE=pull ;;
+    --pull-tag) PULL_TAG="${2:?--pull-tag needs a tag}"; shift ;;
+    --no-build) MODE=reuse ;;
     --cluster) CLUSTER="${2:?--cluster needs a name}"; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "unknown argument: $1" >&2; usage; exit 2 ;;
@@ -55,6 +68,27 @@ CTX="kind-$CLUSTER"
 kube() { kubectl --context "$CTX" "$@"; }
 log()  { printf '\n\033[38;5;214m▸\033[0m %s\n' "$*"; }
 die()  { printf '\033[31m✗\033[0m %s\n' "$*" >&2; exit 1; }
+
+# On any convergence failure, show WHY before dying — pod state, recent events,
+# and logs — so a CI failure is diagnosable from the run log instead of a bare
+# "context deadline exceeded".
+dump_diag() { # $1 = a selector or "" for the whole namespace
+  echo "── diagnostics: namespace $NS ─────────────────────────────────────────"
+  kube -n "$NS" get pods -o wide || true
+  kube -n "$NS" get events --sort-by=.lastTimestamp | tail -25 || true
+  if [ -n "${1:-}" ]; then
+    kube -n "$NS" describe pods -l "$1" || true
+    kube -n "$NS" logs -l "$1" --tail=40 --all-containers 2>/dev/null || true
+  fi
+  echo "───────────────────────────────────────────────────────────────────────"
+}
+
+wait_rollout() { # $1 = deploy (name or name-of), $2 = timeout, $3 = selector, $4 = label
+  if ! kube -n "$NS" rollout status "$1" --timeout="$2"; then
+    dump_diag "$3"
+    die "$4 did not become Ready within $2"
+  fi
+}
 
 cleanup() {
   local code=$?
@@ -77,28 +111,47 @@ kind delete cluster --name "$CLUSTER" >/dev/null 2>&1 || true
 log "creating kind cluster '$CLUSTER'"
 kind create cluster --name "$CLUSTER" --wait 120s
 
-# ── Images: build both, tag as two versions, load into kind ──────────────────
-# The upgrade test (AC-3) needs two tags; the same build under two tags proves
+# ── Throwaway Postgres FIRST, on an unburdened node ──────────────────────────
+# Before any image work: when images are built from source (the local default),
+# the compile is heavy, so getting Postgres Ready first means its readiness never
+# competes with the build. On a pull run it is simply fast.
+log "creating namespace + throwaway Postgres"
+kube create namespace "$NS"
+kube -n "$NS" apply -f "$CHART/ci/postgres.yaml"
+wait_rollout "deploy/$PG" 180s "app=$PG" "Postgres"
+
+# ── Images: build or pull, tag as two versions, load into kind ───────────────
+# The upgrade test (AC-3) needs two tags; the same image under two tags proves
 # the rollout rolls and the app stays reachable across an upgrade without
 # requiring two genuinely different builds.
-if [ "$NO_BUILD" = 0 ]; then
-  log "building control-plane image"
-  docker build -t "$IMG_REPO/nook-control:e2e-1" -f deploy/docker/control.Dockerfile .
-  log "building web image"
-  docker build -t "$IMG_REPO/nook-web:e2e-1" -f deploy/docker/web-prod.Dockerfile .
+prepare_source() {
+  case "$MODE" in
+    build)
+      log "building images from source (control-plane is a full Rust compile)"
+      docker build -t "$IMG_REPO/nook-control:e2e-1" -f deploy/docker/control.Dockerfile .
+      docker build -t "$IMG_REPO/nook-web:e2e-1" -f deploy/docker/web-prod.Dockerfile .
+      ;;
+    pull)
+      log "pulling published images ($PULL_TAG) — no in-job compile"
+      docker pull "$PULL_CONTROL:$PULL_TAG"
+      docker pull "$PULL_WEB:$PULL_TAG"
+      docker tag "$PULL_CONTROL:$PULL_TAG" "$IMG_REPO/nook-control:e2e-1"
+      docker tag "$PULL_WEB:$PULL_TAG" "$IMG_REPO/nook-web:e2e-1"
+      ;;
+    reuse)
+      log "reusing already-loaded images"
+      return 0
+      ;;
+  esac
   docker tag "$IMG_REPO/nook-control:e2e-1" "$IMG_REPO/nook-control:e2e-2"
   docker tag "$IMG_REPO/nook-web:e2e-1" "$IMG_REPO/nook-web:e2e-2"
-fi
+}
+prepare_source
+
 log "loading images into kind"
 kind load docker-image --name "$CLUSTER" \
   "$IMG_REPO/nook-control:e2e-1" "$IMG_REPO/nook-control:e2e-2" \
   "$IMG_REPO/nook-web:e2e-1" "$IMG_REPO/nook-web:e2e-2"
-
-# ── Namespace, throwaway Postgres, and the referenced Secret ─────────────────
-log "creating namespace + throwaway Postgres"
-kube create namespace "$NS"
-kube -n "$NS" apply -f "$CHART/ci/postgres.yaml"
-kube -n "$NS" rollout status "deploy/$PG" --timeout=150s
 
 log "creating the chart's Secret (DATABASE_URL -> in-cluster Postgres)"
 kube -n "$NS" create secret generic "$SECRET" \
@@ -118,10 +171,12 @@ install_at() { # $1 = image tag
 
 assert_healthy() { # $1 = label for the log line
   local web ok=""
-  kube -n "$NS" rollout status \
-    "$(kube -n "$NS" get deploy -l app.kubernetes.io/component=control -o name)" --timeout=200s
-  kube -n "$NS" rollout status \
-    "$(kube -n "$NS" get deploy -l app.kubernetes.io/component=web -o name)" --timeout=200s
+  wait_rollout \
+    "$(kube -n "$NS" get deploy -l app.kubernetes.io/component=control -o name)" \
+    200s "app.kubernetes.io/component=control" "$1: control-plane"
+  wait_rollout \
+    "$(kube -n "$NS" get deploy -l app.kubernetes.io/component=web -o name)" \
+    200s "app.kubernetes.io/component=web" "$1: web"
 
   web="$(kube -n "$NS" get svc -l app.kubernetes.io/component=web -o name | head -1)"
   kube -n "$NS" port-forward "$web" "$PF_PORT:80" >/dev/null 2>&1 &

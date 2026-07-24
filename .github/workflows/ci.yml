@@ -165,7 +165,13 @@ jobs:
   # its images, and this workflow (plus workflow_dispatch for on-demand runs).
   chart-e2e:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 30
+    # Read access to the org's published container images, so the e2e can pull
+    # them rather than compile the control plane in-job (a full Rust build on a
+    # 2-CPU runner starved the kind node and Postgres never became Ready).
+    permissions:
+      contents: read
+      packages: read
     steps:
       - uses: actions/checkout@v4
       - uses: dorny/paths-filter@v3
@@ -189,6 +195,11 @@ jobs:
         uses: helm/kind-action@v1
         with:
           install_only: true
+      # Pull the published images (private packages need this login; public ones
+      # ignore it). The e2e retags them as its two upgrade tags — no in-job compile.
+      - name: Log in to ghcr
+        if: steps.changes.outputs.charts == 'true' || github.event_name == 'workflow_dispatch'
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
       - name: Chart end-to-end on kind
         if: steps.changes.outputs.charts == 'true' || github.event_name == 'workflow_dispatch'
-        run: ./scripts/k8s-e2e.sh
+        run: ./scripts/k8s-e2e.sh --pull
