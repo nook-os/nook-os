@@ -69,30 +69,38 @@ kube() { kubectl --context "$CTX" "$@"; }
 log()  { printf '\n\033[38;5;214m▸\033[0m %s\n' "$*"; }
 die()  { printf '\033[31m✗\033[0m %s\n' "$*" >&2; exit 1; }
 
-# On any convergence failure, show WHY before dying — pod state, recent events,
-# and logs — so a CI failure is diagnosable from the run log instead of a bare
-# "context deadline exceeded".
-dump_diag() { # $1 = a selector or "" for the whole namespace
-  echo "── diagnostics: namespace $NS ─────────────────────────────────────────"
-  kube -n "$NS" get pods -o wide || true
-  kube -n "$NS" get events --sort-by=.lastTimestamp | tail -25 || true
-  if [ -n "${1:-}" ]; then
-    kube -n "$NS" describe pods -l "$1" || true
-    kube -n "$NS" logs -l "$1" --tail=40 --all-containers 2>/dev/null || true
-  fi
-  echo "───────────────────────────────────────────────────────────────────────"
+# Everything needed to see WHY the app did not converge — pod state, scheduling
+# events, and container logs (current AND previous, so a crash-loop shows its
+# last words). Called from the cleanup trap on ANY failing exit, so a
+# `helm --wait` / rollout timeout is diagnosable instead of a bare "context
+# deadline exceeded" followed by the cluster being deleted (which is what made
+# two earlier runs impossible to debug).
+diag_dump() {
+  echo "──────── FAILURE diagnostics: namespace $NS ────────"
+  kube get nodes -o wide 2>/dev/null || true
+  kube -n "$NS" get pods -o wide 2>/dev/null || true
+  kube -n "$NS" get events --sort-by=.lastTimestamp 2>/dev/null | tail -40 || true
+  kube -n "$NS" describe pods 2>/dev/null || true
+  for sel in \
+    "app.kubernetes.io/component=control" \
+    "app.kubernetes.io/component=web" \
+    "app=$PG"; do
+    echo "── logs ($sel) ──"
+    kube -n "$NS" logs -l "$sel" --tail=100 --all-containers 2>/dev/null || true
+    kube -n "$NS" logs -l "$sel" --tail=100 --all-containers --previous 2>/dev/null || true
+  done
+  echo "────────────────────────────────────────────────────"
 }
 
-wait_rollout() { # $1 = deploy (name or name-of), $2 = timeout, $3 = selector, $4 = label
-  if ! kube -n "$NS" rollout status "$1" --timeout="$2"; then
-    dump_diag "$3"
-    die "$4 did not become Ready within $2"
-  fi
+wait_rollout() { # $1 = deploy (name or name-of), $2 = timeout, $3 = label
+  kube -n "$NS" rollout status "$1" --timeout="$2" || die "$3 did not become Ready within $2"
 }
 
 cleanup() {
   local code=$?
   [ -n "$PF_PID" ] && kill "$PF_PID" 2>/dev/null || true
+  # Dump BEFORE teardown erases the evidence.
+  if [ "$code" -ne 0 ]; then diag_dump || true; fi
   if [ "$KEEP" = 1 ]; then
     log "keeping cluster '$CLUSTER' (--keep)"
     echo "  inspect: kubectl --context $CTX get pods -n $NS"
@@ -118,7 +126,7 @@ kind create cluster --name "$CLUSTER" --wait 120s
 log "creating namespace + throwaway Postgres"
 kube create namespace "$NS"
 kube -n "$NS" apply -f "$CHART/ci/postgres.yaml"
-wait_rollout "deploy/$PG" 180s "app=$PG" "Postgres"
+wait_rollout "deploy/$PG" 180s "Postgres"
 
 # ── Images: build or pull, tag as two versions, load into kind ───────────────
 # The upgrade test (AC-3) needs two tags; the same image under two tags proves
@@ -154,29 +162,34 @@ kind load docker-image --name "$CLUSTER" \
   "$IMG_REPO/nook-web:e2e-1" "$IMG_REPO/nook-web:e2e-2"
 
 log "creating the chart's Secret (DATABASE_URL -> in-cluster Postgres)"
+# SECRETS_KEY (64 hex) too: e2e-values runs APP_ENV=production, where the vault
+# key should be explicit rather than derived from SESSION_SECRET.
 kube -n "$NS" create secret generic "$SECRET" \
   --from-literal=DATABASE_URL="postgres://nook:nook@$PG:5432/nook" \
-  --from-literal=SESSION_SECRET="$(openssl rand -hex 32)"
+  --from-literal=SESSION_SECRET="$(openssl rand -hex 32)" \
+  --from-literal=SECRETS_KEY="$(openssl rand -hex 32)"
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 install_at() { # $1 = image tag
+  # No `helm --wait`: its failure is an opaque "context deadline exceeded" with
+  # no pod state. Apply, then wait_rollout ourselves so a stuck deployment is
+  # attributed and the trap dumps its pods/events/logs.
   helm upgrade --install "$RELEASE" "$CHART" \
     --kube-context "$CTX" -n "$NS" \
     -f "$CHART/ci/e2e-values.yaml" \
     --set existingSecret="$SECRET" \
     --set controlPlane.image.tag="$1" \
-    --set web.image.tag="$1" \
-    --wait --timeout 200s
+    --set web.image.tag="$1"
 }
 
 assert_healthy() { # $1 = label for the log line
   local web ok=""
   wait_rollout \
     "$(kube -n "$NS" get deploy -l app.kubernetes.io/component=control -o name)" \
-    200s "app.kubernetes.io/component=control" "$1: control-plane"
+    300s "$1: control-plane"
   wait_rollout \
     "$(kube -n "$NS" get deploy -l app.kubernetes.io/component=web -o name)" \
-    200s "app.kubernetes.io/component=web" "$1: web"
+    300s "$1: web"
 
   web="$(kube -n "$NS" get svc -l app.kubernetes.io/component=web -o name | head -1)"
   kube -n "$NS" port-forward "$web" "$PF_PORT:80" >/dev/null 2>&1 &

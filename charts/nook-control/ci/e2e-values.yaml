@@ -39,3 +39,8 @@ config:
   appEnv: production
   publicBaseUrl: http://localhost:18080
   webOrigin: http://localhost:18080
+
+# The e2e Secret carries SECRETS_KEY (64 hex); wire it so production mode uses an
+# explicit vault key rather than deriving one from SESSION_SECRET.
+secretKeys:
+  secretsKey: SECRETS_KEY
