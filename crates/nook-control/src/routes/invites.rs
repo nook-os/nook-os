@@ -583,4 +583,78 @@ mod db_tests {
             "a mismatched-email invite is NOT consumed by an existing member (AC-10)"
         );
     }
+
+    /// AC-8: acceptance is gated on a VERIFIED email. An accepter whose email
+    /// EQUALS the invite's but is not verified is declined, and the invite is
+    /// NOT consumed — the same link works once the address is verified. Pinned
+    /// on its own (the omnibus test also asserts it) so the gate is a clear,
+    /// hard-to-weaken regression signal, mirroring the AC-10 test above.
+    #[tokio::test]
+    async fn an_unverified_accepter_is_declined_and_the_invite_survives() {
+        let Some(db) = pool().await else { return };
+        let shared = tenant(&db, "ac8share").await;
+        let home = tenant(&db, "ac8home").await;
+        let person = Uuid::new_v4();
+        // The accepter's email EQUALS the invite email, but they are NOT
+        // verified — no `verify(...)`, so no identity carries `email_verified_at`.
+        let me = user(&db, home, "invitee@i8.test", person).await;
+
+        // A pending, unexpired invite in `shared` for that exact email.
+        let token = invite(&db, shared, "invitee@i8.test", 7).await;
+
+        // Unverified accept → declined, and nothing joins.
+        let declined = accept_core(&db, me, TenantId(home), &token).await.unwrap();
+        let member_after_decline = is_member(&db, shared, person).await;
+        let (still_pending,): (i64,) = sqlx::query_as(
+            "SELECT count(*) FROM invites WHERE tenant_id=$1 AND status='pending' AND lower(email)=lower($2)",
+        )
+        .bind(shared)
+        .bind("invitee@i8.test")
+        .fetch_one(&db)
+        .await
+        .unwrap();
+
+        // Verifying the address is the ONLY thing that was missing: the SAME
+        // token now accepts — proving the decline was the AC-8 gate, not a
+        // mismatch or an expiry.
+        verify(&db, me, "invitee@i8.test").await;
+        let accepted = accept_core(&db, me, TenantId(home), &token).await.unwrap();
+        let member_after_verify = is_member(&db, shared, person).await;
+
+        cleanup(&db, &[shared, home]).await;
+
+        assert!(
+            !declined.accepted,
+            "an unverified accepter is declined (AC-8)"
+        );
+        assert_eq!(
+            declined.tenant_id,
+            TenantId(home),
+            "the declined accepter stays in their own tenant"
+        );
+        assert!(
+            declined
+                .message
+                .to_lowercase()
+                .contains("verify your email"),
+            "declined for the verification gate specifically, got: {:?}",
+            declined.message
+        );
+        assert!(
+            !member_after_decline,
+            "no membership is created for an unverified accept (AC-8)"
+        );
+        assert_eq!(
+            still_pending, 1,
+            "the invite is NOT consumed — it stays pending until the email is verified (AC-8)"
+        );
+        assert!(
+            accepted.accepted && accepted.tenant_id == TenantId(shared),
+            "once verified, the SAME link accepts — the gate was the only blocker"
+        );
+        assert!(
+            member_after_verify,
+            "the verified accept creates the membership"
+        );
+    }
 }
