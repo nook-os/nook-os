@@ -6,7 +6,7 @@ import {
   QueryClientProvider,
   useQuery,
 } from "@tanstack/react-query";
-import { BrowserRouter, Route, Routes } from "react-router-dom";
+import { BrowserRouter, Route, Routes, useNavigate } from "react-router-dom";
 import { api } from "@nookos/api";
 import { Empty, ThemeProvider } from "@nookos/ui";
 import { Shell } from "./layout";
@@ -19,6 +19,7 @@ import { FeedbackPage } from "./pages/Feedback";
 import { Login } from "./pages/Login";
 import { Connect } from "./pages/Connect";
 import { checkForUpdate, initDesktop, installUpdate, isDesktop, type AvailableUpdate } from "./desktop";
+import { installLinkHandler } from "./links";
 import { NodeDetail, NodesPage } from "./pages/Nodes";
 import { SessionPage, SessionsPage } from "./pages/Session";
 import { SettingsPage } from "./pages/Settings";
@@ -31,6 +32,15 @@ const queryClient = new QueryClient({
 });
 
 function AuthGate() {
+  // Before anything else, and outside the signed-in branch: the connect screen
+  // shows a link too, and a link that navigates this webview is what broke
+  // sign-in there in the first place.
+  const navigate = useNavigate();
+  useEffect(() => {
+    if (!isDesktop()) return;
+    return installLinkHandler((path) => navigate(path));
+  }, [navigate]);
+
   // The desktop build has no control plane on its own origin, so the stored
   // endpoint has to be loaded and applied BEFORE the first request goes out —
   // otherwise /auth/me is sent to tauri://localhost and fails in a way that

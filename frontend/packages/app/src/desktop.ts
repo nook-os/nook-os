@@ -63,6 +63,25 @@ export async function clearDesktopEndpoint(): Promise<void> {
 }
 
 /**
+ * Hand a URL to the OS browser.
+ *
+ * Never `window.open`, and never a plain `<a href>`, in the packaged app: both
+ * move the ONE webview off `tauri://localhost`. On any other origin Tauri
+ * refuses every command in this file by ACL, so the app arrives somewhere it
+ * cannot read its own endpoint and reports itself as unconfigured. Opening
+ * elsewhere is the only safe thing to do with an address that is not ours.
+ */
+export async function openExternal(url: string): Promise<void> {
+  const call = invoke();
+  if (!call) {
+    // A browser tab has more than one of itself; leaving is free.
+    window.open(url, "_blank", "noopener");
+    return;
+  }
+  await call("open_external", { url });
+}
+
+/**
  * Check a control plane answers before we store its address.
  *
  * `/healthz` needs no credential, so this separates "wrong address" from

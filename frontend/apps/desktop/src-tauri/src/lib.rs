@@ -39,9 +39,8 @@ fn config_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
 fn load_endpoint(app: tauri::AppHandle) -> Result<Endpoint, String> {
     let path = config_path(&app)?;
     match fs::read_to_string(&path) {
-        Ok(text) => {
-            serde_json::from_str(&text).map_err(|e| format!("{} is unreadable: {e}", path.display()))
-        }
+        Ok(text) => serde_json::from_str(&text)
+            .map_err(|e| format!("{} is unreadable: {e}", path.display())),
         // Not configured yet is the ordinary first-run state, not a failure.
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Endpoint::default()),
         Err(e) => Err(format!("cannot read {}: {e}", path.display())),
@@ -74,14 +73,61 @@ fn clear_endpoint(app: tauri::AppHandle) -> Result<(), String> {
     }
 }
 
+/// Open a URL in the OS browser.
+///
+/// The webview must never go anywhere itself — see `allow_navigation`. This is
+/// the other half of that rule: somewhere for a link to go instead.
+#[tauri::command]
+async fn open_external(app: tauri::AppHandle, url: String) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    app.opener()
+        .open_url(url, None::<&str>)
+        .map_err(|e| format!("could not open that link: {e}"))
+}
+
+/// Whether the webview may navigate to `url`.
+///
+/// Only ever its own bundle. This app is served from `tauri://localhost` (and
+/// `http://localhost:5173` while developing), and Tauri denies every command
+/// above to any other origin — so a webview that wanders is an app that can no
+/// longer read its own configuration or sign anybody in. It reported that as
+/// "connect to a control plane", which sent people to re-enter an address that
+/// had been correct all along.
+///
+/// The frontend intercepts link clicks and hands them to `open_external`
+/// before they get here. This is the backstop for the ones it misses:
+/// `window.location`, a form post, a redirect from a page we did load.
+fn allow_navigation(url: &tauri::Url) -> bool {
+    match url.scheme() {
+        "tauri" | "asset" => true,
+        "http" | "https" => matches!(
+            url.host_str(),
+            Some("localhost") | Some("127.0.0.1") | Some("tauri.localhost")
+        ),
+        _ => false,
+    }
+}
+
+/// Carries `allow_navigation` as a plugin, which is where Tauri hangs that
+/// hook — the app builder has no equivalent, and the alternative is building
+/// the window in Rust purely to attach it, abandoning the window config.
+fn nav_guard<R: tauri::Runtime>() -> tauri::plugin::TauriPlugin<R> {
+    tauri::plugin::Builder::new("nook-nav-guard")
+        .on_navigation(|_webview, url| allow_navigation(url))
+        .build()
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_opener::init())
+        .plugin(nav_guard())
         .invoke_handler(tauri::generate_handler![
             load_endpoint,
             save_endpoint,
             clear_endpoint,
+            open_external,
             device_start,
             device_poll,
             update_check,
@@ -89,6 +135,42 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running NookOS desktop");
+}
+
+#[cfg(test)]
+mod nav_tests {
+    use super::allow_navigation;
+
+    fn allowed(u: &str) -> bool {
+        allow_navigation(&tauri::Url::parse(u).expect("test url"))
+    }
+
+    #[test]
+    fn own_bundle_and_dev_server_are_allowed() {
+        assert!(allowed("tauri://localhost/board"));
+        assert!(allowed("http://localhost:5173/sessions/abc"));
+        assert!(allowed("http://127.0.0.1:5173/"));
+        // Windows serves the bundle from here.
+        assert!(allowed("http://tauri.localhost/"));
+    }
+
+    #[test]
+    fn control_planes_and_providers_are_not() {
+        // The exact navigation that stranded the app on the connect screen: a
+        // notification link is absolute, and its origin is not this app.
+        assert!(!allowed("https://nook.hein.network/board?task=MAIN-9"));
+        // And the one that made device sign-in impossible to finish.
+        assert!(!allowed(
+            "https://id.example.com/device?user_code=ABCD-EFGH"
+        ));
+        assert!(!allowed("http://nook.hein.network/"));
+    }
+
+    #[test]
+    fn other_schemes_are_not() {
+        assert!(!allowed("file:///etc/passwd"));
+        assert!(!allowed("javascript:alert(1)"));
+    }
 }
 
 // ── signing in ───────────────────────────────────────────────────────────
@@ -143,9 +225,11 @@ async fn device_start(server: String) -> Result<DeviceStart, String> {
     // changed theirs.
     let providers: Providers = get_json(&format!("{server}/api/v1/auth/providers")).await?;
     if !providers.oidc {
-        return Err("this control plane has no identity provider — sign in with a \
+        return Err(
+            "this control plane has no identity provider — sign in with a \
                     username and password, or paste a token"
-            .into());
+                .into(),
+        );
     }
     let endpoint = providers
         .device_authorization_endpoint

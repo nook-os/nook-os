@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 import {
+  openExternal,
   probeControlPlane,
   probeToken,
   saveDesktopEndpoint,
@@ -164,6 +165,11 @@ export function Connect({ onDone }: { onDone: () => void }) {
     // Rust command) so the code stays on screen and the window stays live.
     const deadline = Date.now() + start.expires_in_secs * 1000;
     savePending({ url, start, deadline });
+    // "Your browser should have opened" was a claim nobody was making true:
+    // nothing opened it, and the fallback link navigated this webview to the
+    // provider — an origin where `device_poll` is denied, so the flow it was
+    // offering to complete could never complete. Open it for real.
+    void openExternal(start.verification_uri);
     await poll(url, start, deadline);
   };
 
