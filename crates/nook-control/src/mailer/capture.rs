@@ -1,9 +1,9 @@
-//! A mailer that records (and logs) what would be sent instead of sending.
+//! The `capture` mail provider: records (and logs) what would be sent instead
+//! of sending it.
 //!
-//! Two jobs: it is what tests assert against, and it is the fallback when no
-//! SMTP is configured — so a dev without a mail server, and a fresh instance
-//! before mail is set up, both boot and run rather than erroring on the first
-//! send.
+//! Two jobs: it is what tests assert against, and it is the default provider —
+//! so a dev without a mail server, and a fresh instance before mail is set up,
+//! both boot and run rather than erroring on the first send.
 
 use std::sync::Mutex;
 
@@ -54,7 +54,7 @@ impl Mailer for CaptureMailer {
         tracing::info!(
             to,
             subject,
-            "email captured — no SMTP configured, not delivered"
+            "email captured by the capture provider — not delivered"
         );
         let mut sent = self.sent.lock().expect("capture lock");
         if sent.len() >= MAX_KEPT {
@@ -70,7 +70,7 @@ impl Mailer for CaptureMailer {
     }
 
     fn describe(&self) -> String {
-        "capture (no SMTP configured — mail is logged, not sent)".into()
+        "capture (mail is logged, not sent)".into()
     }
 }
 

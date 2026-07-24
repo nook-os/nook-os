@@ -112,10 +112,15 @@ pub struct Config {
     /// self-hosted gateways rarely have per-bucket DNS.
     pub s3_path_style: bool,
 
-    // ── Email (SMTP) ────────────────────────────────────────────────────
-    /// SMTP host. Present → mail is sent over SMTP; absent → the capture/log
-    /// mailer (dev without SMTP still boots). Dev points at Mailpit, prod at the
-    /// mail relay.
+    // ── Email (mail provider) ───────────────────────────────────────────
+    /// Which mail transport to use, chosen by name — `smtp` or `capture`.
+    /// Explicit, like `NOOK_ARTIFACT_STORE`, rather than inferred from whether
+    /// an SMTP host happens to be set: a provider is a deployment decision, and
+    /// adding a hosted transport later (SES, Sendgrid, …) means a new name here,
+    /// not new inference. Defaults to `capture` (logs, does not send).
+    pub mail_provider: String,
+    /// SMTP host, used when `mail_provider = smtp`. Dev points at Mailpit, prod
+    /// at the mail relay.
     pub smtp_host: Option<String>,
     /// SMTP port. 587 (submission/STARTTLS) by default; 1025 for Mailpit, 465
     /// for implicit TLS.
@@ -189,6 +194,7 @@ impl Config {
             mcp_token: env_opt("MCP_TOKEN"),
             dev_join_token: env_opt("NOOK_DEV_JOIN_TOKEN"),
 
+            mail_provider: env_opt("MAIL_PROVIDER").unwrap_or_else(|| "capture".into()),
             smtp_host: env_opt("SMTP_HOST"),
             smtp_port: env_opt("SMTP_PORT")
                 .and_then(|v| v.parse().ok())
@@ -201,6 +207,15 @@ impl Config {
 
         if cfg.is_production() && cfg.auth_dev_mode {
             anyhow::bail!("AUTH_DEV_MODE must not be enabled when APP_ENV=production");
+        }
+        // An unknown mail provider is a misconfiguration worth stopping for,
+        // rather than silently falling through to some default and dropping mail.
+        if !crate::mailer::is_known_provider(&cfg.mail_provider) {
+            anyhow::bail!(
+                "MAIL_PROVIDER must be one of [{}] — got {:?}",
+                crate::mailer::PROVIDERS.join(", "),
+                cfg.mail_provider
+            );
         }
         if cfg.session_secret.len() < 32 {
             anyhow::bail!("SESSION_SECRET must be at least 32 characters");
@@ -257,6 +272,7 @@ impl Config {
             s3_access_key_id: None,
             s3_secret_access_key: None,
             s3_path_style: true,
+            mail_provider: "capture".into(),
             smtp_host: None,
             smtp_port: 587,
             smtp_tls: "starttls".into(),
