@@ -28,12 +28,39 @@ use anyhow::Result;
 use async_trait::async_trait;
 
 pub mod capture;
+pub mod guard;
+pub mod postmark;
 pub mod smtp;
+
+pub use guard::GuardedMailer;
 
 /// The mail-provider names this build understands. `MAIL_PROVIDER` must be one
 /// of these; the first is the default. Adding a transport adds a name here and
 /// an arm in [`from_config`] — never a change to the [`Mailer`] trait.
-pub const PROVIDERS: &[&str] = &["capture", "smtp"];
+pub const PROVIDERS: &[&str] = &["capture", "smtp", "postmark"];
+
+/// Why a message is being sent — the axis the send guards gate on. A transport
+/// ignores it (a transport just delivers); the [`GuardedMailer`] uses it to
+/// decide whether a send is allowed (MAIN-52 AC-3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Category {
+    /// Verification and invite mail — a user is waiting on it. Sends whenever
+    /// sending is enabled.
+    Transactional,
+    /// The email notification channel. Sends only when sending is enabled AND
+    /// notifications are separately enabled — so turning mail on does not, by
+    /// itself, start emailing notifications.
+    Notification,
+}
+
+impl Category {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Category::Transactional => "transactional",
+            Category::Notification => "notification",
+        }
+    }
+}
 
 /// Whether `name` is a provider this build understands (config validates it at
 /// boot so an unknown value fails loudly rather than silently dropping mail).
@@ -55,6 +82,7 @@ pub trait Mailer: Send + Sync {
         subject: &str,
         text_body: &str,
         html_body: Option<&str>,
+        category: Category,
     ) -> Result<()>;
 
     /// For logs and the health page: which provider, pointed where.
@@ -80,6 +108,19 @@ pub fn from_config(cfg: &crate::config::Config) -> Box<dyn Mailer> {
                 tracing::error!(
                     error = %e,
                     "MAIL_PROVIDER=smtp but the transport is unusable — capturing mail instead; nothing will be delivered"
+                );
+                Box::new(capture::CaptureMailer::new())
+            }
+        },
+        "postmark" => match postmark::PostmarkMailer::from_config(cfg) {
+            Ok(m) => {
+                tracing::info!(provider = %m.describe(), "mail provider");
+                Box::new(m)
+            }
+            Err(e) => {
+                tracing::error!(
+                    error = %e,
+                    "MAIL_PROVIDER=postmark but the transport is unusable — capturing mail instead; nothing will be delivered"
                 );
                 Box::new(capture::CaptureMailer::new())
             }
@@ -121,6 +162,7 @@ mod tests {
     fn only_known_provider_names_are_accepted() {
         assert!(is_known_provider("capture"));
         assert!(is_known_provider("smtp"));
+        assert!(is_known_provider("postmark"));
         assert!(!is_known_provider("ses"));
         assert!(!is_known_provider(""));
         // The default is a real provider.
