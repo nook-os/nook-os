@@ -163,6 +163,13 @@ jobs:
   # the app answers, exercise `helm upgrade`, then tear down. It builds the
   # images, so it is far heavier than `helm` — hence path-filtered to the chart,
   # its images, and this workflow (plus workflow_dispatch for on-demand runs).
+  #
+  # AC-2 (MAIN-38) — this job must be safe to make a REQUIRED status check. A
+  # required check that never runs blocks a PR forever, so the job runs
+  # UNCONDITIONALLY (no job-level `if`) and gates only its heavy steps: on a PR
+  # that touches no chart files every heavy step skips and the job is a fast
+  # success (the explicit skip note below), so `chart-e2e` reports green on
+  # EVERY PR — chart PRs run the deploy, non-chart PRs are not blocked.
   chart-e2e:
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -183,6 +190,13 @@ jobs:
               - 'deploy/docker/**'
               - 'scripts/k8s-e2e.sh'
               - '.github/workflows/ci.yml'
+      # The fast-success path: no chart-affecting files changed, so the deploy
+      # test is intentionally skipped and this required check reports green.
+      - name: No chart changes — skip the deploy test
+        if: steps.changes.outputs.charts != 'true' && github.event_name != 'workflow_dispatch'
+        run: |
+          echo "No changes under charts/, deploy/docker/, scripts/k8s-e2e.sh or the CI workflow."
+          echo "Skipping the kind deploy test; this required check reports success."
       - name: Set up Helm
         if: steps.changes.outputs.charts == 'true' || github.event_name == 'workflow_dispatch'
         uses: azure/setup-helm@v4
