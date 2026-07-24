@@ -1,0 +1,57 @@
+# Throwaway Postgres for the kind end-to-end run (scripts/k8s-e2e.sh).
+# Ephemeral: emptyDir, no PVC, no persistence — it dies with the cluster.
+# NEVER use this for anything real; the password is a fixed literal on purpose.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nook-e2e-postgres
+  labels:
+    app: nook-e2e-postgres
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: nook-e2e-postgres
+  template:
+    metadata:
+      labels:
+        app: nook-e2e-postgres
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          env:
+            - { name: POSTGRES_USER, value: nook }
+            - { name: POSTGRES_PASSWORD, value: nook }
+            - { name: POSTGRES_DB, value: nook }
+            # Keep PGDATA in a subdir so the emptyDir mount root does not trip
+            # postgres' "directory not empty" check.
+            - { name: PGDATA, value: /var/lib/postgresql/data/pgdata }
+          ports:
+            - containerPort: 5432
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "nook"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 10
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+      volumes:
+        - name: data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nook-e2e-postgres
+  labels:
+    app: nook-e2e-postgres
+spec:
+  selector:
+    app: nook-e2e-postgres
+  ports:
+    - port: 5432
+      targetPort: 5432
