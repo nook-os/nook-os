@@ -10,7 +10,7 @@ use lettre::message::{header::ContentType, Mailbox, MultiPart};
 use lettre::transport::smtp::authentication::Credentials;
 use lettre::{AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor};
 
-use super::Mailer;
+use super::{Category, Mailer};
 
 pub struct SmtpMailer {
     transport: AsyncSmtpTransport<Tokio1Executor>,
@@ -92,6 +92,8 @@ impl Mailer for SmtpMailer {
         subject: &str,
         text_body: &str,
         html_body: Option<&str>,
+        // A transport just delivers; the category is the guard's concern.
+        _category: Category,
     ) -> Result<()> {
         let recipient: Mailbox = to
             .parse()

@@ -115,7 +115,13 @@ pub async fn request_core(
     // Best-effort — a failed send is a reported state, not a crash (AC-5).
     match state
         .mailer
-        .send(&email, "Verify your email — NookOS", &body, None)
+        .send(
+            &email,
+            "Verify your email — NookOS",
+            &body,
+            None,
+            crate::mailer::Category::Transactional,
+        )
         .await
     {
         Ok(()) => Ok(RequestVerificationResult {

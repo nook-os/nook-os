@@ -43,7 +43,15 @@ impl AppState {
         let vault = Vault::from_env(&cfg.session_secret).expect("vault init failed");
         let artifacts: Arc<dyn crate::storage::ArtifactStore> =
             Arc::from(crate::storage::from_config(&cfg).await);
-        let mailer: Arc<dyn crate::mailer::Mailer> = Arc::from(crate::mailer::from_config(&cfg));
+        // The configured transport, wrapped in the send guards (enable /
+        // category / quota) so every provider is gated identically (MAIN-52).
+        let transport: Arc<dyn crate::mailer::Mailer> = Arc::from(crate::mailer::from_config(&cfg));
+        let mailer: Arc<dyn crate::mailer::Mailer> = Arc::new(crate::mailer::GuardedMailer::new(
+            transport,
+            db.clone(),
+            &cfg,
+        ));
+        // A swappable key/value cache; first consumer is the tenants list (MAIN-27).
         let cache: Arc<dyn crate::cache::Cache> = Arc::from(crate::cache::from_config(&cfg));
         Self {
             artifacts,

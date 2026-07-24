@@ -24,5 +24,5 @@ pub use state::AppState;
 // for the new migration to be embedded and applied. Migrations embedded:
 // 0001_init, 0002_add_person_id, 0003_backfill_tenant_members,
 // 0004_add_task_archived_at, 0005_invites, 0006_add_email_verified,
-// 0007_email_verification_tokens.
+// 0007_email_verification_tokens, 0008_mail_sends.
 pub static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
