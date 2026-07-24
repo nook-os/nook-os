@@ -26,13 +26,15 @@ use crate::state::AppState;
 
 /// Every tenant this person belongs to, resolved from `tenant_members`.
 ///
-/// A person is one `users` row PER tenant, keyed by email — the same email in
-/// two tenants is the same human, which is how membership in a shared tenant is
-/// represented (a `users` row with their email + a `tenant_members` grant). So
-/// "which tenants can this user reach" is: find every `users` row sharing this
-/// user's email, keep the ones with a live `tenant_members` grant, and return
-/// their tenants. `tenant_members` is the single source of truth (AC-7): a
-/// membership row that is gone drops the tenant from this list.
+/// A person is one `users` row PER tenant, and the rows are tied together by
+/// `person_id` — a platform-issued value (`0002_add_person_id`), NOT the email
+/// string. Email was the join key once, but it is unverified: anyone who could
+/// create a `users` row carrying a victim's email string reached the victim's
+/// tenants (MAIN-12). So "which tenants can this user reach" is: find every
+/// `users` row sharing this user's `person_id`, keep the ones with a live
+/// `tenant_members` grant, and return their tenants. `tenant_members` is the
+/// single source of truth (AC-7): a membership row that is gone drops the
+/// tenant from this list.
 ///
 /// `active` is the tenant the session is scoped to right now, marked `current`.
 pub async fn memberships_for(
@@ -43,7 +45,7 @@ pub async fn memberships_for(
     let rows: Vec<(TenantId, String, String, String, DateTime<Utc>)> = sqlx::query_as(
         "SELECT t.id, t.name, t.slug, tm.role, t.created_at
          FROM users me
-         JOIN users u ON lower(u.email) = lower(me.email)
+         JOIN users u ON u.person_id = me.person_id
          JOIN tenant_members tm
              ON tm.tenant_id = u.tenant_id
             AND tm.principal_type = 'user'
@@ -81,6 +83,8 @@ fn to_memberships(
 /// they actually belong there. Returns `None` when there is no membership — the
 /// caller turns that into a 403. This is the guard behind tenant switching: the
 /// active tenant can only become one the person is a `tenant_members` of.
+/// Correlated by `person_id`, never email (MAIN-12), so a matching email string
+/// in another tenant cannot be leveraged into a switch.
 pub async fn member_user_in_tenant(
     db: &PgPool,
     user_id: UserId,
@@ -89,7 +93,7 @@ pub async fn member_user_in_tenant(
     let row: Option<(UserId,)> = sqlx::query_as(
         "SELECT u.id
          FROM users me
-         JOIN users u ON lower(u.email) = lower(me.email)
+         JOIN users u ON u.person_id = me.person_id
          JOIN tenant_members tm
              ON tm.tenant_id = u.tenant_id
             AND tm.principal_type = 'user'
@@ -388,5 +392,221 @@ mod tests {
         )];
         let out = to_memberships(rows, orphan);
         assert!(out.iter().all(|m| !m.current));
+    }
+}
+
+/// Behavioral tests that hit a real Postgres — the AC-3 regression can only be
+/// proven against the database, since it is about what the SQL join returns.
+/// They connect to `DATABASE_URL` and no-op when the DB is absent (the same
+/// `NOOK_REQUIRE_DB` gate the rest of the suite uses), so `cargo test` on a
+/// machine without Postgres still passes.
+#[cfg(test)]
+mod db_tests {
+    use super::{member_user_in_tenant, memberships_for};
+    use nook_types::{TenantId, UserId};
+    use sqlx::postgres::PgPoolOptions;
+    use sqlx::PgPool;
+    use uuid::Uuid;
+
+    /// A pool, or `None` when there is no database to talk to — in which case
+    /// the test returns early rather than failing, matching the suite's
+    /// convention that DB-backed tests are skipped without `NOOK_REQUIRE_DB`.
+    async fn pool() -> Option<PgPool> {
+        if std::env::var("NOOK_REQUIRE_DB").ok().as_deref() != Some("1") {
+            return None;
+        }
+        let url = std::env::var("DATABASE_URL").ok()?;
+        PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&url)
+            .await
+            .ok()
+    }
+
+    async fn tenant(db: &PgPool, name: &str) -> TenantId {
+        let id = Uuid::new_v4();
+        // Slug is unique instance-wide; the uuid keeps parallel/repeat runs from
+        // colliding.
+        sqlx::query("INSERT INTO tenants (id, name, slug) VALUES ($1, $2, $3)")
+            .bind(id)
+            .bind(name)
+            .bind(format!("main12-{id}"))
+            .execute(db)
+            .await
+            .unwrap();
+        TenantId(id)
+    }
+
+    /// A `users` row with an EXPLICIT `person_id` and `email`, plus its
+    /// `tenant_members` grant — the two knobs AC-3 turns.
+    async fn member(db: &PgPool, tenant: TenantId, email: &str, person: Uuid) -> UserId {
+        let uid = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO users (id, tenant_id, display_name, email, role, person_id)
+             VALUES ($1, $2, 'T', $3, 'member', $4)",
+        )
+        .bind(uid)
+        .bind(tenant.0)
+        .bind(email)
+        .bind(person)
+        .execute(db)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO tenant_members (id, tenant_id, principal_type, principal_id, role)
+             VALUES ($1, $2, 'user', $3, 'member')",
+        )
+        .bind(Uuid::new_v4())
+        .bind(tenant.0)
+        .bind(uid)
+        .execute(db)
+        .await
+        .unwrap();
+        UserId(uid)
+    }
+
+    async fn cleanup(db: &PgPool, tenants: &[TenantId]) {
+        for t in tenants {
+            let _ = sqlx::query("DELETE FROM tenant_members WHERE tenant_id = $1")
+                .bind(t.0)
+                .execute(db)
+                .await;
+            let _ = sqlx::query("DELETE FROM users WHERE tenant_id = $1")
+                .bind(t.0)
+                .execute(db)
+                .await;
+            let _ = sqlx::query("DELETE FROM tenants WHERE id = $1")
+                .bind(t.0)
+                .execute(db)
+                .await;
+        }
+    }
+
+    /// AC-3, both directions: membership follows `person_id`, never email.
+    ///
+    /// - `me` (tenant A, email `shared@`, person P1)
+    /// - `imposter` (tenant B, SAME email `shared@`, DIFFERENT person P2) — the
+    ///   account-takeover row: under the old email join it would have granted
+    ///   `me` reach into B. It must not.
+    /// - `twin` (tenant C, DIFFERENT email `other@`, SAME person P1) — the
+    ///   legitimate shared membership. It must be reachable, proving the join is
+    ///   by person and not by email.
+    #[tokio::test]
+    async fn membership_follows_person_id_not_email() {
+        let Some(db) = pool().await else {
+            eprintln!("skipping membership_follows_person_id_not_email — no DATABASE_URL");
+            return;
+        };
+
+        let p1 = Uuid::new_v4();
+        let p2 = Uuid::new_v4();
+        let a = tenant(&db, "A").await;
+        let b = tenant(&db, "B").await;
+        let c = tenant(&db, "C").await;
+
+        let me = member(&db, a, "shared@main12.test", p1).await;
+        let _imposter = member(&db, b, "shared@main12.test", p2).await;
+        let twin = member(&db, c, "other@main12.test", p1).await;
+
+        // Collect every result BEFORE asserting, so cleanup always runs even
+        // when an assertion is about to fail.
+        let reachable: Vec<TenantId> = memberships_for(&db, me, a)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|m| m.id)
+            .collect();
+        let into_b = member_user_in_tenant(&db, me, b).await.unwrap();
+        let into_c = member_user_in_tenant(&db, me, c).await.unwrap();
+
+        cleanup(&db, &[a, b, c]).await;
+
+        // Same person → tenants A and C are reachable; the same-email imposter
+        // tenant B is NOT.
+        assert!(reachable.contains(&a), "own tenant A is reachable");
+        assert!(
+            reachable.contains(&c),
+            "tenant C (same person_id, different email) is reachable — resolution is by person"
+        );
+        assert!(
+            !reachable.contains(&b),
+            "tenant B (same email, different person_id) must NOT be reachable — this is the account-takeover the email join allowed"
+        );
+
+        // The switch guard agrees: refused into B, allowed into C as the twin.
+        assert!(
+            into_b.is_none(),
+            "member_user_in_tenant must refuse B (matching email, different person)"
+        );
+        assert_eq!(
+            into_c,
+            Some(twin),
+            "member_user_in_tenant must resolve C to the twin row (matching person)"
+        );
+    }
+
+    /// AC-1/AC-4: the migration ran (`person_id` exists and is NOT NULL), and
+    /// the value comes from the platform default `gen_random_uuid()` — so rows
+    /// created without specifying it get their OWN distinct value, never one
+    /// derived from email. This is the same per-row volatile default that
+    /// backfilled the pre-existing rows, so it proves the distinctness AC-4
+    /// requires without depending on other rows in a shared dev database.
+    #[tokio::test]
+    async fn person_id_defaults_to_a_distinct_platform_value() {
+        let Some(db) = pool().await else {
+            eprintln!("skipping person_id_defaults_to_a_distinct_platform_value — no DATABASE_URL");
+            return;
+        };
+
+        // Column exists and is NOT NULL (the query erroring would fail the test,
+        // and the constraint guarantees no nulls — this also confirms 0002 ran).
+        let (nulls,): (i64,) = sqlx::query_as("SELECT count(*) FROM users WHERE person_id IS NULL")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(nulls, 0, "every users row has a person_id");
+
+        // Insert three users that DO NOT set person_id — the same email even —
+        // and confirm the default gave each a distinct, non-email value.
+        let t = tenant(&db, "defaults").await;
+        let mut ids = Vec::new();
+        for i in 0..3 {
+            let uid = Uuid::new_v4();
+            sqlx::query(
+                "INSERT INTO users (id, tenant_id, display_name, email, role)
+                 VALUES ($1, $2, 'D', $3, 'member')",
+            )
+            .bind(uid)
+            .bind(t.0)
+            // Distinct emails only because of the per-tenant unique constraint;
+            // the point is that person_id is NOT derived from them.
+            .bind(format!("d{i}@main12.test"))
+            .execute(&db)
+            .await
+            .unwrap();
+            ids.push(uid);
+        }
+        let persons: Vec<Uuid> = sqlx::query_as::<_, (Uuid,)>(
+            "SELECT person_id FROM users WHERE tenant_id = $1 ORDER BY id",
+        )
+        .bind(t.0)
+        .fetch_all(&db)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|(p,)| p)
+        .collect();
+
+        cleanup(&db, &[t]).await;
+
+        assert_eq!(persons.len(), 3);
+        let mut sorted = persons.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(
+            sorted.len(),
+            3,
+            "the default assigns each row a distinct person_id"
+        );
     }
 }
