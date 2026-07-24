@@ -27,6 +27,16 @@ export function SessionTabs({ activeId }: { activeId?: string }) {
   const showNewWork = useNewWork((s) => s.show);
   const selectedWorkspaceId = useWorkspaceContext((s) => s.selectedWorkspaceId);
   const [menu, setMenu] = useState<MenuState | null>(null);
+  // Drag-to-reorder state: which tab is being dragged, and where the insertion
+  // line currently sits (a target tab and whether it drops after it). Both null
+  // when nothing is dragging.
+  const [dragId, setDragId] = useState<string | null>(null);
+  const [dropAt, setDropAt] = useState<{ id: string; after: boolean } | null>(null);
+
+  const endDrag = () => {
+    setDragId(null);
+    setDropAt(null);
+  };
 
   // Tabs are scoped to the workspace context; "all workspaces" shows every
   // tab, labeled with its workspace so cross-workspace tabs stay tellable.
@@ -79,18 +89,67 @@ export function SessionTabs({ activeId }: { activeId?: string }) {
         {tabs.map((t) => {
           const st = sessionStatus[t.id];
           const dead = st === "exited" || st === "error" || st === "killed";
+          const dragged = dragId ? tabs.find((x) => x.id === dragId) : null;
+          // A drop is only legal within the same pin group (AC-3), so the
+          // insertion line and the drop itself are gated on it.
+          const sameGroup = dragged ? !!dragged.pinned === !!t.pinned : false;
+          const dropHere = dropAt?.id === t.id ? dropAt : null;
           return (
             <div
               key={t.id}
-              className={`session-tab${t.id === activeId ? " active" : ""}${
-                t.pinned ? " pinned" : ""
-              }`}
+              className={
+                `session-tab${t.id === activeId ? " active" : ""}` +
+                `${t.pinned ? " pinned" : ""}` +
+                `${dragId === t.id ? " dragging" : ""}` +
+                `${dropHere && !dropHere.after ? " drop-before" : ""}` +
+                `${dropHere && dropHere.after ? " drop-after" : ""}`
+              }
+              draggable
               onClick={() => navigate(`/sessions/${t.id}`)}
               onContextMenu={(e) => {
                 e.preventDefault();
                 setMenu({ id: t.id, x: e.clientX, y: e.clientY });
               }}
               onDoubleClick={() => renameSession(t.id, t.name)}
+              // Middle-click closes the tab, like a browser/VS Code. mousedown
+              // preventDefault stops the middle-click autoscroll circle; the
+              // close fires on auxclick so a plain drag never triggers it.
+              onMouseDown={(e) => {
+                if (e.button === 1) e.preventDefault();
+              }}
+              onAuxClick={(e) => {
+                if (e.button === 1) {
+                  e.preventDefault();
+                  closeTab(t.id);
+                }
+              }}
+              onDragStart={(e) => {
+                setDragId(t.id);
+                e.dataTransfer.effectAllowed = "move";
+                // Firefox requires data to be set for a drag to start at all.
+                e.dataTransfer.setData("text/plain", t.id);
+              }}
+              onDragOver={(e) => {
+                if (!dragId || dragId === t.id || !sameGroup) return;
+                // Allow the drop and place the line on the near half.
+                e.preventDefault();
+                const r = e.currentTarget.getBoundingClientRect();
+                const after = e.clientX > r.left + r.width / 2;
+                if (dropAt?.id !== t.id || dropAt.after !== after) {
+                  setDropAt({ id: t.id, after });
+                }
+              }}
+              onDrop={(e) => {
+                if (!dragId || dragId === t.id || !sameGroup) return;
+                e.preventDefault();
+                const r = e.currentTarget.getBoundingClientRect();
+                const after = e.clientX > r.left + r.width / 2;
+                store.reorder(dragId, t.id, after);
+                endDrag();
+              }}
+              // Fires whether the drag ended in a drop or was released outside
+              // the strip — so a cancelled drag leaves order and tabs untouched.
+              onDragEnd={endDrag}
               title={`${t.name} · ${t.runtime}${st ? ` · ${st}` : ""}`}
             >
               <SquareTerminal

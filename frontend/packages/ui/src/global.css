@@ -958,6 +958,23 @@ table.nook-table tr.clickable { cursor: pointer; }
   height: 2px;
   background: var(--nook-accent);
 }
+/* Drag-to-reorder: the tab being dragged dims, and a bright amber insertion
+   line marks where it will land — on the near edge of the tab under the
+   cursor. `::after` is free here (the active tab's top bar uses `::before`). */
+.session-tab.dragging { opacity: 0.4; }
+.session-tab.drop-before::after,
+.session-tab.drop-after::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: var(--nook-accent);
+  box-shadow: 0 0 6px var(--nook-accent);
+  pointer-events: none;
+}
+.session-tab.drop-before::after { left: -1px; }
+.session-tab.drop-after::after { right: -1px; }
 .session-tab-icon { flex: none; }
 .session-tab-icon.ok { color: var(--nook-ok); }
 .session-tab-icon.err { color: var(--nook-err); }
