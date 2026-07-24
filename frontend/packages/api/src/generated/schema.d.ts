@@ -1152,16 +1152,6 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /**
-         * Tenants, at minimum visibility.
-         * @description Always visible, per the model: that a tenant exists, its member count, and
-         *     how many nodes and sessions it runs. Several machines working one task is an
-         *     audit signal, and an operator who cannot see load cannot run the deployment.
-         *
-         *     Never visible here: repository names, branches, worktree paths, task titles.
-         *     Those are policy-gated and added by `enrich` below — they are not selected
-         *     and then removed.
-         */
         get: operations["operator_list_tenants"];
         put?: never;
         post?: never;
@@ -3428,6 +3418,11 @@ export interface components {
             next_cursor?: null | components["schemas"]["EventId"];
             rows: components["schemas"]["OperatorAuditEntry"][];
         };
+        OperatorBindingPage: {
+            /** Format: uuid */
+            next_cursor?: string | null;
+            rows: components["schemas"]["BindingRow"][];
+        };
         OperatorNode: {
             /** Format: int64 */
             active_sessions: number;
@@ -3440,6 +3435,10 @@ export interface components {
             status: string;
             tenant_id: components["schemas"]["TenantId"];
             tenant_slug: string;
+        };
+        OperatorNodePage: {
+            next_cursor?: null | components["schemas"]["NodeId"];
+            rows: components["schemas"]["OperatorNode"][];
         };
         OperatorOrg: {
             /** Format: date-time */
@@ -3476,6 +3475,15 @@ export interface components {
             task_titles?: string[] | null;
             /** Format: int64 */
             workspaces: number;
+        };
+        /**
+         * @description A page of operator tenants + the keyset cursor to the next page. Same shape
+         *     and mechanism as [`OperatorAuditPage`] (keyed on the row's UUID v7 `id`),
+         *     fanned out to the tenants/nodes/bindings lists (MAIN-44).
+         */
+        OperatorTenantPage: {
+            next_cursor?: null | components["schemas"]["TenantId"];
+            rows: components["schemas"]["OperatorTenant"][];
         };
         /** @description An org: the layer between a deployment and its tenants. */
         Org: {
@@ -5970,7 +5978,14 @@ export interface operations {
     };
     operator_list_bindings: {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description Case-insensitive substring; the searched fields differ per list. */
+                q?: string | null;
+                /** @description Keyset cursor: the last `id` already seen. Returns strictly older rows. */
+                after?: string | null;
+                /** @description Page size (default 50, clamped 1..=200). */
+                limit?: number | null;
+            };
             header?: never;
             path?: never;
             cookie?: never;
@@ -5982,7 +5997,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["BindingRow"][];
+                    "application/json": components["schemas"]["OperatorBindingPage"];
                 };
             };
             403: {
@@ -6022,7 +6037,14 @@ export interface operations {
     };
     operator_list_nodes: {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description Case-insensitive substring; the searched fields differ per list. */
+                q?: string | null;
+                /** @description Keyset cursor: the last `id` already seen. Returns strictly older rows. */
+                after?: string | null;
+                /** @description Page size (default 50, clamped 1..=200). */
+                limit?: number | null;
+            };
             header?: never;
             path?: never;
             cookie?: never;
@@ -6034,7 +6056,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["OperatorNode"][];
+                    "application/json": components["schemas"]["OperatorNodePage"];
                 };
             };
             403: {
@@ -6258,7 +6280,14 @@ export interface operations {
     };
     operator_list_tenants: {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description Case-insensitive substring; the searched fields differ per list. */
+                q?: string | null;
+                /** @description Keyset cursor: the last `id` already seen. Returns strictly older rows. */
+                after?: string | null;
+                /** @description Page size (default 50, clamped 1..=200). */
+                limit?: number | null;
+            };
             header?: never;
             path?: never;
             cookie?: never;
@@ -6270,7 +6299,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["OperatorTenant"][];
+                    "application/json": components["schemas"]["OperatorTenantPage"];
                 };
             };
             403: {

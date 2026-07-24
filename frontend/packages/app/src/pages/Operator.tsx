@@ -22,10 +22,15 @@ import {
   TriangleAlert,
   UserPlus,
 } from "lucide-react";
-import { api, type OperatorAuditEntry } from "@nookos/api";
+import {
+  api,
+  type BindingRow,
+  type OperatorAuditEntry,
+  type OperatorNode,
+  type OperatorTenant,
+} from "@nookos/api";
 import {
   DataList,
-  Empty,
   Panel,
   SearchInput,
   Select,
@@ -64,21 +69,53 @@ export function OperatorPage() {
     queryKey: ["me"],
     queryFn: async () => (await api.GET("/api/v1/auth/me")).data ?? null,
   });
-  const { data: tenants } = useQuery({
-    queryKey: ["operator", "tenants"],
-    queryFn: async () => (await api.GET("/api/v1/operator/tenants")).data ?? [],
+  // Tenants, nodes and bindings each paginate by keyset cursor and search
+  // server-side (MAIN-44), through the same shared DataList as the audit log.
+  const [tenantSearch, setTenantSearch] = React.useState("");
+  const tenantsQuery = useInfiniteQuery({
+    queryKey: ["operator", "tenants", tenantSearch],
+    initialPageParam: undefined as string | undefined,
+    queryFn: async ({ pageParam }) =>
+      (
+        await api.GET("/api/v1/operator/tenants", {
+          params: { query: { q: tenantSearch || undefined, after: pageParam || undefined, limit: 50 } },
+        })
+      ).data ?? { rows: [], next_cursor: null },
+    getNextPageParam: (last) => last.next_cursor ?? undefined,
   });
-  const { data: nodes } = useQuery({
-    queryKey: ["operator", "nodes"],
-    queryFn: async () => (await api.GET("/api/v1/operator/nodes")).data ?? [],
+  const tenants = tenantsQuery.data?.pages.flatMap((p) => p.rows) ?? [];
+
+  const [nodeSearch, setNodeSearch] = React.useState("");
+  const nodesQuery = useInfiniteQuery({
+    queryKey: ["operator", "nodes", nodeSearch],
+    initialPageParam: undefined as string | undefined,
+    queryFn: async ({ pageParam }) =>
+      (
+        await api.GET("/api/v1/operator/nodes", {
+          params: { query: { q: nodeSearch || undefined, after: pageParam || undefined, limit: 50 } },
+        })
+      ).data ?? { rows: [], next_cursor: null },
+    getNextPageParam: (last) => last.next_cursor ?? undefined,
   });
+  const nodes = nodesQuery.data?.pages.flatMap((p) => p.rows) ?? [];
+
+  const [bindingSearch, setBindingSearch] = React.useState("");
+  const bindingsQuery = useInfiniteQuery({
+    queryKey: ["operator", "bindings", bindingSearch],
+    initialPageParam: undefined as string | undefined,
+    queryFn: async ({ pageParam }) =>
+      (
+        await api.GET("/api/v1/operator/bindings", {
+          params: { query: { q: bindingSearch || undefined, after: pageParam || undefined, limit: 50 } },
+        })
+      ).data ?? { rows: [], next_cursor: null },
+    getNextPageParam: (last) => last.next_cursor ?? undefined,
+  });
+  const bindings = bindingsQuery.data?.pages.flatMap((p) => p.rows) ?? [];
+
   const { data: orgs } = useQuery({
     queryKey: ["operator", "orgs"],
     queryFn: async () => (await api.GET("/api/v1/operator/orgs")).data ?? [],
-  });
-  const { data: bindings } = useQuery({
-    queryKey: ["operator", "bindings"],
-    queryFn: async () => (await api.GET("/api/v1/operator/bindings")).data ?? [],
   });
   // The audit log paginates by keyset cursor and searches server-side (MAIN-43),
   // so it holds many pages of accumulated rows rather than a single fetch. A new
@@ -306,6 +343,91 @@ export function OperatorPage() {
     );
   }
 
+  // Column defs live inside the component: their action cells close over the
+  // handlers (moveTenant/stageCa/revoke…) and over `orgs`, so — unlike the
+  // static AUDIT_COLUMNS — they cannot be module-level constants.
+  const tenantColumns: DataColumn<OperatorTenant>[] = [
+    { key: "tenant", header: "Tenant", className: "mono bright", cell: (t) => t.slug },
+    { key: "members", header: "Members", cell: (t) => t.members },
+    { key: "nodes", header: "Nodes", cell: (t) => t.nodes },
+    { key: "sessions", header: "Active sessions", cell: (t) => t.active_sessions },
+    { key: "workspaces", header: "Workspaces", cell: (t) => t.workspaces },
+    {
+      key: "org",
+      header: "Org",
+      cell: (t) => (
+        <Select
+          value={t.org_id ?? ""}
+          onChange={(v) => moveTenant(t.id, v)}
+          options={(orgs ?? []).map((o) => ({ value: o.id, label: o.slug }))}
+          ariaLabel="org"
+        />
+      ),
+    },
+    {
+      key: "actions",
+      header: "",
+      cell: (t) => (
+        <button
+          className="btn small"
+          onClick={() => stageCa(t.id, t.slug)}
+          title="stage a new certificate authority"
+        >
+          <KeyRound size={11} /> stage CA
+        </button>
+      ),
+    },
+  ];
+
+  const nodeColumns: DataColumn<OperatorNode>[] = [
+    { key: "node", header: "Node", className: "bright", cell: (n) => n.name },
+    { key: "tenant", header: "Tenant", className: "mono faint", cell: (n) => n.tenant_slug },
+    { key: "platform", header: "Platform", className: "faint", cell: (n) => n.platform },
+    {
+      key: "status",
+      header: "Status",
+      cell: (n) => <span className={n.status === "online" ? "ok" : "faint"}>{n.status}</span>,
+    },
+    { key: "sessions", header: "Sessions", cell: (n) => n.active_sessions },
+    {
+      key: "seen",
+      header: "Last seen",
+      className: "faint small",
+      cell: (n) => (n.last_seen_at ? new Date(n.last_seen_at).toLocaleString() : "—"),
+    },
+    {
+      key: "actions",
+      header: "",
+      cell: (n) => (
+        <span className="op-row-actions">
+          <button className="btn small" onClick={() => revokeNode(n.id, n.name)} title="revoke its certificate">
+            <Ban size={11} />
+          </button>
+          <button className="btn danger small" onClick={() => removeNode(n.id, n.name)} title="remove the node">
+            <Trash2 size={11} />
+          </button>
+        </span>
+      ),
+    },
+  ];
+
+  const bindingColumns: DataColumn<BindingRow>[] = [
+    { key: "who", header: "Who", className: "bright", cell: (b) => b.email },
+    { key: "role", header: "Role", className: "mono", cell: (b) => b.role_key },
+    { key: "scope", header: "Scope", className: "faint", cell: (b) => b.scope_type },
+    { key: "where", header: "Where", className: "mono faint", cell: (b) => b.scope_label ?? "—" },
+    {
+      key: "actions",
+      header: "",
+      cell: (b) =>
+        b.scope_type === "deployment" ? (
+          <button className="btn danger small" onClick={() => revokeRole(b.email, b.role_key)} title="revoke">
+            <Trash2 size={11} />
+          </button>
+        ) : null,
+    },
+  ];
+
   return (
     <div className="nook-grid" style={{ gridTemplateColumns: "1fr" }}>
       <Panel title="Operator · what this deployment is doing">
@@ -321,107 +443,47 @@ export function OperatorPage() {
           </div>
         </div>
 
-        <div className="op-section-h">Tenants</div>
-        {(tenants ?? []).length === 0 && <Empty>No tenants.</Empty>}
-        {(tenants ?? []).length > 0 && (
-          <div className="op-table-wrap">
-            <table className="op-table">
-              <thead>
-                <tr>
-                  <th>Tenant</th>
-                  <th>Members</th>
-                  <th>Nodes</th>
-                  <th>Active sessions</th>
-                  <th>Workspaces</th>
-                  <th>Org</th>
-                  <th />
-                </tr>
-              </thead>
-              <tbody>
-                {(tenants ?? []).map((t) => (
-                  <tr key={t.id}>
-                    <td className="mono bright">{t.slug}</td>
-                    <td>{t.members}</td>
-                    <td>{t.nodes}</td>
-                    {/* Several machines on one task is an audit signal, which
-                        is why this count is always visible. */}
-                    <td>{t.active_sessions}</td>
-                    <td>{t.workspaces}</td>
-                    <td>
-                      <Select
-                        value={t.org_id ?? ""}
-                        onChange={(v) => moveTenant(t.id, v)}
-                        options={(orgs ?? []).map((o) => ({
-                          value: o.id,
-                          label: o.slug,
-                        }))}
-                        ariaLabel="org"
-                      />
-                    </td>
-                    <td>
-                      <button
-                        className="btn small"
-                        onClick={() => stageCa(t.id, t.slug)}
-                        title="stage a new certificate authority"
-                      >
-                        <KeyRound size={11} /> stage CA
-                      </button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-
-        <div className="op-section-h">Nodes</div>
-        <div className="op-table-wrap">
-          <table className="op-table">
-            <thead>
-              <tr>
-                <th>Node</th>
-                <th>Tenant</th>
-                <th>Platform</th>
-                <th>Status</th>
-                <th>Sessions</th>
-                <th>Last seen</th>
-                <th />
-              </tr>
-            </thead>
-            <tbody>
-              {(nodes ?? []).map((n) => (
-                <tr key={n.id}>
-                  <td className="bright">{n.name}</td>
-                  <td className="mono faint">{n.tenant_slug}</td>
-                  <td className="faint">{n.platform}</td>
-                  <td className={n.status === "online" ? "ok" : "faint"}>{n.status}</td>
-                  <td>{n.active_sessions}</td>
-                  <td className="faint small">
-                    {n.last_seen_at ? new Date(n.last_seen_at).toLocaleString() : "—"}
-                  </td>
-                  <td>
-                    <span className="op-row-actions">
-                      <button
-                        className="btn small"
-                        onClick={() => revokeNode(n.id, n.name)}
-                        title="revoke its certificate"
-                      >
-                        <Ban size={11} />
-                      </button>
-                      <button
-                        className="btn danger small"
-                        onClick={() => removeNode(n.id, n.name)}
-                        title="remove the node"
-                      >
-                        <Trash2 size={11} />
-                      </button>
-                    </span>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+        <div className="op-section-head">
+          <span className="op-section-h">Tenants</span>
+          <SearchInput
+            onSearch={setTenantSearch}
+            placeholder="Search slug or name…"
+            ariaLabel="Search tenants"
+          />
         </div>
+        <DataList
+          columns={tenantColumns}
+          rows={tenants}
+          rowKey={(t) => t.id}
+          loading={tenantsQuery.isLoading}
+          filtered={tenantSearch.length > 0}
+          empty="No tenants."
+          noResults="No matches."
+          hasMore={tenantsQuery.hasNextPage}
+          onLoadMore={() => tenantsQuery.fetchNextPage()}
+          loadingMore={tenantsQuery.isFetchingNextPage}
+        />
+
+        <div className="op-section-head">
+          <span className="op-section-h">Nodes</span>
+          <SearchInput
+            onSearch={setNodeSearch}
+            placeholder="Search name, status, platform…"
+            ariaLabel="Search nodes"
+          />
+        </div>
+        <DataList
+          columns={nodeColumns}
+          rows={nodes}
+          rowKey={(n) => n.id}
+          loading={nodesQuery.isLoading}
+          filtered={nodeSearch.length > 0}
+          empty="No nodes."
+          noResults="No matches."
+          hasMore={nodesQuery.hasNextPage}
+          onLoadMore={() => nodesQuery.fetchNextPage()}
+          loadingMore={nodesQuery.isFetchingNextPage}
+        />
       </Panel>
 
       <Panel title="Visibility policy">
@@ -457,49 +519,34 @@ export function OperatorPage() {
       <Panel
         title="Roles"
         actions={
-          <button className="btn small" onClick={grantRole}>
-            <UserPlus size={12} /> grant
-          </button>
+          <span className="op-panel-actions">
+            <SearchInput
+              onSearch={setBindingSearch}
+              placeholder="Search email, role, scope…"
+              ariaLabel="Search roles"
+            />
+            <button className="btn small" onClick={grantRole}>
+              <UserPlus size={12} /> grant
+            </button>
+          </span>
         }
       >
         <p className="muted small op-note">
           A binding grants at its scope and everything under it — `deployment`
           covers every org and tenant. None of them reach session content.
         </p>
-        <div className="op-table-wrap">
-          <table className="op-table">
-            <thead>
-              <tr>
-                <th>Who</th>
-                <th>Role</th>
-                <th>Scope</th>
-                <th>Where</th>
-                <th />
-              </tr>
-            </thead>
-            <tbody>
-              {(bindings ?? []).map((b) => (
-                <tr key={b.id}>
-                  <td className="bright">{b.email}</td>
-                  <td className="mono">{b.role_key}</td>
-                  <td className="faint">{b.scope_type}</td>
-                  <td className="mono faint">{b.scope_label ?? "—"}</td>
-                  <td>
-                    {b.scope_type === "deployment" && (
-                      <button
-                        className="btn danger small"
-                        onClick={() => revokeRole(b.email, b.role_key)}
-                        title="revoke"
-                      >
-                        <Trash2 size={11} />
-                      </button>
-                    )}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+        <DataList
+          columns={bindingColumns}
+          rows={bindings}
+          rowKey={(b) => b.id}
+          loading={bindingsQuery.isLoading}
+          filtered={bindingSearch.length > 0}
+          empty="No role bindings."
+          noResults="No matches."
+          hasMore={bindingsQuery.hasNextPage}
+          onLoadMore={() => bindingsQuery.fetchNextPage()}
+          loadingMore={bindingsQuery.isFetchingNextPage}
+        />
       </Panel>
 
       <Panel

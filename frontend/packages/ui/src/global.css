@@ -3102,6 +3102,24 @@ a.toast-main:hover .toast-title { text-decoration: underline; }
   padding: 10px 12px 4px;
 }
 
+/* A section heading with a search box on the right (MAIN-44 — tenants/nodes). */
+.op-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding-right: 12px;
+}
+.op-section-head .op-section-h {
+  padding-bottom: 4px;
+}
+/* Search + action button together in a panel header (MAIN-44 — roles). */
+.op-panel-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
 .op-table-wrap { overflow-x: auto; padding: 0 12px 12px; }
 .op-table { border-collapse: collapse; width: 100%; font-size: 11.5px; }
 .op-table th {

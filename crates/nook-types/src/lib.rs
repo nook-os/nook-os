@@ -825,6 +825,27 @@ pub struct OperatorAuditPage {
     pub next_cursor: Option<EventId>,
 }
 
+/// A page of operator tenants + the keyset cursor to the next page. Same shape
+/// and mechanism as [`OperatorAuditPage`] (keyed on the row's UUID v7 `id`),
+/// fanned out to the tenants/nodes/bindings lists (MAIN-44).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct OperatorTenantPage {
+    pub rows: Vec<OperatorTenant>,
+    pub next_cursor: Option<TenantId>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct OperatorNodePage {
+    pub rows: Vec<OperatorNode>,
+    pub next_cursor: Option<NodeId>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct OperatorBindingPage {
+    pub rows: Vec<BindingRow>,
+    pub next_cursor: Option<Uuid>,
+}
+
 /// One policy-gated field with its current state and plain-language meaning.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct PolicyField {
