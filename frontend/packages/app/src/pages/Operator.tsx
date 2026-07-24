@@ -15,6 +15,7 @@ import {
   Eye,
   EyeOff,
   KeyRound,
+  Pencil,
   Plus,
   ShieldCheck,
   Trash2,
@@ -141,6 +142,24 @@ export function OperatorPage() {
     if (!name?.trim()) return;
     await run("Creating the org", () =>
       api.POST("/api/v1/operator/orgs", { body: { name: name.trim() } }),
+    );
+  };
+
+  const renameOrg = async (id: string, current: string) => {
+    const name = await askText({
+      title: `Rename ${current}`,
+      label: "Name",
+      value: current,
+      confirmLabel: "rename",
+    });
+    // Same guard as create: no empty name, and a no-op rename sends nothing.
+    // Only the NAME changes — the slug stays as the stable identifier (AC-3).
+    if (!name?.trim() || name.trim() === current) return;
+    await run("Renaming the org", () =>
+      api.PATCH("/api/v1/operator/orgs/{id}", {
+        params: { path: { id } },
+        body: { name: name.trim() },
+      }),
     );
   };
 
@@ -449,6 +468,7 @@ export function OperatorPage() {
                 <th>Name</th>
                 <th>Slug</th>
                 <th>Tenants</th>
+                <th></th>
               </tr>
             </thead>
             <tbody>
@@ -457,6 +477,15 @@ export function OperatorPage() {
                   <td className="bright">{o.name}</td>
                   <td className="mono faint">{o.slug}</td>
                   <td>{o.tenants}</td>
+                  <td style={{ textAlign: "right" }}>
+                    <button
+                      className="btn small icon"
+                      title={`rename ${o.name}`}
+                      onClick={() => renameOrg(o.id, o.name)}
+                    >
+                      <Pencil size={12} />
+                    </button>
+                  </td>
                 </tr>
               ))}
             </tbody>
