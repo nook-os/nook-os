@@ -19,7 +19,7 @@ import { FeedbackPage } from "./pages/Feedback";
 import { Login } from "./pages/Login";
 import { Connect } from "./pages/Connect";
 import { checkForUpdate, initDesktop, installUpdate, isDesktop, type AvailableUpdate } from "./desktop";
-import { installLinkHandler } from "./links";
+import { installLinkHandler, registerNavigator } from "./links";
 import { NodeDetail, NodesPage } from "./pages/Nodes";
 import { SessionPage, SessionsPage } from "./pages/Session";
 import { SettingsPage } from "./pages/Settings";
@@ -36,6 +36,9 @@ function AuthGate() {
   // shows a link too, and a link that navigates this webview is what broke
   // sign-in there in the first place.
   const navigate = useNavigate();
+  // Both builds: a clicked desktop notification has to reach the router from
+  // outside React, and that is not a desktop-only need.
+  useEffect(() => registerNavigator((path) => navigate(path)), [navigate]);
   useEffect(() => {
     if (!isDesktop()) return;
     return installLinkHandler((path) => navigate(path));

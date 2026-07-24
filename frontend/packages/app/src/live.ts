@@ -75,7 +75,7 @@ export function startLive(queryClient: QueryClient) {
       queryClient.invalidateQueries({ queryKey: ["notifications"] });
       // The chime and desktop notification stay: they reach you when the tab
       // is not focused, which a toast cannot.
-      chimeFor(n.level, n.title, n.body);
+      chimeFor(n.level, n.title, n.body, n.link ?? "");
     } else if (event.type === "task_changed") {
       // Agents change tasks constantly — claiming, commenting, moving — and a
       // board that only refetched on a timer would show a human work that was

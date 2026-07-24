@@ -8,6 +8,7 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
 import type { EventItem } from "@nookos/api";
+import { openAppLink } from "./links";
 
 interface NotifyState {
   /** Show desktop notifications (requires browser permission). */
@@ -149,13 +150,24 @@ export function notifyEvent(event: EventItem) {
  * A toast only reaches somebody looking at the tab. These reach somebody who
  * is not — which, for "your agent finished", is the case that matters.
  */
-export function chimeFor(level: string, title = "NookOS", body = "") {
+export function chimeFor(level: string, title = "NookOS", body = "", link = "") {
   const prefs = useNotify.getState();
   const tone: Tone = level === "error" || level === "warning" ? "warn" : "ok";
   if (prefs.sound) playChime(tone);
   if (prefs.desktop && desktopPermission() === "granted") {
     try {
-      new window.Notification(title, { body, tag: "nookos" });
+      const n = new window.Notification(title, { body, tag: "nookos" });
+      // "Claude is waiting on you" is only useful if answering it is one
+      // click. Every hook passes its session through, so these carry a link
+      // to the terminal that raised them — the notification was already
+      // saying "come here" and now it can take you.
+      if (link) {
+        n.onclick = () => {
+          openAppLink(link);
+          // Otherwise it sits in the notification centre looking unread.
+          n.close();
+        };
+      }
     } catch {
       // Some browsers refuse the constructor outside a service worker. The
       // toast and the inbox still carry it, so this is not worth reporting.

@@ -13,7 +13,7 @@ vi.mock("@nookos/api", () => ({ getEndpoint: () => endpoint }));
 const openExternal = vi.fn();
 vi.mock("./desktop", () => ({ openExternal: (url: string) => openExternal(url) }));
 
-import { appPathFor, installLinkHandler } from "./links";
+import { appPathFor, installLinkHandler, openAppLink, registerNavigator } from "./links";
 
 describe("appPathFor", () => {
   const base = "https://nook.hein.network";
@@ -42,9 +42,72 @@ describe("appPathFor", () => {
     expect(appPathFor("javascript:alert(1)", base)).toBeNull();
   });
 
-  it("claims nothing when no control plane is configured", () => {
-    // The connect screen: there is no "our origin" yet, so nothing is ours.
+  it("claims another host even with no endpoint configured", () => {
+    // The desktop connect screen falls back to `tauri://localhost`, which no
+    // http address matches — so nothing is ours until one is chosen.
     expect(appPathFor(`${base}/board`, "")).toBeNull();
+  });
+
+  it("routes same-origin links in the web build, which configures no endpoint", () => {
+    // The browser app is served BY its control plane, so `baseUrl` is empty
+    // and the page's own origin is the thing to compare against. Rejecting
+    // this outright would leave notification clicks dead in the browser.
+    expect(appPathFor(`${window.location.origin}/sessions/abc`, "")).toBe(
+      "/sessions/abc",
+    );
+    expect(appPathFor("/board?task=MAIN-9", "")).toBe("/board?task=MAIN-9");
+  });
+});
+
+describe("openAppLink", () => {
+  beforeEach(() => openExternal.mockClear());
+
+  it("routes one of our links through the router, and focuses the window", () => {
+    const navigate = vi.fn((path: string) => void path);
+    const focus = vi.spyOn(window, "focus").mockImplementation(() => {});
+    const unregister = registerNavigator(navigate);
+
+    openAppLink("https://nook.hein.network/sessions/abc");
+
+    expect(navigate).toHaveBeenCalledWith("/sessions/abc");
+    expect(openExternal).not.toHaveBeenCalled();
+    // A notification arrives while you are looking at something else; landing
+    // on the right screen in a background window is not arriving.
+    expect(focus).toHaveBeenCalled();
+
+    unregister();
+    focus.mockRestore();
+  });
+
+  it("falls back to the OS browser for anything not ours", () => {
+    const navigate = vi.fn((path: string) => void path);
+    const unregister = registerNavigator(navigate);
+
+    openAppLink("https://example.com/thing");
+
+    expect(navigate).not.toHaveBeenCalled();
+    expect(openExternal).toHaveBeenCalledWith("https://example.com/thing");
+    unregister();
+  });
+
+  it("does nothing with an empty link", () => {
+    openAppLink("");
+    expect(openExternal).not.toHaveBeenCalled();
+  });
+
+  it("unregistering does not blank a navigator a later mount installed", () => {
+    const first = vi.fn((p: string) => void p);
+    const second = vi.fn((p: string) => void p);
+    const undoFirst = registerNavigator(first);
+    const undoSecond = registerNavigator(second);
+    // StrictMode double-invokes effects: the old cleanup runs after the new
+    // registration. If it cleared unconditionally, every notification click
+    // after the first remount would silently do nothing.
+    undoFirst();
+
+    openAppLink("https://nook.hein.network/board");
+    expect(second).toHaveBeenCalledWith("/board");
+    undoSecond();
   });
 });
 

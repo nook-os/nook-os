@@ -45,13 +45,15 @@ const APP_ROUTES = new Set([
  * than inside a DOM event handler.
  */
 export function appPathFor(href: string, baseUrl: string): string | null {
-  if (!baseUrl) return null;
   let url: URL;
   let base: URL;
   try {
-    // Relative against the control plane, not against `tauri://localhost` —
-    // in the packaged app the page's own origin is not a server at all.
-    base = new URL(baseUrl);
+    // The configured control plane in the packaged app; the page's own origin
+    // in a browser, where the app IS served by the control plane. On the
+    // desktop connect screen neither applies — the base is `tauri://localhost`,
+    // which no http link can match, so nothing is claimed. Which is right:
+    // until an endpoint is chosen, no address is ours.
+    base = new URL(baseUrl || window.location.origin);
     url = new URL(href, base);
   } catch {
     return null;
@@ -62,6 +64,44 @@ export function appPathFor(href: string, baseUrl: string): string | null {
   if (url.host !== base.host) return null;
   if (!APP_ROUTES.has(url.pathname.split("/")[1] ?? "")) return null;
   return url.pathname + url.search + url.hash;
+}
+
+/**
+ * How to navigate, once something outside React needs to.
+ *
+ * A desktop notification is fired from a plain module and clicked minutes
+ * later, possibly while the app is in the background — there is no component
+ * in scope and no hook to call. Registering the router's `navigate` once gives
+ * that click somewhere to go without every caller reaching for the router.
+ */
+let navigateTo: ((path: string) => void) | null = null;
+
+export function registerNavigator(fn: (path: string) => void): () => void {
+  navigateTo = fn;
+  return () => {
+    // Only clear our own, so an unmount racing a remount cannot blank the
+    // navigator the new mount just set.
+    if (navigateTo === fn) navigateTo = null;
+  };
+}
+
+/**
+ * Follow one of our own links from outside the DOM — a notification click.
+ *
+ * Focuses the window first: the whole point of a desktop notification is that
+ * it reaches you when you are looking at something else, so arriving at the
+ * right screen in a window still behind your editor would be no arrival at all.
+ */
+export function openAppLink(href: string): void {
+  if (!href) return;
+  try {
+    window.focus();
+  } catch {
+    // Focus is a courtesy; navigation is the job.
+  }
+  const path = appPathFor(href, getEndpoint().baseUrl);
+  if (path && navigateTo) navigateTo(path);
+  else void openExternal(absolute(href));
 }
 
 /**
