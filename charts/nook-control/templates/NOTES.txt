@@ -26,6 +26,30 @@ NookOS is installing.
 Secrets come from the Secret named {{ .Values.existingSecret | quote }} — the
 chart never stores secret material. Postgres is external ({{ .Values.secretKeys.databaseUrl }}
 in that Secret).
+{{- if .Values.agent.enabled }}
+
+Agent mTLS listener is ENABLED. A {{ .Values.agent.service.type }} Service on
+{{ .Values.agent.service.port }} carries the raw stream to the control-plane pod's 8081 (TLS
+terminates in-process — the LB must be L4 / passthrough).
+
+  Nodes join at:  {{ .Values.agent.publicUrl }}
+
+1. Point that DNS name at the agent Service's external address:
+
+     kubectl -n {{ .Release.Namespace }} get svc {{ include "nook-control.componentName" (dict "root" . "component" "agent") }} \
+       -o jsonpath='{.status.loadBalancer.ingress[0].ip}{"\n"}'
+
+2. Read the listener cert's fingerprint (pins the self-signed cert on each node):
+
+     kubectl -n {{ .Release.Namespace }} get secret {{ .Values.agent.tlsSecret }} \
+       -o jsonpath='{.data.{{ .Values.agent.tlsCertKey }}}' | base64 -d \
+       | openssl x509 -outform der | sha256sum | cut -d' ' -f1
+
+3. On each node, enrol with a join token from the UI and that fingerprint:
+
+     nook enroll --server https://{{ .Values.agent.publicUrl }} \
+       --token <join token> --server-fingerprint <fingerprint>
+{{- end }}
 {{- if eq .Values.config.appEnv "production" }}
 
 Reminder: SESSION_SECRET must be 32+ characters, and set SECRETS_KEY (64 hex)

@@ -93,3 +93,28 @@ creates or embeds them.
 {{- fail "\n\nvalues.existingSecret is required: create a Kubernetes Secret holding DATABASE_URL and SESSION_SECRET (and any optional OIDC/S3 secrets), then set --set existingSecret=<name>. The chart never stores secret material itself." -}}
 {{- end -}}
 {{- end -}}
+
+{{/*
+Guardrail: an enabled agent listener needs BOTH its TLS Secret and its public
+URL, or it is half-configured — a listener with no cert cannot start and one
+with no advertised address cannot be dialled. mTLS is opt-in; refuse rather
+than render half of it.
+*/}}
+{{- define "nook-control.requireAgent" -}}
+{{- if .Values.agent.enabled -}}
+{{- if not .Values.agent.tlsSecret -}}
+{{- fail "\n\nagent.enabled=true needs agent.tlsSecret: create a Kubernetes TLS Secret holding the agent listener's certificate and key (see the chart README, \"Agent mTLS listener\"), then set --set agent.tlsSecret=<name>. The listener terminates TLS in-process, so the chart will not render it without a cert." -}}
+{{- end -}}
+{{- if not .Values.agent.publicUrl -}}
+{{- fail "\n\nagent.enabled=true needs agent.publicUrl: the externally reachable address of the agent LoadBalancer (e.g. agent.nook.example.com:8081). The control plane bakes it into join tokens so a node dials the right place." -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+The agent-cert mount directory and the cert/key file paths inside it. The whole
+tlsSecret mounts here; the process reads the cert and key from these paths.
+*/}}
+{{- define "nook-control.agentCertDir" -}}/etc/nook/agent{{- end -}}
+{{- define "nook-control.agentCertPath" -}}{{ include "nook-control.agentCertDir" . }}/{{ .Values.agent.tlsCertKey }}{{- end -}}
+{{- define "nook-control.agentKeyPath" -}}{{ include "nook-control.agentCertDir" . }}/{{ .Values.agent.tlsKeyKey }}{{- end -}}
