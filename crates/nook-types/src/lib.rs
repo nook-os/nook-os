@@ -486,6 +486,11 @@ pub struct TaskItem {
     #[serde(default)]
     #[sqlx(skip)]
     pub labels: Vec<Label>,
+    /// When this task was archived off the board, or `None` while it is live.
+    /// Archived tasks are hidden from the board by default and excluded from the
+    /// agent pick query, but the row is preserved and unarchiving clears this.
+    #[serde(default)]
+    pub archived_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

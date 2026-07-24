@@ -581,6 +581,43 @@
         }
       }
     },
+    "/api/v1/columns/{id}/archive-completed": {
+      "post": {
+        "tags": [
+          "crate::routes::boards"
+        ],
+        "summary": "Archive every live task in one completed/canceled column at once (AC-4).\nRefused for any other column type — bulk archive is finished-work cleanup,\nnot a way to sweep in-progress work off the board (NG-3).",
+        "operationId": "archive_completed_in_column",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OpResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": ""
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      }
+    },
     "/api/v1/comments/{id}": {
       "delete": {
         "tags": [
@@ -3156,6 +3193,15 @@
             }
           },
           {
+            "name": "archived",
+            "in": "query",
+            "description": "Include archived tasks. Default (absent/false) excludes them, so the\nagent pick can never claim archived work (MAIN-15 AC-2).",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
             "name": "limit",
             "in": "query",
             "required": false,
@@ -3273,6 +3319,39 @@
           },
           "required": true
         },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TaskItem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      }
+    },
+    "/api/v1/tasks/{id}/archive": {
+      "post": {
+        "tags": [
+          "crate::routes::boards"
+        ],
+        "operationId": "archive_task",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "",
@@ -3753,6 +3832,39 @@
                 }
               }
             }
+          }
+        }
+      }
+    },
+    "/api/v1/tasks/{id}/unarchive": {
+      "post": {
+        "tags": [
+          "crate::routes::boards"
+        ],
+        "operationId": "unarchive_task",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TaskItem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": ""
           }
         }
       }
@@ -8274,6 +8386,14 @@
           "updated_at"
         ],
         "properties": {
+          "archived_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When this task was archived off the board, or `None` while it is live.\nArchived tasks are hidden from the board by default and excluded from the\nagent pick query, but the row is preserved and unarchiving clears this."
+          },
           "assigned_node_id": {
             "oneOf": [
               {

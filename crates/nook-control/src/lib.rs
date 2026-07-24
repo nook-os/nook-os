@@ -20,5 +20,6 @@ pub use state::AppState;
 // `sqlx::migrate!` embeds the migration set at COMPILE time, so adding a new
 // `.sql` file does not by itself force a rebuild — this file has to change too
 // for the new migration to be embedded and applied. Migrations embedded:
-// 0001_init, 0002_add_person_id, 0003_backfill_tenant_members.
+// 0001_init, 0002_add_person_id, 0003_backfill_tenant_members,
+// 0004_add_task_archived_at.
 pub static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");

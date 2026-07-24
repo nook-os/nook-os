@@ -20,6 +20,7 @@ import {
   Trash2,
   Check,
   MoreHorizontal,
+  Archive,
   X,
 } from "lucide-react";
 import { api, type TaskItem } from "@nookos/api";
@@ -52,7 +53,9 @@ function Card({
   return (
     <div
       ref={setNodeRef}
-      className={`board-card${selected ? " selected" : ""}${blocked ? " blocked" : ""}`}
+      className={`board-card${selected ? " selected" : ""}${blocked ? " blocked" : ""}${
+        task.archived_at ? " archived" : ""
+      }`}
       style={{
         transform: transform
           ? `translate(${transform.x}px, ${transform.y}px)`
@@ -149,6 +152,7 @@ function Column({
   onDelete,
   onOpen,
   onMenu,
+  onArchiveCompleted,
   selectedId,
   blockedIds,
   wsName,
@@ -162,12 +166,19 @@ function Column({
   onDelete: () => void;
   onOpen: (id: string) => void;
   onMenu: (task: TaskItem, anchor: { x: number; y: number }) => void;
+  /** Archive every live task in this column at once. Offered only for
+   *  completed/canceled columns (AC-4). */
+  onArchiveCompleted: () => void;
   selectedId: string | null;
   blockedIds: Set<string>;
   /** workspace id → name, so cards can label their repo without each fetching. */
   wsName: Map<string, string>;
 }) {
   const { setNodeRef, isOver } = useDroppable({ id });
+  // Bulk archive is finished-work cleanup only, and there must be something to
+  // clean up.
+  const isDone = type === "completed" || type === "canceled";
+  const archivable = tasks.filter((t) => !t.archived_at).length;
   return (
     <div className="board-column">
       <div className="nook-panel-title">
@@ -181,6 +192,22 @@ function Column({
           )}
         </span>
         <span style={{ display: "inline-flex", gap: 3 }}>
+          {isDone && archivable > 0 && (
+            <button
+              className="btn small"
+              title={`archive all completed (${archivable})`}
+              onClick={async () => {
+                const ok = await askConfirm({
+                  title: `Archive all completed (${archivable})`,
+                  description: `Move ${archivable} finished task(s) off the board. They stay findable and can be unarchived.`,
+                  confirmLabel: "archive",
+                });
+                if (ok) onArchiveCompleted();
+              }}
+            >
+              <Archive size={11} />
+            </button>
+          )}
           <button
             className="btn small"
             title="rename column"
@@ -432,6 +459,15 @@ function Filters({
         </>
       )}
 
+      <span className="filter-sep" />
+      <button
+        className={`task-chip ${value.showArchived ? "on" : ""}`}
+        onClick={() => onChange({ ...value, showArchived: !value.showArchived })}
+        title="show archived tasks (dimmed) in their columns"
+      >
+        show archived
+      </button>
+
       {active && (
         <button className="btn small" onClick={() => onChange(EMPTY_FILTER)}>
           clear
@@ -449,6 +485,8 @@ export interface BoardFilter {
   blocked: boolean | null;
   /** Workspace uuid, or null for all. Confines the board to one repo. */
   workspace: string | null;
+  /** Reveal archived tasks (dimmed) in their columns. Default hidden. */
+  showArchived: boolean;
 }
 
 const EMPTY_FILTER: BoardFilter = {
@@ -458,7 +496,72 @@ const EMPTY_FILTER: BoardFilter = {
   priority: null,
   blocked: null,
   workspace: null,
+  showArchived: false,
 };
+
+// The filter lives in the URL so a filtered board is a link you can copy and
+// reopen to the same view, reloading keeps it, and Back/forward step through
+// filter changes — exactly like the `task` param. These two pure functions are
+// the round-trip (unit-tested), and they only touch the filter keys, never
+// `task`.
+const FILTER_KEYS = [
+  "label",
+  "xlabel",
+  "assignee",
+  "priority",
+  "blocked",
+  "ws",
+  "archived",
+] as const;
+
+export function parseFilter(params: URLSearchParams): BoardFilter {
+  const list = (k: string) =>
+    (params.get(k) ?? "")
+      .split(",")
+      .map((s) => s.trim().toLowerCase())
+      .filter(Boolean);
+  const assignee = params.get("assignee");
+  const priority = params.get("priority");
+  const blocked = params.get("blocked");
+  return {
+    label: list("label"),
+    not_label: list("xlabel"),
+    assignee: assignee === "none" || assignee === "me" ? assignee : "any",
+    priority: priority !== null && priority !== "" ? Number(priority) : null,
+    blocked: blocked === null ? null : blocked === "true",
+    workspace: params.get("ws") || null,
+    showArchived: params.get("archived") === "1",
+  };
+}
+
+/** Apply a filter onto a URLSearchParams, clearing only the filter keys and
+ *  leaving everything else (e.g. `task`) untouched. */
+export function writeFilter(next: URLSearchParams, f: BoardFilter): URLSearchParams {
+  for (const k of FILTER_KEYS) next.delete(k);
+  if (f.label.length) next.set("label", f.label.join(","));
+  if (f.not_label.length) next.set("xlabel", f.not_label.join(","));
+  if (f.assignee !== "any") next.set("assignee", f.assignee);
+  if (f.priority !== null) next.set("priority", String(f.priority));
+  if (f.blocked !== null) next.set("blocked", String(f.blocked));
+  if (f.workspace) next.set("ws", f.workspace);
+  if (f.showArchived) next.set("archived", "1");
+  return next;
+}
+
+/** Serialize a filter to a fresh URLSearchParams — the half of the round-trip
+ *  that `parseFilter` inverts. */
+export function serializeFilter(f: BoardFilter): URLSearchParams {
+  return writeFilter(new URLSearchParams(), f);
+}
+
+/** Whether a task shows on the board given the archive toggle: archived tasks
+ *  are hidden unless "show archived" is on (AC-5). */
+export function showsUnderArchive(
+  showArchived: boolean,
+  archivedAt: string | null | undefined,
+): boolean {
+  return showArchived || !archivedAt;
+}
 
 export function BoardPage() {
   const queryClient = useQueryClient();
@@ -488,7 +591,12 @@ export function BoardPage() {
     task: TaskItem;
     anchor: { x: number; y: number };
   } | null>(null);
-  const [filter, setFilter] = useState<BoardFilter>(EMPTY_FILTER);
+  // The filter lives in the URL, like the open task. A filter change is a
+  // history entry (push) so Back/forward walk through them; the `task` param is
+  // preserved across filter edits by `writeFilter`.
+  const filter = React.useMemo(() => parseFilter(params), [params]);
+  const setFilter = (f: BoardFilter) =>
+    setParams((prev) => writeFilter(new URLSearchParams(prev), f));
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 4 } }),
   );
@@ -572,6 +680,10 @@ export function BoardPage() {
               ...(filter.priority !== null ? { priority: filter.priority } : {}),
               ...(filter.blocked !== null ? { is_blocked: filter.blocked } : {}),
               ...(filter.workspace ? { workspace: filter.workspace } : {}),
+              // When showing archived, the server filter must include them too,
+              // or a filtered view would drop the archived cards the toggle is
+              // meant to reveal.
+              ...(filter.showArchived ? { archived: true } : {}),
             },
           },
         })
@@ -649,6 +761,8 @@ export function BoardPage() {
   // card and filterable in the strip, and it does not move anything.
   const visible = detail.tasks
     .filter((t) => !allowed || allowed.has(t.id))
+    // Archived work is off the board unless the toggle is on (AC-5).
+    .filter((t) => showsUnderArchive(filter.showArchived, t.archived_at))
     .slice()
     .sort((a, b) => a.position - b.position || (a.created_at < b.created_at ? -1 : 1));
 
@@ -679,6 +793,12 @@ export function BoardPage() {
   };
   const deleteColumn = async (colId: string) => {
     await api.DELETE("/api/v1/columns/{id}", { params: { path: { id: colId } } });
+    bust();
+  };
+  const archiveCompleted = async (colId: string) => {
+    await api.POST("/api/v1/columns/{id}/archive-completed", {
+      params: { path: { id: colId } },
+    });
     bust();
   };
   const renameBoard = async () => {
@@ -760,6 +880,7 @@ export function BoardPage() {
                     onDelete={() => deleteColumn(c.id)}
                     onOpen={setOpenTask}
                     onMenu={(t, anchor) => setMenu({ task: t, anchor })}
+                    onArchiveCompleted={() => archiveCompleted(c.id)}
                     selectedId={openTask}
                     blockedIds={blockedIds}
                     wsName={wsName}

@@ -247,6 +247,12 @@ pub fn build_router(state: AppState) -> Router {
             "/tasks/{id}",
             patch(boards::update_task).delete(boards::delete_task),
         )
+        .route("/tasks/{id}/archive", post(boards::archive_task))
+        .route("/tasks/{id}/unarchive", post(boards::unarchive_task))
+        .route(
+            "/columns/{id}/archive-completed",
+            post(boards::archive_completed_in_column),
+        )
         .route("/tasks/{id}/dispatch", post(taskwork::dispatch))
         .route("/tasks/{id}/start-work", post(taskwork::start_work))
         .route("/tasks/{id}/submit-pr", post(taskwork::submit_pr))

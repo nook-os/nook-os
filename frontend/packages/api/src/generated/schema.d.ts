@@ -276,6 +276,27 @@ export interface paths {
         patch: operations["update_column"];
         trace?: never;
     };
+    "/api/v1/columns/{id}/archive-completed": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Archive every live task in one completed/canceled column at once (AC-4).
+         *     Refused for any other column type — bulk archive is finished-work cleanup,
+         *     not a way to sweep in-progress work off the board (NG-3).
+         */
+        post: operations["archive_completed_in_column"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/comments/{id}": {
         parameters: {
             query?: never;
@@ -1456,6 +1477,22 @@ export interface paths {
         patch: operations["update_task"];
         trace?: never;
     };
+    "/api/v1/tasks/{id}/archive": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["archive_task"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/tasks/{id}/claim": {
         parameters: {
             query?: never;
@@ -1620,6 +1657,22 @@ export interface paths {
         get?: never;
         put?: never;
         post: operations["task_submit_pr"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/tasks/{id}/unarchive": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["unarchive_task"];
         delete?: never;
         options?: never;
         head?: never;
@@ -3401,6 +3454,13 @@ export interface components {
         /** Format: uuid */
         TaskId: string;
         TaskItem: {
+            /**
+             * Format: date-time
+             * @description When this task was archived off the board, or `None` while it is live.
+             *     Archived tasks are hidden from the board by default and excluded from the
+             *     agent pick query, but the row is preserved and unarchiving clears this.
+             */
+            archived_at?: string | null;
             assigned_node_id?: null | components["schemas"]["NodeId"];
             assignee_user_id?: null | components["schemas"]["UserId"];
             board_id: components["schemas"]["BoardId"];
@@ -4331,6 +4391,39 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["BoardColumn"];
                 };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    archive_completed_in_column: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OpResponse"];
+                };
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             404: {
                 headers: {
@@ -6408,6 +6501,11 @@ export interface operations {
                 /** @description Filter on the derived blocker state. */
                 is_blocked?: boolean;
                 workspace?: string;
+                /**
+                 * @description Include archived tasks. Default (absent/false) excludes them, so the
+                 *     agent pick can never claim archived work (MAIN-15 AC-2).
+                 */
+                archived?: boolean;
                 limit?: number;
                 /** @description Opaque: the `created_at` of the last row of the previous page. */
                 cursor?: string;
@@ -6494,6 +6592,33 @@ export interface operations {
                 "application/json": components["schemas"]["UpdateTaskRequest"];
             };
         };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskItem"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    archive_task: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
         responses: {
             200: {
                 headers: {
@@ -6829,6 +6954,33 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["TaskItem"];
                 };
+            };
+        };
+    };
+    unarchive_task: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskItem"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
         };
     };
