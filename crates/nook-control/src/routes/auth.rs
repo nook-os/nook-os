@@ -184,6 +184,8 @@ pub async fn callback(
         issuer: claims.issuer().to_string(),
         subject: claims.subject().to_string(),
         email: claims.email().map(|e| e.to_string()),
+        // Only the IdP's assertion verifies the address; absent/false is unverified.
+        email_verified: claims.email_verified().unwrap_or(false),
         display_name: claims
             .name()
             .and_then(|n| n.get(None))
@@ -294,6 +296,8 @@ pub async fn dev_login(
         issuer: "nookos-dev".into(),
         subject: email.clone(),
         email: Some(email.clone()),
+        // The dev login is not a real IdP asserting anything — never verified.
+        email_verified: false,
         display_name: req.display_name.or_else(|| Some("Dev User".into())),
         avatar_url: None,
         raw_claims: serde_json::json!({ "dev": true }),

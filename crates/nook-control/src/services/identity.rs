@@ -137,9 +137,34 @@ pub struct IdentityClaims {
     pub issuer: String,
     pub subject: String,
     pub email: Option<String>,
+    /// The IdP's `email_verified` claim. `true` ONLY when the issuer asserts it;
+    /// an absent or false claim, and every non-OIDC source (the dev login), is
+    /// `false`. This is the only thing that may set `email_verified_at` — never
+    /// the mere presence of an email string (MAIN-29).
+    pub email_verified: bool,
     pub display_name: Option<String>,
     pub avatar_url: Option<String>,
     pub raw_claims: Value,
+}
+
+/// Whether this user's email is verified — for authorization to consume.
+///
+/// True only when the user holds an identity carrying a real verification
+/// timestamp. It is deliberately NOT satisfied by an email string matching
+/// anything: a local account (no identity) is unverified, and so is an OIDC
+/// login whose IdP did not assert `email_verified`. This is the platform
+/// predicate invite acceptance and account-linking will gate on.
+pub async fn email_is_verified(db: &PgPool, user_id: UserId) -> ApiResult<bool> {
+    let (verified,): (bool,) = sqlx::query_as(
+        "SELECT EXISTS (
+             SELECT 1 FROM identities
+             WHERE user_id = $1 AND email_verified_at IS NOT NULL
+         )",
+    )
+    .bind(user_id)
+    .fetch_one(db)
+    .await?;
+    Ok(verified)
 }
 
 pub async fn login_identity(state: &AppState, claims: IdentityClaims) -> ApiResult<(User, Tenant)> {
@@ -160,6 +185,20 @@ pub async fn login_identity(state: &AppState, claims: IdentityClaims) -> ApiResu
             .bind(user.tenant_id)
             .fetch_one(&state.db)
             .await?;
+        // A returning identity may have become verified since last time (the IdP
+        // confirmed the address). Record it the first time we see the claim, and
+        // never clear it — verification only moves one way, and only from a true
+        // claim.
+        if claims.email_verified {
+            sqlx::query(
+                "UPDATE identities SET email_verified_at = now()
+                 WHERE issuer = $1 AND subject = $2 AND email_verified_at IS NULL",
+            )
+            .bind(&claims.issuer)
+            .bind(&claims.subject)
+            .execute(&state.db)
+            .await?;
+        }
         // The lock has to bind both directions, or it is not a lock: a tenant
         // running local accounts must not silently acquire OIDC identities
         // beside them, which is exactly the duplicate-person problem the mode
@@ -279,9 +318,12 @@ pub async fn login_identity(state: &AppState, claims: IdentityClaims) -> ApiResu
     .execute(&state.db)
     .await?;
 
+    // `email_verified_at` is stamped now ONLY when the IdP asserted the address;
+    // otherwise it stays null. A CASE on the bound flag keeps "verified means a
+    // real timestamp" true — nothing here derives it from the email string.
     sqlx::query(
-        "INSERT INTO identities (id, user_id, issuer, subject, email, raw_claims)
-         VALUES ($1, $2, $3, $4, $5, $6)",
+        "INSERT INTO identities (id, user_id, issuer, subject, email, raw_claims, email_verified_at)
+         VALUES ($1, $2, $3, $4, $5, $6, CASE WHEN $7 THEN now() ELSE NULL END)",
     )
     .bind(IdentityId::new())
     .bind(user.id)
@@ -289,6 +331,7 @@ pub async fn login_identity(state: &AppState, claims: IdentityClaims) -> ApiResu
     .bind(&claims.subject)
     .bind(&claims.email)
     .bind(&claims.raw_claims)
+    .bind(claims.email_verified)
     .execute(&state.db)
     .await?;
 
@@ -427,7 +470,9 @@ mod tests {
 /// machine without Postgres still passes.
 #[cfg(test)]
 mod db_tests {
-    use super::{active_membership_exists, member_user_in_tenant, memberships_for};
+    use super::{
+        active_membership_exists, email_is_verified, member_user_in_tenant, memberships_for,
+    };
     use nook_types::{TenantId, UserId};
     use sqlx::postgres::PgPoolOptions;
     use sqlx::PgPool;
@@ -685,6 +730,63 @@ mod db_tests {
         assert!(
             switch_revoked.is_none(),
             "a revoked grant refuses a switch into the same tenant (no same-tenant shortcut)"
+        );
+    }
+
+    /// MAIN-29 AC-3/AC-4: `email_is_verified` is satisfied only by a real
+    /// verification timestamp — a local account (no identity) is false, an
+    /// unverified identity is false, and a matching email string never makes it
+    /// true.
+    #[tokio::test]
+    async fn email_is_verified_only_from_a_timestamp_never_email() {
+        let Some(db) = pool().await else {
+            eprintln!("skipping email_is_verified_only_from_a_timestamp — no DATABASE_URL");
+            return;
+        };
+        // Two tenants so both users can hold the SAME email (users are unique on
+        // (tenant_id, email)) — the point is that a shared email string never
+        // crosses between them.
+        let ta = tenant(&db, "verify-a").await;
+        let tb = tenant(&db, "verify-b").await;
+        // A local-account-style user: a users row with no identity at all.
+        let local = member(&db, ta, "shared@main29.test", Uuid::new_v4()).await;
+        // Another user, same email, with an (initially unverified) OIDC identity.
+        let oidc = member(&db, tb, "shared@main29.test", Uuid::new_v4()).await;
+        sqlx::query(
+            "INSERT INTO identities (id, user_id, issuer, subject, email, raw_claims)
+             VALUES ($1, $2, 'idp', $3, 'shared@main29.test', '{}')",
+        )
+        .bind(Uuid::new_v4())
+        .bind(oidc.0)
+        .bind(format!("sub-{}", Uuid::new_v4().simple()))
+        .execute(&db)
+        .await
+        .unwrap();
+
+        let local_before = email_is_verified(&db, local).await.unwrap();
+        let oidc_unverified = email_is_verified(&db, oidc).await.unwrap();
+
+        // Now the IdP verifies the OIDC identity's address.
+        sqlx::query("UPDATE identities SET email_verified_at = now() WHERE user_id = $1")
+            .bind(oidc.0)
+            .execute(&db)
+            .await
+            .unwrap();
+        let oidc_verified = email_is_verified(&db, oidc).await.unwrap();
+        // The local user shares the email but is still unverified — no string join.
+        let local_after = email_is_verified(&db, local).await.unwrap();
+
+        cleanup(&db, &[ta, tb]).await;
+
+        assert!(!local_before, "a local account (no identity) is unverified");
+        assert!(
+            !oidc_unverified,
+            "an identity with a null timestamp is unverified"
+        );
+        assert!(oidc_verified, "a real timestamp verifies");
+        assert!(
+            !local_after,
+            "sharing an email with a verified user does NOT verify you (never an email join)"
         );
     }
 }

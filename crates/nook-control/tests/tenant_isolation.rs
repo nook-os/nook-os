@@ -10,7 +10,7 @@
 //! tests skip cleanly when it's absent so `cargo test` stays green anywhere.
 
 use nook_control::config::Config;
-use nook_control::services::identity::{login_identity, IdentityClaims};
+use nook_control::services::identity::{email_is_verified, login_identity, IdentityClaims};
 use nook_control::state::AppState;
 use nook_types::TenantId;
 use sqlx::PgPool;
@@ -85,10 +85,15 @@ fn test_config() -> Config {
 }
 
 fn claims(subject: &str, name: &str) -> IdentityClaims {
+    claims_verified(subject, name, false)
+}
+
+fn claims_verified(subject: &str, name: &str, email_verified: bool) -> IdentityClaims {
     IdentityClaims {
         issuer: "test-idp".into(),
         subject: subject.into(),
         email: Some(format!("{subject}@example.test")),
+        email_verified,
         display_name: Some(name.into()),
         avatar_url: None,
         raw_claims: serde_json::json!({}),
@@ -320,4 +325,86 @@ async fn node_tokens_are_confined_to_their_own_machine() {
         human.require_node_self(other_id).is_ok(),
         "driving other nodes is what the control plane is for"
     );
+}
+
+/// MAIN-29: an OIDC login whose IdP asserts `email_verified=true` stamps the
+/// identity, and the predicate reports it. An unverified claim leaves it null.
+#[tokio::test]
+async fn oidc_email_verified_claim_sets_the_timestamp_and_predicate() {
+    let _serial = SERIAL.lock().await;
+    let Some(pool) = test_pool().await else {
+        eprintln!("skipping: DATABASE_URL not set / postgres unreachable");
+        return;
+    };
+    let state = AppState::new(pool.clone(), test_config(), None).await;
+
+    let v_sub = format!("verified-{}", Uuid::now_v7().simple());
+    let (v_user, v_tenant) = login_identity(&state, claims_verified(&v_sub, "Vera", true))
+        .await
+        .expect("verified user signs in");
+    let u_sub = format!("unverified-{}", Uuid::now_v7().simple());
+    let (u_user, u_tenant) = login_identity(&state, claims_verified(&u_sub, "Uri", false))
+        .await
+        .expect("unverified user signs in");
+
+    // The column reflects the claim…
+    let (v_at,): (Option<chrono::DateTime<chrono::Utc>>,) =
+        sqlx::query_as("SELECT email_verified_at FROM identities WHERE subject = $1")
+            .bind(&v_sub)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let (u_at,): (Option<chrono::DateTime<chrono::Utc>>,) =
+        sqlx::query_as("SELECT email_verified_at FROM identities WHERE subject = $1")
+            .bind(&u_sub)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+
+    // …and so does the predicate.
+    let v_pred = email_is_verified(&pool, v_user.id).await.unwrap();
+    let u_pred = email_is_verified(&pool, u_user.id).await.unwrap();
+
+    cleanup(&pool, &[v_tenant.id, u_tenant.id]).await;
+
+    assert!(
+        v_at.is_some(),
+        "email_verified=true must stamp the timestamp"
+    );
+    assert!(
+        u_at.is_none(),
+        "an unverified claim must leave the timestamp null"
+    );
+    assert!(v_pred, "predicate is true for a verified identity");
+    assert!(!u_pred, "predicate is false when the timestamp is null");
+}
+
+/// MAIN-29: a returning identity that was unverified becomes verified the first
+/// time the IdP asserts it — verification only moves one way.
+#[tokio::test]
+async fn returning_login_records_a_newly_verified_email() {
+    let _serial = SERIAL.lock().await;
+    let Some(pool) = test_pool().await else {
+        eprintln!("skipping: DATABASE_URL not set / postgres unreachable");
+        return;
+    };
+    let state = AppState::new(pool.clone(), test_config(), None).await;
+    let sub = format!("laterverify-{}", Uuid::now_v7().simple());
+
+    let (user, tenant) = login_identity(&state, claims_verified(&sub, "Lee", false))
+        .await
+        .expect("first sign-in, unverified");
+    assert!(
+        !email_is_verified(&pool, user.id).await.unwrap(),
+        "starts unverified"
+    );
+
+    // The IdP now confirms the address.
+    login_identity(&state, claims_verified(&sub, "Lee", true))
+        .await
+        .expect("second sign-in, now verified");
+    let verified = email_is_verified(&pool, user.id).await.unwrap();
+
+    cleanup(&pool, &[tenant.id]).await;
+    assert!(verified, "a later verified login records the verification");
 }
