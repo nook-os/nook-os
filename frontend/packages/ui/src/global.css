@@ -2119,21 +2119,23 @@ textarea.env-area.blurred {
 
 .md-hint { margin-left: auto; padding-right: 3px; }
 
+/* The write pane hosts a CodeMirror 6 editor. The look — monospace, amber
+   caret, subtle selection — is set on the `.cm-*` nodes by the theme extension
+   in Markdown.tsx (so it travels with the component); this is just the host box.
+   You are editing the literal characters an agent will parse, which is why it
+   stays monospace and nothing here reformats the text. */
 .md-source {
   display: block;
   width: 100%;
   background: transparent;
   color: var(--nook-fg);
-  border: 0;
-  outline: none;
-  /* Monospace while writing: you are editing the literal characters an agent
-     will parse, and proportional text hides the alignment that matters. */
-  font-family: var(--nook-font-mono, ui-monospace, monospace);
-  font-size: 11.5px;
-  line-height: 1.5;
-  padding: 6px 8px;
-  resize: vertical;
   tab-size: 2;
+}
+.md-source .cm-editor {
+  height: 100%;
+}
+.md-source .cm-editor.cm-focused {
+  outline: none;
 }
 
 .md-preview { padding: 6px 8px; overflow-y: auto; }

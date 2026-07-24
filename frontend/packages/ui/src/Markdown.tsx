@@ -22,6 +22,18 @@ import remarkGfm from "remark-gfm";
 import rehypeRaw from "rehype-raw";
 import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
 import { Eye, Pencil } from "lucide-react";
+import { EditorState, Prec } from "@codemirror/state";
+import {
+  EditorView,
+  keymap,
+  placeholder as cmPlaceholder,
+} from "@codemirror/view";
+import {
+  history,
+  historyKeymap,
+  insertNewline,
+  standardKeymap,
+} from "@codemirror/commands";
 
 /** Render markdown at panel density. */
 /**
@@ -105,12 +117,93 @@ export function Markdown({ src }: { src: string }) {
 }
 
 /**
+ * The editing transforms, as pure functions over a document string and a
+ * selection `[from, to)`. They return the new document and the selection to
+ * restore, so the exact same logic that ran against a `<textarea>`'s
+ * `selectionStart/End` can now drive a CodeMirror transaction — and can be unit
+ * tested by asserting on the resulting string, with no editor at all.
+ */
+export interface EditResult {
+  doc: string;
+  from: number;
+  to: number;
+}
+
+/** Wrap the selection, or (empty selection) insert the markers with the caret
+ *  between them. Byte-for-byte the old `surround`. */
+export function applySurround(
+  doc: string,
+  from: number,
+  to: number,
+  before: string,
+  after: string = before,
+): EditResult {
+  return {
+    doc: doc.slice(0, from) + before + doc.slice(from, to) + after + doc.slice(to),
+    from: from + before.length,
+    to: to + before.length,
+  };
+}
+
+/** Toggle `prefix` on every line the selection touches — how lists and quotes
+ *  get applied, and un-applied. Byte-for-byte the old `prefixLines`, extended to
+ *  report the selection so the whole affected block stays selected. */
+export function applyPrefix(
+  doc: string,
+  from: number,
+  to: number,
+  prefix: string,
+): EditResult {
+  const start = doc.lastIndexOf("\n", from - 1) + 1;
+  const end = doc.indexOf("\n", to);
+  const stop = end === -1 ? doc.length : end;
+  const block = doc
+    .slice(start, stop)
+    .split("\n")
+    .map((l) => (l.startsWith(prefix) ? l.slice(prefix.length) : prefix + l))
+    .join("\n");
+  return {
+    doc: doc.slice(0, start) + block + doc.slice(stop),
+    from: start,
+    to: start + block.length,
+  };
+}
+
+/** Run an `EditResult` transform against a live CodeMirror view as one
+ *  transaction, then keep focus — the imperative half of the pure helpers. */
+function dispatchEdit(view: EditorView, edit: EditResult): boolean {
+  view.dispatch({
+    changes: { from: 0, to: view.state.doc.length, insert: edit.doc },
+    selection: { anchor: edit.from, head: edit.to },
+  });
+  view.focus();
+  return true;
+}
+
+function surroundView(view: EditorView, before: string, after?: string): boolean {
+  const { from, to } = view.state.selection.main;
+  return dispatchEdit(view, applySurround(view.state.doc.toString(), from, to, before, after));
+}
+
+function prefixView(view: EditorView, prefix: string): boolean {
+  const { from, to } = view.state.selection.main;
+  return dispatchEdit(view, applyPrefix(view.state.doc.toString(), from, to, prefix));
+}
+
+/**
  * Edit markdown with a preview.
  *
  * Two panes rather than a WYSIWYG: the stored text IS the artifact — agents
  * parse `- [ ] **AC-1**` out of it — so an editor that rewrote the source into
  * its own idea of equivalent markdown would quietly break the contract the
  * whole loop depends on. You edit the real characters and see what they mean.
+ *
+ * The write pane is CodeMirror 6, configured to be behaviour-neutral with the
+ * `<textarea>` it replaced: Enter inserts a bare newline (no auto-indent), there
+ * is no source highlighting, and nothing reformats what you type. The keymap and
+ * toolbar drive the exact same `applySurround`/`applyPrefix` transforms as
+ * before. This lands the library on its own; inline live-preview is a later
+ * issue.
  */
 export function MarkdownEditor({
   value,
@@ -130,73 +223,107 @@ export function MarkdownEditor({
   autoFocus?: boolean;
 }) {
   const [tab, setTab] = useState<"write" | "preview">("write");
-  const ref = useRef<HTMLTextAreaElement>(null);
+  const boxRef = useRef<HTMLDivElement>(null);
+  const viewRef = useRef<EditorView | null>(null);
 
-  useEffect(() => {
-    if (autoFocus && tab === "write") ref.current?.focus();
-  }, [autoFocus, tab]);
+  // Callbacks change every render; the keymap and update listener read the
+  // latest through refs so the editor never has to be rebuilt to see them.
+  const onChangeRef = useRef(onChange);
+  const onSaveRef = useRef(onSave);
+  const onCancelRef = useRef(onCancel);
+  onChangeRef.current = onChange;
+  onSaveRef.current = onSave;
+  onCancelRef.current = onCancel;
 
-  /** Wrap the selection, or insert the markers and put the caret between. */
-  const surround = (before: string, after = before) => {
-    const el = ref.current;
-    if (!el) return;
-    const { selectionStart: s, selectionEnd: e } = el;
-    const next = value.slice(0, s) + before + value.slice(s, e) + after + value.slice(e);
-    onChange(next);
-    // Restore the selection after React re-renders, or every shortcut would
-    // dump the caret at the end of the document.
-    requestAnimationFrame(() => {
-      el.focus();
-      el.setSelectionRange(s + before.length, e + before.length);
-    });
+  const surround = (before: string, after?: string) => {
+    if (viewRef.current) surroundView(viewRef.current, before, after);
   };
-
-  /** Prefix every selected line — how lists and quotes actually get applied. */
   const prefixLines = (prefix: string) => {
-    const el = ref.current;
-    if (!el) return;
-    const start = value.lastIndexOf("\n", el.selectionStart - 1) + 1;
-    const end = value.indexOf("\n", el.selectionEnd);
-    const stop = end === -1 ? value.length : end;
-    const block = value
-      .slice(start, stop)
-      .split("\n")
-      .map((l) => (l.startsWith(prefix) ? l.slice(prefix.length) : prefix + l))
-      .join("\n");
-    onChange(value.slice(0, start) + block + value.slice(stop));
-    requestAnimationFrame(() => el.focus());
+    if (viewRef.current) prefixView(viewRef.current, prefix);
   };
 
-  const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    const mod = e.metaKey || e.ctrlKey;
-    if (mod && e.key === "Enter") {
-      e.preventDefault();
-      onSave?.();
-      return;
+  // Build the editor once. Value is synced in separately so external updates
+  // (an agent editing, another browser) don't tear down the view mid-keystroke.
+  useEffect(() => {
+    if (!boxRef.current || viewRef.current) return;
+    const theme = EditorView.theme(
+      {
+        "&": { backgroundColor: "transparent", color: "var(--nook-fg)" },
+        "&.cm-focused": { outline: "none" },
+        ".cm-scroller": {
+          fontFamily: "var(--nook-font-mono, ui-monospace, monospace)",
+          fontSize: "11.5px",
+          lineHeight: "1.5",
+          overflow: "auto",
+        },
+        ".cm-content": { padding: "6px 8px", caretColor: "var(--nook-accent)", minHeight: `${minHeight}px` },
+        ".cm-cursor, .cm-dropCursor": { borderLeftColor: "var(--nook-accent)" },
+        "&.cm-focused .cm-selectionBackground, .cm-selectionBackground, .cm-content ::selection":
+          { backgroundColor: "var(--nook-selection)" },
+        ".cm-placeholder": { color: "var(--nook-fg-faint)" },
+        ".cm-line": { padding: "0" },
+      },
+      { dark: true },
+    );
+
+    const view = new EditorView({
+      parent: boxRef.current,
+      state: EditorState.create({
+        doc: value,
+        extensions: [
+          history(),
+          // Prec.highest so the shortcuts below win over the standard bindings.
+          Prec.highest(
+            keymap.of([
+              { key: "Mod-b", run: (v) => surroundView(v, "**") },
+              { key: "Mod-i", run: (v) => surroundView(v, "_") },
+              { key: "Mod-e", run: (v) => surroundView(v, "`") },
+              // Tab toggles two-space indent on the touched lines, exactly as
+              // before. Shift-Tab is deliberately left unbound so it escapes the
+              // editor (moves focus), matching the old textarea.
+              { key: "Tab", run: (v) => prefixView(v, "  ") },
+              { key: "Mod-Enter", run: () => (onSaveRef.current?.(), true) },
+              { key: "Escape", run: () => (onCancelRef.current?.(), true) },
+              // A bare newline, never auto-indented — the stored text stays
+              // byte-identical to what a textarea would have kept.
+              { key: "Enter", run: insertNewline },
+            ]),
+          ),
+          keymap.of([...historyKeymap, ...standardKeymap]),
+          cmPlaceholder(placeholder ?? ""),
+          EditorView.lineWrapping,
+          EditorView.updateListener.of((u) => {
+            if (u.docChanged) onChangeRef.current(u.state.doc.toString());
+          }),
+          theme,
+        ],
+      }),
+    });
+    viewRef.current = view;
+    if (autoFocus) view.focus();
+    return () => {
+      view.destroy();
+      viewRef.current = null;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Keep the editor's document in step with the controlled `value` without
+  // clobbering an in-flight edit: only dispatch when they actually differ (a
+  // change the editor itself made already matches, so this is a no-op then).
+  useEffect(() => {
+    const view = viewRef.current;
+    if (!view) return;
+    const current = view.state.doc.toString();
+    if (value !== current) {
+      view.dispatch({ changes: { from: 0, to: current.length, insert: value } });
     }
-    if (e.key === "Escape") {
-      e.preventDefault();
-      onCancel?.();
-      return;
-    }
-    if (mod && e.key.toLowerCase() === "b") {
-      e.preventDefault();
-      surround("**");
-    } else if (mod && e.key.toLowerCase() === "i") {
-      e.preventDefault();
-      surround("_");
-    } else if (mod && e.key.toLowerCase() === "e") {
-      e.preventDefault();
-      surround("`");
-    } else if (e.key === "Tab") {
-      // Tab indents rather than leaving the field: this is a code-adjacent
-      // editor and nested lists are common. Shift-Tab still escapes.
-      if (!e.shiftKey) {
-        e.preventDefault();
-        prefixLines("  ");
-      }
-    }
-  };
+  }, [value]);
+
+  // Focus when the write pane (re)appears, matching the textarea's autoFocus.
+  useEffect(() => {
+    if (autoFocus && tab === "write") viewRef.current?.focus();
+  }, [autoFocus, tab]);
 
   return (
     <div className="md-editor">
@@ -238,18 +365,15 @@ export function MarkdownEditor({
         {onSave && <span className="faint small md-hint">⌘↵ to save</span>}
       </div>
 
-      {tab === "write" ? (
-        <textarea
-          ref={ref}
-          className="md-source"
-          style={{ minHeight }}
-          value={value}
-          placeholder={placeholder}
-          onChange={(e) => onChange(e.target.value)}
-          onKeyDown={onKeyDown}
-          spellCheck
-        />
-      ) : (
+      {/* The CodeMirror host stays mounted across tab switches (just hidden) so
+          the editor is not torn down and rebuilt every time you peek at the
+          preview — which would drop the cursor and undo history. */}
+      <div
+        ref={boxRef}
+        className="md-source"
+        style={{ minHeight, display: tab === "write" ? "block" : "none" }}
+      />
+      {tab === "preview" && (
         <div className="md-preview" style={{ minHeight }}>
           {value.trim() ? (
             <Markdown src={value} />
