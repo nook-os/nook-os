@@ -8,6 +8,9 @@ wrong thing.
 | Skill | Teaches |
 |---|---|
 | [`nookos/SKILL.md`](nookos/SKILL.md) | Driving sessions on other machines with `nook`: start a Claude/Codex/bash session anywhere in the fleet, type into it, read the answer. No ssh, no tmux. |
+| [`nook-spec/SKILL.md`](nook-spec/SKILL.md) | The spec interview: turn a raw idea into a build-ready NookOS board issue, by researching the code and interviewing the user in rounds. Run with `/nook-spec`. |
+| [`nook-build/SKILL.md`](nook-build/SKILL.md) | The builder: claim the next safe `agent-ready` issue (or fix review feedback), implement it, and open a PR. Run with `/nook-build`; one pass, one unit of work. |
+| [`nook-review/SKILL.md`](nook-review/SKILL.md) | The reviewer: check an open PR against its linked issue and required CI, then post a three-group verdict and set the loop labels. Run with `/nook-review`; never merges. |
 
 ## Format
 
