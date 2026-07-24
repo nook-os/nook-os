@@ -36,11 +36,17 @@ ingress:
   enabled: false
 
 config:
-  appEnv: production
+  # NOT production: APP_ENV=production makes the control plane REFUSE to boot
+  # with a plaintext agent listener (main.rs guards against putting join tokens
+  # on the wire), which would require supplying an agent mTLS cert here — and
+  # testing the agent listener is explicitly out of scope (NG-1). This e2e is a
+  # convergence smoke test of the HTTP path (SPA + /healthz + upgrade), so it
+  # runs non-production, where the agent listener is optional.
+  appEnv: staging
   publicBaseUrl: http://localhost:18080
   webOrigin: http://localhost:18080
 
-# The e2e Secret carries SECRETS_KEY (64 hex); wire it so production mode uses an
-# explicit vault key rather than deriving one from SESSION_SECRET.
+# The e2e Secret carries SECRETS_KEY (64 hex); wire it so the crypto/vault path
+# uses an explicit key rather than deriving one from SESSION_SECRET.
 secretKeys:
   secretsKey: SECRETS_KEY

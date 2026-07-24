@@ -162,8 +162,7 @@ kind load docker-image --name "$CLUSTER" \
   "$IMG_REPO/nook-web:e2e-1" "$IMG_REPO/nook-web:e2e-2"
 
 log "creating the chart's Secret (DATABASE_URL -> in-cluster Postgres)"
-# SECRETS_KEY (64 hex) too: e2e-values runs APP_ENV=production, where the vault
-# key should be explicit rather than derived from SESSION_SECRET.
+# SECRETS_KEY (64 hex) too, so the crypto/vault path uses an explicit key.
 kube -n "$NS" create secret generic "$SECRET" \
   --from-literal=DATABASE_URL="postgres://nook:nook@$PG:5432/nook" \
   --from-literal=SESSION_SECRET="$(openssl rand -hex 32)" \
