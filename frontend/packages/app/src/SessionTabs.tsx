@@ -4,7 +4,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
-import { Pin, Plus, SquareTerminal, X } from "lucide-react";
+import { CircleDot, Loader2, Pin, Plus, SquareTerminal, X } from "lucide-react";
 import { api } from "@nookos/api";
 import { useWorkspaceContext } from "./context";
 import { useLive } from "./live";
@@ -24,6 +24,7 @@ export function SessionTabs({ activeId }: { activeId?: string }) {
   const allTabs = useSessionTabs((s) => s.tabs);
   const store = useSessionTabs();
   const sessionStatus = useLive((s) => s.sessionStatus);
+  const agentState = useLive((s) => s.agentState);
   const showNewWork = useNewWork((s) => s.show);
   const selectedWorkspaceId = useWorkspaceContext((s) => s.selectedWorkspaceId);
   const [menu, setMenu] = useState<MenuState | null>(null);
@@ -94,6 +95,10 @@ export function SessionTabs({ activeId }: { activeId?: string }) {
           // insertion line and the drop itself are gated on it.
           const sameGroup = dragged ? !!dragged.pinned === !!t.pinned : false;
           const dropHere = dropAt?.id === t.id ? dropAt : null;
+          // A live agent's state trumps the plain terminal glyph: a spinner
+          // while it runs, a "needs you" dot when it blocks. A dead session is
+          // dead regardless of the last thing its agent said.
+          const agent = dead ? undefined : agentState[t.id]?.state;
           return (
             <div
               key={t.id}
@@ -150,12 +155,20 @@ export function SessionTabs({ activeId }: { activeId?: string }) {
               // Fires whether the drag ended in a drop or was released outside
               // the strip — so a cancelled drag leaves order and tabs untouched.
               onDragEnd={endDrag}
-              title={`${t.name} · ${t.runtime}${st ? ` · ${st}` : ""}`}
+              title={`${t.name} · ${t.runtime}${st ? ` · ${st}` : ""}${
+                agent ? ` · agent ${agent}` : ""
+              }`}
             >
-              <SquareTerminal
-                size={12}
-                className={`session-tab-icon ${dead ? "err" : "ok"}`}
-              />
+              {agent === "running" ? (
+                <Loader2 size={12} className="session-tab-icon spin running" />
+              ) : agent === "waiting" ? (
+                <CircleDot size={12} className="session-tab-icon waiting" />
+              ) : (
+                <SquareTerminal
+                  size={12}
+                  className={`session-tab-icon ${dead ? "err" : "ok"}`}
+                />
+              )}
               {!selectedWorkspaceId && t.workspaceName && (
                 <span className="session-tab-ws">{t.workspaceName} /</span>
               )}

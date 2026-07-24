@@ -1384,6 +1384,25 @@ pub struct SessionWindow {
     pub panes: u32,
 }
 
+/// A hook reporting what the agent in a session is doing.
+#[derive(Debug, Clone, Deserialize, ToSchema)]
+pub struct ReportAgentStateRequest {
+    /// `running` | `waiting` | `idle`.
+    pub state: String,
+    /// The tmux window the agent runs in, so the right terminal chip lights up.
+    #[serde(default)]
+    pub window: Option<u32>,
+}
+
+/// One session's current agent state, for seeding the UI on load.
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct AgentStateItem {
+    pub session_id: SessionId,
+    #[serde(default)]
+    pub window: Option<u32>,
+    pub state: String,
+}
+
 /// Deleting a workspace. Records always go; the checkouts on disk only go
 /// when explicitly asked for (and if they stay, discovery re-adds them).
 #[derive(Debug, Clone, Default, Deserialize, ToSchema)]

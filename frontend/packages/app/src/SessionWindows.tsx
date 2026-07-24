@@ -4,13 +4,15 @@
 // and re-render from the list tmux reports back.
 import React, { useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Columns2, Plus, Rows2, X } from "lucide-react";
+import { CircleDot, Columns2, Loader2, Plus, Rows2, X } from "lucide-react";
 import { api } from "@nookos/api";
 import { TabMenu } from "./SessionTabs";
+import { useLive } from "./live";
 import { askText } from "./dialogs";
 
 export function SessionWindows({ sessionId }: { sessionId: string }) {
   const queryClient = useQueryClient();
+  const agent = useLive((s) => s.agentState[sessionId]);
   const [menu, setMenu] = useState<{ index: number; x: number; y: number } | null>(
     null,
   );
@@ -62,8 +64,18 @@ export function SessionWindows({ sessionId }: { sessionId: string }) {
               });
               if (name) act({ action: "rename", index: w.index, name });
             }}
-            title={`${w.name}${(w.panes ?? 1) > 1 ? ` · ${w.panes} panes` : ""}`}
+            title={`${w.name}${(w.panes ?? 1) > 1 ? ` · ${w.panes} panes` : ""}${
+              agent && agent.window === w.index ? ` · agent ${agent.state}` : ""
+            }`}
           >
+            {/* The agent runs in exactly one window; light only that chip so the
+                plain shells next to it stay plain. */}
+            {agent && agent.window === w.index && agent.state === "running" && (
+              <Loader2 size={10} className="term-chip-agent spin running" />
+            )}
+            {agent && agent.window === w.index && agent.state === "waiting" && (
+              <CircleDot size={10} className="term-chip-agent waiting" />
+            )}
             {w.name}
             {(w.panes ?? 1) > 1 && <span className="faint"> ⋮{w.panes}</span>}
             {/* Closing ONE terminal needs to be visible. It used to live only

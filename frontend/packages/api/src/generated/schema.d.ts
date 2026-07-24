@@ -1131,6 +1131,27 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/sessions/agent-states": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * `GET /api/v1/sessions/agent-states` — every live agent state in the tenant,
+         *     so a browser that just loaded shows the right spinners immediately rather
+         *     than a blank tab until the next transition. Stale entries are swept here.
+         */
+        get: operations["list_agent_states"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/sessions/{id}": {
         parameters: {
             query?: never;
@@ -1149,6 +1170,30 @@ export interface paths {
         options?: never;
         head?: never;
         patch: operations["update_session"];
+        trace?: never;
+    };
+    "/api/v1/sessions/{id}/agent-state": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * `POST /api/v1/sessions/{id}/agent-state` — a hook says what its agent is
+         *     doing. Guarded by session-content access (only someone who could see the
+         *     terminal may report on it), it stores the state and, on a real change,
+         *     fans a `SessionAgentState` event to every browser in the tenant. The report
+         *     is ephemeral — nothing is written to the database and no notification is
+         *     raised — so a per-turn `running`/`idle` stream costs the inbox nothing.
+         */
+        post: operations["report_agent_state"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
         trace?: never;
     };
     "/api/v1/sessions/{id}/input": {
@@ -2067,6 +2112,13 @@ export interface components {
             credential_id: string;
             label?: string;
             wrapped_secret: string;
+        };
+        /** @description One session's current agent state, for seeding the UI on load. */
+        AgentStateItem: {
+            session_id: components["schemas"]["SessionId"];
+            state: string;
+            /** Format: int32 */
+            window?: number | null;
         };
         /** @description Terminal attach socket messages (browser → control plane). */
         AttachClientMessage: {
@@ -3059,6 +3111,16 @@ export interface components {
             csr_pem: string;
             node_id: components["schemas"]["NodeId"];
         };
+        /** @description A hook reporting what the agent in a session is doing. */
+        ReportAgentStateRequest: {
+            /** @description `running` | `waiting` | `idle`. */
+            state: string;
+            /**
+             * Format: int32
+             * @description The tmux window the agent runs in, so the right terminal chip lights up.
+             */
+            window?: number | null;
+        };
         /** @description The node the resource-aware scheduler chose for "Auto" placement. */
         ScheduledNode: {
             node_id: components["schemas"]["NodeId"];
@@ -3453,6 +3515,23 @@ export interface components {
             };
             /** @enum {string} */
             type: "session_status";
+        } | {
+            /**
+             * @description What the agent in a session is doing right now: `running`, `waiting`
+             *     (blocked on a human), or `idle`. Driven by Claude Code hooks reporting
+             *     through `nook agent-state`, so the terminal tabs can show a spinner vs a
+             *     "needs you" mark without anyone watching the output. `window` is the
+             *     tmux window index the agent runs in, so the right in-session terminal
+             *     chip lights up and the shells beside it do not.
+             */
+            data: {
+                session_id: components["schemas"]["SessionId"];
+                state: string;
+                /** Format: int32 */
+                window?: number | null;
+            };
+            /** @enum {string} */
+            type: "session_agent_state";
         } | {
             data: {
                 node_id: components["schemas"]["NodeId"];
@@ -5746,6 +5825,25 @@ export interface operations {
             };
         };
     };
+    list_agent_states: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AgentStateItem"][];
+                };
+            };
+        };
+    };
     get_session: {
         parameters: {
             query?: never;
@@ -5820,6 +5918,47 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["Session"];
                 };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    report_agent_state: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ReportAgentStateRequest"];
+            };
+        };
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             404: {
                 headers: {

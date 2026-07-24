@@ -983,6 +983,44 @@ pub async fn current_session_workspace(client: &Client) -> Option<SessionWorkspa
     Some(SessionWorkspace { id, name })
 }
 
+/// `nook agent-state <running|waiting|idle>` — report what the agent in this
+/// session is doing, so the terminal tabs can show a spinner or a "needs you"
+/// mark. Driven by the Claude Code hooks.
+///
+/// A no-op outside a nook session (`AC-1`): with no `NOOK_SESSION_ID` there is
+/// nothing to report about, and the hook that calls this runs in plain
+/// terminals too. Best-effort — a control plane that is down or slow must never
+/// make an agent's turn hang or fail, so a failed report is swallowed.
+pub async fn agent_state(state: &str) -> Result<()> {
+    let Ok(sid) = std::env::var("NOOK_SESSION_ID") else {
+        return Ok(());
+    };
+    if sid.is_empty() {
+        return Ok(());
+    }
+    // The tmux window the agent is in, so the right in-session terminal chip
+    // lights up rather than the whole strip. Absent when not under tmux.
+    let window = std::process::Command::new("tmux")
+        .args(["display-message", "-p", "#{window_index}"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .and_then(|s| s.trim().parse::<u32>().ok());
+
+    let Ok(client) = Client::from_config() else {
+        return Ok(());
+    };
+    let mut body = serde_json::json!({ "state": state });
+    if let Some(w) = window {
+        body["window"] = serde_json::json!(w);
+    }
+    let _ = client
+        .post(&format!("/api/v1/sessions/{sid}/agent-state"), body)
+        .await;
+    Ok(())
+}
+
 /// `nook workspace current` — which workspace is this session in?
 ///
 /// The seam `/loop-spec` uses to stamp a new ticket with the workspace it was

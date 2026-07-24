@@ -490,3 +490,66 @@ pub async fn delete(
     .await;
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
+
+/// `POST /api/v1/sessions/{id}/agent-state` — a hook says what its agent is
+/// doing. Guarded by session-content access (only someone who could see the
+/// terminal may report on it), it stores the state and, on a real change,
+/// fans a `SessionAgentState` event to every browser in the tenant. The report
+/// is ephemeral — nothing is written to the database and no notification is
+/// raised — so a per-turn `running`/`idle` stream costs the inbox nothing.
+#[utoipa::path(post, path = "/api/v1/sessions/{id}/agent-state",
+    operation_id = "report_agent_state",
+    params(("id" = String, Path,)),
+    request_body = ReportAgentStateRequest,
+    responses((status = 204), (status = 400), (status = 403), (status = 404)))]
+pub async fn report_agent_state(
+    State(state): State<AppState>,
+    auth: AuthCtx,
+    Path(id): Path<SessionId>,
+    Json(req): Json<ReportAgentStateRequest>,
+) -> ApiResult<axum::http::StatusCode> {
+    if !matches!(req.state.as_str(), "running" | "waiting" | "idle") {
+        return Err(ApiError::BadRequest(
+            "state must be running, waiting, or idle".into(),
+        ));
+    }
+    let session = session_for_content(&state, &auth, id).await?;
+
+    let changed = state
+        .registry
+        .set_agent_state(session.tenant_id, id, req.window, &req.state);
+    if changed {
+        state.registry.publish(
+            session.tenant_id,
+            UiEvent::SessionAgentState {
+                session_id: id,
+                window: req.window,
+                state: req.state,
+            },
+        );
+    }
+    Ok(axum::http::StatusCode::NO_CONTENT)
+}
+
+/// `GET /api/v1/sessions/agent-states` — every live agent state in the tenant,
+/// so a browser that just loaded shows the right spinners immediately rather
+/// than a blank tab until the next transition. Stale entries are swept here.
+#[utoipa::path(get, path = "/api/v1/sessions/agent-states",
+    operation_id = "list_agent_states",
+    responses((status = 200, body = [AgentStateItem])))]
+pub async fn agent_states(
+    State(state): State<AppState>,
+    auth: AuthCtx,
+) -> ApiResult<Json<Vec<AgentStateItem>>> {
+    let items = state
+        .registry
+        .agent_states_for(auth.tenant_id)
+        .into_iter()
+        .map(|(session_id, window, state)| AgentStateItem {
+            session_id,
+            window,
+            state,
+        })
+        .collect();
+    Ok(Json(items))
+}

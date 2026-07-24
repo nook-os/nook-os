@@ -6,13 +6,12 @@
 //! every phone and every Slack channel hears about it at once. Nothing polls,
 //! and nothing has to watch a terminal for the output to stop changing.
 //!
-//! Three events are wired, chosen for signal rather than completeness:
-//!
-//! - **Stop** → `agent.finished`. The turn is done.
-//! - **Notification** → `agent.waiting`. Claude is BLOCKED — waiting for input
-//!   or a permission. This is the one worth a buzz in your pocket: "finished"
-//!   can wait, "stuck until you come back" cannot.
-//! - **SubagentStop** → `agent.subagent_finished`. A delegated task returned.
+//! Two families of hook are wired. **Notifications** land in the inbox (toast +
+//! phone + channels): Stop → `agent.finished`, Notification → `agent.waiting`
+//! (BLOCKED — the one worth a buzz in your pocket), SubagentStop →
+//! `agent.subagent_finished`. **State reports** are ephemeral and drive the
+//! terminal-tab spinner without touching the inbox: UserPromptSubmit → running,
+//! Notification → waiting, Stop → idle, via `nook agent-state`.
 //!
 //! Deliberately NOT wired: `SessionStart` and `PreCompact` fire on every resume
 //! and every compaction, so they are heartbeats disguised as events — a lot of
@@ -30,41 +29,94 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
 
-/// One Claude Code event, mapped to the notification it raises.
+/// What a hook does when its Claude event fires. Two kinds, deliberately
+/// separate: a `Notify` lands in the inbox (toast + phone + channels), a `State`
+/// is an ephemeral report that drives the terminal-tab spinner and never
+/// touches the inbox. Some events do both — a `Stop` both notifies "finished"
+/// and reports `idle` — which is why they are separate entries rather than one.
+enum Action {
+    Notify {
+        title: &'static str,
+        level: &'static str,
+        kind: &'static str,
+    },
+    State {
+        value: &'static str,
+    },
+}
+
+/// One Claude Code event, mapped to a single action. An event can appear more
+/// than once (a notify AND a state).
 struct Hook {
     /// The Claude Code hook event name — the key under `hooks` in settings.
     event: &'static str,
-    /// The `--kind` the notification carries, and the marker that identifies
-    /// THIS hook for idempotent re-install: unique per event.
-    kind: &'static str,
-    level: &'static str,
-    title: &'static str,
+    action: Action,
 }
 
 /// The set installed, in the order they appear in the confirmation output.
 const HOOKS: &[Hook] = &[
+    // ── Inbox notifications ───────────────────────────────────────────────
     Hook {
         event: "Stop",
-        kind: "agent.finished",
-        level: "success",
-        title: "Claude Code finished",
+        action: Action::Notify {
+            title: "Claude Code finished",
+            level: "success",
+            kind: "agent.finished",
+        },
     },
     Hook {
-        // The high-value one. Claude fires this when it wants input or a
-        // permission — i.e. it has stopped and is waiting on a human. `warning`
-        // so it stands out from the routine "finished".
+        // Claude fires this when it wants input or a permission — stopped, and
+        // waiting on a human. `warning` so it stands out from routine finishes.
         event: "Notification",
-        kind: "agent.waiting",
-        level: "warning",
-        title: "Claude needs you",
+        action: Action::Notify {
+            title: "Claude needs you",
+            level: "warning",
+            kind: "agent.waiting",
+        },
     },
     Hook {
         event: "SubagentStop",
-        kind: "agent.subagent_finished",
-        level: "info",
-        title: "A subagent finished",
+        action: Action::Notify {
+            title: "A subagent finished",
+            level: "info",
+            kind: "agent.subagent_finished",
+        },
+    },
+    // ── Ephemeral tab state ───────────────────────────────────────────────
+    // Running the moment a prompt is submitted, waiting when Claude blocks,
+    // idle when the turn ends. `SubagentStop` is intentionally NOT here — the
+    // main agent is still running while a subagent finishes (NG-3).
+    Hook {
+        event: "UserPromptSubmit",
+        action: Action::State { value: "running" },
+    },
+    Hook {
+        event: "Notification",
+        action: Action::State { value: "waiting" },
+    },
+    Hook {
+        event: "Stop",
+        action: Action::State { value: "idle" },
     },
 ];
+
+/// The unique substring that identifies THIS hook's command, for idempotent
+/// re-install and uninstall — a notify by its `--kind`, a state report by its
+/// `agent-state <value>`.
+fn marker(h: &Hook) -> String {
+    match h.action {
+        Action::Notify { kind, .. } => format!("--kind {kind}"),
+        Action::State { value } => format!("agent-state {value}"),
+    }
+}
+
+/// A short human label for the confirmation output.
+fn label(h: &Hook) -> String {
+    match h.action {
+        Action::Notify { kind, .. } => format!("notify {kind}"),
+        Action::State { value } => format!("agent-state {value}"),
+    }
+}
 
 /// The shell command a hook runs.
 ///
@@ -80,30 +132,30 @@ const HOOKS: &[Hook] = &[
 /// notification read `repo" on host`. Parameter expansion needs no quoting, no
 /// subshell, and cannot be mangled by whatever writes the settings file.
 fn command(h: &Hook) -> String {
-    // `${NOOK_SESSION_ID:+--session $NOOK_SESSION_ID}` expands to the two words
-    // `--session <uuid>` only when the var is set — i.e. when the agent runs
-    // inside a nook session — and to nothing otherwise. A session id has no
-    // spaces, so it needs no quoting; and `:+` means an agent running in a
-    // plain terminal (no NOOK_SESSION_ID) still notifies, just without a link.
-    // This is what makes "Claude needs you" open the actual terminal.
-    format!(
-        "nook notify \"{title}\" --level {level} --kind {kind} \
-         --body \"${{PWD##*/}} on $(hostname)\" \
-         ${{NOOK_SESSION_ID:+--session $NOOK_SESSION_ID}} >/dev/null 2>&1 || true",
-        title = h.title,
-        level = h.level,
-        kind = h.kind,
-    )
+    match h.action {
+        // `${NOOK_SESSION_ID:+--session $NOOK_SESSION_ID}` expands to the two
+        // words `--session <uuid>` only when the var is set — so "Claude needs
+        // you" deep-links to the terminal in a nook session, and an agent in a
+        // plain terminal still notifies, just without a link.
+        Action::Notify { title, level, kind } => format!(
+            "nook notify \"{title}\" --level {level} --kind {kind} \
+             --body \"${{PWD##*/}} on $(hostname)\" \
+             ${{NOOK_SESSION_ID:+--session $NOOK_SESSION_ID}} >/dev/null 2>&1 || true",
+        ),
+        // Ephemeral: `nook agent-state` is a no-op outside a nook session, so
+        // this is harmless in a plain terminal and never touches the inbox.
+        Action::State { value } => {
+            format!("nook agent-state {value} >/dev/null 2>&1 || true")
+        }
+    }
 }
 
-/// Does this settings entry belong to the given hook?
-///
-/// Matched by the `--kind`, which is unique per hook, so re-installing updates
-/// in place instead of stacking a second copy that fires twice.
-fn is_ours(entry: &Value, kind: &str) -> bool {
+/// Does this settings entry belong to the given hook? Matched by its unique
+/// marker, so re-installing updates in place instead of stacking a duplicate.
+fn is_ours(entry: &Value, marker: &str) -> bool {
     serde_json::to_string(entry)
         .unwrap_or_default()
-        .contains(&format!("--kind {kind}"))
+        .contains(marker)
 }
 
 fn home() -> Result<PathBuf> {
@@ -142,7 +194,7 @@ pub fn install(dry_run: bool) -> Result<()> {
             .or_insert_with(|| json!([]))
             .as_array_mut()
             .with_context(|| format!("`hooks.{}` in settings.json is not an array", h.event))?;
-        list.retain(|e| !is_ours(e, h.kind));
+        list.retain(|e| !is_ours(e, &marker(h)));
         list.push(json!({
             "matcher": "",
             "hooks": [{ "type": "command", "command": command(h) }],
@@ -163,7 +215,7 @@ pub fn install(dry_run: bool) -> Result<()> {
 
     println!("✓ Claude Code will now tell the fleet what it is doing:");
     for h in HOOKS {
-        println!("    {:16} → {}", h.event, h.kind);
+        println!("    {:16} → {}", h.event, label(h));
     }
     println!("  {}", path.display());
     println!();
@@ -187,7 +239,7 @@ pub fn uninstall() -> Result<()> {
         for h in HOOKS {
             if let Some(list) = hooks.get_mut(h.event).and_then(Value::as_array_mut) {
                 let before = list.len();
-                list.retain(|e| !is_ours(e, h.kind));
+                list.retain(|e| !is_ours(e, &marker(h)));
                 removed += before - list.len();
             }
         }
@@ -220,70 +272,128 @@ mod tests {
         }
     }
 
-    /// Each hook carries a unique kind — the marker re-install and uninstall
-    /// key on. A duplicate would make one hook's removal take another's entry.
+    /// Every hook's marker is unique — the string re-install and uninstall key
+    /// on. A duplicate would make one hook's removal take another's entry. This
+    /// matters more now that one EVENT (Notification, Stop) carries two hooks.
     #[test]
-    fn kinds_are_unique() {
-        let mut kinds: Vec<&str> = HOOKS.iter().map(|h| h.kind).collect();
-        let n = kinds.len();
-        kinds.sort_unstable();
-        kinds.dedup();
-        assert_eq!(kinds.len(), n, "two hooks share a --kind");
+    fn markers_are_unique() {
+        let mut m: Vec<String> = HOOKS.iter().map(marker).collect();
+        let n = m.len();
+        m.sort();
+        m.dedup();
+        assert_eq!(m.len(), n, "two hooks share a marker");
     }
 
-    /// Every hook passes the session through, so a notification can deep-link
-    /// to the terminal. Guarded with `:+` so it only appears when set — an
-    /// agent outside a nook session still notifies, just without a link.
+    /// The agent-state hooks that drive the tab indicator are all present, and
+    /// SubagentStop is deliberately NOT among them (NG-3 — the main agent is
+    /// still running when a subagent finishes).
     #[test]
-    fn every_command_links_to_its_session() {
+    fn the_three_agent_states_are_wired() {
+        let states: Vec<(&str, &str)> = HOOKS
+            .iter()
+            .filter_map(|h| match h.action {
+                Action::State { value } => Some((h.event, value)),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            states.contains(&("UserPromptSubmit", "running")),
+            "{states:?}"
+        );
+        assert!(states.contains(&("Notification", "waiting")), "{states:?}");
+        assert!(states.contains(&("Stop", "idle")), "{states:?}");
+        assert!(
+            !states.iter().any(|(e, _)| *e == "SubagentStop"),
+            "SubagentStop must not change the session state: {states:?}"
+        );
+    }
+
+    /// A state report is ephemeral — it calls `nook agent-state`, NOT
+    /// `nook notify`, so a per-turn running/idle stream never touches the inbox.
+    #[test]
+    fn state_hooks_do_not_notify() {
         for h in HOOKS {
-            let c = command(h);
-            assert!(
-                c.contains("${NOOK_SESSION_ID:+--session $NOOK_SESSION_ID}"),
-                "{}: no session link: {c}",
-                h.event
-            );
+            if let Action::State { value } = h.action {
+                let c = command(h);
+                assert!(c.contains(&format!("agent-state {value}")), "{c}");
+                assert!(
+                    !c.contains("nook notify"),
+                    "state hook must not notify: {c}"
+                );
+            }
         }
     }
 
-    /// The blocked-waiting hook is the point of adding more than one, so it had
+    /// The blocked-waiting notification is the point of the inbox set, so it had
     /// better be present and stand out from routine completion.
     #[test]
-    fn the_waiting_hook_exists_and_is_a_warning() {
+    fn the_waiting_notification_is_a_warning() {
         let waiting = HOOKS
             .iter()
-            .find(|h| h.kind == "agent.waiting")
-            .expect("a hook for when Claude is blocked");
+            .find(|h| {
+                matches!(
+                    h.action,
+                    Action::Notify {
+                        kind: "agent.waiting",
+                        ..
+                    }
+                )
+            })
+            .expect("a notification for when Claude is blocked");
         assert_eq!(waiting.event, "Notification");
-        assert_eq!(waiting.level, "warning");
+        assert!(matches!(
+            waiting.action,
+            Action::Notify {
+                level: "warning",
+                ..
+            }
+        ));
     }
 
-    /// No escaped quotes, because they do not survive the trip through JSON to
-    /// a shell — an escaped quote once ended up in the notification body as a
-    /// literal character. It looked right everywhere except the output.
+    /// Notify commands carry the session deep-link; state commands do not need
+    /// it (the server derives the link on the `agent-state` path from the id).
     #[test]
-    fn no_command_has_escaped_quotes() {
+    fn notify_commands_link_to_their_session() {
         for h in HOOKS {
-            let c = command(h);
-            assert!(!c.contains("\\\""), "{}: {c}", h.event);
-            assert!(
-                !c.contains("basename"),
-                "{}: use ${{PWD##*/}}: {c}",
-                h.event
-            );
-            assert!(c.contains("${PWD##*/}"), "{}: {c}", h.event);
-            assert_eq!(
-                c.matches('"').count() % 2,
-                0,
-                "{}: unbalanced quotes",
-                h.event
-            );
+            if matches!(h.action, Action::Notify { .. }) {
+                let c = command(h);
+                assert!(
+                    c.contains("${NOOK_SESSION_ID:+--session $NOOK_SESSION_ID}"),
+                    "{}: no session link: {c}",
+                    h.event
+                );
+            }
         }
     }
 
-    /// Installing is idempotent: two runs leave one entry per event, not two.
-    /// The bug this guards against is a hook that fires twice per turn because
-    /// re-running stacked a second copy.
+    /// No escaped quotes in a notify command — they do not survive the trip
+    /// through JSON to a shell, and once ended up in a notification body as a
+    /// literal character. It looked right everywhere except the output.
+    #[test]
+    fn notify_commands_have_no_escaped_quotes() {
+        for h in HOOKS {
+            if matches!(h.action, Action::Notify { .. }) {
+                let c = command(h);
+                assert!(!c.contains("\\\""), "{}: {c}", h.event);
+                assert!(
+                    !c.contains("basename"),
+                    "{}: use ${{PWD##*/}}: {c}",
+                    h.event
+                );
+                assert!(c.contains("${PWD##*/}"), "{}: {c}", h.event);
+                assert_eq!(
+                    c.matches('"').count() % 2,
+                    0,
+                    "{}: unbalanced quotes",
+                    h.event
+                );
+            }
+        }
+    }
+
+    /// Installing is idempotent: two runs leave one entry PER HOOK, not two —
+    /// even for an event that carries two hooks. The bug this guards against is
+    /// a hook that fires twice per turn because re-running stacked a copy.
     #[test]
     fn reinstall_is_idempotent() {
         let mut hooks = serde_json::Map::new();
@@ -294,16 +404,18 @@ mod tests {
                     .or_insert_with(|| json!([]))
                     .as_array_mut()
                     .unwrap();
-                list.retain(|e| !is_ours(e, h.kind));
+                list.retain(|e| !is_ours(e, &marker(h)));
                 list.push(json!({
                     "matcher": "",
                     "hooks": [{ "type": "command", "command": command(h) }],
                 }));
             }
         }
+        // Each hook appears exactly once, found by its own marker.
         for h in HOOKS {
-            let n = hooks[h.event].as_array().unwrap().len();
-            assert_eq!(n, 1, "{} has {n} entries after two installs", h.event);
+            let list = hooks[h.event].as_array().unwrap();
+            let n = list.iter().filter(|e| is_ours(e, &marker(h))).count();
+            assert_eq!(n, 1, "{} / {} has {n} entries", h.event, marker(h));
         }
     }
 }

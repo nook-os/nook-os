@@ -170,6 +170,9 @@ enum Command {
     /// Which workspace is the session you are in? (`nook workspace current`)
     #[command(subcommand)]
     Workspace(WorkspaceCommand),
+    /// Report the agent's state for this session (running|waiting|idle). A
+    /// no-op outside a nook session; called by the Claude Code hooks.
+    AgentState { state: String },
     /// Claim a task so nobody else takes it.
     Claim {
         key: String,
@@ -424,6 +427,7 @@ async fn main() -> Result<()> {
         Command::Workspace(WorkspaceCommand::Current { json }) => {
             cli::workspace_current(json).await
         }
+        Command::AgentState { state } => cli::agent_state(&state).await,
         Command::Claim {
             key,
             column_type,

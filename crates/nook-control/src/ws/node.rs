@@ -435,6 +435,9 @@ async fn handle_message(
                     status: "exited".into(),
                 },
             );
+            // A dead session has no agent state — clear it so a spinner does not
+            // outlive the terminal, on screen now or on the next reload.
+            clear_agent_state(state, tenant, session_id);
             state.registry.publish_session(
                 session_id,
                 nook_proto::AttachServerMessage::Status {
@@ -477,6 +480,7 @@ async fn handle_message(
                     status: "error".into(),
                 },
             );
+            clear_agent_state(state, tenant, session_id);
             state.registry.publish_session(
                 session_id,
                 nook_proto::AttachServerMessage::Status {
@@ -537,4 +541,20 @@ async fn handle_message(
         NodeToControl::Pong => {}
     }
     Ok(())
+}
+
+/// Clear a session's agent state on death and tell every browser to drop the
+/// spinner. Only publishes when there was something to clear, so an ordinary
+/// exit of a session that never ran an agent stays silent.
+fn clear_agent_state(state: &AppState, tenant: TenantId, session_id: nook_types::SessionId) {
+    if state.registry.clear_agent_state(session_id) {
+        state.registry.publish(
+            tenant,
+            UiEvent::SessionAgentState {
+                session_id,
+                window: None,
+                state: "idle".into(),
+            },
+        );
+    }
 }
