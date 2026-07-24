@@ -1090,6 +1090,37 @@
         }
       }
     },
+    "/api/v1/invites/accept": {
+      "post": {
+        "tags": [
+          "crate::routes::invites"
+        ],
+        "summary": "`POST /api/v1/invites/accept` — the signed-in person consumes a token. On a\nmatch (pending, unexpired, email equals the signed-in email) they are added\nto the tenant with the invite's role — linked by `person_id`, keeping their\npersonal tenant — and the invite becomes `accepted`. Any failure leaves the\ninvite untouched and returns the caller to their own tenant with a message\n(AC-4/5); already-a-member is a no-op success (AC-6).",
+        "operationId": "accept_invite",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AcceptInviteRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AcceptInviteResult"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/labels": {
       "get": {
         "tags": [
@@ -4079,6 +4110,123 @@
         }
       }
     },
+    "/api/v1/tenants/{id}/invites": {
+      "get": {
+        "tags": [
+          "crate::routes::invites"
+        ],
+        "summary": "`GET /api/v1/tenants/{id}/invites` — pending invites (never the token).\nowner/admin only.",
+        "operationId": "list_invites",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Invite"
+                  }
+                }
+              }
+            }
+          },
+          "403": {
+            "description": ""
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "crate::routes::invites"
+        ],
+        "summary": "`POST /api/v1/tenants/{id}/invites` — create a pending invite, returning the\naccept URL. Re-inviting the same email replaces the existing pending invite\n(AC-2). owner/admin only.",
+        "operationId": "create_invite",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateInviteRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Invite"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": ""
+          }
+        }
+      }
+    },
+    "/api/v1/tenants/{id}/invites/{invite}": {
+      "delete": {
+        "tags": [
+          "crate::routes::invites"
+        ],
+        "summary": "`DELETE /api/v1/tenants/{id}/invites/{invite}` — revoke a pending invite; its\nlink stops working. owner/admin only.",
+        "operationId": "revoke_invite",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "invite",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": ""
+          },
+          "403": {
+            "description": ""
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      }
+    },
     "/api/v1/tenants/{id}/leave": {
       "post": {
         "tags": [
@@ -5323,6 +5471,39 @@
   },
   "components": {
     "schemas": {
+      "AcceptInviteRequest": {
+        "type": "object",
+        "required": [
+          "token"
+        ],
+        "properties": {
+          "token": {
+            "type": "string"
+          }
+        }
+      },
+      "AcceptInviteResult": {
+        "type": "object",
+        "description": "The outcome of accepting (or failing to accept) an invite. Whichever tenant\nthe person ends up in, the UI switches/refetches to it.",
+        "required": [
+          "accepted",
+          "tenant_id",
+          "message"
+        ],
+        "properties": {
+          "accepted": {
+            "type": "boolean",
+            "description": "True when the person is now a member of the invited tenant."
+          },
+          "message": {
+            "type": "string"
+          },
+          "tenant_id": {
+            "$ref": "#/components/schemas/TenantId",
+            "description": "The tenant to land in — the shared one on success, else the person's own."
+          }
+        }
+      },
       "AddPasskeyRequest": {
         "type": "object",
         "description": "Enrolling a passkey. The wrapping happens in the browser; the server only\never sees the sealed blob.",
@@ -6099,6 +6280,24 @@
               "null"
             ],
             "description": "Paste an existing private key (OpenSSH PEM)…"
+          }
+        }
+      },
+      "CreateInviteRequest": {
+        "type": "object",
+        "required": [
+          "email"
+        ],
+        "properties": {
+          "email": {
+            "type": "string"
+          },
+          "role": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`member` | `admin`. `owner` is never invitable (NG-3)."
           }
         }
       },
@@ -7044,6 +7243,50 @@
         "properties": {
           "name": {
             "type": "string"
+          }
+        }
+      },
+      "Invite": {
+        "type": "object",
+        "description": "A pending/accepted/revoked invitation into a tenant. `accept_url` is set only\non the create response (the link to hand out); the token is never listed.",
+        "required": [
+          "id",
+          "email",
+          "role",
+          "status",
+          "created_at",
+          "expires_at"
+        ],
+        "properties": {
+          "accept_url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The accept link, returned only when the invite is created (never listed)."
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "email": {
+            "type": "string"
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "role": {
+            "type": "string",
+            "description": "`member` | `admin`."
+          },
+          "status": {
+            "type": "string",
+            "description": "`pending` | `accepted` | `revoked`."
           }
         }
       },

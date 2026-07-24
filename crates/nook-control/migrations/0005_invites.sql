@@ -6,13 +6,16 @@
 -- `person_id`, so the switcher immediately offers the tenant). Emailing the link
 -- is MAIN-7; this issue returns it in the API and copies it in the UI.
 --
--- Idempotent (IF NOT EXISTS) so a database that already has the table converges.
+-- Only the token's SHA-256 (`token_hash`) is stored — the plaintext rides only
+-- in the accept link (AC-9), so a database dump does not hand out working
+-- invites. Idempotent (IF NOT EXISTS) so a database that already has the table
+-- converges.
 CREATE TABLE IF NOT EXISTS public.invites (
     id          uuid PRIMARY KEY,
     tenant_id   uuid NOT NULL REFERENCES public.tenants(id) ON DELETE CASCADE,
     email       text NOT NULL,
     role        text NOT NULL DEFAULT 'member',
-    token       text NOT NULL UNIQUE,
+    token_hash  text NOT NULL UNIQUE,
     status      text NOT NULL DEFAULT 'pending',
     invited_by  uuid,
     created_at  timestamptz NOT NULL DEFAULT now(),
@@ -27,5 +30,5 @@ CREATE TABLE IF NOT EXISTS public.invites (
 CREATE UNIQUE INDEX IF NOT EXISTS invites_one_pending_per_email
     ON public.invites (tenant_id, lower(email)) WHERE status = 'pending';
 
--- Accept looks up by token; keep it quick.
-CREATE INDEX IF NOT EXISTS invites_token_idx ON public.invites (token);
+-- Accept looks up by the token hash; keep it quick.
+CREATE INDEX IF NOT EXISTS invites_token_hash_idx ON public.invites (token_hash);
