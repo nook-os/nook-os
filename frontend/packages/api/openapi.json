@@ -4003,6 +4003,161 @@
         }
       }
     },
+    "/api/v1/tenants/{id}/leave": {
+      "post": {
+        "tags": [
+          "crate::routes::tenants"
+        ],
+        "summary": "`POST /api/v1/tenants/{id}/leave` — remove your own membership. You keep your\npersonal tenant; the last owner cannot leave (that includes your personal\ntenant, where you are the sole owner) (AC-4, AC-5).",
+        "operationId": "leave_tenant",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": ""
+          },
+          "403": {
+            "description": ""
+          }
+        }
+      }
+    },
+    "/api/v1/tenants/{id}/members": {
+      "get": {
+        "tags": [
+          "crate::routes::tenants"
+        ],
+        "summary": "`GET /api/v1/tenants/{id}/members` — everyone in the tenant. Any member may\nview (AC-1); management is gated separately.",
+        "operationId": "list_members",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/TenantMemberItem"
+                  }
+                }
+              }
+            }
+          },
+          "403": {
+            "description": ""
+          }
+        }
+      }
+    },
+    "/api/v1/tenants/{id}/members/{pid}": {
+      "delete": {
+        "tags": [
+          "crate::routes::tenants"
+        ],
+        "summary": "`DELETE /api/v1/tenants/{id}/members/{pid}` — remove a member. owner/admin\nonly; the last owner cannot be removed (AC-3, AC-5). The `users` row and all\nauthored work stay with the tenant (NG-2); only the membership grant is gone,\nso the person loses access on their next request.",
+        "operationId": "remove_member",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "pid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": ""
+          },
+          "403": {
+            "description": ""
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "crate::routes::tenants"
+        ],
+        "summary": "`PATCH /api/v1/tenants/{id}/members/{pid}` — change a member's role.\nowner/admin may move member↔admin; only an owner may grant `owner`\n(co-owner / transfer). The last owner cannot be demoted (AC-2, AC-5).",
+        "operationId": "change_member_role",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "pid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ChangeMemberRoleRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TenantMemberItem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": ""
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      }
+    },
     "/api/v1/themes": {
       "get": {
         "tags": [
@@ -5574,6 +5729,18 @@
             ],
             "format": "uuid",
             "description": "The org this caller's tenant belongs to, for reading its policy."
+          }
+        }
+      },
+      "ChangeMemberRoleRequest": {
+        "type": "object",
+        "description": "Change a member's role. `member` ↔ `admin` for any owner/admin; `owner`\n(a co-owner / transfer) is owner-only.",
+        "required": [
+          "role"
+        ],
+        "properties": {
+          "role": {
+            "type": "string"
           }
         }
       },
@@ -8692,6 +8859,37 @@
       "TenantId": {
         "type": "string",
         "format": "uuid"
+      },
+      "TenantMemberItem": {
+        "type": "object",
+        "description": "One member OF a tenant, for the members panel — distinct from\n`TenantMembership` (a tenant the caller belongs to). Keyed by\n`principal_id`, the `users.id`/`tenant_members.principal_id` used to change\nthe role or remove them.",
+        "required": [
+          "principal_id",
+          "email",
+          "display_name",
+          "role",
+          "joined_at"
+        ],
+        "properties": {
+          "display_name": {
+            "type": "string"
+          },
+          "email": {
+            "type": "string"
+          },
+          "joined_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "principal_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "role": {
+            "type": "string",
+            "description": "`owner` | `admin` | `member`."
+          }
+        }
       },
       "TenantMembership": {
         "type": "object",

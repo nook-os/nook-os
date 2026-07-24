@@ -1755,6 +1755,74 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/tenants/{id}/leave": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * `POST /api/v1/tenants/{id}/leave` — remove your own membership. You keep your
+         *     personal tenant; the last owner cannot leave (that includes your personal
+         *     tenant, where you are the sole owner) (AC-4, AC-5).
+         */
+        post: operations["leave_tenant"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/tenants/{id}/members": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * `GET /api/v1/tenants/{id}/members` — everyone in the tenant. Any member may
+         *     view (AC-1); management is gated separately.
+         */
+        get: operations["list_members"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/tenants/{id}/members/{pid}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * `DELETE /api/v1/tenants/{id}/members/{pid}` — remove a member. owner/admin
+         *     only; the last owner cannot be removed (AC-3, AC-5). The `users` row and all
+         *     authored work stay with the tenant (NG-2); only the membership grant is gone,
+         *     so the person loses access on their next request.
+         */
+        delete: operations["remove_member"];
+        options?: never;
+        head?: never;
+        /**
+         * `PATCH /api/v1/tenants/{id}/members/{pid}` — change a member's role.
+         *     owner/admin may move member↔admin; only an owner may grant `owner`
+         *     (co-owner / transfer). The last owner cannot be demoted (AC-2, AC-5).
+         */
+        patch: operations["change_member_role"];
+        trace?: never;
+    };
     "/api/v1/themes": {
         parameters: {
             query?: never;
@@ -2402,6 +2470,13 @@ export interface components {
              * @description The org this caller's tenant belongs to, for reading its policy.
              */
             org_id?: string | null;
+        };
+        /**
+         * @description Change a member's role. `member` ↔ `admin` for any owner/admin; `owner`
+         *     (a co-owner / transfer) is owner-only.
+         */
+        ChangeMemberRoleRequest: {
+            role: string;
         };
         ChangePasswordRequest: {
             current: string;
@@ -3575,6 +3650,22 @@ export interface components {
         };
         /** Format: uuid */
         TenantId: string;
+        /**
+         * @description One member OF a tenant, for the members panel — distinct from
+         *     `TenantMembership` (a tenant the caller belongs to). Keyed by
+         *     `principal_id`, the `users.id`/`tenant_members.principal_id` used to change
+         *     the role or remove them.
+         */
+        TenantMemberItem: {
+            display_name: string;
+            email: string;
+            /** Format: date-time */
+            joined_at: string;
+            /** Format: uuid */
+            principal_id: string;
+            /** @description `owner` | `admin` | `member`. */
+            role: string;
+        };
         /**
          * @description A tenant the caller belongs to, and the role they hold in it.
          *
@@ -7112,6 +7203,128 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["TenantMembership"][];
                 };
+            };
+        };
+    };
+    leave_tenant: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    list_members: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TenantMemberItem"][];
+                };
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    remove_member: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+                pid: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    change_member_role: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+                pid: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ChangeMemberRoleRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TenantMemberItem"];
+                };
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
         };
     };
