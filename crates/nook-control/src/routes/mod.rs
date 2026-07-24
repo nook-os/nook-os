@@ -251,6 +251,12 @@ pub fn build_router(state: AppState) -> Router {
         .route("/tasks/{id}/prune-worktree", post(taskwork::prune_worktree))
         .route("/tasks/{id}/move", post(taskwork::move_task))
         .route("/sessions", get(sessions::list).post(sessions::create))
+        // Before `/sessions/{id}` so the literal path is not captured as an id.
+        .route("/sessions/agent-states", get(sessions::agent_states))
+        .route(
+            "/sessions/{id}/agent-state",
+            post(sessions::report_agent_state),
+        )
         .route(
             "/sessions/{id}",
             get(sessions::get_one)

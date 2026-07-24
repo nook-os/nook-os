@@ -14,13 +14,31 @@ import { api } from "@nookos/api";
 
 const ACTIVITY_BUFFER = 250;
 
+/** How long a `running`/`waiting` mark survives with no fresh report before the
+ *  UI treats it as idle. A crashed agent never fires `Stop`, so without this a
+ *  spinner would spin forever. Kept just under the server's 15-min sweep so the
+ *  client fades the mark at about the same time the server forgets it. */
+export const AGENT_STATE_STALE_MS = 14 * 60 * 1000;
+
+export interface AgentState {
+  /** `running` | `waiting`. `idle` is represented by absence. */
+  state: string;
+  /** tmux window the agent runs in, so the right terminal chip lights up. */
+  window: number | null;
+  /** Client receipt time (ms), for the staleness fallback above. */
+  at: number;
+}
+
 interface LiveState {
   connected: boolean;
   nodeStatus: Record<string, string>;
   nodeResources: Record<string, unknown>;
   sessionStatus: Record<string, string>;
+  /** Live agent activity per session (running/waiting). Absence means idle. */
+  agentState: Record<string, AgentState>;
   activity: EventItem[];
   seedActivity(events: EventItem[]): void;
+  seedAgentStates(items: { session_id: string; window?: number | null; state: string }[]): void;
 }
 
 export const useLive = create<LiveState>(() => ({
@@ -28,6 +46,7 @@ export const useLive = create<LiveState>(() => ({
   nodeStatus: {},
   nodeResources: {},
   sessionStatus: {},
+  agentState: {},
   activity: [],
   seedActivity(events) {
     useLive.setState((s) => {
@@ -36,6 +55,18 @@ export const useLive = create<LiveState>(() => ({
       merged.sort((a, b) => (a.occurred_at < b.occurred_at ? 1 : -1));
       return { activity: merged.slice(0, ACTIVITY_BUFFER) };
     });
+  },
+  // Seed the agent-state map on load (and on reconnect) from
+  // GET /sessions/agent-states, so a tab already spinning when you open the app
+  // shows it without waiting for the next hook to fire.
+  seedAgentStates(items) {
+    const now = Date.now();
+    const next: Record<string, AgentState> = {};
+    for (const it of items) {
+      if (it.state === "idle") continue;
+      next[it.session_id] = { state: it.state, window: it.window ?? null, at: now };
+    }
+    useLive.setState({ agentState: next });
   },
 }));
 
@@ -67,6 +98,17 @@ export function startLive(queryClient: QueryClient) {
         },
       }));
       queryClient.invalidateQueries({ queryKey: ["sessions"] });
+    } else if (event.type === "session_agent_state") {
+      // What the agent in a session is doing right now. `idle` is the absence
+      // of a mark, so remove the entry rather than storing it — that keeps the
+      // "is anything running" check a simple key lookup.
+      const { session_id, window, state } = event.data;
+      useLive.setState((s) => {
+        const agentState = { ...s.agentState };
+        if (state === "idle") delete agentState[session_id];
+        else agentState[session_id] = { state, window: window ?? null, at: Date.now() };
+        return { agentState };
+      });
     } else if (event.type === "notification") {
       // Toast it now, and refresh the inbox so the bell's count is right even
       // if nobody looks until tomorrow.
@@ -138,14 +180,41 @@ export function startLive(queryClient: QueryClient) {
     }
   };
 
+  // Pull the current agent-state snapshot so tabs already running when the app
+  // opens (or after a socket drop) show their mark without waiting for the next
+  // hook. The push stream keeps it current after this.
+  const seedAgentStates = async () => {
+    const { data } = await api.GET("/api/v1/sessions/agent-states");
+    if (data) useLive.getState().seedAgentStates(data);
+  };
+
   connectUiSocket(handle, {
     // "Live" means the socket is open, not that an event has arrived — a quiet
     // fleet is still connected.
-    onOpen: () => useLive.setState({ connected: true }),
+    onOpen: () => {
+      useLive.setState({ connected: true });
+      void seedAgentStates();
+    },
     onClose: () => useLive.setState({ connected: false }),
     onReconnect: () => {
       // Reconnected after a gap: refetch everything that could have moved.
       queryClient.invalidateQueries();
     },
   });
+
+  // Fade a mark whose agent went away without ever reporting idle (a crash, a
+  // killed machine). The server sweeps its own copy on the same clock; this is
+  // the client mirror so a spinner does not outlive the thing it tracks.
+  setInterval(() => {
+    const now = Date.now();
+    useLive.setState((s) => {
+      const stale = Object.entries(s.agentState).filter(
+        ([, v]) => now - v.at > AGENT_STATE_STALE_MS,
+      );
+      if (stale.length === 0) return {};
+      const agentState = { ...s.agentState };
+      for (const [id] of stale) delete agentState[id];
+      return { agentState };
+    });
+  }, 60 * 1000);
 }

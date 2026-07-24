@@ -2460,6 +2460,30 @@
         }
       }
     },
+    "/api/v1/sessions/agent-states": {
+      "get": {
+        "tags": [
+          "crate::routes::sessions"
+        ],
+        "summary": "`GET /api/v1/sessions/agent-states` — every live agent state in the tenant,\nso a browser that just loaded shows the right spinners immediately rather\nthan a blank tab until the next transition. Stale entries are swept here.",
+        "operationId": "list_agent_states",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/AgentStateItem"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/sessions/{id}": {
       "get": {
         "tags": [
@@ -2552,6 +2576,49 @@
                 }
               }
             }
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      }
+    },
+    "/api/v1/sessions/{id}/agent-state": {
+      "post": {
+        "tags": [
+          "crate::routes::sessions"
+        ],
+        "summary": "`POST /api/v1/sessions/{id}/agent-state` — a hook says what its agent is\ndoing. Guarded by session-content access (only someone who could see the\nterminal may report on it), it stores the state and, on a real change,\nfans a `SessionAgentState` event to every browser in the tenant. The report\nis ephemeral — nothing is written to the database and no notification is\nraised — so a per-turn `running`/`idle` stream costs the inbox nothing.",
+        "operationId": "report_agent_state",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReportAgentStateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": ""
+          },
+          "400": {
+            "description": ""
+          },
+          "403": {
+            "description": ""
           },
           "404": {
             "description": ""
@@ -4849,6 +4916,30 @@
           },
           "wrapped_secret": {
             "type": "string"
+          }
+        }
+      },
+      "AgentStateItem": {
+        "type": "object",
+        "description": "One session's current agent state, for seeding the UI on load.",
+        "required": [
+          "session_id",
+          "state"
+        ],
+        "properties": {
+          "session_id": {
+            "$ref": "#/components/schemas/SessionId"
+          },
+          "state": {
+            "type": "string"
+          },
+          "window": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "minimum": 0
           }
         }
       },
@@ -7489,6 +7580,28 @@
           }
         }
       },
+      "ReportAgentStateRequest": {
+        "type": "object",
+        "description": "A hook reporting what the agent in a session is doing.",
+        "required": [
+          "state"
+        ],
+        "properties": {
+          "state": {
+            "type": "string",
+            "description": "`running` | `waiting` | `idle`."
+          },
+          "window": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The tmux window the agent runs in, so the right terminal chip lights up.",
+            "minimum": 0
+          }
+        }
+      },
       "ScheduledNode": {
         "type": "object",
         "description": "The node the resource-aware scheduler chose for \"Auto\" placement.",
@@ -8559,6 +8672,46 @@
                 "type": "string",
                 "enum": [
                   "session_status"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "What the agent in a session is doing right now: `running`, `waiting`\n(blocked on a human), or `idle`. Driven by Claude Code hooks reporting\nthrough `nook agent-state`, so the terminal tabs can show a spinner vs a\n\"needs you\" mark without anyone watching the output. `window` is the\ntmux window index the agent runs in, so the right in-session terminal\nchip lights up and the shells beside it do not.",
+            "required": [
+              "data",
+              "type"
+            ],
+            "properties": {
+              "data": {
+                "type": "object",
+                "description": "What the agent in a session is doing right now: `running`, `waiting`\n(blocked on a human), or `idle`. Driven by Claude Code hooks reporting\nthrough `nook agent-state`, so the terminal tabs can show a spinner vs a\n\"needs you\" mark without anyone watching the output. `window` is the\ntmux window index the agent runs in, so the right in-session terminal\nchip lights up and the shells beside it do not.",
+                "required": [
+                  "session_id",
+                  "state"
+                ],
+                "properties": {
+                  "session_id": {
+                    "$ref": "#/components/schemas/SessionId"
+                  },
+                  "state": {
+                    "type": "string"
+                  },
+                  "window": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "int32",
+                    "minimum": 0
+                  }
+                }
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "session_agent_state"
                 ]
               }
             }

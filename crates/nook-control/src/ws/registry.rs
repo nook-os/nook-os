@@ -11,7 +11,7 @@
 
 use std::collections::HashSet;
 use std::sync::{Arc, OnceLock};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
 use nook_proto::{AttachServerMessage, ControlToNode, UiEvent};
@@ -88,7 +88,31 @@ pub struct Registry {
     /// serving traffic); in a test that publishes within milliseconds it is
     /// the whole ballgame.
     bus_ready: watch::Sender<bool>,
+
+    /// The current agent state per session — `running` / `waiting` / `idle`,
+    /// the tmux window it is in, and when it was last reported. Held in memory,
+    /// not the database: it is ephemeral by nature (a spinner, not a record),
+    /// and a browser that connects late reads it from here rather than waiting
+    /// for the next transition. Keyed by session; the tenant is stored so the
+    /// reload snapshot can be scoped to the caller.
+    agent_state: DashMap<SessionId, AgentStateEntry>,
 }
+
+/// One session's live agent state. `at` gates staleness: a `running` state that
+/// nothing has refreshed in `AGENT_STATE_TTL` is treated as gone, so a crashed
+/// agent cannot leave a tab spinning forever.
+#[derive(Clone)]
+pub struct AgentStateEntry {
+    pub tenant: TenantId,
+    pub window: Option<u32>,
+    pub state: String,
+    pub at: Instant,
+}
+
+/// A `running`/`waiting` state older than this, with no refresh, is stale —
+/// the hooks report on every transition, and a healthy agent transitions far
+/// more often than this, so silence this long means the process is gone.
+pub const AGENT_STATE_TTL: Duration = Duration::from_secs(15 * 60);
 
 impl Default for Registry {
     fn default() -> Self {
@@ -115,7 +139,64 @@ impl Registry {
             remote_viewers: DashMap::new(),
             bus_tx: OnceLock::new(),
             bus_ready: watch::channel(false).0,
+            agent_state: DashMap::new(),
         }
+    }
+
+    /// Record an agent's state and return `true` if it changed (a repeat of the
+    /// same state just refreshes the timestamp, so a poll cannot spam the UI).
+    /// `idle` clears the entry — idle is the absence of a spinner, and keeping a
+    /// row for it would only be a thing to expire later.
+    pub fn set_agent_state(
+        &self,
+        tenant: TenantId,
+        session: SessionId,
+        window: Option<u32>,
+        state: &str,
+    ) -> bool {
+        if state == "idle" {
+            return self.agent_state.remove(&session).is_some();
+        }
+        let changed = self
+            .agent_state
+            .get(&session)
+            .is_none_or(|e| e.state != state || e.window != window);
+        self.agent_state.insert(
+            session,
+            AgentStateEntry {
+                tenant,
+                window,
+                state: state.to_string(),
+                at: Instant::now(),
+            },
+        );
+        changed
+    }
+
+    /// Forget a session's agent state — on death, or when it goes stale.
+    pub fn clear_agent_state(&self, session: SessionId) -> bool {
+        self.agent_state.remove(&session).is_some()
+    }
+
+    /// Every live (non-stale) agent state for a tenant, for seeding a browser on
+    /// load. Sweeps stale entries as it goes, so a crashed agent's spinner does
+    /// not survive a refresh.
+    pub fn agent_states_for(&self, tenant: TenantId) -> Vec<(SessionId, Option<u32>, String)> {
+        let now = Instant::now();
+        let stale: Vec<SessionId> = self
+            .agent_state
+            .iter()
+            .filter(|e| now.duration_since(e.at) > AGENT_STATE_TTL)
+            .map(|e| *e.key())
+            .collect();
+        for s in stale {
+            self.agent_state.remove(&s);
+        }
+        self.agent_state
+            .iter()
+            .filter(|e| e.tenant == tenant)
+            .map(|e| (*e.key(), e.window, e.state.clone()))
+            .collect()
     }
 
     pub fn instance_id(&self) -> Uuid {
@@ -836,4 +917,94 @@ struct SessionViewers {
 struct ViewerInfo {
     size: Option<(u16, u16)>,
     last_active: Instant,
+}
+
+#[cfg(test)]
+mod agent_state_tests {
+    use super::*;
+    use nook_types::{SessionId, TenantId};
+
+    #[test]
+    fn set_returns_true_only_on_change() {
+        let r = Registry::new();
+        let (t, s) = (TenantId::new(), SessionId::new());
+        assert!(
+            r.set_agent_state(t, s, Some(0), "running"),
+            "first set is a change"
+        );
+        assert!(
+            !r.set_agent_state(t, s, Some(0), "running"),
+            "a repeat only refreshes the timestamp — no UI churn"
+        );
+        assert!(
+            r.set_agent_state(t, s, Some(0), "waiting"),
+            "new state is a change"
+        );
+        assert!(
+            r.set_agent_state(t, s, Some(1), "waiting"),
+            "new window is a change"
+        );
+    }
+
+    #[test]
+    fn idle_clears_the_entry() {
+        let r = Registry::new();
+        let (t, s) = (TenantId::new(), SessionId::new());
+        r.set_agent_state(t, s, None, "running");
+        assert!(
+            r.set_agent_state(t, s, None, "idle"),
+            "idle over a live entry is a change"
+        );
+        assert!(r.agent_states_for(t).is_empty(), "idle leaves no row");
+        assert!(
+            !r.set_agent_state(t, s, None, "idle"),
+            "idle over nothing is not a change"
+        );
+    }
+
+    #[test]
+    fn states_are_scoped_to_their_tenant() {
+        let r = Registry::new();
+        let (t1, t2) = (TenantId::new(), TenantId::new());
+        let (a, b) = (SessionId::new(), SessionId::new());
+        r.set_agent_state(t1, a, None, "running");
+        r.set_agent_state(t2, b, None, "waiting");
+        let one = r.agent_states_for(t1);
+        assert_eq!(one.len(), 1);
+        assert_eq!(one[0].0, a);
+        assert_eq!(
+            r.agent_states_for(t2).len(),
+            1,
+            "a tenant never sees another's agents"
+        );
+    }
+
+    #[test]
+    fn a_stale_entry_is_swept_on_read() {
+        let r = Registry::new();
+        let (t, s) = (TenantId::new(), SessionId::new());
+        r.set_agent_state(t, s, None, "running");
+        // Backdate past the TTL to simulate an agent that crashed without ever
+        // reporting idle.
+        if let Some(mut e) = r.agent_state.get_mut(&s) {
+            e.at = Instant::now() - AGENT_STATE_TTL - Duration::from_secs(1);
+        }
+        assert!(
+            r.agent_states_for(t).is_empty(),
+            "a stale spinner does not survive a read"
+        );
+    }
+
+    #[test]
+    fn clear_forgets_on_death() {
+        let r = Registry::new();
+        let (t, s) = (TenantId::new(), SessionId::new());
+        r.set_agent_state(t, s, None, "waiting");
+        assert!(
+            r.clear_agent_state(s),
+            "clearing a live entry reports it removed"
+        );
+        assert!(r.agent_states_for(t).is_empty());
+        assert!(!r.clear_agent_state(s), "clearing nothing is a no-op");
+    }
 }

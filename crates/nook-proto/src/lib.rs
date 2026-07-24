@@ -321,6 +321,18 @@ pub enum UiEvent {
         session_id: SessionId,
         status: String,
     },
+    /// What the agent in a session is doing right now: `running`, `waiting`
+    /// (blocked on a human), or `idle`. Driven by Claude Code hooks reporting
+    /// through `nook agent-state`, so the terminal tabs can show a spinner vs a
+    /// "needs you" mark without anyone watching the output. `window` is the
+    /// tmux window index the agent runs in, so the right in-session terminal
+    /// chip lights up and the shells beside it do not.
+    SessionAgentState {
+        session_id: SessionId,
+        #[serde(default)]
+        window: Option<u32>,
+        state: String,
+    },
     NodeResources {
         node_id: NodeId,
         resources: serde_json::Value,
