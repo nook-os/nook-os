@@ -1174,6 +1174,13 @@ pub struct UpdateTaskRequest {
     #[serde(default, deserialize_with = "double_option")]
     #[schema(value_type = Option<String>, nullable)]
     pub workspace_id: Option<Option<WorkspaceId>>,
+    /// Optimistic-concurrency precondition. When set, the update applies only
+    /// if the task's current `updated_at` still equals this; a mismatch makes
+    /// NO change and returns `409 Conflict` (the body changed under the caller).
+    /// The body-editing surfaces send it; a move / other unguarded PATCH leaves
+    /// it absent and behaves exactly as before (MAIN-36).
+    #[serde(default)]
+    pub expected_updated_at: Option<DateTime<Utc>>,
 }
 
 /// Deserialize a field that can be absent, null, or a value.

@@ -18,6 +18,7 @@ import {
   useAnchoredMenu,
 } from "@nookos/ui";
 import { PRIORITIES } from "./taskmeta";
+import { toggleTaskCheckbox } from "./taskCheckbox";
 
 /** The "no workspace" option's value. `Select` needs a string, and an empty
  *  one cannot collide with a uuid. */
@@ -105,12 +106,49 @@ export function TaskDetail({
   };
 
   const saveDescription = async (description: string) => {
-    await api.PATCH("/api/v1/tasks/{id}", {
+    // Guard the save on the version we opened the editor at (AC-7): if the body
+    // changed under us the server returns 409 and applies nothing — the global
+    // write-failure toast carries the message, and we reload so the view shows
+    // the current content rather than the edit that did not apply.
+    const { error, response } = await api.PATCH("/api/v1/tasks/{id}", {
       params: { path: { id: taskId } },
-      body: { description },
+      body: { description, expected_updated_at: data?.task.updated_at },
     });
-    setEditing(false);
+    if (!error && response.ok) setEditing(false);
     bust();
+  };
+
+  // Clicking a rendered checkbox flips the matching source marker through the
+  // safe path: read the current body+version, toggle only that occurrence, PATCH
+  // with the guard. On a concurrent edit (409) re-read the fresh body, re-apply
+  // the toggle, and retry once; a second conflict reloads rather than clobbers
+  // (AC-5/AC-6). It rides the same TaskChanged as any edit, so other viewers and
+  // the board update live (AC-8).
+  const toggleCheckbox = async (index: number) => {
+    let base = data?.task;
+    if (!base) return;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const next = toggleTaskCheckbox(base.description ?? "", index);
+      const { error, response } = await api.PATCH("/api/v1/tasks/{id}", {
+        params: { path: { id: taskId } },
+        body: { description: next, expected_updated_at: base.updated_at },
+      });
+      if (!error && response.ok) {
+        bust();
+        return;
+      }
+      if (response.status === 409 && attempt === 0) {
+        const fresh = (
+          await api.GET("/api/v1/tasks/{id}", { params: { path: { id: taskId } } })
+        ).data;
+        if (fresh?.task) {
+          base = fresh.task;
+          continue; // re-apply the toggle to the fresh body and retry once
+        }
+      }
+      bust(); // a second conflict or other error — reload; the toast explains
+      return;
+    }
   };
 
   const saveTitle = async (title: string) => {
@@ -250,6 +288,7 @@ export function TaskDetail({
               editing={editing}
               onEditingChange={setEditing}
               onSave={saveDescription}
+              onToggle={toggleCheckbox}
               placeholder="No description yet — double-click to write the acceptance criteria."
             />
           </div>

@@ -2221,6 +2221,17 @@ textarea.env-area.blurred {
 .md li:has(> .md-check) { list-style: none; margin-left: -14px; }
 .md-check { margin-right: 4px; color: var(--nook-fg-faint); }
 .md-check.done { color: var(--nook-ok, #48c78e); }
+/* The clickable variant (task description checkboxes) — a bare button that
+   still reads as a checkbox glyph, but invites a click. */
+.md-check-btn {
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  cursor: pointer;
+  line-height: 1;
+}
+.md-check-btn:hover { color: var(--nook-accent); }
 
 .md a { color: var(--nook-accent); text-decoration: underline; text-underline-offset: 2px; }
 .md a:hover { text-decoration-thickness: 2px; }

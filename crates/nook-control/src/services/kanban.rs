@@ -216,10 +216,15 @@ impl KanbanProvider for LocalBoardProvider {
             (None, None) => None,
         };
 
-        let updated = sqlx::query_as(
+        let updated: Option<TaskItem> = sqlx::query_as(
             // Workspace cannot use COALESCE like the rest: COALESCE reads a
             // NULL as "leave it", which is exactly the instruction to clear
             // it. The flag says whether the caller mentioned the field at all.
+            //
+            // `$11` is the optimistic-concurrency precondition (MAIN-36): NULL
+            // means "unguarded" (behaviour unchanged), otherwise the row updates
+            // only while its `updated_at` still equals what the caller last saw.
+            // A guarded update that touches 0 rows is a lost race, handled below.
             "UPDATE tasks SET
                 title = COALESCE($3, title),
                 description = COALESCE($4, description),
@@ -230,6 +235,7 @@ impl KanbanProvider for LocalBoardProvider {
                 workspace_id = CASE WHEN $9 THEN $10 ELSE workspace_id END,
                 updated_at = now()
              WHERE id = $1 AND tenant_id = $2
+               AND ($11::timestamptz IS NULL OR updated_at = $11)
              RETURNING *",
         )
         .bind(task)
@@ -242,11 +248,34 @@ impl KanbanProvider for LocalBoardProvider {
         .bind(req.priority.map(|p| p.clamp(0, 4)))
         .bind(req.workspace_id.is_some())
         .bind(req.workspace_id.flatten())
+        .bind(req.expected_updated_at)
         .fetch_optional(&self.db)
         .await
-        .map_err(ApiError::from)?
-        .ok_or(ApiError::NotFound)?;
-        Ok(updated)
+        .map_err(ApiError::from)?;
+
+        if let Some(t) = updated {
+            return Ok(t);
+        }
+
+        // Zero rows. Without a precondition that can only mean the task is gone
+        // (404). With one, tell a lost race (409, carrying the CURRENT task so
+        // the caller can reconcile without a second round-trip) apart from a
+        // task that truly no longer exists (404).
+        let current: Option<TaskItem> =
+            sqlx::query_as("SELECT * FROM tasks WHERE id = $1 AND tenant_id = $2")
+                .bind(task)
+                .bind(tenant)
+                .fetch_optional(&self.db)
+                .await
+                .map_err(ApiError::from)?;
+        match current {
+            Some(cur) if req.expected_updated_at.is_some() => {
+                let body = serde_json::to_string(&cur)
+                    .unwrap_or_else(|_| "the task changed under this edit".into());
+                Err(ProviderError::Api(ApiError::Conflict(body)))
+            }
+            _ => Err(ProviderError::Api(ApiError::NotFound)),
+        }
     }
 }
 

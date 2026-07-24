@@ -119,6 +119,14 @@ enum Command {
         /// The comment body (markdown).
         body: Vec<String>,
     },
+    /// Safely replace a task's description. Reads the current version and writes
+    /// with an optimistic-concurrency guard, retrying on a concurrent edit — so
+    /// it never silently loses your change. Read the body first with `nook task`.
+    SetDescription {
+        key: String,
+        /// The new description (markdown).
+        description: Vec<String>,
+    },
     /// Add or remove a label.
     Label {
         key: String,
@@ -423,6 +431,9 @@ async fn main() -> Result<()> {
         }
         Command::Task { key, json } => cli::task(&key, json).await,
         Command::Comment { key, body } => cli::comment(&key, &body.join(" ")).await,
+        Command::SetDescription { key, description } => {
+            cli::set_description(&key, &description.join(" ")).await
+        }
         Command::Label { key, name, remove } => cli::label(&key, &name, remove).await,
         Command::Workspace(WorkspaceCommand::Current { json }) => {
             cli::workspace_current(json).await

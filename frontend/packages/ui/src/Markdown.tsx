@@ -97,7 +97,19 @@ const SCHEMA = {
   },
 };
 
-export function Markdown({ src }: { src: string }) {
+export function Markdown({
+  src,
+  onToggle,
+}: {
+  src: string;
+  /** When present, rendered task-list checkboxes become clickable and call this
+   *  with the checkbox's ordinal (0-based, source order) so the caller can flip
+   *  the matching `- [ ] `/`- [x] ` in the source (MAIN-36). */
+  onToggle?: (index: number) => void;
+}) {
+  // Reset each render; react-markdown renders the inputs in document order, so
+  // the Nth `input` is the Nth checkbox in source — the index `onToggle` gets.
+  let checkboxIndex = 0;
   return (
     <div className="md">
       <ReactMarkdown
@@ -121,16 +133,37 @@ export function Markdown({ src }: { src: string }) {
               <table>{children}</table>
             </div>
           ),
-          input: (props) =>
-            props.type === "checkbox" ? (
-              // GFM task lists carry the AC-N contract the loop parses. They
-              // render as state, not as controls: the source of truth is the
-              // description, and a checkbox that silently did nothing would be
-              // worse than one that is obviously read-only.
-              <span className={`md-check ${props.checked ? "done" : ""}`}>
-                {props.checked ? "☑" : "☐"}
-              </span>
-            ) : null,
+          input: (props) => {
+            if (props.type !== "checkbox") return null;
+            const glyph = props.checked ? "☑" : "☐";
+            // Without an onToggle the checkbox is read-only state (the source of
+            // truth is the description text); a control that did nothing would
+            // be worse than one that is obviously not a control.
+            if (!onToggle) {
+              return (
+                <span className={`md-check ${props.checked ? "done" : ""}`}>
+                  {glyph}
+                </span>
+              );
+            }
+            // Clickable: the Nth checkbox toggles the Nth source marker (AC-5/6).
+            const i = checkboxIndex++;
+            return (
+              <button
+                type="button"
+                role="checkbox"
+                aria-checked={!!props.checked}
+                className={`md-check md-check-btn ${props.checked ? "done" : ""}`}
+                title="toggle this item"
+                onClick={(e) => {
+                  e.preventDefault();
+                  onToggle(i);
+                }}
+              >
+                {glyph}
+              </button>
+            );
+          },
         }}
       >
         {src}
@@ -438,6 +471,7 @@ export function EditableMarkdown({
   minHeight = 200,
   editing: controlledEditing,
   onEditingChange,
+  onToggle,
 }: {
   value: string;
   onSave: (next: string) => Promise<void> | void;
@@ -446,6 +480,8 @@ export function EditableMarkdown({
   /** Optional: drive edit mode from outside (a toolbar button elsewhere). */
   editing?: boolean;
   onEditingChange?: (editing: boolean) => void;
+  /** Optional: make rendered checkboxes clickable in the display view (MAIN-36). */
+  onToggle?: (index: number) => void;
 }) {
   const [uncontrolled, setUncontrolled] = useState(false);
   const editing = controlledEditing ?? uncontrolled;
@@ -484,7 +520,7 @@ export function EditableMarkdown({
         title="double-click to edit"
       >
         {value.trim() ? (
-          <Markdown src={value} />
+          <Markdown src={value} onToggle={onToggle} />
         ) : (
           <span className="md-placeholder">{placeholder}</span>
         )}
