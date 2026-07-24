@@ -118,6 +118,15 @@ pub struct TenantMemberItem {
     pub joined_at: DateTime<Utc>,
 }
 
+/// A page of tenant members + the keyset cursor to the next page. Same shape and
+/// mechanism as the operator lists (keyed on the member's UUID v7 `principal_id`),
+/// so a large tenant's members are searchable and paged (MAIN-45).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct TenantMemberPage {
+    pub rows: Vec<TenantMemberItem>,
+    pub next_cursor: Option<Uuid>,
+}
+
 /// Change a member's role. `member` ↔ `admin` for any owner/admin; `owner`
 /// (a co-owner / transfer) is owner-only.
 #[derive(Debug, Clone, Deserialize, ToSchema)]

@@ -4354,6 +4354,44 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "description": "Case-insensitive substring across email, display name, and role.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "after",
+            "in": "query",
+            "description": "Keyset cursor: the last member `principal_id` seen. Returns older rows.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Page size (default 50, clamped 1..=200).",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64"
+            }
           }
         ],
         "responses": {
@@ -4362,10 +4400,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "array",
-                  "items": {
-                    "$ref": "#/components/schemas/TenantMemberItem"
-                  }
+                  "$ref": "#/components/schemas/TenantMemberPage"
                 }
               }
             }
@@ -9396,6 +9431,28 @@
           "role": {
             "type": "string",
             "description": "`owner` | `admin` | `member`."
+          }
+        }
+      },
+      "TenantMemberPage": {
+        "type": "object",
+        "description": "A page of tenant members + the keyset cursor to the next page. Same shape and\nmechanism as the operator lists (keyed on the member's UUID v7 `principal_id`),\nso a large tenant's members are searchable and paged (MAIN-45).",
+        "required": [
+          "rows"
+        ],
+        "properties": {
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "rows": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TenantMemberItem"
+            }
           }
         }
       },

@@ -2,14 +2,26 @@ import React from "react";
 import { OrgVisibility } from "../OrgVisibility";
 import { Invites } from "../Invites";
 import { NotificationChannels } from "../NotificationChannels";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { api } from "@nookos/api";
+import {
+  useInfiniteQuery,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query";
+import {
+  api,
+  type TenantMemberItem,
+  type UserToken,
+  type VaultPasskey,
+} from "@nookos/api";
 import {
   applyTokens,
+  DataList,
   DEFAULT_THEME,
   Empty,
   Panel,
   Pill,
+  SearchInput,
+  type DataColumn,
   type ThemeTokens,
 } from "@nookos/ui";
 import { KeyRound, Trash2 } from "lucide-react";
@@ -102,10 +114,50 @@ function AppPasswordSettings() {
  */
 function AccessTokenSettings() {
   const queryClient = useQueryClient();
+  const [search, setSearch] = React.useState("");
   const { data: tokens } = useQuery({
     queryKey: ["user-tokens"],
     queryFn: async () => (await api.GET("/api/v1/tokens", {})).data ?? [],
   });
+
+  const revoke = async (t: UserToken) => {
+    const ok = await askConfirm({
+      title: `Revoke "${t.name || "unnamed"}"`,
+      description:
+        "Anything using it stops working immediately. Machines keep their own node tokens.",
+      confirmLabel: "revoke",
+      danger: true,
+    });
+    if (!ok) return;
+    await api.DELETE("/api/v1/tokens/{id}", { params: { path: { id: t.id } } });
+    queryClient.invalidateQueries({ queryKey: ["user-tokens"] });
+  };
+
+  // Client-side filter: a per-user list is small enough that no backend paging
+  // is needed (AC-3), but the search stays consistent with the other tables.
+  const term = search.trim().toLowerCase();
+  const rows = (tokens ?? []).filter(
+    (t) => !term || (t.name ?? "").toLowerCase().includes(term),
+  );
+  const columns: DataColumn<UserToken>[] = [
+    { key: "name", header: "Name", className: "bright", cell: (t) => t.name || "unnamed" },
+    {
+      key: "used",
+      header: "Last used",
+      className: "muted",
+      cell: (t) =>
+        t.last_used_at ? `used ${new Date(t.last_used_at).toLocaleDateString()}` : "never used",
+    },
+    {
+      key: "actions",
+      header: "",
+      cell: (t) => (
+        <button className="btn small danger" onClick={() => revoke(t)}>
+          revoke
+        </button>
+      ),
+    },
+  ];
 
   const mint = async () => {
     const name = await askText({
@@ -145,45 +197,21 @@ function AccessTokenSettings() {
           its own.
         </span>
       </div>
-      {(tokens ?? []).length === 0 ? (
-        <Empty>No access tokens.</Empty>
-      ) : (
-        <table className="nook-table">
-          <tbody>
-            {(tokens ?? []).map((t) => (
-              <tr key={t.id}>
-                <td className="bright">{t.name || "unnamed"}</td>
-                <td className="muted">
-                  {t.last_used_at
-                    ? `used ${new Date(t.last_used_at).toLocaleDateString()}`
-                    : "never used"}
-                </td>
-                <td>
-                  <button
-                    className="btn small danger"
-                    onClick={async () => {
-                      const ok = await askConfirm({
-                        title: `Revoke "${t.name || "unnamed"}"`,
-                        description:
-                          "Anything using it stops working immediately. Machines keep their own node tokens.",
-                        confirmLabel: "revoke",
-                        danger: true,
-                      });
-                      if (!ok) return;
-                      await api.DELETE("/api/v1/tokens/{id}", {
-                        params: { path: { id: t.id } },
-                      });
-                      queryClient.invalidateQueries({ queryKey: ["user-tokens"] });
-                    }}
-                  >
-                    revoke
-                  </button>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+      {(tokens ?? []).length > 0 && (
+        <SearchInput
+          onSearch={setSearch}
+          placeholder="Search tokens…"
+          ariaLabel="Search access tokens"
+        />
       )}
+      <DataList
+        columns={columns}
+        rows={rows}
+        rowKey={(t) => t.id}
+        filtered={search.trim().length > 0}
+        empty="No access tokens."
+        noResults="No matches."
+      />
     </div>
   );
 }
@@ -196,6 +224,7 @@ function AccessTokenSettings() {
 function PasskeySettings() {
   const queryClient = useQueryClient();
   const [busy, setBusy] = React.useState(false);
+  const [search, setSearch] = React.useState("");
   const { data: passkeys } = useQuery({
     queryKey: ["vault", "passkeys"],
     queryFn: async () => (await api.GET("/api/v1/vault/passkeys", {})).data ?? [],
@@ -255,6 +284,30 @@ function PasskeySettings() {
     queryClient.invalidateQueries({ queryKey: ["vault"] });
   };
 
+  const term = search.trim().toLowerCase();
+  const filteredPasskeys = (passkeys ?? []).filter(
+    (p) => !term || p.label.toLowerCase().includes(term),
+  );
+  const passkeyColumns: DataColumn<VaultPasskey>[] = [
+    { key: "label", header: "Passkey", cell: (p) => p.label },
+    {
+      key: "used",
+      header: "Last used",
+      className: "muted",
+      cell: (p) =>
+        p.last_used_at ? `used ${new Date(p.last_used_at).toLocaleDateString()}` : "never used",
+    },
+    {
+      key: "actions",
+      header: "",
+      cell: (p) => (
+        <button className="btn small icon" title="remove" onClick={() => remove(p.id, p.label)}>
+          <Trash2 size={12} />
+        </button>
+      ),
+    },
+  ];
+
   return (
     <div style={{ borderTop: "1px solid var(--nook-border)", paddingTop: 10 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -276,29 +329,23 @@ function PasskeySettings() {
       </div>
 
       {!!passkeys?.length && (
-        <table className="nook-table small" style={{ marginTop: 8 }}>
-          <tbody>
-            {passkeys.map((p) => (
-              <tr key={p.id}>
-                <td>{p.label}</td>
-                <td className="muted">
-                  {p.last_used_at
-                    ? `used ${new Date(p.last_used_at).toLocaleDateString()}`
-                    : "never used"}
-                </td>
-                <td style={{ textAlign: "right" }}>
-                  <button
-                    className="btn small icon"
-                    title="remove"
-                    onClick={() => remove(p.id, p.label)}
-                  >
-                    <Trash2 size={12} />
-                  </button>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+        <div style={{ marginTop: 8 }}>
+          {passkeys.length > 1 && (
+            <SearchInput
+              onSearch={setSearch}
+              placeholder="Search passkeys…"
+              ariaLabel="Search passkeys"
+            />
+          )}
+          <DataList
+            columns={passkeyColumns}
+            rows={filteredPasskeys}
+            rowKey={(p) => p.id}
+            filtered={search.trim().length > 0}
+            empty="No passkeys."
+            noResults="No matches."
+          />
+        </div>
       )}
 
       <p className="muted" style={{ marginTop: 6 }}>
@@ -389,18 +436,28 @@ function Members() {
   const myId = me?.user?.id;
   const canManage = myRole === "owner" || myRole === "admin";
 
-  const { data: members } = useQuery({
-    queryKey: ["tenant-members", tenantId],
-    queryFn: async () =>
+  // The members list grows with tenant size, so it paginates by keyset cursor
+  // and searches server-side (MAIN-45 AC-2) — the same pattern the Operator
+  // lists use. A new search string is a new query key (restarts from page one).
+  const [search, setSearch] = React.useState("");
+  const membersQuery = useInfiniteQuery({
+    queryKey: ["tenant-members", tenantId, search],
+    initialPageParam: undefined as string | undefined,
+    queryFn: async ({ pageParam }) =>
       tenantId
         ? (
             await api.GET("/api/v1/tenants/{id}/members", {
-              params: { path: { id: tenantId } },
+              params: {
+                path: { id: tenantId },
+                query: { q: search || undefined, after: pageParam || undefined, limit: 50 },
+              },
             })
-          ).data ?? []
-        : [],
+          ).data ?? { rows: [], next_cursor: null }
+        : { rows: [], next_cursor: null },
+    getNextPageParam: (last) => last.next_cursor ?? undefined,
     enabled: !!tenantId,
   });
+  const members = membersQuery.data?.pages.flatMap((p) => p.rows) ?? [];
 
   const bust = () =>
     queryClient.invalidateQueries({ queryKey: ["tenant-members", tenantId] });
@@ -453,55 +510,79 @@ function Members() {
     queryClient.invalidateQueries();
   };
 
-  const list = members ?? [];
-  if (list.length === 0) return <Empty>No members.</Empty>;
+  const columns: DataColumn<TenantMemberItem>[] = [
+    {
+      key: "name",
+      header: "Name",
+      className: "bright",
+      cell: (m) => (
+        <>
+          {m.display_name}
+          {m.principal_id === myId && <span className="faint small"> (you)</span>}
+        </>
+      ),
+    },
+    { key: "email", header: "Email", className: "mono muted", cell: (m) => m.email },
+    {
+      key: "role",
+      header: "Role",
+      cell: (m) =>
+        canManage && m.principal_id !== myId ? (
+          <select
+            className="task-select"
+            value={m.role}
+            onChange={(e) => changeRole(m.principal_id, e.target.value)}
+          >
+            {/* Only an owner may grant ownership; the server enforces it too. */}
+            {myRole === "owner" && <option value="owner">owner</option>}
+            <option value="admin">admin</option>
+            <option value="member">member</option>
+          </select>
+        ) : (
+          <Pill tone={m.role === "owner" ? "ok" : undefined}>{m.role}</Pill>
+        ),
+    },
+    {
+      key: "actions",
+      header: "",
+      cell: (m) =>
+        m.principal_id === myId ? (
+          <button className="btn danger small" onClick={leave}>
+            Leave
+          </button>
+        ) : canManage ? (
+          <button
+            className="btn danger small"
+            onClick={() => remove(m.principal_id, m.display_name)}
+          >
+            Remove
+          </button>
+        ) : null,
+    },
+  ];
+
   return (
-    <table className="nook-table">
-      <tbody>
-        {list.map((m) => {
-          const isSelf = m.principal_id === myId;
-          return (
-            <tr key={m.principal_id}>
-              <td className="bright">
-                {m.display_name}
-                {isSelf && <span className="faint small"> (you)</span>}
-              </td>
-              <td className="mono muted">{m.email}</td>
-              <td>
-                {canManage && !isSelf ? (
-                  <select
-                    className="task-select"
-                    value={m.role}
-                    onChange={(e) => changeRole(m.principal_id, e.target.value)}
-                  >
-                    {/* Only an owner may grant ownership; the server enforces it too. */}
-                    {myRole === "owner" && <option value="owner">owner</option>}
-                    <option value="admin">admin</option>
-                    <option value="member">member</option>
-                  </select>
-                ) : (
-                  <Pill tone={m.role === "owner" ? "ok" : undefined}>{m.role}</Pill>
-                )}
-              </td>
-              <td>
-                {isSelf ? (
-                  <button className="btn danger small" onClick={leave}>
-                    Leave
-                  </button>
-                ) : canManage ? (
-                  <button
-                    className="btn danger small"
-                    onClick={() => remove(m.principal_id, m.display_name)}
-                  >
-                    Remove
-                  </button>
-                ) : null}
-              </td>
-            </tr>
-          );
-        })}
-      </tbody>
-    </table>
+    <>
+      <div style={{ padding: "0 0 8px" }}>
+        <SearchInput
+          onSearch={setSearch}
+          placeholder="Search members…"
+          ariaLabel="Search members"
+        />
+      </div>
+      <DataList
+        columns={columns}
+        rows={members}
+        rowKey={(m) => m.principal_id}
+        loading={membersQuery.isLoading}
+        filtered={search.length > 0}
+        empty="No members."
+        noResults="No matches."
+        hasMore={membersQuery.hasNextPage}
+        onLoadMore={() => membersQuery.fetchNextPage()}
+        loadingMore={membersQuery.isFetchingNextPage}
+      />
+    </>
   );
 }
 
