@@ -20,8 +20,11 @@ export function Panel({
     <section className={`nook-panel ${className}`.trim()} style={style}>
       {title !== undefined && (
         <header className="nook-panel-title">
-          <span>{title}</span>
-          {actions && <span>{actions}</span>}
+          {/* Two stable classes, not :first/:last-child: a panel may have a
+              title and no actions, where one span would be BOTH — so the title
+              truncates and the actions never shrink, unambiguously (MAIN-47). */}
+          <span className="nook-panel-heading">{title}</span>
+          {actions && <span className="nook-panel-actions">{actions}</span>}
         </header>
       )}
       <div className="nook-panel-body">{children}</div>

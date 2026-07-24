@@ -2028,18 +2028,58 @@
         "tags": [
           "crate::routes::operator"
         ],
-        "summary": "The audit trail, including operator reads themselves.",
+        "summary": "The audit trail, including operator reads themselves — paged and searchable.",
         "operationId": "operator_audit",
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "description": "Case-insensitive substring matched across kind, tenant slug, and actor.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "after",
+            "in": "query",
+            "description": "Keyset cursor: the last `id` already seen. Returns strictly older rows.",
+            "required": false,
+            "schema": {
+              "oneOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "$ref": "#/components/schemas/EventId"
+                }
+              ]
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Page size (default 50, clamped 1..=200).",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "",
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "array",
-                  "items": {
-                    "$ref": "#/components/schemas/OperatorAuditEntry"
-                  }
+                  "$ref": "#/components/schemas/OperatorAuditPage"
                 }
               }
             }
@@ -8056,6 +8096,32 @@
           },
           "tenant_slug": {
             "type": "string"
+          }
+        }
+      },
+      "OperatorAuditPage": {
+        "type": "object",
+        "description": "A page of audit rows plus the keyset cursor to reach the next (older) page.\n\nMirrors [`EventsPage`]'s `{ items, next_cursor }` shape so the two feeds read\nthe same way, but keys on the row's UUID v7 `id` rather than a timestamp:\nv7 ids are creation-ordered and unique, so `id < cursor` walks strictly\nolder rows with no ties to break (and needs no new column). `next_cursor` is\nnull at the end of the list.",
+        "required": [
+          "rows"
+        ],
+        "properties": {
+          "next_cursor": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/EventId",
+                "description": "Pass as `after` to fetch the next (older) page; null at end of list."
+              }
+            ]
+          },
+          "rows": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/OperatorAuditEntry"
+            }
           }
         }
       },

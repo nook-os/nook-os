@@ -1006,7 +1006,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** The audit trail, including operator reads themselves. */
+        /** The audit trail, including operator reads themselves — paged and searchable. */
         get: operations["operator_audit"];
         put?: never;
         post?: never;
@@ -3414,6 +3414,19 @@ export interface components {
             occurred_at: string;
             tenant_id: components["schemas"]["TenantId"];
             tenant_slug: string;
+        };
+        /**
+         * @description A page of audit rows plus the keyset cursor to reach the next (older) page.
+         *
+         *     Mirrors [`EventsPage`]'s `{ items, next_cursor }` shape so the two feeds read
+         *     the same way, but keys on the row's UUID v7 `id` rather than a timestamp:
+         *     v7 ids are creation-ordered and unique, so `id < cursor` walks strictly
+         *     older rows with no ties to break (and needs no new column). `next_cursor` is
+         *     null at the end of the list.
+         */
+        OperatorAuditPage: {
+            next_cursor?: null | components["schemas"]["EventId"];
+            rows: components["schemas"]["OperatorAuditEntry"][];
         };
         OperatorNode: {
             /** Format: int64 */
@@ -5925,7 +5938,14 @@ export interface operations {
     };
     operator_audit: {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description Case-insensitive substring matched across kind, tenant slug, and actor. */
+                q?: string | null;
+                /** @description Keyset cursor: the last `id` already seen. Returns strictly older rows. */
+                after?: null | components["schemas"]["EventId"];
+                /** @description Page size (default 50, clamped 1..=200). */
+                limit?: number | null;
+            };
             header?: never;
             path?: never;
             cookie?: never;
@@ -5937,7 +5957,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["OperatorAuditEntry"][];
+                    "application/json": components["schemas"]["OperatorAuditPage"];
                 };
             };
             403: {

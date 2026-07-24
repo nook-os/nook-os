@@ -9,7 +9,7 @@
 // The page exists only for someone holding an operator binding — the rail entry
 // is hidden otherwise, and every request 403s regardless.
 import React from "react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useInfiniteQuery, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Ban,
   Eye,
@@ -22,9 +22,40 @@ import {
   TriangleAlert,
   UserPlus,
 } from "lucide-react";
-import { api } from "@nookos/api";
-import { Empty, Panel, Select } from "@nookos/ui";
+import { api, type OperatorAuditEntry } from "@nookos/api";
+import {
+  DataList,
+  Empty,
+  Panel,
+  SearchInput,
+  Select,
+  type DataColumn,
+} from "@nookos/ui";
 import { askConfirm, askForm, askText, notify } from "../dialogs";
+
+// Columns for the audit DataList. Module-level: the cells read only the row, so
+// they never close over component state and the array is stable across renders.
+const AUDIT_COLUMNS: DataColumn<OperatorAuditEntry>[] = [
+  {
+    key: "when",
+    header: "When",
+    className: "faint small",
+    cell: (e) => new Date(e.occurred_at).toLocaleString(),
+  },
+  { key: "what", header: "What", className: "mono", cell: (e) => e.kind },
+  {
+    key: "tenant",
+    header: "Tenant",
+    className: "mono faint",
+    cell: (e) => e.tenant_slug,
+  },
+  {
+    key: "actor",
+    header: "Actor",
+    className: "faint small",
+    cell: (e) => e.actor_type ?? "—",
+  },
+];
 
 export function OperatorPage() {
   const qc = useQueryClient();
@@ -49,10 +80,28 @@ export function OperatorPage() {
     queryKey: ["operator", "bindings"],
     queryFn: async () => (await api.GET("/api/v1/operator/bindings")).data ?? [],
   });
-  const { data: audit } = useQuery({
-    queryKey: ["operator", "audit"],
-    queryFn: async () => (await api.GET("/api/v1/operator/audit")).data ?? [],
+  // The audit log paginates by keyset cursor and searches server-side (MAIN-43),
+  // so it holds many pages of accumulated rows rather than a single fetch. A new
+  // search string is a new query key, which restarts from the newest page.
+  const [auditSearch, setAuditSearch] = React.useState("");
+  const auditQuery = useInfiniteQuery({
+    queryKey: ["operator", "audit", auditSearch],
+    initialPageParam: undefined as string | undefined,
+    queryFn: async ({ pageParam }) =>
+      (
+        await api.GET("/api/v1/operator/audit", {
+          params: {
+            query: {
+              q: auditSearch || undefined,
+              after: pageParam || undefined,
+              limit: 50,
+            },
+          },
+        })
+      ).data ?? { rows: [], next_cursor: null },
+    getNextPageParam: (last) => last.next_cursor ?? undefined,
   });
+  const auditRows = auditQuery.data?.pages.flatMap((p) => p.rows) ?? [];
   const orgId = me?.capability?.org_id ?? null;
   const { data: policy } = useQuery({
     queryKey: ["operator", "policy", orgId],
@@ -493,31 +542,28 @@ export function OperatorPage() {
         </div>
       </Panel>
 
-      <Panel title="Audit · including who looked">
-        <div className="op-table-wrap">
-          <table className="op-table">
-            <thead>
-              <tr>
-                <th>When</th>
-                <th>What</th>
-                <th>Tenant</th>
-                <th>Actor</th>
-              </tr>
-            </thead>
-            <tbody>
-              {(audit ?? []).map((e) => (
-                <tr key={e.id}>
-                  <td className="faint small">
-                    {new Date(e.occurred_at).toLocaleString()}
-                  </td>
-                  <td className="mono">{e.kind}</td>
-                  <td className="mono faint">{e.tenant_slug}</td>
-                  <td className="faint small">{e.actor_type ?? "—"}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+      <Panel
+        title="Audit · including who looked"
+        actions={
+          <SearchInput
+            onSearch={setAuditSearch}
+            placeholder="Search kind, tenant, actor…"
+            ariaLabel="Search the audit log"
+          />
+        }
+      >
+        <DataList
+          columns={AUDIT_COLUMNS}
+          rows={auditRows}
+          rowKey={(e) => e.id}
+          loading={auditQuery.isLoading}
+          filtered={auditSearch.length > 0}
+          empty="Nothing here yet."
+          noResults="No matches."
+          hasMore={auditQuery.hasNextPage}
+          onLoadMore={() => auditQuery.fetchNextPage()}
+          loadingMore={auditQuery.isFetchingNextPage}
+        />
       </Panel>
     </div>
   );

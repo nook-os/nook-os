@@ -130,7 +130,9 @@ function GitPanel({
       title={
         <>
           <GitBranch size={12} style={{ verticalAlign: "-2px" }} /> git ·{" "}
-          <span className="bright">{data?.branch ?? "…"}</span>
+          <span className="bright" title={data?.branch ?? undefined}>
+            {data?.branch ?? "…"}
+          </span>
         </>
       }
       actions={

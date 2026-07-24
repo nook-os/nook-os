@@ -744,7 +744,22 @@ code,
   font-family: var(--nook-font-mono);
 }
 
-.nook-panel-title > span:first-child::before {
+/* The title flexes to fill and truncates; the actions keep their natural width
+   and never shrink, so a long title (e.g. a long git branch) can never push the
+   diff/files/refresh controls off or overlap them (MAIN-47). `min-width: 0` is
+   what lets the flex child shrink below its content so the ellipsis engages. */
+.nook-panel-heading {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.nook-panel-actions {
+  flex: none;
+}
+
+.nook-panel-heading::before {
   content: "// ";
   color: var(--nook-fg-faint);
   letter-spacing: 0;
@@ -3102,6 +3117,53 @@ a.toast-main:hover .toast-title { text-decoration: underline; }
 }
 .op-table td { padding: 4px 8px 4px 0; border-bottom: 1px solid var(--nook-border); }
 .op-table tr:hover td { background: var(--nook-bg-raised); }
+
+/* ── DataList + SearchInput (reusable, amber-CRT) ─────────────────────────── */
+.data-list { display: flex; flex-direction: column; }
+.data-list-note {
+  padding: 10px 12px;
+  font-size: 11.5px;
+  color: var(--nook-fg-faint);
+}
+.data-list-note.empty { color: var(--nook-fg-dim, var(--nook-fg-faint)); }
+.data-list-more { padding: 8px 12px 12px; }
+.data-list-more-btn {
+  font: inherit;
+  font-size: 11px;
+  color: var(--nook-accent);
+  background: none;
+  border: 1px solid var(--nook-border);
+  border-radius: 3px;
+  padding: 3px 12px;
+  cursor: pointer;
+}
+.data-list-more-btn:hover:not(:disabled) {
+  border-color: var(--nook-accent);
+  background: var(--nook-bg-raised);
+}
+.data-list-more-btn:disabled { opacity: 0.5; cursor: default; }
+
+.search-input {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 7px;
+  border: 1px solid var(--nook-border);
+  border-radius: 3px;
+  background: var(--nook-bg);
+}
+.search-input:focus-within { border-color: var(--nook-accent); }
+.search-input-icon { color: var(--nook-fg-faint); flex: none; }
+.search-input-field {
+  font: inherit;
+  font-size: 11.5px;
+  color: var(--nook-fg);
+  background: none;
+  border: none;
+  outline: none;
+  width: 180px;
+}
+.search-input-field::placeholder { color: var(--nook-fg-faint); }
 
 .op-policy { display: flex; flex-direction: column; gap: 7px; padding: 10px 12px; }
 .op-policy-row { display: flex; gap: 9px; align-items: center; }

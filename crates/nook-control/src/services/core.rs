@@ -159,6 +159,61 @@ pub async fn events_page(
     })
 }
 
+/// The operator audit trail, paged by keyset cursor and filtered by an optional
+/// server-side search (MAIN-43).
+///
+/// Search (`q`) is case-insensitive and matches across the event kind, the
+/// tenant slug, and the actor (type or id) — the whole log, not just the page
+/// in hand, because the `WHERE` runs before `LIMIT`. Pagination is keyset on the
+/// row's UUID v7 `id`: `after` is the last id the caller has seen, and rows are
+/// walked `id DESC`, so each page is strictly older with no offset to drift.
+///
+/// The cursor is the last id of a full page (mirroring `events_page`): when a
+/// page comes back short of `limit` there is no more, so `next_cursor` is null.
+/// A caller that pages one past the end gets an empty page and a null cursor —
+/// a clean end-of-list, not an error.
+///
+/// Kinds, actors and times only — never payloads, which can carry a branch name
+/// or task title this surface must not hand over (the same rule `audit_log`
+/// enforced before it grew a cursor).
+pub async fn operator_audit_page(
+    db: &PgPool,
+    q: Option<String>,
+    after: Option<EventId>,
+    limit: i64,
+) -> ApiResult<OperatorAuditPage> {
+    let limit = limit.clamp(1, 200);
+    // An empty or whitespace-only search is "no filter", not "match the empty
+    // string" — the search box clears to that and must show the whole log.
+    let q = q.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+    let rows: Vec<OperatorAuditEntry> = sqlx::query_as(
+        "SELECT e.id, e.kind, e.actor_type, e.actor_id, e.tenant_id,
+                t.slug AS tenant_slug, e.occurred_at
+         FROM events e JOIN tenants t ON t.id = e.tenant_id
+         WHERE (e.kind LIKE 'operator.%' OR e.kind LIKE 'rbac.%'
+                OR e.kind LIKE 'node.%'  OR e.kind LIKE 'user.%')
+           AND ($2::text IS NULL OR (
+                    e.kind ILIKE '%' || $2 || '%'
+                 OR t.slug ILIKE '%' || $2 || '%'
+                 OR e.actor_type ILIKE '%' || $2 || '%'
+                 OR e.actor_id::text ILIKE '%' || $2 || '%'))
+           AND ($3::uuid IS NULL OR e.id < $3)
+         ORDER BY e.id DESC
+         LIMIT $1",
+    )
+    .bind(limit)
+    .bind(q)
+    .bind(after)
+    .fetch_all(db)
+    .await?;
+    let next_cursor = if rows.len() as i64 == limit {
+        rows.last().map(|r| r.id)
+    } else {
+        None
+    };
+    Ok(OperatorAuditPage { rows, next_cursor })
+}
+
 /// Create a session and instruct the node to start it. Shared by the REST
 /// handler and the MCP backend. Resolves the checkout path from workspace +
 /// node (first match), then delegates to [`create_session_at`].
@@ -378,4 +433,210 @@ pub async fn create_note(
     .bind(req.kind.unwrap_or_else(|| "rolling".into()))
     .fetch_one(db)
     .await?)
+}
+
+/// DB-backed tests for the audit paging/search query. They self-provision the
+/// schema and no-op without `NOOK_REQUIRE_DB=1`, matching the suite convention.
+#[cfg(test)]
+mod db_tests {
+    use super::operator_audit_page;
+    use nook_types::{EventId, TenantId};
+    use sqlx::postgres::PgPoolOptions;
+    use sqlx::PgPool;
+    use uuid::Uuid;
+
+    async fn pool() -> Option<PgPool> {
+        if std::env::var("NOOK_REQUIRE_DB").ok().as_deref() != Some("1") {
+            return None;
+        }
+        let url = std::env::var("DATABASE_URL").ok()?;
+        let db = PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&url)
+            .await
+            .ok()?;
+        crate::MIGRATOR.run(&db).await.ok()?;
+        Some(db)
+    }
+
+    async fn tenant(db: &PgPool, slug: &str) -> TenantId {
+        let id = Uuid::new_v4();
+        sqlx::query("INSERT INTO tenants (id, name, slug) VALUES ($1, $2, $3)")
+            .bind(id)
+            .bind(slug)
+            .bind(format!("{slug}-{id}"))
+            .execute(db)
+            .await
+            .unwrap();
+        TenantId(id)
+    }
+
+    /// Insert one audit-visible event and return its (v7, creation-ordered) id.
+    async fn event(db: &PgPool, tenant: TenantId, kind: &str, actor_type: &str) -> EventId {
+        let id = EventId::new();
+        sqlx::query(
+            "INSERT INTO events (id, tenant_id, kind, actor_type, actor_id)
+             VALUES ($1, $2, $3, $4, $5)",
+        )
+        .bind(id)
+        .bind(tenant.0)
+        .bind(kind)
+        .bind(actor_type)
+        .bind(Uuid::new_v4())
+        .execute(db)
+        .await
+        .unwrap();
+        id
+    }
+
+    async fn cleanup(db: &PgPool, t: TenantId) {
+        let _ = sqlx::query("DELETE FROM events WHERE tenant_id = $1")
+            .bind(t.0)
+            .execute(db)
+            .await;
+        let _ = sqlx::query("DELETE FROM tenants WHERE id = $1")
+            .bind(t.0)
+            .execute(db)
+            .await;
+    }
+
+    /// AC-1/AC-2: pages are bounded, the cursor walks strictly older rows with
+    /// no overlap or gap, and the end of the list yields a null cursor.
+    #[tokio::test]
+    async fn cursor_walks_older_rows_with_no_overlap_or_gap() {
+        let Some(db) = pool().await else {
+            eprintln!("skipping cursor_walks_older_rows_with_no_overlap_or_gap — no DATABASE_URL");
+            return;
+        };
+        let t = tenant(&db, "audit-page").await;
+        // Five events, oldest → newest (v7 ids increase with insertion order).
+        let mut ids = Vec::new();
+        for _ in 0..5 {
+            ids.push(event(&db, t, "operator.audit", "user").await);
+        }
+        // Newest first is the reverse of insertion order.
+        let newest_first: Vec<EventId> = ids.iter().rev().copied().collect();
+
+        // Page 1: the two newest, with a cursor.
+        let p1 = operator_audit_page(&db, None, None, 2).await.unwrap();
+        // Filter to THIS tenant's rows so a shared dev DB's other events don't
+        // perturb the assertions — we only reason about ids we inserted.
+        let seen: Vec<EventId> = p1
+            .rows
+            .iter()
+            .map(|r| r.id)
+            .filter(|id| ids.contains(id))
+            .collect();
+        assert!(p1.rows.len() <= 2, "page is bounded by the limit");
+        assert!(p1.next_cursor.is_some(), "a full page carries a cursor");
+
+        // Walk every page for this tenant via the cursor and collect our ids.
+        let mut collected = Vec::new();
+        collected.extend(seen);
+        let mut cursor = p1.next_cursor;
+        let mut guard = 0;
+        while let Some(after) = cursor {
+            guard += 1;
+            assert!(guard < 20, "cursor did not terminate");
+            let page = operator_audit_page(&db, None, Some(after), 2)
+                .await
+                .unwrap();
+            for r in &page.rows {
+                if ids.contains(&r.id) {
+                    collected.push(r.id);
+                }
+            }
+            cursor = page.next_cursor;
+        }
+
+        // No id appears twice (no overlap) and every id appears (no gap).
+        let mut deduped = collected.clone();
+        deduped.sort();
+        deduped.dedup();
+        assert_eq!(deduped.len(), collected.len(), "no row was returned twice");
+        for id in &ids {
+            assert!(collected.contains(id), "every inserted row was reached");
+        }
+        // And the order our ids came back in is newest-first.
+        let ours_in_order: Vec<EventId> = collected
+            .iter()
+            .filter(|id| ids.contains(id))
+            .copied()
+            .collect();
+        assert_eq!(ours_in_order, newest_first, "rows arrive newest-first");
+
+        cleanup(&db, t).await;
+    }
+
+    /// AC-2: search filters the WHOLE log — a match that lives beyond the first
+    /// page is still returned — and is case-insensitive.
+    #[tokio::test]
+    async fn search_finds_a_match_beyond_the_first_page() {
+        let Some(db) = pool().await else {
+            eprintln!("skipping search_finds_a_match_beyond_the_first_page — no DATABASE_URL");
+            return;
+        };
+        let t = tenant(&db, "audit-search").await;
+        // The distinctive kind is the OLDEST row, so without server-side search
+        // it would sit on a later page.
+        let needle = event(&db, t, "node.RevokeD", "node").await;
+        for _ in 0..5 {
+            event(&db, t, "operator.audit", "user").await;
+        }
+
+        // Case-insensitive substring on the kind, small page — the match is not
+        // on page one, yet search returns it.
+        let hit = operator_audit_page(&db, Some("revoked".into()), None, 2)
+            .await
+            .unwrap();
+        assert!(
+            hit.rows.iter().any(|r| r.id == needle),
+            "server-side search reached a match beyond the first page"
+        );
+        // The noise rows do not match the needle.
+        assert!(
+            hit.rows
+                .iter()
+                .all(|r| r.kind.to_lowercase().contains("revoked")),
+            "search excludes non-matching rows"
+        );
+
+        cleanup(&db, t).await;
+    }
+
+    /// AC-2: paging one past the end is a clean empty page with a null cursor,
+    /// not an error; and a short page (fewer than the limit) has no cursor.
+    #[tokio::test]
+    async fn end_of_list_is_a_clean_null_cursor() {
+        let Some(db) = pool().await else {
+            eprintln!("skipping end_of_list_is_a_clean_null_cursor — no DATABASE_URL");
+            return;
+        };
+        let t = tenant(&db, "audit-end").await;
+        let only = event(&db, t, "operator.audit", "user").await;
+
+        // A page larger than the (single) result: short page, no cursor.
+        let page = operator_audit_page(&db, Some("operator.audit".into()), None, 50)
+            .await
+            .unwrap();
+        assert!(page.rows.iter().any(|r| r.id == only));
+        // (Other tenants' rows may share the kind; what matters is the cursor is
+        // null whenever the page did not fill to the limit.)
+        assert!(
+            page.rows.len() < 50,
+            "the page did not fill, so there is no next page"
+        );
+        assert!(page.next_cursor.is_none(), "a short page ends the list");
+
+        // Paging strictly past our row returns no error (empty of our id).
+        let past = operator_audit_page(&db, None, Some(only), 50)
+            .await
+            .unwrap();
+        assert!(
+            !past.rows.iter().any(|r| r.id == only),
+            "the cursor excludes the row it points at"
+        );
+
+        cleanup(&db, t).await;
+    }
 }
