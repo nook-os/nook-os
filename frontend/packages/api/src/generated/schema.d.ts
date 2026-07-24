@@ -499,6 +499,30 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/invites/accept": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * `POST /api/v1/invites/accept` — the signed-in person consumes a token. On a
+         *     match (pending, unexpired, email equals the signed-in email) they are added
+         *     to the tenant with the invite's role — linked by `person_id`, keeping their
+         *     personal tenant — and the invite becomes `accepted`. Any failure leaves the
+         *     invite untouched and returns the caller to their own tenant with a message
+         *     (AC-4/5); already-a-member is a no-op success (AC-6).
+         */
+        post: operations["accept_invite"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/labels": {
         parameters: {
             query?: never;
@@ -1817,6 +1841,51 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/tenants/{id}/invites": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * `GET /api/v1/tenants/{id}/invites` — pending invites (never the token).
+         *     owner/admin only.
+         */
+        get: operations["list_invites"];
+        put?: never;
+        /**
+         * `POST /api/v1/tenants/{id}/invites` — create a pending invite, returning the
+         *     accept URL. Re-inviting the same email replaces the existing pending invite
+         *     (AC-2). owner/admin only.
+         */
+        post: operations["create_invite"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/tenants/{id}/invites/{invite}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * `DELETE /api/v1/tenants/{id}/invites/{invite}` — revoke a pending invite; its
+         *     link stops working. owner/admin only.
+         */
+        delete: operations["revoke_invite"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/tenants/{id}/leave": {
         parameters: {
             query?: never;
@@ -2364,6 +2433,20 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        AcceptInviteRequest: {
+            token: string;
+        };
+        /**
+         * @description The outcome of accepting (or failing to accept) an invite. Whichever tenant
+         *     the person ends up in, the UI switches/refetches to it.
+         */
+        AcceptInviteResult: {
+            /** @description True when the person is now a member of the invited tenant. */
+            accepted: boolean;
+            message: string;
+            /** @description The tenant to land in — the shared one on success, else the person's own. */
+            tenant_id: components["schemas"]["TenantId"];
+        };
         /**
          * @description Enrolling a passkey. The wrapping happens in the browser; the server only
          *     ever sees the sealed blob.
@@ -2651,6 +2734,11 @@ export interface components {
             name: string;
             /** @description Paste an existing private key (OpenSSH PEM)… */
             private_key?: string | null;
+        };
+        CreateInviteRequest: {
+            email: string;
+            /** @description `member` | `admin`. `owner` is never invitable (NG-3). */
+            role?: string | null;
         };
         CreateJoinTokenResponse: {
             /**
@@ -2999,6 +3087,25 @@ export interface components {
         };
         InitProjectRequest: {
             name: string;
+        };
+        /**
+         * @description A pending/accepted/revoked invitation into a tenant. `accept_url` is set only
+         *     on the create response (the link to hand out); the token is never listed.
+         */
+        Invite: {
+            /** @description The accept link, returned only when the invite is created (never listed). */
+            accept_url?: string | null;
+            /** Format: date-time */
+            created_at: string;
+            email: string;
+            /** Format: date-time */
+            expires_at: string;
+            /** Format: uuid */
+            id: string;
+            /** @description `member` | `admin`. */
+            role: string;
+            /** @description `pending` | `accepted` | `revoked`. */
+            status: string;
         };
         /** @description Sent by `nook join` (unauthenticated; the join token IS the credential). */
         JoinRequest: {
@@ -5012,6 +5119,29 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+        };
+    };
+    accept_invite: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AcceptInviteRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AcceptInviteResult"];
+                };
             };
         };
     };
@@ -7388,6 +7518,96 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["TenantMembership"][];
                 };
+            };
+        };
+    };
+    list_invites: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Invite"][];
+                };
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    create_invite: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateInviteRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Invite"];
+                };
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    revoke_invite: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+                invite: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
         };
     };

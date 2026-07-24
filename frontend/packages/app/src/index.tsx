@@ -11,6 +11,7 @@ import { api } from "@nookos/api";
 import { Empty, ThemeProvider } from "@nookos/ui";
 import { Shell } from "./layout";
 import { startLive } from "./live";
+import { AcceptInvitePage } from "./pages/AcceptInvite";
 import { ActivityPage } from "./pages/Activity";
 import { BoardPage } from "./pages/Board";
 import { Dashboard } from "./pages/Dashboard";
@@ -124,6 +125,7 @@ function AuthGate() {
         <Route path="sessions" element={<SessionsPage />} />
         <Route path="sessions/:id" element={<SessionPage />} />
         <Route path="board" element={<BoardPage />} />
+        <Route path="accept" element={<AcceptInvitePage />} />
         <Route path="operator" element={<OperatorPage />} />
         <Route path="activity" element={<ActivityPage />} />
         <Route path="nodes" element={<NodesPage />} />
