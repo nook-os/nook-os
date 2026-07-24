@@ -6,6 +6,7 @@ pub mod events;
 pub mod feedback;
 pub mod gitops;
 pub mod health;
+pub mod invites;
 pub mod join;
 pub mod labels;
 pub mod local_auth;
@@ -104,6 +105,15 @@ pub fn build_router(state: AppState) -> Router {
             patch(tenants::change_member_role).delete(tenants::remove_member),
         )
         .route("/tenants/{id}/leave", post(tenants::leave_tenant))
+        .route(
+            "/tenants/{id}/invites",
+            get(invites::list).post(invites::create),
+        )
+        .route(
+            "/tenants/{id}/invites/{invite}",
+            delete_route(invites::revoke),
+        )
+        .route("/invites/accept", post(invites::accept))
         .route(
             "/workspaces",
             get(workspaces::list).post(workspaces::create),

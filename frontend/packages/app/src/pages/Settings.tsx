@@ -1,5 +1,6 @@
 import React from "react";
 import { OrgVisibility } from "../OrgVisibility";
+import { Invites } from "../Invites";
 import { NotificationChannels } from "../NotificationChannels";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "@nookos/api";
@@ -636,6 +637,8 @@ export function SettingsPage() {
       <Panel title="Notifications">
         <NotificationSettings />
       </Panel>
+
+      <Invites />
 
       <OrgVisibility />
 

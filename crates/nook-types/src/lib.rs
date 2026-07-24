@@ -149,6 +149,48 @@ pub struct SwitchTenantRequest {
     pub tenant_id: TenantId,
 }
 
+/// A pending/accepted/revoked invitation into a tenant. `accept_url` is set only
+/// on the create response (the link to hand out); the token is never listed.
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
+pub struct Invite {
+    pub id: Uuid,
+    pub email: String,
+    /// `member` | `admin`.
+    pub role: String,
+    /// `pending` | `accepted` | `revoked`.
+    pub status: String,
+    pub created_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+    /// The accept link, returned only when the invite is created (never listed).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[sqlx(default)]
+    pub accept_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, ToSchema)]
+pub struct CreateInviteRequest {
+    pub email: String,
+    /// `member` | `admin`. `owner` is never invitable (NG-3).
+    #[serde(default)]
+    pub role: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, ToSchema)]
+pub struct AcceptInviteRequest {
+    pub token: String,
+}
+
+/// The outcome of accepting (or failing to accept) an invite. Whichever tenant
+/// the person ends up in, the UI switches/refetches to it.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct AcceptInviteResult {
+    /// True when the person is now a member of the invited tenant.
+    pub accepted: bool,
+    /// The tenant to land in — the shared one on success, else the person's own.
+    pub tenant_id: TenantId,
+    pub message: String,
+}
+
 /// Unauthenticated sign-in capabilities, so the login screen only offers what
 /// this instance actually supports.
 /// Hand an identity provider's ID token to the control plane, get one of ours.
