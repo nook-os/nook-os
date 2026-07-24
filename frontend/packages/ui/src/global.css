@@ -121,6 +121,10 @@ textarea,
 pre,
 code,
 .activity-row .detail,
+/* Rendered markdown — task descriptions and comments — is prose you are meant
+   to read and copy out (an acceptance criterion into another tool, a command
+   from a comment). The chrome around it stays unselectable. */
+.md,
 /* Dialogs hand out things you are meant to keep — an access token, a command
    to paste on another machine. Text you cannot select is text you cannot use. */
 .dialog-description,
@@ -2000,6 +2004,12 @@ textarea.env-area.blurred {
 
 .md p { margin: 5px 0; }
 .md ul, .md ol { margin: 5px 0; padding-left: 18px; }
+/* Ordered lists need more room than the 18px an unordered bullet uses: the
+   marker sits (outside) in the padding, and a two-digit "10." is wider than
+   18px, so its left edge fell off the panel and clipped to "1|0". 26px fits two
+   digits. Ordered-list only, so `ul` — and the task-list de-indent that keys on
+   it (below) — are untouched. */
+.md ol { padding-left: 26px; }
 .md li { margin: 2px 0; }
 .md li > ul, .md li > ol { margin: 2px 0; }
 
