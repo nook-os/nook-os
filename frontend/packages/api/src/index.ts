@@ -52,10 +52,32 @@ export const api = createClient<paths>({
 // rather than at client construction keeps that decision runtime — the app
 // cannot know the address until someone types it.
 api.use({
-  onRequest({ request }) {
+  async onRequest({ request }) {
     if (!isRemote()) return request;
     const url = new URL(request.url);
-    const rewritten = new Request(apiUrl(url.pathname + url.search), request);
+
+    // The body is read out and passed as bytes rather than letting
+    // `new Request(url, request)` carry it over. That form gives the copy a
+    // ReadableStream body, and WebKit — every webview on macOS, so every Mac
+    // desktop install — refuses to upload a stream: "ReadableStream uploading
+    // is not supported". Chromium accepts it, so this looked fine everywhere
+    // it was tried. The failure was every write from the desktop app going
+    // nowhere while reads worked perfectly, which reads as "the button does
+    // nothing" rather than as a network bug.
+    const hasBody = request.method !== "GET" && request.method !== "HEAD";
+    const body = hasBody ? await request.arrayBuffer() : undefined;
+
+    const rewritten = new Request(apiUrl(url.pathname + url.search), {
+      method: request.method,
+      headers: request.headers,
+      body,
+      credentials: request.credentials,
+      mode: request.mode,
+      redirect: request.redirect,
+      referrer: request.referrer,
+      integrity: request.integrity,
+      signal: request.signal,
+    });
     for (const [k, v] of Object.entries(authHeaders())) {
       rewritten.headers.set(k, v);
     }
