@@ -443,26 +443,38 @@ pub async fn switch_tenant(
         return Err(ApiError::Unauthorized);
     }
 
-    // Arrival, recorded in the destination tenant.
+    // Arrival, recorded in the destination tenant. The payload names BOTH
+    // tenants and its direction, so a consumer reads the whole switch from this
+    // one row without inferring anything from which key happens to be present
+    // (MAIN-46 AC-1). Still the single `user.tenant_switched` kind (NG-1).
     events::record(
         &state,
         req.tenant_id,
         EventDraft::new("user.tenant_switched")
             .actor("user", target_user.0)
-            .payload(serde_json::json!({ "tenant_id": req.tenant_id })),
+            .payload(serde_json::json!({
+                "direction": "in",
+                "from_tenant": source_tenant,
+                "to_tenant": req.tenant_id,
+            })),
     )
     .await;
 
     // Departure, recorded in the tenant left behind, so a switch is auditable
-    // from BOTH sides (AC-2) — naming the originating user and the destination.
-    // Skipped when re-selecting the current tenant (no crossing to record).
+    // from BOTH sides (AC-2) — same self-describing payload, direction "out",
+    // actor = the source-tenant user. Skipped when re-selecting the current
+    // tenant (no crossing to record).
     if source_tenant != req.tenant_id {
         events::record(
             &state,
             source_tenant,
             EventDraft::new("user.tenant_switched")
                 .actor("user", auth.user_id.0)
-                .payload(serde_json::json!({ "left_for_tenant": req.tenant_id })),
+                .payload(serde_json::json!({
+                    "direction": "out",
+                    "from_tenant": source_tenant,
+                    "to_tenant": req.tenant_id,
+                })),
         )
         .await;
     }

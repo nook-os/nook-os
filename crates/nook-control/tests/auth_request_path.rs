@@ -311,7 +311,9 @@ async fn a_switch_is_audited_from_both_tenants() {
     .await
     .expect("the switch succeeds");
 
-    let count = |t: TenantId| {
+    // The whole `user.tenant_switched` payload in a tenant's log (exactly one
+    // is written per side in this scenario).
+    let payload = |t: TenantId| {
         let pool = pool.clone();
         async move {
             let (n,): (i64,) = sqlx::query_as(
@@ -321,14 +323,105 @@ async fn a_switch_is_audited_from_both_tenants() {
             .fetch_one(&pool)
             .await
             .unwrap();
-            n
+            let (p,): (serde_json::Value,) = sqlx::query_as(
+                "SELECT payload FROM events WHERE tenant_id = $1 AND kind = 'user.tenant_switched'",
+            )
+            .bind(t)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            (n, p)
         }
     };
-    let from_source = count(a).await;
-    let from_dest = count(b).await;
+    let (dest_count, dest) = payload(b).await;
+    let (source_count, source) = payload(a).await;
 
     cleanup(&pool, &[a, b]).await;
 
-    assert_eq!(from_dest, 1, "the destination records the arrival");
-    assert_eq!(from_source, 1, "the source records the departure (AC-2)");
+    assert_eq!(dest_count, 1, "the destination records the arrival");
+    assert_eq!(source_count, 1, "the source records the departure (AC-2)");
+
+    // Arrival, in B: self-describing — direction "in", both tenants named
+    // (AC-1). `from`/`to` are the same on both sides; only `direction` differs.
+    assert_eq!(dest["direction"], "in", "arrival is direction=in");
+    assert_eq!(
+        dest["from_tenant"],
+        a.to_string(),
+        "arrival names the source"
+    );
+    assert_eq!(
+        dest["to_tenant"],
+        b.to_string(),
+        "arrival names the destination"
+    );
+
+    // Departure, in A: direction "out", the same two tenants (AC-2).
+    assert_eq!(source["direction"], "out", "departure is direction=out");
+    assert_eq!(
+        source["from_tenant"],
+        a.to_string(),
+        "departure names the source"
+    );
+    assert_eq!(
+        source["to_tenant"],
+        b.to_string(),
+        "departure names the destination"
+    );
+
+    // The ad-hoc keys are gone; direction alone disambiguates (AC-3).
+    for p in [&dest, &source] {
+        assert!(p.get("tenant_id").is_none(), "old `tenant_id` key removed");
+        assert!(
+            p.get("left_for_tenant").is_none(),
+            "old `left_for_tenant` key removed"
+        );
+    }
+}
+
+/// AC-2/NG-4: re-selecting the tenant you are already in records the arrival but
+/// NO departure — there is no crossing to record.
+#[tokio::test]
+async fn reselecting_the_current_tenant_records_no_departure() {
+    let Some(pool) = test_pool().await else {
+        return;
+    };
+    let state = AppState::new(pool.clone(), test_config(), None).await;
+    let person = Uuid::new_v4();
+    let a = seed_tenant(&pool).await;
+    let me_a = seed_member(&pool, a, person).await;
+    let sid = seed_session(&pool, me_a, a).await;
+
+    let ctx = AuthCtx {
+        session_id: AuthSessionId(sid),
+        user_id: me_a,
+        tenant_id: a,
+        principal: Principal::User,
+        cookie_session: true,
+    };
+    // Switch INTO the tenant already active.
+    let _ok = nook_control::routes::auth::switch_tenant(
+        State(state),
+        ctx,
+        Json(SwitchTenantRequest { tenant_id: a }),
+    )
+    .await
+    .expect("re-selecting the current tenant succeeds");
+
+    let directions: Vec<(String,)> = sqlx::query_as(
+        "SELECT payload->>'direction' FROM events
+         WHERE tenant_id = $1 AND kind = 'user.tenant_switched'",
+    )
+    .bind(a)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+
+    cleanup(&pool, &[a]).await;
+
+    // Exactly the arrival, and nothing with direction "out".
+    assert_eq!(directions.len(), 1, "only the arrival is recorded");
+    assert_eq!(
+        directions[0].0, "in",
+        "and it is an arrival, not a departure"
+    );
 }
