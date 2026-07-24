@@ -10,6 +10,7 @@ import { useWorkspaceContext } from "./context";
 import { useLive } from "./live";
 import { useNewWork } from "./newwork";
 import { useSessionTabs } from "./sessionTabsStore";
+import { useTabHotkeys } from "./tabHotkeys";
 import { askText, notify } from "./dialogs";
 
 interface MenuState {
@@ -49,6 +50,15 @@ export function SessionTabs({ activeId }: { activeId?: string }) {
   )
     .slice()
     .sort((a, b) => Number(!!b.pinned) - Number(!!a.pinned));
+
+  // Chrome-style Ctrl+Tab / Ctrl+Cmd-number switching over exactly this visible
+  // list (desktop only). Called before the early return so the hook order is
+  // stable across renders; with an empty list it simply has nothing to switch.
+  useTabHotkeys(
+    tabs.map((t) => t.id),
+    activeId,
+    navigate,
+  );
 
   if (tabs.length === 0) return null;
 
