@@ -16,9 +16,26 @@ const ACTIVITY_BUFFER = 250;
 
 /** How long a `running`/`waiting` mark survives with no fresh report before the
  *  UI treats it as idle. A crashed agent never fires `Stop`, so without this a
- *  spinner would spin forever. Kept just under the server's 15-min sweep so the
- *  client fades the mark at about the same time the server forgets it. */
-export const AGENT_STATE_STALE_MS = 14 * 60 * 1000;
+ *  spinner would spin forever. Kept AT LEAST as long as the server's TTL
+ *  (`AGENT_STATE_TTL` = 15 min in `crates/nook-control/src/ws/registry.rs`): if
+ *  the client faded a mark first, a reload would re-seed it from
+ *  `GET /sessions/agent-states` — which the server still serves until its own
+ *  sweep — and the spinner would flicker back. Being >= the server means the
+ *  client never drops a mark the server would still hand back. */
+export const AGENT_STATE_STALE_MS = 15 * 60 * 1000;
+
+/** The agent mark to show for a session, or `undefined` when the session is
+ *  dead — a session that has `exited`/`error`/`killed` must show no agent mark,
+ *  so the last state its agent reported does not linger as a spinner. Pure and
+ *  shared so the term-chip (`SessionWindows`) and the top tab (`SessionTabs`)
+ *  cannot disagree about a dead session. */
+export function liveAgentMark(
+  status: string | undefined,
+  agent: AgentState | undefined,
+): AgentState | undefined {
+  const dead = status === "exited" || status === "error" || status === "killed";
+  return dead ? undefined : agent;
+}
 
 export interface AgentState {
   /** `running` | `waiting`. `idle` is represented by absence. */
