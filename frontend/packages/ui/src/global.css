@@ -978,16 +978,16 @@ table.nook-table tr.clickable { cursor: pointer; }
 .session-tab-icon { flex: none; }
 .session-tab-icon.ok { color: var(--nook-ok); }
 .session-tab-icon.err { color: var(--nook-err); }
-/* Live agent activity on a tab: the accent spins while it works, and a warning
-   dot pulses when it is blocked waiting for you — the one worth noticing. */
+/* Live agent activity on a tab: the accent spins while it works, and a static
+   warning-coloured dot marks "blocked, waiting for you". Per AC-4 the waiting
+   mark is deliberately NOT animated — motion reads as "working", so only the
+   running spinner moves; distinctness for waiting is carried by the glyph
+   (CircleDot vs SquareTerminal) and the warn colour. */
 .session-tab-icon.running { color: var(--nook-accent); }
-.session-tab-icon.waiting { color: var(--nook-warn); animation: nook-pulse 1.4s ease-in-out infinite; }
+.session-tab-icon.waiting { color: var(--nook-warn); }
 .term-chip-agent { flex: none; margin-right: 3px; vertical-align: -1px; }
 .term-chip-agent.running { color: var(--nook-accent); }
-.term-chip-agent.waiting { color: var(--nook-warn); animation: nook-pulse 1.4s ease-in-out infinite; }
-@keyframes nook-pulse {
-  50% { opacity: 0.35; }
-}
+.term-chip-agent.waiting { color: var(--nook-warn); }
 .session-tab-ws {
   color: var(--nook-fg-faint);
   max-width: 110px;
