@@ -60,6 +60,7 @@ use crate::state::AppState;
 pub fn build_agent_router(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(health::healthz))
+        .route("/livez", get(health::livez))
         .nest(
             "/api/v1",
             Router::new()
@@ -317,6 +318,10 @@ pub fn build_router(state: AppState) -> Router {
 
     let mut router = Router::new()
         .route("/healthz", get(health::healthz))
+        // Liveness beside readiness: `/livez` never touches the DB, so a probe
+        // can tell "process up" from "DB reachable" and only the latter recycles
+        // a pod. Unauthenticated like `/healthz` — a kubelet carries no session.
+        .route("/livez", get(health::livez))
         // Both unauthenticated: they are fetched by a machine that has no
         // session yet, holding nothing but a join token.
         .route("/install.sh", get(dist::install_script))

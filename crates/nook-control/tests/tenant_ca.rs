@@ -324,6 +324,7 @@ fn test_config() -> nook_control::config::Config {
     nook_control::config::Config {
         app_env: "test".into(),
         bind: "127.0.0.1:0".into(),
+        shutdown_grace_secs: 25,
         agent_bind: "127.0.0.1:0".into(),
         agent_public_url: None,
         agent_tls_cert: None,

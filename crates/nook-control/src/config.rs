@@ -8,6 +8,12 @@ use anyhow::{Context, Result};
 pub struct Config {
     pub app_env: String,
     pub bind: String,
+    /// How long, in seconds, in-flight requests get to finish after a shutdown
+    /// signal before the process exits anyway. Bounds the graceful drain so one
+    /// stuck connection cannot hold the pod past Kubernetes' own grace period
+    /// (`terminationGracePeriodSeconds`) and earn a SIGKILL mid-request. Set a
+    /// touch below that value; defaults to 25s.
+    pub shutdown_grace_secs: u64,
     pub public_base_url: String,
     pub web_origin: String,
     pub database_url: String,
@@ -116,6 +122,9 @@ impl Config {
         let cfg = Self {
             app_env: env_opt("APP_ENV").unwrap_or_else(|| "dev".into()),
             bind: env_opt("CONTROL_PLANE_BIND").unwrap_or_else(|| "0.0.0.0:8080".into()),
+            shutdown_grace_secs: env_opt("NOOK_SHUTDOWN_GRACE_SECS")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(25),
             public_base_url: env_opt("PUBLIC_BASE_URL")
                 .unwrap_or_else(|| "http://localhost:8080".into()),
             web_origin: env_opt("WEB_ORIGIN").unwrap_or_else(|| "http://localhost:5173".into()),

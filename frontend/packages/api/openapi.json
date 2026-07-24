@@ -5066,10 +5066,25 @@
         "tags": [
           "crate::routes::health"
         ],
+        "summary": "Readiness: 200 only when the database is reachable. Kubernetes pulls a pod\nthat fails this from Service endpoints but does NOT restart it — a DB blip\nshould stop routing traffic, not recycle the process.",
         "operationId": "healthz",
         "responses": {
           "200": {
-            "description": "Service healthy"
+            "description": "Service ready"
+          }
+        }
+      }
+    },
+    "/livez": {
+      "get": {
+        "tags": [
+          "crate::routes::health"
+        ],
+        "summary": "Liveness: 200 whenever the process is up, deliberately WITHOUT touching the\ndatabase. Used as a Kubernetes liveness probe, this must not depend on any\nexternal dependency — otherwise a brief DB outage would make the cluster\nkill and restart otherwise-healthy pods, turning a hiccup into an outage.\nTakes no `State` at all, so it cannot grow a database call by accident.",
+        "operationId": "livez",
+        "responses": {
+          "200": {
+            "description": "Process alive"
           }
         }
       }

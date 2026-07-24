@@ -2193,7 +2193,35 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
+        /**
+         * Readiness: 200 only when the database is reachable. Kubernetes pulls a pod
+         *     that fails this from Service endpoints but does NOT restart it — a DB blip
+         *     should stop routing traffic, not recycle the process.
+         */
         get: operations["healthz"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/livez": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Liveness: 200 whenever the process is up, deliberately WITHOUT touching the
+         *     database. Used as a Kubernetes liveness probe, this must not depend on any
+         *     external dependency — otherwise a brief DB outage would make the cluster
+         *     kill and restart otherwise-healthy pods, turning a hiccup into an outage.
+         *     Takes no `State` at all, so it cannot grow a database call by accident.
+         */
+        get: operations["livez"];
         put?: never;
         post?: never;
         delete?: never;
@@ -7920,7 +7948,25 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Service healthy */
+            /** @description Service ready */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    livez: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Process alive */
             200: {
                 headers: {
                     [name: string]: unknown;
