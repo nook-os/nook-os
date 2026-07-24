@@ -3340,6 +3340,15 @@
             }
           },
           {
+            "name": "q",
+            "in": "query",
+            "description": "Free-text search: case-insensitive substring across the task's title,\ndescription body, and display key (`MAIN-42`). ANDs with the other\nfilters. Absent = no text filter.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
             "name": "archived",
             "in": "query",
             "description": "Include archived tasks. Default (absent/false) excludes them, so the\nagent pick can never claim archived work (MAIN-15 AC-2).",

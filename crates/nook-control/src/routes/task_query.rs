@@ -42,6 +42,10 @@ pub struct TaskFilter {
     /// Filter on the derived blocker state.
     pub is_blocked: Option<bool>,
     pub workspace: Option<uuid::Uuid>,
+    /// Free-text search: case-insensitive substring across the task's title,
+    /// description body, and display key (`MAIN-42`). ANDs with the other
+    /// filters. Absent = no text filter.
+    pub q: Option<String>,
     /// Include archived tasks. Default (absent/false) excludes them, so the
     /// agent pick can never claim archived work (MAIN-15 AC-2).
     pub archived: Option<bool>,
@@ -79,6 +83,9 @@ impl TaskFilter {
                 "label" => many(&mut f.label),
                 "not_label" => many(&mut f.not_label),
                 "board" => f.board = Some(v),
+                // Not lower-cased: ILIKE is already case-insensitive, and the
+                // raw term keeps a key search like `MAIN-42` intact.
+                "q" => f.q = Some(v),
                 "assignee" => f.assignee = Some(v),
                 "column_type" => f.column_type = Some(v),
                 "priority" => f.priority = Some(num(&k, &v)?),
@@ -222,6 +229,12 @@ pub async fn query_rows(
           AND ($11::timestamptz IS NULL OR t.created_at > $11)
           -- archived work is off the board and NEVER pickable unless explicitly asked for
           AND ($13::bool OR t.archived_at IS NULL)
+          -- free-text search across title, description, and display key (MAIN-54).
+          -- Substring, case-insensitive; ANDs with every filter above.
+          AND ($14::text IS NULL OR (
+                    t.title ILIKE $14
+                 OR t.description ILIKE $14
+                 OR (b.key || '-' || t.number::text) ILIKE $14))
         -- priority 0 means "unset", which sorts last rather than first
         ORDER BY CASE WHEN t.priority = 0 THEN 5 ELSE t.priority END, t.created_at
         LIMIT $12
@@ -240,6 +253,8 @@ pub async fn query_rows(
     .bind(f.cursor)
     .bind(limit)
     .bind(f.archived.unwrap_or(false))
+    // `%term%` for a substring match; None disables the clause via the IS NULL guard.
+    .bind(f.q.as_ref().map(|s| format!("%{s}%")))
     .fetch_all(db)
     .await?;
 
@@ -456,6 +471,21 @@ mod tests {
         let f = TaskFilter::parse(Some("label=needs%20review")).unwrap();
         assert_eq!(f.label, vec!["needs review"]);
     }
+
+    /// `q` parses as a raw term (not lower-cased — ILIKE handles case, and a
+    /// key search like `MAIN-42` must survive intact) (MAIN-54).
+    #[test]
+    fn q_parses_and_keeps_its_case() {
+        assert_eq!(TaskFilter::parse(Some("")).unwrap().q, None);
+        assert_eq!(
+            TaskFilter::parse(Some("q=Postmark")).unwrap().q.as_deref(),
+            Some("Postmark")
+        );
+        assert_eq!(
+            TaskFilter::parse(Some("q=MAIN-42")).unwrap().q.as_deref(),
+            Some("MAIN-42")
+        );
+    }
 }
 
 /// Behavioral tests for the archived exclusion (MAIN-15 AC-2), against a real
@@ -499,6 +529,145 @@ mod db_tests {
         .await
         .unwrap();
         TaskId(id)
+    }
+
+    /// Insert a task with a title, description, and number, returning its id.
+    async fn titled_task(
+        db: &PgPool,
+        tenant: Uuid,
+        board: Uuid,
+        col: Uuid,
+        number: i32,
+        title: &str,
+        description: &str,
+    ) -> TaskId {
+        let id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO tasks (id, tenant_id, board_id, column_id, title, description, number)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+        )
+        .bind(id)
+        .bind(tenant)
+        .bind(board)
+        .bind(col)
+        .bind(title)
+        .bind(description)
+        .bind(number)
+        .execute(db)
+        .await
+        .unwrap();
+        TaskId(id)
+    }
+
+    /// AC-1/AC-4: `q` matches title, description body, and display key,
+    /// case-insensitively, and combines with the other filters.
+    #[tokio::test]
+    async fn q_searches_title_description_and_key() {
+        let Some(db) = pool().await else {
+            eprintln!("skipping q_searches_title_description_and_key — no DATABASE_URL");
+            return;
+        };
+        let tenant = Uuid::new_v4();
+        let board = Uuid::new_v4();
+        let col = Uuid::new_v4();
+        sqlx::query("INSERT INTO tenants (id, name, slug) VALUES ($1, 'S54', $2)")
+            .bind(tenant)
+            .bind(format!("s54-{tenant}"))
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO boards (id, tenant_id, name, key) VALUES ($1, $2, 'B', $3)")
+            .bind(board)
+            .bind(tenant)
+            .bind(format!("SR{}", &board.simple().to_string()[..6]).to_uppercase())
+            .execute(&db)
+            .await
+            .unwrap();
+        let board_key: (String,) = sqlx::query_as("SELECT key FROM boards WHERE id = $1")
+            .bind(board)
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO board_columns (id, board_id, name, type, position)
+             VALUES ($1, $2, 'Todo', 'unstarted', 0)",
+        )
+        .bind(col)
+        .bind(board)
+        .execute(&db)
+        .await
+        .unwrap();
+
+        let by_title = titled_task(&db, tenant, board, col, 1, "Alpha Postmark work", "n/a").await;
+        let by_desc = titled_task(
+            &db,
+            tenant,
+            board,
+            col,
+            42,
+            "Beta",
+            "mentions Postmark in the body",
+        )
+        .await;
+        let unrelated = titled_task(&db, tenant, board, col, 7, "Gamma", "unrelated text").await;
+
+        let search = |q: &str| {
+            let db = db.clone();
+            let f = TaskFilter {
+                board: Some(board.to_string()),
+                q: Some(q.to_string()),
+                ..Default::default()
+            };
+            async move {
+                query_rows(&db, TenantId(tenant), &f)
+                    .await
+                    .unwrap()
+                    .into_iter()
+                    .map(|t| t.id)
+                    .collect::<Vec<_>>()
+            }
+        };
+
+        // Case-insensitive substring across title AND description body.
+        let hits = search("postmark").await;
+        assert!(hits.contains(&by_title), "matches in the title");
+        assert!(hits.contains(&by_desc), "matches in the description body");
+        assert!(!hits.contains(&unrelated), "excludes non-matching tasks");
+        assert_eq!(search("POSTMARK").await, hits, "search is case-insensitive");
+
+        // By display key: full key, and bare number both find task #42.
+        let full_key = format!("{}-42", board_key.0);
+        assert!(
+            search(&full_key).await.contains(&by_desc),
+            "found by full key"
+        );
+        assert!(
+            search("42").await.contains(&by_desc),
+            "found by bare number"
+        );
+
+        // No matches → empty (distinct from a board with tasks).
+        assert!(
+            search("zznothingmatches").await.is_empty(),
+            "no matches is empty"
+        );
+
+        let _ = sqlx::query("DELETE FROM tasks WHERE board_id = $1")
+            .bind(board)
+            .execute(&db)
+            .await;
+        let _ = sqlx::query("DELETE FROM board_columns WHERE board_id = $1")
+            .bind(board)
+            .execute(&db)
+            .await;
+        let _ = sqlx::query("DELETE FROM boards WHERE id = $1")
+            .bind(board)
+            .execute(&db)
+            .await;
+        let _ = sqlx::query("DELETE FROM tenants WHERE id = $1")
+            .bind(tenant)
+            .execute(&db)
+            .await;
     }
 
     #[tokio::test]
