@@ -22,14 +22,16 @@
 //! Writes (CA rotation, node revocation) are deliberately absent until the read
 //! surface is proven.
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::Json;
 use nook_types::*;
+use serde::Deserialize;
 use uuid::Uuid;
 
 use crate::auth::perm::{Permission, Scope};
 use crate::auth::AuthCtx;
 use crate::error::ApiResult;
+use crate::services::core;
 use crate::services::policy::{self, Field};
 use crate::state::AppState;
 
@@ -167,31 +169,35 @@ pub async fn nodes(
     Ok(Json(rows))
 }
 
-/// The audit trail, including operator reads themselves.
+/// Query for the audit trail: an optional server-side search and a keyset
+/// cursor. Both absent returns the newest page.
+#[derive(Deserialize, utoipa::IntoParams)]
+pub struct AuditQuery {
+    /// Case-insensitive substring matched across kind, tenant slug, and actor.
+    pub q: Option<String>,
+    /// Keyset cursor: the last `id` already seen. Returns strictly older rows.
+    pub after: Option<EventId>,
+    /// Page size (default 50, clamped 1..=200).
+    pub limit: Option<i64>,
+}
+
+/// The audit trail, including operator reads themselves — paged and searchable.
 #[utoipa::path(get, path = "/api/v1/operator/audit",
     operation_id = "operator_audit",
-    responses((status = 200, body = [OperatorAuditEntry]), (status = 403)))]
+    params(AuditQuery),
+    responses((status = 200, body = OperatorAuditPage), (status = 403)))]
 pub async fn audit_log(
     State(state): State<AppState>,
     auth: AuthCtx,
-) -> ApiResult<Json<Vec<OperatorAuditEntry>>> {
+    Query(q): Query<AuditQuery>,
+) -> ApiResult<Json<OperatorAuditPage>> {
     auth.require(&state, Permission::AuditView, Scope::Deployment)
         .await?;
-    // Kinds, actors and times — never payloads. An event payload can carry a
-    // branch name or a task title, which is exactly what this surface must not
-    // hand over without policy.
-    let rows: Vec<OperatorAuditEntry> = sqlx::query_as(
-        "SELECT e.id, e.kind, e.actor_type, e.actor_id, e.tenant_id,
-                t.slug AS tenant_slug, e.occurred_at
-         FROM events e JOIN tenants t ON t.id = e.tenant_id
-         WHERE e.kind LIKE 'operator.%' OR e.kind LIKE 'rbac.%'
-            OR e.kind LIKE 'node.%'     OR e.kind LIKE 'user.%'
-         ORDER BY e.occurred_at DESC LIMIT 200",
-    )
-    .fetch_all(&state.db)
-    .await?;
+    // Kinds, actors and times — never payloads. The projection and the
+    // prefix filter live in `core::operator_audit_page`, shared with its tests.
+    let page = core::operator_audit_page(&state.db, q.q, q.after, q.limit.unwrap_or(50)).await?;
     audit(&state, &auth, "audit", None).await;
-    Ok(Json(rows))
+    Ok(Json(page))
 }
 
 /// The current policy for one org, for the operator who may change it.

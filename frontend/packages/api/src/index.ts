@@ -29,6 +29,8 @@ export type EventItem = Schemas["Event"];
 export type Note = Schemas["Note"];
 export type Theme = Schemas["Theme"];
 export type DispatchSuggestion = Schemas["DispatchSuggestion"];
+export type OperatorAuditEntry = Schemas["OperatorAuditEntry"];
+export type OperatorAuditPage = Schemas["OperatorAuditPage"];
 
 export type { paths };
 export * from "./ws";
