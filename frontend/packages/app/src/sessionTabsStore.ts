@@ -23,6 +23,30 @@ export interface SessionTab {
 
 const KEY = "nook.session-tabs";
 
+/** Move `id` to just before/after `targetId`, but only WITHIN a pin group.
+ *
+ *  Pure so the ordering rule is testable without the store or localStorage. The
+ *  tab strip renders pinned-first via a stable sort, so the array order is the
+ *  within-group order; moving among same-group items here is exactly what the
+ *  visible strip shows. A cross-group move (pinned ↔ unpinned) is rejected —
+ *  returned unchanged — because pinned tabs stay grouped ahead (AC-3), and a
+ *  self-drop or an unknown id is a no-op. */
+export function reorderTabs(
+  tabs: SessionTab[],
+  id: string,
+  targetId: string,
+  after: boolean,
+): SessionTab[] {
+  if (id === targetId) return tabs;
+  const dragged = tabs.find((t) => t.id === id);
+  const target = tabs.find((t) => t.id === targetId);
+  if (!dragged || !target) return tabs;
+  if (!!dragged.pinned !== !!target.pinned) return tabs; // cross-group: rejected
+  const without = tabs.filter((t) => t.id !== id);
+  const at = without.findIndex((t) => t.id === targetId) + (after ? 1 : 0);
+  return [...without.slice(0, at), dragged, ...without.slice(at)];
+}
+
 function load(): SessionTab[] {
   try {
     const raw = localStorage.getItem(KEY);
@@ -54,6 +78,8 @@ interface SessionTabsState {
   closeAll(ids: string[]): void;
   togglePin(id: string): void;
   rename(id: string, name: string): void;
+  /** Drag-reorder: move `id` to before/after `targetId`, within its pin group. */
+  reorder(id: string, targetId: string, after: boolean): void;
 }
 
 export const useSessionTabs = create<SessionTabsState>((set) => ({
@@ -106,6 +132,13 @@ export const useSessionTabs = create<SessionTabsState>((set) => ({
   rename: (id, name) =>
     set((s) => {
       const tabs = s.tabs.map((t) => (t.id === id ? { ...t, name } : t));
+      save(tabs);
+      return { tabs };
+    }),
+  reorder: (id, targetId, after) =>
+    set((s) => {
+      const tabs = reorderTabs(s.tabs, id, targetId, after);
+      if (tabs === s.tabs) return s; // rejected/no-op — don't churn storage
       save(tabs);
       return { tabs };
     }),
