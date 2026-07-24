@@ -89,6 +89,17 @@ spec:
                   name: {{ .Values.existingSecret }}
                   key: {{ $sk.s3SecretAccessKey }}
             {{- end }}
+            {{- if .Values.agent.enabled }}
+            # Agent mTLS listener: the process reads the cert/key from the paths
+            # the tlsSecret is mounted at (below), and advertises publicUrl in
+            # join tokens so a node dials the right place.
+            - name: NOOK_AGENT_TLS_CERT
+              value: {{ include "nook-control.agentCertPath" . | quote }}
+            - name: NOOK_AGENT_TLS_KEY
+              value: {{ include "nook-control.agentKeyPath" . | quote }}
+            - name: NOOK_AGENT_PUBLIC_URL
+              value: {{ .Values.agent.publicUrl | quote }}
+            {{- end }}
             {{- with .Values.controlPlane.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -119,6 +130,18 @@ spec:
             failureThreshold: 30
           resources:
             {{- toYaml .Values.controlPlane.resources | nindent 12 }}
+          {{- if .Values.agent.enabled }}
+          volumeMounts:
+            - name: agent-tls
+              mountPath: {{ include "nook-control.agentCertDir" . }}
+              readOnly: true
+          {{- end }}
+      {{- if .Values.agent.enabled }}
+      volumes:
+        - name: agent-tls
+          secret:
+            secretName: {{ .Values.agent.tlsSecret }}
+      {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

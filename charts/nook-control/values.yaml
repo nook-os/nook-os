@@ -145,6 +145,38 @@ service:
     # -- Web Service port.
     port: 80
 
+# ── Agent mTLS listener (:8081, opt-in) ──────────────────────────────────────
+# Nodes join over a mutual-TLS listener whose TLS terminates INSIDE the
+# control-plane process (it routes on SNI and judges each client cert against
+# the right tenant CA). Any proxy in front must therefore be L4 / passthrough —
+# it may route the TCP stream but must never terminate TLS. Off by default;
+# turn it on to let external nodes join a cluster-hosted control plane.
+agent:
+  # -- Expose the agent listener. When true, agent.tlsSecret and agent.publicUrl
+  #    are REQUIRED — the chart refuses to render a half-configured listener.
+  enabled: false
+  # -- Externally reachable address of the agent LoadBalancer, e.g.
+  #    "agent.nook.example.com:8081". Baked into join tokens (NOOK_AGENT_PUBLIC_URL)
+  #    so a node dials the right place. Point a DNS name at the LB's address.
+  publicUrl: ""
+  # -- Name of a Kubernetes TLS Secret holding the agent listener cert + key.
+  #    May be a dedicated Secret or reuse existingSecret if it carries the keys
+  #    below. See the README for the generate-cert + read-fingerprint path.
+  tlsSecret: ""
+  # -- Key inside tlsSecret holding the certificate (PEM). Default matches a
+  #    `kubectl create secret tls` Secret.
+  tlsCertKey: tls.crt
+  # -- Key inside tlsSecret holding the private key (PEM).
+  tlsKeyKey: tls.key
+  service:
+    # -- Agent Service type. LoadBalancer (L4 passthrough) by default; switch to
+    #    NodePort or ClusterIP for other exposures (see README).
+    type: LoadBalancer
+    # -- Agent Service port (the LB listens here; targets the pod's 8081).
+    port: 8081
+    # -- Cloud LB annotations, e.g. to force an L4/NLB passthrough LB.
+    annotations: {}
+
 # ── Ingress (HTTP, fronting web) ─────────────────────────────────────────────
 ingress:
   # -- Create an Ingress fronting the web Service.

@@ -136,3 +136,13 @@ control plane and the nginx `web` image, an HTTP Ingress, external Postgres only
 and secrets by reference (`existingSecret`) — no bundled dependencies, no
 migration Job (the control plane migrates at startup, advisory-locked). See the
 chart README for a minimal `helm install`.
+
+The **agent port** (above) has a Kubernetes path too: set `agent.enabled=true`
+with `agent.tlsSecret` (a TLS Secret holding the listener cert) and
+`agent.publicUrl`, and the chart renders a dedicated **L4 / passthrough
+LoadBalancer** on 8081 — the same passthrough requirement as the Traefik router,
+because TLS still terminates in the control-plane process. For clusters without
+a cloud L4 LB, the chart README documents Gateway API `TLSRoute` (passthrough)
+and ingress-nginx TCP passthrough as alternatives, plus how to generate the
+listener cert and read its fingerprint. Off by default: with `agent.enabled=false`
+the API still serves, nodes just cannot join a cluster-hosted control plane.

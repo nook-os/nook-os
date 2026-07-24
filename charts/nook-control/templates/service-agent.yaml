@@ -1,0 +1,31 @@
+{{- /*
+The agent mTLS listener (:8081), exposed as an L4 / passthrough LoadBalancer.
+TLS terminates in the control-plane process (SNI routing + per-tenant CA), so
+this Service must carry the raw TCP stream to the pod's 8081 untouched — never
+terminate TLS in front of it. Gated on agent.enabled; requireAgent refuses a
+half-configured listener (missing cert or public URL).
+*/ -}}
+{{- include "nook-control.requireAgent" . -}}
+{{- if .Values.agent.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "nook-control.componentName" (dict "root" . "component" "agent") }}
+  labels:
+    {{- include "nook-control.labels" . | nindent 4 }}
+    app.kubernetes.io/component: agent
+  {{- with .Values.agent.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.agent.service.type }}
+  # Target the control-plane pod: the agent listener shares its process on 8081.
+  selector:
+    {{- include "nook-control.componentSelectorLabels" (dict "root" . "component" "control") | nindent 4 }}
+  ports:
+    - name: agent
+      port: {{ .Values.agent.service.port }}
+      targetPort: agent
+      protocol: TCP
+{{- end }}
