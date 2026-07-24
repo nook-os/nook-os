@@ -142,7 +142,16 @@ pub trait Channel: Send + Sync {
 
     /// Send it. Returning `Err` records the message against the channel so a
     /// quietly-broken integration is visible rather than merely silent.
-    async fn deliver(&self, cfg: &Value, n: &Notification) -> anyhow::Result<()>;
+    ///
+    /// `mailer` is the control plane's shared [`Mailer`](crate::mailer::Mailer):
+    /// the Email channel delivers through it, so there is one mail path to
+    /// configure; every other channel ignores it and is byte-for-byte unchanged.
+    async fn deliver(
+        &self,
+        cfg: &Value,
+        n: &Notification,
+        mailer: &dyn crate::mailer::Mailer,
+    ) -> anyhow::Result<()>;
 }
 
 /// Every provider NookOS knows how to talk to.
@@ -154,6 +163,7 @@ pub fn channels() -> Vec<Box<dyn Channel>> {
         Box::new(Telegram),
         Box::new(Ntfy),
         Box::new(Twilio),
+        Box::new(Email),
     ]
 }
 
@@ -219,7 +229,12 @@ impl Channel for Webhook {
             fields: vec![field("url", "URL", "https://example.com/hooks/nook", false)],
         }
     }
-    async fn deliver(&self, cfg: &Value, n: &Notification) -> anyhow::Result<()> {
+    async fn deliver(
+        &self,
+        cfg: &Value,
+        n: &Notification,
+        _mailer: &dyn crate::mailer::Mailer,
+    ) -> anyhow::Result<()> {
         let url = str_field(cfg, "url")?;
         // Re-checked here, not only when it was configured: DNS can change
         // between the two, which is the whole point of a rebinding attack.
@@ -265,7 +280,12 @@ impl Channel for Slack {
             )],
         }
     }
-    async fn deliver(&self, cfg: &Value, n: &Notification) -> anyhow::Result<()> {
+    async fn deliver(
+        &self,
+        cfg: &Value,
+        n: &Notification,
+        _mailer: &dyn crate::mailer::Mailer,
+    ) -> anyhow::Result<()> {
         let url = str_field(cfg, "webhook_url")?;
         let mut text = format!("{} *{}*", emoji(&n.level), n.title);
         if !n.body.is_empty() {
@@ -305,7 +325,12 @@ impl Channel for Discord {
             )],
         }
     }
-    async fn deliver(&self, cfg: &Value, n: &Notification) -> anyhow::Result<()> {
+    async fn deliver(
+        &self,
+        cfg: &Value,
+        n: &Notification,
+        _mailer: &dyn crate::mailer::Mailer,
+    ) -> anyhow::Result<()> {
         let url = str_field(cfg, "webhook_url")?;
         let mut content = format!("{} **{}**", emoji(&n.level), n.title);
         if !n.body.is_empty() {
@@ -343,7 +368,12 @@ impl Channel for Telegram {
             ],
         }
     }
-    async fn deliver(&self, cfg: &Value, n: &Notification) -> anyhow::Result<()> {
+    async fn deliver(
+        &self,
+        cfg: &Value,
+        n: &Notification,
+        _mailer: &dyn crate::mailer::Mailer,
+    ) -> anyhow::Result<()> {
         let token = str_field(cfg, "bot_token")?;
         let chat = str_field(cfg, "chat_id")?;
         let mut text = format!("{} {}", emoji(&n.level), n.title);
@@ -384,7 +414,12 @@ impl Channel for Ntfy {
             ],
         }
     }
-    async fn deliver(&self, cfg: &Value, n: &Notification) -> anyhow::Result<()> {
+    async fn deliver(
+        &self,
+        cfg: &Value,
+        n: &Notification,
+        _mailer: &dyn crate::mailer::Mailer,
+    ) -> anyhow::Result<()> {
         let server = str_field(cfg, "server").unwrap_or("https://ntfy.sh");
         let topic = str_field(cfg, "topic")?;
         guard_url(server)?;
@@ -427,7 +462,12 @@ impl Channel for Twilio {
             ],
         }
     }
-    async fn deliver(&self, cfg: &Value, n: &Notification) -> anyhow::Result<()> {
+    async fn deliver(
+        &self,
+        cfg: &Value,
+        n: &Notification,
+        _mailer: &dyn crate::mailer::Mailer,
+    ) -> anyhow::Result<()> {
         let sid = str_field(cfg, "account_sid")?;
         let token = str_field(cfg, "auth_token")?;
         let from = str_field(cfg, "from")?;
@@ -451,6 +491,49 @@ impl Channel for Twilio {
                 .await?,
         )
         .await
+    }
+}
+
+/// Email the notification through the control plane's SHARED mailer — one mail
+/// path to configure, whatever `MAIL_PROVIDER` it is (capture logs it, smtp
+/// sends it). The channel carries only a recipient; there is no per-channel SMTP
+/// (NG-2), no secret.
+///
+/// Design note (built by nobody here): a future TWO-WAY integration — a
+/// Slack-chat bot that also receives — will implement a SEPARATE trait alongside
+/// `Channel`, never merged into it. `Channel` stays one-way delivery; email is
+/// just one more impl of it (NG-1/NG-5).
+struct Email;
+
+#[async_trait]
+impl Channel for Email {
+    fn id(&self) -> &'static str {
+        "email"
+    }
+    fn describe(&self) -> ChannelKind {
+        ChannelKind {
+            id: "email".into(),
+            label: "Email".into(),
+            description: "Email the notification via the server's configured mail transport."
+                .into(),
+            fields: vec![field("to", "To", "you@example.com", false)],
+        }
+    }
+    async fn deliver(
+        &self,
+        cfg: &Value,
+        n: &Notification,
+        mailer: &dyn crate::mailer::Mailer,
+    ) -> anyhow::Result<()> {
+        let to = str_field(cfg, "to")?;
+        // Subject = title; body = the notification body, with its deep link
+        // appended when present (the same information ntfy puts in Click).
+        let mut text = n.body.clone();
+        if let Some(link) = &n.link {
+            text.push_str("\n\n");
+            text.push_str(link);
+        }
+        mailer.send(to, &n.title, &text, None).await
     }
 }
 
@@ -624,7 +707,9 @@ async fn fan_out(state: &AppState, tenant: TenantId, n: &Notification) {
             tracing::warn!(kind = %row.kind, "no provider for this channel kind");
             continue;
         };
-        let result = provider.deliver(&row.config_with_secret(), n).await;
+        let result = provider
+            .deliver(&row.config_with_secret(), n, &*state.mailer)
+            .await;
         record_outcome(&state.db, row.id, result).await;
     }
 }
@@ -703,7 +788,7 @@ pub async fn test_channel(
         read_at: None,
         created_at: chrono::Utc::now(),
     };
-    let result = provider.deliver(&config, &sample).await;
+    let result = provider.deliver(&config, &sample, &*state.mailer).await;
     let message = result.as_ref().err().map(|e| e.to_string());
     record_outcome(&state.db, id, result).await;
     match message {
@@ -778,12 +863,71 @@ mod tests {
     #[tokio::test]
     async fn a_missing_setting_names_itself() {
         let n = sample("info", "custom");
+        let mailer = crate::mailer::capture::CaptureMailer::new();
         let err = Telegram
-            .deliver(&serde_json::json!({ "bot_token": "x" }), &n)
+            .deliver(&serde_json::json!({ "bot_token": "x" }), &n, &mailer)
             .await
             .unwrap_err()
             .to_string();
         assert!(err.contains("chat_id"), "{err}");
+    }
+
+    /// The Email channel delivers through the shared mailer: `send` is called
+    /// with the configured `to`, the notification title as subject, and the body
+    /// (plus its deep link) as the text — captured by the capture provider (AC-3).
+    #[tokio::test]
+    async fn email_channel_sends_via_the_shared_mailer() {
+        let mut n = sample("warning", "task.assigned");
+        n.title = "You were assigned MAIN-9".into();
+        n.body = "Ready to build.".into();
+        n.link = Some("https://nook.example/board?task=MAIN-9".into());
+
+        let mailer = crate::mailer::capture::CaptureMailer::new();
+        Email
+            .deliver(
+                &serde_json::json!({ "to": "you@example.test" }),
+                &n,
+                &mailer,
+            )
+            .await
+            .expect("capture send is Ok");
+
+        let sent = mailer.sent();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].to, "you@example.test");
+        assert_eq!(sent[0].subject, "You were assigned MAIN-9");
+        assert!(sent[0].text_body.contains("Ready to build."));
+        assert!(
+            sent[0]
+                .text_body
+                .contains("https://nook.example/board?task=MAIN-9"),
+            "the deep link rides in the body: {:?}",
+            sent[0].text_body
+        );
+    }
+
+    /// A missing `to` names the setting, like every other channel.
+    #[tokio::test]
+    async fn email_without_a_recipient_names_the_setting() {
+        let n = sample("info", "custom");
+        let mailer = crate::mailer::capture::CaptureMailer::new();
+        let err = Email
+            .deliver(&serde_json::json!({}), &n, &mailer)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("`to`"), "{err}");
+    }
+
+    /// The registry (and thus the UI's kind list) includes email.
+    #[test]
+    fn kinds_include_email_with_a_to_field() {
+        let email = kinds()
+            .into_iter()
+            .find(|k| k.id == "email")
+            .expect("email is a registered kind");
+        assert_eq!(email.fields.len(), 1);
+        assert_eq!(email.fields[0].name, "to");
     }
 }
 
