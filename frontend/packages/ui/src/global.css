@@ -413,6 +413,136 @@ code,
 .ws-switcher-item:hover { background: var(--nook-bg-panel); color: var(--nook-fg-bright); }
 .ws-switcher-item.current { color: var(--nook-accent); }
 
+/* ── Control-plane switcher (desktop only) ─────────────────────────────────
+   The pill sits left of the workspace switcher; its menu renders through the
+   anchored-menu portal (position: fixed at body), so `.cp-menu` carries the
+   raised-panel look itself rather than inheriting a positioned ancestor. */
+.cp-pill-wrap { display: inline-flex; align-items: center; }
+.cp-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 10px;
+  line-height: 1;
+  background: var(--nook-bg-raised);
+  border: 1px solid var(--nook-border);
+  border-radius: var(--nook-radius);
+  color: var(--nook-fg);
+  cursor: pointer;
+  font-family: var(--nook-font-mono);
+  max-width: 200px;
+}
+.cp-pill:hover { border-color: var(--nook-accent); }
+.cp-pill-label {
+  color: var(--nook-fg-bright);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cp-menu {
+  min-width: 260px;
+  max-width: 340px;
+  background: var(--nook-bg-raised);
+  border: 1px solid var(--nook-border-bright);
+  border-radius: var(--nook-radius);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+  z-index: 200;
+  padding: 4px;
+  font-family: var(--nook-font-mono);
+}
+.cp-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 10px;
+  background: transparent;
+  border: none;
+  border-radius: calc(var(--nook-radius) - 2px);
+  color: var(--nook-fg);
+  cursor: pointer;
+  text-align: left;
+}
+.cp-row:hover { background: var(--nook-bg-panel); color: var(--nook-fg-bright); }
+.cp-row.current .cp-row-name { color: var(--nook-accent); }
+.cp-row-check {
+  display: inline-flex;
+  width: 13px;
+  flex: 0 0 13px;
+  color: var(--nook-accent);
+  margin-top: 2px;
+}
+.cp-row-text { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.cp-row-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cp-row-host,
+.cp-row-account {
+  font-size: 11px;
+  color: var(--nook-fg-faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cp-row-add { border-top: 1px solid var(--nook-border); margin-top: 4px; padding-top: 8px; }
+.cp-row-add .cp-row-name { color: var(--nook-fg-faint); }
+.cp-row-add:hover .cp-row-name { color: var(--nook-fg-bright); }
+
+/* Reachability dot. `checking` pulses until /healthz answers. */
+.cp-dot {
+  width: 8px;
+  height: 8px;
+  flex: 0 0 8px;
+  border-radius: 50%;
+  margin-top: 4px;
+  background: var(--nook-fg-faint);
+}
+.cp-dot.up { background: #3fb950; box-shadow: 0 0 5px rgba(63, 185, 80, 0.7); }
+.cp-dot.down { background: #d0603a; }
+.cp-dot.checking { background: var(--nook-fg-faint); animation: cp-pulse 1s ease-in-out infinite; }
+@keyframes cp-pulse { 0%, 100% { opacity: 0.3; } 50% { opacity: 1; } }
+
+/* Right-click row menu — positioned at the cursor. */
+.cp-context {
+  z-index: 300;
+  min-width: 140px;
+  background: var(--nook-bg-raised);
+  border: 1px solid var(--nook-border-bright);
+  border-radius: var(--nook-radius);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+  padding: 4px;
+  font-family: var(--nook-font-mono);
+}
+.cp-context button {
+  display: block;
+  width: 100%;
+  padding: 5px 10px;
+  background: transparent;
+  border: none;
+  border-radius: calc(var(--nook-radius) - 2px);
+  color: var(--nook-fg);
+  cursor: pointer;
+  text-align: left;
+}
+.cp-context button:hover { background: var(--nook-bg-panel); color: var(--nook-fg-bright); }
+
+/* "Add control plane…" / expired-token reconnect renders the Connect screen
+   over the app. */
+.cp-add-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 400;
+  background: var(--nook-bg);
+}
+
+/* A status line above the Connect form (e.g. why a reconnect is being asked). */
+.login-notice {
+  color: var(--nook-accent);
+  border: 1px solid var(--nook-border-bright);
+  border-radius: var(--nook-radius);
+  padding: 6px 10px;
+}
+
 /* Tenant switcher in the status strip. Sits at the bottom of the window, so its
    menu opens UPWARD. Reuses the amber-CRT menu look of the workspace switcher. */
 .tenant-switcher { position: relative; display: inline-flex; }

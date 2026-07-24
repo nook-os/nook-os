@@ -13,6 +13,44 @@ export interface DesktopEndpoint {
   token: string;
 }
 
+/** One stored control plane. `base_url` is the identity (one entry per URL). */
+export interface ControlPlane {
+  base_url: string;
+  token: string;
+  label?: string | null;
+  account?: string | null;
+}
+
+/** The desktop store: every control plane and which is active (by base_url). */
+export interface ControlPlaneStore {
+  control_planes: ControlPlane[];
+  active: string | null;
+}
+
+// The active server's URL, cached synchronously in localStorage so modules that
+// load before any async call (the session-tabs store) can namespace by it
+// without awaiting. Rewritten on every initDesktop / switch; the webview reload
+// that a switch triggers is what makes those modules pick up the new value.
+const ACTIVE_CP_KEY = "nook.active-cp";
+
+/** The active control plane's URL, or "" on the web build. Synchronous. */
+export function activeControlPlaneKey(): string {
+  try {
+    return localStorage.getItem(ACTIVE_CP_KEY) ?? "";
+  } catch {
+    return "";
+  }
+}
+
+function rememberActive(url: string) {
+  try {
+    if (url) localStorage.setItem(ACTIVE_CP_KEY, url);
+    else localStorage.removeItem(ACTIVE_CP_KEY);
+  } catch {
+    // storage unavailable — tab namespacing falls back to the shared key
+  }
+}
+
 /** True when running inside the Tauri shell rather than a browser tab. */
 export function isDesktop(): boolean {
   return typeof (window as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ !==
@@ -43,23 +81,82 @@ export async function initDesktop(): Promise<DesktopEndpoint | null> {
   if (stored.base_url) {
     setEndpoint({ baseUrl: stored.base_url, token: stored.token });
   }
+  rememberActive(stored.base_url);
   return stored;
 }
 
+/**
+ * Add a control plane (or re-authenticate one already stored, replacing its
+ * token in place) and make it active. Used by the Connect screen for both
+ * first-run and "Add control plane…".
+ */
 export async function saveDesktopEndpoint(
   endpoint: DesktopEndpoint,
 ): Promise<void> {
   const call = invoke();
   if (!call) return;
-  await call("save_endpoint", { endpoint });
+  await call("add_control_plane", { endpoint });
   setEndpoint({ baseUrl: endpoint.base_url, token: endpoint.token });
+  rememberActive(endpoint.base_url);
 }
 
-export async function clearDesktopEndpoint(): Promise<void> {
+/** Every stored control plane and which is active (empty on the web build). */
+export async function listControlPlanes(): Promise<ControlPlaneStore> {
+  const call = invoke();
+  if (!call) return { control_planes: [], active: null };
+  return call<ControlPlaneStore>("list_control_planes");
+}
+
+/**
+ * Make a stored server active. The caller reloads the webview afterwards
+ * (AC-4): the whole app — /auth/me, the live socket, board, workspaces — must
+ * come back up on the new server with nothing from the old one visible, and a
+ * reload is the mechanism (NG-5).
+ */
+export async function setActiveControlPlane(url: string): Promise<void> {
   const call = invoke();
   if (!call) return;
-  await call("clear_endpoint");
-  setEndpoint({ baseUrl: "", token: "" });
+  await call("set_active_control_plane", { url });
+  rememberActive(url);
+}
+
+/** Remove a server and its token from disk. */
+export async function forgetControlPlane(url: string): Promise<void> {
+  const call = invoke();
+  if (!call) return;
+  await call("forget_control_plane", { url });
+  // Its namespaced session tabs go too — nothing left points at that server.
+  try {
+    localStorage.removeItem(sessionTabsKey(url));
+  } catch {
+    // ignore
+  }
+}
+
+/** Set (or clear, with "") a server's custom label. */
+export async function renameControlPlane(
+  url: string,
+  label: string,
+): Promise<void> {
+  const call = invoke();
+  if (!call) return;
+  await call("rename_control_plane", { url, label });
+}
+
+/** Record which account is signed in on a server (backfilled from /auth/me). */
+export async function setControlPlaneAccount(
+  url: string,
+  account: string,
+): Promise<void> {
+  const call = invoke();
+  if (!call) return;
+  await call("set_control_plane_account", { url, account });
+}
+
+/** localStorage key holding the session tabs for one control plane (AC-8). The
+ *  web build (empty key) keeps the original un-namespaced key for continuity. */
+export function sessionTabsKey(cpKey: string): string {
+  return cpKey ? `nook.session-tabs::${cpKey}` : "nook.session-tabs";
 }
 
 /**

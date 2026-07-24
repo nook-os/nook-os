@@ -28,6 +28,7 @@ import { TenantSwitcher } from "./TenantSwitcher";
 import { useControlPlaneVersion } from "./NodeFacts";
 import { useWorkspaceContext } from "./context";
 import { NewWorkHost } from "./NewWorkModal";
+import { ControlPlanePill } from "./ControlPlanePill";
 import { askText, DialogHost, notify } from "./dialogs";
 import { JobsHud } from "./JobsHud";
 import { useNewWork } from "./newwork";
@@ -267,6 +268,7 @@ export function Shell({ me }: { me: MeResponse }) {
         <button className="btn primary" onClick={() => showNewWork()}>
           <Plus size={14} style={{ verticalAlign: "-2px" }} /> New Work
         </button>
+        <ControlPlanePill />
         <WorkspaceSwitcher />
         <nav className="nook-tabs">
           <ContextTabs />
