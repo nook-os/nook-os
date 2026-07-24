@@ -6948,6 +6948,12 @@ export interface operations {
                 is_blocked?: boolean;
                 workspace?: string;
                 /**
+                 * @description Free-text search: case-insensitive substring across the task's title,
+                 *     description body, and display key (`MAIN-42`). ANDs with the other
+                 *     filters. Absent = no text filter.
+                 */
+                q?: string;
+                /**
                  * @description Include archived tasks. Default (absent/false) excludes them, so the
                  *     agent pick can never claim archived work (MAIN-15 AC-2).
                  */

@@ -342,6 +342,40 @@ function Composer({ onAdd }: { onAdd: (title: string) => void }) {
   );
 }
 
+/** Debounced board search (MAIN-54). Controlled by the URL-backed `q`: it fires
+ *  `onSearch` after the user pauses (not per keystroke), and re-syncs when `q`
+ *  changes externally — e.g. the "clear" button — so the box empties with it.
+ *  A ref keeps the debounced emitter stable across renders while always calling
+ *  the latest handler. */
+function BoardSearch({
+  value,
+  onSearch,
+}: {
+  value: string;
+  onSearch: (q: string) => void;
+}) {
+  const [text, setText] = React.useState(value);
+  React.useEffect(() => setText(value), [value]);
+  const cb = React.useRef(onSearch);
+  cb.current = onSearch;
+  const timer = React.useRef<ReturnType<typeof setTimeout>>();
+  return (
+    <input
+      className="board-search"
+      type="search"
+      value={text}
+      placeholder="Search title, key, body…"
+      aria-label="Search the board"
+      onChange={(e) => {
+        const q = e.target.value;
+        setText(q);
+        if (timer.current) clearTimeout(timer.current);
+        timer.current = setTimeout(() => cb.current(q), 250);
+      }}
+    />
+  );
+}
+
 /** The filter strip. Drives the same query an agent's pick step uses. */
 function Filters({
   labels,
@@ -375,10 +409,12 @@ function Filters({
     value.not_label.length > 0 ||
     value.assignee !== "any" ||
     value.priority !== null ||
-    value.blocked !== null;
+    value.blocked !== null ||
+    value.q.length > 0;
 
   return (
     <div className="board-filters">
+      <BoardSearch value={value.q} onSearch={(q) => onChange({ ...value, q })} />
       <span className="faint small">labels</span>
       {labels.map((l) => {
         const inc = value.label.includes(l.name);
@@ -487,6 +523,8 @@ export interface BoardFilter {
   workspace: string | null;
   /** Reveal archived tasks (dimmed) in their columns. Default hidden. */
   showArchived: boolean;
+  /** Free-text search across title, key, and description. Empty = no search. */
+  q: string;
 }
 
 const EMPTY_FILTER: BoardFilter = {
@@ -497,6 +535,7 @@ const EMPTY_FILTER: BoardFilter = {
   blocked: null,
   workspace: null,
   showArchived: false,
+  q: "",
 };
 
 // The filter lives in the URL so a filtered board is a link you can copy and
@@ -512,6 +551,7 @@ const FILTER_KEYS = [
   "blocked",
   "ws",
   "archived",
+  "q",
 ] as const;
 
 export function parseFilter(params: URLSearchParams): BoardFilter {
@@ -531,6 +571,7 @@ export function parseFilter(params: URLSearchParams): BoardFilter {
     blocked: blocked === null ? null : blocked === "true",
     workspace: params.get("ws") || null,
     showArchived: params.get("archived") === "1",
+    q: params.get("q") ?? "",
   };
 }
 
@@ -545,6 +586,7 @@ export function writeFilter(next: URLSearchParams, f: BoardFilter): URLSearchPar
   if (f.blocked !== null) next.set("blocked", String(f.blocked));
   if (f.workspace) next.set("ws", f.workspace);
   if (f.showArchived) next.set("archived", "1");
+  if (f.q) next.set("q", f.q);
   return next;
 }
 
@@ -659,7 +701,8 @@ export function BoardPage() {
     filter.assignee !== "any" ||
     filter.priority !== null ||
     filter.blocked !== null ||
-    filter.workspace !== null;
+    filter.workspace !== null ||
+    filter.q.length > 0;
 
   const { data: filtered } = useQuery({
     queryKey: ["tasks", "filtered", board?.id, filter, me?.user?.id],
@@ -680,6 +723,7 @@ export function BoardPage() {
               ...(filter.priority !== null ? { priority: filter.priority } : {}),
               ...(filter.blocked !== null ? { is_blocked: filter.blocked } : {}),
               ...(filter.workspace ? { workspace: filter.workspace } : {}),
+              ...(filter.q ? { q: filter.q } : {}),
               // When showing archived, the server filter must include them too,
               // or a filtered view would drop the archived cards the toggle is
               // meant to reveal.
@@ -865,6 +909,15 @@ export function BoardPage() {
             value={filter}
             onChange={setFilter}
           />
+          {/* Distinct from a genuinely empty board: a filter/search is on and
+              nothing matched, rather than "this board has no tasks" (AC-4). */}
+          {filterActive && visible.length === 0 && (
+            <div className="board-no-matches faint small">
+              {filter.q
+                ? `No tasks match “${filter.q}”.`
+                : "No tasks match these filters."}
+            </div>
+          )}
           <div className="board-split">
             <DndContext sensors={sensors} onDragEnd={onDragEnd}>
               <div className="board-columns">

@@ -1084,6 +1084,29 @@ table.nook-table tr.clickable { cursor: pointer; }
   font-size: 11px;
 }
 
+/* Board search box (MAIN-54) — sits at the head of the filter strip. */
+.board-search {
+  font: inherit;
+  font-size: 11px;
+  color: var(--nook-fg);
+  background: var(--nook-bg);
+  border: 1px solid var(--nook-border);
+  border-radius: 3px;
+  padding: 2px 7px;
+  width: 190px;
+}
+.board-search:focus {
+  outline: none;
+  border-color: var(--nook-accent);
+}
+.board-search::placeholder {
+  color: var(--nook-fg-faint);
+}
+.board-no-matches {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--nook-border);
+}
+
 .filter-sep {
   width: 1px;
   height: 14px;

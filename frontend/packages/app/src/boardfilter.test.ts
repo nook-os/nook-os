@@ -19,6 +19,7 @@ describe("board filter URL round-trip (MAIN-15 AC-1)", () => {
       blocked: null,
       workspace: null,
       showArchived: false,
+      q: "",
     },
     {
       label: ["agent-ready", "urgent"],
@@ -28,6 +29,7 @@ describe("board filter URL round-trip (MAIN-15 AC-1)", () => {
       blocked: false,
       workspace: "019f840f-2d80-7163-b4b1-8b1e12d7e0d3",
       showArchived: true,
+      q: "postmark",
     },
     {
       label: [],
@@ -37,6 +39,7 @@ describe("board filter URL round-trip (MAIN-15 AC-1)", () => {
       blocked: true,
       workspace: null,
       showArchived: false,
+      q: "MAIN-42",
     },
   ];
 
