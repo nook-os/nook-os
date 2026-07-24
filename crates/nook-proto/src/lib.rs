@@ -491,4 +491,55 @@ mod skill_name_tests {
         // A `name:` in the body is prose, not a declaration.
         assert_eq!(skill_name_from_frontmatter("# t\n\nname: nope\n"), None);
     }
+
+    /// Every skill shipped in the repo must be teachable by the same path
+    /// `nook teach` uses: a parseable frontmatter `name:` that is a valid skill
+    /// name AND equals the directory it lives in, so teaching `skills/<dir>` is
+    /// never a surprise. This guards the nook-spec/build/review packaging
+    /// (MAIN-31) and the pre-existing nookos skill together.
+    #[test]
+    fn every_shipped_skill_is_teachable_and_named_after_its_directory() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../skills");
+        let mut checked = 0;
+        for entry in std::fs::read_dir(&root).expect("skills/ must exist") {
+            let dir = entry.unwrap().path();
+            if !dir.is_dir() {
+                continue;
+            }
+            let file = dir.join("SKILL.md");
+            let content = std::fs::read_to_string(&file)
+                .unwrap_or_else(|_| panic!("{} must have a SKILL.md", dir.display()));
+            let declared = skill_name_from_frontmatter(&content)
+                .unwrap_or_else(|| panic!("{} has no frontmatter name:", file.display()));
+            valid_skill_name(&declared).unwrap_or_else(|e| panic!("{}: {e}", file.display()));
+            let dir_name = dir.file_name().unwrap().to_string_lossy();
+            assert_eq!(
+                declared,
+                dir_name,
+                "{}: frontmatter name must match its directory",
+                file.display()
+            );
+            checked += 1;
+        }
+        assert!(
+            checked >= 4,
+            "expected nookos + nook-spec/build/review, saw {checked}"
+        );
+    }
+
+    /// The MAIN-31 rename must be complete: none of the three loop-derived
+    /// skills may still name the old `loop-*` skills. (The GitHub *labels*
+    /// `loop-changes-requested` / `loop-approved` are a different string and are
+    /// deliberately preserved, so this checks only the skill-name tokens.)
+    #[test]
+    fn the_nook_skills_carry_no_loop_skill_names() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../skills");
+        for name in ["nook-spec", "nook-build", "nook-review"] {
+            let content = std::fs::read_to_string(root.join(name).join("SKILL.md"))
+                .unwrap_or_else(|_| panic!("{name}/SKILL.md must exist"));
+            for stale in ["loop-spec", "loop-build", "loop-review"] {
+                assert!(!content.contains(stale), "{name} still references {stale}");
+            }
+        }
+    }
 }
