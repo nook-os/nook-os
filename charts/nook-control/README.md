@@ -45,6 +45,13 @@ the web pod serves the SPA and proxies `/api` to the control-plane Service.
 
 ## Secrets (by reference)
 
+**The contract:** the chart consumes exactly one Kubernetes Secret, by name
+(`values.existingSecret`). How that Secret is populated is your choice of
+tooling — **NookOS integrates with no secret manager directly** (no Vault/GCP/AWS
+SDK in the control plane, by design); it only ever reads env vars from a
+Kubernetes Secret. Keep credentials in your backend, sync them into a Secret,
+point the chart at it.
+
 `values.existingSecret` names a Secret you manage. The chart wires env vars from
 it with `secretKeyRef` — nothing secret is ever rendered into a manifest.
 `secretKeys` maps env vars to keys inside that Secret:
@@ -62,6 +69,20 @@ Set an optional key's value to the key name inside your Secret to wire it; leave
 it `""` to omit that env var. Non-secret config (`APP_ENV`, `PUBLIC_BASE_URL`,
 `WEB_ORIGIN`, OIDC issuer/client id, S3 bucket/endpoint, …) comes from
 `values.config` via a ConfigMap.
+
+`SECRETS_KEY` is a deployment credential that unlocks NookOS's **own** at-rest
+secret encryption — a separate concept from these deployment credentials; see
+[`docs/secrets-encryption.md`](../../docs/secrets-encryption.md).
+
+### Syncing from a secret manager
+
+Clients keep credentials in Vault, Google Secret Manager, or AWS Secrets
+Manager. The pattern is the same for all: a tool (typically the External Secrets
+Operator) reads your backend and writes the Kubernetes Secret above; the install
+command is unchanged. Worked, copy-adjust examples for each backend — producing
+the identical Secret so only the source differs — plus the Secrets Store CSI
+driver and Vault Agent Injector alternatives, are in
+[`examples/secrets/`](examples/secrets/README.md).
 
 ## Ingress & TLS
 
