@@ -243,6 +243,7 @@ fn ctx(user: UserId, tenant: TenantId) -> AuthCtx {
         user_id: user,
         tenant_id: tenant,
         principal: Principal::User,
+        cookie_session: true,
     }
 }
 

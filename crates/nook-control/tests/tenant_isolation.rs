@@ -276,6 +276,7 @@ async fn node_tokens_cannot_escalate() {
         user_id: UserId(Uuid::nil()),
         tenant_id: TenantId(Uuid::nil()),
         principal: Principal::Node(NodeId(Uuid::now_v7())),
+        cookie_session: false,
     };
     let human = AuthCtx {
         principal: Principal::User,
@@ -307,6 +308,7 @@ async fn node_tokens_are_confined_to_their_own_machine() {
         user_id: UserId(Uuid::nil()),
         tenant_id: TenantId(Uuid::nil()),
         principal: Principal::Node(self_id),
+        cookie_session: false,
     };
     let human = AuthCtx {
         principal: Principal::User,

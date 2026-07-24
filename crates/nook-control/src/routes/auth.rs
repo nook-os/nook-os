@@ -407,6 +407,19 @@ pub async fn switch_tenant(
 ) -> ApiResult<Json<MeResponse>> {
     auth.require_user()?;
 
+    // A user token (also `Principal::User`) has no `sessions_auth` row to move,
+    // so it structurally cannot switch — refuse it up front (AC-3), rather than
+    // inferring "token" from a zero-row UPDATE, which cannot tell it apart from
+    // a browser session whose row vanished mid-request.
+    if !auth.cookie_session {
+        return Err(ApiError::BadRequest(
+            "tenant switching is available on a browser session only — a user \
+             token stays bound to the tenant it was minted for"
+                .into(),
+        ));
+    }
+    let source_tenant = auth.tenant_id;
+
     // Membership is checked on EVERY switch, including re-selecting the tenant
     // you are already in. The earlier shortcut (`req.tenant_id == auth.tenant_id
     // => auth.user_id`) skipped the check, so switching into your current tenant
@@ -424,13 +437,13 @@ pub async fn switch_tenant(
         .execute(&state.db)
         .await?;
     if res.rows_affected() == 0 {
-        return Err(ApiError::BadRequest(
-            "tenant switching is available on a browser session only — a user \
-             token stays bound to the tenant it was minted for"
-                .into(),
-        ));
+        // The caller IS a cookie session (checked above), so a zero-row update
+        // means its `sessions_auth` row is gone — a concurrent logout or expiry
+        // between authentication and here. The session is gone, not a token (AC-3).
+        return Err(ApiError::Unauthorized);
     }
 
+    // Arrival, recorded in the destination tenant.
     events::record(
         &state,
         req.tenant_id,
@@ -439,6 +452,20 @@ pub async fn switch_tenant(
             .payload(serde_json::json!({ "tenant_id": req.tenant_id })),
     )
     .await;
+
+    // Departure, recorded in the tenant left behind, so a switch is auditable
+    // from BOTH sides (AC-2) — naming the originating user and the destination.
+    // Skipped when re-selecting the current tenant (no crossing to record).
+    if source_tenant != req.tenant_id {
+        events::record(
+            &state,
+            source_tenant,
+            EventDraft::new("user.tenant_switched")
+                .actor("user", auth.user_id.0)
+                .payload(serde_json::json!({ "left_for_tenant": req.tenant_id })),
+        )
+        .await;
+    }
 
     // Rebuild the caller against the tenant they just moved to, so the client
     // updates in one round trip.
