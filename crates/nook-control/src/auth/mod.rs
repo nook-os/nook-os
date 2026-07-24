@@ -80,6 +80,13 @@ pub struct AuthCtx {
     pub user_id: UserId,
     pub tenant_id: TenantId,
     pub principal: Principal,
+    /// True only when this caller is backed by a real `sessions_auth` row (a
+    /// browser cookie session) — the kind a tenant switch can move. A user
+    /// token is also `Principal::User` but sets this `false`, so `switch_tenant`
+    /// can tell "structurally cannot switch" (token → 400) from "the session
+    /// row vanished mid-request" (cookie → 401) without inferring it from
+    /// `rows_affected`.
+    pub cookie_session: bool,
 }
 
 impl AuthCtx {
@@ -111,6 +118,7 @@ impl AuthCtx {
             user_id: UserId(owner.map(|(u,)| u).unwrap_or(id.node_id)),
             tenant_id: TenantId(id.tenant_id),
             principal: Principal::Node(nook_types::NodeId(id.node_id)),
+            cookie_session: false,
         })
     }
 
@@ -241,29 +249,34 @@ impl FromRequestParts<AppState> for AuthCtx {
             .and_then(|c| c.value().parse().ok())
             .ok_or(ApiError::Unauthorized)?;
 
-        let row: Option<(Uuid, Uuid)> = sqlx::query_as(
-            "SELECT user_id, tenant_id FROM sessions_auth WHERE id = $1 AND expires_at > now()",
+        // One round-trip resolves the session AND its active-membership grant.
+        // The membership `EXISTS` is a SELECT column, not a WHERE clause, so the
+        // two failure modes stay distinct (folding it into WHERE would collapse
+        // them into a single 401):
+        //   - no row  → no valid `sessions_auth`           → 401 Unauthorized
+        //   - row, is_member = false → grant revoked       → 403 Forbidden
+        //
+        // AC-7: `tenant_members` is the single source of truth for the LIFE of a
+        // session, not just at switch time — a browser session scoped to a
+        // tenant whose grant has since been revoked loses access on its very
+        // next request. Cookie sessions only: node/user tokens are different
+        // principals (a node token borrows the owner's id and legitimately has
+        // no membership row), so this check lives on the sessions_auth path.
+        let row: Option<(Uuid, Uuid, bool)> = sqlx::query_as(
+            "SELECT sa.user_id, sa.tenant_id,
+                    EXISTS(SELECT 1 FROM tenant_members m
+                           WHERE m.tenant_id = sa.tenant_id
+                             AND m.principal_type = 'user'
+                             AND m.principal_id = sa.user_id) AS is_member
+             FROM sessions_auth sa
+             WHERE sa.id = $1 AND sa.expires_at > now()",
         )
         .bind(sid)
         .fetch_optional(&state.db)
         .await?;
 
-        let (user_id, tenant_id) = row.ok_or(ApiError::Unauthorized)?;
-
-        // AC-7: `tenant_members` is the single source of truth for the LIFE of a
-        // session, not just at switch time. A browser session scoped to a tenant
-        // whose grant has since been revoked must lose access on its very next
-        // request — not linger until logout. Cookie sessions only: node/user
-        // tokens are different principals (a node token borrows the owner's id
-        // and legitimately has no membership row), so this check lives on the
-        // sessions_auth path, the one a switch moves.
-        if !crate::services::identity::active_membership_exists(
-            &state.db,
-            UserId(user_id),
-            TenantId(tenant_id),
-        )
-        .await?
-        {
+        let (user_id, tenant_id, is_member) = row.ok_or(ApiError::Unauthorized)?;
+        if !is_member {
             return Err(ApiError::Forbidden);
         }
 
@@ -272,6 +285,7 @@ impl FromRequestParts<AppState> for AuthCtx {
             user_id: UserId(user_id),
             tenant_id: TenantId(tenant_id),
             principal: Principal::User,
+            cookie_session: true,
         })
     }
 }
@@ -315,6 +329,8 @@ async fn user_token_ctx(state: &AppState, token: &str) -> Result<AuthCtx, ApiErr
         user_id: UserId(user_id),
         tenant_id: TenantId(tenant_id),
         principal: Principal::User,
+        // A bearer token, not a sessions_auth row: a switch cannot move it.
+        cookie_session: false,
     })
 }
 
@@ -344,6 +360,7 @@ async fn node_token_ctx(state: &AppState, token: &str) -> Result<AuthCtx, ApiErr
         user_id: UserId(owner.map(|(id,)| id).unwrap_or_else(Uuid::nil)),
         tenant_id: TenantId(tenant_id),
         principal: Principal::Node(nook_types::NodeId(node_id)),
+        cookie_session: false,
     })
 }
 
