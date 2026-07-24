@@ -8,50 +8,23 @@
 // webview onto it (AC-4); "Add control plane…" and an expired token both drop
 // to the Connect screen (AC-5, AC-6); right-click renames or forgets (AC-7).
 import React, { useEffect, useRef, useState } from "react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQueryClient } from "@tanstack/react-query";
 import { Check, Plus, Server, ChevronDown } from "lucide-react";
 import { useAnchoredMenu } from "@nookos/ui";
+import { isDesktop, type ControlPlane } from "./desktop";
 import {
-  forgetControlPlane,
-  isDesktop,
-  listControlPlanes,
-  probeControlPlane,
-  renameControlPlane,
-  setActiveControlPlane,
-  type ControlPlane,
-} from "./desktop";
-import { askText } from "./dialogs";
+  forgetControlPlaneAndReconcile,
+  healthCache,
+  healthDot,
+  HEALTH_TTL,
+  hostOf,
+  probeCached,
+  renameControlPlaneWithDialog,
+  switchToControlPlane,
+  useControlPlanes,
+  type Health,
+} from "./controlPlanes";
 import { Connect } from "./pages/Connect";
-
-/** The host part of a URL, for the pill label and the row subtitle. */
-function hostOf(url: string): string {
-  try {
-    return new URL(url).host;
-  } catch {
-    return url.replace(/^https?:\/\//, "");
-  }
-}
-
-// Reachability is cached ~30s so reopening the menu does not re-probe (AC-9),
-// and nothing is probed while the menu is closed. Module-level so the cache
-// survives the menu unmounting.
-const HEALTH_TTL = 30_000;
-const healthCache = new Map<string, { ok: boolean; at: number }>();
-
-async function probeCached(url: string): Promise<boolean> {
-  const hit = healthCache.get(url);
-  if (hit && Date.now() - hit.at < HEALTH_TTL) return hit.ok;
-  // Resolve within ~1s (AC-9): an unreachable host would otherwise hang on the
-  // browser's default fetch timeout and leave the dot spinning.
-  const ok = await Promise.race([
-    probeControlPlane(url).then((r) => r.ok),
-    new Promise<boolean>((res) => setTimeout(() => res(false), 1000)),
-  ]);
-  healthCache.set(url, { ok, at: Date.now() });
-  return ok;
-}
-
-type Health = "checking" | "up" | "down";
 
 export function ControlPlanePill() {
   // Stable per environment, so an early return before the hooks below does not
@@ -69,14 +42,7 @@ function Pill() {
   const [adding, setAdding] = useState<{ prefillUrl?: string; notice?: string } | null>(null);
   const ctxRef = useRef<HTMLDivElement>(null);
 
-  const { data: store } = useQuery({
-    queryKey: ["control-planes"],
-    queryFn: listControlPlanes,
-    staleTime: 10_000,
-  });
-  const servers = store?.control_planes ?? [];
-  const activeUrl = store?.active ?? null;
-  const active = servers.find((c) => c.base_url === activeUrl) ?? servers[0];
+  const { servers, activeUrl, active } = useControlPlanes();
 
   const { hostRef, portal } = useAnchoredMenu(open, () => setOpen(false), {
     height: 320,
@@ -117,49 +83,23 @@ function Pill() {
 
   if (!active) return null; // configured servers always exist past first-run
 
+  // Both surfaces delegate the actual switch/rename/forget to the shared module
+  // (controlPlanes.ts); the pill only manages its own menu state around them.
   const switchTo = async (url: string) => {
     setOpen(false);
-    if (url === activeUrl) return;
-    await setActiveControlPlane(url);
-    // The reload is the mechanism (NG-5): the app comes back up on the new
-    // server, with none of the previous one's data visible (AC-4).
-    window.location.reload();
+    await switchToControlPlane(url, activeUrl);
   };
-
   const rename = async (cp: ControlPlane) => {
     setCtx(null);
-    const label = await askText({
-      title: `Rename ${hostOf(cp.base_url)}`,
-      description:
-        "A display name for this control plane. Its host still shows underneath, " +
-        "so a rename never hides which machine a row points at.",
-      label: "Shown as",
-      value: cp.label ?? "",
-      confirmLabel: "rename",
-    });
-    if (label === null) return;
-    await renameControlPlane(cp.base_url, label);
-    qc.invalidateQueries({ queryKey: ["control-planes"] });
+    await renameControlPlaneWithDialog(cp, qc);
   };
-
   const forget = async (cp: ControlPlane) => {
     setCtx(null);
-    const wasActive = cp.base_url === activeUrl;
-    await forgetControlPlane(cp.base_url);
-    if (wasActive) {
-      // Switched to the first remaining server, or the Connect screen if none
-      // remain — a reload resolves to whichever (AC-7).
-      window.location.reload();
-      return;
-    }
-    qc.invalidateQueries({ queryKey: ["control-planes"] });
+    await forgetControlPlaneAndReconcile(cp, activeUrl, qc);
   };
 
   const dot = (cp: ControlPlane) => {
-    const s = health[cp.base_url];
-    const cls = s === "up" ? "up" : s === "down" ? "down" : "checking";
-    const title =
-      s === "up" ? "reachable" : s === "down" ? "unreachable" : "checking…";
+    const { cls, title } = healthDot(health[cp.base_url]);
     return <span className={`cp-dot ${cls}`} title={title} />;
   };
 

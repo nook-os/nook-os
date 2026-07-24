@@ -413,7 +413,78 @@ code,
 .ws-switcher-item:hover { background: var(--nook-bg-panel); color: var(--nook-fg-bright); }
 .ws-switcher-item.current { color: var(--nook-accent); }
 
-/* ── Control-plane switcher (desktop only) ─────────────────────────────────
+/* ── Control-plane tab strip (desktop only) ────────────────────────────────
+   A VSCode-style row above the top bar (MAIN-39). Thin, dense, edge-to-edge,
+   amber-CRT. Overflowing tabs scroll WITHIN the strip (overflow-x: auto) so the
+   page body never scrolls horizontally. The default OS titlebar sits above this
+   content, so the strip never overlaps the traffic lights. */
+.cp-tabs {
+  display: flex;
+  align-items: stretch;
+  gap: 1px;
+  height: 30px;
+  padding: 0 4px;
+  background: var(--nook-bg-panel);
+  border-bottom: 1px solid var(--nook-border);
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: thin;
+  font-family: var(--nook-font-mono);
+  flex: 0 0 auto;
+}
+.cp-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 100%;
+  padding: 0 12px;
+  max-width: 220px;
+  background: transparent;
+  border: none;
+  border-right: 1px solid var(--nook-border);
+  color: var(--nook-fg-faint);
+  cursor: pointer;
+  white-space: nowrap;
+  flex: 0 0 auto;
+}
+.cp-tab:hover { background: var(--nook-bg-raised); color: var(--nook-fg); }
+/* The active tab is the lit one: amber text, a top accent bar, panel bg. */
+.cp-tab.active {
+  background: var(--nook-bg);
+  color: var(--nook-fg-bright);
+  box-shadow: inset 0 2px 0 var(--nook-accent);
+}
+.cp-tab-body {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  min-width: 0;
+  line-height: 1.15;
+}
+.cp-tab-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cp-tab.active .cp-tab-name { color: var(--nook-accent); }
+.cp-tab-account {
+  font-size: 10px;
+  color: var(--nook-fg-faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cp-tab-add {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  width: 30px;
+  flex: 0 0 auto;
+  background: transparent;
+  border: none;
+  color: var(--nook-fg-faint);
+  cursor: pointer;
+}
+.cp-tab-add:hover { background: var(--nook-bg-raised); color: var(--nook-fg-bright); }
+
+/* ── Control-plane switcher pill (desktop only) ────────────────────────────
    The pill sits left of the workspace switcher; its menu renders through the
    anchored-menu portal (position: fixed at body), so `.cp-menu` carries the
    raised-panel look itself rather than inheriting a positioned ancestor. */

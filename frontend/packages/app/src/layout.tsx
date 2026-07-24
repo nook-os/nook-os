@@ -29,6 +29,7 @@ import { useControlPlaneVersion } from "./NodeFacts";
 import { useWorkspaceContext } from "./context";
 import { NewWorkHost } from "./NewWorkModal";
 import { ControlPlanePill } from "./ControlPlanePill";
+import { ControlPlaneTabs } from "./ControlPlaneTabs";
 import { askText, DialogHost, notify } from "./dialogs";
 import { JobsHud } from "./JobsHud";
 import { useNewWork } from "./newwork";
@@ -259,6 +260,9 @@ export function Shell({ me }: { me: MeResponse }) {
       <FeedbackModalHost />
       <DialogHost />
       <JobsHud />
+      {/* Desktop-only control-plane tab strip, above the top bar. Renders null
+          on the web build, so the layout there is unchanged (AC-1/NG-5). */}
+      <ControlPlaneTabs />
       <header className="nook-topbar">
         <div className="nook-brand">
           <span>◆</span>
