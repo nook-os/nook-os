@@ -282,6 +282,82 @@
         }
       }
     },
+    "/api/v1/auth/verify-email/confirm": {
+      "post": {
+        "tags": [
+          "crate::routes::verify_email"
+        ],
+        "summary": "`POST /api/v1/auth/verify-email/confirm` — consume a token and mark the\naddress verified. Token-authenticated (works from any browser). A consumed\nor expired token is refused (AC-2); re-confirming an already-verified address\nis a no-op success (AC-5).",
+        "operationId": "confirm_email_verification",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConfirmVerificationRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConfirmVerificationResult"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/auth/verify-email/request": {
+      "post": {
+        "tags": [
+          "crate::routes::verify_email"
+        ],
+        "summary": "`POST /api/v1/auth/verify-email/request` — issue a token and email the link.\nBest-effort: a mail-transport failure is reported, never a 500 (AC-5).",
+        "operationId": "request_email_verification",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RequestVerificationResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": ""
+          }
+        }
+      }
+    },
+    "/api/v1/auth/verify-email/status": {
+      "get": {
+        "tags": [
+          "crate::routes::verify_email"
+        ],
+        "summary": "`GET /api/v1/auth/verify-email/status` — is this user's email verified, and\ncan they request a local verification email? (AC-4)",
+        "operationId": "email_verification_status",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EmailVerificationStatus"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/boards": {
       "get": {
         "tags": [
@@ -5890,6 +5966,32 @@
         "type": "string",
         "format": "uuid"
       },
+      "ConfirmVerificationRequest": {
+        "type": "object",
+        "required": [
+          "token"
+        ],
+        "properties": {
+          "token": {
+            "type": "string"
+          }
+        }
+      },
+      "ConfirmVerificationResult": {
+        "type": "object",
+        "required": [
+          "verified",
+          "message"
+        ],
+        "properties": {
+          "message": {
+            "type": "string"
+          },
+          "verified": {
+            "type": "boolean"
+          }
+        }
+      },
       "CreateBoardRequest": {
         "type": "object",
         "required": [
@@ -6454,6 +6556,27 @@
             "items": {
               "$ref": "#/components/schemas/DispatchItem"
             }
+          }
+        }
+      },
+      "EmailVerificationStatus": {
+        "type": "object",
+        "description": "Whether the signed-in user's email is verified, and whether a local\nverification round-trip applies to them (MAIN-30).",
+        "required": [
+          "email",
+          "verified",
+          "can_request"
+        ],
+        "properties": {
+          "can_request": {
+            "type": "boolean",
+            "description": "True for a local account that can request a verification email. OIDC\nusers are verified upstream and cannot request one here (NG-1)."
+          },
+          "email": {
+            "type": "string"
+          },
+          "verified": {
+            "type": "boolean"
           }
         }
       },
@@ -7965,6 +8088,22 @@
             "format": "int32",
             "description": "The tmux window the agent runs in, so the right terminal chip lights up.",
             "minimum": 0
+          }
+        }
+      },
+      "RequestVerificationResult": {
+        "type": "object",
+        "description": "The outcome of requesting a verification email — best-effort send, so a\nmail-transport failure is reported here rather than failing the request.",
+        "required": [
+          "sent",
+          "message"
+        ],
+        "properties": {
+          "message": {
+            "type": "string"
+          },
+          "sent": {
+            "type": "boolean"
           }
         }
       },

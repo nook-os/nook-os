@@ -26,6 +26,7 @@ pub mod tenants;
 pub mod themes;
 pub mod tokens;
 pub mod vault;
+pub mod verify_email;
 pub mod workspaces;
 
 use axum::response::IntoResponse;
@@ -93,6 +94,9 @@ pub fn build_router(state: AppState) -> Router {
         .route("/auth/local/bootstrap", post(local_auth::bootstrap))
         .route("/auth/local/users", post(local_auth::create_user))
         .route("/auth/local/password", post(local_auth::change_password))
+        .route("/auth/verify-email/status", get(verify_email::status))
+        .route("/auth/verify-email/request", post(verify_email::request))
+        .route("/auth/verify-email/confirm", post(verify_email::confirm))
         .route("/tenants", get(tenants::list))
         .route("/tenants/{id}/members", get(tenants::list_members))
         .route(

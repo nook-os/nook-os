@@ -167,6 +167,28 @@ pub async fn email_is_verified(db: &PgPool, user_id: UserId) -> ApiResult<bool> 
     Ok(verified)
 }
 
+/// Record that a local account's email was verified (MAIN-30), through the same
+/// verified-email model OIDC uses. A local account has no identity of its own,
+/// so a completed local round-trip writes one: issuer `local`, keyed to the
+/// user, carrying `email_verified_at`. `email_is_verified` then reports true
+/// with no change to the predicate. Idempotent — a second confirm keeps the
+/// first verification time.
+pub async fn mark_local_email_verified(db: &PgPool, user_id: UserId, email: &str) -> ApiResult<()> {
+    sqlx::query(
+        "INSERT INTO identities (id, user_id, issuer, subject, email, raw_claims, email_verified_at)
+         VALUES ($1, $2, 'local', $3, $4, '{\"verified_via\":\"local\"}'::jsonb, now())
+         ON CONFLICT (issuer, subject)
+           DO UPDATE SET email_verified_at = COALESCE(identities.email_verified_at, now())",
+    )
+    .bind(uuid::Uuid::now_v7())
+    .bind(user_id)
+    .bind(user_id.0.to_string())
+    .bind(email)
+    .execute(db)
+    .await?;
+    Ok(())
+}
+
 pub async fn login_identity(state: &AppState, claims: IdentityClaims) -> ApiResult<(User, Tenant)> {
     // Existing identity → existing user.
     let existing: Option<(UserId,)> =
