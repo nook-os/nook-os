@@ -27,3 +27,10 @@ tracing-subscriber = { workspace = true }
 dotenvy = { workspace = true }
 dashmap = { workspace = true }
 futures-util = { workspace = true }
+
+[dev-dependencies]
+# Test-only: the search_path regression test provisions the control-plane
+# `public` schema (tenants/users/sessions_auth/tenant_members) via its MIGRATOR,
+# so the test does not depend on a database that already has it. No cycle —
+# nook-control does not depend on nook-chat.
+nook-control = { workspace = true }
