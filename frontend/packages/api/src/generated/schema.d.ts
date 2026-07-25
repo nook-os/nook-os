@@ -2690,6 +2690,51 @@ export interface components {
             id: string;
             label: string;
         };
+        /** @description A chat channel visible to a tenant member. */
+        ChatChannel: {
+            /** @description Archived channels are hidden from the default list and refuse new posts. */
+            archived: boolean;
+            /** Format: date-time */
+            created_at: string;
+            /** Format: uuid */
+            id: string;
+            name: string;
+            slug: string;
+        };
+        /**
+         * @description A posted message. `id` is a UUID v7, so history paginates by keyset on it
+         *     (AC-2/AC-4), like the rest of NookOS.
+         */
+        ChatMessage: {
+            /** Format: uuid */
+            author_id: string;
+            body: string;
+            /** Format: uuid */
+            channel_id: string;
+            /** Format: date-time */
+            created_at: string;
+            /** Format: uuid */
+            id: string;
+        };
+        /** @description One page of channel history, newest-first, keyset-paginated on message id. */
+        ChatMessagePage: {
+            messages: components["schemas"]["ChatMessage"][];
+            /**
+             * Format: uuid
+             * @description Pass as `before=` to fetch the next (older) page; `None` at the end.
+             */
+            next_cursor?: string | null;
+        };
+        /**
+         * @description What the chat websocket pushes to a subscribed client (AC-3). Adjacently
+         *     tagged for clean generated TypeScript, like the node protocol.
+         */
+        ChatServerMessage: {
+            /** @description A new message posted to the subscribed channel. */
+            data: components["schemas"]["ChatMessage"];
+            /** @enum {string} */
+            type: "message";
+        };
         /** @description `POST /tasks/{id}/claim` — take the work without racing another agent. */
         ClaimTaskRequest: {
             assignee_user_id?: null | components["schemas"]["UserId"];
@@ -2731,6 +2776,10 @@ export interface components {
             kind: string;
             kinds?: string[];
             levels?: string[];
+            name: string;
+        };
+        /** @description Create a channel: a human name. The slug is derived server-side. */
+        CreateChatChannel: {
             name: string;
         };
         CreateColumnRequest: {
@@ -3511,6 +3560,10 @@ export interface components {
             enabled: boolean;
             field: string;
         };
+        /** @description Post a message to a channel. */
+        PostChatMessage: {
+            body: string;
+        };
         PutSecretRequest: {
             content: string;
             /** @description Wipe the synced file from checkouts when the session ends. */
@@ -4097,6 +4150,11 @@ export interface components {
             enabled?: boolean | null;
             kinds?: string[] | null;
             levels?: string[] | null;
+            name?: string | null;
+        };
+        /** @description Rename and/or archive a channel. Absent fields are left unchanged. */
+        UpdateChatChannel: {
+            archived?: boolean | null;
             name?: string | null;
         };
         UpdateColumnRequest: {

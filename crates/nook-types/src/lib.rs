@@ -1854,3 +1854,69 @@ pub struct DispatchItem {
     pub suggested_runtime: Option<String>,
     pub workspace_id: Option<WorkspaceId>,
 }
+
+// ── Team chat (MAIN-49) ──────────────────────────────────────────────────────
+//
+// v1 channels are tenant-owned; the DTOs stay owner-agnostic on the wire (the
+// tenant scope is enforced server-side), so org channels are a later addition
+// with no shape change. `id`s are UUID v7 so history keysets on them.
+
+/// A chat channel visible to a tenant member.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ChatChannel {
+    pub id: Uuid,
+    pub name: String,
+    pub slug: String,
+    /// Archived channels are hidden from the default list and refuse new posts.
+    pub archived: bool,
+    pub created_at: DateTime<Utc>,
+}
+
+/// A posted message. `id` is a UUID v7, so history paginates by keyset on it
+/// (AC-2/AC-4), like the rest of NookOS.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ChatMessage {
+    pub id: Uuid,
+    pub channel_id: Uuid,
+    pub author_id: Uuid,
+    pub body: String,
+    pub created_at: DateTime<Utc>,
+}
+
+/// One page of channel history, newest-first, keyset-paginated on message id.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ChatMessagePage {
+    pub messages: Vec<ChatMessage>,
+    /// Pass as `before=` to fetch the next (older) page; `None` at the end.
+    pub next_cursor: Option<Uuid>,
+}
+
+/// Create a channel: a human name. The slug is derived server-side.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct CreateChatChannel {
+    pub name: String,
+}
+
+/// Rename and/or archive a channel. Absent fields are left unchanged.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct UpdateChatChannel {
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub archived: Option<bool>,
+}
+
+/// Post a message to a channel.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct PostChatMessage {
+    pub body: String,
+}
+
+/// What the chat websocket pushes to a subscribed client (AC-3). Adjacently
+/// tagged for clean generated TypeScript, like the node protocol.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(tag = "type", content = "data", rename_all = "snake_case")]
+pub enum ChatServerMessage {
+    /// A new message posted to the subscribed channel.
+    Message(ChatMessage),
+}

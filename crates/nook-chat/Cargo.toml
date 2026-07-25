@@ -10,6 +10,7 @@ path = "src/main.rs"
 
 [dependencies]
 nook-auth = { workspace = true }
+nook-types = { workspace = true }
 tokio = { workspace = true }
 axum = { workspace = true }
 axum-extra = { workspace = true }
@@ -24,3 +25,5 @@ anyhow = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 dotenvy = { workspace = true }
+dashmap = { workspace = true }
+futures-util = { workspace = true }
