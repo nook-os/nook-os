@@ -187,6 +187,7 @@ services:
     command: sh -c "corepack enable && pnpm install && pnpm --filter @nookos/web dev"
     environment:
       NOOK_API_PROXY: http://control-plane:8080
+      NOOK_CHAT_PROXY: http://chat:8082
     ports:
       - "5173:5173"
     volumes:

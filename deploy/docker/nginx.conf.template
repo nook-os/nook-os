@@ -34,11 +34,25 @@ server {
     }
 
     # Team chat (REST + its websocket) → the chat container, keeping the SPA
-    # same-origin (MAIN-48). Reuses the $connection_upgrade map above; the long
-    # read timeout is for the live socket. ${CHAT_ORIGIN} is substituted by the
-    # nginx image's envsubst entrypoint, like ${CONTROL_PLANE_ORIGIN}.
-    location ~ ^/chat/? {
-        proxy_pass ${CHAT_ORIGIN};
+    # same-origin (MAIN-48). nook-chat serves its routes at the root, so the
+    # `/chat` prefix is stripped before forwarding (`/chat/api/me` → `/api/me`);
+    # a pass-through would 404 every request. Reuses the $connection_upgrade map
+    # above; the long read timeout is for the live socket.
+    #
+    # The upstream is passed through a runtime variable, not a literal, so nginx
+    # resolves it per request instead of at config load. That keeps this web
+    # image booting on deployments that have no chat container yet (the Helm
+    # chart — MAIN-48 NG-6): a literal upstream would fail startup DNS and
+    # crash-loop the whole web tier, whereas a missing backend here surfaces as
+    # a 502 only when /chat is actually hit. ${CHAT_ORIGIN} (default
+    # http://chat:8082) and ${DNS_RESOLVER} (default 127.0.0.11, Docker's
+    # embedded DNS) are substituted by the nginx image's envsubst entrypoint,
+    # like ${CONTROL_PLANE_ORIGIN}.
+    location /chat/ {
+        resolver ${DNS_RESOLVER} valid=10s;
+        set $chat_upstream ${CHAT_ORIGIN};
+        rewrite ^/chat/(.*)$ /$1 break;
+        proxy_pass $chat_upstream;
         proxy_http_version 1.1;
         proxy_set_header Host $host;
         proxy_set_header X-Forwarded-Proto $http_x_forwarded_proto;
