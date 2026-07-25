@@ -25,5 +25,5 @@ pub use state::AppState;
 // 0001_init, 0002_add_person_id, 0003_backfill_tenant_members,
 // 0004_add_task_archived_at, 0005_invites, 0006_add_email_verified,
 // 0007_email_verification_tokens, 0008_mail_sends, 0009_task_type,
-// 0010_review_column.
+// 0010_review_column, 0011_user_notebook.
 pub static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");

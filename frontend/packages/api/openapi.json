@@ -1706,6 +1706,283 @@
         }
       }
     },
+    "/api/v1/notebook/folders": {
+      "get": {
+        "tags": [
+          "crate::routes::notebook"
+        ],
+        "operationId": "notebook_list_folders",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/UserNoteFolder"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "crate::routes::notebook"
+        ],
+        "operationId": "notebook_create_folder",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateUserNoteFolder"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserNoteFolder"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/notebook/folders/{id}": {
+      "delete": {
+        "tags": [
+          "crate::routes::notebook"
+        ],
+        "operationId": "notebook_delete_folder",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": ""
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "crate::routes::notebook"
+        ],
+        "operationId": "notebook_update_folder",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateUserNoteFolder"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserNoteFolder"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      }
+    },
+    "/api/v1/notebook/notes": {
+      "get": {
+        "tags": [
+          "crate::routes::notebook"
+        ],
+        "operationId": "notebook_list_notes",
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/UserNoteSummary"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "crate::routes::notebook"
+        ],
+        "operationId": "notebook_create_note",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateUserNote"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserNote"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/notebook/notes/{id}": {
+      "get": {
+        "tags": [
+          "crate::routes::notebook"
+        ],
+        "operationId": "notebook_get_note",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserNote"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "crate::routes::notebook"
+        ],
+        "operationId": "notebook_delete_note",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": ""
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "crate::routes::notebook"
+        ],
+        "operationId": "notebook_update_note",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateUserNote"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserNote"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      }
+    },
     "/api/v1/notes/{id}": {
       "patch": {
         "tags": [
@@ -6906,6 +7183,53 @@
           }
         }
       },
+      "CreateUserNote": {
+        "type": "object",
+        "description": "Create a note. Body defaults to empty; `folder_id` None places it at root.",
+        "required": [
+          "title"
+        ],
+        "properties": {
+          "content_md": {
+            "type": "string"
+          },
+          "folder_id": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/UserNoteFolderId"
+              }
+            ]
+          },
+          "title": {
+            "type": "string"
+          }
+        }
+      },
+      "CreateUserNoteFolder": {
+        "type": "object",
+        "description": "Create a folder. `parent_id` None makes it a root folder.",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "parent_id": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/UserNoteFolderId"
+              }
+            ]
+          }
+        }
+      },
       "CreateUserTokenRequest": {
         "type": "object",
         "description": "Asking for a personal access token.",
@@ -10396,6 +10720,56 @@
           }
         }
       },
+      "UpdateUserNote": {
+        "type": "object",
+        "description": "Update a note. Each field absent = leave alone. `folder_id` is tri-state:\nabsent = leave, `null` = move to root, an id = move into that folder.",
+        "properties": {
+          "content_md": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "folder_id": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/UserNoteFolderId"
+              }
+            ]
+          },
+          "title": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "UpdateUserNoteFolder": {
+        "type": "object",
+        "description": "Update a folder. Rename and/or move; `parent_id` is tri-state like a note's\n`folder_id` (absent = leave, `null` = move to root, an id = move under it).",
+        "properties": {
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "parent_id": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/UserNoteFolderId"
+              }
+            ]
+          }
+        }
+      },
       "User": {
         "type": "object",
         "description": "Role values: `owner` | `admin` | `member` (TEXT CHECK in the schema).",
@@ -10443,6 +10817,136 @@
       "UserId": {
         "type": "string",
         "format": "uuid"
+      },
+      "UserNote": {
+        "type": "object",
+        "description": "A single note WITH its decrypted body (the `get` response).",
+        "required": [
+          "id",
+          "title",
+          "content_md",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "content_md": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "folder_id": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/UserNoteFolderId"
+              }
+            ]
+          },
+          "id": {
+            "$ref": "#/components/schemas/UserNoteId"
+          },
+          "title": {
+            "type": "string"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "UserNoteFolder": {
+        "type": "object",
+        "description": "A folder in a person's notebook. `parent_id: None` is a root folder.",
+        "required": [
+          "id",
+          "person_id",
+          "name",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "id": {
+            "$ref": "#/components/schemas/UserNoteFolderId"
+          },
+          "name": {
+            "type": "string"
+          },
+          "parent_id": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/UserNoteFolderId"
+              }
+            ]
+          },
+          "person_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "UserNoteFolderId": {
+        "type": "string",
+        "format": "uuid"
+      },
+      "UserNoteId": {
+        "type": "string",
+        "format": "uuid"
+      },
+      "UserNoteSummary": {
+        "type": "object",
+        "description": "A note's metadata — the tree/list item and the search result. Never carries\nthe body: that is encrypted at rest and fetched (decrypted) one note at a\ntime. `path` is the plaintext folder path for display and search.",
+        "required": [
+          "id",
+          "title",
+          "path",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "folder_id": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/UserNoteFolderId"
+              }
+            ]
+          },
+          "id": {
+            "$ref": "#/components/schemas/UserNoteId"
+          },
+          "path": {
+            "type": "string",
+            "description": "Plaintext folder path, e.g. \"Work/Ideas\". Empty for a root note."
+          },
+          "title": {
+            "type": "string"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
       },
       "UserToken": {
         "type": "object",

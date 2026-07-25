@@ -11,6 +11,7 @@ pub mod join;
 pub mod labels;
 pub mod local_auth;
 pub mod nodes;
+pub mod notebook;
 pub mod notes;
 pub mod notifications;
 pub mod oidc_exchange;
@@ -248,6 +249,25 @@ pub fn build_router(state: AppState) -> Router {
             get(notes::list).post(notes::create),
         )
         .route("/notes/{id}", patch(notes::update))
+        // Personal notebook (MAIN-66): person-owned, cross-org, operator-invisible.
+        .route(
+            "/notebook/notes",
+            get(notebook::list_notes).post(notebook::create_note),
+        )
+        .route(
+            "/notebook/notes/{id}",
+            get(notebook::get_note)
+                .patch(notebook::update_note)
+                .delete(notebook::delete_note),
+        )
+        .route(
+            "/notebook/folders",
+            get(notebook::list_folders).post(notebook::create_folder),
+        )
+        .route(
+            "/notebook/folders/{id}",
+            patch(notebook::update_folder).delete(notebook::delete_folder),
+        )
         .route("/nodes", get(nodes::list))
         .route("/nodes/{id}", get(nodes::get_one).delete(nodes::delete))
         .route("/node/releases", get(dist::releases))

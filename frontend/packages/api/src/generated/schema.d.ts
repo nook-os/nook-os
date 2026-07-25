@@ -859,6 +859,70 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/notebook/folders": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["notebook_list_folders"];
+        put?: never;
+        post: operations["notebook_create_folder"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/notebook/folders/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete: operations["notebook_delete_folder"];
+        options?: never;
+        head?: never;
+        patch: operations["notebook_update_folder"];
+        trace?: never;
+    };
+    "/api/v1/notebook/notes": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["notebook_list_notes"];
+        put?: never;
+        post: operations["notebook_create_note"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/notebook/notes/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["notebook_get_note"];
+        put?: never;
+        post?: never;
+        delete: operations["notebook_delete_note"];
+        options?: never;
+        head?: never;
+        patch: operations["notebook_update_note"];
+        trace?: never;
+    };
     "/api/v1/notes/{id}": {
         parameters: {
             query?: never;
@@ -2894,6 +2958,17 @@ export interface components {
             /** @description The runtime to run — `bash` by default, but any the node has installed. */
             runtime?: string | null;
         };
+        /** @description Create a note. Body defaults to empty; `folder_id` None places it at root. */
+        CreateUserNote: {
+            content_md?: string;
+            folder_id?: null | components["schemas"]["UserNoteFolderId"];
+            title: string;
+        };
+        /** @description Create a folder. `parent_id` None makes it a root folder. */
+        CreateUserNoteFolder: {
+            name: string;
+            parent_id?: null | components["schemas"]["UserNoteFolderId"];
+        };
         /** @description Asking for a personal access token. */
         CreateUserTokenRequest: {
             /**
@@ -4230,6 +4305,23 @@ export interface components {
              */
             workspace_id?: string | null;
         };
+        /**
+         * @description Update a note. Each field absent = leave alone. `folder_id` is tri-state:
+         *     absent = leave, `null` = move to root, an id = move into that folder.
+         */
+        UpdateUserNote: {
+            content_md?: string | null;
+            folder_id?: null | components["schemas"]["UserNoteFolderId"];
+            title?: string | null;
+        };
+        /**
+         * @description Update a folder. Rename and/or move; `parent_id` is tri-state like a note's
+         *     `folder_id` (absent = leave, `null` = move to root, an id = move under it).
+         */
+        UpdateUserNoteFolder: {
+            name?: string | null;
+            parent_id?: null | components["schemas"]["UserNoteFolderId"];
+        };
         /** @description Role values: `owner` | `admin` | `member` (TEXT CHECK in the schema). */
         User: {
             avatar_url?: string | null;
@@ -4245,6 +4337,49 @@ export interface components {
         };
         /** Format: uuid */
         UserId: string;
+        /** @description A single note WITH its decrypted body (the `get` response). */
+        UserNote: {
+            content_md: string;
+            /** Format: date-time */
+            created_at: string;
+            folder_id?: null | components["schemas"]["UserNoteFolderId"];
+            id: components["schemas"]["UserNoteId"];
+            title: string;
+            /** Format: date-time */
+            updated_at: string;
+        };
+        /** @description A folder in a person's notebook. `parent_id: None` is a root folder. */
+        UserNoteFolder: {
+            /** Format: date-time */
+            created_at: string;
+            id: components["schemas"]["UserNoteFolderId"];
+            name: string;
+            parent_id?: null | components["schemas"]["UserNoteFolderId"];
+            /** Format: uuid */
+            person_id: string;
+            /** Format: date-time */
+            updated_at: string;
+        };
+        /** Format: uuid */
+        UserNoteFolderId: string;
+        /** Format: uuid */
+        UserNoteId: string;
+        /**
+         * @description A note's metadata — the tree/list item and the search result. Never carries
+         *     the body: that is encrypted at rest and fetched (decrypted) one note at a
+         *     time. `path` is the plaintext folder path for display and search.
+         */
+        UserNoteSummary: {
+            /** Format: date-time */
+            created_at: string;
+            folder_id?: null | components["schemas"]["UserNoteFolderId"];
+            id: components["schemas"]["UserNoteId"];
+            /** @description Plaintext folder path, e.g. "Work/Ideas". Empty for a root note. */
+            path: string;
+            title: string;
+            /** Format: date-time */
+            updated_at: string;
+        };
         /** @description A personal access token as listed back — everything except the secret. */
         UserToken: {
             /** Format: date-time */
@@ -5782,6 +5917,231 @@ export interface operations {
             };
             /** @description node is offline */
             400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    notebook_list_folders: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UserNoteFolder"][];
+                };
+            };
+        };
+    };
+    notebook_create_folder: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateUserNoteFolder"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UserNoteFolder"];
+                };
+            };
+        };
+    };
+    notebook_delete_folder: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    notebook_update_folder: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdateUserNoteFolder"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UserNoteFolder"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    notebook_list_notes: {
+        parameters: {
+            query?: {
+                q?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UserNoteSummary"][];
+                };
+            };
+        };
+    };
+    notebook_create_note: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateUserNote"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UserNote"];
+                };
+            };
+        };
+    };
+    notebook_get_note: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UserNote"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    notebook_delete_note: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    notebook_update_note: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdateUserNote"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UserNote"];
+                };
+            };
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };
