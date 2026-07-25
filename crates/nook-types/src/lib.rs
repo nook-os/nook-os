@@ -438,6 +438,28 @@ pub struct TeachResponse {
     pub offline: Vec<String>,
 }
 
+/// A piece of centrally-managed fleet content — the managed `nookos` skill or
+/// the managed hook set (MAIN-78). The control plane seeds it from the binary's
+/// embedded defaults and holds it as the source of truth the rest of the
+/// fleet-controlled-skills epic reads from.
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
+pub struct ManagedContent {
+    pub id: uuid::Uuid,
+    /// `skill` or `hooks`.
+    pub kind: String,
+    /// The skill name (e.g. `nookos`), or `default` for the single hook set.
+    pub name: String,
+    /// The apply-ready body: a `SKILL.md` for a skill, or the
+    /// `~/.claude/settings.json` `hooks` fragment (JSON) for the hook set.
+    pub content: String,
+    /// Of `content` — lets a node skip an apply it already has.
+    pub sha256: String,
+    /// Monotonic: bumped when a newer shipped default refreshes the row (or, in
+    /// a later sub-ticket, when an operator edits it).
+    pub version: i64,
+    pub updated_at: DateTime<Utc>,
+}
+
 // ── Workspaces ───────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow, ToSchema)]

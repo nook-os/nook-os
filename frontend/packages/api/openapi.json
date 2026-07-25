@@ -1200,6 +1200,58 @@
         }
       }
     },
+    "/api/v1/managed/hooks": {
+      "get": {
+        "tags": [
+          "crate::routes::managed"
+        ],
+        "operationId": "get_managed_hooks",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManagedContent"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": ""
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      }
+    },
+    "/api/v1/managed/skills": {
+      "get": {
+        "tags": [
+          "crate::routes::managed"
+        ],
+        "operationId": "list_managed_skills",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ManagedContent"
+                  }
+                }
+              }
+            }
+          },
+          "403": {
+            "description": ""
+          }
+        }
+      }
+    },
     "/api/v1/me/tenant": {
       "post": {
         "tags": [
@@ -8218,6 +8270,50 @@
           },
           "username": {
             "type": "string"
+          }
+        }
+      },
+      "ManagedContent": {
+        "type": "object",
+        "description": "A piece of centrally-managed fleet content — the managed `nookos` skill or\nthe managed hook set (MAIN-78). The control plane seeds it from the binary's\nembedded defaults and holds it as the source of truth the rest of the\nfleet-controlled-skills epic reads from.",
+        "required": [
+          "id",
+          "kind",
+          "name",
+          "content",
+          "sha256",
+          "version",
+          "updated_at"
+        ],
+        "properties": {
+          "content": {
+            "type": "string",
+            "description": "The apply-ready body: a `SKILL.md` for a skill, or the\n`~/.claude/settings.json` `hooks` fragment (JSON) for the hook set."
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "kind": {
+            "type": "string",
+            "description": "`skill` or `hooks`."
+          },
+          "name": {
+            "type": "string",
+            "description": "The skill name (e.g. `nookos`), or `default` for the single hook set."
+          },
+          "sha256": {
+            "type": "string",
+            "description": "Of `content` — lets a node skip an apply it already has."
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "version": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Monotonic: bumped when a newer shipped default refreshes the row (or, in\na later sub-ticket, when an operator edits it)."
           }
         }
       },

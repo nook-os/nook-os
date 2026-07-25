@@ -560,6 +560,38 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/managed/hooks": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["get_managed_hooks"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/managed/skills": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["list_managed_skills"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/me/tenant": {
         parameters: {
             query?: never;
@@ -3329,6 +3361,35 @@ export interface components {
             password: string;
             username: string;
         };
+        /**
+         * @description A piece of centrally-managed fleet content — the managed `nookos` skill or
+         *     the managed hook set (MAIN-78). The control plane seeds it from the binary's
+         *     embedded defaults and holds it as the source of truth the rest of the
+         *     fleet-controlled-skills epic reads from.
+         */
+        ManagedContent: {
+            /**
+             * @description The apply-ready body: a `SKILL.md` for a skill, or the
+             *     `~/.claude/settings.json` `hooks` fragment (JSON) for the hook set.
+             */
+            content: string;
+            /** Format: uuid */
+            id: string;
+            /** @description `skill` or `hooks`. */
+            kind: string;
+            /** @description The skill name (e.g. `nookos`), or `default` for the single hook set. */
+            name: string;
+            /** @description Of `content` — lets a node skip an apply it already has. */
+            sha256: string;
+            /** Format: date-time */
+            updated_at: string;
+            /**
+             * Format: int64
+             * @description Monotonic: bumped when a newer shipped default refreshes the row (or, in
+             *     a later sub-ticket, when an operator edits it).
+             */
+            version: number;
+        };
         /** @description The signed-in caller with their tenant. */
         MeResponse: {
             /**
@@ -5542,6 +5603,62 @@ export interface operations {
                 content?: never;
             };
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    get_managed_hooks: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ManagedContent"];
+                };
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    list_managed_skills: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ManagedContent"][];
+                };
+            };
+            403: {
                 headers: {
                     [name: string]: unknown;
                 };

@@ -10,6 +10,7 @@ pub mod invites;
 pub mod join;
 pub mod labels;
 pub mod local_auth;
+pub mod managed;
 pub mod nodes;
 pub mod notebook;
 pub mod notes;
@@ -235,6 +236,8 @@ pub fn build_router(state: AppState) -> Router {
             "/skills/{name}",
             get(skills::get_one).delete(skills::unteach),
         )
+        .route("/managed/skills", get(managed::list_skills))
+        .route("/managed/hooks", get(managed::get_hooks))
         .route("/nodes/{id}/rescan", post(nodes::rescan))
         .route("/nodes/{id}/update", post(nodes::update))
         .route("/nodes/{id}/terminal", post(sessions::open_terminal))

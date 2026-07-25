@@ -10,6 +10,10 @@ use nook_types::{Capabilities, NodeId, SessionId};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
+/// The canonical NookOS hook set, shared by the node (which installs it) and the
+/// control plane (which stores it as managed content). See [`hooks`].
+pub mod hooks;
+
 /// A git repository found under a node's workspace roots. Repositories are
 /// self-describing; the node reports, the control plane reconciles.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
