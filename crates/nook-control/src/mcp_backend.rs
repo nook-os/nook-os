@@ -343,6 +343,7 @@ impl NookBackend for McpBackend {
                     column_type: None,
                     workspace_id: None,
                     priority: None,
+                    type_: None,
                     // Never `agent-ready`: an agent that could label its own
                     // work ready would be approving it, and that gate is the
                     // load-bearing safety property of the whole loop.
@@ -499,6 +500,7 @@ impl NookBackend for McpBackend {
                 position: None,
                 assignee_user_id: None,
                 priority: None,
+                type_: None,
                 workspace_id: None,
                 expected_updated_at: Some(cur.updated_at),
             };
@@ -543,6 +545,8 @@ impl NookBackend for McpBackend {
                 assignee: f.assignee,
                 column_type: f.column_type,
                 priority: f.priority,
+                // Type filtering isn't exposed over MCP's pick (parity with q).
+                type_: Vec::new(),
                 is_blocked: f.is_blocked,
                 workspace: None,
                 q: None,

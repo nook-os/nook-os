@@ -39,6 +39,11 @@ pub struct TaskFilter {
     pub assignee: Option<String>,
     pub column_type: Option<String>,
     pub priority: Option<i32>,
+    /// Repeatable issue-type filter (MAIN-59). ORs within types (`type=epic&type=bug`
+    /// returns either) and ANDs with the other filters. Named `type_`; the query
+    /// key is `type`.
+    #[serde(rename = "type", default)]
+    pub type_: Vec<String>,
     /// Filter on the derived blocker state.
     pub is_blocked: Option<bool>,
     pub workspace: Option<uuid::Uuid>,
@@ -89,6 +94,7 @@ impl TaskFilter {
                 "assignee" => f.assignee = Some(v),
                 "column_type" => f.column_type = Some(v),
                 "priority" => f.priority = Some(num(&k, &v)?),
+                "type" => many(&mut f.type_),
                 "limit" => f.limit = Some(num(&k, &v)?),
                 "is_blocked" => f.is_blocked = Some(flag(&k, &v)?),
                 "archived" => f.archived = Some(flag(&k, &v)?),
@@ -195,6 +201,7 @@ pub async fn query_rows(
         .iter()
         .map(|l| l.trim().to_lowercase())
         .collect();
+    let types: Vec<String> = f.type_.iter().map(|t| t.trim().to_lowercase()).collect();
 
     let rows: Vec<TaskItem> = sqlx::query_as(
         r#"
@@ -235,6 +242,9 @@ pub async fn query_rows(
                     t.title ILIKE $14
                  OR t.description ILIKE $14
                  OR (b.key || '-' || t.number::text) ILIKE $14))
+          -- issue-type filter (MAIN-59): empty = no filter; otherwise the type
+          -- must be one of the requested ones (OR within types)
+          AND (cardinality($15::text[]) = 0 OR t.type = ANY($15))
         -- priority 0 means "unset", which sorts last rather than first
         ORDER BY CASE WHEN t.priority = 0 THEN 5 ELSE t.priority END, t.created_at
         LIMIT $12
@@ -255,6 +265,7 @@ pub async fn query_rows(
     .bind(f.archived.unwrap_or(false))
     // `%term%` for a substring match; None disables the clause via the IS NULL guard.
     .bind(f.q.as_ref().map(|s| format!("%{s}%")))
+    .bind(&types)
     .fetch_all(db)
     .await?;
 
@@ -403,6 +414,18 @@ mod tests {
         // Mixed, and case-folded to match how labels are stored.
         let c = TaskFilter::parse(Some("label=A,B&label=C")).unwrap();
         assert_eq!(c.label, vec!["a", "b", "c"]);
+    }
+
+    /// The issue-type filter (MAIN-59) is repeatable and case-folded, like
+    /// labels — `type=epic&type=bug` ORs the two.
+    #[test]
+    fn the_type_filter_is_repeatable_and_case_folded() {
+        let a = TaskFilter::parse(Some("type=epic&type=bug")).unwrap();
+        assert_eq!(a.type_, vec!["epic", "bug"]);
+        let b = TaskFilter::parse(Some("type=Epic,BUG")).unwrap();
+        assert_eq!(b.type_, a.type_);
+        // No type filter is the empty vec — the default, unchanged behaviour.
+        assert!(TaskFilter::parse(Some("label=x")).unwrap().type_.is_empty());
     }
 
     #[test]

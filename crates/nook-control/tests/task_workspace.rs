@@ -30,6 +30,7 @@ fn no_change() -> UpdateTaskRequest {
         position: None,
         assignee_user_id: None,
         priority: None,
+        type_: None,
         workspace_id: None,
         expected_updated_at: None,
     }
@@ -104,6 +105,7 @@ async fn new_task(
                 column_type: None,
                 workspace_id: workspace,
                 priority: None,
+                type_: None,
                 labels: vec![],
             },
         )

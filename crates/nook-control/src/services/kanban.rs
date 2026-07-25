@@ -21,6 +21,23 @@ pub enum ProviderError {
 
 pub type ProviderResult<T> = Result<T, ProviderError>;
 
+/// The allowed issue types (MAIN-59). The DB CHECK is the backstop; validating
+/// here turns an invalid value into a clean 400 rather than a database error.
+pub const TASK_TYPES: &[&str] = &["task", "bug", "epic", "story", "chore"];
+
+/// Reject an out-of-set `type` with a 400 (AC-2) — never silently coerce it.
+fn validate_task_type(t: Option<&str>) -> ApiResult<()> {
+    if let Some(v) = t {
+        if !TASK_TYPES.contains(&v) {
+            return Err(ApiError::BadRequest(format!(
+                "invalid task type {v:?} — one of {}",
+                TASK_TYPES.join(", ")
+            )));
+        }
+    }
+    Ok(())
+}
+
 #[async_trait]
 pub trait KanbanProvider: Send + Sync {
     fn id(&self) -> &'static str;
@@ -97,6 +114,7 @@ impl KanbanProvider for LocalBoardProvider {
         board: BoardId,
         req: CreateTaskRequest,
     ) -> ProviderResult<TaskItem> {
+        validate_task_type(req.type_.as_deref())?;
         // Explicit id wins; then a semantic type, which is what automation
         // knows; then the board's first column.
         let column_id: ColumnId = match (req.column_id, req.column_type.as_deref()) {
@@ -140,8 +158,8 @@ impl KanbanProvider for LocalBoardProvider {
 
         let task: TaskItem = sqlx::query_as(
             "INSERT INTO tasks (id, tenant_id, board_id, column_id, title, description,
-                                position, workspace_id, priority, number)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING *",
+                                position, workspace_id, priority, type, number)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING *",
         )
         .bind(TaskId::new())
         .bind(tenant)
@@ -152,6 +170,8 @@ impl KanbanProvider for LocalBoardProvider {
         .bind(max_pos.unwrap_or(-1) + 1)
         .bind(req.workspace_id)
         .bind(req.priority.unwrap_or(0).clamp(0, 4))
+        // Omitted → the column DEFAULT ('task'); validated above (AC-2).
+        .bind(req.type_.as_deref().unwrap_or("task"))
         .bind(number)
         .fetch_one(&mut *tx)
         .await
@@ -197,6 +217,7 @@ impl KanbanProvider for LocalBoardProvider {
         task: TaskId,
         req: UpdateTaskRequest,
     ) -> ProviderResult<TaskItem> {
+        validate_task_type(req.type_.as_deref())?;
         // A type given instead of an id is resolved against the task's OWN
         // board — the caller knows "move it to started", not which board this
         // task happens to live on.
@@ -233,6 +254,7 @@ impl KanbanProvider for LocalBoardProvider {
                 assignee_user_id = COALESCE($7, assignee_user_id),
                 priority = COALESCE($8, priority),
                 workspace_id = CASE WHEN $9 THEN $10 ELSE workspace_id END,
+                type = COALESCE($12, type),
                 updated_at = now()
              WHERE id = $1 AND tenant_id = $2
                AND ($11::timestamptz IS NULL OR updated_at = $11)
@@ -249,6 +271,8 @@ impl KanbanProvider for LocalBoardProvider {
         .bind(req.workspace_id.is_some())
         .bind(req.workspace_id.flatten())
         .bind(req.expected_updated_at)
+        // $12: absent leaves the type unchanged (COALESCE); validated above.
+        .bind(req.type_.as_deref())
         .fetch_optional(&self.db)
         .await
         .map_err(ApiError::from)?;
