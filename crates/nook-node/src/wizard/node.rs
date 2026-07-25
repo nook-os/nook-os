@@ -67,10 +67,13 @@ pub async fn setup(args: SetupArgs) -> Result<()> {
     };
 
     let workspace_root = {
+        // An existing root is kept as the prompt default (AC-3); a fresh node
+        // defaults to a per-control-plane root (MAIN-58 AC-1). Either is
+        // overridable at the prompt (AC-2).
         let d = existing
             .as_ref()
             .and_then(|c| c.workspace_roots.first().cloned())
-            .unwrap_or_else(|| "~/.nook/workspace".into());
+            .unwrap_or_else(|| crate::config::default_workspace_root(&server));
         t.text("Workspace root (repos live under this directory)", Some(&d))?
     };
 

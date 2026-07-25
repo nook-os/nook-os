@@ -109,7 +109,10 @@ pub async fn enroll(
         node_id: issued.node_id.to_string(),
         node_name: hostname.clone(),
         node_token: String::new(),
-        workspace_roots: vec!["~/.nook/workspace".into()],
+        // A fresh enrollment defaults to a per-control-plane root so nodes on one
+        // machine never share a checkout tree (MAIN-58 AC-1). An `existing` config
+        // is kept verbatim — this branch only runs for a first enrollment (AC-3).
+        workspace_roots: vec![crate::config::default_workspace_root(&server)],
         ssh_key_path: None,
         server_fingerprint: None,
         agent_server: None,

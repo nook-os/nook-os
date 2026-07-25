@@ -1028,8 +1028,11 @@ async fn join(spec: JoinSpec) -> Result<()> {
         anyhow::bail!("tmux is required — install tmux and re-run `nook join`");
     }
 
+    // An explicit root (--workspace-root, a config file's workspace_roots, or the
+    // docker entrypoint's NOOK_WORKSPACE_ROOT → --workspace-root) always wins;
+    // only the DEFAULT becomes per-control-plane (MAIN-58 AC-1/AC-2).
     let workspace_roots = if spec.workspace_roots.is_empty() {
-        vec!["~/workspace".to_string()]
+        vec![crate::config::default_workspace_root(&server)]
     } else {
         spec.workspace_roots
     };
