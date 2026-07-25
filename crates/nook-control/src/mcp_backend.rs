@@ -332,10 +332,12 @@ impl NookBackend for McpBackend {
             .kanban
             .get(&board.provider)
             .ok_or_else(|| anyhow::anyhow!("provider missing"))?;
+        let creator = self.user().await?;
         let task = provider
             .create_task(
                 tenant,
                 board.id,
+                Some(creator),
                 CreateTaskRequest {
                     title,
                     description,
@@ -344,6 +346,8 @@ impl NookBackend for McpBackend {
                     workspace_id: None,
                     priority: None,
                     type_: None,
+                    // Omitted → `team`, the tenant-visible default (MAIN-76).
+                    visibility: None,
                     // Never `agent-ready`: an agent that could label its own
                     // work ready would be approving it, and that gate is the
                     // load-bearing safety property of the whole loop.
@@ -419,7 +423,8 @@ impl NookBackend for McpBackend {
         let id: TaskId = task_id
             .parse()
             .map_err(|_| anyhow::anyhow!("bad task id"))?;
-        Ok(crate::services::taskwork::dispatch(&self.state, tenant, id).await?)
+        let viewer = self.user().await?;
+        Ok(crate::services::taskwork::dispatch(&self.state, tenant, viewer, id).await?)
     }
 
     async fn start_work(
@@ -436,9 +441,11 @@ impl NookBackend for McpBackend {
             Some(n) => Some(self.resolve_node(tenant, Some(n)).await?),
             None => None,
         };
+        let viewer = self.user().await?;
         let (_, session) = crate::services::taskwork::start_work(
             &self.state,
             tenant,
+            viewer,
             None,
             id,
             crate::services::taskwork::StartWork {
@@ -501,6 +508,7 @@ impl NookBackend for McpBackend {
                 assignee_user_id: None,
                 priority: None,
                 type_: None,
+                visibility: None,
                 workspace_id: None,
                 expected_updated_at: Some(cur.updated_at),
             };
@@ -535,9 +543,11 @@ impl NookBackend for McpBackend {
 
     async fn list_tasks(&self, f: nook_mcp::TaskQuery) -> anyhow::Result<Vec<TaskItem>> {
         let tenant = self.tenant().await?;
+        let viewer = self.user().await?;
         let rows = crate::routes::task_query::pick(
             &self.state,
             tenant,
+            viewer,
             crate::routes::task_query::TaskFilter {
                 board: f.board,
                 label: f.label,
@@ -562,8 +572,9 @@ impl NookBackend for McpBackend {
 
     async fn get_task(&self, task: String) -> anyhow::Result<serde_json::Value> {
         let tenant = self.tenant().await?;
+        let viewer = self.user().await?;
         let id = crate::services::tasks::resolve_id(&self.state.db, tenant, &task).await?;
-        let detail = crate::routes::task_detail::detail(&self.state, tenant, id).await?;
+        let detail = crate::routes::task_detail::detail(&self.state, tenant, viewer, id).await?;
         Ok(serde_json::to_value(detail)?)
     }
 
@@ -715,9 +726,11 @@ impl NookBackend for McpBackend {
         kind: String,
     ) -> anyhow::Result<serde_json::Value> {
         let tenant = self.tenant().await?;
+        let viewer = self.user().await?;
         let f = crate::services::tasks::resolve_id(&self.state.db, tenant, &from).await?;
         let t = crate::services::tasks::resolve_id(&self.state.db, tenant, &to).await?;
-        let row = crate::routes::task_detail::link(&self.state, tenant, f, t, &kind).await?;
+        let row =
+            crate::routes::task_detail::link(&self.state, tenant, viewer, f, t, &kind).await?;
         Ok(serde_json::to_value(row)?)
     }
 }

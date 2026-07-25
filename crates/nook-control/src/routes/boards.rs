@@ -96,13 +96,24 @@ pub async fn get_one(
         .await
         .map_err(provider_err)?;
 
+    // Visibility (MAIN-76): the provider returns every card on the board; drop
+    // the ones this viewer may not see (private cards they neither created nor
+    // are assigned) BEFORE enrich, so a private title never even reaches the
+    // response. The provider trait stays viewer-agnostic; the filter lives here
+    // where the caller's identity is known.
+    let visible: Vec<_> = detail
+        .tasks
+        .into_iter()
+        .filter(|t| crate::services::tasks::visible_to(t, auth.user_id))
+        .collect();
+
     // Keys, deep links and labels are computed rather than stored, so the
     // board's cards would otherwise render without any of them. Enriched here
     // rather than in the provider because only this layer knows the public URL
     // — a provider that had to be told its own deployment's hostname would be
     // the wrong shape for the external ones this trait exists to allow.
     let detail = BoardDetail {
-        tasks: crate::services::tasks::enrich(&state.db, &state.cfg.public_base_url, detail.tasks)
+        tasks: crate::services::tasks::enrich(&state.db, &state.cfg.public_base_url, visible)
             .await?,
         ..detail
     };
@@ -126,7 +137,7 @@ pub async fn create_task(
         .kanban
         .get(&provider)
         .ok_or(ApiError::NotFound)?
-        .create_task(auth.tenant_id, id, req)
+        .create_task(auth.tenant_id, id, Some(auth.user_id), req)
         .await
         .map_err(provider_err)?;
 
@@ -135,7 +146,12 @@ pub async fn create_task(
         auth.tenant_id,
         EventDraft::new("task.created")
             .actor("user", auth.user_id.0)
-            .payload(serde_json::json!({ "task_id": task.id, "title": task.title })),
+            // A private card's title must not reach the tenant activity feed
+            // (MAIN-76 AC-3): `public_title` omits it for a private task.
+            .payload(serde_json::json!({
+                "task_id": task.id,
+                "title": crate::services::tasks::public_title(&task),
+            })),
     )
     .await;
     let _ = workspace_id;
@@ -144,30 +160,37 @@ pub async fn create_task(
         nook_proto::UiEvent::TaskChanged { task_id: task.id },
     );
 
+    // A private card must not ping the whole tenant. The notification is a
+    // tenant-wide toast + phone push + channel delivery, so skip it entirely for
+    // a private task (MAIN-76 AC-3) — its title and existence stay with its
+    // owner. Grab visibility before enrich (which does not touch it).
+    let is_private = task.visibility == "private";
     let enriched =
         crate::services::tasks::enrich_one(&state.db, &state.cfg.public_base_url, task).await?;
 
-    // Tell the tenant a card landed. The activity event above feeds the
-    // Activity page — a place you go look — but a task appearing on the board
-    // (an import, an agent filing an issue, a teammate adding work) is exactly
-    // the kind of thing worth a toast and a phone buzz, which is the notify
-    // path, not the activity path. Carries the key and a deep link so the toast
-    // is actionable rather than just "something changed".
-    let mut draft = crate::services::notify::Draft::new(match enriched.key.as_deref() {
-        Some(k) => format!("New task: {k}"),
-        None => "New task".to_string(),
-    })
-    .level("info")
-    .kind("task.created")
-    .body(enriched.title.clone())
-    .payload(serde_json::json!({
-        "task_id": enriched.id,
-        "key": enriched.key,
-    }));
-    if let Some(url) = enriched.url.clone() {
-        draft = draft.link(url);
+    if !is_private {
+        // Tell the tenant a card landed. The activity event above feeds the
+        // Activity page — a place you go look — but a task appearing on the board
+        // (an import, an agent filing an issue, a teammate adding work) is exactly
+        // the kind of thing worth a toast and a phone buzz, which is the notify
+        // path, not the activity path. Carries the key and a deep link so the toast
+        // is actionable rather than just "something changed".
+        let mut draft = crate::services::notify::Draft::new(match enriched.key.as_deref() {
+            Some(k) => format!("New task: {k}"),
+            None => "New task".to_string(),
+        })
+        .level("info")
+        .kind("task.created")
+        .body(enriched.title.clone())
+        .payload(serde_json::json!({
+            "task_id": enriched.id,
+            "key": enriched.key,
+        }));
+        if let Some(url) = enriched.url.clone() {
+            draft = draft.link(url);
+        }
+        crate::services::notify::raise(&state, auth.tenant_id, draft).await;
     }
-    crate::services::notify::raise(&state, auth.tenant_id, draft).await;
 
     Ok(Json(enriched))
 }
@@ -192,13 +215,19 @@ pub async fn update_task(
     // endpoint that took only ids would be one an agent cannot call with what
     // it was given.
     let id = crate::services::tasks::resolve_id(&state.db, auth.tenant_id, &ident).await?;
-    let (board_id,): (BoardId,) =
-        sqlx::query_as("SELECT board_id FROM tasks WHERE id = $1 AND tenant_id = $2")
-            .bind(id)
-            .bind(auth.tenant_id)
-            .fetch_optional(&state.db)
-            .await?
-            .ok_or(ApiError::NotFound)?;
+    // Load the whole task so visibility is checked before any change: a private
+    // card cannot be seen OR altered by anyone but its owner (MAIN-76 AC-5),
+    // including a tenant admin — refused as NotFound, consistent with the read.
+    let existing: TaskItem = sqlx::query_as("SELECT * FROM tasks WHERE id = $1 AND tenant_id = $2")
+        .bind(id)
+        .bind(auth.tenant_id)
+        .fetch_optional(&state.db)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    if !crate::services::tasks::visible_to(&existing, auth.user_id) {
+        return Err(ApiError::NotFound);
+    }
+    let board_id = existing.board_id;
     let provider = provider_for_board(&state, auth.tenant_id, board_id).await?;
     let moved_column = req.column_id.is_some() || req.column_type.is_some();
     let task = state
@@ -215,7 +244,10 @@ pub async fn update_task(
             auth.tenant_id,
             EventDraft::new("task.moved")
                 .actor("user", auth.user_id.0)
-                .payload(serde_json::json!({ "task_id": task.id, "title": task.title })),
+                .payload(serde_json::json!({
+                    "task_id": task.id,
+                    "title": crate::services::tasks::public_title(&task),
+                })),
         )
         .await;
     }
@@ -261,7 +293,10 @@ async fn set_archived(
             "task.unarchived"
         })
         .actor("user", auth.user_id.0)
-        .payload(serde_json::json!({ "task_id": task.id, "title": task.title })),
+        .payload(serde_json::json!({
+            "task_id": task.id,
+            "title": crate::services::tasks::public_title(&task),
+        })),
     )
     .await;
     state.registry.publish(

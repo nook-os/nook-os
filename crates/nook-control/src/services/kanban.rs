@@ -5,7 +5,7 @@
 use async_trait::async_trait;
 use nook_types::{
     Board, BoardDetail, BoardId, ColumnId, CreateTaskRequest, TaskId, TaskItem, TenantId,
-    UpdateTaskRequest,
+    UpdateTaskRequest, UserId,
 };
 use sqlx::PgPool;
 
@@ -38,15 +38,35 @@ fn validate_task_type(t: Option<&str>) -> ApiResult<()> {
     Ok(())
 }
 
+/// The allowed task visibilities (MAIN-76). `team` is the default; the DB CHECK
+/// is the backstop.
+pub const TASK_VISIBILITIES: &[&str] = &["private", "team", "org"];
+
+/// Reject an out-of-set `visibility` with a 400 — never silently coerce it.
+fn validate_visibility(v: Option<&str>) -> ApiResult<()> {
+    if let Some(val) = v {
+        if !TASK_VISIBILITIES.contains(&val) {
+            return Err(ApiError::BadRequest(format!(
+                "invalid visibility {val:?} — one of {}",
+                TASK_VISIBILITIES.join(", ")
+            )));
+        }
+    }
+    Ok(())
+}
+
 #[async_trait]
 pub trait KanbanProvider: Send + Sync {
     fn id(&self) -> &'static str;
     async fn list_boards(&self, tenant: TenantId) -> ProviderResult<Vec<Board>>;
     async fn board_detail(&self, tenant: TenantId, board: BoardId) -> ProviderResult<BoardDetail>;
+    // `created_by`: the per-tenant `users.id` of the creator, stamped so a
+    // `private` card is owned. `None` only for non-user callers.
     async fn create_task(
         &self,
         tenant: TenantId,
         board: BoardId,
+        created_by: Option<UserId>,
         req: CreateTaskRequest,
     ) -> ProviderResult<TaskItem>;
     async fn update_task(
@@ -112,9 +132,11 @@ impl KanbanProvider for LocalBoardProvider {
         &self,
         tenant: TenantId,
         board: BoardId,
+        created_by: Option<UserId>,
         req: CreateTaskRequest,
     ) -> ProviderResult<TaskItem> {
         validate_task_type(req.type_.as_deref())?;
+        validate_visibility(req.visibility.as_deref())?;
         // Explicit id wins; then a semantic type, which is what automation
         // knows; then the board's first column.
         let column_id: ColumnId = match (req.column_id, req.column_type.as_deref()) {
@@ -158,8 +180,9 @@ impl KanbanProvider for LocalBoardProvider {
 
         let task: TaskItem = sqlx::query_as(
             "INSERT INTO tasks (id, tenant_id, board_id, column_id, title, description,
-                                position, workspace_id, priority, type, number)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING *",
+                                position, workspace_id, priority, type, number,
+                                visibility, created_by)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) RETURNING *",
         )
         .bind(TaskId::new())
         .bind(tenant)
@@ -173,6 +196,9 @@ impl KanbanProvider for LocalBoardProvider {
         // Omitted → the column DEFAULT ('task'); validated above (AC-2).
         .bind(req.type_.as_deref().unwrap_or("task"))
         .bind(number)
+        // Omitted → the column DEFAULT ('team'), reproducing today's behaviour.
+        .bind(req.visibility.as_deref().unwrap_or("team"))
+        .bind(created_by)
         .fetch_one(&mut *tx)
         .await
         .map_err(ApiError::from)?;
@@ -218,6 +244,7 @@ impl KanbanProvider for LocalBoardProvider {
         req: UpdateTaskRequest,
     ) -> ProviderResult<TaskItem> {
         validate_task_type(req.type_.as_deref())?;
+        validate_visibility(req.visibility.as_deref())?;
         // A type given instead of an id is resolved against the task's OWN
         // board — the caller knows "move it to started", not which board this
         // task happens to live on.
@@ -255,6 +282,7 @@ impl KanbanProvider for LocalBoardProvider {
                 priority = COALESCE($8, priority),
                 workspace_id = CASE WHEN $9 THEN $10 ELSE workspace_id END,
                 type = COALESCE($12, type),
+                visibility = COALESCE($13, visibility),
                 updated_at = now()
              WHERE id = $1 AND tenant_id = $2
                AND ($11::timestamptz IS NULL OR updated_at = $11)
@@ -273,6 +301,8 @@ impl KanbanProvider for LocalBoardProvider {
         .bind(req.expected_updated_at)
         // $12: absent leaves the type unchanged (COALESCE); validated above.
         .bind(req.type_.as_deref())
+        // $13: absent leaves the visibility unchanged (COALESCE); validated above.
+        .bind(req.visibility.as_deref())
         .fetch_optional(&self.db)
         .await
         .map_err(ApiError::from)?;
@@ -324,6 +354,7 @@ macro_rules! stub_provider {
                 &self,
                 _: TenantId,
                 _: BoardId,
+                _: Option<UserId>,
                 _: CreateTaskRequest,
             ) -> ProviderResult<TaskItem> {
                 Err(ProviderError::NotConfigured($id))

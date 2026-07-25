@@ -2945,6 +2945,11 @@ export interface components {
              *     rejected. Named `type_`; the wire name is `type`.
              */
             type?: string | null;
+            /**
+             * @description Who may see this card (MAIN-76): `private`/`team`/`org`. Omitted →
+             *     defaults to `team`; an invalid value is rejected.
+             */
+            visibility?: string | null;
             workspace_id?: null | components["schemas"]["WorkspaceId"];
         };
         /**
@@ -3952,6 +3957,7 @@ export interface components {
             column_id: components["schemas"]["ColumnId"];
             /** Format: date-time */
             created_at: string;
+            created_by?: null | components["schemas"]["UserId"];
             description?: string | null;
             external_id?: string | null;
             external_url?: string | null;
@@ -3999,6 +4005,12 @@ export interface components {
              *     NOOK-42" can give a human something to click.
              */
             url?: string | null;
+            /**
+             * @description Who may see this card (MAIN-76): `private` (creator + assignee only),
+             *     `team` (the whole tenant — the default), or `org`. Enforced server-side
+             *     on every read and claim path, not by an RBAC permission.
+             */
+            visibility?: string;
             workspace_id?: null | components["schemas"]["WorkspaceId"];
             worktree_node_id?: null | components["schemas"]["NodeId"];
             worktree_path?: string | null;
@@ -4292,6 +4304,11 @@ export interface components {
              *     value is rejected. Named `type_`; the wire name is `type`.
              */
             type?: string | null;
+            /**
+             * @description Change who may see this card (MAIN-76): `private`/`team`/`org`. Absent
+             *     leaves it unchanged; an invalid value is rejected.
+             */
+            visibility?: string | null;
             /**
              * @description Which workspace this task belongs to. Absent leaves it alone, `null`
              *     clears it, an id sets it.

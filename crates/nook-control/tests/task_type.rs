@@ -55,6 +55,7 @@ fn create(title: &str, type_: Option<&str>) -> CreateTaskRequest {
         workspace_id: None,
         priority: None,
         type_: type_.map(str::to_string),
+        visibility: None,
         labels: vec![],
     }
 }
@@ -69,6 +70,7 @@ fn patch_type(type_: &str) -> UpdateTaskRequest {
         assignee_user_id: None,
         priority: None,
         type_: Some(type_.into()),
+        visibility: None,
         workspace_id: None,
         expected_updated_at: None,
     }
@@ -82,14 +84,14 @@ async fn create_persists_type_and_defaults_to_task() {
 
     // Explicit type is stored.
     let bug = provider
-        .create_task(tenant, board, create("a bug", Some("bug")))
+        .create_task(tenant, board, None, create("a bug", Some("bug")))
         .await
         .expect("create bug");
     assert_eq!(bug.type_, "bug");
 
     // Omitted → defaults to `task` (AC-2/AC-5).
     let plain = provider
-        .create_task(tenant, board, create("a task", None))
+        .create_task(tenant, board, None, create("a task", None))
         .await
         .expect("create task");
     assert_eq!(plain.type_, "task");
@@ -102,7 +104,7 @@ async fn an_invalid_type_is_rejected_not_coerced() {
     let provider = LocalBoardProvider { db: db.clone() };
 
     let err = provider
-        .create_task(tenant, board, create("nope", Some("frobnicate")))
+        .create_task(tenant, board, None, create("nope", Some("frobnicate")))
         .await
         .expect_err("an invalid type is refused, not silently coerced (AC-2)");
     // A provider error wrapping a 400 — not a database CHECK 500.
@@ -121,7 +123,7 @@ async fn patch_changes_the_type() {
     let provider = LocalBoardProvider { db: db.clone() };
 
     let task = provider
-        .create_task(tenant, board, create("t", None))
+        .create_task(tenant, board, None, create("t", None))
         .await
         .expect("create");
     assert_eq!(task.type_, "task");
@@ -141,7 +143,7 @@ async fn the_list_filter_ors_within_types_and_is_off_by_default() {
 
     for (title, ty) in [("e", "epic"), ("b", "bug"), ("c", "chore"), ("t", "task")] {
         provider
-            .create_task(tenant, board, create(title, Some(ty)))
+            .create_task(tenant, board, None, create(title, Some(ty)))
             .await
             .expect("create");
     }
@@ -152,7 +154,11 @@ async fn the_list_filter_ors_within_types_and_is_off_by_default() {
             ..Default::default()
         };
         let db = db.clone();
-        async move { query_rows(&db, tenant, &f).await.expect("query") }
+        async move {
+            query_rows(&db, tenant, nook_types::UserId::new(), &f)
+                .await
+                .expect("query")
+        }
     };
 
     // OR within types.

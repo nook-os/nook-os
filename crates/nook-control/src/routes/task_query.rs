@@ -149,7 +149,7 @@ pub async fn query(
     RawQuery(raw): RawQuery,
 ) -> ApiResult<Json<Vec<TaskItem>>> {
     let f = TaskFilter::parse(raw.as_deref())?;
-    Ok(Json(pick(&state, auth.tenant_id, f).await?))
+    Ok(Json(pick(&state, auth.tenant_id, auth.user_id, f).await?))
 }
 
 /// The pick query itself, callable from MCP as well as HTTP.
@@ -157,8 +157,13 @@ pub async fn query(
 /// Shared rather than duplicated: two implementations of "which tasks are
 /// pickable" would drift, and the one an agent uses decides what work happens
 /// while the one a human sees decides whether they believe it.
-pub async fn pick(state: &AppState, tenant: TenantId, f: TaskFilter) -> ApiResult<Vec<TaskItem>> {
-    let rows = query_rows(&state.db, tenant, &f).await?;
+pub async fn pick(
+    state: &AppState,
+    tenant: TenantId,
+    viewer: UserId,
+    f: TaskFilter,
+) -> ApiResult<Vec<TaskItem>> {
+    let rows = query_rows(&state.db, tenant, viewer, &f).await?;
     tasks::enrich(&state.db, &state.cfg.public_base_url, rows)
         .await
         .map_err(Into::into)
@@ -170,6 +175,7 @@ pub async fn pick(state: &AppState, tenant: TenantId, f: TaskFilter) -> ApiResul
 pub async fn query_rows(
     db: &sqlx::PgPool,
     tenant: TenantId,
+    viewer: UserId,
     f: &TaskFilter,
 ) -> ApiResult<Vec<TaskItem>> {
     let limit = f.limit.unwrap_or(50).clamp(1, 200);
@@ -252,6 +258,11 @@ pub async fn query_rows(
           -- issue-type filter (MAIN-59): empty = no filter; otherwise the type
           -- must be one of the requested ones (OR within types)
           AND (cardinality($15::text[]) = 0 OR t.type = ANY($15))
+          -- per-task visibility (MAIN-76): a `private` card is seen only by its
+          -- creator or assignee; `team`/`org` are tenant-visible. Same predicate
+          -- an agent's claim path enforces, so the list never shows work it
+          -- could not then start.
+          AND (t.visibility <> 'private' OR t.created_by = $16 OR t.assignee_user_id = $16)
         -- priority 0 means "unset", which sorts last rather than first
         ORDER BY CASE WHEN t.priority = 0 THEN 5 ELSE t.priority END, t.created_at
         LIMIT $12
@@ -273,6 +284,8 @@ pub async fn query_rows(
     // `%term%` for a substring match; None disables the clause via the IS NULL guard.
     .bind(f.q.as_ref().map(|s| format!("%{s}%")))
     .bind(&types)
+    // $16: the viewer, for the visibility predicate above.
+    .bind(viewer)
     .fetch_all(db)
     .await?;
 
@@ -310,6 +323,19 @@ pub async fn claim_inner(
     column_type: Option<String>,
 ) -> ApiResult<TaskItem> {
     let id = tasks::resolve_id(&state.db, tenant, ident).await?;
+
+    // Visibility guard (MAIN-76 AC-9): a private card is claimable only by its
+    // owner (creator or assignee). Refused as NotFound — consistent with the
+    // read filter, and so a non-owner agent cannot claim it even by id.
+    let existing: TaskItem = sqlx::query_as("SELECT * FROM tasks WHERE id = $1 AND tenant_id = $2")
+        .bind(id)
+        .bind(tenant)
+        .fetch_optional(&state.db)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    if !tasks::visible_to(&existing, claimant) {
+        return Err(ApiError::NotFound);
+    }
 
     // Resolving the target column is a separate read, but it cannot race: a
     // column's type does not change under a claim, and if the column is missing
@@ -362,7 +388,12 @@ pub async fn claim_inner(
         tenant,
         crate::events::EventDraft::new("task.claimed")
             .actor("user", claimant.0)
-            .payload(serde_json::json!({ "task_id": id, "title": task.title })),
+            // Redact a private card's title from the tenant activity feed
+            // (MAIN-76 AC-3), even though the claimant now owns it.
+            .payload(serde_json::json!({
+                "task_id": id,
+                "title": tasks::public_title(&task),
+            })),
     )
     .await;
     state
@@ -649,7 +680,7 @@ mod db_tests {
                 ..Default::default()
             };
             async move {
-                query_rows(&db, TenantId(tenant), &f)
+                query_rows(&db, TenantId(tenant), nook_types::UserId::new(), &f)
                     .await
                     .unwrap()
                     .into_iter()
@@ -739,23 +770,29 @@ mod db_tests {
             board: Some(board.to_string()),
             ..Default::default()
         };
-        let default_ids: Vec<TaskId> = query_rows(&db, TenantId(tenant), &f)
-            .await
-            .unwrap()
-            .into_iter()
-            .map(|t| t.id)
-            .collect();
+        let default_ids: Vec<TaskId> =
+            query_rows(&db, TenantId(tenant), nook_types::UserId::new(), &f)
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|t| t.id)
+                .collect();
 
         let with_archived = TaskFilter {
             archived: Some(true),
             ..f.clone()
         };
-        let all_ids: Vec<TaskId> = query_rows(&db, TenantId(tenant), &with_archived)
-            .await
-            .unwrap()
-            .into_iter()
-            .map(|t| t.id)
-            .collect();
+        let all_ids: Vec<TaskId> = query_rows(
+            &db,
+            TenantId(tenant),
+            nook_types::UserId::new(),
+            &with_archived,
+        )
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|t| t.id)
+        .collect();
 
         // A direct id fetch still resolves the archived task (AC-6 / by-key).
         let (by_id,): (i64,) = sqlx::query_as("SELECT count(*) FROM tasks WHERE id = $1")

@@ -13,6 +13,28 @@ use std::collections::HashMap;
 
 use crate::error::{ApiError, ApiResult};
 
+/// Whether `viewer` may see or act on `task` — the ONE task-visibility predicate
+/// (MAIN-76). A `private` card is confined to its creator and its assignee;
+/// `team` and `org` cards are visible to the whole tenant (org's cross-tenant
+/// reach is a later ticket, so today it matches team). Deliberately NOT a role
+/// or policy check (NG-3): visibility is a per-task owner predicate, and this is
+/// the single definition every read/claim path routes through.
+pub fn visible_to(task: &TaskItem, viewer: UserId) -> bool {
+    task.visibility != "private"
+        || task.created_by == Some(viewer)
+        || task.assignee_user_id == Some(viewer)
+}
+
+/// The task title safe to put in a TENANT-FACING event payload or notification
+/// (MAIN-76 AC-3/AC-4). A private card's title must not reach the tenant
+/// activity feed, the live event websocket, or a notification channel — those
+/// broadcast to the whole tenant, and a private card is confined to its owner.
+/// Returns `None` for a private card (the payload then carries no title) and the
+/// real title otherwise.
+pub fn public_title(task: &TaskItem) -> Option<&str> {
+    (task.visibility != "private").then_some(task.title.as_str())
+}
+
 /// Fill in `key`, `url` and `labels` for a batch of tasks.
 ///
 /// Batched deliberately: the board endpoint returns every task at once, and an

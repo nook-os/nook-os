@@ -138,8 +138,15 @@ async fn enrich(state: &AppState, row: &mut OperatorTenant) -> ApiResult<()> {
         row.repositories = Some(names.into_iter().map(|(n,)| n).collect());
     }
     if policy::enabled(&state.db, org, Field::TaskTitles).await? {
+        // A `private` task never reaches an operator, even with the policy on
+        // (MAIN-76 AC-4). The exclusion is baked into the projection itself
+        // because the policy is ADDITIVE (it adds titles, it does not filter),
+        // so a private card must simply never be selected here — a missed filter
+        // would fail open.
         let titles: Vec<(String,)> = sqlx::query_as(
-            "SELECT title FROM tasks WHERE tenant_id = $1 ORDER BY created_at DESC LIMIT 50",
+            "SELECT title FROM tasks
+             WHERE tenant_id = $1 AND visibility <> 'private'
+             ORDER BY created_at DESC LIMIT 50",
         )
         .bind(row.id)
         .fetch_all(&state.db)
