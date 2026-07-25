@@ -204,7 +204,9 @@ async fn epic_parent_create_patch_validate_filter_and_orphan() {
     assert_eq!(ids, want, "parent filter returns exactly the two children");
 
     // The epic's detail carries the children array (AC-5).
-    let d = detail(&state, tenant, nook_types::UserId::new(), epic.id).await.expect("epic detail");
+    let d = detail(&state, tenant, nook_types::UserId::new(), epic.id)
+        .await
+        .expect("epic detail");
     assert_eq!(d.children.len(), 2, "epic detail lists its children");
     assert!(
         d.children.iter().all(|c| c.key.is_some()),
@@ -214,7 +216,12 @@ async fn epic_parent_create_patch_validate_filter_and_orphan() {
     // ── Validation, each a 400 (AC-2) ───────────────────────────────────────
     // parent is not an epic
     assert!(provider
-        .create_task(tenant, board, None, req("x", None, Some(&plain.id.to_string())))
+        .create_task(
+            tenant,
+            board,
+            None,
+            req("x", None, Some(&plain.id.to_string()))
+        )
         .await
         .is_err());
     // an epic may not have a parent
@@ -230,7 +237,12 @@ async fn epic_parent_create_patch_validate_filter_and_orphan() {
         .expect("epic2");
     assert!(
         provider
-            .create_task(tenant, board, None, req("x", None, Some(&epic2.id.to_string())))
+            .create_task(
+                tenant,
+                board,
+                None,
+                req("x", None, Some(&epic2.id.to_string()))
+            )
             .await
             .is_err(),
         "cross-board parent refused"
@@ -281,7 +293,12 @@ async fn epic_parent_create_patch_validate_filter_and_orphan() {
     let other = make_tenant(&pool).await;
     let other_board = make_board(&pool, other).await;
     let other_epic = provider
-        .create_task(other, other_board, None, req("Other epic", Some("epic"), None))
+        .create_task(
+            other,
+            other_board,
+            None,
+            req("Other epic", Some("epic"), None),
+        )
         .await
         .expect("other epic");
     // A task in `tenant` cannot parent onto an epic in `other` (its key/uuid
@@ -305,4 +322,104 @@ async fn epic_parent_create_patch_validate_filter_and_orphan() {
             .execute(&pool)
             .await;
     }
+}
+
+/// MAIN-76 × MAIN-81: a private child must not leak its title/key through the
+/// epic's `children` array or the `?parent=` filter to a viewer who neither
+/// created it nor is assigned — the leak the visibility rebase closed.
+#[tokio::test]
+async fn private_child_does_not_leak_through_epic() {
+    let Some(pool) = test_pool().await else {
+        eprintln!("skipping private-child leak test — no DATABASE_URL");
+        return;
+    };
+    let state = AppState::new(pool.clone(), test_config(), None).await;
+    let tenant = make_tenant(&pool).await;
+    let board = make_board(&pool, tenant).await;
+    let provider = state.kanban.get("local").expect("local provider");
+
+    // Owner A and an unrelated member B.
+    let a = UserId::new();
+    let b = UserId::new();
+
+    // A team epic, a team child, and a PRIVATE child owned by A.
+    let epic = provider
+        .create_task(tenant, board, Some(a), req("Epic", Some("epic"), None))
+        .await
+        .expect("epic");
+    let epic = nook_control::services::tasks::enrich_one(&pool, "http://x", epic)
+        .await
+        .expect("enrich");
+    let epic_key = epic.key.clone().expect("key");
+
+    let team_child = provider
+        .create_task(
+            tenant,
+            board,
+            Some(a),
+            req("open child", None, Some(&epic_key)),
+        )
+        .await
+        .expect("team child");
+
+    let secret_child = provider
+        .create_task(
+            tenant,
+            board,
+            Some(a),
+            CreateTaskRequest {
+                visibility: Some("private".into()),
+                ..req("secret child", None, Some(&epic_key))
+            },
+        )
+        .await
+        .expect("private child");
+
+    // ── Epic detail: A sees both children; B sees only the team one ─────────
+    let a_detail = detail(&state, tenant, a, epic.id).await.expect("A detail");
+    assert_eq!(a_detail.children.len(), 2, "the owner sees both children");
+    let b_detail = detail(&state, tenant, b, epic.id).await.expect("B detail");
+    let b_child_ids: Vec<TaskId> = b_detail.children.iter().map(|c| c.id).collect();
+    assert!(
+        b_child_ids.contains(&team_child.id),
+        "B sees the team child"
+    );
+    assert!(
+        !b_child_ids.contains(&secret_child.id),
+        "B never sees the private child's title/key through epic detail"
+    );
+
+    // ── `?parent=` filter is likewise visibility-scoped ─────────────────────
+    let f = TaskFilter {
+        board: Some(board.to_string()),
+        parent: Some(epic_key.clone()),
+        limit: Some(200),
+        ..Default::default()
+    };
+    let b_ids: Vec<TaskId> = query_rows(&pool, tenant, b, &f)
+        .await
+        .expect("B parent list")
+        .into_iter()
+        .map(|t| t.id)
+        .collect();
+    assert!(b_ids.contains(&team_child.id));
+    assert!(
+        !b_ids.contains(&secret_child.id),
+        "the parent filter never leaks the private child to a non-owner"
+    );
+    let a_ids: Vec<TaskId> = query_rows(&pool, tenant, a, &f)
+        .await
+        .expect("A parent list")
+        .into_iter()
+        .map(|t| t.id)
+        .collect();
+    assert!(
+        a_ids.contains(&secret_child.id),
+        "the owner still sees their private child under the epic"
+    );
+
+    let _ = sqlx::query("DELETE FROM tenants WHERE id = $1 AND slug <> 'dev'")
+        .bind(tenant)
+        .execute(&pool)
+        .await;
 }

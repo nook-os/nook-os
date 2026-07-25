@@ -78,7 +78,9 @@ async fn validate_parent(
     let parent_id = crate::services::tasks::resolve_id(db, tenant, parent_ref)
         .await
         .map_err(|_| {
-            ApiError::BadRequest(format!("parent {parent_ref:?} is not a task in this tenant"))
+            ApiError::BadRequest(format!(
+                "parent {parent_ref:?} is not a task in this tenant"
+            ))
         })?;
     let parent: Option<TaskItem> =
         sqlx::query_as("SELECT * FROM tasks WHERE id = $1 AND tenant_id = $2")
@@ -88,7 +90,9 @@ async fn validate_parent(
             .await
             .map_err(ApiError::from)?;
     let parent = parent.ok_or_else(|| {
-        ApiError::BadRequest(format!("parent {parent_ref:?} is not a task in this tenant"))
+        ApiError::BadRequest(format!(
+            "parent {parent_ref:?} is not a task in this tenant"
+        ))
     })?;
     // A private epic the caller cannot see is treated as not a task in this
     // tenant — parenting must not leak or confirm it (MAIN-76).
@@ -366,7 +370,10 @@ impl KanbanProvider for LocalBoardProvider {
             Some(None) => (true, None),
             Some(Some(p)) => (
                 true,
-                Some(validate_parent(&self.db, tenant, viewer, cur_board, p, effective_is_epic).await?),
+                Some(
+                    validate_parent(&self.db, tenant, viewer, cur_board, p, effective_is_epic)
+                        .await?,
+                ),
             ),
         };
         // An epic may not KEEP a parent: retyping to epic while it has one (and
