@@ -2492,6 +2492,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "nook-auth"
+version = "0.4.12"
+dependencies = [
+ "sha2 0.10.9",
+ "sqlx",
+ "uuid",
+]
+
+[[package]]
+name = "nook-chat"
+version = "0.4.12"
+dependencies = [
+ "anyhow",
+ "axum",
+ "axum-extra",
+ "chrono",
+ "dotenvy",
+ "nook-auth",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "thiserror 2.0.19",
+ "tokio",
+ "tower-http",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
 name = "nook-control"
 version = "0.4.12"
 dependencies = [
@@ -2517,6 +2547,7 @@ dependencies = [
  "hyper 1.10.1",
  "hyper-util",
  "lettre",
+ "nook-auth",
  "nook-dispatcher",
  "nook-mcp",
  "nook-proto",

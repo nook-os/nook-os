@@ -1,0 +1,14 @@
+[package]
+name = "nook-auth"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "nook_auth"
+path = "src/lib.rs"
+
+[dependencies]
+sqlx = { workspace = true }
+uuid = { workspace = true }
+sha2 = { workspace = true }

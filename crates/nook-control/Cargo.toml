@@ -17,6 +17,7 @@ nook-types = { workspace = true }
 nook-proto = { workspace = true }
 nook-dispatcher = { workspace = true }
 nook-mcp = { workspace = true }
+nook-auth = { workspace = true }
 tokio = { workspace = true }
 axum = { workspace = true }
 axum-extra = { workspace = true }

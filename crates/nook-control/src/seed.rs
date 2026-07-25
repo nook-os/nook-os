@@ -3,14 +3,14 @@
 
 use anyhow::Result;
 use nook_types::*;
-use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 
 use crate::config::Config;
 
-pub fn hash_token(token: &str) -> String {
-    format!("{:x}", Sha256::digest(token.as_bytes()))
-}
+/// The token hash lives in `nook-auth` now, so the control plane and chat hash
+/// identically (MAIN-48). Re-exported here because 28 call sites import it as
+/// `crate::seed::hash_token`.
+pub use nook_auth::hash_token;
 
 /// Built-in amber CRT theme: hacker-terminal mission control. Seeded with
 /// tenant NULL so every tenant sees it.
