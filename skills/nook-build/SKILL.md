@@ -74,6 +74,14 @@ Results already arrive in the order work should be taken: urgent first, tasks
 with **no** priority last, then oldest first. Take the first row. If the list
 is empty, say so and end the pass. Do not invent work.
 
+**Skip epics.** An `epic` (`"type": "epic"` in the row) is a tracker/roadmap
+parent, never a unit of work — it decomposes into buildable children and has no
+PR of its own. Skip any row whose `type` is `epic` and take the next; this is a
+safety net beyond `agent-ready`, in case one was approved by mistake. The other
+four types (`task`/`bug`/`story`/`chore`) are all buildable. If you ever file or
+update a task yourself, set an appropriate `type` (never `epic` for a unit of
+work you intend to build).
+
 Add `--board KEY` if the tenant has more than one board and this loop owns one
 of them.
 
