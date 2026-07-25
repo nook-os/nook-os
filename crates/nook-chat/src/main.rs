@@ -127,12 +127,53 @@ async fn livez() -> Json<Value> {
     Json(json!({ "status": "alive" }))
 }
 
-async fn me(caller: Caller) -> Json<Value> {
-    Json(json!({
+async fn me(State(state): State<AppState>, caller: Caller) -> Result<Json<Value>, ChatError> {
+    // The caller's tenant role, so the frontend can gate channel management to
+    // admins (MAIN-94 AC-5) — `null` for a caller with no `users` row.
+    let role = tenant_role(&state.db, caller.user_id, caller.tenant_id).await?;
+    Ok(Json(json!({
         "user_id": caller.user_id,
         "tenant_id": caller.tenant_id,
         "cookie_session": caller.cookie_session,
-    }))
+        "role": role,
+    })))
+}
+
+/// The caller's role in their tenant, read from the shared `public.users`
+/// (reachable through the `chat,public` search_path). `None` when there is no
+/// membership row. This is the ONLY role source chat uses (NG-5): the existing
+/// per-tenant `users.role`, not a new permission catalog.
+pub(crate) async fn tenant_role(
+    db: &PgPool,
+    user: Uuid,
+    tenant: Uuid,
+) -> Result<Option<String>, ChatError> {
+    let row: Option<(String,)> =
+        sqlx::query_as("SELECT role FROM users WHERE id = $1 AND tenant_id = $2")
+            .bind(user)
+            .bind(tenant)
+            .fetch_optional(db)
+            .await
+            .map_err(|_| ChatError::Internal)?;
+    Ok(row.map(|(r,)| r))
+}
+
+/// Owner and admin manage channels; everyone else is a member who can read and
+/// post but not create/rename/archive. Mirrors the control plane's
+/// `require_tenant_admin` (MAIN-94 AC-5, NG-5).
+pub(crate) fn role_is_admin(role: Option<&str>) -> bool {
+    matches!(role, Some("owner") | Some("admin"))
+}
+
+/// Refuse a caller who is not a tenant owner/admin with a 403 — the gate on
+/// every channel-management handler (MAIN-94 AC-5).
+pub(crate) async fn require_admin(db: &PgPool, caller: &Caller) -> Result<(), ChatError> {
+    let role = tenant_role(db, caller.user_id, caller.tenant_id).await?;
+    if role_is_admin(role.as_deref()) {
+        Ok(())
+    } else {
+        Err(ChatError::Forbidden)
+    }
 }
 
 /// A validated caller, resolved through `nook-auth` exactly as the control plane
@@ -241,4 +282,21 @@ async fn shutdown_signal() {
         _ = int.recv() => {},
     }
     tracing::info!("shutdown signal received");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::role_is_admin;
+
+    /// Only owner/admin manage channels; a member or an unknown caller does not
+    /// (MAIN-94 AC-5). Getting this backwards would silently open management to
+    /// everyone or lock it from the admins.
+    #[test]
+    fn admin_roles_are_owner_and_admin_only() {
+        assert!(role_is_admin(Some("owner")));
+        assert!(role_is_admin(Some("admin")));
+        assert!(!role_is_admin(Some("member")));
+        assert!(!role_is_admin(Some("")));
+        assert!(!role_is_admin(None));
+    }
 }

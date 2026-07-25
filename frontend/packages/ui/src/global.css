@@ -3466,6 +3466,7 @@ a.toast-main:hover .toast-title { text-decoration: underline; }
   height: var(--nook-titlebar-h);
   display: flex;
   align-items: center;
+  justify-content: space-between;
   padding: 0 10px;
   font-size: 11px;
   letter-spacing: 0.08em;
@@ -3473,6 +3474,55 @@ a.toast-main:hover .toast-title { text-decoration: underline; }
   color: var(--nook-fg-dim);
   border-bottom: 1px solid var(--nook-border);
 }
+/* The gear that opens the channel-management modal (MAIN-94), admin-only. */
+.chat-channels-manage {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 3px;
+  border: none;
+  background: transparent;
+  color: var(--nook-fg-dim);
+  cursor: pointer;
+  border-radius: var(--nook-radius);
+}
+.chat-channels-manage:hover {
+  color: var(--nook-accent);
+  background: var(--nook-bg-raised);
+}
+
+/* Channel-management modal (MAIN-94), Discord-style over the amber-CRT theme. */
+.modal.chan-manage {
+  width: min(460px, calc(100vw - 32px));
+}
+.modal.chan-manage .modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.chan-manage-create { display: flex; gap: 8px; }
+.chan-manage-create .chan-input { flex: 1; }
+.chan-manage-error { color: var(--nook-err); font-size: 12px; }
+.chan-manage-list,
+.chan-manage-archived { display: flex; flex-direction: column; gap: 4px; }
+.chan-manage-subhdr {
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  margin-top: 6px;
+  padding-top: 8px;
+  border-top: 1px solid var(--nook-border);
+}
+.chan-manage-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 6px;
+  border: 1px solid var(--nook-border);
+  border-radius: var(--nook-radius);
+  background: var(--nook-bg-panel);
+}
+.chan-manage-row.archived { opacity: 0.7; }
+.chan-manage-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .chat-channels-empty {
   padding: 10px;
   color: var(--nook-fg-dim);

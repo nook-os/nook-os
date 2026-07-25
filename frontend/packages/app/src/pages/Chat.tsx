@@ -10,17 +10,26 @@ import {
   useQuery,
   useQueryClient,
 } from "@tanstack/react-query";
+import { Settings } from "lucide-react";
 import {
   api,
   channelHistory,
   connectChatSocket,
   listChannels,
+  me as chatMe,
   postMessage,
   type ChatChannel,
   type ChatMessage,
 } from "@nookos/api";
 import { ChatView } from "@nookos/ui";
 import { buildChatMessages, type PendingMessage } from "./chatMessages";
+import { ChannelManager } from "./ChannelManager";
+
+/** Owner and admin manage channels; everyone else reads and posts. Mirrors the
+ *  chat service's gate, so the UI never shows a control the server would 403. */
+function isAdminRole(role: string | null | undefined): boolean {
+  return role === "owner" || role === "admin";
+}
 
 const PAGE_SIZE = 50;
 
@@ -33,13 +42,22 @@ export function ChatPage() {
   });
   const meId = me?.user.id;
 
+  // The caller's tenant role, from chat's own /api/me, gates the management
+  // affordances (AC-5). A non-admin simply never sees them.
+  const { data: chatIdentity } = useQuery({
+    queryKey: ["chat", "me"],
+    queryFn: chatMe,
+  });
+  const canManage = isAdminRole(chatIdentity?.role);
+
   const channelsQuery = useQuery({
     queryKey: ["chat", "channels"],
-    queryFn: listChannels,
+    queryFn: () => listChannels(),
   });
   const channels = channelsQuery.data ?? [];
 
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [managing, setManaging] = useState(false);
 
   // Auto-select the first channel once the list loads, but never fight a user's
   // choice or point at a channel that has since vanished.
@@ -147,7 +165,20 @@ export function ChatPage() {
   return (
     <div className="chat-page">
       <aside className="chat-channels" aria-label="Channels">
-        <div className="chat-channels-head">Channels</div>
+        <div className="chat-channels-head">
+          <span>Channels</span>
+          {canManage && (
+            <button
+              type="button"
+              className="chat-channels-manage"
+              onClick={() => setManaging(true)}
+              title="manage channels"
+              aria-label="manage channels"
+            >
+              <Settings size={13} />
+            </button>
+          )}
+        </div>
         {channelsQuery.isLoading ? (
           <div className="chat-channels-empty">Loading…</div>
         ) : channels.length === 0 ? (
@@ -189,6 +220,7 @@ export function ChatPage() {
           onRetry={onRetry}
         />
       </section>
+      {managing && canManage && <ChannelManager onClose={() => setManaging(false)} />}
     </div>
   );
 }
