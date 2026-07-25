@@ -467,6 +467,63 @@ impl NookBackend for McpBackend {
         Ok(crate::services::taskwork::submit_pr(&self.state, tenant, id, pr_url).await?)
     }
 
+    async fn set_task_description(
+        &self,
+        task: String,
+        description: String,
+    ) -> anyhow::Result<TaskItem> {
+        use crate::services::kanban::{KanbanProvider, LocalBoardProvider, ProviderError};
+        let tenant = self.tenant().await?;
+        let id = crate::services::tasks::resolve_id(&self.state.db, tenant, &task).await?;
+        let provider = LocalBoardProvider {
+            db: self.state.db.clone(),
+        };
+        // Read-guard-retry: base the write on the version just read, and on a
+        // concurrent edit re-read and try again a bounded number of times, so an
+        // agent's body edit never silently clobbers a human's change (AC-3).
+        for _ in 0..5 {
+            let cur: Option<TaskItem> =
+                sqlx::query_as("SELECT * FROM tasks WHERE id = $1 AND tenant_id = $2")
+                    .bind(id)
+                    .bind(tenant)
+                    .fetch_optional(&self.state.db)
+                    .await?;
+            let Some(cur) = cur else {
+                anyhow::bail!("no such task");
+            };
+            let req = UpdateTaskRequest {
+                title: None,
+                description: Some(description.clone()),
+                column_id: None,
+                column_type: None,
+                position: None,
+                assignee_user_id: None,
+                priority: None,
+                workspace_id: None,
+                expected_updated_at: Some(cur.updated_at),
+            };
+            match provider.update_task(tenant, id, req).await {
+                Ok(t) => {
+                    self.state
+                        .registry
+                        .publish(tenant, nook_proto::UiEvent::TaskChanged { task_id: id });
+                    return Ok(crate::services::tasks::enrich_one(
+                        &self.state.db,
+                        &self.state.cfg.public_base_url,
+                        t,
+                    )
+                    .await?);
+                }
+                Err(ProviderError::Api(crate::error::ApiError::Conflict(_))) => continue,
+                Err(ProviderError::Api(e)) => anyhow::bail!("{e}"),
+                Err(e) => anyhow::bail!("{e}"),
+            }
+        }
+        anyhow::bail!(
+            "the task body kept changing under concurrent edits — read it again and retry"
+        )
+    }
+
     // ── The agent loop ──────────────────────────────────────────────────────
     //
     // These delegate to the same services the HTTP routes use rather than

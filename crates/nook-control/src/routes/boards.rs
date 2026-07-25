@@ -175,7 +175,12 @@ pub async fn create_task(
     operation_id = "update_task",
     params(("id" = String, Path,)),
     request_body = UpdateTaskRequest,
-    responses((status = 200, body = TaskItem), (status = 404)))]
+    responses(
+        (status = 200, body = TaskItem),
+        (status = 404),
+        // Optimistic-concurrency conflict: the caller sent `expected_updated_at`
+        // and the task changed since; body carries the current task (MAIN-36).
+        (status = 409, body = TaskItem)))]
 pub async fn update_task(
     State(state): State<AppState>,
     auth: AuthCtx,

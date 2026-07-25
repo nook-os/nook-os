@@ -104,6 +104,14 @@ pub trait NookBackend: Send + Sync + 'static {
         body_md: String,
         author_name: Option<String>,
     ) -> anyhow::Result<serde_json::Value>;
+    /// Safely replace a task's description. Reads the current version and writes
+    /// with an optimistic-concurrency guard, retrying on a concurrent edit — so
+    /// a body-edit from an agent never silently clobbers a human's change.
+    async fn set_task_description(
+        &self,
+        task: String,
+        description: String,
+    ) -> anyhow::Result<TaskItem>;
     async fn add_label(&self, task: String, label: String) -> anyhow::Result<serde_json::Value>;
     async fn remove_label(&self, task: String, label: String) -> anyhow::Result<serde_json::Value>;
     async fn set_priority(&self, task: String, priority: i32) -> anyhow::Result<TaskItem>;
@@ -251,6 +259,15 @@ pub struct MoveTaskParams {
 pub struct TaskRefParams {
     /// Human key (NOOK-42) or uuid.
     pub task: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct SetDescriptionParams {
+    /// Human key (NOOK-42) or uuid.
+    pub task: String,
+    /// The new description (Markdown). Replaces the whole body; read it first
+    /// with `get_task` and edit the text you want to change.
+    pub description: String,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -540,6 +557,22 @@ impl NookMcp {
             &self
                 .backend
                 .move_task(p.task_id, p.column)
+                .await
+                .map_err(backend_err)?,
+        )
+    }
+
+    #[tool(
+        description = "Safely replace a task's description (Markdown). Reads the current version and writes with an optimistic-concurrency guard, retrying on a concurrent edit, so it never clobbers someone else's change. Read the body first with get_task."
+    )]
+    async fn set_task_description(
+        &self,
+        Parameters(p): Parameters<SetDescriptionParams>,
+    ) -> Result<CallToolResult, McpError> {
+        to_result(
+            &self
+                .backend
+                .set_task_description(p.task, p.description)
                 .await
                 .map_err(backend_err)?,
         )

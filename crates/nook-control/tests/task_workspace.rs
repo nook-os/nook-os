@@ -31,6 +31,7 @@ fn no_change() -> UpdateTaskRequest {
         assignee_user_id: None,
         priority: None,
         workspace_id: None,
+        expected_updated_at: None,
     }
 }
 
@@ -205,4 +206,143 @@ fn the_three_json_cases_stay_distinct() {
     let set: UpdateTaskRequest =
         serde_json::from_str(&format!(r#"{{"workspace_id":"{id}"}}"#)).unwrap();
     assert_eq!(set.workspace_id, Some(Some(WorkspaceId(id))));
+}
+
+// ── MAIN-36: optimistic concurrency on the task body ────────────────────────
+
+/// A guarded update with the CURRENT version applies; a stale version is a 409
+/// (ApiError::Conflict) that leaves the row untouched; no version applies
+/// (backward compatible).
+#[tokio::test]
+async fn expected_updated_at_guards_the_body() {
+    use nook_control::error::ApiError;
+    use nook_control::services::kanban::ProviderError;
+
+    let Some(db) = test_pool().await else { return };
+    let (tenant, board, _a, _b) = fixture(&db).await;
+    let provider = LocalBoardProvider { db: db.clone() };
+    let task = new_task(&provider, tenant, board, None).await;
+
+    // Matching version → applies.
+    let ok = provider
+        .update_task(
+            tenant,
+            task.id,
+            UpdateTaskRequest {
+                description: Some("first edit".into()),
+                expected_updated_at: Some(task.updated_at),
+                ..no_change()
+            },
+        )
+        .await
+        .expect("a matching version applies");
+    assert_eq!(ok.description.as_deref(), Some("first edit"));
+    assert!(ok.updated_at >= task.updated_at, "updated_at advances");
+
+    // The ORIGINAL version is now stale → 409, and the row is left unchanged.
+    let err = provider
+        .update_task(
+            tenant,
+            task.id,
+            UpdateTaskRequest {
+                description: Some("clobber".into()),
+                expected_updated_at: Some(task.updated_at), // stale
+                ..no_change()
+            },
+        )
+        .await
+        .expect_err("a stale version conflicts");
+    match err {
+        ProviderError::Api(ApiError::Conflict(body)) => {
+            // The current task is carried in the conflict body.
+            assert!(
+                body.contains("first edit"),
+                "conflict carries the current task"
+            );
+        }
+        other => panic!("expected 409 Conflict, got {other:?}"),
+    }
+    let after = provider
+        .update_task(tenant, task.id, no_change())
+        .await
+        .expect("still there");
+    assert_eq!(
+        after.description.as_deref(),
+        Some("first edit"),
+        "a rejected update changes nothing"
+    );
+
+    // No precondition → applies (unguarded PATCH still works — moves etc.).
+    let unguarded = provider
+        .update_task(
+            tenant,
+            task.id,
+            UpdateTaskRequest {
+                description: Some("unguarded".into()),
+                ..no_change()
+            },
+        )
+        .await
+        .expect("an unguarded update applies");
+    assert_eq!(unguarded.description.as_deref(), Some("unguarded"));
+
+    // A guarded update to a MISSING task is 404, not 409.
+    let missing = provider
+        .update_task(
+            tenant,
+            nook_types::TaskId(uuid::Uuid::now_v7()),
+            UpdateTaskRequest {
+                description: Some("x".into()),
+                expected_updated_at: Some(task.updated_at),
+                ..no_change()
+            },
+        )
+        .await
+        .expect_err("a missing task errors");
+    assert!(
+        matches!(missing, ProviderError::Api(ApiError::NotFound)),
+        "a guarded update to a missing task is 404, not 409"
+    );
+}
+
+/// Two edits from the SAME base version: the first wins, the second gets 409.
+#[tokio::test]
+async fn two_edits_from_one_base_version_the_second_conflicts() {
+    use nook_control::error::ApiError;
+    use nook_control::services::kanban::ProviderError;
+
+    let Some(db) = test_pool().await else { return };
+    let (tenant, board, _a, _b) = fixture(&db).await;
+    let provider = LocalBoardProvider { db: db.clone() };
+    let task = new_task(&provider, tenant, board, None).await;
+    let base = task.updated_at;
+
+    let first = provider
+        .update_task(
+            tenant,
+            task.id,
+            UpdateTaskRequest {
+                description: Some("A wins".into()),
+                expected_updated_at: Some(base),
+                ..no_change()
+            },
+        )
+        .await;
+    let second = provider
+        .update_task(
+            tenant,
+            task.id,
+            UpdateTaskRequest {
+                description: Some("B loses".into()),
+                expected_updated_at: Some(base),
+                ..no_change()
+            },
+        )
+        .await;
+
+    assert!(first.is_ok(), "the first edit from the base version wins");
+    assert!(
+        matches!(second, Err(ProviderError::Api(ApiError::Conflict(_)))),
+        "the second edit from the same base version conflicts (409)"
+    );
 }
