@@ -174,10 +174,17 @@ async fn the_list_filter_ors_within_types_and_is_off_by_default() {
     assert_eq!(epics.len(), 1);
     assert_eq!(epics[0].type_, "epic");
 
-    // No type filter → all four (unchanged behaviour, AC-5).
+    // No type filter → the three buildable types; the epic is excluded by
+    // default now (MAIN-80 AC-2), and returns only with an explicit type=epic.
     let all = filtered(vec![]).await;
-    assert_eq!(all.len(), 4);
-    assert!(all
-        .iter()
-        .all(|t| ["task", "bug", "epic", "chore"].contains(&t.type_.as_str())));
+    assert_eq!(all.len(), 3, "epic is excluded from the default pick");
+    assert!(
+        all.iter()
+            .all(|t| ["task", "bug", "chore"].contains(&t.type_.as_str())),
+        "no epic in the default pick"
+    );
+    assert!(
+        !all.iter().any(|t| t.type_ == "epic"),
+        "the epic is only returned when explicitly filtered for"
+    );
 }

@@ -103,6 +103,11 @@ enum Command {
         /// Ignore the session's workspace and list across the whole tenant.
         #[arg(long = "all-workspaces")]
         all_workspaces: bool,
+        /// Include tasks in the backlog (Triage). Excluded by default: the
+        /// backlog is a human refinement space the loop never draws from, and
+        /// epics are excluded too — both are enforced server-side.
+        #[arg(long)]
+        backlog: bool,
         #[arg(long)]
         json: bool,
     },
@@ -417,6 +422,7 @@ async fn main() -> Result<()> {
             unblocked,
             workspace,
             all_workspaces,
+            backlog,
             json,
         } => {
             cli::tasks(
@@ -428,6 +434,7 @@ async fn main() -> Result<()> {
                 unblocked,
                 workspace.as_deref(),
                 all_workspaces,
+                backlog,
                 json,
             )
             .await

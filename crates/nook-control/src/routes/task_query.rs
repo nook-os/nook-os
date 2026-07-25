@@ -58,6 +58,10 @@ pub struct TaskFilter {
     /// Include archived tasks. Default (absent/false) excludes them, so the
     /// agent pick can never claim archived work (MAIN-15 AC-2).
     pub archived: Option<bool>,
+    /// Include tasks in a `backlog`-type column. Default (absent/false) excludes
+    /// them: the backlog is a human refinement space the loop never draws from
+    /// (MAIN-80). Set `backlog=true` to see them. Independent of labels.
+    pub backlog: Option<bool>,
     pub limit: Option<i64>,
     /// Opaque: the `created_at` of the last row of the previous page.
     pub cursor: Option<chrono::DateTime<chrono::Utc>>,
@@ -103,6 +107,7 @@ impl TaskFilter {
                 "parent" => f.parent = Some(v),
                 "is_blocked" => f.is_blocked = Some(flag(&k, &v)?),
                 "archived" => f.archived = Some(flag(&k, &v)?),
+                "backlog" => f.backlog = Some(flag(&k, &v)?),
                 "workspace" => {
                     f.workspace = Some(v.parse().map_err(|_| {
                         ApiError::BadRequest(format!("workspace must be a uuid, got {v:?}"))
@@ -274,9 +279,13 @@ pub async fn query_rows(
                     t.title ILIKE $14
                  OR t.description ILIKE $14
                  OR (b.key || '-' || t.number::text) ILIKE $14))
-          -- issue-type filter (MAIN-59): empty = no filter; otherwise the type
-          -- must be one of the requested ones (OR within types)
-          AND (cardinality($15::text[]) = 0 OR t.type = ANY($15))
+          -- issue-type filter (MAIN-59) + epic exclusion (MAIN-80): with an
+          -- explicit type filter the requested types pass (so `type=epic`
+          -- surfaces epics on purpose); with no type filter, everything EXCEPT
+          -- `epic` passes — an epic is a container, never a unit of work the
+          -- loop should pick. Labels (incl. agent-ready) have no bearing.
+          AND (t.type = ANY($15)
+               OR (cardinality($15::text[]) = 0 AND t.type <> 'epic'))
           -- per-task visibility (MAIN-76): a `private` card is seen only by its
           -- creator or assignee; `team`/`org` are tenant-visible. Same predicate
           -- an agent's claim path enforces, so the list never shows work it
@@ -288,6 +297,12 @@ pub async fn query_rows(
           -- BOTH this and the visibility predicate apply, so an epic's children
           -- are still filtered to what the viewer may see.
           AND ($17::uuid IS NULL OR t.parent_task_id = $17)
+          -- backlog exclusion (MAIN-80): a `backlog`-type column is the human
+          -- refinement space; the loop never draws from it unless `backlog=true`
+          -- ($18). AC-3: a `parent=` query (an epic's children, which span
+          -- backlog and board — $17 present) LIFTS this exclusion, so listing an
+          -- epic's tickets never silently drops the ones still in triage.
+          AND ($18::bool OR $17::uuid IS NOT NULL OR c.type <> 'backlog')
         -- priority 0 means "unset", which sorts last rather than first
         ORDER BY CASE WHEN t.priority = 0 THEN 5 ELSE t.priority END, t.created_at
         LIMIT $12
@@ -313,6 +328,8 @@ pub async fn query_rows(
     .bind(viewer)
     // $17: the epic-children filter (None disables it via the IS NULL guard).
     .bind(parent_id)
+    // $18: include backlog-column tasks (default false, MAIN-80).
+    .bind(f.backlog.unwrap_or(false))
     .fetch_all(db)
     .await?;
 
@@ -353,7 +370,9 @@ pub async fn claim_inner(
 
     // Visibility guard (MAIN-76 AC-9): a private card is claimable only by its
     // owner (creator or assignee). Refused as NotFound — consistent with the
-    // read filter, and so a non-owner agent cannot claim it even by id.
+    // read filter, and so a non-owner agent cannot claim it even by id. Checked
+    // first so a non-owner cannot even distinguish a backlog/epic refusal from
+    // "does not exist".
     let existing: TaskItem = sqlx::query_as("SELECT * FROM tasks WHERE id = $1 AND tenant_id = $2")
         .bind(id)
         .bind(tenant)
@@ -362,6 +381,28 @@ pub async fn claim_inner(
         .ok_or(ApiError::NotFound)?;
     if !tasks::visible_to(&existing, claimant) {
         return Err(ApiError::NotFound);
+    }
+
+    // Backlog and epic tasks are never claimable (MAIN-80 AC-4), refused BEFORE
+    // the assignee UPDATE with distinct 400s so a caller can tell "never
+    // claimable" apart from the 409 lost-claim race. The backlog is a human
+    // refinement space; an epic is a container, not a unit of work. The task
+    // row is already loaded above for the visibility guard (its `type_` is the
+    // epic test); only the column's type needs a lookup.
+    let column_kind: Option<(String,)> =
+        sqlx::query_as("SELECT c.type FROM board_columns c WHERE c.id = $1")
+            .bind(existing.column_id)
+            .fetch_optional(&state.db)
+            .await?;
+    if column_kind.as_ref().is_some_and(|(k,)| k == "backlog") {
+        return Err(ApiError::BadRequest(
+            "task is in the backlog — send it to the board first".into(),
+        ));
+    }
+    if existing.type_ == "epic" {
+        return Err(ApiError::BadRequest(
+            "epics are containers and cannot be claimed".into(),
+        ));
     }
 
     // Resolving the target column is a separate read, but it cannot race: a

@@ -3767,6 +3767,15 @@
             }
           },
           {
+            "name": "backlog",
+            "in": "query",
+            "description": "Include tasks in a `backlog`-type column. Default (absent/false) excludes\nthem: the backlog is a human refinement space the loop never draws from\n(MAIN-80). Set `backlog=true` to see them. Independent of labels.",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
             "name": "limit",
             "in": "query",
             "required": false,

@@ -568,6 +568,8 @@ impl NookBackend for McpBackend {
                 q: None,
                 // Archived work is off the board and never pickable over MCP either.
                 archived: None,
+                // Backlog excluded by default here too (MAIN-80); opt in via the tool.
+                backlog: f.backlog,
                 limit: f.limit,
                 cursor: None,
             },
