@@ -31,6 +31,11 @@ struct Cli {
     command: Command,
 }
 
+// The `K8s` variant carries the wide `k8s init` flag set (host/OIDC/mail/…), so
+// it dwarfs the others. The lint guards against a big variant bloating a
+// frequently-moved enum; this one is parsed once at startup and never copied in
+// a hot path, so boxing it would only add an allocation and fight clap's derive.
+#[allow(clippy::large_enum_variant)]
 #[derive(Subcommand)]
 enum Command {
     /// Interactive first-time setup: server, token, workspace root, SSH key
@@ -582,8 +587,37 @@ async fn main() -> Result<()> {
             agent_url,
             agent_tls_secret,
             chart_version,
+            advanced,
+            app_env,
+            log_level,
+            oidc,
+            oidc_issuer,
+            oidc_client_id,
+            oidc_client_secret,
+            oidc_scopes,
+            oidc_device_client_id,
+            oidc_device_authorization_endpoint,
+            mail_provider,
+            mail_from,
+            mail_token,
+            mail_send_enabled,
+            mail_notifications_enabled,
+            mail_max_per_month,
+            mail_max_per_day,
+            mail_smtp_host,
+            mail_smtp_port,
+            mail_smtp_tls,
+            mail_smtp_username,
+            mail_postmark_api_url,
         }) => {
             let home = std::env::var("HOME").context("HOME is not set")?;
+            // Any OIDC/mail field implies its branch is on, mirroring how an agent
+            // address implies --agent: nobody passes --oidc-issuer without meaning it.
+            let oidc = oidc
+                || oidc_issuer.is_some()
+                || oidc_client_id.is_some()
+                || oidc_client_secret.is_some()
+                || oidc_device_client_id.is_some();
             wizard::k8s::init(wizard::k8s::InitOptions {
                 release,
                 namespace,
@@ -598,6 +632,28 @@ async fn main() -> Result<()> {
                 agent_url,
                 agent_tls_secret,
                 chart_version,
+                advanced,
+                app_env,
+                log_level,
+                oidc,
+                oidc_issuer,
+                oidc_client_id,
+                oidc_client_secret,
+                oidc_scopes,
+                oidc_device_client_id,
+                oidc_device_authorization_endpoint,
+                mail_provider,
+                mail_from,
+                mail_token,
+                mail_send_enabled,
+                mail_notifications_enabled,
+                mail_max_per_month,
+                mail_max_per_day,
+                mail_smtp_host,
+                mail_smtp_port,
+                mail_smtp_tls,
+                mail_smtp_username,
+                mail_postmark_api_url,
                 // The chart's version equals the release tag WITHOUT the `v`
                 // (the release workflow stamps it that way), so the bare crate
                 // version is the right default pin — not the v-prefixed image tag.
@@ -850,6 +906,77 @@ enum K8sCommand {
         /// Defaults to this binary's build version.
         #[arg(long)]
         chart_version: Option<String>,
+        /// Take the Advanced path on every branch (OIDC, mail, logging): prompt
+        /// for every field. Without a terminal, this is what reproduces the
+        /// full interactive result from flags alone.
+        #[arg(long)]
+        advanced: bool,
+        /// APP_ENV: "dev" (default, dev-login hatch ON) or "production" (OFF).
+        #[arg(long)]
+        app_env: Option<String>,
+        /// RUST_LOG: a bare level (error/warn/info/debug/trace) or a full
+        /// EnvFilter directive. Default: info.
+        #[arg(long)]
+        log_level: Option<String>,
+        /// Configure OIDC single sign-on. Implied by any --oidc-* flag below.
+        #[arg(long)]
+        oidc: bool,
+        /// OIDC_ISSUER_URL. Its /.well-known/openid-configuration is probed.
+        #[arg(long)]
+        oidc_issuer: Option<String>,
+        /// OIDC_CLIENT_ID (the confidential client).
+        #[arg(long)]
+        oidc_client_id: Option<String>,
+        /// OIDC client secret → the printed secret command only, never written.
+        #[arg(long)]
+        oidc_client_secret: Option<String>,
+        /// OIDC_SCOPES. Default: "openid profile email".
+        #[arg(long)]
+        oidc_scopes: Option<String>,
+        /// OIDC_DEVICE_CLIENT_ID (the public client for device sign-in).
+        #[arg(long)]
+        oidc_device_client_id: Option<String>,
+        /// OIDC_DEVICE_AUTHORIZATION_ENDPOINT — only needed when discovery does
+        /// not advertise one. Emitted via controlPlane.extraEnv.
+        #[arg(long)]
+        oidc_device_authorization_endpoint: Option<String>,
+        /// MAIL_PROVIDER: "capture" (default, delivers nothing), "smtp", or
+        /// "postmark". smtp/postmark take the Advanced mail path.
+        #[arg(long)]
+        mail_provider: Option<String>,
+        /// MAIL_FROM address for outbound mail.
+        #[arg(long)]
+        mail_from: Option<String>,
+        /// SMTP password or Postmark token → the printed secret command only.
+        #[arg(long)]
+        mail_token: Option<String>,
+        /// MAIL_SEND_ENABLED: the master send switch.
+        #[arg(long)]
+        mail_send_enabled: bool,
+        /// MAIL_NOTIFICATIONS_ENABLED: also send notification emails.
+        #[arg(long)]
+        mail_notifications_enabled: bool,
+        /// MAIL_MAX_PER_MONTH cap on real sends (blank = uncapped).
+        #[arg(long)]
+        mail_max_per_month: Option<String>,
+        /// MAIL_MAX_PER_DAY cap on real sends (blank = uncapped).
+        #[arg(long)]
+        mail_max_per_day: Option<String>,
+        /// SMTP_HOST (provider=smtp).
+        #[arg(long)]
+        mail_smtp_host: Option<String>,
+        /// SMTP_PORT (provider=smtp).
+        #[arg(long)]
+        mail_smtp_port: Option<String>,
+        /// SMTP_TLS: none/starttls/implicit (provider=smtp).
+        #[arg(long)]
+        mail_smtp_tls: Option<String>,
+        /// SMTP_USERNAME (provider=smtp).
+        #[arg(long)]
+        mail_smtp_username: Option<String>,
+        /// POSTMARK_API_URL override (provider=postmark).
+        #[arg(long)]
+        mail_postmark_api_url: Option<String>,
     },
 }
 
