@@ -3,6 +3,7 @@
 import createClient from "openapi-fetch";
 import type { paths, components } from "./generated/schema";
 import { apiUrl, authHeaders, isRemote, openSocket } from "./endpoint";
+import { reportWriteFailure } from "./write-failure";
 
 export type Schemas = components["schemas"];
 export type Tenant = Schemas["Tenant"];
@@ -34,6 +35,13 @@ export type OperatorAuditPage = Schemas["OperatorAuditPage"];
 export type OperatorTenant = Schemas["OperatorTenant"];
 export type OperatorNode = Schemas["OperatorNode"];
 export type BindingRow = Schemas["BindingRow"];
+// Team chat (MAIN-49/50). The chat service is a separate origin behind the
+// `/chat` proxy, so its calls go through `./chat`, but its types are Rust-owned
+// here like everything else.
+export type ChatChannel = Schemas["ChatChannel"];
+export type ChatMessage = Schemas["ChatMessage"];
+export type ChatMessagePage = Schemas["ChatMessagePage"];
+export type ChatServerMessage = Schemas["ChatServerMessage"];
 export type UserToken = Schemas["UserToken"];
 export type VaultPasskey = Schemas["VaultPasskey"];
 export type TenantMemberItem = Schemas["TenantMemberItem"];
@@ -41,6 +49,8 @@ export type TenantMemberItem = Schemas["TenantMemberItem"];
 export type { paths };
 export * from "./ws";
 export * from "./endpoint";
+export * from "./write-failure";
+export * from "./chat";
 
 // Same-origin by default: dev (Vite proxies /api) and production (the control
 // plane fronts the app) both work with no configuration.
@@ -101,36 +111,6 @@ export function apiSocket(path: string): WebSocket {
   return openSocket(path);
 }
 
-/** A write that did not happen, and why — as much as we can say. */
-export interface WriteFailure {
-  method: string;
-  path: string;
-  /** Absent when the request never got a reply at all. */
-  status?: number;
-  message: string;
-}
-
-let onWriteFailure: ((f: WriteFailure) => void) | null = null;
-
-/**
- * Be told when a write fails, so something can say so.
- *
- * `openapi-fetch` returns errors rather than throwing, and almost every call
- * site here reads `data` and ignores `error`. That is survivable one call at a
- * time and disastrous in aggregate: when a bug stopped the desktop app writing
- * anything at all, not one screen said so — a total write outage looked like
- * buttons that did nothing. Reporting centrally means a new call site cannot
- * forget, because it never had to remember.
- *
- * Reads are left alone: those have a query layer with error states, whereas a
- * failed write is a thing the person believes they just did.
- */
-export function setWriteFailureHandler(
-  fn: ((f: WriteFailure) => void) | null,
-): void {
-  onWriteFailure = fn;
-}
-
 function isWrite(method: string): boolean {
   return method !== "GET" && method !== "HEAD";
 }
@@ -145,10 +125,7 @@ function pathOf(url: string): string {
 
 api.use({
   async onResponse({ request, response }) {
-    if (response.ok || !isWrite(request.method) || !onWriteFailure) return;
-    // 401 is the session expiring; the auth gate already handles that and a
-    // toast on top of being bounced to sign in is just noise.
-    if (response.status === 401) return;
+    if (response.ok || !isWrite(request.method)) return;
     let message = `${response.status} ${response.statusText}`.trim();
     try {
       const text = await response.clone().text();
@@ -160,7 +137,7 @@ api.use({
       // A body we cannot read is not worth failing over; the status still says
       // something useful.
     }
-    onWriteFailure({
+    reportWriteFailure({
       method: request.method,
       path: pathOf(request.url),
       status: response.status,
@@ -171,8 +148,8 @@ api.use({
     // The case that matters most, and the one a status check would miss: the
     // request never left. That is what a WebKit webview does when handed a
     // body it cannot upload, and it is what being offline looks like.
-    if (!isWrite(request.method) || !onWriteFailure) return;
-    onWriteFailure({
+    if (!isWrite(request.method)) return;
+    reportWriteFailure({
       method: request.method,
       path: pathOf(request.url),
       message: error instanceof Error ? error.message : String(error),

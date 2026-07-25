@@ -42,6 +42,7 @@ const SECTIONS = [
   { to: "/workspaces", label: "Workspaces", icon: FolderGit2 },
   { to: "/sessions", label: "Sessions", icon: SquareTerminal },
   { to: "/board", label: "Board", icon: KanbanSquare },
+  { to: "/chat", label: "Chat", icon: MessageSquare },
   { to: "/activity", label: "Activity", icon: Activity },
   { to: "/nodes", label: "Nodes", icon: Server },
 ];

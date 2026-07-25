@@ -14,6 +14,7 @@ import { startLive } from "./live";
 import { AcceptInvitePage } from "./pages/AcceptInvite";
 import { ActivityPage } from "./pages/Activity";
 import { BoardPage } from "./pages/Board";
+import { ChatPage } from "./pages/Chat";
 import { Dashboard } from "./pages/Dashboard";
 import { DocsPage } from "./pages/Docs";
 import { FeedbackPage } from "./pages/Feedback";
@@ -145,6 +146,7 @@ function AuthGate() {
         <Route path="sessions" element={<SessionsPage />} />
         <Route path="sessions/:id" element={<SessionPage />} />
         <Route path="board" element={<BoardPage />} />
+        <Route path="chat" element={<ChatPage />} />
         <Route path="accept" element={<AcceptInvitePage />} />
         <Route path="operator" element={<OperatorPage />} />
         <Route path="activity" element={<ActivityPage />} />
