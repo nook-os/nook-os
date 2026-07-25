@@ -7520,6 +7520,12 @@ export interface operations {
                  *     agent pick can never claim archived work (MAIN-15 AC-2).
                  */
                 archived?: boolean;
+                /**
+                 * @description Include tasks in a `backlog`-type column. Default (absent/false) excludes
+                 *     them: the backlog is a human refinement space the loop never draws from
+                 *     (MAIN-80). Set `backlog=true` to see them. Independent of labels.
+                 */
+                backlog?: boolean;
                 limit?: number;
                 /** @description Opaque: the `created_at` of the last row of the previous page. */
                 cursor?: string;

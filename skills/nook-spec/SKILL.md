@@ -147,6 +147,13 @@ no `key` means the POST silently no-op'd — almost always the board key was use
 in the path instead of the UUID.** Later skills use that key rather than
 guessing it. Confirm with `nook task NOOK-42`.
 
+**A filed ticket lands in the backlog** (Triage — the board's first column), and
+the loop cannot pick from the backlog: it stays a human refinement space until
+someone sends it to the board (MAIN-80). So `nook tasks` (the default pick) will
+NOT show a ticket you just filed — list your backlog with `nook tasks --backlog`.
+A ticket is only buildable once a human moves it out of Triage AND applies
+`agent-ready`.
+
 If the user gave a priority, set it — urgent `1`, high `2`, medium `3`,
 low `4`, none `0`. Unset sorts *last*, not first.
 

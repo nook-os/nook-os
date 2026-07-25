@@ -86,13 +86,18 @@ Results already arrive in the order work should be taken: urgent first, tasks
 with **no** priority last, then oldest first. Take the first row. If the list
 is empty, say so and end the pass. Do not invent work.
 
-**Skip epics.** An `epic` (`"type": "epic"` in the row) is a tracker/roadmap
-parent, never a unit of work — it decomposes into buildable children and has no
-PR of its own. Skip any row whose `type` is `epic` and take the next; this is a
-safety net beyond `agent-ready`, in case one was approved by mistake. The other
-four types (`task`/`bug`/`story`/`chore`) are all buildable. If you ever file or
-update a task yourself, set an appropriate `type` (never `epic` for a unit of
-work you intend to build).
+**The backlog and epics are excluded server-side** (MAIN-80). The pick query
+above never returns a task in a `backlog`-type column (Triage) — the backlog is
+a human refinement space the loop draws from only after a human sends a card to
+the board — nor a `type='epic'` task (a tracker that decomposes into buildable
+children, with no PR of its own). This holds regardless of labels, so an
+`agent-ready` card left in Triage, or an approved-by-mistake epic, simply does
+not appear. The command is unchanged; the server does the filtering. (`nook
+tasks --backlog` includes backlog tasks for a human; a builder never uses it.
+`type=epic` on the filter surfaces epics on purpose.) The four other types
+(`task`/`bug`/`story`/`chore`) are all buildable. If you ever file or update a
+task yourself, set an appropriate `type` (never `epic` for a unit of work you
+intend to build).
 
 Add `--board KEY` if the tenant has more than one board and this loop owns one
 of them.
@@ -119,6 +124,14 @@ database, so two builders polling the same queue cannot both win.
 **A lost claim is normal, not an error.** If it reports the task was already
 taken, go back to step 2 and take the next one. Never retry the same task —
 an agent that retries the one task it cannot have will spin forever.
+
+The server also refuses two claims outright (MAIN-80), each a distinct message,
+not the lost-claim 409: **"task is in the backlog — send it to the board first"**
+(a card still in Triage) and **"epics are containers and cannot be claimed"**.
+Both mean *never claimable by the loop* — do not retry either; take the next
+task. They should never reach you anyway, because the pick query already
+excludes backlog and epic tasks; a claim that hits one means the row moved or
+was hand-fed, and the answer is the same: move on.
 
 Target the column *type* (`started`), never a column name. A human renaming
 "In Progress" to "Doing" must not break this.

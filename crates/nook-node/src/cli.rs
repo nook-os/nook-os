@@ -1121,6 +1121,7 @@ pub async fn tasks(
     unblocked: bool,
     workspace: Option<&str>,
     all_workspaces: bool,
+    backlog: bool,
     json: bool,
 ) -> Result<()> {
     let client = Client::from_config()?;
@@ -1157,6 +1158,10 @@ pub async fn tasks(
     }
     if unblocked {
         q.push("is_blocked=false".into());
+    }
+    // The backlog (and epics) are excluded server-side by default; opt in.
+    if backlog {
+        q.push("backlog=true".into());
     }
     let path = if q.is_empty() {
         "/api/v1/tasks".to_string()
