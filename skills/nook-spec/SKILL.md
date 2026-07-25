@@ -120,32 +120,22 @@ empty (you are not in a workspace session), say so in the draft and file
 unscoped only if the user confirms — an unscoped ticket needs a workspace set on
 the board before any loop will pick it up.
 
-> **Gap:** the CLI has no create verb yet — there is no `nook create task`.
-> Until one exists, POST to the control plane directly, reading the server and
-> token the CLI already stores in `~/.config/nook/auth.toml`:
+Create it with **`nook create task`**. It resolves the board itself (the first
+by default; `--board KEY` to pick another) and inherits the session's workspace,
+so there are no UUIDs to hand-resolve. The drafted markdown is the description —
+feed it on stdin with `--description -`:
 
 ```bash
-NOOK_SERVER=$(grep '^server' ~/.config/nook/auth.toml | sed 's/.*"\(.*\)"/\1/')
-NOOK_TOKEN=$(grep '^token'  ~/.config/nook/auth.toml | sed 's/.*"\(.*\)"/\1/')
-
-# The board path segment is the board's UUID, NOT its key. Passing the key
-# (e.g. "NOOK") does not 404 — it comes back an EMPTY 200, which reads as
-# success and files nothing. Resolve the UUID first:
-BOARD=$(curl -s "$NOOK_SERVER/api/v1/boards" -H "Authorization: Bearer $NOOK_TOKEN" \
-  | python3 -c 'import sys,json; print(json.load(sys.stdin)[0]["id"])')   # first board
-# (If there is more than one board, pick the id whose "key" matches the one
-#  you want rather than [0].)
-
-curl -s -X POST "$NOOK_SERVER/api/v1/boards/$BOARD/tasks" \
-  -H "Authorization: Bearer $NOOK_TOKEN" \
-  -H 'Content-Type: application/json' \
-  --data-binary @issue.json
+nook create task --title "<the issue title>" --description - <<'EOF'
+## Problem
+…the whole drafted markdown…
+EOF
 ```
 
-Report the `key` (e.g. `NOOK-42`) and `url` the API returns. **A response with
-no `key` means the POST silently no-op'd — almost always the board key was used
-in the path instead of the UUID.** Later skills use that key rather than
-guessing it. Confirm with `nook task NOOK-42`.
+It prints the created `key` (e.g. `NOOK-42`) and `url`; later skills use that key
+rather than guessing it. A rejected value (an unknown type, a non-epic parent, a
+blank title) exits non-zero with the server's own message. Confirm with
+`nook task NOOK-42`.
 
 **A filed ticket lands in the backlog** (Triage — the board's first column), and
 the loop cannot pick from the backlog: it stays a human refinement space until
@@ -154,10 +144,10 @@ NOT show a ticket you just filed — list your backlog with `nook tasks --backlo
 A ticket is only buildable once a human moves it out of Triage AND applies
 `agent-ready`.
 
-If the user gave a priority, set it — urgent `1`, high `2`, medium `3`,
-low `4`, none `0`. Unset sorts *last*, not first.
+If the user gave a priority, pass `--priority` — urgent `1`, high `2`, medium
+`3`, low `4`, none `0`. Unset sorts *last*, not first.
 
-**Set the issue type.** Include `"type"` in the issue JSON — one of `task`,
+**Set the issue type** with `--type` — one of `task`,
 `bug`, `epic`, `story`, `chore` (exactly the values the board accepts; anything
 else is rejected). Use `epic` for a tracker/roadmap ticket — the kind that
 never gets `agent-ready` because it is a parent that decomposes into buildable
@@ -169,37 +159,37 @@ classification and can override it before you file.
 
 If this issue depends on another, record it so the builder skips it until the
 blocker is done. **Direction matters and is the opposite of what reads
-naturally:** a relation is `from_task blocks to_task`, so `from_task` is the
-BLOCKER. Post it on the **blocker**, with `to_task` = the dependent — NOT on
-the dependent. `to_task` also takes a UUID, not a key.
+naturally:** in `nook relate <BLOCKER> blocks <DEPENDENT>`, the first argument is
+the BLOCKER and the second is what it holds up. Keys or uuids both work, and the
+command reports whether the dependent is now blocked so you can confirm the
+direction landed:
 
 ```bash
-# "MAIN-4 blocks MAIN-5" — post on the blocker (MAIN-4), point at the dependent:
-curl -s -X POST "$NOOK_SERVER/api/v1/tasks/<blocker-uuid>/relations" \
-  -H "Authorization: Bearer $NOOK_TOKEN" -H 'Content-Type: application/json' \
-  -d '{"to_task":"<dependent-uuid>","kind":"blocks"}'
+nook relate MAIN-4 blocks MAIN-5   # MAIN-4 blocks MAIN-5
 ```
 
-Verify the direction landed right: fetch the DEPENDENT and confirm it reports
-`is_blocked: true` with the blocker in its `blocked_by` list.
+Kinds `relates` and `duplicates` are also accepted.
 
 ## Epics
 
-An **epic** (`type: "epic"`) is a tracker that other tickets hang off. To file a
-ticket under one, set `"parent"` in the issue JSON to the epic's key or uuid —
-the parent must be a `type='epic'` task **on the same board**, and an epic
-itself never has a parent (no nesting):
+An **epic** (`--type epic`) is a tracker that other tickets hang off. To file a
+ticket under one, pass `--parent <epic key or uuid>` to `nook create task` — the
+parent must be a `type='epic'` task **on the same board**, and an epic itself
+never has a parent (no nesting):
 
-```json
-{ "title": "...", "type": "task", "parent": "NOOK-7", ... }
+```bash
+nook create task --title "…" --type task --parent NOOK-7 --description - <<'EOF'
+…
+EOF
 ```
 
 When you spec a **chain** off an epic — decomposing it into the small buildable
-issues the epic tracks — set `"parent"` on **every** child so the whole chain is
+issues the epic tracks — set `--parent` on **every** child so the whole chain is
 listable and the epic shows its progress. List an epic's tickets any time with
-`GET /api/v1/tasks?parent=NOOK-7` (a uuid or key), and `nook task NOOK-7` shows
-the epic's `children` array directly. Re-file or detach later with the `parent`
-field on a PATCH to `/api/v1/tasks/{id}` (`"parent": null` detaches).
+`nook tasks --parent NOOK-7 --backlog` (a uuid or key), and `nook task NOOK-7`
+shows a Children section directly. Detach later with the `parent` field on a
+PATCH to `/api/v1/tasks/{id}` (`"parent": null`) — there is no CLI verb for that
+yet.
 
 ## Hard rule
 

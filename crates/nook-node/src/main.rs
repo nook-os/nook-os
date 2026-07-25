@@ -98,6 +98,14 @@ enum Command {
         /// backlog | unstarted | started | completed | canceled
         #[arg(long = "column-type")]
         column_type: Option<String>,
+        /// Issue type to include (repeatable): task|bug|epic|story|chore.
+        /// `--type epic` lists epics, which are excluded by default.
+        #[arg(long = "type")]
+        types: Vec<String>,
+        /// An epic's children (key or uuid): the tasks filed under it, including
+        /// backlog ones.
+        #[arg(long)]
+        parent: Option<String>,
         /// Hide anything with an unresolved blocker.
         #[arg(long)]
         unblocked: bool,
@@ -143,6 +151,22 @@ enum Command {
         name: String,
         #[arg(long)]
         remove: bool,
+    },
+    /// Create board objects (currently: a task).
+    #[command(subcommand)]
+    Create(CreateCommand),
+    /// Relate two tasks: `nook relate <BLOCKER> blocks <DEPENDENT>`.
+    ///
+    /// Posts the relation on the BLOCKER. Kinds: blocks | relates | duplicates.
+    /// Keys or uuids both work. After a `blocks`, it reports whether the
+    /// dependent is now blocked.
+    Relate {
+        /// The blocking task (key or uuid).
+        blocker: String,
+        /// blocks | relates | duplicates
+        kind: String,
+        /// The dependent task (key or uuid).
+        dependent: String,
     },
     /// Wire an agent's finish hook so it notifies the fleet when it is done.
     #[command(subcommand)]
@@ -424,6 +448,8 @@ async fn main() -> Result<()> {
             not_labels,
             assignee,
             column_type,
+            types,
+            parent,
             unblocked,
             workspace,
             all_workspaces,
@@ -436,6 +462,8 @@ async fn main() -> Result<()> {
                 &not_labels,
                 assignee.as_deref(),
                 column_type.as_deref(),
+                &types,
+                parent.as_deref(),
                 unblocked,
                 workspace.as_deref(),
                 all_workspaces,
@@ -444,6 +472,35 @@ async fn main() -> Result<()> {
             )
             .await
         }
+        Command::Create(CreateCommand::Task {
+            title,
+            board,
+            description,
+            column_type,
+            priority,
+            labels,
+            type_,
+            parent,
+            workspace,
+        }) => {
+            cli::create_task(cli::CreateTask {
+                title,
+                board,
+                description,
+                column_type,
+                priority,
+                labels,
+                type_,
+                parent,
+                workspace,
+            })
+            .await
+        }
+        Command::Relate {
+            blocker,
+            kind,
+            dependent,
+        } => cli::relate(&blocker, &kind, &dependent).await,
         Command::Task { key, json } => cli::task(&key, json).await,
         Command::Comment { key, body } => cli::comment(&key, &body.join(" ")).await,
         Command::SetDescription { key, description } => {
@@ -819,6 +876,41 @@ enum WorkspaceCommand {
     Current {
         #[arg(long)]
         json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum CreateCommand {
+    /// File a new task on the board. Prints the created key and url; exits
+    /// non-zero with the server's message on a rejected value.
+    Task {
+        /// The title (required).
+        #[arg(long)]
+        title: String,
+        /// Board key or uuid. Defaults to the first board.
+        #[arg(long)]
+        board: Option<String>,
+        /// Markdown body. `-` reads stdin, for multi-line bodies.
+        #[arg(long)]
+        description: Option<String>,
+        /// backlog | unstarted | started | completed | canceled. Default: backlog.
+        #[arg(long = "column-type")]
+        column_type: Option<String>,
+        /// 0 none, 1 urgent, 2 high, 3 medium, 4 low.
+        #[arg(long)]
+        priority: Option<i32>,
+        /// Attach a label by name (repeatable), created for the tenant if new.
+        #[arg(long = "label")]
+        labels: Vec<String>,
+        /// task | bug | epic | story | chore. Default: task.
+        #[arg(long = "type")]
+        type_: Option<String>,
+        /// File under an epic (key or uuid) on the same board.
+        #[arg(long)]
+        parent: Option<String>,
+        /// Workspace (uuid or name). Defaults to the session's workspace.
+        #[arg(long)]
+        workspace: Option<String>,
     },
 }
 
