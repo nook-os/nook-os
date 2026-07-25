@@ -41,6 +41,60 @@ async fn person_id_for(state: &AppState, auth: &AuthCtx) -> ApiResult<Uuid> {
     row.map(|(p,)| p).ok_or(ApiError::NotFound)
 }
 
+/// The most a title or folder name may be — measured after trim, by Unicode
+/// scalar count. A title is a label for a tree, not a document (MAIN-84 AC-3).
+const MAX_NAME_LEN: usize = 200;
+
+/// Reject a blank or over-long title / folder name (MAIN-84 AC-2, AC-3).
+///
+/// Trims ONLY to decide accept/reject — the value is stored exactly as sent
+/// (NG-2), so leading/trailing spaces a person typed on purpose survive. On
+/// update, callers apply this only when a name was supplied, so an omitted name
+/// still means "leave unchanged".
+fn validate_name(value: &str, what: &str) -> ApiResult<()> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(ApiError::BadRequest(format!("a {what} cannot be blank")));
+    }
+    let len = trimmed.chars().count();
+    if len > MAX_NAME_LEN {
+        return Err(ApiError::BadRequest(format!(
+            "a {what} is at most {MAX_NAME_LEN} characters (got {len})"
+        )));
+    }
+    Ok(())
+}
+
+/// Would moving `folder` under `new_parent` create a cycle (MAIN-84 AC-1)?
+///
+/// True when `new_parent` is `folder` itself or any descendant of it. Decided by
+/// climbing `new_parent`'s ancestor chain — within the person's own folders —
+/// and asking whether `folder` sits on it. Subsumes the self-parent case (the
+/// chain starts at `new_parent`, so `new_parent == folder` is caught at once).
+async fn would_cycle(
+    state: &AppState,
+    person: Uuid,
+    folder: UserNoteFolderId,
+    new_parent: UserNoteFolderId,
+) -> ApiResult<bool> {
+    let (cycles,): (bool,) = sqlx::query_as(
+        "WITH RECURSIVE ancestors AS (
+             SELECT id, parent_id FROM user_note_folders
+             WHERE id = $1 AND person_id = $2
+             UNION ALL
+             SELECT f.id, f.parent_id FROM user_note_folders f
+             JOIN ancestors a ON f.id = a.parent_id AND f.person_id = $2
+         )
+         SELECT EXISTS(SELECT 1 FROM ancestors WHERE id = $3)",
+    )
+    .bind(new_parent)
+    .bind(person)
+    .bind(folder)
+    .fetch_one(&state.db)
+    .await?;
+    Ok(cycles)
+}
+
 /// A note row straight from the table — body still ciphertext. Kept private so
 /// the encrypted bytes never leave this module without going through `decrypt`.
 #[derive(sqlx::FromRow)]
@@ -168,6 +222,7 @@ pub async fn create_note(
     Json(req): Json<CreateUserNote>,
 ) -> ApiResult<Json<UserNote>> {
     let person = person_id_for(&state, &auth).await?;
+    validate_name(&req.title, "note title")?;
     if let Some(folder) = req.folder_id {
         owned_folder(&state, person, folder).await?;
     }
@@ -201,6 +256,11 @@ pub async fn update_note(
     Json(req): Json<UpdateUserNote>,
 ) -> ApiResult<Json<UserNote>> {
     let person = person_id_for(&state, &auth).await?;
+    // A blank title on update is a 400, not a silent COALESCE no-op (AC-2); an
+    // omitted title (None) still leaves the name unchanged.
+    if let Some(title) = &req.title {
+        validate_name(title, "note title")?;
+    }
     // A move must target one of the person's own folders (or root).
     if let Some(Some(folder)) = req.folder_id {
         owned_folder(&state, person, folder).await?;
@@ -291,6 +351,7 @@ pub async fn create_folder(
     Json(req): Json<CreateUserNoteFolder>,
 ) -> ApiResult<Json<UserNoteFolder>> {
     let person = person_id_for(&state, &auth).await?;
+    validate_name(&req.name, "folder name")?;
     if let Some(parent) = req.parent_id {
         owned_folder(&state, person, parent).await?;
     }
@@ -319,13 +380,20 @@ pub async fn update_folder(
     Json(req): Json<UpdateUserNoteFolder>,
 ) -> ApiResult<Json<UserNoteFolder>> {
     let person = person_id_for(&state, &auth).await?;
+    if let Some(name) = &req.name {
+        validate_name(name, "folder name")?;
+    }
     if let Some(Some(parent)) = req.parent_id {
-        if parent == id {
+        // The parent must be the person's own folder, and the move must not put
+        // the folder inside its own subtree (AC-1) — which would drop it out of
+        // the root-anchored path CTE and make its notes' paths render empty. The
+        // cycle check subsumes the old self-parent guard.
+        owned_folder(&state, person, parent).await?;
+        if would_cycle(&state, person, id, parent).await? {
             return Err(ApiError::BadRequest(
-                "a folder cannot be its own parent".into(),
+                "that move would put a folder inside its own subtree".into(),
             ));
         }
-        owned_folder(&state, person, parent).await?;
     }
     let (set_parent, parent_val) = match req.parent_id {
         None => (false, None),
