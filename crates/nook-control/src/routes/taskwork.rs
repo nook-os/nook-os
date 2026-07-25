@@ -22,7 +22,9 @@ pub async fn dispatch(
     // Placing work on a scheduler-chosen machine is an operator action; a node
     // token cannot constrain it to itself, so it does not get to do it.
     auth.require_user()?;
-    Ok(Json(taskwork::dispatch(&state, auth.tenant_id, id).await?))
+    Ok(Json(
+        taskwork::dispatch(&state, auth.tenant_id, auth.user_id, id).await?,
+    ))
 }
 
 #[utoipa::path(post, path = "/api/v1/tasks/{id}/start-work",
@@ -42,6 +44,7 @@ pub async fn start_work(
     let (task, session) = taskwork::start_work(
         &state,
         auth.tenant_id,
+        auth.user_id,
         Some(auth.user_id),
         id,
         taskwork::StartWork {

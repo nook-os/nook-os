@@ -31,6 +31,7 @@ fn no_change() -> UpdateTaskRequest {
         assignee_user_id: None,
         priority: None,
         type_: None,
+        visibility: None,
         workspace_id: None,
         expected_updated_at: None,
     }
@@ -98,6 +99,7 @@ async fn new_task(
         .create_task(
             tenant,
             board,
+            None,
             CreateTaskRequest {
                 title: "t".into(),
                 description: None,
@@ -106,6 +108,7 @@ async fn new_task(
                 workspace_id: workspace,
                 priority: None,
                 type_: None,
+                visibility: None,
                 labels: vec![],
             },
         )

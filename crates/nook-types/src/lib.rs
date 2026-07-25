@@ -551,6 +551,12 @@ fn default_task_type() -> String {
     "task".into()
 }
 
+/// The default task visibility — `team` reproduces today's behaviour (visible to
+/// the whole tenant), matching the column's DB default (MAIN-76).
+fn default_visibility() -> String {
+    "team".into()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
 pub struct TaskItem {
     /// Issue type: one of `task`, `bug`, `epic`, `story`, `chore` (MAIN-59).
@@ -569,6 +575,15 @@ pub struct TaskItem {
     pub external_id: Option<String>,
     pub external_url: Option<String>,
     pub assignee_user_id: Option<UserId>,
+    /// Who may see this card (MAIN-76): `private` (creator + assignee only),
+    /// `team` (the whole tenant — the default), or `org`. Enforced server-side
+    /// on every read and claim path, not by an RBAC permission.
+    #[serde(default = "default_visibility")]
+    pub visibility: String,
+    /// The per-tenant `users.id` of the creator. `None` for rows created before
+    /// visibility existed (ownerless team cards).
+    #[serde(default)]
+    pub created_by: Option<UserId>,
     pub workspace_id: Option<WorkspaceId>,
     /// Node the triage scheduler chose (or you forced) to run this work.
     pub assigned_node_id: Option<NodeId>,
@@ -1290,6 +1305,10 @@ pub struct CreateTaskRequest {
     /// rejected. Named `type_`; the wire name is `type`.
     #[serde(rename = "type", default)]
     pub type_: Option<String>,
+    /// Who may see this card (MAIN-76): `private`/`team`/`org`. Omitted →
+    /// defaults to `team`; an invalid value is rejected.
+    #[serde(default)]
+    pub visibility: Option<String>,
     /// Label NAMES, created for the tenant if new. Names rather than ids
     /// because a filer knows `agent-ready`, not its uuid.
     #[serde(default)]
@@ -1323,6 +1342,10 @@ pub struct UpdateTaskRequest {
     #[serde(default, deserialize_with = "double_option")]
     #[schema(value_type = Option<String>, nullable)]
     pub workspace_id: Option<Option<WorkspaceId>>,
+    /// Change who may see this card (MAIN-76): `private`/`team`/`org`. Absent
+    /// leaves it unchanged; an invalid value is rejected.
+    #[serde(default)]
+    pub visibility: Option<String>,
     /// Optimistic-concurrency precondition. When set, the update applies only
     /// if the task's current `updated_at` still equals this; a mismatch makes
     /// NO change and returns `409 Conflict` (the body changed under the caller).

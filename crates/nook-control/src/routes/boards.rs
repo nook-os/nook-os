@@ -96,13 +96,24 @@ pub async fn get_one(
         .await
         .map_err(provider_err)?;
 
+    // Visibility (MAIN-76): the provider returns every card on the board; drop
+    // the ones this viewer may not see (private cards they neither created nor
+    // are assigned) BEFORE enrich, so a private title never even reaches the
+    // response. The provider trait stays viewer-agnostic; the filter lives here
+    // where the caller's identity is known.
+    let visible: Vec<_> = detail
+        .tasks
+        .into_iter()
+        .filter(|t| crate::services::tasks::visible_to(t, auth.user_id))
+        .collect();
+
     // Keys, deep links and labels are computed rather than stored, so the
     // board's cards would otherwise render without any of them. Enriched here
     // rather than in the provider because only this layer knows the public URL
     // — a provider that had to be told its own deployment's hostname would be
     // the wrong shape for the external ones this trait exists to allow.
     let detail = BoardDetail {
-        tasks: crate::services::tasks::enrich(&state.db, &state.cfg.public_base_url, detail.tasks)
+        tasks: crate::services::tasks::enrich(&state.db, &state.cfg.public_base_url, visible)
             .await?,
         ..detail
     };
@@ -126,7 +137,7 @@ pub async fn create_task(
         .kanban
         .get(&provider)
         .ok_or(ApiError::NotFound)?
-        .create_task(auth.tenant_id, id, req)
+        .create_task(auth.tenant_id, id, Some(auth.user_id), req)
         .await
         .map_err(provider_err)?;
 
@@ -192,13 +203,19 @@ pub async fn update_task(
     // endpoint that took only ids would be one an agent cannot call with what
     // it was given.
     let id = crate::services::tasks::resolve_id(&state.db, auth.tenant_id, &ident).await?;
-    let (board_id,): (BoardId,) =
-        sqlx::query_as("SELECT board_id FROM tasks WHERE id = $1 AND tenant_id = $2")
-            .bind(id)
-            .bind(auth.tenant_id)
-            .fetch_optional(&state.db)
-            .await?
-            .ok_or(ApiError::NotFound)?;
+    // Load the whole task so visibility is checked before any change: a private
+    // card cannot be seen OR altered by anyone but its owner (MAIN-76 AC-5),
+    // including a tenant admin — refused as NotFound, consistent with the read.
+    let existing: TaskItem = sqlx::query_as("SELECT * FROM tasks WHERE id = $1 AND tenant_id = $2")
+        .bind(id)
+        .bind(auth.tenant_id)
+        .fetch_optional(&state.db)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    if !crate::services::tasks::visible_to(&existing, auth.user_id) {
+        return Err(ApiError::NotFound);
+    }
+    let board_id = existing.board_id;
     let provider = provider_for_board(&state, auth.tenant_id, board_id).await?;
     let moved_column = req.column_id.is_some() || req.column_type.is_some();
     let task = state

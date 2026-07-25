@@ -76,8 +76,17 @@ async fn column_id(
 
 /// Triage → Todo: the scheduler picks the best online node by resources
 /// (preferring one that already hosts the task's workspace, if any).
-pub async fn dispatch(state: &AppState, tenant: TenantId, task_id: TaskId) -> ApiResult<TaskItem> {
+pub async fn dispatch(
+    state: &AppState,
+    tenant: TenantId,
+    viewer: UserId,
+    task_id: TaskId,
+) -> ApiResult<TaskItem> {
     let task = load_task(state, tenant, task_id).await?;
+    // MAIN-76 AC-9: a non-owner agent cannot act on a private card, even by id.
+    if !crate::services::tasks::visible_to(&task, viewer) {
+        return Err(ApiError::NotFound);
+    }
     let node = crate::services::schedule::pick(state, tenant, task.workspace_id).await?;
     let todo = column_id(state, task.board_id, "Todo", 1).await?;
 
@@ -113,11 +122,16 @@ pub struct StartWork {
 pub async fn start_work(
     state: &AppState,
     tenant: TenantId,
+    viewer: UserId,
     user: Option<UserId>,
     task_id: TaskId,
     req: StartWork,
 ) -> ApiResult<(TaskItem, Session)> {
     let task = load_task(state, tenant, task_id).await?;
+    // MAIN-76 AC-9: a non-owner agent cannot start-work a private card by id.
+    if !crate::services::tasks::visible_to(&task, viewer) {
+        return Err(ApiError::NotFound);
+    }
     if task.worktree_path.is_some() {
         return Err(ApiError::Conflict(
             "work already started for this task".into(),

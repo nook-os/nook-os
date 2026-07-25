@@ -13,6 +13,29 @@ use std::collections::HashMap;
 
 use crate::error::{ApiError, ApiResult};
 
+/// Whether `viewer` may see or act on `task` — the ONE task-visibility predicate
+/// (MAIN-76). A `private` card is confined to its creator and its assignee;
+/// `team` and `org` cards are visible to the whole tenant (org's cross-tenant
+/// reach is a later ticket, so today it matches team). Deliberately NOT a role
+/// or policy check (NG-3): visibility is a per-task owner predicate, and this is
+/// the single definition every read/claim path routes through.
+pub fn visible_to(task: &TaskItem, viewer: UserId) -> bool {
+    task.visibility != "private"
+        || task.created_by == Some(viewer)
+        || task.assignee_user_id == Some(viewer)
+}
+
+/// The SQL form of [`visible_to`], for the list query where filtering in Rust
+/// would mean fetching rows the caller may not see. `$viewer` is the bind
+/// placeholder to substitute (e.g. `"$16"`); it is compared to `created_by` and
+/// `assignee_user_id`. `alias` is the tasks table alias (e.g. `"t"`).
+pub fn visible_sql(alias: &str, viewer: &str) -> String {
+    format!(
+        "({alias}.visibility <> 'private' OR {alias}.created_by = {viewer} \
+         OR {alias}.assignee_user_id = {viewer})"
+    )
+}
+
 /// Fill in `key`, `url` and `labels` for a batch of tasks.
 ///
 /// Batched deliberately: the board endpoint returns every task at once, and an

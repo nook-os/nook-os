@@ -323,16 +323,27 @@ pub async fn get_task(
     Path(ident): Path<String>,
 ) -> ApiResult<Json<TaskDetail>> {
     let id = tasks::resolve_id(&state.db, auth.tenant_id, &ident).await?;
-    Ok(Json(detail(&state, auth.tenant_id, id).await?))
+    Ok(Json(
+        detail(&state, auth.tenant_id, auth.user_id, id).await?,
+    ))
 }
 
-pub async fn detail(state: &AppState, tenant: TenantId, id: TaskId) -> ApiResult<TaskDetail> {
+pub async fn detail(
+    state: &AppState,
+    tenant: TenantId,
+    viewer: UserId,
+    id: TaskId,
+) -> ApiResult<TaskDetail> {
     let task: TaskItem = sqlx::query_as("SELECT * FROM tasks WHERE id = $1 AND tenant_id = $2")
         .bind(id)
         .bind(tenant)
         .fetch_optional(&state.db)
         .await?
         .ok_or(ApiError::NotFound)?;
+    // MAIN-76: a private card is a 404 for anyone but its creator or assignee.
+    if !tasks::visible_to(&task, viewer) {
+        return Err(ApiError::NotFound);
+    }
     let task = tasks::enrich_one(&state.db, &state.cfg.public_base_url, task).await?;
 
     let related = related_tasks(state, id).await?;

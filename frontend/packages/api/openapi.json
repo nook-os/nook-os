@@ -7151,6 +7151,13 @@
             ],
             "description": "Issue type (MAIN-59). Omitted → defaults to `task`; an invalid value is\nrejected. Named `type_`; the wire name is `type`."
           },
+          "visibility": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Who may see this card (MAIN-76): `private`/`team`/`org`. Omitted →\ndefaults to `team`; an invalid value is rejected."
+          },
           "workspace_id": {
             "oneOf": [
               {
@@ -9819,6 +9826,17 @@
             "type": "string",
             "format": "date-time"
           },
+          "created_by": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/UserId",
+                "description": "The per-tenant `users.id` of the creator. `None` for rows created before\nvisibility existed (ownerless team cards)."
+              }
+            ]
+          },
           "description": {
             "type": [
               "string",
@@ -9907,6 +9925,10 @@
               "null"
             ],
             "description": "Absolute deep link into the web UI, so an agent reporting \"filed\nNOOK-42\" can give a human something to click."
+          },
+          "visibility": {
+            "type": "string",
+            "description": "Who may see this card (MAIN-76): `private` (creator + assignee only),\n`team` (the whole tenant — the default), or `org`. Enforced server-side\non every read and claim path, not by an RBAC permission."
           },
           "workspace_id": {
             "oneOf": [
@@ -10710,6 +10732,13 @@
               "null"
             ],
             "description": "Change the issue type (MAIN-59). Absent leaves it unchanged; an invalid\nvalue is rejected. Named `type_`; the wire name is `type`."
+          },
+          "visibility": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Change who may see this card (MAIN-76): `private`/`team`/`org`. Absent\nleaves it unchanged; an invalid value is rejected."
           },
           "workspace_id": {
             "type": [
