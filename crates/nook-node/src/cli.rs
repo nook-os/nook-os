@@ -1109,40 +1109,197 @@ async fn resolve_workspace(client: &Client, needle: &str) -> Result<String> {
         .with_context(|| format!("no workspace named '{needle}' — try `nook get workspaces`"))
 }
 
-// One parameter per CLI flag by design — this is the dispatch seam for
-// `nook tasks`, and a struct would just move the same list one hop away.
+/// The board's id: an explicit key/uuid, or the first board when none is given.
+/// The create endpoint is keyed by board UUID, so a key must be resolved here.
+async fn resolve_board(client: &Client, needle: Option<&str>) -> Result<String> {
+    let list = client.get("/api/v1/boards").await?;
+    let boards: Vec<Value> = list.as_array().cloned().unwrap_or_default();
+    match needle {
+        None => boards
+            .first()
+            .and_then(|b| b.get("id").and_then(Value::as_str).map(str::to_string))
+            .context("no boards exist yet"),
+        Some(n) => boards
+            .iter()
+            .find(|b| {
+                b.get("id").and_then(Value::as_str) == Some(n)
+                    || b.get("key")
+                        .and_then(Value::as_str)
+                        .is_some_and(|k| k.eq_ignore_ascii_case(n))
+            })
+            .and_then(|b| b.get("id").and_then(Value::as_str).map(str::to_string))
+            .with_context(|| format!("no board '{n}' — try `nook tasks` or omit --board")),
+    }
+}
+
+/// The flags for `nook create task`, one field per flag (mirrors `main.rs`).
+pub struct CreateTask {
+    pub title: String,
+    pub board: Option<String>,
+    pub description: Option<String>,
+    pub column_type: Option<String>,
+    pub priority: Option<i32>,
+    pub labels: Vec<String>,
+    pub type_: Option<String>,
+    pub parent: Option<String>,
+    pub workspace: Option<String>,
+}
+
+/// The create-task request body, by the wire field names, omitting anything
+/// unset so the server's own defaults apply (column → backlog, type → task,
+/// visibility → team). Pure so the flag → body mapping is unit-tested.
+fn build_create_body(
+    opts: &CreateTask,
+    description: Option<String>,
+    workspace_id: Option<String>,
+) -> Value {
+    let mut body = serde_json::Map::new();
+    body.insert("title".into(), Value::String(opts.title.clone()));
+    if let Some(d) = description {
+        body.insert("description".into(), Value::String(d));
+    }
+    if let Some(c) = &opts.column_type {
+        body.insert("column_type".into(), Value::String(c.clone()));
+    }
+    if let Some(p) = opts.priority {
+        body.insert("priority".into(), Value::Number(p.into()));
+    }
+    if let Some(t) = &opts.type_ {
+        body.insert("type".into(), Value::String(t.clone()));
+    }
+    if let Some(p) = &opts.parent {
+        body.insert("parent".into(), Value::String(p.clone()));
+    }
+    if let Some(w) = workspace_id {
+        body.insert("workspace_id".into(), Value::String(w));
+    }
+    if !opts.labels.is_empty() {
+        body.insert(
+            "labels".into(),
+            Value::Array(opts.labels.iter().cloned().map(Value::String).collect()),
+        );
+    }
+    Value::Object(body)
+}
+
+/// `nook create task --title …` — file a task on the board (MAIN-89 AC-3).
+///
+/// The server owns every validation (a bad type, a non-epic parent, a blank
+/// title); `Client::post` surfaces its message and this exits non-zero on a 4xx.
+pub async fn create_task(opts: CreateTask) -> Result<()> {
+    let client = Client::from_config()?;
+    let board = resolve_board(&client, opts.board.as_deref()).await?;
+
+    // `-` reads the body from stdin, so a multi-line spec can be piped in.
+    let description = match opts.description.as_deref() {
+        Some("-") => {
+            let mut s = String::new();
+            std::io::Read::read_to_string(&mut std::io::stdin(), &mut s)
+                .context("reading the description from stdin")?;
+            Some(s)
+        }
+        other => other.map(str::to_string),
+    };
+
+    // Workspace: an explicit flag wins; otherwise inherit the session's, like
+    // `nook tasks` — so a filer inside a repo files against that repo by default.
+    let workspace_id = match opts.workspace.as_deref() {
+        Some(w) => Some(resolve_workspace(&client, w).await?),
+        None => current_session_workspace(&client).await.map(|w| w.id),
+    };
+
+    let body = build_create_body(&opts, description, workspace_id);
+    let created = client
+        .post(&format!("/api/v1/boards/{board}/tasks"), body)
+        .await?;
+    let key = created["key"].as_str().unwrap_or("?");
+    println!(
+        "{} created {}",
+        crate::style::ok_c("✓"),
+        crate::style::bold(key)
+    );
+    if let Some(url) = created["url"].as_str() {
+        println!("  {url}");
+    }
+    Ok(())
+}
+
+/// `nook relate <BLOCKER> <kind> <DEPENDENT>` (MAIN-89 AC-4).
+///
+/// The relation is posted on the BLOCKER. `to_task` on the endpoint is a uuid,
+/// so a dependent given as a key is resolved first. After a `blocks`, the
+/// dependent's blocked state is re-read so the direction is confirmed, not
+/// assumed.
+pub async fn relate(blocker: &str, kind: &str, dependent: &str) -> Result<()> {
+    const KINDS: [&str; 3] = ["blocks", "relates", "duplicates"];
+    if !KINDS.contains(&kind) {
+        bail!(
+            "{kind:?} is not a relation kind — expected one of {}",
+            KINDS.join(", ")
+        );
+    }
+    let client = Client::from_config()?;
+
+    // Resolve the dependent to a uuid: the endpoint's `to_task` is a TaskId.
+    let dep = client.get(&format!("/api/v1/tasks/{dependent}")).await?;
+    let dep_id = dep["task"]["id"]
+        .as_str()
+        .with_context(|| format!("no task '{dependent}'"))?
+        .to_string();
+
+    client
+        .post(
+            &format!("/api/v1/tasks/{blocker}/relations"),
+            serde_json::json!({ "to_task": dep_id, "kind": kind }),
+        )
+        .await?;
+    println!(
+        "{} {} {} {}",
+        crate::style::ok_c("✓"),
+        crate::style::bold(blocker),
+        kind,
+        crate::style::bold(dependent)
+    );
+
+    // Confirm direction: a `blocks` should leave the DEPENDENT blocked.
+    if kind == "blocks" {
+        let after = client.get(&format!("/api/v1/tasks/{dependent}")).await?;
+        let blocked = after["is_blocked"].as_bool().unwrap_or(false);
+        println!(
+            "  {} is now {}",
+            dependent,
+            if blocked {
+                crate::style::err("blocked")
+            } else {
+                "not blocked".to_string()
+            }
+        );
+    }
+    Ok(())
+}
+
+/// The `/tasks` query params, given an already-resolved workspace id. Pure so
+/// the flag → query mapping (including `type`/`parent`, MAIN-89) is unit-tested
+/// without a server.
 #[allow(clippy::too_many_arguments)]
-pub async fn tasks(
+fn build_tasks_query(
     board: Option<&str>,
+    workspace_id: Option<&str>,
     labels: &[String],
     not_labels: &[String],
     assignee: Option<&str>,
     column_type: Option<&str>,
+    types: &[String],
+    parent: Option<&str>,
     unblocked: bool,
-    workspace: Option<&str>,
-    all_workspaces: bool,
     backlog: bool,
-    json: bool,
-) -> Result<()> {
-    let client = Client::from_config()?;
+) -> Vec<String> {
     let mut q: Vec<String> = Vec::new();
     if let Some(b) = board {
         q.push(format!("board={b}"));
     }
-
-    // Confinement. An explicit `--workspace` wins; otherwise, unless the caller
-    // asked for `--all-workspaces`, a command running inside a workspace session
-    // scopes to that workspace by default — so a builder agent cannot see, and
-    // therefore cannot take, another repo's work just by forgetting a flag.
-    if let Some(w) = workspace {
-        q.push(format!(
-            "workspace={}",
-            resolve_workspace(&client, w).await?
-        ));
-    } else if !all_workspaces {
-        if let Some(ws) = current_session_workspace(&client).await {
-            q.push(format!("workspace={}", ws.id));
-        }
+    if let Some(w) = workspace_id {
+        q.push(format!("workspace={w}"));
     }
     for l in labels {
         q.push(format!("label={l}"));
@@ -1156,6 +1313,16 @@ pub async fn tasks(
     if let Some(c) = column_type {
         q.push(format!("column_type={c}"));
     }
+    // Issue type (repeatable): the server ORs within types and lifts the default
+    // epic exclusion when `epic` is asked for.
+    for t in types {
+        q.push(format!("type={t}"));
+    }
+    // An epic's children — the server lifts the backlog exclusion for a `parent`
+    // query, so a child in Triage still shows.
+    if let Some(p) = parent {
+        q.push(format!("parent={p}"));
+    }
     if unblocked {
         q.push("is_blocked=false".into());
     }
@@ -1163,6 +1330,52 @@ pub async fn tasks(
     if backlog {
         q.push("backlog=true".into());
     }
+    q
+}
+
+// One parameter per CLI flag by design — this is the dispatch seam for
+// `nook tasks`, and a struct would just move the same list one hop away.
+#[allow(clippy::too_many_arguments)]
+pub async fn tasks(
+    board: Option<&str>,
+    labels: &[String],
+    not_labels: &[String],
+    assignee: Option<&str>,
+    column_type: Option<&str>,
+    types: &[String],
+    parent: Option<&str>,
+    unblocked: bool,
+    workspace: Option<&str>,
+    all_workspaces: bool,
+    backlog: bool,
+    json: bool,
+) -> Result<()> {
+    let client = Client::from_config()?;
+
+    // Confinement. An explicit `--workspace` wins; otherwise, unless the caller
+    // asked for `--all-workspaces`, a command running inside a workspace session
+    // scopes to that workspace by default — so a builder agent cannot see, and
+    // therefore cannot take, another repo's work just by forgetting a flag.
+    let workspace_id: Option<String> = if let Some(w) = workspace {
+        Some(resolve_workspace(&client, w).await?)
+    } else if !all_workspaces {
+        current_session_workspace(&client).await.map(|ws| ws.id)
+    } else {
+        None
+    };
+
+    let q = build_tasks_query(
+        board,
+        workspace_id.as_deref(),
+        labels,
+        not_labels,
+        assignee,
+        column_type,
+        types,
+        parent,
+        unblocked,
+        backlog,
+    );
     let path = if q.is_empty() {
         "/api/v1/tasks".to_string()
     } else {
@@ -1247,6 +1460,33 @@ pub async fn task(key: &str, json: bool) -> Result<()> {
     if let Some(d) = t["description"].as_str().filter(|d| !d.is_empty()) {
         println!();
         println!("{d}");
+    }
+    // Epic children (MAIN-89 AC-2): the tickets filed under this epic, with a
+    // done count. `done` is a child in a completed OR canceled column.
+    let children = resp["children"].as_array().cloned().unwrap_or_default();
+    if t["type"].as_str() == Some("epic") || !children.is_empty() {
+        let done = children
+            .iter()
+            .filter(|c| {
+                matches!(
+                    c["column_type"].as_str(),
+                    Some("completed") | Some("canceled")
+                )
+            })
+            .count();
+        println!();
+        println!(
+            "{}",
+            crate::style::dim(&format!("── Children · {done}/{} done", children.len()))
+        );
+        for c in &children {
+            println!(
+                "  {:<10} {:<12} {}",
+                c["key"].as_str().unwrap_or("—"),
+                c["column_type"].as_str().unwrap_or("—"),
+                c["title"].as_str().unwrap_or(""),
+            );
+        }
     }
     let comments = resp["comments"].as_array().cloned().unwrap_or_default();
     if !comments.is_empty() {
@@ -1795,5 +2035,94 @@ mod table_tests {
             !headers.iter().any(|h| h.contains('.')),
             "no header should carry a dotted path: {headers:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod task_verb_tests {
+    use super::*;
+
+    #[test]
+    fn tasks_query_maps_type_and_parent() {
+        // `--type epic` (repeatable) and `--parent` reach the query verbatim
+        // (MAIN-89 AC-1) — the server lifts the epic/backlog exclusions for them.
+        let q = build_tasks_query(
+            Some("MAIN"),
+            Some("ws-1"),
+            &["agent-ready".into()],
+            &["blocked".into()],
+            Some("none"),
+            None,
+            &["epic".into(), "bug".into()],
+            Some("NOOK-7"),
+            true,
+            true,
+        );
+        assert!(q.contains(&"type=epic".to_string()));
+        assert!(q.contains(&"type=bug".to_string()));
+        assert!(q.contains(&"parent=NOOK-7".to_string()));
+        assert!(q.contains(&"board=MAIN".to_string()));
+        assert!(q.contains(&"workspace=ws-1".to_string()));
+        assert!(q.contains(&"label=agent-ready".to_string()));
+        assert!(q.contains(&"not_label=blocked".to_string()));
+        assert!(q.contains(&"assignee=none".to_string()));
+        assert!(q.contains(&"is_blocked=false".to_string()));
+        assert!(q.contains(&"backlog=true".to_string()));
+    }
+
+    #[test]
+    fn tasks_query_omits_unset_filters() {
+        // No workspace, no type, no parent → none of those keys appear, so a
+        // bare `nook tasks` hits `/api/v1/tasks` with nothing extra.
+        let q = build_tasks_query(None, None, &[], &[], None, None, &[], None, false, false);
+        assert!(q.is_empty(), "an unfiltered query is empty: {q:?}");
+    }
+
+    fn opts() -> CreateTask {
+        CreateTask {
+            title: "cli test".into(),
+            board: None,
+            description: None,
+            column_type: None,
+            priority: Some(2),
+            labels: vec!["test".into()],
+            type_: Some("bug".into()),
+            parent: Some("NOOK-7".into()),
+            workspace: None,
+        }
+    }
+
+    #[test]
+    fn create_body_uses_wire_names_and_omits_unset() {
+        // Every flag lands under its wire name (`type`, `parent`, `labels`,
+        // `workspace_id`); the description is resolved by the caller (AC-3).
+        let body = build_create_body(&opts(), Some("# body".into()), Some("ws-9".into()));
+        assert_eq!(body["title"], "cli test");
+        assert_eq!(body["description"], "# body");
+        assert_eq!(body["priority"], 2);
+        assert_eq!(body["type"], "bug"); // wire name is `type`, not `type_`
+        assert_eq!(body["parent"], "NOOK-7");
+        assert_eq!(body["workspace_id"], "ws-9");
+        assert_eq!(body["labels"], serde_json::json!(["test"]));
+        // Unset stays absent so the server's defaults apply.
+        assert!(body.get("column_type").is_none());
+    }
+
+    #[test]
+    fn create_body_without_optionals_is_just_the_title() {
+        let bare = CreateTask {
+            title: "t".into(),
+            board: None,
+            description: None,
+            column_type: None,
+            priority: None,
+            labels: vec![],
+            type_: None,
+            parent: None,
+            workspace: None,
+        };
+        let body = build_create_body(&bare, None, None);
+        assert_eq!(body["title"], "t");
+        assert_eq!(body.as_object().unwrap().len(), 1, "only title: {body}");
     }
 }
