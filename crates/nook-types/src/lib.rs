@@ -543,8 +543,20 @@ fn default_column_type() -> String {
     "unstarted".into()
 }
 
+/// The default issue type — a task read back before/without a type is a `task`
+/// (MAIN-59 AC-5), matching the column's DB default.
+fn default_task_type() -> String {
+    "task".into()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
 pub struct TaskItem {
+    /// Issue type: one of `task`, `bug`, `epic`, `story`, `chore` (MAIN-59).
+    /// Named `type_` because `type` is a Rust keyword; the wire/column name is
+    /// `type`.
+    #[serde(rename = "type", default = "default_task_type")]
+    #[sqlx(rename = "type")]
+    pub type_: String,
     pub id: TaskId,
     pub tenant_id: TenantId,
     pub board_id: BoardId,
@@ -1189,6 +1201,10 @@ pub struct CreateTaskRequest {
     pub workspace_id: Option<WorkspaceId>,
     #[serde(default)]
     pub priority: Option<i32>,
+    /// Issue type (MAIN-59). Omitted → defaults to `task`; an invalid value is
+    /// rejected. Named `type_`; the wire name is `type`.
+    #[serde(rename = "type", default)]
+    pub type_: Option<String>,
     /// Label NAMES, created for the tenant if new. Names rather than ids
     /// because a filer knows `agent-ready`, not its uuid.
     #[serde(default)]
@@ -1206,6 +1222,10 @@ pub struct UpdateTaskRequest {
     pub assignee_user_id: Option<UserId>,
     #[serde(default)]
     pub priority: Option<i32>,
+    /// Change the issue type (MAIN-59). Absent leaves it unchanged; an invalid
+    /// value is rejected. Named `type_`; the wire name is `type`.
+    #[serde(rename = "type", default)]
+    pub type_: Option<String>,
     /// Which workspace this task belongs to. Absent leaves it alone, `null`
     /// clears it, an id sets it.
     ///

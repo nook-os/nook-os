@@ -2876,6 +2876,11 @@ export interface components {
             /** Format: int32 */
             priority?: number | null;
             title: string;
+            /**
+             * @description Issue type (MAIN-59). Omitted → defaults to `task`; an invalid value is
+             *     rejected. Named `type_`; the wire name is `type`.
+             */
+            type?: string | null;
             workspace_id?: null | components["schemas"]["WorkspaceId"];
         };
         /**
@@ -3906,6 +3911,12 @@ export interface components {
             session_id?: null | components["schemas"]["SessionId"];
             tenant_id: components["schemas"]["TenantId"];
             title: string;
+            /**
+             * @description Issue type: one of `task`, `bug`, `epic`, `story`, `chore` (MAIN-59).
+             *     Named `type_` because `type` is a Rust keyword; the wire/column name is
+             *     `type`.
+             */
+            type?: string;
             /** Format: date-time */
             updated_at: string;
             /**
@@ -4201,6 +4212,11 @@ export interface components {
             /** Format: int32 */
             priority?: number | null;
             title?: string | null;
+            /**
+             * @description Change the issue type (MAIN-59). Absent leaves it unchanged; an invalid
+             *     value is rejected. Named `type_`; the wire name is `type`.
+             */
+            type?: string | null;
             /**
              * @description Which workspace this task belongs to. Absent leaves it alone, `null`
              *     clears it, an id sets it.
@@ -7060,6 +7076,12 @@ export interface operations {
                 assignee?: string;
                 column_type?: string;
                 priority?: number;
+                /**
+                 * @description Repeatable issue-type filter (MAIN-59). ORs within types (`type=epic&type=bug`
+                 *     returns either) and ANDs with the other filters. Named `type_`; the query
+                 *     key is `type`.
+                 */
+                type?: string[];
                 /** @description Filter on the derived blocker state. */
                 is_blocked?: boolean;
                 workspace?: string;

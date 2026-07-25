@@ -3433,6 +3433,18 @@
             }
           },
           {
+            "name": "type",
+            "in": "query",
+            "description": "Repeatable issue-type filter (MAIN-59). ORs within types (`type=epic&type=bug`\nreturns either) and ANDs with the other filters. Named `type_`; the query\nkey is `type`.",
+            "required": false,
+            "schema": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          {
             "name": "is_blocked",
             "in": "query",
             "description": "Filter on the derived blocker state.",
@@ -6855,6 +6867,13 @@
           "title": {
             "type": "string"
           },
+          "type": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Issue type (MAIN-59). Omitted → defaults to `task`; an invalid value is\nrejected. Named `type_`; the wire name is `type`."
+          },
           "workspace_id": {
             "oneOf": [
               {
@@ -9550,6 +9569,10 @@
           "title": {
             "type": "string"
           },
+          "type": {
+            "type": "string",
+            "description": "Issue type: one of `task`, `bug`, `epic`, `story`, `chore` (MAIN-59).\nNamed `type_` because `type` is a Rust keyword; the wire/column name is\n`type`."
+          },
           "updated_at": {
             "type": "string",
             "format": "date-time"
@@ -10356,6 +10379,13 @@
               "string",
               "null"
             ]
+          },
+          "type": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Change the issue type (MAIN-59). Absent leaves it unchanged; an invalid\nvalue is rejected. Named `type_`; the wire name is `type`."
           },
           "workspace_id": {
             "type": [
