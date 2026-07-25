@@ -2512,6 +2512,7 @@ dependencies = [
  "dotenvy",
  "futures-util",
  "nook-auth",
+ "nook-control",
  "nook-types",
  "serde",
  "serde_json",

@@ -82,12 +82,22 @@ async fn resolve_session_resolves_public_auth_tables_on_the_chat_first_pool() {
         return;
     };
 
-    // The `chat` schema must exist for a `chat,public` search_path to connect.
+    // Provision the control-plane `public` schema this test depends on. The
+    // nook-chat crate ships only its own `chat` migrations, so a fresh CI
+    // database has no `public.tenants`/`users`/`sessions_auth`/`tenant_members` —
+    // seeding would then fail on `relation "public.tenants" does not exist`.
+    // Running the control plane's own MIGRATOR (idempotent) creates them exactly
+    // as production has them, rather than hand-maintaining table DDL that could
+    // drift. The `chat` schema must also exist for a `chat,public` pool to connect.
     let bootstrap = pool(&url, "public").await;
     sqlx::query("CREATE SCHEMA IF NOT EXISTS chat")
         .execute(&bootstrap)
         .await
         .unwrap();
+    nook_control::MIGRATOR
+        .run(&bootstrap)
+        .await
+        .expect("control-plane migrations must provision the public auth tables");
     let (tenant, session) = seed(&bootstrap).await;
 
     // EXACTLY the service's pool config (main.rs): `chat` first so chat's own
