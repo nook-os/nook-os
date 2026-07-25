@@ -3322,3 +3322,184 @@ a.toast-main:hover .toast-title { text-decoration: underline; }
 .op-row-actions { display: inline-flex; gap: 4px; }
 .op-note { padding: 8px 12px 0; margin: 0; }
 .op-table td .sel { min-width: 120px; }
+
+/* ── Team chat ─────────────────────────────────────────────────────────────
+   Full-height, two-panel: channel list + the reusable ChatView. Amber-CRT,
+   dense, edge-to-edge like the rest of the console. */
+.chat-page {
+  display: grid;
+  grid-template-columns: 200px 1fr;
+  height: 100%;
+  min-height: 0;
+  background: var(--nook-bg);
+}
+.chat-channels {
+  display: flex;
+  flex-direction: column;
+  border-right: 1px solid var(--nook-border);
+  background: var(--nook-bg-panel);
+  overflow-y: auto;
+}
+.chat-channels-head {
+  height: var(--nook-titlebar-h);
+  display: flex;
+  align-items: center;
+  padding: 0 10px;
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--nook-fg-dim);
+  border-bottom: 1px solid var(--nook-border);
+}
+.chat-channels-empty {
+  padding: 10px;
+  color: var(--nook-fg-dim);
+  font-size: 12px;
+}
+.chat-channel {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: var(--nook-row-h);
+  padding: 0 10px;
+  border: 0;
+  background: transparent;
+  color: var(--nook-fg);
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+.chat-channel:hover { background: var(--nook-bg-raised); }
+.chat-channel.active {
+  background: var(--nook-selection);
+  color: var(--nook-fg-bright);
+  box-shadow: inset 2px 0 0 var(--nook-accent);
+}
+.chat-channel-hash { color: var(--nook-fg-faint); }
+
+.chat-main {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+.chat-main-head {
+  height: var(--nook-titlebar-h);
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 12px;
+  border-bottom: 1px solid var(--nook-border);
+  color: var(--nook-fg-bright);
+  font-size: 13px;
+}
+
+/* ── ChatView (reusable) ── */
+.chat-view {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+.chat-log {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 8px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.chat-older {
+  align-self: center;
+  padding: 4px 0 8px;
+  font-size: 11px;
+  color: var(--nook-fg-dim);
+}
+.chat-empty {
+  margin: auto;
+  color: var(--nook-fg-dim);
+  font-size: 12px;
+}
+.chat-msg { padding: 0 0 0 2px; }
+.chat-msg.head { margin-top: 8px; }
+.chat-msg-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 1px;
+}
+.chat-author {
+  color: var(--nook-accent);
+  font-size: 12px;
+  font-weight: 600;
+  text-shadow: var(--nook-glow);
+}
+.chat-msg.mine .chat-author { color: var(--nook-info); text-shadow: none; }
+.chat-time { color: var(--nook-fg-faint); font-size: 11px; }
+.chat-body {
+  color: var(--nook-fg);
+  font-size: 13px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.chat-msg.pending .chat-body { opacity: 0.55; }
+.chat-msg.failed .chat-body { color: var(--nook-err); }
+.chat-retry {
+  margin-top: 2px;
+  border: 0;
+  background: transparent;
+  color: var(--nook-err);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+  text-decoration: underline;
+}
+
+.chat-composer {
+  display: flex;
+  gap: 6px;
+  align-items: flex-end;
+  padding: 8px 12px;
+  border-top: 1px solid var(--nook-border);
+  background: var(--nook-bg-panel);
+}
+.chat-input {
+  flex: 1;
+  resize: none;
+  max-height: 120px;
+  padding: 6px 8px;
+  border: 1px solid var(--nook-border-bright);
+  border-radius: var(--nook-radius);
+  background: var(--nook-bg);
+  color: var(--nook-fg);
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.4;
+}
+.chat-input:focus {
+  outline: none;
+  border-color: var(--nook-accent);
+  box-shadow: var(--nook-glow);
+}
+.chat-input:disabled { opacity: 0.5; }
+.chat-send {
+  height: var(--nook-ctrl);
+  padding: 0 14px;
+  border: 1px solid var(--nook-accent);
+  border-radius: var(--nook-radius);
+  background: var(--nook-accent);
+  color: #1a1400;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.chat-send:disabled {
+  background: transparent;
+  color: var(--nook-fg-faint);
+  border-color: var(--nook-border-bright);
+  cursor: default;
+}
