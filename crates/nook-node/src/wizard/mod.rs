@@ -7,6 +7,7 @@
 
 pub mod generate;
 pub mod hooks;
+pub mod k8s;
 pub mod node;
 pub mod server;
 pub mod service;
