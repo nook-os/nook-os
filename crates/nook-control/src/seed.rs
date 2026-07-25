@@ -290,6 +290,12 @@ pub async fn run(db: &PgPool, cfg: &Config) -> Result<()> {
         .await?;
     }
 
+    // Managed fleet content — the `nookos` skill and hook set (MAIN-78). Built-in
+    // content, so seeded in every environment (like themes) and before the dev
+    // gate. Idempotent: refreshes only when the shipped default changed, never
+    // clobbering an operator edit.
+    crate::routes::managed::seed(db).await?;
+
     if cfg.is_production() {
         tracing::info!("seed: built-in themes only (production)");
         return Ok(());
