@@ -219,7 +219,9 @@ pub async fn start_work(
     Ok((updated, session))
 }
 
-/// In Progress → Done: record the PR (given or derived from the remote).
+/// In Progress → In Review: record the PR (given or derived from the remote)
+/// and park the card in the board's review stage, not Done — so "Done" can mean
+/// merged and review has a home (MAIN-71).
 pub async fn submit_pr(
     state: &AppState,
     tenant: TenantId,
@@ -239,14 +241,24 @@ pub async fn submit_pr(
             .unwrap_or_else(|| format!("(no remote) branch {branch}")),
     };
 
-    let done = column_id(state, task.board_id, "Done", 3).await?;
+    // By TYPE, not name: a submitted PR parks in the board's `review` column,
+    // falling back to `completed` only for a board that somehow has no review
+    // column (one that predates this and missed the backfill).
+    let target = match crate::services::tasks::column_of_type(&state.db, task.board_id, "review")
+        .await
+    {
+        Ok(id) => id,
+        Err(_) => {
+            crate::services::tasks::column_of_type(&state.db, task.board_id, "completed").await?
+        }
+    };
     let updated: TaskItem = sqlx::query_as(
         "UPDATE tasks SET pr_url = $2, column_id = $3, updated_at = now()
          WHERE id = $1 RETURNING *",
     )
     .bind(task_id)
     .bind(&url)
-    .bind(done)
+    .bind(target)
     .fetch_one(&state.db)
     .await?;
 
