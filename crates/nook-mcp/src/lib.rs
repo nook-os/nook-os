@@ -47,10 +47,13 @@ pub trait NookBackend: Send + Sync + 'static {
     ) -> anyhow::Result<Vec<Event>>;
     async fn get_notes(&self, workspace: String) -> anyhow::Result<Vec<Note>>;
     async fn append_note(&self, workspace: String, content: String) -> anyhow::Result<Note>;
+    // `parent` (MAIN-81): file under an epic — a uuid or key of a `type='epic'`
+    // task on the same board; omit for a top-level task.
     async fn create_task(
         &self,
         title: String,
         description: Option<String>,
+        parent: Option<String>,
     ) -> anyhow::Result<TaskItem>;
 
     // ── Git-powerhouse management (drive workspace/project creation) ─────────
@@ -115,6 +118,13 @@ pub trait NookBackend: Send + Sync + 'static {
     async fn add_label(&self, task: String, label: String) -> anyhow::Result<serde_json::Value>;
     async fn remove_label(&self, task: String, label: String) -> anyhow::Result<serde_json::Value>;
     async fn set_priority(&self, task: String, priority: i32) -> anyhow::Result<TaskItem>;
+    /// File a task under an epic, or detach it (MAIN-81). `parent` is a uuid or
+    /// key of a `type='epic'` task on the same board; omit `parent` to detach.
+    async fn set_task_parent(
+        &self,
+        task: String,
+        parent: Option<String>,
+    ) -> anyhow::Result<TaskItem>;
     async fn link_tasks(
         &self,
         from: String,
@@ -142,6 +152,9 @@ pub struct TaskQuery {
     pub priority: Option<i32>,
     /// false excludes anything with an unresolved blocker.
     pub is_blocked: Option<bool>,
+    /// An epic's children (MAIN-81): a uuid or key. Returns the tickets filed
+    /// under that epic, across every column.
+    pub parent: Option<String>,
     pub limit: Option<i64>,
 }
 
@@ -211,6 +224,9 @@ pub struct AppendNoteParams {
 pub struct CreateTaskParams {
     pub title: String,
     pub description: Option<String>,
+    /// File under an epic (MAIN-81): a uuid or key of a `type='epic'` task on
+    /// the same board. Omit for a top-level task.
+    pub parent: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -299,6 +315,15 @@ pub struct PriorityParams {
     pub task: String,
     /// 0 none, 1 urgent, 2 high, 3 medium, 4 low.
     pub priority: i32,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct SetTaskParentParams {
+    /// The task to (re)file — a uuid or key.
+    pub task: String,
+    /// The epic to file it under (uuid or key of a `type='epic'` task on the
+    /// same board). Omit to DETACH the task from its epic.
+    pub parent: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -469,7 +494,7 @@ impl NookMcp {
         to_result(
             &self
                 .backend
-                .create_task(p.title, p.description)
+                .create_task(p.title, p.description, p.parent)
                 .await
                 .map_err(backend_err)?,
         )
@@ -730,6 +755,23 @@ impl NookMcp {
             &self
                 .backend
                 .set_priority(p.task, p.priority)
+                .await
+                .map_err(backend_err)?,
+        )
+    }
+
+    #[tool(
+        description = "File a task under an epic, or detach it. `parent` is a uuid or key of a \
+                       type=epic task on the same board; omit `parent` to detach (MAIN-81)."
+    )]
+    async fn set_task_parent(
+        &self,
+        Parameters(p): Parameters<SetTaskParentParams>,
+    ) -> Result<CallToolResult, McpError> {
+        to_result(
+            &self
+                .backend
+                .set_task_parent(p.task, p.parent)
                 .await
                 .map_err(backend_err)?,
         )

@@ -266,6 +266,7 @@ use utoipa::OpenApi;
         nook_types::UpdateCommentRequest,
         nook_types::TaskRelation,
         nook_types::RelatedTask,
+        nook_types::EpicChild,
         nook_types::CreateRelationRequest,
         nook_types::TaskDetail,
         nook_types::ClaimTaskRequest,

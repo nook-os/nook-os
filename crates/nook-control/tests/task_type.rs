@@ -56,6 +56,7 @@ fn create(title: &str, type_: Option<&str>) -> CreateTaskRequest {
         priority: None,
         type_: type_.map(str::to_string),
         visibility: None,
+        parent: None,
         labels: vec![],
     }
 }
@@ -71,6 +72,7 @@ fn patch_type(type_: &str) -> UpdateTaskRequest {
         priority: None,
         type_: Some(type_.into()),
         visibility: None,
+        parent: None,
         workspace_id: None,
         expected_updated_at: None,
     }
@@ -129,7 +131,7 @@ async fn patch_changes_the_type() {
     assert_eq!(task.type_, "task");
 
     let updated = provider
-        .update_task(tenant, task.id, patch_type("epic"))
+        .update_task(tenant, None, task.id, patch_type("epic"))
         .await
         .expect("patch");
     assert_eq!(updated.type_, "epic");

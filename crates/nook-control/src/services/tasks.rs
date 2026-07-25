@@ -96,11 +96,46 @@ pub async fn enrich(
         });
     }
 
+    // Parent numbers, one query for the whole batch, so an epic's children can
+    // show "under NOOK-7" without an N+1 (MAIN-81). The parent is on the same
+    // board as the child, so the child's board key builds the parent key too.
+    let parent_ids: Vec<uuid::Uuid> = {
+        let mut v: Vec<uuid::Uuid> = tasks
+            .iter()
+            .filter_map(|t| t.parent_task_id.map(|p| p.0))
+            .collect();
+        v.sort_unstable();
+        v.dedup();
+        v
+    };
+    let parent_numbers: HashMap<uuid::Uuid, Option<i32>> = if parent_ids.is_empty() {
+        HashMap::new()
+    } else {
+        sqlx::query_as::<_, (uuid::Uuid, Option<i32>)>(
+            "SELECT id, number FROM tasks WHERE id = ANY($1)",
+        )
+        .bind(&parent_ids)
+        .fetch_all(db)
+        .await?
+        .into_iter()
+        .collect()
+    };
+
     let base = base_url.trim_end_matches('/');
     for t in &mut tasks {
         t.labels = by_task.remove(&t.id.0).unwrap_or_default();
         t.key = match (keys.get(&t.board_id.0).and_then(|k| k.clone()), t.number) {
             (Some(k), Some(n)) => Some(format!("{k}-{n}")),
+            _ => None,
+        };
+        t.parent_key = match (
+            t.parent_task_id,
+            keys.get(&t.board_id.0).and_then(|k| k.clone()),
+        ) {
+            (Some(p), Some(board_key)) => parent_numbers
+                .get(&p.0)
+                .and_then(|n| *n)
+                .map(|n| format!("{board_key}-{n}")),
             _ => None,
         };
         // Deep link by key where there is one, else by id — a task created

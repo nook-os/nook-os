@@ -387,6 +387,34 @@ pub async fn detail(
         .iter()
         .any(|r| r.column_type != "completed" && r.column_type != "canceled");
 
+    // An epic's detail carries its children (MAIN-81); anything else has none.
+    // `column_type` lets a reader compute done/total inline. Ordered by priority
+    // then age, matching the board's own sense of "what to look at first".
+    // Filtered by visibility (MAIN-76): a private child the viewer neither
+    // created nor is assigned must not leak its title/key through epic detail —
+    // the same predicate the list/board reads enforce.
+    let children: Vec<EpicChild> = if task.type_ == "epic" {
+        sqlx::query_as(
+            "SELECT t.id,
+                    (b.key || '-' || t.number::text) AS key,
+                    t.title, t.type, t.priority,
+                    bc.type AS column_type,
+                    t.archived_at
+             FROM tasks t
+             JOIN boards b ON b.id = t.board_id
+             JOIN board_columns bc ON bc.id = t.column_id
+             WHERE t.parent_task_id = $1
+               AND (t.visibility <> 'private' OR t.created_by = $2 OR t.assignee_user_id = $2)
+             ORDER BY CASE WHEN t.priority = 0 THEN 5 ELSE t.priority END, t.created_at",
+        )
+        .bind(id)
+        .bind(viewer)
+        .fetch_all(&state.db)
+        .await?
+    } else {
+        Vec::new()
+    };
+
     Ok(TaskDetail {
         task,
         comments: comments_of(state, id).await?,
@@ -394,6 +422,7 @@ pub async fn detail(
         blocking,
         related: other,
         is_blocked,
+        children,
     })
 }
 

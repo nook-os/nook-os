@@ -46,6 +46,10 @@ pub struct TaskFilter {
     pub type_: Vec<String>,
     /// Filter on the derived blocker state.
     pub is_blocked: Option<bool>,
+    /// An epic's children (MAIN-81): a uuid or key (`NOOK-7`). Returns the tasks
+    /// whose `parent_task_id` is that epic, across every column (an epic's
+    /// tickets span backlog and board), still respecting `archived`.
+    pub parent: Option<String>,
     pub workspace: Option<uuid::Uuid>,
     /// Free-text search: case-insensitive substring across the task's title,
     /// description body, and display key (`MAIN-42`). ANDs with the other
@@ -96,6 +100,7 @@ impl TaskFilter {
                 "priority" => f.priority = Some(num(&k, &v)?),
                 "type" => many(&mut f.type_),
                 "limit" => f.limit = Some(num(&k, &v)?),
+                "parent" => f.parent = Some(v),
                 "is_blocked" => f.is_blocked = Some(flag(&k, &v)?),
                 "archived" => f.archived = Some(flag(&k, &v)?),
                 "workspace" => {
@@ -208,6 +213,20 @@ pub async fn query_rows(
             )));
         }
     }
+    // Resolve the epic parent (uuid or key) to an id for the children filter
+    // (MAIN-81). A parent that does not resolve is a 400, not an empty list, so
+    // a typo is not silently "this epic has no tickets".
+    let parent_id: Option<uuid::Uuid> = match f.parent.as_deref() {
+        Some(p) => Some(
+            tasks::resolve_id(db, tenant, p)
+                .await
+                .map_err(|_| {
+                    ApiError::BadRequest(format!("parent {p:?} is not a task in this tenant"))
+                })?
+                .0,
+        ),
+        None => None,
+    };
     let labels: Vec<String> = f.label.iter().map(|l| l.trim().to_lowercase()).collect();
     let not_labels: Vec<String> = f
         .not_label
@@ -263,6 +282,12 @@ pub async fn query_rows(
           -- an agent's claim path enforces, so the list never shows work it
           -- could not then start.
           AND (t.visibility <> 'private' OR t.created_by = $16 OR t.assignee_user_id = $16)
+          -- epic children (MAIN-81): when a parent is given, restrict to its
+          -- tickets. This spans every column (children live in backlog and on
+          -- the board), so it deliberately does NOT constrain the column type.
+          -- BOTH this and the visibility predicate apply, so an epic's children
+          -- are still filtered to what the viewer may see.
+          AND ($17::uuid IS NULL OR t.parent_task_id = $17)
         -- priority 0 means "unset", which sorts last rather than first
         ORDER BY CASE WHEN t.priority = 0 THEN 5 ELSE t.priority END, t.created_at
         LIMIT $12
@@ -286,6 +311,8 @@ pub async fn query_rows(
     .bind(&types)
     // $16: the viewer, for the visibility predicate above.
     .bind(viewer)
+    // $17: the epic-children filter (None disables it via the IS NULL guard).
+    .bind(parent_id)
     .fetch_all(db)
     .await?;
 

@@ -138,6 +138,7 @@ async fn make_task(
                 priority: None,
                 type_: None,
                 visibility: Some(visibility.into()),
+                parent: None,
                 labels: vec![],
             },
         )
@@ -397,6 +398,7 @@ fn blank_update() -> UpdateTaskRequest {
         type_: None,
         visibility: None,
         workspace_id: None,
+        parent: None,
         expected_updated_at: None,
     }
 }

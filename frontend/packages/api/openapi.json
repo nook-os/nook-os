@@ -3731,6 +3731,15 @@
             }
           },
           {
+            "name": "parent",
+            "in": "query",
+            "description": "An epic's children (MAIN-81): a uuid or key (`NOOK-7`). Returns the tasks\nwhose `parent_task_id` is that epic, across every column (an epic's\ntickets span backlog and board), still respecting `archived`.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
             "name": "workspace",
             "in": "query",
             "required": false,
@@ -7134,6 +7143,13 @@
             },
             "description": "Label NAMES, created for the tenant if new. Names rather than ids\nbecause a filer knows `agent-ready`, not its uuid."
           },
+          "parent": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "File this task under an epic (MAIN-81): a uuid OR a key (`NOOK-7`),\ntenant-scoped. Must resolve to a `type='epic'` task on the same board.\nOmitted → top-level."
+          },
           "priority": {
             "type": [
               "integer",
@@ -7552,6 +7568,49 @@
           "not_after": {
             "type": "string",
             "format": "date-time"
+          }
+        }
+      },
+      "EpicChild": {
+        "type": "object",
+        "description": "One child ticket of an epic, for the epic's detail (MAIN-81). `done`/`total`\nis derivable by the reader: a child is done when its `column_type` is\n`completed` or `canceled`.",
+        "required": [
+          "id",
+          "title",
+          "type",
+          "priority",
+          "column_type"
+        ],
+        "properties": {
+          "archived_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "column_type": {
+            "type": "string",
+            "description": "The column TYPE the child sits in — so progress is derivable inline."
+          },
+          "id": {
+            "$ref": "#/components/schemas/TaskId"
+          },
+          "key": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "priority": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "title": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string"
           }
         }
       },
@@ -9742,6 +9801,13 @@
             },
             "description": "Tasks waiting on this one."
           },
+          "children": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/EpicChild"
+            },
+            "description": "When this task is an epic, the tickets filed under it (MAIN-81). Empty\nfor a non-epic or a childless epic."
+          },
           "comments": {
             "type": "array",
             "items": {
@@ -9879,6 +9945,24 @@
             ],
             "format": "int32",
             "description": "Per-board sequence behind the human key. `None` only for a task created\nbefore keys existed and not yet backfilled."
+          },
+          "parent_key": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The parent epic's human key (`NOOK-7`), when this task has a parent.\nComputed like `key`, so a reader can show \"under NOOK-7\" without a second\nlookup (MAIN-81)."
+          },
+          "parent_task_id": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/TaskId",
+                "description": "The epic this task hangs off, or `None` for a top-level task (MAIN-81).\nThe parent is always a `type='epic'` task on the same board; an epic\nnever has a parent (no nesting). Cleared to `None` if the epic is deleted."
+              }
+            ]
           },
           "position": {
             "type": "integer",
@@ -10705,6 +10789,13 @@
             ],
             "format": "date-time",
             "description": "Optimistic-concurrency precondition. When set, the update applies only\nif the task's current `updated_at` still equals this; a mismatch makes\nNO change and returns `409 Conflict` (the body changed under the caller).\nThe body-editing surfaces send it; a move / other unguarded PATCH leaves\nit absent and behaves exactly as before (MAIN-36)."
+          },
+          "parent": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Re-file under an epic, or detach (MAIN-81). Absent = unchanged, `null` =\ndetach (become top-level), a uuid/key = move under that epic (validated\nlike `create`). Tri-state for the same reason `workspace_id` is."
           },
           "position": {
             "type": [
