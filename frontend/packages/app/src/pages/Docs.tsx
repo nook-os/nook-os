@@ -37,14 +37,17 @@ export function DocsPage() {
 
           <h2>Kanban drives the work</h2>
           <p>
-            The board is first-class and lives in the control plane. A task moves through{" "}
-            <b>Triage → Todo → In Progress → In Review → Done</b>:
+            The board is first-class and lives in the control plane. The Board page has two tabs:
+            the <b>Backlog</b> — a prioritized refinement queue nothing runs from — and the{" "}
+            <b>Board</b> kanban, where a task moves through{" "}
+            <b>Todo → In Progress → In Review → Done</b>:
           </p>
           <ul>
             <li>
-              <b>Triage</b>: nothing runs yet. <b>Dispatch</b> lets the resource-aware scheduler
-              pick the best online node (most free memory, lowest load, fewest sessions) — or drag
-              it to Todo and pick the node yourself.
+              <b>Backlog</b>: nothing runs yet. <b>Send to board</b> moves a task to Todo, or{" "}
+              <b>Dispatch</b> lets the resource-aware scheduler pick the best online node (most free
+              memory, lowest load, fewest sessions) and place it on Todo for you. Epics live here
+              too.
             </li>
             <li>
               <b>Todo → In Progress</b>: <b>Start work</b> creates a worktree for the task's branch

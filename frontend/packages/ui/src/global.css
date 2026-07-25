@@ -1063,6 +1063,74 @@ table.nook-table tr.clickable { cursor: pointer; }
 
 .board-body { display: flex; flex-direction: column; height: 100%; min-height: 0; }
 
+/* Board / Backlog tabs (MAIN-82) — the cp-tab lit-tab pattern, board-scoped. */
+.board-tabs {
+  display: flex;
+  height: 30px;
+  background: var(--nook-bg-panel);
+  border-bottom: 1px solid var(--nook-border);
+  flex: 0 0 auto;
+}
+.board-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 14px;
+  background: transparent;
+  border: none;
+  border-right: 1px solid var(--nook-border);
+  color: var(--nook-fg-faint);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+}
+.board-tab:hover { background: var(--nook-bg-raised); color: var(--nook-fg); }
+.board-tab.active {
+  background: var(--nook-bg);
+  color: var(--nook-fg-bright);
+  box-shadow: inset 0 2px 0 var(--nook-accent);
+}
+.board-tab-count {
+  font-size: 10px;
+  padding: 0 5px;
+  border-radius: 8px;
+  background: var(--nook-border-bright);
+  color: var(--nook-fg);
+}
+
+/* Backlog tab: a dense prioritized list, not columns (MAIN-82). */
+.backlog { display: flex; flex-direction: column; flex: 1; min-height: 0; overflow-y: auto; }
+.backlog-composer {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--nook-border);
+}
+.backlog-composer .composer-input { flex: 1; }
+.backlog-list { display: flex; flex-direction: column; }
+.backlog-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 10px;
+  border-bottom: 1px solid var(--nook-border);
+  cursor: pointer;
+  font-size: 12px;
+}
+.backlog-row:hover { background: var(--nook-bg-raised); }
+.backlog-row.selected { background: var(--nook-bg-raised); box-shadow: inset 2px 0 0 var(--nook-accent); }
+.backlog-row.blocked { opacity: 0.55; }
+.backlog-row-title { color: var(--nook-fg-bright); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.backlog-row-preview {
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.backlog-row-actions { margin-left: auto; display: inline-flex; align-items: center; gap: 4px; flex: 0 0 auto; }
+
 .board-split {
   display: flex;
   flex: 1;
