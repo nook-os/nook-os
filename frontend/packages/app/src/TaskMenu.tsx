@@ -25,6 +25,7 @@ export interface MenuAnchor {
 export function TaskMenu({
   task,
   columns,
+  epics,
   anchor,
   onClose,
   onStartWork,
@@ -33,6 +34,8 @@ export function TaskMenu({
 }: {
   task: TaskItem;
   columns: MenuColumn[];
+  /** The board's epics, for "Move to epic" (MAIN-83 AC-5). Omitted → no entry. */
+  epics?: { id: string; key?: string | null; title: string; type?: string }[];
   anchor: MenuAnchor;
   onClose: () => void;
   onStartWork: (task: TaskItem) => void;
@@ -41,7 +44,7 @@ export function TaskMenu({
 }) {
   const ref = useRef<HTMLDivElement>(null);
   const [pos, setPos] = useState(anchor);
-  const [submenu, setSubmenu] = useState<"move" | null>(null);
+  const [submenu, setSubmenu] = useState<"move" | "epic" | null>(null);
 
   // Keep the menu on screen. Opened from a card near the right edge or the
   // bottom of a tall column, a naively-placed menu renders half off-screen and
@@ -82,6 +85,19 @@ export function TaskMenu({
         body: { column_id },
       }),
     );
+
+  // File under an epic, or detach with `null` (MAIN-83 AC-5). A backend refusal
+  // (non-epic parent) surfaces via the write-failure toast, untouched (AC-6).
+  const moveToEpic = (parent: string | null) =>
+    run(() =>
+      api.PATCH("/api/v1/tasks/{id}", {
+        params: { path: { id: task.id } },
+        body: { parent },
+      }),
+    );
+  // Only for a non-epic task, and only when epics are known. Exclude self.
+  const epicChoices = (epics ?? []).filter((e) => e.id !== task.id);
+  const canMoveToEpic = task.type !== "epic" && !!epics;
 
   const copy = async (text: string, what: string) => {
     try {
@@ -187,6 +203,47 @@ export function TaskMenu({
           </div>
         )}
       </div>
+
+      {canMoveToEpic && (
+        <div
+          className="ctx-sub-host"
+          onMouseEnter={() => setSubmenu("epic")}
+          onMouseLeave={() => setSubmenu(null)}
+        >
+          {item("Move to epic", () => setSubmenu(submenu === "epic" ? null : "epic"), {
+            sub: true,
+          })}
+          {submenu === "epic" && (
+            <div className="ctx-submenu">
+              {task.parent_task_id && (
+                <button
+                  className="ctx-item"
+                  onMouseDown={(e) => e.stopPropagation()}
+                  onClick={() => moveToEpic(null)}
+                >
+                  — No epic —
+                </button>
+              )}
+              {epicChoices.length === 0 && !task.parent_task_id && (
+                <span className="ctx-item faint">no epics on this board</span>
+              )}
+              {epicChoices.map((e) =>
+                e.id === task.parent_task_id ? null : (
+                  <button
+                    key={e.id}
+                    className="ctx-item"
+                    onMouseDown={(ev) => ev.stopPropagation()}
+                    onClick={() => moveToEpic(e.id)}
+                  >
+                    {e.key ? `${e.key} ` : ""}
+                    {e.title}
+                  </button>
+                ),
+              )}
+            </div>
+          )}
+        </div>
+      )}
 
       <div className="ctx-sep" />
 

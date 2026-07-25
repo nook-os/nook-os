@@ -1131,6 +1131,35 @@ table.nook-table tr.clickable { cursor: pointer; }
 }
 .backlog-row-actions { margin-left: auto; display: inline-flex; align-items: center; gap: 4px; flex: 0 0 auto; }
 
+/* Epic grouping in the Backlog tab (MAIN-83). */
+.backlog-epic { border-bottom: 1px solid var(--nook-border); }
+.backlog-epic-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 10px;
+  background: var(--nook-bg-panel);
+  cursor: pointer;
+  font-size: 12px;
+}
+.backlog-epic-head.no-epic { cursor: default; }
+.backlog-epic-head:hover { background: var(--nook-bg-raised); }
+.backlog-epic-title { color: var(--nook-fg-bright); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.backlog-epic-progress { margin-left: auto; font-size: 11px; flex: 0 0 auto; }
+.backlog-epic-head .card-menu-btn { margin-left: 4px; }
+.backlog-epic-body { display: flex; flex-direction: column; }
+.backlog-epic-body .backlog-row { padding-left: 22px; }
+.backlog-epic-empty { padding: 4px 10px 4px 22px; }
+/* A child's status chip: column type or "archived". */
+.backlog-status {
+  font-size: 10px;
+  padding: 0 5px;
+  border-radius: 8px;
+  background: var(--nook-border-bright);
+  color: var(--nook-fg-faint);
+  flex: 0 0 auto;
+}
+
 .board-split {
   display: flex;
   flex: 1;
