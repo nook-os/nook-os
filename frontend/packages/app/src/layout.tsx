@@ -57,10 +57,7 @@ const OPERATOR_SECTION = {
   end: false,
 };
 
-const COMING_SOON = [
-  { label: "Team", icon: Users },
-  { label: "Standup", icon: Mic },
-];
+const COMING_SOON = [{ label: "Standup", icon: Mic }];
 
 /** Workspace-context tabs shown in the top bar once a workspace is chosen. */
 function ContextTabs() {
@@ -277,6 +274,14 @@ export function Shell({ me }: { me: MeResponse }) {
         <nav className="nook-tabs">
           <ContextTabs />
           <span style={{ flex: 1 }} />
+          <NavLink
+            to="/team"
+            className={({ isActive }) => `nook-tab${isActive ? " active" : ""}`}
+            title="members, invites and your organizations"
+          >
+            <Users size={14} />
+            Team
+          </NavLink>
           {COMING_SOON.map((s) => (
             <span key={s.label} className="nook-tab soon" title="coming soon">
               <s.icon size={14} />

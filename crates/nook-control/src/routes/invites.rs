@@ -73,9 +73,43 @@ fn invite_email(tenant: &str, inviter: &str, accept_url: &str) -> (String, Strin
     (subject, text, html)
 }
 
+/// What an invite send should log: the skip-vs-sent decision, pulled out as a
+/// pure function so it is unit-testable without a mailer or tracing.
+#[derive(Debug, PartialEq, Eq)]
+enum InviteMailLog {
+    /// A real transport delivered it.
+    Sent,
+    /// No delivery was attempted; the reason, for the log line.
+    Skipped(&'static str),
+    /// The transport was tried and errored.
+    Failed,
+}
+
+/// Classify an invite send from the provider and the reported outcome.
+///
+/// The old logic logged "sent" on any `Ok`, but `Ok` from the guarded mailer
+/// means only "not an error" — a message held by a gate (sending disabled,
+/// notifications off, quota) also returns `Ok`. Now the guard reports whether it
+/// actually delivered, so a hold logs a skip regardless of provider. The capture
+/// provider records but never delivers, so it is a skip too.
+fn classify_invite_send(
+    provider: &str,
+    outcome: &anyhow::Result<crate::mailer::SendOutcome>,
+) -> InviteMailLog {
+    use crate::mailer::SendOutcome;
+    match outcome {
+        Err(_) => InviteMailLog::Failed,
+        Ok(SendOutcome::Held(reason)) => InviteMailLog::Skipped(reason),
+        Ok(SendOutcome::Delivered) if provider == "capture" => {
+            InviteMailLog::Skipped("mail is captured (MAIL_PROVIDER=capture)")
+        }
+        Ok(SendOutcome::Delivered) => InviteMailLog::Sent,
+    }
+}
+
 /// Email the accept link, best-effort: the send never fails the API call (AC-2),
-/// and the outcome is logged as sent / skipped-because-disabled / failed (AC-6).
-/// Takes the mailer and provider name (not `AppState`) so it is unit-testable.
+/// and the outcome is logged as sent / skipped / failed (AC-6). Takes the mailer
+/// and provider name (not `AppState`) so it is unit-testable.
 async fn send_invite_email(
     mailer: &dyn crate::mailer::Mailer,
     provider: &str,
@@ -85,10 +119,10 @@ async fn send_invite_email(
     accept_url: &str,
 ) {
     let (subject, text, html) = invite_email(tenant, inviter, accept_url);
-    // Hand it to the mailer regardless (the capture provider records it for a
-    // glance/test), then log the delivery outcome.
+    // Report-aware send: the guard tells us whether the message actually left,
+    // rather than us inferring "sent" from a bare `Ok`.
     let outcome = mailer
-        .send(
+        .send_reporting(
             to,
             &subject,
             &text,
@@ -96,14 +130,15 @@ async fn send_invite_email(
             crate::mailer::Category::Transactional,
         )
         .await;
-    match (provider, outcome) {
-        ("capture", _) => tracing::info!(
+    match classify_invite_send(provider, &outcome) {
+        InviteMailLog::Sent => tracing::info!(to, "invite email sent"),
+        InviteMailLog::Skipped(reason) => tracing::info!(
             to,
-            "invite email skipped — mail is disabled (MAIL_PROVIDER=capture); use the copy-link"
+            reason,
+            "invite email skipped — no delivery attempted; use the copy-link"
         ),
-        (_, Ok(())) => tracing::info!(to, "invite email sent"),
-        (_, Err(e)) => tracing::error!(
-            error = %e,
+        InviteMailLog::Failed => tracing::error!(
+            error = %outcome.err().map(|e| e.to_string()).unwrap_or_default(),
             to,
             "invite email failed to send (best-effort; the invite still stands)"
         ),
@@ -499,7 +534,34 @@ mod tests {
         assert!(super::validated_role(None).is_ok(), "defaults to member");
     }
 
-    use super::{invite_email, send_invite_email};
+    use super::{classify_invite_send, invite_email, send_invite_email, InviteMailLog};
+    use crate::mailer::SendOutcome;
+
+    #[test]
+    fn invite_send_is_classified_honestly() {
+        // A real transport that delivered → sent.
+        assert_eq!(
+            classify_invite_send("smtp", &Ok(SendOutcome::Delivered)),
+            InviteMailLog::Sent
+        );
+        // The guard held it (sending disabled / quota / notifications off) → a
+        // skip, REGARDLESS of provider — the old code logged "sent" here.
+        assert_eq!(
+            classify_invite_send("smtp", &Ok(SendOutcome::Held("sending disabled"))),
+            InviteMailLog::Skipped("sending disabled")
+        );
+        // The capture provider records but never delivers → a skip even though
+        // the transport returned Delivered.
+        assert_eq!(
+            classify_invite_send("capture", &Ok(SendOutcome::Delivered)),
+            InviteMailLog::Skipped("mail is captured (MAIL_PROVIDER=capture)")
+        );
+        // A transport error → failed.
+        assert_eq!(
+            classify_invite_send("smtp", &Err(anyhow::anyhow!("relay down"))),
+            InviteMailLog::Failed
+        );
+    }
 
     #[test]
     fn invite_email_carries_the_link_tenant_inviter_and_escapes_html() {
