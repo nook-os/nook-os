@@ -316,6 +316,15 @@ use utoipa::OpenApi;
         nook_proto::DiscoveredWorkspace,
         nook_proto::AttachClientMessage,
         nook_proto::AttachServerMessage,
+        // Team chat (MAIN-49) — served by the separate nook-chat service, but
+        // its types are Rust-owned here so the UI consumes one typed contract.
+        nook_types::ChatChannel,
+        nook_types::ChatMessage,
+        nook_types::ChatMessagePage,
+        nook_types::CreateChatChannel,
+        nook_types::UpdateChatChannel,
+        nook_types::PostChatMessage,
+        nook_types::ChatServerMessage,
     ))
 )]
 pub struct ApiDoc;

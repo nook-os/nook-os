@@ -8,15 +8,21 @@
 //! and authenticates callers by REUSING NookOS auth via the shared `nook-auth`
 //! crate rather than a second login.
 
+mod bus;
+mod channels;
 mod config;
+mod messages;
+mod registry;
+mod ws;
 
 use std::str::FromStr;
+use std::sync::Arc;
 
 use axum::extract::{FromRequestParts, State};
 use axum::http::request::Parts;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, patch};
 use axum::{Json, Router};
 use axum_extra::extract::CookieJar;
 use serde_json::{json, Value};
@@ -29,8 +35,10 @@ use uuid::Uuid;
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
 #[derive(Clone)]
-struct AppState {
-    db: PgPool,
+pub(crate) struct AppState {
+    pub(crate) db: PgPool,
+    /// Per-channel live fan-out for the delivery websocket (AC-3).
+    pub(crate) registry: Arc<registry::Registry>,
 }
 
 #[tokio::main]
@@ -65,13 +73,29 @@ async fn main() -> anyhow::Result<()> {
         .await?;
     MIGRATOR.run(&db).await?;
 
-    let state = AppState { db };
+    // Live fan-out: a local per-channel broadcast registry, plus a Postgres
+    // LISTEN/NOTIFY bus so a post on any instance reaches subscribers on all of
+    // them (AC-3). Held in memory — a restart drops subscriptions, and clients
+    // reconnect and backfill from history.
+    let registry = Arc::new(registry::Registry::new());
+    bus::start(registry.clone(), db.clone());
+
+    let state = AppState { db, registry };
     let app = Router::new()
         .route("/healthz", get(healthz))
         .route("/livez", get(livez))
         // A minimal authenticated endpoint proving auth reuse (AC-4): it
         // resolves the SAME user+tenant the control plane would.
         .route("/api/me", get(me))
+        // Channels (AC-1) + messages (AC-2/AC-4) + delivery websocket (AC-3),
+        // all tenant-scoped via the shared auth (AC-5).
+        .route("/api/channels", get(channels::list).post(channels::create))
+        .route("/api/channels/{id}", patch(channels::update))
+        .route(
+            "/api/channels/{id}/messages",
+            get(messages::history).post(messages::post),
+        )
+        .route("/api/channels/{id}/ws", get(ws::subscribe))
         .layer(tower_http::trace::TraceLayer::new_for_http())
         .with_state(state);
 
@@ -108,10 +132,10 @@ async fn me(caller: Caller) -> Json<Value> {
 /// A validated caller, resolved through `nook-auth` exactly as the control plane
 /// does. The credential plumbing (bearer header / session cookie) lives here;
 /// the database check is the shared one.
-struct Caller {
-    user_id: Uuid,
-    tenant_id: Uuid,
-    cookie_session: bool,
+pub(crate) struct Caller {
+    pub(crate) user_id: Uuid,
+    pub(crate) tenant_id: Uuid,
+    pub(crate) cookie_session: bool,
 }
 
 impl FromRequestParts<AppState> for Caller {
@@ -158,10 +182,19 @@ impl From<nook_auth::Resolved> for Caller {
     }
 }
 
-/// Chat's error → HTTP mapping. Preserves NookOS's 401/403/500 split.
-enum ChatError {
+/// Chat's error → HTTP mapping. Preserves NookOS's 401/403/500 split, plus the
+/// request-shape errors the messaging routes need.
+#[derive(Debug)]
+pub(crate) enum ChatError {
     Unauthorized,
     Forbidden,
+    /// The channel does not exist (distinct from another tenant's channel, which
+    /// is `Forbidden` per AC-5).
+    NotFound,
+    BadRequest(String),
+    /// A rule was violated that is not the client's malformed input — a
+    /// duplicate channel name, a post to an archived channel.
+    Conflict(String),
     Internal,
 }
 
@@ -178,9 +211,15 @@ impl From<nook_auth::AuthError> for ChatError {
 impl IntoResponse for ChatError {
     fn into_response(self) -> Response {
         let (status, msg) = match self {
-            ChatError::Unauthorized => (StatusCode::UNAUTHORIZED, "unauthorized"),
-            ChatError::Forbidden => (StatusCode::FORBIDDEN, "forbidden"),
-            ChatError::Internal => (StatusCode::INTERNAL_SERVER_ERROR, "internal error"),
+            ChatError::Unauthorized => (StatusCode::UNAUTHORIZED, "unauthorized".to_string()),
+            ChatError::Forbidden => (StatusCode::FORBIDDEN, "forbidden".to_string()),
+            ChatError::NotFound => (StatusCode::NOT_FOUND, "not found".to_string()),
+            ChatError::BadRequest(m) => (StatusCode::BAD_REQUEST, m),
+            ChatError::Conflict(m) => (StatusCode::CONFLICT, m),
+            ChatError::Internal => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal error".to_string(),
+            ),
         };
         (status, Json(json!({ "error": msg }))).into_response()
     }

@@ -6336,6 +6336,117 @@
           }
         }
       },
+      "ChatChannel": {
+        "type": "object",
+        "description": "A chat channel visible to a tenant member.",
+        "required": [
+          "id",
+          "name",
+          "slug",
+          "archived",
+          "created_at"
+        ],
+        "properties": {
+          "archived": {
+            "type": "boolean",
+            "description": "Archived channels are hidden from the default list and refuse new posts."
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string"
+          },
+          "slug": {
+            "type": "string"
+          }
+        }
+      },
+      "ChatMessage": {
+        "type": "object",
+        "description": "A posted message. `id` is a UUID v7, so history paginates by keyset on it\n(AC-2/AC-4), like the rest of NookOS.",
+        "required": [
+          "id",
+          "channel_id",
+          "author_id",
+          "body",
+          "created_at"
+        ],
+        "properties": {
+          "author_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "body": {
+            "type": "string"
+          },
+          "channel_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      },
+      "ChatMessagePage": {
+        "type": "object",
+        "description": "One page of channel history, newest-first, keyset-paginated on message id.",
+        "required": [
+          "messages"
+        ],
+        "properties": {
+          "messages": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ChatMessage"
+            }
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Pass as `before=` to fetch the next (older) page; `None` at the end."
+          }
+        }
+      },
+      "ChatServerMessage": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "A new message posted to the subscribed channel.",
+            "required": [
+              "data",
+              "type"
+            ],
+            "properties": {
+              "data": {
+                "$ref": "#/components/schemas/ChatMessage",
+                "description": "A new message posted to the subscribed channel."
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "message"
+                ]
+              }
+            }
+          }
+        ],
+        "description": "What the chat websocket pushes to a subscribed client (AC-3). Adjacently\ntagged for clean generated TypeScript, like the node protocol."
+      },
       "ClaimTaskRequest": {
         "type": "object",
         "description": "`POST /tasks/{id}/claim` — take the work without racing another agent.",
@@ -6477,6 +6588,18 @@
               "type": "string"
             }
           },
+          "name": {
+            "type": "string"
+          }
+        }
+      },
+      "CreateChatChannel": {
+        "type": "object",
+        "description": "Create a channel: a human name. The slug is derived server-side.",
+        "required": [
+          "name"
+        ],
+        "properties": {
           "name": {
             "type": "string"
           }
@@ -8548,6 +8671,18 @@
           }
         }
       },
+      "PostChatMessage": {
+        "type": "object",
+        "description": "Post a message to a channel.",
+        "required": [
+          "body"
+        ],
+        "properties": {
+          "body": {
+            "type": "string"
+          }
+        }
+      },
       "PutSecretRequest": {
         "type": "object",
         "required": [
@@ -10041,6 +10176,24 @@
             "items": {
               "type": "string"
             }
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "UpdateChatChannel": {
+        "type": "object",
+        "description": "Rename and/or archive a channel. Absent fields are left unchanged.",
+        "properties": {
+          "archived": {
+            "type": [
+              "boolean",
+              "null"
+            ]
           },
           "name": {
             "type": [
