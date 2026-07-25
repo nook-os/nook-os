@@ -59,16 +59,24 @@ async fn cols(db: &PgPool, board: BoardId) -> Vec<(String, i32, String)> {
     .expect("cols")
 }
 
-/// The migration's backfill, run against one board. Mirrors
+/// The migration's backfill, run against ONE board. Mirrors
 /// `0010_review_column.sql` so the positioning + idempotency it relies on is
 /// pinned by a test rather than only exercised once at deploy.
-async fn run_backfill(db: &PgPool) {
+///
+/// Scoped to `board` with `= $1`, not global. The migration is global, but the
+/// test must be: a global backfill mutates every other test's boards, and under
+/// parallel DB load that races `submit_pr_resolution` — inserting a review
+/// column into the board it needs to have none — which is exactly the isolation
+/// gap that surfaced once the suite gained more concurrent DB tests.
+async fn run_backfill(db: &PgPool, board: BoardId) {
     sqlx::query(
         "UPDATE board_columns c SET position = position + 1
-         WHERE EXISTS (SELECT 1 FROM board_columns d WHERE d.board_id = c.board_id AND d.type = 'completed')
+         WHERE c.board_id = $1
+           AND EXISTS (SELECT 1 FROM board_columns d WHERE d.board_id = c.board_id AND d.type = 'completed')
            AND NOT EXISTS (SELECT 1 FROM board_columns d WHERE d.board_id = c.board_id AND d.type = 'review')
            AND c.position >= (SELECT min(position) FROM board_columns d WHERE d.board_id = c.board_id AND d.type = 'completed')",
     )
+    .bind(board)
     .execute(db)
     .await
     .expect("shift");
@@ -78,9 +86,11 @@ async fn run_backfill(db: &PgPool) {
                 (SELECT min(position) FROM board_columns c WHERE c.board_id = b.id AND c.type = 'completed') - 1,
                 'review'
          FROM boards b
-         WHERE EXISTS (SELECT 1 FROM board_columns c WHERE c.board_id = b.id AND c.type = 'completed')
+         WHERE b.id = $1
+           AND EXISTS (SELECT 1 FROM board_columns c WHERE c.board_id = b.id AND c.type = 'completed')
            AND NOT EXISTS (SELECT 1 FROM board_columns c WHERE c.board_id = b.id AND c.type = 'review')",
     )
+    .bind(board)
     .execute(db)
     .await
     .expect("insert review");
@@ -154,7 +164,7 @@ async fn backfill_inserts_one_review_before_completed_and_is_idempotent() {
     add_col(&db, board, "In Progress", 2, "started").await;
     add_col(&db, board, "Done", 3, "completed").await;
 
-    run_backfill(&db).await;
+    run_backfill(&db, board).await;
     let after = cols(&db, board).await;
     // Exactly one review column, positioned immediately before completed (AC-2).
     let review: Vec<_> = after.iter().filter(|c| c.2 == "review").collect();
@@ -168,7 +178,7 @@ async fn backfill_inserts_one_review_before_completed_and_is_idempotent() {
     );
 
     // Idempotent: a second run adds nothing.
-    run_backfill(&db).await;
+    run_backfill(&db, board).await;
     let again = cols(&db, board).await;
     assert_eq!(
         again.iter().filter(|c| c.2 == "review").count(),

@@ -362,6 +362,73 @@ async fn notify_action_raises_a_notification_with_a_deep_link() {
 }
 
 #[tokio::test]
+async fn notify_is_skipped_for_a_private_card_but_labels_still_apply() {
+    // MAIN-76 leak guard (review of #60): the notify action is a tenant-wide
+    // broadcast (toast + phone + channels), so it must NOT fire for a private
+    // card — its title (via `{title}` or the default body) would reach the whole
+    // tenant. Label actions broadcast nothing, so they still apply on a private
+    // card.
+    let Some(pool) = test_pool().await else {
+        eprintln!("skipping private-card notify test — no DATABASE_URL");
+        return;
+    };
+    let state = state_and(&pool).await;
+    let f = fixture(
+        &pool,
+        serde_json::json!({
+            "review": [
+                { "kind": "notify", "title": "{title}" },
+                { "kind": "add_board_label", "label": "in-review" },
+            ]
+        }),
+    )
+    .await;
+    let task = task_in(&pool, &f, f.todo, 1).await;
+    sqlx::query(
+        "UPDATE tasks SET visibility = 'private', title = 'SUPER SECRET TITLE' WHERE id = $1",
+    )
+    .bind(task)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    triggers::on_column_change(&state, f.tenant, task, f.board, f.todo, f.review).await;
+
+    // No tenant-wide automation notification was raised at all…
+    let notifs: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM notifications WHERE tenant_id = $1 AND kind = 'board.automation'",
+    )
+    .bind(f.tenant)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(notifs, 0, "no tenant-wide notify fires for a private card");
+    // …and the private title never reached any notification field.
+    let leaked: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM notifications
+         WHERE tenant_id = $1 AND (title LIKE '%SUPER SECRET%' OR body LIKE '%SUPER SECRET%')",
+    )
+    .bind(f.tenant)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        leaked, 0,
+        "the private title must not leak into a notification"
+    );
+
+    // The label action still applied — it does not broadcast, so it is not gated.
+    assert!(
+        labels_of(&pool, task)
+            .await
+            .contains(&"in-review".to_string()),
+        "a non-broadcasting action still runs on a private card"
+    );
+
+    cleanup(&pool, f.tenant).await;
+}
+
+#[tokio::test]
 async fn patch_board_rejects_a_bogus_automation_config() {
     let Some(pool) = test_pool().await else {
         eprintln!("skipping automation validation test — no DATABASE_URL");

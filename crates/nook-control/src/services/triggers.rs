@@ -251,6 +251,21 @@ async fn notify_action(
     title: Option<&str>,
     body: Option<&str>,
 ) -> Result<(), String> {
+    // A private card's title must never reach the tenant (MAIN-76). This notify
+    // is a tenant-wide broadcast (toast + phone + channels), and both the
+    // `{title}` token and the default body would carry that title — so, exactly
+    // as `task.created` does for a private card, the whole notification is
+    // skipped rather than risk the leak. Label actions are unaffected: they only
+    // touch the card's own labels and broadcast nothing.
+    let visibility: String = sqlx::query_scalar("SELECT visibility FROM tasks WHERE id = $1")
+        .bind(task_id)
+        .fetch_one(&state.db)
+        .await
+        .map_err(|e| e.to_string())?;
+    if visibility == "private" {
+        return Ok(());
+    }
+
     let (key, task_title, url) = task_ref(state, task_id).await.map_err(|e| e.to_string())?;
     let expand = |t: &str| {
         t.replace("{key}", &key)
