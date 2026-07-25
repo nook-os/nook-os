@@ -14,6 +14,7 @@ describe("board filter URL round-trip (MAIN-15 AC-1)", () => {
     {
       label: [],
       not_label: [],
+      type: [],
       assignee: "any",
       priority: null,
       blocked: null,
@@ -24,6 +25,7 @@ describe("board filter URL round-trip (MAIN-15 AC-1)", () => {
     {
       label: ["agent-ready", "urgent"],
       not_label: ["blocked"],
+      type: ["bug", "epic"],
       assignee: "me",
       priority: 2,
       blocked: false,
@@ -34,6 +36,7 @@ describe("board filter URL round-trip (MAIN-15 AC-1)", () => {
     {
       label: [],
       not_label: [],
+      type: ["chore"],
       assignee: "none",
       priority: 0,
       blocked: true,
@@ -56,6 +59,16 @@ describe("board filter URL round-trip (MAIN-15 AC-1)", () => {
     const next = writeFilter(params, cases[1]);
     expect(next.get("task")).toBe("NOOK-42"); // untouched
     expect(next.get("label")).toBe("agent-ready,urgent"); // rewritten
+  });
+
+  it("writes the multi-select type filter as a comma list, and parses it back (MAIN-60 AC-4)", () => {
+    expect(serializeFilter(cases[1]).get("type")).toBe("bug,epic");
+    expect(parseFilter(new URLSearchParams("type=bug,epic")).type).toEqual([
+      "bug",
+      "epic",
+    ]);
+    // No type filter → the key is absent, so a default board URL is unchanged.
+    expect(serializeFilter(cases[0]).has("type")).toBe(false);
   });
 });
 

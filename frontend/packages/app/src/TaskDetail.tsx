@@ -7,7 +7,15 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
-import { GitBranch, SquareTerminal, X, Ban, Link2, MoreHorizontal } from "lucide-react";
+import {
+  GitBranch,
+  SquareTerminal,
+  X,
+  Ban,
+  Link2,
+  MoreHorizontal,
+  ChevronDown,
+} from "lucide-react";
 import { api, type TaskLabel, type RelatedTask } from "@nookos/api";
 import {
   Pill,
@@ -15,6 +23,8 @@ import {
   MarkdownEditor,
   EditableMarkdown,
   Select,
+  TypeBadge,
+  TYPE_META,
   useAnchoredMenu,
 } from "@nookos/ui";
 import { PRIORITIES } from "./taskmeta";
@@ -184,6 +194,14 @@ export function TaskDetail({
     bust();
   };
 
+  const setType = async (type: string) => {
+    await api.PATCH("/api/v1/tasks/{id}", {
+      params: { path: { id: taskId } },
+      body: { type },
+    });
+    bust();
+  };
+
   /** Which repo this ticket is work on. `""` means none, sent as null. */
   const setWorkspace = async (id: string) => {
     await api.PATCH("/api/v1/tasks/{id}", {
@@ -239,6 +257,9 @@ export function TaskDetail({
           and the fields that are read at a glance stop interrupting it. */}
       <div className="task-panes">
         <div className="task-main">
+          {/* Upper-left, by the title: the type is what a ticket IS, so it
+              classifies the spec before you read it (AC-1). */}
+          <TypeSelect value={task.type} onChange={setType} />
           {/* Editable in place: renaming is the most common edit there is. */}
           <input
             className="task-modal-title"
@@ -492,6 +513,59 @@ export function TaskDetail({
         </aside>
       </div>
     </Shell>
+  );
+}
+
+/**
+ * The issue-type control by the title: shows the current type as a badge and
+ * opens a menu of the five types, PATCHing on pick (AC-1). The trigger and each
+ * option are buttons, so it is keyboard-reachable (AC-5); the menu is portalled
+ * for the same reason the selects are — it lives inside `.task-main` (scrolls)
+ * inside `.modal` (hides overflow).
+ */
+function TypeSelect({
+  value,
+  onChange,
+}: {
+  value: string | null | undefined;
+  onChange: (type: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const close = useCallback(() => setOpen(false), []);
+  const { hostRef, portal } = useAnchoredMenu(open, close, {
+    height: TYPE_META.length * 30 + 8,
+  });
+  const current = value ?? "task";
+  const menu = portal(
+    <div className="type-menu">
+      {TYPE_META.map((t) => (
+        <button
+          key={t.value}
+          className={`type-menu-item${t.value === current ? " current" : ""}`}
+          onClick={() => {
+            if (t.value !== current) onChange(t.value);
+            setOpen(false);
+          }}
+        >
+          <TypeBadge type={t.value} />
+        </button>
+      ))}
+    </div>,
+    "type-menu-portal",
+  );
+  return (
+    <div ref={hostRef} className="task-type-row">
+      <button
+        className="type-select-trigger"
+        aria-label="issue type"
+        aria-haspopup="menu"
+        onClick={() => setOpen((v) => !v)}
+      >
+        <TypeBadge type={value} />
+        <ChevronDown size={12} />
+      </button>
+      {menu}
+    </div>
   );
 }
 

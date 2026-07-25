@@ -3503,3 +3503,82 @@ a.toast-main:hover .toast-title { text-decoration: underline; }
   border-color: var(--nook-border-bright);
   cursor: default;
 }
+
+/* ── Issue-type badge (MAIN-60) ────────────────────────────────────────────
+   A compact type indicator toned from the shared vocabulary. Icon-only on
+   cards (compact); icon + label in the detail selector and the filter. */
+.type-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 6px 1px 5px;
+  height: var(--nook-pill-h);
+  border: 1px solid var(--nook-border-bright);
+  border-radius: var(--nook-radius);
+  font-size: 11px;
+  line-height: 1;
+  color: var(--nook-fg-dim);
+  white-space: nowrap;
+}
+.type-badge .type-badge-icon { flex: none; }
+.type-badge.err {
+  color: var(--nook-err);
+  border-color: color-mix(in srgb, var(--nook-err) 45%, transparent);
+}
+.type-badge.accent {
+  color: var(--nook-accent);
+  border-color: color-mix(in srgb, var(--nook-accent) 45%, transparent);
+}
+.type-badge.info {
+  color: var(--nook-info);
+  border-color: color-mix(in srgb, var(--nook-info) 45%, transparent);
+}
+.type-badge.ok {
+  color: var(--nook-ok);
+  border-color: color-mix(in srgb, var(--nook-ok) 45%, transparent);
+}
+.type-badge.dim {
+  color: var(--nook-fg-dim);
+  border-color: var(--nook-border-bright);
+}
+
+/* The type control by the task title: the badge as a button that opens the
+   type menu. Reuses the anchored-menu item styling used by Select. */
+.type-select-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--nook-radius);
+  padding: 1px 4px;
+  cursor: pointer;
+  font: inherit;
+}
+.type-select-trigger:hover { border-color: var(--nook-border-bright); }
+.type-menu {
+  display: flex;
+  flex-direction: column;
+  padding: 4px;
+  gap: 2px;
+}
+.type-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  border: 0;
+  border-radius: var(--nook-radius);
+  background: transparent;
+  color: var(--nook-fg);
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+.type-menu-item:hover,
+.type-menu-item.active { background: var(--nook-selection); }
+.type-menu-item.current { box-shadow: inset 2px 0 0 var(--nook-accent); }
+
+/* The type control row sits just above the title in the task detail. */
+.task-type-row { margin-bottom: 4px; }

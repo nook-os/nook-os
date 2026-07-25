@@ -1,4 +1,5 @@
 import React from "react";
+import { BookOpen, Bug, Layers, SquareCheck, Wrench, type LucideIcon } from "lucide-react";
 
 export function Panel({
   title,
@@ -49,6 +50,58 @@ export function Panel({
  * below for the status→tone mapping every status pill should route through.
  */
 export type Tone = "ok" | "warn" | "err" | "info" | "accent" | "dim";
+
+/** The five issue types (MAIN-59). String, not an enum, because the server is
+ *  the source of truth for the set; this is only its presentation. */
+export type TaskType = "task" | "bug" | "epic" | "story" | "chore";
+
+export interface TypeMeta {
+  value: TaskType;
+  label: string;
+  tone: Tone;
+  Icon: LucideIcon;
+}
+
+/**
+ * The ONE issue-type → (tone, icon, label) mapping (AC-2). The task-detail
+ * selector, the board card, and the board filter all read it, so a type looks
+ * identical everywhere and a new type is added in exactly one place. Tones come
+ * from the shared vocabulary above — no per-type colours (NG-5), no raw emoji.
+ */
+export const TYPE_META: TypeMeta[] = [
+  { value: "task", label: "Task", tone: "dim", Icon: SquareCheck },
+  { value: "bug", label: "Bug", tone: "err", Icon: Bug },
+  { value: "epic", label: "Epic", tone: "accent", Icon: Layers },
+  { value: "story", label: "Story", tone: "info", Icon: BookOpen },
+  { value: "chore", label: "Chore", tone: "dim", Icon: Wrench },
+];
+
+/** Look up a type's presentation, defaulting to `task` for an absent or unknown
+ *  value — the server's own default — so nothing ever renders blank. */
+export function typeMeta(type: string | null | undefined): TypeMeta {
+  return TYPE_META.find((t) => t.value === type) ?? TYPE_META[0];
+}
+
+/**
+ * A compact, theme-native indicator for an issue type: the type's icon, plus
+ * its label unless `compact`. Toned from the shared vocabulary. Reused on board
+ * cards (compact), in the detail selector, and in the board filter (AC-2/AC-3).
+ */
+export function TypeBadge({
+  type,
+  compact = false,
+}: {
+  type: string | null | undefined;
+  compact?: boolean;
+}) {
+  const m = typeMeta(type);
+  return (
+    <span className={`type-badge ${m.tone}`} title={m.label}>
+      <m.Icon size={12} className="type-badge-icon" />
+      {!compact && <span className="type-badge-label">{m.label}</span>}
+    </span>
+  );
+}
 
 export function Pill({
   tone,
