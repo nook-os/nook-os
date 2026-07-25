@@ -59,10 +59,16 @@ async fn main() -> anyhow::Result<()> {
         "nook-chat starting",
     );
 
-    // Pin every connection's search_path to `chat` (libpq `-c search_path=chat`).
-    // sqlx then creates its ledger as `chat._sqlx_migrations` and chat's tables
-    // in `chat.*`, independent of the control plane's `public` schema (AC-5).
-    let opts = PgConnectOptions::from_str(&cfg.database_url)?.options([("search_path", "chat")]);
+    // Pin every connection's search_path to `chat,public` (libpq `-c
+    // search_path=chat,public`). `chat` is first, so sqlx creates its ledger as
+    // `chat._sqlx_migrations` and chat's own tables in `chat.*`, independent of
+    // the control plane's `public` schema (AC-5). `public` is the fallback so the
+    // SHARED `nook-auth` session query — unqualified `sessions_auth`,
+    // `tenant_members`, `user_tokens`, which live only in `public` — resolves
+    // instead of 500ing on `chat.sessions_auth does not exist`. No chat table
+    // shares a name with a public one, so `chat` winning first is safe.
+    let opts =
+        PgConnectOptions::from_str(&cfg.database_url)?.options([("search_path", "chat,public")]);
     let db = PgPoolOptions::new()
         .max_connections(10)
         .connect_with(opts)
