@@ -179,6 +179,18 @@ pub async fn notify_now(
     Ok(axum::http::StatusCode::ACCEPTED)
 }
 
+/// The catalog of notification kinds the system can emit (MAIN-91 AC-3): every
+/// event kind `notable()` can raise, each with a human label, description, and
+/// its dotted `group` prefix. A settings UI renders this as a per-kind /
+/// per-group checklist for a channel's `kinds` filter, instead of a free-text
+/// guess. Open to any authenticated caller — it is a static list, not tenant
+/// data.
+#[utoipa::path(get, path = "/api/v1/notifications/kinds",
+    operation_id = "list_notification_kinds", responses((status = 200, body = [NotificationKind])))]
+pub async fn notification_kinds() -> Json<Vec<NotificationKind>> {
+    Json(crate::events::catalog())
+}
+
 // ── channels ────────────────────────────────────────────────────────────────
 
 /// What providers exist and what each one needs, so the UI builds its forms

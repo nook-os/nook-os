@@ -2298,6 +2298,30 @@
         }
       }
     },
+    "/api/v1/notifications/kinds": {
+      "get": {
+        "tags": [
+          "crate::routes::notifications"
+        ],
+        "summary": "The catalog of notification kinds the system can emit (MAIN-91 AC-3): every\nevent kind `notable()` can raise, each with a human label, description, and\nits dotted `group` prefix. A settings UI renders this as a per-kind /\nper-group checklist for a channel's `kinds` filter, instead of a free-text\nguess. Open to any authenticated caller — it is a static list, not tenant\ndata.",
+        "operationId": "list_notification_kinds",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/NotificationKind"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/notifications/read": {
       "post": {
         "tags": [
@@ -8760,6 +8784,30 @@
           "updated_at": {
             "type": "string",
             "format": "date-time"
+          }
+        }
+      },
+      "NotificationKind": {
+        "type": "object",
+        "description": "One entry in the notification-kind catalog: an event kind the bell can\nraise. The authoritative list a settings UI renders as a checklist, so a\nper-channel `kinds` filter can be built from real options rather than a\nfree-text guess. `group` is the dotted prefix (`task.`, `node.`) the filter\nalready prefix-matches on, so a UI can offer per-group as well as per-kind.",
+        "required": [
+          "id",
+          "label",
+          "description",
+          "group"
+        ],
+        "properties": {
+          "description": {
+            "type": "string"
+          },
+          "group": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "label": {
+            "type": "string"
           }
         }
       },

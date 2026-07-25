@@ -851,6 +851,41 @@ mod tests {
         assert!(!matches_filters(&n, &["info".into()], &["task.".into()]));
     }
 
+    /// The new task kinds (MAIN-91) must not slip past existing channel filters:
+    /// a channel narrowed to `task.claimed` keeps receiving claims and does NOT
+    /// start receiving comments or escalation labels, and the `task.` group
+    /// still catches all three (AC-4).
+    #[test]
+    fn new_task_kinds_respect_existing_filters() {
+        let comment = sample("info", "task.comment.created");
+        let label = sample("warning", "task.label.added");
+        let claim = sample("info", "task.claimed");
+
+        // A channel filtered to claims only.
+        let claims_only = ["task.claimed".to_string()];
+        assert!(matches_filters(&claim, &[], &claims_only));
+        assert!(
+            !matches_filters(&comment, &[], &claims_only),
+            "a claims-only channel must not receive comments"
+        );
+        assert!(
+            !matches_filters(&label, &[], &claims_only),
+            "a claims-only channel must not receive label escalations"
+        );
+
+        // The group prefix still catches every task kind, new ones included.
+        let all_task = ["task.".to_string()];
+        for n in [&comment, &label, &claim] {
+            assert!(
+                matches_filters(n, &[], &all_task),
+                "task. catches {}",
+                n.kind
+            );
+        }
+        // And empty still means everything.
+        assert!(matches_filters(&comment, &[], &[]));
+    }
+
     /// Every provider must be reachable by the `kind` stored on a row, or a
     /// channel saved through the UI silently delivers nothing.
     #[test]

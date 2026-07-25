@@ -183,12 +183,24 @@ pub async fn labels_of(state: &AppState, task: TaskId) -> ApiResult<Vec<Label>> 
 }
 
 async fn record(state: &AppState, auth: &AuthCtx, task: TaskId, label: &str, kind: &'static str) {
-    let title: Option<(String,)> = sqlx::query_as("SELECT title FROM tasks WHERE id = $1")
-        .bind(task)
-        .fetch_optional(&state.db)
-        .await
-        .ok()
-        .flatten();
+    // Title feeds the activity timeline (unchanged); the human key lets the
+    // escalation-label notification name the task WITHOUT its title, so an
+    // escalation on a private card leaks nothing new (MAIN-91 AC-2, NG-4).
+    let meta: Option<(String, Option<i32>, Option<String>)> = sqlx::query_as(
+        "SELECT t.title, t.number, b.key FROM tasks t
+         JOIN boards b ON b.id = t.board_id
+         WHERE t.id = $1",
+    )
+    .bind(task)
+    .fetch_optional(&state.db)
+    .await
+    .ok()
+    .flatten();
+    let (title, key) = match meta {
+        Some((title, Some(n), Some(k))) => (title, format!("{k}-{n}")),
+        Some((title, _, _)) => (title, String::new()),
+        None => (String::new(), String::new()),
+    };
     crate::events::record(
         state,
         auth.tenant_id,
@@ -196,8 +208,9 @@ async fn record(state: &AppState, auth: &AuthCtx, task: TaskId, label: &str, kin
             .actor("user", auth.user_id.0)
             .payload(serde_json::json!({
                 "task_id": task,
-                "task": title.map(|t| t.0).unwrap_or_default(),
+                "task": title,
                 "label": label,
+                "key": key,
             })),
     )
     .await;

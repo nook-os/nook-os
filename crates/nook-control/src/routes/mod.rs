@@ -196,6 +196,10 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route("/notifications/read", post(notifications::mark_read))
         .route(
+            "/notifications/kinds",
+            get(notifications::notification_kinds),
+        )
+        .route(
             "/notification-channels",
             get(notifications::list_channels).post(notifications::create_channel),
         )
