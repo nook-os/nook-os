@@ -113,8 +113,13 @@ pub async fn get_one(
     // — a provider that had to be told its own deployment's hostname would be
     // the wrong shape for the external ones this trait exists to allow.
     let detail = BoardDetail {
-        tasks: crate::services::tasks::enrich(&state.db, &state.cfg.public_base_url, visible)
-            .await?,
+        tasks: crate::services::tasks::enrich(
+            &state.db,
+            &state.cfg.public_base_url,
+            auth.user_id,
+            visible,
+        )
+        .await?,
         ..detail
     };
     Ok(Json(detail))
@@ -165,8 +170,13 @@ pub async fn create_task(
     // a private task (MAIN-76 AC-3) — its title and existence stay with its
     // owner. Grab visibility before enrich (which does not touch it).
     let is_private = task.visibility == "private";
-    let enriched =
-        crate::services::tasks::enrich_one(&state.db, &state.cfg.public_base_url, task).await?;
+    let enriched = crate::services::tasks::enrich_one(
+        &state.db,
+        &state.cfg.public_base_url,
+        auth.user_id,
+        task,
+    )
+    .await?;
 
     if !is_private {
         // Tell the tenant a card landed. The activity event above feeds the
@@ -283,7 +293,13 @@ pub async fn update_task(
         nook_proto::UiEvent::TaskChanged { task_id: task.id },
     );
     Ok(Json(
-        crate::services::tasks::enrich_one(&state.db, &state.cfg.public_base_url, task).await?,
+        crate::services::tasks::enrich_one(
+            &state.db,
+            &state.cfg.public_base_url,
+            auth.user_id,
+            task,
+        )
+        .await?,
     ))
 }
 
@@ -330,7 +346,7 @@ async fn set_archived(
         auth.tenant_id,
         nook_proto::UiEvent::TaskChanged { task_id: task.id },
     );
-    crate::services::tasks::enrich_one(&state.db, &state.cfg.public_base_url, task)
+    crate::services::tasks::enrich_one(&state.db, &state.cfg.public_base_url, auth.user_id, task)
         .await
         .map_err(Into::into)
 }

@@ -20,7 +20,27 @@ use crate::error::{ApiError, ApiResult};
 /// or policy check (NG-3): visibility is a per-task owner predicate, and this is
 /// the single definition every read/claim path routes through.
 pub fn visible_to(task: &TaskItem, viewer: UserId) -> bool {
-    task.visibility != "private" || owns(task, viewer)
+    visible_by_cols(
+        &task.visibility,
+        task.created_by,
+        task.assignee_user_id,
+        viewer,
+    )
+}
+
+/// The same visibility rule as [`visible_to`], but over the loose columns
+/// rather than a whole `TaskItem`. `enrich` loads only these three fields for a
+/// child's *parent* (it never holds the parent as a full task), and gates the
+/// derived `parent_key` on this so a private epic's key never leaks onto a
+/// child a non-owner can see (MAIN-86). Kept identical to `visible_to` by
+/// construction — that predicate now routes through it too.
+pub fn visible_by_cols(
+    visibility: &str,
+    created_by: Option<UserId>,
+    assignee: Option<UserId>,
+    viewer: UserId,
+) -> bool {
+    visibility != "private" || owns_fields(created_by, assignee, viewer)
 }
 
 /// The card's owner set — its creator or its assignee. The single definition
@@ -28,7 +48,15 @@ pub fn visible_to(task: &TaskItem, viewer: UserId) -> bool {
 /// (MAIN-85), so "who owns this card" can never come to mean two different
 /// things in the two places it decides access.
 pub fn owns(task: &TaskItem, user: UserId) -> bool {
-    task.created_by == Some(user) || task.assignee_user_id == Some(user)
+    owns_fields(task.created_by, task.assignee_user_id, user)
+}
+
+/// The owner test over just the two loose columns it needs, so the whole-task
+/// [`owns`] (MAIN-85's visibility-change gate) and the loose-column
+/// [`visible_by_cols`] (MAIN-86's enrich redaction) share ONE definition of
+/// "who owns this card" — the two can never drift.
+fn owns_fields(created_by: Option<UserId>, assignee: Option<UserId>, user: UserId) -> bool {
+    created_by == Some(user) || assignee == Some(user)
 }
 
 /// The task title safe to put in a TENANT-FACING event payload or notification
@@ -49,6 +77,7 @@ pub fn public_title(task: &TaskItem) -> Option<&str> {
 pub async fn enrich(
     db: &PgPool,
     base_url: &str,
+    viewer: UserId,
     mut tasks: Vec<TaskItem>,
 ) -> Result<Vec<TaskItem>, sqlx::Error> {
     if tasks.is_empty() {
@@ -102,9 +131,12 @@ pub async fn enrich(
         });
     }
 
-    // Parent numbers, one query for the whole batch, so an epic's children can
-    // show "under NOOK-7" without an N+1 (MAIN-81). The parent is on the same
-    // board as the child, so the child's board key builds the parent key too.
+    // Parent number AND visibility, one query for the whole batch, so an epic's
+    // children can show "under NOOK-7" without an N+1 (MAIN-81). The number
+    // builds the `BOARD-N` key; the visibility/owner columns decide whether THIS
+    // viewer may see that key at all — a private epic's key must not leak onto a
+    // child a non-owner can see (MAIN-86). The parent is on the same board as
+    // the child, so the child's board key builds the parent key too.
     let parent_ids: Vec<uuid::Uuid> = {
         let mut v: Vec<uuid::Uuid> = tasks
             .iter()
@@ -114,16 +146,32 @@ pub async fn enrich(
         v.dedup();
         v
     };
-    let parent_numbers: HashMap<uuid::Uuid, Option<i32>> = if parent_ids.is_empty() {
+    // (number, visibility, created_by, assignee) — enough to build the key AND
+    // decide whether this viewer may see it.
+    type ParentInfo = (Option<i32>, String, Option<UserId>, Option<UserId>);
+    let parents: HashMap<uuid::Uuid, ParentInfo> = if parent_ids.is_empty() {
         HashMap::new()
     } else {
-        sqlx::query_as::<_, (uuid::Uuid, Option<i32>)>(
-            "SELECT id, number FROM tasks WHERE id = ANY($1)",
+        sqlx::query_as::<
+            _,
+            (
+                uuid::Uuid,
+                Option<i32>,
+                String,
+                Option<UserId>,
+                Option<UserId>,
+            ),
+        >(
+            "SELECT id, number, visibility, created_by, assignee_user_id
+             FROM tasks WHERE id = ANY($1)",
         )
         .bind(&parent_ids)
         .fetch_all(db)
         .await?
         .into_iter()
+        .map(|(id, number, visibility, created_by, assignee)| {
+            (id, (number, visibility, created_by, assignee))
+        })
         .collect()
     };
 
@@ -138,10 +186,17 @@ pub async fn enrich(
             t.parent_task_id,
             keys.get(&t.board_id.0).and_then(|k| k.clone()),
         ) {
-            (Some(p), Some(board_key)) => parent_numbers
-                .get(&p.0)
-                .and_then(|n| *n)
-                .map(|n| format!("{board_key}-{n}")),
+            (Some(p), Some(board_key)) => match parents.get(&p.0) {
+                // A private epic's key is blanked for a viewer who is neither its
+                // creator nor its assignee: the child renders parentless to them
+                // rather than exposing a card they cannot open (MAIN-86 AC-3).
+                Some((number, visibility, created_by, assignee))
+                    if visible_by_cols(visibility, *created_by, *assignee, viewer) =>
+                {
+                    number.map(|n| format!("{board_key}-{n}"))
+                }
+                _ => None,
+            },
             _ => None,
         };
         // Deep link by key where there is one, else by id — a task created
@@ -158,9 +213,10 @@ pub async fn enrich(
 pub async fn enrich_one(
     db: &PgPool,
     base_url: &str,
+    viewer: UserId,
     task: TaskItem,
 ) -> Result<TaskItem, sqlx::Error> {
-    Ok(enrich(db, base_url, vec![task])
+    Ok(enrich(db, base_url, viewer, vec![task])
         .await?
         .pop()
         .expect("enrich preserves length"))

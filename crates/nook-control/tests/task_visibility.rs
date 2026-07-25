@@ -589,3 +589,117 @@ fn blank_update() -> UpdateTaskRequest {
         expected_updated_at: None,
     }
 }
+
+/// MAIN-86 AC-3: a child's derived `parent_key` is blanked for a viewer who
+/// cannot see its PRIVATE parent epic, and restored the moment the parent
+/// becomes visible — so a private epic's `BOARD-N` never leaks onto a card a
+/// non-owner can open. Drives the real `enrich`, the one path every board and
+/// detail read goes through.
+#[tokio::test]
+async fn private_parent_key_is_redacted_from_children_for_non_owners() {
+    let _serial = SERIAL.lock().await;
+    let Some(pool) = test_pool().await else {
+        eprintln!("skipping parent-key redaction test — no DATABASE_URL");
+        return;
+    };
+    let state = AppState::new(pool.clone(), test_config(), None).await;
+
+    // O owns the tenant and the epic; V is an ordinary member who is neither the
+    // epic's creator nor its assignee.
+    let sub = format!("owner-{}", Uuid::now_v7().simple());
+    let (owner, tenant) = login_identity(&state, claims(&sub, "Owner"))
+        .await
+        .expect("owner signs in");
+    let o = owner.id;
+    let v = add_member(&pool, tenant.id, "vic", "member").await;
+
+    let board_key = format!("E{}", &Uuid::now_v7().simple().to_string()[..6]).to_uppercase();
+    let board: BoardId = sqlx::query_scalar(
+        "INSERT INTO boards (id, tenant_id, name, key, provider)
+         VALUES ($1, $2, 'b', $3, 'local') RETURNING id",
+    )
+    .bind(BoardId::new())
+    .bind(tenant.id)
+    .bind(&board_key)
+    .fetch_one(&pool)
+    .await
+    .expect("board");
+    sqlx::query(
+        "INSERT INTO board_columns (id, board_id, name, position, type)
+         VALUES ($1, $2, 'Todo', 0, 'unstarted')",
+    )
+    .bind(Uuid::now_v7())
+    .bind(board)
+    .execute(&pool)
+    .await
+    .expect("column");
+
+    // A PRIVATE epic owned by O, and a TEAM child filed under it.
+    let epic = make_task(&state, tenant.id, board, o, "roadmap", "private").await;
+    let child = make_task(&state, tenant.id, board, o, "do the thing", "team").await;
+    sqlx::query("UPDATE tasks SET parent_task_id = $2 WHERE id = $1")
+        .bind(child.id)
+        .bind(epic.id)
+        .execute(&pool)
+        .await
+        .expect("file the child under the epic");
+    let expected = format!("{board_key}-{}", epic.number.expect("epic has a number"));
+
+    async fn row(pool: &PgPool, id: TaskId) -> TaskItem {
+        sqlx::query_as("SELECT * FROM tasks WHERE id = $1")
+            .bind(id)
+            .fetch_one(pool)
+            .await
+            .expect("row")
+    }
+    let enrich_as = |viewer: UserId, t: TaskItem| {
+        let db = state.db.clone();
+        let base = state.cfg.public_base_url.clone();
+        async move {
+            nook_control::services::tasks::enrich(&db, &base, viewer, vec![t])
+                .await
+                .expect("enrich")
+                .pop()
+                .expect("one task")
+        }
+    };
+
+    // O (the epic's owner) sees the parent key.
+    let as_o = enrich_as(o, row(&pool, child.id).await).await;
+    assert_eq!(
+        as_o.parent_key.as_deref(),
+        Some(expected.as_str()),
+        "the owner sees the private epic's key on its child"
+    );
+
+    // V (non-owner) sees the child as parentless — the key is redacted.
+    let as_v = enrich_as(v, row(&pool, child.id).await).await;
+    assert_eq!(
+        as_v.parent_key, None,
+        "a private epic's key is not exposed on a child a non-owner can see"
+    );
+    // NG-1: only the DERIVED key is blanked — the row's parent linkage stands.
+    assert_eq!(
+        as_v.parent_task_id,
+        Some(epic.id),
+        "the parent_task_id itself is unchanged"
+    );
+
+    // Flip the epic to team-visible → the key returns for V (non-regression).
+    sqlx::query("UPDATE tasks SET visibility = 'team' WHERE id = $1")
+        .bind(epic.id)
+        .execute(&pool)
+        .await
+        .expect("flip epic to team");
+    let as_v2 = enrich_as(v, row(&pool, child.id).await).await;
+    assert_eq!(
+        as_v2.parent_key.as_deref(),
+        Some(expected.as_str()),
+        "a team epic's key appears on its children for any tenant viewer"
+    );
+
+    let _ = sqlx::query("DELETE FROM tenants WHERE id = $1 AND slug <> 'dev'")
+        .bind(tenant.id)
+        .execute(&pool)
+        .await;
+}
