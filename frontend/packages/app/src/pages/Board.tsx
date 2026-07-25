@@ -24,7 +24,7 @@ import {
   X,
 } from "lucide-react";
 import { api, type TaskItem } from "@nookos/api";
-import { Empty, Panel, Pill } from "@nookos/ui";
+import { Empty, Panel, Pill, TypeBadge, TYPE_META } from "@nookos/ui";
 import { useNewWork } from "../newwork";
 import { askChoice, askConfirm, askForm, askText, notify } from "../dialogs";
 import { TaskDetail } from "../TaskDetail";
@@ -80,6 +80,12 @@ function Card({
           <span className="card-blocked" title="blocked">
             ⊘
           </span>
+        )}
+        {/* Non-default types are flagged inline so they are scannable across
+            columns (AC-3); a plain `task` shows nothing, so a default board
+            reads as before (AC-5). */}
+        {task.type && task.type !== "task" && (
+          <TypeBadge type={task.type} compact />
         )}
         <span className="card-key mono">{task.key ?? ""}</span>
         {task.title}
@@ -404,9 +410,18 @@ function Filters({
       onChange({ ...value, label: [...value.label, name] });
     }
   };
+  // Each type chip toggles membership; several selected are OR'd (any of them).
+  const toggleType = (t: string) =>
+    onChange({
+      ...value,
+      type: value.type.includes(t)
+        ? value.type.filter((x) => x !== t)
+        : [...value.type, t],
+    });
   const active =
     value.label.length > 0 ||
     value.not_label.length > 0 ||
+    value.type.length > 0 ||
     value.assignee !== "any" ||
     value.priority !== null ||
     value.blocked !== null ||
@@ -429,6 +444,24 @@ function Filters({
           >
             {exc ? "−" : inc ? "+" : ""}
             {l.name}
+          </button>
+        );
+      })}
+
+      <span className="filter-sep" />
+      <span className="faint small">type</span>
+      {TYPE_META.map((t) => {
+        const on = value.type.includes(t.value);
+        return (
+          <button
+            key={t.value}
+            className={`task-chip type-chip ${on ? "on" : ""}`}
+            aria-pressed={on}
+            onClick={() => toggleType(t.value)}
+            title={on ? `click to clear ${t.label}` : `filter to ${t.label}`}
+          >
+            <TypeBadge type={t.value} compact />
+            {t.label}
           </button>
         );
       })}
@@ -516,6 +549,8 @@ function Filters({
 export interface BoardFilter {
   label: string[];
   not_label: string[];
+  /** Issue types to include (OR'd); empty = any type. */
+  type: string[];
   assignee: "any" | "none" | "me";
   priority: number | null;
   blocked: boolean | null;
@@ -530,6 +565,7 @@ export interface BoardFilter {
 const EMPTY_FILTER: BoardFilter = {
   label: [],
   not_label: [],
+  type: [],
   assignee: "any",
   priority: null,
   blocked: null,
@@ -546,6 +582,7 @@ const EMPTY_FILTER: BoardFilter = {
 const FILTER_KEYS = [
   "label",
   "xlabel",
+  "type",
   "assignee",
   "priority",
   "blocked",
@@ -566,6 +603,7 @@ export function parseFilter(params: URLSearchParams): BoardFilter {
   return {
     label: list("label"),
     not_label: list("xlabel"),
+    type: list("type"),
     assignee: assignee === "none" || assignee === "me" ? assignee : "any",
     priority: priority !== null && priority !== "" ? Number(priority) : null,
     blocked: blocked === null ? null : blocked === "true",
@@ -581,6 +619,7 @@ export function writeFilter(next: URLSearchParams, f: BoardFilter): URLSearchPar
   for (const k of FILTER_KEYS) next.delete(k);
   if (f.label.length) next.set("label", f.label.join(","));
   if (f.not_label.length) next.set("xlabel", f.not_label.join(","));
+  if (f.type.length) next.set("type", f.type.join(","));
   if (f.assignee !== "any") next.set("assignee", f.assignee);
   if (f.priority !== null) next.set("priority", String(f.priority));
   if (f.blocked !== null) next.set("blocked", String(f.blocked));
@@ -698,6 +737,7 @@ export function BoardPage() {
   const filterActive =
     filter.label.length > 0 ||
     filter.not_label.length > 0 ||
+    filter.type.length > 0 ||
     filter.assignee !== "any" ||
     filter.priority !== null ||
     filter.blocked !== null ||
@@ -715,6 +755,7 @@ export function BoardPage() {
               limit: 200,
               ...(filter.label.length ? { label: filter.label } : {}),
               ...(filter.not_label.length ? { not_label: filter.not_label } : {}),
+              ...(filter.type.length ? { type: filter.type } : {}),
               ...(filter.assignee === "none"
                 ? { assignee: "none" }
                 : filter.assignee === "me" && me?.user?.id
