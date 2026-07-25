@@ -1130,6 +1130,19 @@ pub struct ChannelField {
     pub required: bool,
 }
 
+/// One entry in the notification-kind catalog: an event kind the bell can
+/// raise. The authoritative list a settings UI renders as a checklist, so a
+/// per-channel `kinds` filter can be built from real options rather than a
+/// free-text guess. `group` is the dotted prefix (`task.`, `node.`) the filter
+/// already prefix-matches on, so a UI can offer per-group as well as per-kind.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct NotificationKind {
+    pub id: String,
+    pub label: String,
+    pub description: String,
+    pub group: String,
+}
+
 // ── Activity ─────────────────────────────────────────────────────────────────
 
 /// Everything produces events. Kind is an open dotted string:

@@ -1056,6 +1056,30 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/notifications/kinds": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The catalog of notification kinds the system can emit (MAIN-91 AC-3): every
+         *     event kind `notable()` can raise, each with a human label, description, and
+         *     its dotted `group` prefix. A settings UI renders this as a per-kind /
+         *     per-group checklist for a channel's `kinds` filter, instead of a free-text
+         *     guess. Open to any authenticated caller — it is a static list, not tenant
+         *     data.
+         */
+        get: operations["list_notification_kinds"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/notifications/read": {
         parameters: {
             query?: never;
@@ -3586,6 +3610,19 @@ export interface components {
             tenant_id: components["schemas"]["TenantId"];
             /** Format: date-time */
             updated_at: string;
+        };
+        /**
+         * @description One entry in the notification-kind catalog: an event kind the bell can
+         *     raise. The authoritative list a settings UI renders as a checklist, so a
+         *     per-channel `kinds` filter can be built from real options rather than a
+         *     free-text guess. `group` is the dotted prefix (`task.`, `node.`) the filter
+         *     already prefix-matches on, so a UI can offer per-group as well as per-kind.
+         */
+        NotificationKind: {
+            description: string;
+            group: string;
+            id: string;
+            label: string;
         };
         NotificationPage: {
             notifications: components["schemas"]["Notification"][];
@@ -6547,6 +6584,25 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+        };
+    };
+    list_notification_kinds: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NotificationKind"][];
+                };
             };
         };
     };

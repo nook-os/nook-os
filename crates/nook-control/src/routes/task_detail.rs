@@ -97,12 +97,45 @@ pub async fn create_comment(
     // Comments are the content; events remain the timeline. Both, so the
     // activity feed still shows that something was said without becoming the
     // place the saying is stored.
+    //
+    // A NON-private card's comment carries an excerpt + human key so the
+    // notification bridge (MAIN-91) can raise a notification; a PRIVATE card's
+    // event carries neither — its body must not reach the tenant-wide feed or a
+    // channel, and the absence of an excerpt is exactly what keeps it silent
+    // (NG-4, matching MAIN-76's title omission).
+    let meta: Option<(String, Option<i32>, Option<String>)> = sqlx::query_as(
+        "SELECT t.visibility, t.number, b.key FROM tasks t
+         JOIN boards b ON b.id = t.board_id
+         WHERE t.id = $1 AND t.tenant_id = $2",
+    )
+    .bind(task)
+    .bind(auth.tenant_id)
+    .fetch_optional(&state.db)
+    .await?;
+    let mut payload = serde_json::json!({ "task_id": task, "author": name });
+    if let Some((visibility, number, board_key)) = meta {
+        if visibility != "private" {
+            // One line, trimmed, capped — a teaser, not the whole comment.
+            let excerpt: String = req
+                .body_md
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+                .chars()
+                .take(140)
+                .collect();
+            payload["excerpt"] = serde_json::json!(excerpt);
+            if let (Some(k), Some(n)) = (board_key, number) {
+                payload["key"] = serde_json::json!(format!("{k}-{n}"));
+            }
+        }
+    }
     crate::events::record(
         &state,
         auth.tenant_id,
         crate::events::EventDraft::new("task.comment.created")
             .actor("user", auth.user_id.0)
-            .payload(serde_json::json!({ "task_id": task, "author": name })),
+            .payload(payload),
     )
     .await;
 
