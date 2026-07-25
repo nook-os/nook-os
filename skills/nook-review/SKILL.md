@@ -9,7 +9,7 @@ metadata:
   hermes:
     tags: [NookOS, Board, Kanban, Review, Pull-Request, CI, Loop]
     category: autonomous-ai-agents
-    related_skills: [nookos, nook-spec, nook-build]
+    related_skills: [nookos, nook-spec, nook-build, nook-epic]
 ---
 
 # Loop reviewer

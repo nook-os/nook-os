@@ -9,7 +9,7 @@ metadata:
   hermes:
     tags: [NookOS, Board, Kanban, Spec, Planning, Interview, Loop]
     category: autonomous-ai-agents
-    related_skills: [nookos, nook-build, nook-review]
+    related_skills: [nookos, nook-build, nook-review, nook-epic]
 ---
 
 # Spec interview
