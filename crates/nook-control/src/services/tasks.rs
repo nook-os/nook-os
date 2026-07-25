@@ -157,7 +157,14 @@ fn split_key(ident: &str) -> Option<(String, i32)> {
 /// rather than an error, because a board with "In Review" and "In Progress"
 /// both marked `started` is a reasonable thing for a human to build.
 pub async fn column_of_type(db: &PgPool, board: BoardId, column_type: &str) -> ApiResult<ColumnId> {
-    const TYPES: [&str; 5] = ["backlog", "unstarted", "started", "completed", "canceled"];
+    const TYPES: [&str; 6] = [
+        "backlog",
+        "unstarted",
+        "started",
+        "review",
+        "completed",
+        "canceled",
+    ];
     if !TYPES.contains(&column_type) {
         return Err(ApiError::BadRequest(format!(
             "{column_type:?} is not a column type — expected one of {}",

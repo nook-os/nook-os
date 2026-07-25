@@ -47,9 +47,21 @@ queue until a human resolves the escalation.
 
 If any PR remains, choose the least recently updated one. Read its linked
 board issue (`nook task NOOK-NN`) and the latest `Loop review of COMMIT_SHA`
-verdict in that issue's comments. Check out its branch, fix only the "Must fix
-before merge" items, run the relevant checks, push, remove
-`loop-changes-requested`, and comment with what changed. End this pass.
+verdict in that issue's comments. Its card is sitting in **In Review**; move it
+back to In Progress so the board shows it is being worked again (the endpoint
+resolves the name to the `started`-type column):
+
+```bash
+NOOK_SERVER=$(grep '^server' ~/.config/nook/auth.toml | sed 's/.*"\(.*\)"/\1/')
+NOOK_TOKEN=$(grep '^token'  ~/.config/nook/auth.toml | sed 's/.*"\(.*\)"/\1/')
+curl -s -X POST "$NOOK_SERVER/api/v1/tasks/NOOK-NN/move" \
+  -H "Authorization: Bearer $NOOK_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"column":"In Progress"}'
+```
+
+Then check out its branch, fix only the "Must fix before merge" items, run the
+relevant checks, push, remove `loop-changes-requested`, and comment with what
+changed. Submitting the fix parks it back in In Review. End this pass.
 
 If a proposed fix would cross an issue non-goal or requires a product decision,
 do not implement it. Comment the exact conflict on both the PR and the issue,
@@ -73,6 +85,14 @@ unfinished blocker.
 Results already arrive in the order work should be taken: urgent first, tasks
 with **no** priority last, then oldest first. Take the first row. If the list
 is empty, say so and end the pass. Do not invent work.
+
+**Skip epics.** An `epic` (`"type": "epic"` in the row) is a tracker/roadmap
+parent, never a unit of work — it decomposes into buildable children and has no
+PR of its own. Skip any row whose `type` is `epic` and take the next; this is a
+safety net beyond `agent-ready`, in case one was approved by mistake. The other
+four types (`task`/`bug`/`story`/`chore`) are all buildable. If you ever file or
+update a task yourself, set an appropriate `type` (never `epic` for a unit of
+work you intend to build).
 
 Add `--board KEY` if the tenant has more than one board and this loop owns one
 of them.
@@ -153,11 +173,17 @@ Push and open a PR with `gh pr create`. Its description must include:
 If `Other behavior changes: None` is not true, stop and get the issue amended
 before opening the PR.
 
-Record the PR on the issue, then leave it in the started column for a human to
-move on merge:
+Record the PR on the issue, then park the card in **In Review** — its home
+while a human reviews and merges (Done means merged, so the builder never puts
+a card there):
 
 ```bash
 nook comment NOOK-42 "PR opened: <url>"
+NOOK_SERVER=$(grep '^server' ~/.config/nook/auth.toml | sed 's/.*"\(.*\)"/\1/')
+NOOK_TOKEN=$(grep '^token'  ~/.config/nook/auth.toml | sed 's/.*"\(.*\)"/\1/')
+curl -s -X POST "$NOOK_SERVER/api/v1/tasks/NOOK-42/move" \
+  -H "Authorization: Bearer $NOOK_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"column":"In Review"}'
 ```
 
 Never merge and never enable auto-merge. End the pass.

@@ -150,6 +150,16 @@ guessing it. Confirm with `nook task NOOK-42`.
 If the user gave a priority, set it — urgent `1`, high `2`, medium `3`,
 low `4`, none `0`. Unset sorts *last*, not first.
 
+**Set the issue type.** Include `"type"` in the issue JSON — one of `task`,
+`bug`, `epic`, `story`, `chore` (exactly the values the board accepts; anything
+else is rejected). Use `epic` for a tracker/roadmap ticket — the kind that
+never gets `agent-ready` because it is a parent that decomposes into buildable
+children, not a unit of work — and otherwise the best fit: `bug` for a defect,
+`story` for user-facing behaviour, `chore` for maintenance/tooling/config, and
+`task` as the default when none of those fit. Omitting it defaults to `task`.
+Show `Type: <type>` in the draft next to `Workspace:` so the user sees the
+classification and can override it before you file.
+
 If this issue depends on another, record it so the builder skips it until the
 blocker is done. **Direction matters and is the opposite of what reads
 naturally:** a relation is `from_task blocks to_task`, so `from_task` is the

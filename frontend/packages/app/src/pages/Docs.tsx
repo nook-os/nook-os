@@ -38,7 +38,7 @@ export function DocsPage() {
           <h2>Kanban drives the work</h2>
           <p>
             The board is first-class and lives in the control plane. A task moves through{" "}
-            <b>Triage → Todo → In Progress → Done</b>:
+            <b>Triage → Todo → In Progress → In Review → Done</b>:
           </p>
           <ul>
             <li>
@@ -51,11 +51,12 @@ export function DocsPage() {
               and opens a session in it.
             </li>
             <li>
-              <b>In Progress → Done</b>: <b>Submit PR</b> records the PR (or generates a compare
-              link) and moves it to Done.
+              <b>In Progress → In Review</b>: <b>Submit PR</b> records the PR (or generates a
+              compare link) and parks the card in <b>In Review</b> — so Done can mean merged.
             </li>
             <li>
-              <b>Done</b>: <b>Prune worktree</b> removes the checkout when you're finished.
+              <b>Done</b>: a human moves the card here on merge; <b>Prune worktree</b> removes the
+              checkout when you're finished.
             </li>
           </ul>
 

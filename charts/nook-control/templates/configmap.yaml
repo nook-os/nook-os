@@ -1,4 +1,7 @@
 {{- $c := .Values.config -}}
+{{- if and $c.authDevMode (eq $c.appEnv "production") -}}
+{{- fail "config.authDevMode=true is incompatible with config.appEnv=production: the dev-login hatch must be OFF in production. The control plane (config.rs) refuses to boot on this combo, so the chart refuses to render it. Set config.authDevMode=false, or use a non-production appEnv." -}}
+{{- end -}}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -11,6 +14,12 @@ data:
   APP_ENV: {{ $c.appEnv | quote }}
   CONTROL_PLANE_BIND: "0.0.0.0:8080"
   NOOK_AGENT_BIND: "0.0.0.0:8081"
+  {{- if $c.authDevMode }}
+  AUTH_DEV_MODE: {{ $c.authDevMode | quote }}
+  {{- end }}
+  {{- with $c.logLevel }}
+  RUST_LOG: {{ . | quote }}
+  {{- end }}
   {{- with $c.publicBaseUrl }}
   PUBLIC_BASE_URL: {{ . | quote }}
   {{- end }}
@@ -43,3 +52,36 @@ data:
   NOOK_S3_REGION: {{ . | quote }}
   {{- end }}
   NOOK_S3_PATH_STYLE: {{ $c.s3.pathStyle | quote }}
+  {{- with $c.mail.provider }}
+  MAIL_PROVIDER: {{ . | quote }}
+  {{- end }}
+  {{- with $c.mail.from }}
+  MAIL_FROM: {{ . | quote }}
+  {{- end }}
+  {{- if $c.mail.sendEnabled }}
+  MAIL_SEND_ENABLED: {{ $c.mail.sendEnabled | quote }}
+  {{- end }}
+  {{- if $c.mail.notificationsEnabled }}
+  MAIL_NOTIFICATIONS_ENABLED: {{ $c.mail.notificationsEnabled | quote }}
+  {{- end }}
+  {{- with $c.mail.maxPerMonth }}
+  MAIL_MAX_PER_MONTH: {{ . | quote }}
+  {{- end }}
+  {{- with $c.mail.maxPerDay }}
+  MAIL_MAX_PER_DAY: {{ . | quote }}
+  {{- end }}
+  {{- with $c.mail.smtpHost }}
+  SMTP_HOST: {{ . | quote }}
+  {{- end }}
+  {{- with $c.mail.smtpPort }}
+  SMTP_PORT: {{ . | quote }}
+  {{- end }}
+  {{- with $c.mail.smtpTls }}
+  SMTP_TLS: {{ . | quote }}
+  {{- end }}
+  {{- with $c.mail.smtpUsername }}
+  SMTP_USERNAME: {{ . | quote }}
+  {{- end }}
+  {{- with $c.mail.postmarkApiUrl }}
+  POSTMARK_API_URL: {{ . | quote }}
+  {{- end }}

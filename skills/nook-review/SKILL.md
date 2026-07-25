@@ -17,7 +17,10 @@ metadata:
 One pass = one PR reviewed. Under `/loop`, each iteration runs this skill once.
 
 The contract lives on the NookOS board. The code, CI and verdict live on
-GitHub.
+GitHub. A PR under review has its card parked in the board's **In Review**
+column (the builder moves it there on submit); **Done** means merged, so a card
+only reaches Done when a human merges. This skill reads and labels; it never
+moves cards and never merges.
 
 ## 0. Preflight
 
@@ -47,8 +50,17 @@ review, say so and end the pass.
   nook task NOOK-42
   ```
 
-  That returns the description, labels, comments and blockers. No linked issue
-  is a must-fix finding.
+  That returns the description, labels, comments, blockers, and the issue
+  `type` (`task`/`bug`/`epic`/`story`/`chore`). No linked issue is a must-fix
+  finding.
+- **Account for the type.** An `epic` is a tracker/roadmap parent, not a unit of
+  work — it decomposes into buildable children and should have no PR closing it.
+  A PR whose `Closes` points at an `epic` is either closing a tracker or built
+  against a mis-typed ticket: treat it as a `[DEFECT]` and mark the PR for human
+  escalation rather than approving it. For the four buildable types
+  (`task`/`bug`/`story`/`chore`) review normally; a `bug` fix in particular
+  should carry a regression test, and its absence is a must-fix `[AC-N]`/`[DEFECT]`
+  when the issue's acceptance criteria imply one.
 - Read the full diff and every changed file in context.
 - Review only against the linked issue: acceptance-criteria gaps, defects,
   broken data flow, unnecessary scope expansion, security problems, missing

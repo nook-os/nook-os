@@ -51,6 +51,7 @@ pub async fn create(
         ("Triage", "backlog"),
         ("Todo", "unstarted"),
         ("In Progress", "started"),
+        ("In Review", "review"),
         ("Done", "completed"),
     ]
     .iter()

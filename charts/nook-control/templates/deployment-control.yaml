@@ -89,6 +89,20 @@ spec:
                   name: {{ .Values.existingSecret }}
                   key: {{ $sk.s3SecretAccessKey }}
             {{- end }}
+            {{- if $sk.smtpPassword }}
+            - name: SMTP_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.existingSecret }}
+                  key: {{ $sk.smtpPassword }}
+            {{- end }}
+            {{- if $sk.postmarkToken }}
+            - name: POSTMARK_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.existingSecret }}
+                  key: {{ $sk.postmarkToken }}
+            {{- end }}
             {{- if .Values.agent.enabled }}
             # Agent mTLS listener: the process reads the cert/key from the paths
             # the tlsSecret is mounted at (below), and advertises publicUrl in

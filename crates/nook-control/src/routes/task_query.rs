@@ -187,7 +187,14 @@ pub async fn query_rows(
         ),
     };
     if let Some(ct) = f.column_type.as_deref() {
-        const TYPES: [&str; 5] = ["backlog", "unstarted", "started", "completed", "canceled"];
+        const TYPES: [&str; 6] = [
+            "backlog",
+            "unstarted",
+            "started",
+            "review",
+            "completed",
+            "canceled",
+        ];
         if !TYPES.contains(&ct) {
             return Err(ApiError::BadRequest(format!(
                 "{ct:?} is not a column type — expected one of {}",

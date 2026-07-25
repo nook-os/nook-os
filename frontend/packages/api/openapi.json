@@ -6409,7 +6409,7 @@
           },
           "type": {
             "type": "string",
-            "description": "What this column MEANS, independent of what it is called:\n`backlog` | `unstarted` | `started` | `completed` | `canceled`.\n\nAutomation targets the type so that renaming \"In Progress\" to \"Doing\"\nis a cosmetic change rather than a broken loop. The name is for people."
+            "description": "What this column MEANS, independent of what it is called:\n`backlog` | `unstarted` | `started` | `review` | `completed` | `canceled`.\n\nAutomation targets the type so that renaming \"In Progress\" to \"Doing\"\nis a cosmetic change rather than a broken loop. The name is for people."
           }
         }
       },
