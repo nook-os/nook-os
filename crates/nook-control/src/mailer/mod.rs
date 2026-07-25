@@ -68,6 +68,22 @@ pub fn is_known_provider(name: &str) -> bool {
     PROVIDERS.contains(&name)
 }
 
+/// Whether a message actually left toward the recipient, or was held back —
+/// with a short reason, for logs, when it was held.
+///
+/// A bare `Result<()>` from [`Mailer::send`] cannot tell these apart: the
+/// [`GuardedMailer`] returns `Ok(())` whether it delivered or captured, so a
+/// caller that logged "sent" on `Ok` was lying every time a gate (sending
+/// disabled, notifications off, quota reached) held the message. `send_reporting`
+/// returns this instead, so callers can log honestly.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SendOutcome {
+    /// The message reached the transport.
+    Delivered,
+    /// Nothing was sent; the string is why (a static reason, for the log).
+    Held(&'static str),
+}
+
 #[async_trait]
 pub trait Mailer: Send + Sync {
     /// Send one message. `html_body`, when present, makes the message
@@ -84,6 +100,24 @@ pub trait Mailer: Send + Sync {
         html_body: Option<&str>,
         category: Category,
     ) -> Result<()>;
+
+    /// Like [`send`](Mailer::send), but reports whether the message was actually
+    /// delivered or held back by a gate. The default assumes a plain transport
+    /// delivers whenever `send` succeeds — true for capture/smtp/postmark, which
+    /// have no gates of their own. [`GuardedMailer`] overrides it so its gates
+    /// report [`SendOutcome::Held`] instead of a misleading "delivered".
+    async fn send_reporting(
+        &self,
+        to: &str,
+        subject: &str,
+        text_body: &str,
+        html_body: Option<&str>,
+        category: Category,
+    ) -> Result<SendOutcome> {
+        self.send(to, subject, text_body, html_body, category)
+            .await
+            .map(|()| SendOutcome::Delivered)
+    }
 
     /// For logs and the health page: which provider, pointed where.
     fn describe(&self) -> String;

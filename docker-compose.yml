@@ -101,6 +101,11 @@ services:
       # only — the shipped default is MAIL_PROVIDER unset → capture (nothing is
       # delivered), so this never makes another environment send mail.
       MAIL_PROVIDER: smtp
+      # The transport alone is not enough: the send guard (MAIL_SEND_ENABLED,
+      # default OFF) captures everything regardless of provider, so without this
+      # invite/verification mail never actually left for Mailpit. Enable it here,
+      # dev only — prod keeps the default-off guard (NG-5).
+      MAIL_SEND_ENABLED: "1"
       SMTP_HOST: mailpit
       SMTP_PORT: "1025"
       SMTP_TLS: none

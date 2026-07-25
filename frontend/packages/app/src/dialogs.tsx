@@ -189,7 +189,7 @@ export async function notify(
 }
 
 /** A value plus a button that puts it on the clipboard. */
-function CopyRow({ value }: { value: string }) {
+export function CopyRow({ value }: { value: string }) {
   const [copied, setCopied] = useState(false);
   const copy = async () => {
     try {

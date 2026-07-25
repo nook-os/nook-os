@@ -1,15 +1,9 @@
 import React from "react";
 import { OrgVisibility } from "../OrgVisibility";
-import { Invites } from "../Invites";
 import { NotificationChannels } from "../NotificationChannels";
-import {
-  useInfiniteQuery,
-  useQuery,
-  useQueryClient,
-} from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   api,
-  type TenantMemberItem,
   type UserToken,
   type VaultPasskey,
 } from "@nookos/api";
@@ -423,169 +417,6 @@ function NotificationSettings() {
   );
 }
 
-/** Who is in this tenant, with role controls and remove/leave. Management
- *  controls show only to an owner/admin; a plain member sees just Leave. */
-function Members() {
-  const queryClient = useQueryClient();
-  const { data: me } = useQuery({
-    queryKey: ["me"],
-    queryFn: async () => (await api.GET("/api/v1/auth/me")).data ?? null,
-  });
-  const tenantId = me?.tenant?.id;
-  const myRole = (me?.tenants ?? []).find((t) => t.current)?.role ?? "member";
-  const myId = me?.user?.id;
-  const canManage = myRole === "owner" || myRole === "admin";
-
-  // The members list grows with tenant size, so it paginates by keyset cursor
-  // and searches server-side (MAIN-45 AC-2) — the same pattern the Operator
-  // lists use. A new search string is a new query key (restarts from page one).
-  const [search, setSearch] = React.useState("");
-  const membersQuery = useInfiniteQuery({
-    queryKey: ["tenant-members", tenantId, search],
-    initialPageParam: undefined as string | undefined,
-    queryFn: async ({ pageParam }) =>
-      tenantId
-        ? (
-            await api.GET("/api/v1/tenants/{id}/members", {
-              params: {
-                path: { id: tenantId },
-                query: { q: search || undefined, after: pageParam || undefined, limit: 50 },
-              },
-            })
-          ).data ?? { rows: [], next_cursor: null }
-        : { rows: [], next_cursor: null },
-    getNextPageParam: (last) => last.next_cursor ?? undefined,
-    enabled: !!tenantId,
-  });
-  const members = membersQuery.data?.pages.flatMap((p) => p.rows) ?? [];
-
-  const bust = () =>
-    queryClient.invalidateQueries({ queryKey: ["tenant-members", tenantId] });
-  const fail = async (title: string, error: unknown) =>
-    notify(
-      title,
-      typeof error === "object" && error && "error" in error
-        ? String((error as { error: unknown }).error)
-        : JSON.stringify(error ?? {}),
-    );
-
-  const changeRole = async (pid: string, role: string) => {
-    if (!tenantId) return;
-    const { error, response } = await api.PATCH("/api/v1/tenants/{id}/members/{pid}", {
-      params: { path: { id: tenantId, pid } },
-      body: { role },
-    });
-    if (error || !response.ok) return void (await fail("Could not change role", error));
-    bust();
-  };
-  const remove = async (pid: string, name: string) => {
-    if (!tenantId) return;
-    const ok = await askConfirm({
-      title: `Remove ${name}?`,
-      description: "They lose access to this tenant immediately. Their work stays with the tenant.",
-      confirmLabel: "remove",
-      danger: true,
-    });
-    if (!ok) return;
-    const { error, response } = await api.DELETE("/api/v1/tenants/{id}/members/{pid}", {
-      params: { path: { id: tenantId, pid } },
-    });
-    if (error || !response.ok) return void (await fail("Could not remove", error));
-    bust();
-  };
-  const leave = async () => {
-    if (!tenantId) return;
-    const ok = await askConfirm({
-      title: "Leave this tenant?",
-      description: "You lose access to it. You keep your personal tenant.",
-      confirmLabel: "leave",
-      danger: true,
-    });
-    if (!ok) return;
-    const { error, response } = await api.POST("/api/v1/tenants/{id}/leave", {
-      params: { path: { id: tenantId } },
-    });
-    if (error || !response.ok) return void (await fail("Could not leave", error));
-    // Membership changed — refetch everything so the switcher and board re-scope.
-    queryClient.invalidateQueries();
-  };
-
-  const columns: DataColumn<TenantMemberItem>[] = [
-    {
-      key: "name",
-      header: "Name",
-      className: "bright",
-      cell: (m) => (
-        <>
-          {m.display_name}
-          {m.principal_id === myId && <span className="faint small"> (you)</span>}
-        </>
-      ),
-    },
-    { key: "email", header: "Email", className: "mono muted", cell: (m) => m.email },
-    {
-      key: "role",
-      header: "Role",
-      cell: (m) =>
-        canManage && m.principal_id !== myId ? (
-          <select
-            className="task-select"
-            value={m.role}
-            onChange={(e) => changeRole(m.principal_id, e.target.value)}
-          >
-            {/* Only an owner may grant ownership; the server enforces it too. */}
-            {myRole === "owner" && <option value="owner">owner</option>}
-            <option value="admin">admin</option>
-            <option value="member">member</option>
-          </select>
-        ) : (
-          <Pill tone={m.role === "owner" ? "ok" : undefined}>{m.role}</Pill>
-        ),
-    },
-    {
-      key: "actions",
-      header: "",
-      cell: (m) =>
-        m.principal_id === myId ? (
-          <button className="btn danger small" onClick={leave}>
-            Leave
-          </button>
-        ) : canManage ? (
-          <button
-            className="btn danger small"
-            onClick={() => remove(m.principal_id, m.display_name)}
-          >
-            Remove
-          </button>
-        ) : null,
-    },
-  ];
-
-  return (
-    <>
-      <div style={{ padding: "0 0 8px" }}>
-        <SearchInput
-          onSearch={setSearch}
-          placeholder="Search members…"
-          ariaLabel="Search members"
-        />
-      </div>
-      <DataList
-        columns={columns}
-        rows={members}
-        rowKey={(m) => m.principal_id}
-        loading={membersQuery.isLoading}
-        filtered={search.length > 0}
-        empty="No members."
-        noResults="No matches."
-        hasMore={membersQuery.hasNextPage}
-        onLoadMore={() => membersQuery.fetchNextPage()}
-        loadingMore={membersQuery.isFetchingNextPage}
-      />
-    </>
-  );
-}
-
 /**
  * Email verification for local accounts (MAIN-30). OIDC users are verified by
  * their IdP and see that state, with no action to take; a local user can request
@@ -711,15 +542,9 @@ export function SettingsPage() {
         <AccessTokenSettings />
       </Panel>
 
-      <Panel title="Members">
-        <Members />
-      </Panel>
-
       <Panel title="Notifications">
         <NotificationSettings />
       </Panel>
-
-      <Invites />
 
       <OrgVisibility />
 

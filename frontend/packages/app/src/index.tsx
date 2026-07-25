@@ -25,6 +25,7 @@ import { installLinkHandler, registerNavigator } from "./links";
 import { NodeDetail, NodesPage } from "./pages/Nodes";
 import { SessionPage, SessionsPage } from "./pages/Session";
 import { SettingsPage } from "./pages/Settings";
+import { TeamPage } from "./pages/Team";
 import { VerifyEmailPage } from "./pages/VerifyEmail";
 import { WorkspaceDetail, WorkspacesPage } from "./pages/Workspaces";
 
@@ -153,6 +154,7 @@ function AuthGate() {
         <Route path="nodes" element={<NodesPage />} />
         <Route path="nodes/:id" element={<NodeDetail />} />
         <Route path="settings" element={<SettingsPage />} />
+        <Route path="team" element={<TeamPage />} />
         <Route path="verify-email" element={<VerifyEmailPage />} />
         <Route path="feedback" element={<FeedbackPage />} />
         <Route path="help" element={<DocsPage />} />

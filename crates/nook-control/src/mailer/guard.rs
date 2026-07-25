@@ -25,7 +25,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use sqlx::PgPool;
 
-use super::{Category, Mailer};
+use super::{Category, Mailer, SendOutcome};
 
 pub struct GuardedMailer {
     inner: Arc<dyn Mailer>,
@@ -113,16 +113,18 @@ pub fn recipient_domain(to: &str) -> String {
     }
 }
 
-#[async_trait]
-impl Mailer for GuardedMailer {
-    async fn send(
+impl GuardedMailer {
+    /// The gate matrix, run once and reported as an outcome. Both trait methods
+    /// go through here so `send` and `send_reporting` can never disagree about
+    /// whether a message was held.
+    async fn run(
         &self,
         to: &str,
         subject: &str,
         text_body: &str,
         html_body: Option<&str>,
         category: Category,
-    ) -> Result<()> {
+    ) -> Result<SendOutcome> {
         // 1. Global enable. Off ⇒ capture, whatever the provider is (AC-2).
         if !self.send_enabled {
             tracing::info!(
@@ -131,7 +133,9 @@ impl Mailer for GuardedMailer {
                 category = category.as_str(),
                 "mail would-send (capture): sending is disabled (MAIL_SEND_ENABLED off)"
             );
-            return Ok(());
+            return Ok(SendOutcome::Held(
+                "sending disabled (MAIL_SEND_ENABLED off)",
+            ));
         }
         // 2. Category gate: notifications need their own flag (AC-3).
         if category == Category::Notification && !self.notifications_enabled {
@@ -140,7 +144,9 @@ impl Mailer for GuardedMailer {
                 subject,
                 "mail would-send (capture): notifications disabled (MAIL_NOTIFICATIONS_ENABLED off)"
             );
-            return Ok(());
+            return Ok(SendOutcome::Held(
+                "notifications disabled (MAIL_NOTIFICATIONS_ENABLED off)",
+            ));
         }
         // 3. Quota backstop (AC-4).
         if self.at_quota().await {
@@ -150,7 +156,7 @@ impl Mailer for GuardedMailer {
                 category = category.as_str(),
                 "mail quota-blocked (capture): monthly/daily cap reached"
             );
-            return Ok(());
+            return Ok(SendOutcome::Held("monthly/daily cap reached"));
         }
         // Real send.
         match self
@@ -161,13 +167,40 @@ impl Mailer for GuardedMailer {
             Ok(()) => {
                 self.record_sent(to, category).await;
                 tracing::info!(to, subject, category = category.as_str(), "mail sent");
-                Ok(())
+                Ok(SendOutcome::Delivered)
             }
             Err(e) => {
                 tracing::error!(to, subject, error = %e, "mail send failed");
                 Err(e)
             }
         }
+    }
+}
+
+#[async_trait]
+impl Mailer for GuardedMailer {
+    async fn send(
+        &self,
+        to: &str,
+        subject: &str,
+        text_body: &str,
+        html_body: Option<&str>,
+        category: Category,
+    ) -> Result<()> {
+        self.run(to, subject, text_body, html_body, category)
+            .await
+            .map(|_| ())
+    }
+
+    async fn send_reporting(
+        &self,
+        to: &str,
+        subject: &str,
+        text_body: &str,
+        html_body: Option<&str>,
+        category: Category,
+    ) -> Result<SendOutcome> {
+        self.run(to, subject, text_body, html_body, category).await
     }
 
     fn describe(&self) -> String {
