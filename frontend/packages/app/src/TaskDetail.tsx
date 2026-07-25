@@ -33,17 +33,22 @@ import { toggleTaskCheckbox } from "./taskCheckbox";
 /** The "no workspace" option's value. `Select` needs a string, and an empty
  *  one cannot collide with a uuid. */
 const NO_WORKSPACE = "";
+/** The "no epic" option's value (MAIN-83) — same empty-string convention. */
+const NO_EPIC = "";
 
 
 export function TaskDetail({
   taskId,
   columns,
+  epics,
   onClose,
   onMenu,
 }: {
   taskId: string;
   /** The board's columns, so state can be changed from here. */
   columns: { id: string; name: string; type?: string }[];
+  /** The board's epics, for the Epic picker (MAIN-83 AC-4). Omitted → no picker. */
+  epics?: { id: string; key?: string | null; title: string }[];
   onClose: () => void;
   /** Open the same action menu the cards use, anchored to the ⋯ button. */
   onMenu?: (anchor: { x: number; y: number }) => void;
@@ -216,6 +221,17 @@ export function TaskDetail({
     qc.invalidateQueries({ queryKey: ["tasks"] });
   };
 
+  /** File this task under an epic (MAIN-83 AC-4). Tri-state like workspace: `""`
+   *  → null = detach; a uuid = move under that epic. A backend rejection (a
+   *  non-epic parent) surfaces via the write-failure toast, untouched (AC-6). */
+  const setParent = async (id: string) => {
+    await api.PATCH("/api/v1/tasks/{id}", {
+      params: { path: { id: taskId } },
+      body: { parent: id === NO_EPIC ? null : id },
+    });
+    bust();
+  };
+
   if (isLoading || !data) {
     return (
       <Shell onClose={onClose}>
@@ -226,8 +242,9 @@ export function TaskDetail({
     );
   }
 
-  const { task, comments, blocked_by, blocking, related, is_blocked } = data;
+  const { task, comments, blocked_by, blocking, related, is_blocked, children } = data;
   const linked = [...blocked_by, ...blocking, ...related];
+  const isEpic = task.type === "epic";
 
   return (
     <Shell onClose={onClose}>
@@ -340,6 +357,28 @@ export function TaskDetail({
             </div>
           )}
 
+          {/* An epic's tickets (MAIN-83 AC-4): from the detail `children` array,
+              each with a status chip (column type or archived). */}
+          {isEpic && (
+            <div className="task-section">
+              <div className="task-section-h">
+                tickets · {(children ?? []).filter((c) => c.column_type === "completed").length}/
+                {(children ?? []).length}
+              </div>
+              {(children ?? []).length === 0 && (
+                <div className="faint small">No tickets filed under this epic yet.</div>
+              )}
+              {(children ?? []).map((c) => (
+                <div key={c.id} className="task-rel-row">
+                  <span className="task-rel">
+                    <span className="mono">{c.key ?? "—"}</span> {c.title}
+                    <span className="backlog-status">{c.archived_at ? "archived" : c.column_type}</span>
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+
           <div className="task-section">
             <div className="task-section-h">activity · {comments.length} comment(s)</div>
             {comments.length === 0 && <div className="faint small">Nothing yet.</div>}
@@ -423,6 +462,28 @@ export function TaskDetail({
                   })),
                 ]}
               />
+
+              {/* Epic membership (MAIN-83 AC-4): only for a non-epic task, and
+                  only when the board's epics are known. Detach with "— none —". */}
+              {!isEpic && epics && (
+                <>
+                  <span className="faint small">Epic</span>
+                  <Select
+                    ariaLabel="epic"
+                    value={task.parent_task_id ?? NO_EPIC}
+                    onChange={setParent}
+                    options={[
+                      { value: NO_EPIC, label: "— none —" },
+                      ...epics
+                        .filter((e) => e.id !== task.id)
+                        .map((e) => ({
+                          value: e.id,
+                          label: `${e.key ? `${e.key} ` : ""}${e.title}`,
+                        })),
+                    ]}
+                  />
+                </>
+              )}
 
               <span className="faint small">Priority</span>
               <Select

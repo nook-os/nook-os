@@ -581,6 +581,79 @@ export function isBacklogTask(
   return columnType === "backlog" || taskType === "epic";
 }
 
+/// The pick order the whole board reads in: priority first (unset last), then
+/// oldest. Shared by the backlog list and every epic section (MAIN-82/83).
+function pickOrder(a: TaskItem, b: TaskItem): number {
+  return (
+    priorityRank(a.priority ?? 0) - priorityRank(b.priority ?? 0) ||
+    (a.created_at < b.created_at ? -1 : 1)
+  );
+}
+
+export interface EpicSection {
+  epic: TaskItem;
+  /** Every child of the epic, on any column, in pick order. */
+  children: TaskItem[];
+  /** Children in a `completed` column, over the total — the progress count. */
+  done: number;
+  total: number;
+}
+
+export interface BacklogGroups {
+  epics: EpicSection[];
+  /** Parentless backlog-column tasks — the "No epic" section. */
+  noEpic: TaskItem[];
+}
+
+/// Group the Backlog tab by epic (MAIN-83 AC-1): one section per epic on the
+/// board (any column), each carrying ALL its children and a done/total count
+/// derived from them; a final "No epic" bucket holds the parentless backlog
+/// tasks. Pure and unit-tested so the grouping is one definition.
+export function groupByEpic(
+  tasks: TaskItem[],
+  colTypeById: Map<string, string | undefined>,
+): BacklogGroups {
+  const childrenByEpic = new Map<string, TaskItem[]>();
+  for (const t of tasks) {
+    const pid = t.parent_task_id;
+    if (pid) {
+      const list = childrenByEpic.get(pid) ?? [];
+      list.push(t);
+      childrenByEpic.set(pid, list);
+    }
+  }
+  const epics: EpicSection[] = tasks
+    .filter((t) => t.type === "epic")
+    .slice()
+    .sort(pickOrder)
+    .map((epic) => {
+      const children = (childrenByEpic.get(epic.id) ?? []).slice().sort(pickOrder);
+      const done = children.filter(
+        (c) => colTypeById.get(c.column_id) === "completed",
+      ).length;
+      return { epic, children, done, total: children.length };
+    });
+  const noEpic = tasks
+    .filter(
+      (t) =>
+        t.type !== "epic" &&
+        !t.parent_task_id &&
+        colTypeById.get(t.column_id) === "backlog",
+    )
+    .slice()
+    .sort(pickOrder);
+  return { epics, noEpic };
+}
+
+/// The epics a task may be filed under (MAIN-83 AC-4/AC-5): every epic on the
+/// board except the task itself, in pick order. Pure and unit-tested.
+export function epicOptions(tasks: TaskItem[], selfId: string): TaskItem[] {
+  return tasks
+    .filter((t) => t.type === "epic" && t.id !== selfId)
+    .slice()
+    .sort(pickOrder);
+}
+
 const EMPTY_FILTER: BoardFilter = {
   label: [],
   not_label: [],
@@ -916,10 +989,34 @@ export function BoardPage() {
         (a.created_at < b.created_at ? -1 : 1),
     );
 
+  // The Backlog tab grouped by epic (MAIN-83). Epics and their children come from
+  // the same `visible` set; the epic picker/menu use the unfiltered epic list so
+  // you can always file under any epic.
+  const backlogGroups = groupByEpic(visible, colTypeById);
+  const epics = detail.tasks.filter((t) => t.type === "epic");
+
   const addTask = async (columnId: string, title: string) => {
     await api.POST("/api/v1/boards/{id}/tasks", {
       params: { path: { id: board.id } },
       body: { title, column_id: columnId },
+    });
+    bust();
+  };
+  // A new epic (MAIN-83 AC-3): a `type='epic'` task in the backlog column.
+  const addEpic = async (title: string) => {
+    if (!backlogColumn) return;
+    await api.POST("/api/v1/boards/{id}/tasks", {
+      params: { path: { id: board.id } },
+      body: { title, column_id: backlogColumn.id, type: "epic" },
+    });
+    bust();
+  };
+  // A child of an epic (MAIN-83 AC-3): filed into the backlog with `parent` preset.
+  const addChild = async (epicId: string, title: string) => {
+    if (!backlogColumn) return;
+    await api.POST("/api/v1/boards/{id}/tasks", {
+      params: { path: { id: board.id } },
+      body: { title, column_id: backlogColumn.id, parent: epicId },
     });
     bust();
   };
@@ -1070,12 +1167,15 @@ export function BoardPage() {
           )}
           {filter.view === "backlog" ? (
             <BoardBacklog
-              tasks={backlogTasks}
+              groups={backlogGroups}
+              colTypeById={colTypeById}
               wsName={wsName}
               selectedId={openTask}
               blockedIds={blockedIds}
               canSendToBoard={!!unstartedColumn}
-              onAdd={(title) => backlogColumn && addTask(backlogColumn.id, title)}
+              onAddEpic={addEpic}
+              onAddChild={addChild}
+              onAddBacklog={(title) => backlogColumn && addTask(backlogColumn.id, title)}
               onOpen={setOpenTask}
               onMenu={(t, anchor) => setMenu({ task: t, anchor })}
               onSendToBoard={sendToBoard}
@@ -1128,6 +1228,7 @@ export function BoardPage() {
         <TaskDetail
           taskId={openTask}
           columns={detail.columns}
+          epics={epics}
           onClose={() => setOpenTask(null)}
           onMenu={(anchor) => {
             const t = detail.tasks.find(
@@ -1142,6 +1243,7 @@ export function BoardPage() {
         <TaskMenu
           task={menu.task}
           columns={detail.columns}
+          epics={epics}
           anchor={menu.anchor}
           onClose={() => setMenu(null)}
           onOpen={() => setOpenTask(menu.task.key ?? menu.task.id)}

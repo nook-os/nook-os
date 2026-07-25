@@ -1,12 +1,29 @@
 import { describe, expect, it } from "vitest";
+import { type TaskItem } from "@nookos/api";
 import {
   parseFilter,
   serializeFilter,
   writeFilter,
   showsUnderArchive,
   isBacklogTask,
+  groupByEpic,
+  epicOptions,
   type BoardFilter,
 } from "./pages/Board";
+
+/** A minimal TaskItem for the grouping tests — only the fields the pure
+ *  functions read; the rest is filled to satisfy the type. */
+function mk(p: Partial<TaskItem> & { id: string }): TaskItem {
+  return {
+    title: p.id,
+    type: "task",
+    priority: 0,
+    position: 0,
+    created_at: "2026-01-01T00:00:00Z",
+    column_id: "col-backlog",
+    ...p,
+  } as TaskItem;
+}
 
 const roundTrip = (f: BoardFilter) => parseFilter(serializeFilter(f));
 
@@ -84,6 +101,53 @@ describe("board filter URL round-trip (MAIN-15 AC-1)", () => {
     // Anything else falls back to the board tab.
     expect(parseFilter(new URLSearchParams("view=nonsense")).view).toBe("board");
     expect(parseFilter(new URLSearchParams("")).view).toBe("board");
+  });
+});
+
+describe("epic grouping in the Backlog tab (MAIN-83 AC-1)", () => {
+  const colType = new Map<string, string | undefined>([
+    ["col-backlog", "backlog"],
+    ["col-todo", "unstarted"],
+    ["col-done", "completed"],
+  ]);
+
+  it("groups children under their epic, counts done/total, and buckets parentless backlog tasks", () => {
+    const tasks = [
+      mk({ id: "E1", type: "epic", priority: 2 }),
+      mk({ id: "E2", type: "epic", priority: 3 }), // empty epic
+      mk({ id: "C1", parent_task_id: "E1", column_id: "col-backlog" }),
+      mk({ id: "C2", parent_task_id: "E1", column_id: "col-done" }), // done
+      mk({ id: "N1", column_id: "col-backlog" }), // parentless backlog → No epic
+      mk({ id: "B1", column_id: "col-todo" }), // parentless on-board → shown nowhere here
+    ];
+    const g = groupByEpic(tasks, colType);
+
+    // Epics in pick order (E1 priority 2 before E2 priority 3).
+    expect(g.epics.map((s) => s.epic.id)).toEqual(["E1", "E2"]);
+    const e1 = g.epics[0];
+    expect(e1.children.map((c) => c.id).sort()).toEqual(["C1", "C2"]);
+    expect(e1.done).toBe(1); // only C2 is in a completed column
+    expect(e1.total).toBe(2);
+    expect(g.epics[1].total).toBe(0); // empty epic still gets a section
+
+    // The No-epic bucket holds ONLY the parentless backlog task, not the
+    // parentless on-board one (that lives on the kanban).
+    expect(g.noEpic.map((t) => t.id)).toEqual(["N1"]);
+  });
+});
+
+describe("epic picker options (MAIN-83 AC-4/AC-5)", () => {
+  it("offers every epic except the task itself, and only epics", () => {
+    const tasks = [
+      mk({ id: "E1", type: "epic" }),
+      mk({ id: "E2", type: "epic" }),
+      mk({ id: "T1", type: "task" }),
+    ];
+    expect(epicOptions(tasks, "T1").map((e) => e.id)).toEqual(["E1", "E2"]);
+    // An epic cannot be filed under itself.
+    expect(epicOptions(tasks, "E1").map((e) => e.id)).toEqual(["E2"]);
+    // Non-epics are never options.
+    expect(epicOptions(tasks, "E1").some((e) => e.id === "T1")).toBe(false);
   });
 });
 
