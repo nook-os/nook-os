@@ -20,9 +20,15 @@ use crate::error::{ApiError, ApiResult};
 /// or policy check (NG-3): visibility is a per-task owner predicate, and this is
 /// the single definition every read/claim path routes through.
 pub fn visible_to(task: &TaskItem, viewer: UserId) -> bool {
-    task.visibility != "private"
-        || task.created_by == Some(viewer)
-        || task.assignee_user_id == Some(viewer)
+    task.visibility != "private" || owns(task, viewer)
+}
+
+/// The card's owner set — its creator or its assignee. The single definition
+/// shared by the visibility read predicate above AND the visibility-change gate
+/// (MAIN-85), so "who owns this card" can never come to mean two different
+/// things in the two places it decides access.
+pub fn owns(task: &TaskItem, user: UserId) -> bool {
+    task.created_by == Some(user) || task.assignee_user_id == Some(user)
 }
 
 /// The task title safe to put in a TENANT-FACING event payload or notification

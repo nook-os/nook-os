@@ -227,6 +227,22 @@ pub async fn update_task(
     if !crate::services::tasks::visible_to(&existing, auth.user_id) {
         return Err(ApiError::NotFound);
     }
+    // Visibility-change gate (MAIN-85): a `team`/`org` card is visible to every
+    // tenant member, so without this ANY of them could flip a teammate's card to
+    // `private` and hide it from its collaborators. Only the card's owner (its
+    // creator or assignee) or a tenant owner/admin may change its scope. Fires
+    // ONLY on an actual change — a PATCH that omits `visibility` or round-trips
+    // the current value is untouched, so column moves and field edits keep
+    // working for any member who can see the card (AC-2). Checked before the
+    // provider write, so a refusal rejects the ENTIRE request (AC-3), and after
+    // the visibility read above, so a card the caller cannot see is still a 404,
+    // not a 403 (AC-4).
+    if let Some(new_vis) = req.visibility.as_deref() {
+        if new_vis != existing.visibility && !crate::services::tasks::owns(&existing, auth.user_id)
+        {
+            auth.require_tenant_admin(&state).await?;
+        }
+    }
     let board_id = existing.board_id;
     let provider = provider_for_board(&state, auth.tenant_id, board_id).await?;
     let moved_column = req.column_id.is_some() || req.column_type.is_some();

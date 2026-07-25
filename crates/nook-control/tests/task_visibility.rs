@@ -6,6 +6,7 @@
 use axum::extract::{Path, State};
 use nook_control::auth::{AuthCtx, Principal};
 use nook_control::config::Config;
+use nook_control::error::ApiError;
 use nook_control::routes::task_query::{claim_inner, query_rows, TaskFilter};
 use nook_control::services::identity::{login_identity, IdentityClaims};
 use nook_control::state::AppState;
@@ -369,6 +370,183 @@ async fn visibility_governs_read_claim_board_and_update() {
         .await;
 }
 
+/// MAIN-85: changing a card's `visibility` is gated to the card's owner
+/// (creator ∪ assignee) or a tenant owner/admin. Everyone else is refused 403,
+/// with the whole PATCH dropped — while every OTHER edit a member could already
+/// make stays exactly as permissive as before. Drives the real `update_task`
+/// route so the gate is tested where it lives, against live Postgres.
+#[tokio::test]
+async fn visibility_change_is_gated_to_owner_or_admin() {
+    let _serial = SERIAL.lock().await;
+    let Some(pool) = test_pool().await else {
+        eprintln!("skipping visibility-gate test — no DATABASE_URL");
+        return;
+    };
+    let state = AppState::new(pool.clone(), test_config(), None).await;
+
+    // A owns the tenant and creates the cards. B is an ordinary member (neither
+    // creator nor assignee nor admin). ADM is a tenant admin who is likewise
+    // neither creator nor assignee. ASG will be made a card's assignee.
+    let sub = format!("owner-{}", Uuid::now_v7().simple());
+    let (owner, tenant) = login_identity(&state, claims(&sub, "Owner"))
+        .await
+        .expect("owner signs in");
+    let a = owner.id;
+    let b = add_member(&pool, tenant.id, "bob", "member").await;
+    let adm = add_member(&pool, tenant.id, "admin", "admin").await;
+    let asg = add_member(&pool, tenant.id, "asa", "member").await;
+
+    let board: BoardId = sqlx::query_scalar(
+        "INSERT INTO boards (id, tenant_id, name, key, provider)
+         VALUES ($1, $2, 'b', $3, 'local') RETURNING id",
+    )
+    .bind(BoardId::new())
+    .bind(tenant.id)
+    .bind(format!("G{}", &Uuid::now_v7().simple().to_string()[..6]).to_uppercase())
+    .fetch_one(&pool)
+    .await
+    .expect("board");
+    sqlx::query(
+        "INSERT INTO board_columns (id, board_id, name, position, type)
+         VALUES ($1, $2, 'Todo', 0, 'unstarted')",
+    )
+    .bind(Uuid::now_v7())
+    .bind(board)
+    .execute(&pool)
+    .await
+    .expect("column");
+
+    // Helper: current visibility of a card, read straight from the row.
+    async fn vis(pool: &PgPool, id: TaskId) -> String {
+        sqlx::query_scalar("SELECT visibility FROM tasks WHERE id = $1")
+            .bind(id)
+            .fetch_one(pool)
+            .await
+            .expect("visibility")
+    }
+    async fn title_of(pool: &PgPool, id: TaskId) -> String {
+        sqlx::query_scalar("SELECT title FROM tasks WHERE id = $1")
+            .bind(id)
+            .fetch_one(pool)
+            .await
+            .expect("title")
+    }
+    let patch = |st: &AppState, who: UserId, id: TaskId, req: UpdateTaskRequest| {
+        let st = st.clone();
+        async move {
+            nook_control::routes::boards::update_task(
+                State(st),
+                auth(who, tenant.id),
+                Path(id.to_string()),
+                axum::Json(req),
+            )
+            .await
+        }
+    };
+
+    // ── AC-1: a non-owner, non-admin member cannot change scope ─────────────
+    let team = make_task(&state, tenant.id, board, a, "shared plan", "team").await;
+    let denied = patch(&state, b, team.id, UpdateUserVis::visibility("private")).await;
+    assert!(
+        matches!(denied, Err(ApiError::ForbiddenMsg(_))),
+        "a non-owner, non-admin member is refused 403, got {denied:?}"
+    );
+    assert_eq!(
+        vis(&pool, team.id).await,
+        "team",
+        "a refused visibility change leaves the card untouched"
+    );
+
+    // ── AC-1: the creator may change scope ──────────────────────────────────
+    let asc = patch(&state, a, team.id, UpdateUserVis::visibility("org"))
+        .await
+        .expect("creator changes scope");
+    assert_eq!(asc.0.visibility, "org", "creator set it to org");
+
+    // ── AC-1: the assignee may change scope (owner = creator ∪ assignee) ─────
+    sqlx::query("UPDATE tasks SET assignee_user_id = $2 WHERE id = $1")
+        .bind(team.id)
+        .bind(asg)
+        .execute(&pool)
+        .await
+        .expect("assign");
+    let by_assignee = patch(&state, asg, team.id, UpdateUserVis::visibility("team"))
+        .await
+        .expect("assignee changes scope");
+    assert_eq!(by_assignee.0.visibility, "team", "assignee set it to team");
+
+    // ── AC-1: a tenant admin (neither creator nor assignee) may change scope ─
+    let admcard = make_task(&state, tenant.id, board, a, "admin can flip", "team").await;
+    let by_admin = patch(
+        &state,
+        adm,
+        admcard.id,
+        UpdateUserVis::visibility("private"),
+    )
+    .await
+    .expect("tenant admin changes scope");
+    assert_eq!(by_admin.0.visibility, "private", "admin set it to private");
+
+    // ── AC-2: the gate fires only on an actual change ───────────────────────
+    // A non-owner member editing another field (title) with NO visibility set
+    // still succeeds — other-field authority is unchanged (NG-4).
+    let move_card = make_task(&state, tenant.id, board, a, "movable", "team").await;
+    let field_only = patch(
+        &state,
+        b,
+        move_card.id,
+        UpdateUserVis::title("renamed by member"),
+    )
+    .await
+    .expect("a member may edit a visible team card's other fields");
+    assert_eq!(
+        field_only.0.title, "renamed by member",
+        "the title edit applied"
+    );
+    // A non-owner sending the SAME visibility value it already has is not blocked.
+    let same_vis = patch(&state, b, move_card.id, UpdateUserVis::visibility("team"))
+        .await
+        .expect("round-tripping the current visibility is never gated");
+    assert_eq!(same_vis.0.visibility, "team", "unchanged, and allowed");
+
+    // ── AC-3: a refused change drops the WHOLE request, other fields included ─
+    let before = title_of(&pool, move_card.id).await;
+    let combo = patch(
+        &state,
+        b,
+        move_card.id,
+        UpdateUserVis::visibility_and_title("private", "hijacked title"),
+    )
+    .await;
+    assert!(
+        matches!(combo, Err(ApiError::ForbiddenMsg(_))),
+        "changing visibility + title as a non-owner is refused 403, got {combo:?}"
+    );
+    assert_eq!(
+        title_of(&pool, move_card.id).await,
+        before,
+        "the title in the refused request was NOT applied"
+    );
+    assert_eq!(
+        vis(&pool, move_card.id).await,
+        "team",
+        "and neither was the visibility change"
+    );
+
+    // ── AC-4: a private card the caller cannot see is 404, never 403 ────────
+    let secret = make_task(&state, tenant.id, board, a, "hidden", "private").await;
+    let unseen = patch(&state, b, secret.id, UpdateUserVis::visibility("team")).await;
+    assert!(
+        matches!(unseen, Err(ApiError::NotFound)),
+        "a private card is NotFound (404) to a non-owner, not a 403, got {unseen:?}"
+    );
+
+    let _ = sqlx::query("DELETE FROM tenants WHERE id = $1 AND slug <> 'dev'")
+        .bind(tenant.id)
+        .execute(&pool)
+        .await;
+}
+
 /// Small builders for `UpdateTaskRequest` in the two update assertions above.
 struct UpdateUserVis;
 impl UpdateUserVis {
@@ -381,6 +559,15 @@ impl UpdateUserVis {
     fn visibility(v: &str) -> UpdateTaskRequest {
         UpdateTaskRequest {
             visibility: Some(v.into()),
+            ..blank_update()
+        }
+    }
+    /// A PATCH that changes visibility AND another field in one request — the
+    /// all-or-nothing case (MAIN-85 AC-3): a refusal must drop the title too.
+    fn visibility_and_title(v: &str, t: &str) -> UpdateTaskRequest {
+        UpdateTaskRequest {
+            visibility: Some(v.into()),
+            title: Some(t.into()),
             ..blank_update()
         }
     }
