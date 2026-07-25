@@ -224,6 +224,100 @@ pub fn expand_path(p: &str) -> String {
     p.to_string()
 }
 
+/// A filesystem-safe slug identifying a control plane, derived from its server
+/// URL's host (MAIN-58 AC-1). Scheme, userinfo, port and path are stripped; the
+/// host is lowercased; anything outside `[a-z0-9.-]` becomes `-`. Idempotent —
+/// slugging a bare host is a no-op — so composing the same root twice is stable.
+///
+/// `https://Nook.Hein.Network:8443/x` → `nook.hein.network`.
+pub fn cp_slug(server_url: &str) -> String {
+    // Strip the scheme, then take the authority up to the first path/query/frag.
+    let after_scheme = server_url
+        .split_once("://")
+        .map(|(_, rest)| rest)
+        .unwrap_or(server_url);
+    let authority = after_scheme
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or(after_scheme);
+    // Drop any `user@` prefix, then the `:port` suffix.
+    let host = authority.rsplit('@').next().unwrap_or(authority);
+    let host = host.split(':').next().unwrap_or(host);
+
+    let mut out = String::with_capacity(host.len());
+    for ch in host.chars() {
+        let lower = ch.to_ascii_lowercase();
+        if lower.is_ascii_alphanumeric() || lower == '.' || lower == '-' {
+            out.push(lower);
+        } else {
+            out.push('-');
+        }
+    }
+    let trimmed = out.trim_matches(|c| c == '-' || c == '.');
+    if trimmed.is_empty() {
+        "control-plane".into()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+/// The workspace root a fresh enrollment gets when none is set explicitly:
+/// `~/.nook/workspace/<cp-slug>` (MAIN-58 AC-1). Because the control plane's
+/// slug is part of the root *string*, two nodes on one machine that belong to
+/// different control planes never share a checkout tree (AC-5) — while the
+/// layout under the root (`<owner>/<repo>`, worktrees, discovery) is unchanged
+/// (AC-4). Only the default; an explicit root always wins (AC-2).
+pub fn default_workspace_root(server_url: &str) -> String {
+    format!("~/.nook/workspace/{}", cp_slug(server_url))
+}
+
+#[cfg(test)]
+mod slug_tests {
+    use super::*;
+
+    #[test]
+    fn strips_scheme_port_path_and_lowercases() {
+        assert_eq!(cp_slug("https://nook.hein.network"), "nook.hein.network");
+        assert_eq!(
+            cp_slug("https://Nook.Hein.Network:8443/foo?x=1"),
+            "nook.hein.network"
+        );
+        assert_eq!(cp_slug("http://Localhost:8080"), "localhost");
+        assert_eq!(
+            cp_slug("https://user@host.example.com:443"),
+            "host.example.com"
+        );
+    }
+
+    #[test]
+    fn sanitizes_unsafe_characters_to_dashes() {
+        // Dots and dashes are kept (they are safe in a directory name); anything
+        // else becomes a single dash, and leading/trailing separators are trimmed.
+        assert_eq!(cp_slug("https://a_b~c.example"), "a-b-c.example");
+        assert!(cp_slug("https://weird™host")
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-'));
+        // A URL with nothing host-like still yields a usable directory name.
+        assert_eq!(cp_slug("https://"), "control-plane");
+    }
+
+    #[test]
+    fn slugging_a_slug_is_a_no_op() {
+        let slug = cp_slug("https://nook.hein.network:8443");
+        assert_eq!(slug, "nook.hein.network");
+        assert_eq!(cp_slug(&slug), slug, "idempotent");
+    }
+
+    #[test]
+    fn different_control_planes_get_distinct_roots() {
+        let a = default_workspace_root("https://nook.hein.network");
+        let b = default_workspace_root("https://other.example.com");
+        assert_eq!(a, "~/.nook/workspace/nook.hein.network");
+        assert_eq!(b, "~/.nook/workspace/other.example.com");
+        assert_ne!(a, b);
+    }
+}
+
 #[cfg(test)]
 mod security_tests {
     use super::*;
