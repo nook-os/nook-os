@@ -61,6 +61,8 @@ id_type!(
     ThemeId,
     SettingId,
     GitCredentialId,
+    UserNoteId,
+    UserNoteFolderId,
 );
 
 // ── Tenancy ──────────────────────────────────────────────────────────────────
@@ -1084,6 +1086,89 @@ pub struct Note {
     pub kind: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+// ── Personal notebook (MAIN-66) ──────────────────────────────────────────────
+// A separate, PERSON-owned resource — distinct from the workspace `Note` above.
+// Keyed by `person_id` (a plain uuid, the platform-issued value), so a person
+// sees the same notebook signed into any of their orgs. Note bodies are stored
+// encrypted; only the decrypted `UserNote` carries `content_md`.
+
+/// A folder in a person's notebook. `parent_id: None` is a root folder.
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
+pub struct UserNoteFolder {
+    pub id: UserNoteFolderId,
+    #[schema(value_type = String, format = Uuid)]
+    pub person_id: Uuid,
+    pub parent_id: Option<UserNoteFolderId>,
+    pub name: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// A note's metadata — the tree/list item and the search result. Never carries
+/// the body: that is encrypted at rest and fetched (decrypted) one note at a
+/// time. `path` is the plaintext folder path for display and search.
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
+pub struct UserNoteSummary {
+    pub id: UserNoteId,
+    pub folder_id: Option<UserNoteFolderId>,
+    pub title: String,
+    /// Plaintext folder path, e.g. "Work/Ideas". Empty for a root note.
+    pub path: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// A single note WITH its decrypted body (the `get` response).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct UserNote {
+    pub id: UserNoteId,
+    pub folder_id: Option<UserNoteFolderId>,
+    pub title: String,
+    pub content_md: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Create a note. Body defaults to empty; `folder_id` None places it at root.
+#[derive(Debug, Clone, Deserialize, ToSchema)]
+pub struct CreateUserNote {
+    pub title: String,
+    #[serde(default)]
+    pub content_md: String,
+    #[serde(default)]
+    pub folder_id: Option<UserNoteFolderId>,
+}
+
+/// Update a note. Each field absent = leave alone. `folder_id` is tri-state:
+/// absent = leave, `null` = move to root, an id = move into that folder.
+#[derive(Debug, Clone, Default, Deserialize, ToSchema)]
+pub struct UpdateUserNote {
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub content_md: Option<String>,
+    #[serde(default)]
+    pub folder_id: Option<Option<UserNoteFolderId>>,
+}
+
+/// Create a folder. `parent_id` None makes it a root folder.
+#[derive(Debug, Clone, Deserialize, ToSchema)]
+pub struct CreateUserNoteFolder {
+    pub name: String,
+    #[serde(default)]
+    pub parent_id: Option<UserNoteFolderId>,
+}
+
+/// Update a folder. Rename and/or move; `parent_id` is tri-state like a note's
+/// `folder_id` (absent = leave, `null` = move to root, an id = move under it).
+#[derive(Debug, Clone, Default, Deserialize, ToSchema)]
+pub struct UpdateUserNoteFolder {
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub parent_id: Option<Option<UserNoteFolderId>>,
 }
 
 // ── Themes ───────────────────────────────────────────────────────────────────
