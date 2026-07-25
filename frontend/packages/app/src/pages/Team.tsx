@@ -301,10 +301,18 @@ function TeamInvites() {
   });
 
   const revokeMutation = useMutation({
+    // openapi-fetch returns errors rather than throwing, so a failed DELETE must
+    // be checked and rethrown — otherwise onSuccess fires on a failure and shows
+    // "Invite revoked" while the invite is still there. Not `orThrow`: DELETE
+    // succeeds with a bodyless 204, so there is no `data` to require.
     mutationFn: async (inv: Invite) => {
-      await api.DELETE("/api/v1/tenants/{id}/invites/{invite}", {
-        params: { path: { id: tenantId!, invite: inv.id } },
-      });
+      const { error, response } = await api.DELETE(
+        "/api/v1/tenants/{id}/invites/{invite}",
+        { params: { path: { id: tenantId!, invite: inv.id } } },
+      );
+      if (error || !response.ok) {
+        throw new Error(typeof error === "string" ? error : `${response.status}`);
+      }
       return inv;
     },
     onSuccess: () => {

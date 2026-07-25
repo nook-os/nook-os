@@ -72,6 +72,7 @@ beforeEach(() => {
   pushSpy.mockClear();
   mock.GET.mockReset();
   mock.POST.mockReset();
+  mock.DELETE.mockReset();
 });
 afterEach(() => cleanup());
 
@@ -116,6 +117,29 @@ describe("TeamPage", () => {
       expect(pushSpy).toHaveBeenCalledWith(
         expect.objectContaining({ level: "success", title: "Invite sent to new@x.test" }),
       ),
+    );
+  });
+
+  it("does not claim success when a revoke fails (AC-7)", async () => {
+    // A pending invite is present so its row (and revoke button) renders.
+    wireGet("owner", [
+      { id: "inv9", email: "pending@x.test", role: "member", expires_at: "2026-08-10T00:00:00Z" },
+    ]);
+    // openapi-fetch surfaces a failure as `error`, not a throw.
+    mock.DELETE.mockResolvedValue({
+      error: { error: "boom" },
+      response: { ok: false, status: 500 },
+    });
+    renderPage();
+
+    // askConfirm is mocked to true, so clicking revoke proceeds to the DELETE.
+    const revoke = await screen.findByTitle("revoke");
+    await userEvent.click(revoke);
+
+    await waitFor(() => expect(mock.DELETE).toHaveBeenCalled());
+    // The failure must NOT masquerade as success — no "Invite revoked" toast.
+    expect(pushSpy).not.toHaveBeenCalledWith(
+      expect.objectContaining({ title: "Invite revoked" }),
     );
   });
 });
