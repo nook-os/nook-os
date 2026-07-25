@@ -18,7 +18,7 @@ use crate::error::{ApiError, ApiResult};
 use crate::services::tasks;
 use crate::state::AppState;
 
-fn validate(name: &str) -> Result<String, ApiError> {
+pub(crate) fn validate(name: &str) -> Result<String, ApiError> {
     let n = name.trim().to_lowercase();
     if n.is_empty() || n.len() > 48 {
         return Err(ApiError::BadRequest(

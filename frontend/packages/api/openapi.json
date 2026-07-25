@@ -6416,6 +6416,9 @@
           "updated_at"
         ],
         "properties": {
+          "automation": {
+            "description": "Per-board automation (MAIN-73): a map from column TYPE to an ordered list\nof actions that fire when a task enters a column of that type. `{}` when\nunset. Validated server-side on write."
+          },
           "created_at": {
             "type": "string",
             "format": "date-time"
@@ -10693,6 +10696,9 @@
           "name"
         ],
         "properties": {
+          "automation": {
+            "description": "Replace the board's automation rules (MAIN-73). Omitted leaves them\nunchanged; a value is validated (known kinds, valid column types, sound\nconfig) before it is stored."
+          },
           "key": {
             "type": [
               "string",

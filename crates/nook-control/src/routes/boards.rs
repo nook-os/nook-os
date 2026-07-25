@@ -250,6 +250,17 @@ pub async fn update_task(
                 })),
         )
         .await;
+        // Board automation (MAIN-73): fire the destination column's rules. The
+        // engine no-ops when the column did not actually change.
+        crate::services::triggers::on_column_change(
+            &state,
+            auth.tenant_id,
+            task.id,
+            board_id,
+            existing.column_id,
+            task.column_id,
+        )
+        .await;
     }
     state.registry.publish(
         auth.tenant_id,
@@ -434,14 +445,21 @@ pub async fn update_board(
         Some(k) => Some(validate_key(k)?),
         None => None,
     };
+    // Validate the automation config before it can be stored (MAIN-73 AC-1): a
+    // stored rule set is always one the engine can run. Omitted leaves it as is.
+    if let Some(automation) = &req.automation {
+        crate::services::triggers::validate(automation)?;
+    }
     let board: Option<Board> = sqlx::query_as(
-        "UPDATE boards SET name = $3, key = COALESCE($4, key), updated_at = now()
+        "UPDATE boards SET name = $3, key = COALESCE($4, key),
+                           automation = COALESCE($5, automation), updated_at = now()
          WHERE id = $1 AND tenant_id = $2 RETURNING *",
     )
     .bind(id)
     .bind(auth.tenant_id)
     .bind(&req.name)
     .bind(&key)
+    .bind(&req.automation)
     .fetch_optional(&state.db)
     .await?;
     board.map(Json).ok_or(ApiError::NotFound)

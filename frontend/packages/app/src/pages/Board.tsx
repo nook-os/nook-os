@@ -22,8 +22,10 @@ import {
   MoreHorizontal,
   Archive,
   X,
+  Zap,
 } from "lucide-react";
 import { api, type TaskItem } from "@nookos/api";
+import { AutomationDialog } from "./BoardAutomation";
 import { Empty, Panel, Pill, TypeBadge, TYPE_META } from "@nookos/ui";
 import { useNewWork } from "../newwork";
 import { askChoice, askConfirm, askForm, askText, notify } from "../dialogs";
@@ -830,6 +832,7 @@ export function BoardPage() {
   };
 
   const bust = () => queryClient.invalidateQueries({ queryKey: ["boards"] });
+  const [showAutomation, setShowAutomation] = useState(false);
 
   const blockedIds = new Set((blockedList ?? []).map((t) => t.id));
   // When a filter is on, the API decides what is visible; otherwise show the
@@ -937,6 +940,13 @@ export function BoardPage() {
             <button className="btn small" onClick={renameBoard} title="rename board">
               <Pencil size={11} />
             </button>
+            <button
+              className="btn small"
+              onClick={() => setShowAutomation(true)}
+              title="automation"
+            >
+              <Zap size={11} /> automation
+            </button>
             <button className="btn danger small" onClick={deleteBoard} title="delete board">
               <Trash2 size={11} />
             </button>
@@ -985,6 +995,16 @@ export function BoardPage() {
           </div>
         </div>
       </Panel>
+
+      {showAutomation && (
+        <AutomationDialog
+          boardId={board.id}
+          boardName={detail.board.name}
+          automation={detail.board.automation}
+          onClose={() => setShowAutomation(false)}
+          onSaved={bust}
+        />
+      )}
 
       {openTask && (
         <TaskDetail
