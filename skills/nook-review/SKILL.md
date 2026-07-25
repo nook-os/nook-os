@@ -17,7 +17,10 @@ metadata:
 One pass = one PR reviewed. Under `/loop`, each iteration runs this skill once.
 
 The contract lives on the NookOS board. The code, CI and verdict live on
-GitHub.
+GitHub. A PR under review has its card parked in the board's **In Review**
+column (the builder moves it there on submit); **Done** means merged, so a card
+only reaches Done when a human merges. This skill reads and labels; it never
+moves cards and never merges.
 
 ## 0. Preflight
 

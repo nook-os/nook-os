@@ -531,7 +531,7 @@ pub struct BoardColumn {
     pub name: String,
     pub position: i32,
     /// What this column MEANS, independent of what it is called:
-    /// `backlog` | `unstarted` | `started` | `completed` | `canceled`.
+    /// `backlog` | `unstarted` | `started` | `review` | `completed` | `canceled`.
     ///
     /// Automation targets the type so that renaming "In Progress" to "Doing"
     /// is a cosmetic change rather than a broken loop. The name is for people.
