@@ -10,7 +10,7 @@ use std::sync::Mutex;
 use anyhow::Result;
 use async_trait::async_trait;
 
-use super::Mailer;
+use super::{Category, Mailer};
 
 /// One message that would have been sent.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,10 +50,12 @@ impl Mailer for CaptureMailer {
         subject: &str,
         text_body: &str,
         html_body: Option<&str>,
+        category: Category,
     ) -> Result<()> {
         tracing::info!(
             to,
             subject,
+            category = category.as_str(),
             "email captured by the capture provider — not delivered"
         );
         let mut sent = self.sent.lock().expect("capture lock");
@@ -81,12 +83,24 @@ mod tests {
     #[tokio::test]
     async fn records_the_message_and_returns_ok() {
         let m = CaptureMailer::new();
-        m.send("her@example.com", "Hi", "plain", Some("<b>rich</b>"))
-            .await
-            .expect("capture send is always Ok");
-        m.send("them@example.com", "Second", "body2", None)
-            .await
-            .unwrap();
+        m.send(
+            "her@example.com",
+            "Hi",
+            "plain",
+            Some("<b>rich</b>"),
+            Category::Transactional,
+        )
+        .await
+        .expect("capture send is always Ok");
+        m.send(
+            "them@example.com",
+            "Second",
+            "body2",
+            None,
+            Category::Notification,
+        )
+        .await
+        .unwrap();
 
         let sent = m.sent();
         assert_eq!(sent.len(), 2);
@@ -107,9 +121,15 @@ mod tests {
     async fn keeps_memory_bounded() {
         let m = CaptureMailer::new();
         for i in 0..(MAX_KEPT + 10) {
-            m.send("x@example.com", &format!("n{i}"), "b", None)
-                .await
-                .unwrap();
+            m.send(
+                "x@example.com",
+                &format!("n{i}"),
+                "b",
+                None,
+                Category::Transactional,
+            )
+            .await
+            .unwrap();
         }
         let sent = m.sent();
         assert_eq!(

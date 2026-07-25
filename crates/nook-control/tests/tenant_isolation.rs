@@ -74,6 +74,7 @@ fn test_config() -> Config {
         s3_access_key_id: None,
         s3_secret_access_key: None,
         s3_path_style: true,
+        cache_provider: "memory".into(),
         mail_provider: "capture".into(),
         smtp_host: None,
         smtp_port: 587,
@@ -81,6 +82,13 @@ fn test_config() -> Config {
         smtp_from: "NookOS <no-reply@localhost>".into(),
         smtp_username: None,
         smtp_password: None,
+        postmark_token: None,
+        postmark_api_url: "https://api.postmarkapp.com/email".into(),
+        mail_from: "NookOS <no-reply@localhost>".into(),
+        mail_send_enabled: false,
+        mail_notifications_enabled: false,
+        mail_max_per_month: Some(100),
+        mail_max_per_day: None,
     }
 }
 

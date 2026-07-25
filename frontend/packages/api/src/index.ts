@@ -34,6 +34,9 @@ export type OperatorAuditPage = Schemas["OperatorAuditPage"];
 export type OperatorTenant = Schemas["OperatorTenant"];
 export type OperatorNode = Schemas["OperatorNode"];
 export type BindingRow = Schemas["BindingRow"];
+export type UserToken = Schemas["UserToken"];
+export type VaultPasskey = Schemas["VaultPasskey"];
+export type TenantMemberItem = Schemas["TenantMemberItem"];
 
 export type { paths };
 export * from "./ws";

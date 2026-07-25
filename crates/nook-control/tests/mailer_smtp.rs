@@ -39,6 +39,7 @@ async fn sends_through_smtp_to_mailpit() {
             "NookOS SMTP wire check",
             "This message proves the SMTP Mailer puts bytes on the wire.",
             Some("<p>This message proves the <b>SMTP Mailer</b> puts bytes on the wire.</p>"),
+            nook_control::mailer::Category::Transactional,
         )
         .await
         .expect("the send should reach Mailpit");

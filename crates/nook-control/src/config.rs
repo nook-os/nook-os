@@ -112,6 +112,13 @@ pub struct Config {
     /// self-hosted gateways rarely have per-bucket DNS.
     pub s3_path_style: bool,
 
+    // ── Cache provider ──────────────────────────────────────────────────
+    /// Which cache backend to use, chosen by name — `memory` (default) or the
+    /// reserved-but-unbuilt `redis`. Explicit, like `NOOK_ARTIFACT_STORE`: a
+    /// cache is a deployment decision, and a hosted redis later means a new
+    /// name here, not inference. See `crate::cache`.
+    pub cache_provider: String,
+
     // ── Email (mail provider) ───────────────────────────────────────────
     /// Which mail transport to use, chosen by name — `smtp` or `capture`.
     /// Explicit, like `NOOK_ARTIFACT_STORE`, rather than inferred from whether
@@ -133,6 +140,36 @@ pub struct Config {
     /// Optional SMTP auth. Both set → credentials are sent; Mailpit needs none.
     pub smtp_username: Option<String>,
     pub smtp_password: Option<String>,
+
+    // ── Postmark (HTTP mail provider) ───────────────────────────────────
+    /// Server token for `mail_provider = postmark`, sent as the
+    /// `X-Postmark-Server-Token` header. Missing → the provider fails to build
+    /// and falls back to capture (nothing is delivered), never a panic.
+    pub postmark_token: Option<String>,
+    /// Postmark's send endpoint. Overridable so tests can point it at a mock.
+    pub postmark_api_url: String,
+    /// The verified sender used by the Postmark provider, e.g.
+    /// `NookOS <no-reply@hein.network>`. Separate from `smtp_from` because the
+    /// verified sender at Postmark need not match the SMTP relay's envelope.
+    pub mail_from: String,
+
+    // ── Send guards (provider-agnostic) ─────────────────────────────────
+    /// GLOBAL send switch. Default OFF: unless this is true, EVERY provider —
+    /// including a fully-configured postmark/smtp — captures (logs "would
+    /// send"), delivering nothing. Turning sending on is a deliberate ops step.
+    pub mail_send_enabled: bool,
+    /// Whether `notification`-category mail (the email notification channel) may
+    /// send. Default OFF: even with `mail_send_enabled`, notifications stay
+    /// captured until this is separately turned on. Transactional mail
+    /// (verification, invites) is unaffected by this flag.
+    pub mail_notifications_enabled: bool,
+    /// Hard monthly cap on REAL sends — a backstop against exhausting the
+    /// Postmark allowance. At the cap, further sends are captured (WARN), not
+    /// sent. Counted from recorded sends, so it survives restarts. Defaults to
+    /// 100 (the Postmark free allowance); `0` blocks all real sends.
+    pub mail_max_per_month: Option<i64>,
+    /// Optional daily cap, same semantics as the monthly one. Unset by default.
+    pub mail_max_per_day: Option<i64>,
 }
 
 fn env_opt(key: &str) -> Option<String> {
@@ -194,6 +231,8 @@ impl Config {
             mcp_token: env_opt("MCP_TOKEN"),
             dev_join_token: env_opt("NOOK_DEV_JOIN_TOKEN"),
 
+            cache_provider: env_opt("NOOK_CACHE_PROVIDER").unwrap_or_else(|| "memory".into()),
+
             mail_provider: env_opt("MAIL_PROVIDER").unwrap_or_else(|| "capture".into()),
             smtp_host: env_opt("SMTP_HOST"),
             smtp_port: env_opt("SMTP_PORT")
@@ -203,11 +242,35 @@ impl Config {
             smtp_from: env_opt("SMTP_FROM").unwrap_or_else(|| "NookOS <no-reply@localhost>".into()),
             smtp_username: env_opt("SMTP_USERNAME"),
             smtp_password: env_opt("SMTP_PASSWORD"),
+
+            postmark_token: env_opt("POSTMARK_TOKEN"),
+            postmark_api_url: env_opt("POSTMARK_API_URL")
+                .unwrap_or_else(|| "https://api.postmarkapp.com/email".into()),
+            mail_from: env_opt("MAIL_FROM").unwrap_or_else(|| "NookOS <no-reply@localhost>".into()),
+
+            mail_send_enabled: env_opt("MAIL_SEND_ENABLED")
+                .map(|v| v == "true" || v == "1")
+                .unwrap_or(false),
+            mail_notifications_enabled: env_opt("MAIL_NOTIFICATIONS_ENABLED")
+                .map(|v| v == "true" || v == "1")
+                .unwrap_or(false),
+            // Always a monthly cap; unset or unparseable falls back to 100 (the
+            // Postmark free allowance) so a typo can never silently uncap sends.
+            mail_max_per_month: Some(
+                env_opt("MAIL_MAX_PER_MONTH")
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(100),
+            ),
+            mail_max_per_day: env_opt("MAIL_MAX_PER_DAY").and_then(|v| v.parse().ok()),
         };
 
         if cfg.is_production() && cfg.auth_dev_mode {
             anyhow::bail!("AUTH_DEV_MODE must not be enabled when APP_ENV=production");
         }
+        // A cache provider is selected the same way, and `redis` is reserved
+        // but unbuilt — refuse it at boot with a pointed message rather than
+        // silently handing back a per-process cache someone asked to be shared.
+        crate::cache::validate_provider(&cfg.cache_provider)?;
         // An unknown mail provider is a misconfiguration worth stopping for,
         // rather than silently falling through to some default and dropping mail.
         if !crate::mailer::is_known_provider(&cfg.mail_provider) {
@@ -272,6 +335,7 @@ impl Config {
             s3_access_key_id: None,
             s3_secret_access_key: None,
             s3_path_style: true,
+            cache_provider: "memory".into(),
             mail_provider: "capture".into(),
             smtp_host: None,
             smtp_port: 587,
@@ -279,6 +343,15 @@ impl Config {
             smtp_from: "NookOS <no-reply@localhost>".into(),
             smtp_username: None,
             smtp_password: None,
+            postmark_token: None,
+            postmark_api_url: "https://api.postmarkapp.com/email".into(),
+            mail_from: "NookOS <no-reply@localhost>".into(),
+            // Tests get the shipped-safe defaults: sending off, notifications
+            // off, a monthly cap. Guard tests set these explicitly per case.
+            mail_send_enabled: false,
+            mail_notifications_enabled: false,
+            mail_max_per_month: Some(100),
+            mail_max_per_day: None,
         }
     }
 }

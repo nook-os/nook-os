@@ -182,6 +182,7 @@ use utoipa::OpenApi;
         nook_types::MeResponse,
         nook_types::TenantMembership,
         nook_types::TenantMemberItem,
+        nook_types::TenantMemberPage,
         nook_types::ChangeMemberRoleRequest,
         nook_types::Invite,
         nook_types::CreateInviteRequest,

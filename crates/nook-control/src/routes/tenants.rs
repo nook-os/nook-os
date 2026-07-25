@@ -5,13 +5,25 @@
 //! — when a shared tenant can be joined, this is what the switcher reads, and
 //! nothing else has to change to make that true.
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::Json;
 use nook_types::*;
+use serde::Deserialize;
 
 use crate::auth::AuthCtx;
 use crate::error::{ApiError, ApiResult};
 use crate::state::AppState;
+
+/// Query for the paginated + searchable members list (MAIN-45).
+#[derive(Deserialize, utoipa::IntoParams)]
+pub struct MemberListQuery {
+    /// Case-insensitive substring across email, display name, and role.
+    pub q: Option<String>,
+    /// Keyset cursor: the last member `principal_id` seen. Returns older rows.
+    pub after: Option<uuid::Uuid>,
+    /// Page size (default 50, clamped 1..=200).
+    pub limit: Option<i64>,
+}
 
 /// The caller's role in a tenant, read from `tenant_members` — the single source
 /// of truth (not `users.role`), so authorization is against the membership that
@@ -117,26 +129,28 @@ pub async fn list(
 /// view (AC-1); management is gated separately.
 #[utoipa::path(get, path = "/api/v1/tenants/{id}/members",
     operation_id = "list_members",
-    params(("id" = String, Path,)),
-    responses((status = 200, body = [TenantMemberItem]), (status = 403)))]
+    params(("id" = String, Path,), MemberListQuery),
+    responses((status = 200, body = TenantMemberPage), (status = 403)))]
 pub async fn list_members(
     State(state): State<AppState>,
     auth: AuthCtx,
     Path(tenant): Path<TenantId>,
-) -> ApiResult<Json<Vec<TenantMemberItem>>> {
+    Query(q): Query<MemberListQuery>,
+) -> ApiResult<Json<TenantMemberPage>> {
     // Viewing is open to any member of the active tenant.
     require_active_tenant(&state, &auth, tenant).await?;
-    let rows: Vec<TenantMemberItem> = sqlx::query_as(
-        "SELECT m.principal_id, u.email, u.display_name, m.role, m.created_at AS joined_at
-         FROM tenant_members m
-         JOIN users u ON u.id = m.principal_id
-         WHERE m.tenant_id = $1 AND m.principal_type = 'user'
-         ORDER BY (m.role = 'owner') DESC, (m.role = 'admin') DESC, u.display_name",
+    // Keyset-paginated + searched server-side, so a large tenant's members are
+    // paged, not fetched whole (MAIN-45 AC-2). The keyset order (newest member
+    // first) replaces the old owner-first display sort.
+    let page = crate::services::core::tenant_members_page(
+        &state.db,
+        tenant,
+        q.q,
+        q.after,
+        q.limit.unwrap_or(50),
     )
-    .bind(tenant)
-    .fetch_all(&state.db)
     .await?;
-    Ok(Json(rows))
+    Ok(Json(page))
 }
 
 /// `PATCH /api/v1/tenants/{id}/members/{pid}` — change a member's role.
@@ -204,6 +218,11 @@ pub async fn change_member_role(
         .execute(&state.db)
         .await?;
 
+    // The role is part of the cached tenants list, so a change makes that
+    // person's cached entry stale — drop it across their sessions (MAIN-27 AC-4).
+    crate::services::identity::invalidate_person_tenants(&*state.cache, &state.db, UserId(pid))
+        .await;
+
     let member: TenantMemberItem = sqlx::query_as(
         "SELECT m.principal_id, u.email, u.display_name, m.role, m.created_at AS joined_at
          FROM tenant_members m JOIN users u ON u.id = m.principal_id
@@ -259,6 +278,12 @@ pub async fn remove_member(
     if res.rows_affected() == 0 {
         return Err(ApiError::NotFound);
     }
+    // The grant is gone: drop the tenant from that person's cached list now, so
+    // every one of their sessions reflects the removal immediately (AC-4). The
+    // access gate already reads the table directly, so access was refused the
+    // moment the row was deleted regardless of the cache (NG-2).
+    crate::services::identity::invalidate_person_tenants(&*state.cache, &state.db, UserId(pid))
+        .await;
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
 
@@ -288,6 +313,9 @@ pub async fn leave_tenant(
     .bind(auth.user_id.0)
     .execute(&state.db)
     .await?;
+    // You just left: drop the tenant from your own cached list immediately (AC-4).
+    crate::services::identity::invalidate_person_tenants(&*state.cache, &state.db, auth.user_id)
+        .await;
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
 

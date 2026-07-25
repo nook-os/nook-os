@@ -488,6 +488,7 @@ impl NookBackend for McpBackend {
                 priority: f.priority,
                 is_blocked: f.is_blocked,
                 workspace: None,
+                q: None,
                 // Archived work is off the board and never pickable over MCP either.
                 archived: None,
                 limit: f.limit,

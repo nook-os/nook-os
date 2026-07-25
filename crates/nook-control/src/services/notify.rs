@@ -533,7 +533,17 @@ impl Channel for Email {
             text.push_str("\n\n");
             text.push_str(link);
         }
-        mailer.send(to, &n.title, &text, None).await
+        // Notification category: gated behind BOTH the global send switch and
+        // MAIL_NOTIFICATIONS_ENABLED (MAIN-52 AC-3).
+        mailer
+            .send(
+                to,
+                &n.title,
+                &text,
+                None,
+                crate::mailer::Category::Notification,
+            )
+            .await
     }
 }
 

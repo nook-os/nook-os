@@ -87,7 +87,15 @@ async fn send_invite_email(
     let (subject, text, html) = invite_email(tenant, inviter, accept_url);
     // Hand it to the mailer regardless (the capture provider records it for a
     // glance/test), then log the delivery outcome.
-    let outcome = mailer.send(to, &subject, &text, Some(&html)).await;
+    let outcome = mailer
+        .send(
+            to,
+            &subject,
+            &text,
+            Some(&html),
+            crate::mailer::Category::Transactional,
+        )
+        .await;
     match (provider, outcome) {
         ("capture", _) => tracing::info!(
             to,
@@ -516,7 +524,14 @@ mod tests {
     struct FailingMailer;
     #[async_trait::async_trait]
     impl crate::mailer::Mailer for FailingMailer {
-        async fn send(&self, _: &str, _: &str, _: &str, _: Option<&str>) -> anyhow::Result<()> {
+        async fn send(
+            &self,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: Option<&str>,
+            _: crate::mailer::Category,
+        ) -> anyhow::Result<()> {
             Err(anyhow::anyhow!("relay unreachable"))
         }
         fn describe(&self) -> String {
