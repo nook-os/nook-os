@@ -6,6 +6,8 @@ import { defineConfig } from "vitest/config";
 export default defineConfig({
   test: {
     environment: "jsdom",
-    include: ["src/**/*.test.ts"],
+    // `.tsx` too: the assembly test (Operator.test.tsx) renders components, so
+    // it needs JSX. Additive — the existing `.test.ts` suites still match.
+    include: ["src/**/*.test.{ts,tsx}"],
   },
 });

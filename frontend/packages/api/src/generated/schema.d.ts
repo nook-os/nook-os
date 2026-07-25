@@ -1153,7 +1153,12 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * Never visible here: repository names, branches, worktree paths, task titles.
+         * Tenants, at minimum visibility.
+         * @description Always visible, per the model: that a tenant exists, its member count, and
+         *     how many nodes and sessions it runs. Several machines working one task is an
+         *     audit signal, and an operator who cannot see load cannot run the deployment.
+         *
+         *     Never visible here: repository names, branches, worktree paths, task titles.
          *     Those are policy-gated and added by `enrich` below — they are not selected
          *     and then removed.
          */

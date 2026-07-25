@@ -2492,7 +2492,8 @@
         "tags": [
           "crate::routes::operator"
         ],
-        "summary": "Never visible here: repository names, branches, worktree paths, task titles.\nThose are policy-gated and added by `enrich` below — they are not selected\nand then removed.",
+        "summary": "Tenants, at minimum visibility.",
+        "description": "Always visible, per the model: that a tenant exists, its member count, and\nhow many nodes and sessions it runs. Several machines working one task is an\naudit signal, and an operator who cannot see load cannot run the deployment.\n\nNever visible here: repository names, branches, worktree paths, task titles.\nThose are policy-gated and added by `enrich` below — they are not selected\nand then removed.",
         "operationId": "operator_list_tenants",
         "parameters": [
           {

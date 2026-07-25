@@ -74,12 +74,6 @@ pub async fn orgs(
     Ok(Json(rows))
 }
 
-/// Tenants, at minimum visibility.
-///
-/// Always visible, per the model: that a tenant exists, its member count, and
-/// how many nodes and sessions it runs. Several machines working one task is an
-/// audit signal, and an operator who cannot see load cannot run the deployment.
-///
 /// Query for a paginated + searchable operator list. The cursor is the last
 /// `id` seen; all three list ids are uuids, so one struct serves every list.
 #[derive(Deserialize, utoipa::IntoParams)]
@@ -92,6 +86,12 @@ pub struct OperatorListQuery {
     pub limit: Option<i64>,
 }
 
+/// Tenants, at minimum visibility.
+///
+/// Always visible, per the model: that a tenant exists, its member count, and
+/// how many nodes and sessions it runs. Several machines working one task is an
+/// audit signal, and an operator who cannot see load cannot run the deployment.
+///
 /// Never visible here: repository names, branches, worktree paths, task titles.
 /// Those are policy-gated and added by `enrich` below — they are not selected
 /// and then removed.
