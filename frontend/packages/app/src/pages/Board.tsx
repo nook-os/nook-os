@@ -898,6 +898,14 @@ export function BoardPage() {
 
   const refresh = () => queryClient.invalidateQueries({ queryKey: ["boards"] });
 
+  // Board-automation panel toggle. Declared with the other hooks, ABOVE every
+  // early return below: a `useState` after `if (!board) return` is a
+  // Rules-of-Hooks violation — when the boards query re-resolves (e.g. a card's
+  // type change busts ["boards"]) the hook count changes and BoardPage throws
+  // "rendered more hooks than during the previous render", white-screening the
+  // board (MAIN-99).
+  const [showAutomation, setShowAutomation] = useState(false);
+
   if (!board) {
     return (
       <div className="nook-grid" style={{ gridTemplateColumns: "1fr" }}>
@@ -950,7 +958,6 @@ export function BoardPage() {
   };
 
   const bust = () => queryClient.invalidateQueries({ queryKey: ["boards"] });
-  const [showAutomation, setShowAutomation] = useState(false);
 
   const blockedIds = new Set((blockedList ?? []).map((t) => t.id));
   // When a filter is on, the API decides what is visible; otherwise show the
