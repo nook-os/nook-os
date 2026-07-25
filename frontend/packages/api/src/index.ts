@@ -21,6 +21,7 @@ export type TaskItem = Schemas["TaskItem"];
 export type Notification = Schemas["Notification"];
 export type NotificationChannel = Schemas["NotificationChannel"];
 export type ChannelKind = Schemas["ChannelKind"];
+export type NotificationKind = Schemas["NotificationKind"];
 export type Invite = Schemas["Invite"];
 export type TaskDetail = Schemas["TaskDetail"];
 export type TaskLabel = Schemas["Label"];

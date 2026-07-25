@@ -3191,6 +3191,8 @@ a.toast-main:hover .toast-title { text-decoration: underline; }
 .chan-item {
   display: flex;
   align-items: flex-start;
+  /* The per-channel filter checklist wraps to a full-width row below. */
+  flex-wrap: wrap;
   gap: 10px;
   border: 1px solid var(--nook-border);
   border-radius: var(--nook-radius);
@@ -3201,6 +3203,29 @@ a.toast-main:hover .toast-title { text-decoration: underline; }
 .chan-item.off { opacity: 0.5; }
 .chan-item-main { flex: 1; min-width: 0; }
 .chan-item-actions { display: flex; gap: 4px; flex: none; }
+.chan-item-filter {
+  flex-basis: 100%;
+  border-top: 1px solid var(--nook-border);
+  margin-top: 4px;
+  padding-top: 8px;
+}
+
+/* The notification-kind checklist (MAIN-92). */
+.chan-row-top { align-items: start; }
+.chan-kinds { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.chan-kinds-mode { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.chan-kind-group { display: flex; flex-direction: column; gap: 2px; }
+.chan-kind {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  cursor: pointer;
+  padding-left: 18px;
+}
+.chan-kind input { cursor: pointer; margin: 0; }
+.chan-kind-hdr { padding-left: 0; margin-top: 3px; }
+.chan-kind-chips { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; margin-top: 2px; }
 
 .chan-error {
   display: flex;
