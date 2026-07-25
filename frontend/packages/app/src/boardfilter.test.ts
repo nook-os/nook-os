@@ -4,6 +4,7 @@ import {
   serializeFilter,
   writeFilter,
   showsUnderArchive,
+  isBacklogTask,
   type BoardFilter,
 } from "./pages/Board";
 
@@ -21,6 +22,7 @@ describe("board filter URL round-trip (MAIN-15 AC-1)", () => {
       workspace: null,
       showArchived: false,
       q: "",
+      view: "board",
     },
     {
       label: ["agent-ready", "urgent"],
@@ -32,6 +34,7 @@ describe("board filter URL round-trip (MAIN-15 AC-1)", () => {
       workspace: "019f840f-2d80-7163-b4b1-8b1e12d7e0d3",
       showArchived: true,
       q: "postmark",
+      view: "backlog",
     },
     {
       label: [],
@@ -43,6 +46,7 @@ describe("board filter URL round-trip (MAIN-15 AC-1)", () => {
       workspace: null,
       showArchived: false,
       q: "MAIN-42",
+      view: "board",
     },
   ];
 
@@ -69,6 +73,32 @@ describe("board filter URL round-trip (MAIN-15 AC-1)", () => {
     ]);
     // No type filter → the key is absent, so a default board URL is unchanged.
     expect(serializeFilter(cases[0]).has("type")).toBe(false);
+  });
+
+  it("round-trips the Board/Backlog tab via ?view (MAIN-82 AC-4)", () => {
+    // The default `board` tab writes no key, so a plain board URL is unchanged.
+    expect(serializeFilter(cases[0]).has("view")).toBe(false);
+    // The backlog tab is addressable and survives a round-trip.
+    expect(serializeFilter(cases[1]).get("view")).toBe("backlog");
+    expect(parseFilter(new URLSearchParams("view=backlog")).view).toBe("backlog");
+    // Anything else falls back to the board tab.
+    expect(parseFilter(new URLSearchParams("view=nonsense")).view).toBe("board");
+    expect(parseFilter(new URLSearchParams("")).view).toBe("board");
+  });
+});
+
+describe("which tab a task belongs to (MAIN-82 AC-1/AC-5)", () => {
+  it("puts backlog-column tasks and epics in the Backlog tab, everything else on the Board", () => {
+    // A backlog-column task → Backlog.
+    expect(isBacklogTask("backlog", "task")).toBe(true);
+    // An epic → Backlog, regardless of the column it sits in.
+    expect(isBacklogTask("started", "epic")).toBe(true);
+    expect(isBacklogTask("backlog", "epic")).toBe(true);
+    // A normal workflow task → the kanban Board tab.
+    expect(isBacklogTask("unstarted", "task")).toBe(false);
+    expect(isBacklogTask("review", "bug")).toBe(false);
+    // Unknown/absent types default to the Board tab (only backlog/epic leave it).
+    expect(isBacklogTask(undefined, undefined)).toBe(false);
   });
 });
 

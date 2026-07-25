@@ -26,6 +26,7 @@ import {
 } from "lucide-react";
 import { api, type TaskItem } from "@nookos/api";
 import { AutomationDialog } from "./BoardAutomation";
+import { BoardBacklog } from "./BoardBacklog";
 import { Empty, Panel, Pill, TypeBadge, TYPE_META } from "@nookos/ui";
 import { useNewWork } from "../newwork";
 import { askChoice, askConfirm, askForm, askText, notify } from "../dialogs";
@@ -562,6 +563,22 @@ export interface BoardFilter {
   showArchived: boolean;
   /** Free-text search across title, key, and description. Empty = no search. */
   q: string;
+  /** Which Board-page tab is showing: the kanban `board` or the `backlog` list
+   *  (MAIN-82). URL-addressable (`?view=backlog`) so it survives a refresh. */
+  view: BoardView;
+}
+
+export type BoardView = "board" | "backlog";
+
+/// Which tab a task belongs to (MAIN-82). A task lives in the Backlog tab when
+/// its column is backlog-type OR it is an epic — epics never render on the
+/// kanban tab (they are containers, shown flat in the backlog for now). Pure and
+/// unit-tested so the split is one definition both tabs share.
+export function isBacklogTask(
+  columnType: string | undefined,
+  taskType: string | null | undefined,
+): boolean {
+  return columnType === "backlog" || taskType === "epic";
 }
 
 const EMPTY_FILTER: BoardFilter = {
@@ -574,6 +591,7 @@ const EMPTY_FILTER: BoardFilter = {
   workspace: null,
   showArchived: false,
   q: "",
+  view: "board",
 };
 
 // The filter lives in the URL so a filtered board is a link you can copy and
@@ -591,6 +609,7 @@ const FILTER_KEYS = [
   "ws",
   "archived",
   "q",
+  "view",
 ] as const;
 
 export function parseFilter(params: URLSearchParams): BoardFilter {
@@ -612,6 +631,7 @@ export function parseFilter(params: URLSearchParams): BoardFilter {
     workspace: params.get("ws") || null,
     showArchived: params.get("archived") === "1",
     q: params.get("q") ?? "",
+    view: params.get("view") === "backlog" ? "backlog" : "board",
   };
 }
 
@@ -628,6 +648,7 @@ export function writeFilter(next: URLSearchParams, f: BoardFilter): URLSearchPar
   if (f.workspace) next.set("ws", f.workspace);
   if (f.showArchived) next.set("archived", "1");
   if (f.q) next.set("q", f.q);
+  if (f.view === "backlog") next.set("view", "backlog");
   return next;
 }
 
@@ -771,12 +792,36 @@ export function BoardPage() {
               // or a filtered view would drop the archived cards the toggle is
               // meant to reveal.
               ...(filter.showArchived ? { archived: true } : {}),
+              // On the Backlog tab, the server would exclude backlog-column tasks
+              // by default (MAIN-80), blanking the very view being filtered — so
+              // ask for them (MAIN-82 AC-5). The kanban tab does not.
+              ...(filter.view === "backlog" ? { backlog: true } : {}),
             },
           },
         })
       ).data ?? [],
     enabled: !!board && filterActive,
   });
+
+  // Deep link to a backlog task → show the Backlog tab (MAIN-82 AC-4). Only when
+  // the tab was not already chosen explicitly (no `view` in the URL), so a manual
+  // Board-tab choice is respected. `replace` so it does not add a history entry.
+  React.useEffect(() => {
+    if (!detail || !openTask || params.has("view")) return;
+    const t = detail.tasks.find((x) => x.key === openTask || x.id === openTask);
+    if (!t) return;
+    const colType = detail.columns.find((c) => c.id === t.column_id)?.type;
+    if (isBacklogTask(colType, t.type)) {
+      setParams(
+        (prev) => {
+          const next = new URLSearchParams(prev);
+          next.set("view", "backlog");
+          return next;
+        },
+        { replace: true },
+      );
+    }
+  }, [detail, openTask, params, setParams]);
 
   const refresh = () => queryClient.invalidateQueries({ queryKey: ["boards"] });
 
@@ -854,11 +899,42 @@ export function BoardPage() {
     .slice()
     .sort((a, b) => a.position - b.position || (a.created_at < b.created_at ? -1 : 1));
 
+  // The kanban tab shows only real workflow columns; backlog-type columns move
+  // to the Backlog tab (MAIN-82 AC-1). Both are fed by `detail` — one fetch.
+  const colTypeById = new Map(detail.columns.map((c) => [c.id, c.type]));
+  const kanbanColumns = detail.columns.filter((c) => c.type !== "backlog");
+  const backlogColumn = detail.columns.find((c) => c.type === "backlog");
+  const unstartedColumn = detail.columns.find((c) => c.type === "unstarted");
+  // The backlog list: backlog-column tasks and epics, in pick order (priority
+  // first — unset last — then oldest), the same order the agent pick uses (AC-2).
+  const backlogTasks = visible
+    .filter((t) => isBacklogTask(colTypeById.get(t.column_id), t.type))
+    .slice()
+    .sort(
+      (a, b) =>
+        priorityRank(a.priority ?? 0) - priorityRank(b.priority ?? 0) ||
+        (a.created_at < b.created_at ? -1 : 1),
+    );
+
   const addTask = async (columnId: string, title: string) => {
     await api.POST("/api/v1/boards/{id}/tasks", {
       params: { path: { id: board.id } },
       body: { title, column_id: columnId },
     });
+    bust();
+  };
+  // Send a backlog task to the board: move it to the unstarted column, no node
+  // assigned (AC-3). Dispatch instead lets the scheduler pick a node.
+  const sendToBoard = async (taskId: string) => {
+    if (!unstartedColumn) return;
+    await api.PATCH("/api/v1/tasks/{id}", {
+      params: { path: { id: taskId } },
+      body: { column_id: unstartedColumn.id },
+    });
+    bust();
+  };
+  const dispatchTask = async (taskId: string) => {
+    await api.POST("/api/v1/tasks/{id}/dispatch", { params: { path: { id: taskId } } });
     bust();
   };
   const addColumn = async () => {
@@ -954,6 +1030,29 @@ export function BoardPage() {
         }
       >
         <div className="board-body">
+          {/* Board / Backlog tabs (MAIN-82 AC-1). The kanban is the workflow;
+              the backlog is the refinement queue that used to crowd it. */}
+          <div className="board-tabs" role="tablist" aria-label="Board views">
+            <button
+              role="tab"
+              aria-selected={filter.view === "board"}
+              className={`board-tab${filter.view === "board" ? " active" : ""}`}
+              onClick={() => setFilter({ ...filter, view: "board" })}
+            >
+              Board
+            </button>
+            <button
+              role="tab"
+              aria-selected={filter.view === "backlog"}
+              className={`board-tab${filter.view === "backlog" ? " active" : ""}`}
+              onClick={() => setFilter({ ...filter, view: "backlog" })}
+            >
+              Backlog
+              {backlogTasks.length > 0 && (
+                <span className="board-tab-count">{backlogTasks.length}</span>
+              )}
+            </button>
+          </div>
           <Filters
             labels={labels ?? []}
             workspaces={workspaces ?? []}
@@ -969,30 +1068,49 @@ export function BoardPage() {
                 : "No tasks match these filters."}
             </div>
           )}
-          <div className="board-split">
-            <DndContext sensors={sensors} onDragEnd={onDragEnd}>
-              <div className="board-columns">
-                {detail.columns.map((c) => (
-                  <Column
-                    key={c.id}
-                    id={c.id}
-                    name={c.name}
-                    type={c.type}
-                    tasks={visible.filter((t) => t.column_id === c.id)}
-                    onAdd={(title) => addTask(c.id, title)}
-                    onRename={(n) => renameColumn(c.id, n)}
-                    onDelete={() => deleteColumn(c.id)}
-                    onOpen={setOpenTask}
-                    onMenu={(t, anchor) => setMenu({ task: t, anchor })}
-                    onArchiveCompleted={() => archiveCompleted(c.id)}
-                    selectedId={openTask}
-                    blockedIds={blockedIds}
-                    wsName={wsName}
-                  />
-                ))}
-              </div>
-            </DndContext>
-          </div>
+          {filter.view === "backlog" ? (
+            <BoardBacklog
+              tasks={backlogTasks}
+              wsName={wsName}
+              selectedId={openTask}
+              blockedIds={blockedIds}
+              canSendToBoard={!!unstartedColumn}
+              onAdd={(title) => backlogColumn && addTask(backlogColumn.id, title)}
+              onOpen={setOpenTask}
+              onMenu={(t, anchor) => setMenu({ task: t, anchor })}
+              onSendToBoard={sendToBoard}
+              onDispatch={dispatchTask}
+            />
+          ) : (
+            <div className="board-split">
+              <DndContext sensors={sensors} onDragEnd={onDragEnd}>
+                <div className="board-columns">
+                  {kanbanColumns.map((c) => (
+                    <Column
+                      key={c.id}
+                      id={c.id}
+                      name={c.name}
+                      type={c.type}
+                      // Epics never render on the kanban tab — they show only in
+                      // the Backlog list, flat (AC-5).
+                      tasks={visible.filter(
+                        (t) => t.column_id === c.id && t.type !== "epic",
+                      )}
+                      onAdd={(title) => addTask(c.id, title)}
+                      onRename={(n) => renameColumn(c.id, n)}
+                      onDelete={() => deleteColumn(c.id)}
+                      onOpen={setOpenTask}
+                      onMenu={(t, anchor) => setMenu({ task: t, anchor })}
+                      onArchiveCompleted={() => archiveCompleted(c.id)}
+                      selectedId={openTask}
+                      blockedIds={blockedIds}
+                      wsName={wsName}
+                    />
+                  ))}
+                </div>
+              </DndContext>
+            </div>
+          )}
         </div>
       </Panel>
 
