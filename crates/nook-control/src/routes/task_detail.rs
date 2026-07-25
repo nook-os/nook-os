@@ -211,7 +211,7 @@ pub async fn create_relation(
     let from = tasks::resolve_id(&state.db, auth.tenant_id, &ident).await?;
     let to = tasks::resolve_id(&state.db, auth.tenant_id, &req.to_task.to_string()).await?;
     Ok(Json(
-        link(&state, auth.tenant_id, from, to, &req.kind).await?,
+        link(&state, auth.tenant_id, auth.user_id, from, to, &req.kind).await?,
     ))
 }
 
@@ -221,6 +221,7 @@ pub async fn create_relation(
 pub async fn link(
     state: &AppState,
     tenant: TenantId,
+    viewer: UserId,
     from: TaskId,
     to: TaskId,
     kind: &str,
@@ -236,6 +237,22 @@ pub async fn link(
         return Err(ApiError::BadRequest(
             "a task cannot relate to itself".into(),
         ));
+    }
+
+    // Both ends must be visible to the caller (MAIN-76): a non-owner must not be
+    // able to link to — and thereby confirm the existence of, or leak into their
+    // own detail — a private task they neither created nor are assigned. A
+    // private endpoint they cannot see is refused as NotFound.
+    for end in [from, to] {
+        let t: TaskItem = sqlx::query_as("SELECT * FROM tasks WHERE id = $1 AND tenant_id = $2")
+            .bind(end)
+            .bind(tenant)
+            .fetch_optional(&state.db)
+            .await?
+            .ok_or(ApiError::NotFound)?;
+        if !tasks::visible_to(&t, viewer) {
+            return Err(ApiError::NotFound);
+        }
     }
 
     // A blocks-cycle is a deadlock nothing can ever pick up: every task in the
@@ -346,7 +363,7 @@ pub async fn detail(
     }
     let task = tasks::enrich_one(&state.db, &state.cfg.public_base_url, task).await?;
 
-    let related = related_tasks(state, id).await?;
+    let related = related_tasks(state, viewer, id).await?;
     let blocked_by: Vec<RelatedTask> = related
         .iter()
         .filter(|r| r.kind == "blocked_by")
@@ -384,7 +401,14 @@ pub async fn detail(
 /// view: an edge "A blocks B" is `blocking` when you asked about A and
 /// `blocked_by` when you asked about B. The raw direction is a fact about the
 /// row; what a person needs is which side they are on.
-async fn related_tasks(state: &AppState, id: TaskId) -> ApiResult<Vec<RelatedTask>> {
+async fn related_tasks(
+    state: &AppState,
+    viewer: UserId,
+    id: TaskId,
+) -> ApiResult<Vec<RelatedTask>> {
+    // The OTHER side of each relation is filtered by visibility (MAIN-76): a
+    // private task the viewer neither created nor is assigned must not surface
+    // its title/key through a relation on a task they can see.
     let rows: Vec<RelatedTask> = sqlx::query_as(
         "SELECT r.id AS relation_id, t.id, t.title,
                 CASE WHEN b.key IS NOT NULL AND t.number IS NOT NULL
@@ -397,10 +421,12 @@ async fn related_tasks(state: &AppState, id: TaskId) -> ApiResult<Vec<RelatedTas
          JOIN tasks t ON t.id = CASE WHEN r.from_task = $1 THEN r.to_task ELSE r.from_task END
          JOIN boards b ON b.id = t.board_id
          JOIN board_columns c ON c.id = t.column_id
-         WHERE r.from_task = $1 OR r.to_task = $1
+         WHERE (r.from_task = $1 OR r.to_task = $1)
+           AND (t.visibility <> 'private' OR t.created_by = $2 OR t.assignee_user_id = $2)
          ORDER BY t.number",
     )
     .bind(id)
+    .bind(viewer)
     .fetch_all(&state.db)
     .await?;
     Ok(rows)

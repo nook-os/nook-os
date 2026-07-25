@@ -146,7 +146,12 @@ pub async fn create_task(
         auth.tenant_id,
         EventDraft::new("task.created")
             .actor("user", auth.user_id.0)
-            .payload(serde_json::json!({ "task_id": task.id, "title": task.title })),
+            // A private card's title must not reach the tenant activity feed
+            // (MAIN-76 AC-3): `public_title` omits it for a private task.
+            .payload(serde_json::json!({
+                "task_id": task.id,
+                "title": crate::services::tasks::public_title(&task),
+            })),
     )
     .await;
     let _ = workspace_id;
@@ -155,30 +160,37 @@ pub async fn create_task(
         nook_proto::UiEvent::TaskChanged { task_id: task.id },
     );
 
+    // A private card must not ping the whole tenant. The notification is a
+    // tenant-wide toast + phone push + channel delivery, so skip it entirely for
+    // a private task (MAIN-76 AC-3) — its title and existence stay with its
+    // owner. Grab visibility before enrich (which does not touch it).
+    let is_private = task.visibility == "private";
     let enriched =
         crate::services::tasks::enrich_one(&state.db, &state.cfg.public_base_url, task).await?;
 
-    // Tell the tenant a card landed. The activity event above feeds the
-    // Activity page — a place you go look — but a task appearing on the board
-    // (an import, an agent filing an issue, a teammate adding work) is exactly
-    // the kind of thing worth a toast and a phone buzz, which is the notify
-    // path, not the activity path. Carries the key and a deep link so the toast
-    // is actionable rather than just "something changed".
-    let mut draft = crate::services::notify::Draft::new(match enriched.key.as_deref() {
-        Some(k) => format!("New task: {k}"),
-        None => "New task".to_string(),
-    })
-    .level("info")
-    .kind("task.created")
-    .body(enriched.title.clone())
-    .payload(serde_json::json!({
-        "task_id": enriched.id,
-        "key": enriched.key,
-    }));
-    if let Some(url) = enriched.url.clone() {
-        draft = draft.link(url);
+    if !is_private {
+        // Tell the tenant a card landed. The activity event above feeds the
+        // Activity page — a place you go look — but a task appearing on the board
+        // (an import, an agent filing an issue, a teammate adding work) is exactly
+        // the kind of thing worth a toast and a phone buzz, which is the notify
+        // path, not the activity path. Carries the key and a deep link so the toast
+        // is actionable rather than just "something changed".
+        let mut draft = crate::services::notify::Draft::new(match enriched.key.as_deref() {
+            Some(k) => format!("New task: {k}"),
+            None => "New task".to_string(),
+        })
+        .level("info")
+        .kind("task.created")
+        .body(enriched.title.clone())
+        .payload(serde_json::json!({
+            "task_id": enriched.id,
+            "key": enriched.key,
+        }));
+        if let Some(url) = enriched.url.clone() {
+            draft = draft.link(url);
+        }
+        crate::services::notify::raise(&state, auth.tenant_id, draft).await;
     }
-    crate::services::notify::raise(&state, auth.tenant_id, draft).await;
 
     Ok(Json(enriched))
 }
@@ -232,7 +244,10 @@ pub async fn update_task(
             auth.tenant_id,
             EventDraft::new("task.moved")
                 .actor("user", auth.user_id.0)
-                .payload(serde_json::json!({ "task_id": task.id, "title": task.title })),
+                .payload(serde_json::json!({
+                    "task_id": task.id,
+                    "title": crate::services::tasks::public_title(&task),
+                })),
         )
         .await;
     }
@@ -278,7 +293,10 @@ async fn set_archived(
             "task.unarchived"
         })
         .actor("user", auth.user_id.0)
-        .payload(serde_json::json!({ "task_id": task.id, "title": task.title })),
+        .payload(serde_json::json!({
+            "task_id": task.id,
+            "title": crate::services::tasks::public_title(&task),
+        })),
     )
     .await;
     state.registry.publish(

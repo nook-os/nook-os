@@ -388,7 +388,12 @@ pub async fn claim_inner(
         tenant,
         crate::events::EventDraft::new("task.claimed")
             .actor("user", claimant.0)
-            .payload(serde_json::json!({ "task_id": id, "title": task.title })),
+            // Redact a private card's title from the tenant activity feed
+            // (MAIN-76 AC-3), even though the claimant now owns it.
+            .payload(serde_json::json!({
+                "task_id": id,
+                "title": tasks::public_title(&task),
+            })),
     )
     .await;
     state

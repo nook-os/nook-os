@@ -25,15 +25,14 @@ pub fn visible_to(task: &TaskItem, viewer: UserId) -> bool {
         || task.assignee_user_id == Some(viewer)
 }
 
-/// The SQL form of [`visible_to`], for the list query where filtering in Rust
-/// would mean fetching rows the caller may not see. `$viewer` is the bind
-/// placeholder to substitute (e.g. `"$16"`); it is compared to `created_by` and
-/// `assignee_user_id`. `alias` is the tasks table alias (e.g. `"t"`).
-pub fn visible_sql(alias: &str, viewer: &str) -> String {
-    format!(
-        "({alias}.visibility <> 'private' OR {alias}.created_by = {viewer} \
-         OR {alias}.assignee_user_id = {viewer})"
-    )
+/// The task title safe to put in a TENANT-FACING event payload or notification
+/// (MAIN-76 AC-3/AC-4). A private card's title must not reach the tenant
+/// activity feed, the live event websocket, or a notification channel — those
+/// broadcast to the whole tenant, and a private card is confined to its owner.
+/// Returns `None` for a private card (the payload then carries no title) and the
+/// real title otherwise.
+pub fn public_title(task: &TaskItem) -> Option<&str> {
+    (task.visibility != "private").then_some(task.title.as_str())
 }
 
 /// Fill in `key`, `url` and `labels` for a batch of tasks.

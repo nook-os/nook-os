@@ -310,6 +310,41 @@ async fn visibility_governs_read_claim_board_and_update() {
     .0;
     assert_eq!(ok.visibility, "team", "creator set it to team");
 
+    // ── Relations must not leak a private task (MAIN-76 review DEFECT 2) ─────
+    // A fresh private card owned by A, and a team card. A non-owner (B) must not
+    // be able to link to the private card, and must not see it surface through a
+    // relation on the team card.
+    let secret2 = make_task(&state, tenant.id, board, a, "hush", "private").await;
+    let shared = make_task(&state, tenant.id, board, a, "open work", "team").await;
+
+    // B cannot create a relation to A's private card (NotFound).
+    let leak = nook_control::routes::task_detail::link(
+        &state, tenant.id, b, shared.id, secret2.id, "relates",
+    )
+    .await;
+    assert!(leak.is_err(), "a non-owner cannot link to a private card");
+
+    // A (the owner) can link them.
+    nook_control::routes::task_detail::link(&state, tenant.id, a, shared.id, secret2.id, "relates")
+        .await
+        .expect("owner links its own cards");
+
+    // Now the shared card's detail: A sees the private relation; B does not.
+    let a_detail = nook_control::routes::task_detail::detail(&state, tenant.id, a, shared.id)
+        .await
+        .expect("A detail");
+    assert!(
+        a_detail.related.iter().any(|r| r.id == secret2.id),
+        "the owner sees the private related card"
+    );
+    let b_detail = nook_control::routes::task_detail::detail(&state, tenant.id, b, shared.id)
+        .await
+        .expect("B detail");
+    assert!(
+        !b_detail.related.iter().any(|r| r.id == secret2.id),
+        "a non-owner never sees the private related card's title/key"
+    );
+
     // ── Operator exclusion (AC-4): the titles projection omits private ──────
     let titles: Vec<String> = sqlx::query_scalar(
         "SELECT title FROM tasks WHERE tenant_id = $1 AND visibility <> 'private' ORDER BY title",

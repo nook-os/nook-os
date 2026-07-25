@@ -726,9 +726,11 @@ impl NookBackend for McpBackend {
         kind: String,
     ) -> anyhow::Result<serde_json::Value> {
         let tenant = self.tenant().await?;
+        let viewer = self.user().await?;
         let f = crate::services::tasks::resolve_id(&self.state.db, tenant, &from).await?;
         let t = crate::services::tasks::resolve_id(&self.state.db, tenant, &to).await?;
-        let row = crate::routes::task_detail::link(&self.state, tenant, f, t, &kind).await?;
+        let row =
+            crate::routes::task_detail::link(&self.state, tenant, viewer, f, t, &kind).await?;
         Ok(serde_json::to_value(row)?)
     }
 }
