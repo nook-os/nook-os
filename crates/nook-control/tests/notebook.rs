@@ -6,6 +6,7 @@ use axum::extract::{Path, Query, State};
 use axum::Json;
 use nook_control::auth::{AuthCtx, Principal};
 use nook_control::config::Config;
+use nook_control::error::ApiError;
 use nook_control::routes::notebook;
 use nook_control::routes::notebook::NoteListQuery;
 use nook_control::services::identity::{login_identity, IdentityClaims};
@@ -340,6 +341,304 @@ async fn notebook_is_person_scoped_encrypted_and_reparents() {
             .execute(&pool)
             .await;
     }
+}
+
+/// MAIN-84 hardening: the folder-cycle guard, the blank-name rejection, and the
+/// 200-char cap — all on create and update, for notes and folders, driven
+/// through the real handlers.
+#[tokio::test]
+async fn notebook_hardening_cycles_blanks_and_length() {
+    let _serial = SERIAL.lock().await;
+    let Some(pool) = test_pool().await else {
+        eprintln!("skipping notebook hardening test — no DATABASE_URL");
+        return;
+    };
+    let state = AppState::new(pool.clone(), test_config(), None).await;
+    let sub = format!("carol-{}", Uuid::now_v7().simple());
+    let (user, tenant) = login_identity(&state, claims(&sub, "Carol"))
+        .await
+        .expect("carol signs in");
+    let c = auth(user.id, tenant.id);
+
+    // A generic fn, not a closure: it is applied to Results with different Ok
+    // types (folder vs note), which a single closure cannot be.
+    fn is_400<T>(r: &Result<T, ApiError>) -> bool {
+        matches!(r, Err(ApiError::BadRequest(_)))
+    }
+
+    // ── AC-2 / AC-3: blank + over-long on CREATE, note and folder ────────────
+    for bad in ["", "   "] {
+        assert!(
+            is_400(
+                &notebook::create_folder(
+                    State(state.clone()),
+                    c,
+                    Json(CreateUserNoteFolder {
+                        name: bad.into(),
+                        parent_id: None
+                    }),
+                )
+                .await
+            ),
+            "a blank folder name is a 400: {bad:?}"
+        );
+        assert!(
+            is_400(
+                &notebook::create_note(State(state.clone()), c, Json(mk_note(bad, "b", None)))
+                    .await
+            ),
+            "a blank note title is a 400: {bad:?}"
+        );
+    }
+    assert!(
+        is_400(
+            &notebook::create_folder(
+                State(state.clone()),
+                c,
+                Json(CreateUserNoteFolder {
+                    name: "x".repeat(201),
+                    parent_id: None
+                }),
+            )
+            .await
+        ),
+        "a 201-char folder name is a 400"
+    );
+    // 200 is exactly at the cap → accepted.
+    let f200 = notebook::create_folder(
+        State(state.clone()),
+        c,
+        Json(CreateUserNoteFolder {
+            name: "y".repeat(200),
+            parent_id: None,
+        }),
+    )
+    .await
+    .expect("a 200-char name is accepted")
+    .0;
+    assert_eq!(f200.name.chars().count(), 200);
+
+    // ── AC-1: cycle guard ────────────────────────────────────────────────────
+    // A, then B under A. Moving A under B (its own descendant) must be refused,
+    // and A must be unchanged. Self-parent is the same guard.
+    let a = notebook::create_folder(
+        State(state.clone()),
+        c,
+        Json(CreateUserNoteFolder {
+            name: "A".into(),
+            parent_id: None,
+        }),
+    )
+    .await
+    .expect("A")
+    .0;
+    let b = notebook::create_folder(
+        State(state.clone()),
+        c,
+        Json(CreateUserNoteFolder {
+            name: "B".into(),
+            parent_id: Some(a.id),
+        }),
+    )
+    .await
+    .expect("B under A")
+    .0;
+    let cyc = notebook::update_folder(
+        State(state.clone()),
+        c,
+        Path(a.id),
+        Json(UpdateUserNoteFolder {
+            name: None,
+            parent_id: Some(Some(b.id)),
+        }),
+    )
+    .await;
+    assert!(is_400(&cyc), "moving A under its descendant B is a 400");
+    let a_parent: Option<UserNoteFolderId> =
+        sqlx::query_scalar("SELECT parent_id FROM user_note_folders WHERE id = $1")
+            .bind(a.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        a_parent, None,
+        "A's parent is unchanged after the rejected move"
+    );
+    assert!(
+        is_400(
+            &notebook::update_folder(
+                State(state.clone()),
+                c,
+                Path(a.id),
+                Json(UpdateUserNoteFolder {
+                    name: None,
+                    parent_id: Some(Some(a.id))
+                }),
+            )
+            .await
+        ),
+        "self-parent is refused by the same guard"
+    );
+    // A legal move to an unrelated folder still works.
+    let d = notebook::create_folder(
+        State(state.clone()),
+        c,
+        Json(CreateUserNoteFolder {
+            name: "D".into(),
+            parent_id: None,
+        }),
+    )
+    .await
+    .expect("D")
+    .0;
+    let b_moved = notebook::update_folder(
+        State(state.clone()),
+        c,
+        Path(b.id),
+        Json(UpdateUserNoteFolder {
+            name: None,
+            parent_id: Some(Some(d.id)),
+        }),
+    )
+    .await
+    .expect("a move to an unrelated folder succeeds")
+    .0;
+    assert_eq!(b_moved.parent_id, Some(d.id));
+
+    // ── AC-2 / AC-3 on UPDATE: folder rename ─────────────────────────────────
+    assert!(
+        is_400(
+            &notebook::update_folder(
+                State(state.clone()),
+                c,
+                Path(a.id),
+                Json(UpdateUserNoteFolder {
+                    name: Some("   ".into()),
+                    parent_id: None
+                }),
+            )
+            .await
+        ),
+        "a blank rename is a 400, not a silent COALESCE no-op"
+    );
+    let a_name: String = sqlx::query_scalar("SELECT name FROM user_note_folders WHERE id = $1")
+        .bind(a.id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        a_name, "A",
+        "the name did not change on the rejected blank rename"
+    );
+    // An omitted name leaves it unchanged (a move-only / no-op update).
+    let kept = notebook::update_folder(
+        State(state.clone()),
+        c,
+        Path(a.id),
+        Json(UpdateUserNoteFolder {
+            name: None,
+            parent_id: None,
+        }),
+    )
+    .await
+    .expect("omitted name is fine")
+    .0;
+    assert_eq!(kept.name, "A", "an omitted name leaves it unchanged");
+    assert!(
+        is_400(
+            &notebook::update_folder(
+                State(state.clone()),
+                c,
+                Path(a.id),
+                Json(UpdateUserNoteFolder {
+                    name: Some("z".repeat(201)),
+                    parent_id: None
+                }),
+            )
+            .await
+        ),
+        "a 201-char rename is a 400"
+    );
+    let a200 = notebook::update_folder(
+        State(state.clone()),
+        c,
+        Path(a.id),
+        Json(UpdateUserNoteFolder {
+            name: Some("z".repeat(200)),
+            parent_id: None,
+        }),
+    )
+    .await
+    .expect("a 200-char rename is accepted")
+    .0;
+    assert_eq!(a200.name.chars().count(), 200);
+
+    // ── AC-2 / AC-3 on UPDATE: note title ────────────────────────────────────
+    let note = notebook::create_note(
+        State(state.clone()),
+        c,
+        Json(mk_note("Title", "body", None)),
+    )
+    .await
+    .expect("note")
+    .0;
+    for bad in ["", "   "] {
+        assert!(
+            is_400(
+                &notebook::update_note(
+                    State(state.clone()),
+                    c,
+                    Path(note.id),
+                    Json(UpdateUserNote {
+                        title: Some(bad.into()),
+                        content_md: None,
+                        folder_id: None
+                    }),
+                )
+                .await
+            ),
+            "a blank note title on update is a 400: {bad:?}"
+        );
+    }
+    assert!(
+        is_400(
+            &notebook::update_note(
+                State(state.clone()),
+                c,
+                Path(note.id),
+                Json(UpdateUserNote {
+                    title: Some("t".repeat(201)),
+                    content_md: None,
+                    folder_id: None
+                }),
+            )
+            .await
+        ),
+        "a 201-char note title is a 400"
+    );
+    // An omitted title with a body change leaves the title unchanged.
+    let body_only = notebook::update_note(
+        State(state.clone()),
+        c,
+        Path(note.id),
+        Json(UpdateUserNote {
+            title: None,
+            content_md: Some("new".into()),
+            folder_id: None,
+        }),
+    )
+    .await
+    .expect("title omitted is fine")
+    .0;
+    assert_eq!(
+        body_only.title, "Title",
+        "an omitted title leaves it unchanged"
+    );
+
+    let _ = sqlx::query("DELETE FROM tenants WHERE id = $1 AND slug <> 'dev'")
+        .bind(tenant.id)
+        .execute(&pool)
+        .await;
 }
 
 /// AC-5 belt-and-braces: no operator surface may read notebook rows. The
