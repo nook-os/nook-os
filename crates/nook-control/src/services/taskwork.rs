@@ -107,7 +107,22 @@ pub async fn dispatch(
             .payload(serde_json::json!({ "task_id": task_id, "node_id": node })),
     )
     .await;
+    fire_automation(state, tenant, &task, &updated).await;
     Ok(updated)
+}
+
+/// Fire board automation for a taskwork move (MAIN-73). One helper so every
+/// move site reads the same and the no-op-on-same-column rule lives in one place.
+async fn fire_automation(state: &AppState, tenant: TenantId, before: &TaskItem, after: &TaskItem) {
+    crate::services::triggers::on_column_change(
+        state,
+        tenant,
+        after.id,
+        after.board_id,
+        before.column_id,
+        after.column_id,
+    )
+    .await;
 }
 
 pub struct StartWork {
@@ -230,6 +245,7 @@ pub async fn start_work(
             .payload(serde_json::json!({ "task_id": task_id, "branch": branch })),
     )
     .await;
+    fire_automation(state, tenant, &task, &updated).await;
     Ok((updated, session))
 }
 
@@ -283,6 +299,7 @@ pub async fn submit_pr(
             .payload(serde_json::json!({ "task_id": task_id, "pr_url": url })),
     )
     .await;
+    fire_automation(state, tenant, &task, &updated).await;
     Ok(updated)
 }
 
@@ -342,13 +359,15 @@ pub async fn move_task(
 ) -> ApiResult<TaskItem> {
     let task = load_task(state, tenant, task_id).await?;
     let col = column_id(state, task.board_id, column, 0).await?;
-    Ok(sqlx::query_as(
+    let updated: TaskItem = sqlx::query_as(
         "UPDATE tasks SET column_id = $2, updated_at = now() WHERE id = $1 RETURNING *",
     )
     .bind(task_id)
     .bind(col)
     .fetch_one(&state.db)
-    .await?)
+    .await?;
+    fire_automation(state, tenant, &task, &updated).await;
+    Ok(updated)
 }
 
 /// Best-effort compare/MR URL from the worktree's git remote.

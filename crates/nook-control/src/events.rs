@@ -129,6 +129,17 @@ fn notable(
         "skill.install_failed" => Draft::new("A node could not learn a skill")
             .level("error")
             .body(text("error").unwrap_or_default().to_string()),
+        // Board automation (MAIN-73 AC-5): an action failed. Error level, and the
+        // payload's `task_id` gives the branch below a `/board?task=…` deep link.
+        "task.automation_failed" => {
+            Draft::new("Automation action failed")
+                .level("error")
+                .body(format!(
+                    "{}: {}",
+                    text("action").unwrap_or("action"),
+                    text("error").unwrap_or_default()
+                ))
+        }
         _ => return None,
     };
 

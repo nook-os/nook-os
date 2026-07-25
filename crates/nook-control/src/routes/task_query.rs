@@ -464,6 +464,18 @@ pub async fn claim_inner(
             })),
     )
     .await;
+    // Board automation (MAIN-73): a claim that also moves the card (a started
+    // column_type was given) fires that column's rules. No-op when the claim did
+    // not change the column (`existing.column_id == task.column_id`).
+    crate::services::triggers::on_column_change(
+        state,
+        tenant,
+        task.id,
+        task.board_id,
+        existing.column_id,
+        task.column_id,
+    )
+    .await;
     state
         .registry
         .publish(tenant, nook_proto::UiEvent::TaskChanged { task_id: id });

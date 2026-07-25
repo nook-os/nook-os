@@ -2677,6 +2677,12 @@ export interface components {
          *     External boards remain authoritative; NookOS federates.
          */
         Board: {
+            /**
+             * @description Per-board automation (MAIN-73): a map from column TYPE to an ordered list
+             *     of actions that fire when a task enters a column of that type. `{}` when
+             *     unset. Validated server-side on write.
+             */
+            automation?: unknown;
             /** Format: date-time */
             created_at: string;
             id: components["schemas"]["BoardId"];
@@ -4326,6 +4332,12 @@ export interface components {
             type: "task_changed";
         };
         UpdateBoardRequest: {
+            /**
+             * @description Replace the board's automation rules (MAIN-73). Omitted leaves them
+             *     unchanged; a value is validated (known kinds, valid column types, sound
+             *     config) before it is stored.
+             */
+            automation?: unknown;
             /**
              * @description Change the prefix in `NOOK-42`.
              *

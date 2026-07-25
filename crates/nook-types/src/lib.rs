@@ -544,6 +544,11 @@ pub struct Board {
     #[serde(default)]
     pub key: Option<String>,
     pub provider: String,
+    /// Per-board automation (MAIN-73): a map from column TYPE to an ordered list
+    /// of actions that fire when a task enters a column of that type. `{}` when
+    /// unset. Validated server-side on write.
+    #[serde(default)]
+    pub automation: serde_json::Value,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -1331,6 +1336,11 @@ pub struct UpdateBoardRequest {
     /// person chose.
     #[serde(default)]
     pub key: Option<String>,
+    /// Replace the board's automation rules (MAIN-73). Omitted leaves them
+    /// unchanged; a value is validated (known kinds, valid column types, sound
+    /// config) before it is stored.
+    #[serde(default)]
+    pub automation: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Deserialize, ToSchema)]
