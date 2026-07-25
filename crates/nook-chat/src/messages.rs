@@ -138,11 +138,9 @@ mod tests {
 
     use axum::extract::{Path, Query};
     use axum::Json;
-    use nook_types::{CreateChatChannel, UpdateChatChannel};
     use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 
     use super::*;
-    use crate::channels;
 
     /// A chat-schema pool + fresh registry, or `None` when the suite runs without
     /// a database (the same gate the rest of the suite uses). Channel/message
@@ -181,15 +179,24 @@ mod tests {
         }
     }
 
+    // Insert a channel row directly, rather than through `channels::create` —
+    // these tests run on a `chat`-only pool with no seeded `public.users`, and
+    // create now gates on a tenant admin (MAIN-94), which that query cannot
+    // resolve here. The message tests only need a channel to exist, not to
+    // exercise create's authorization.
     async fn make_channel(state: &AppState, tenant: Uuid, name: &str) -> Uuid {
-        let (_, Json(ch)) = channels::create(
-            State(state.clone()),
-            caller(tenant),
-            Json(CreateChatChannel { name: name.into() }),
+        let id = Uuid::now_v7();
+        sqlx::query(
+            "INSERT INTO chat_channels (id, owner_type, owner_id, name, slug)
+             VALUES ($1, 'tenant', $2, $3, $3)",
         )
+        .bind(id)
+        .bind(tenant)
+        .bind(name)
+        .execute(&state.db)
         .await
         .unwrap();
-        ch.id
+        id
     }
 
     #[tokio::test]
@@ -333,18 +340,14 @@ mod tests {
         .await
         .unwrap();
 
-        // Archive it.
-        let _ = channels::update(
-            State(state.clone()),
-            caller(tenant),
-            Path(channel),
-            Json(UpdateChatChannel {
-                name: None,
-                archived: Some(true),
-            }),
-        )
-        .await
-        .unwrap();
+        // Archive it directly (create/update are admin-gated on a `public.users`
+        // lookup this chat-only pool cannot resolve — MAIN-94; these tests are
+        // about posting, not channel-management auth).
+        sqlx::query("UPDATE chat_channels SET archived_at = now() WHERE id = $1")
+            .bind(channel)
+            .execute(&state.db)
+            .await
+            .unwrap();
 
         // Posting is refused…
         let err = post(

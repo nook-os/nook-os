@@ -12,6 +12,17 @@ type Schemas = components["schemas"];
 type ChatChannel = Schemas["ChatChannel"];
 type ChatMessage = Schemas["ChatMessage"];
 type ChatMessagePage = Schemas["ChatMessagePage"];
+type CreateChatChannel = Schemas["CreateChatChannel"];
+type UpdateChatChannel = Schemas["UpdateChatChannel"];
+
+/** `GET /api/me` — the caller as chat resolves them, including their tenant
+ *  `role` so the UI can gate channel management to admins (MAIN-94 AC-5). */
+export interface ChatMe {
+  user_id: string;
+  tenant_id: string;
+  cookie_session: boolean;
+  role: string | null;
+}
 
 // Everything hangs off the `/chat` proxy path — the same rewrite `apiUrl`
 // applies to `/api` in the desktop build carries chat along with it.
@@ -29,9 +40,78 @@ async function chatGet<T>(path: string): Promise<T> {
   return (await res.json()) as T;
 }
 
-/** List the tenant's channels. Archived channels are excluded by the service. */
-export function listChannels(): Promise<ChatChannel[]> {
-  return chatGet<ChatChannel[]>("/channels");
+/**
+ * A write against the chat service (POST/PATCH), routed through the same
+ * `authHeaders` and the shared write-failure path as `postMessage`, and
+ * rethrowing so a caller can surface an inline error. Mirrors the control-plane
+ * client's write handling so a failed channel edit looks like any other.
+ */
+async function chatWrite<T>(
+  method: "POST" | "PATCH",
+  path: string,
+  body: unknown,
+): Promise<T> {
+  const full = `${CHAT_PREFIX}${path}`;
+  let res: Response;
+  try {
+    res = await fetch(apiUrl(full), {
+      method,
+      headers: { ...authHeaders(), "Content-Type": "application/json" },
+      credentials: "same-origin",
+      body: JSON.stringify(body),
+    });
+  } catch (err) {
+    reportWriteFailure({
+      method,
+      path: full,
+      message: err instanceof Error ? err.message : String(err),
+    });
+    throw err;
+  }
+  if (!res.ok) {
+    let message = `${res.status} ${res.statusText}`.trim();
+    try {
+      const text = await res.clone().text();
+      if (text) {
+        const parsed = JSON.parse(text) as { message?: string; error?: string };
+        message = parsed.message ?? parsed.error ?? text.slice(0, 200);
+      }
+    } catch {
+      // A body we cannot read is not worth failing over.
+    }
+    reportWriteFailure({ method, path: full, status: res.status, message });
+    throw new Error(message);
+  }
+  return (await res.json()) as T;
+}
+
+/**
+ * List the tenant's channels. Archived channels are excluded by default (what
+ * the sidebar wants); pass `includeArchived` for the management modal's
+ * archived view (MAIN-94 AC-6).
+ */
+export function listChannels(includeArchived = false): Promise<ChatChannel[]> {
+  const q = includeArchived ? "?include_archived=true" : "";
+  return chatGet<ChatChannel[]>(`/channels${q}`);
+}
+
+/** The caller, including their tenant role (MAIN-94 AC-5). */
+export function me(): Promise<ChatMe> {
+  return chatGet<ChatMe>("/me");
+}
+
+/** Create a channel (admin only server-side; the UI hides it for non-admins). */
+export function createChannel(name: string): Promise<ChatChannel> {
+  const body: CreateChatChannel = { name };
+  return chatWrite<ChatChannel>("POST", "/channels", body);
+}
+
+/** Rename or (un)archive a channel (admin only server-side). */
+export function updateChannel(
+  id: string,
+  patch: UpdateChatChannel,
+): Promise<ChatChannel> {
+  return chatWrite<ChatChannel>("PATCH", `/channels/${id}`, patch);
 }
 
 /**

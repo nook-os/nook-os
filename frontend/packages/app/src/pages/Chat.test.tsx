@@ -12,9 +12,19 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 // Capture the live-socket callback so the test can push messages through it.
 let liveCallback: ((m: unknown) => void) | null = null;
 const dispose = vi.fn();
+// The caller's chat role, mutable so the admin-gate tests can flip it (AC-5).
+const identity = vi.hoisted(() => ({ role: "member" as string | null }));
 
 vi.mock("@nookos/api", () => ({
   api: { GET: vi.fn(async () => ({ data: { user: { id: "me" } } })) },
+  me: vi.fn(async () => ({
+    user_id: "me",
+    tenant_id: "t",
+    cookie_session: false,
+    role: identity.role,
+  })),
+  createChannel: vi.fn(),
+  updateChannel: vi.fn(),
   listChannels: vi.fn(async () => [
     { id: "c1", name: "general", slug: "general", archived: false, created_at: "2026-07-25T09:00:00Z" },
   ]),
@@ -50,6 +60,7 @@ function renderPage() {
 
 beforeEach(() => {
   liveCallback = null;
+  identity.role = "member";
   dispose.mockClear();
 });
 afterEach(() => cleanup());
@@ -111,5 +122,20 @@ describe("ChatPage", () => {
     await waitFor(() => expect(liveCallback).not.toBeNull());
     unmount();
     expect(dispose).toHaveBeenCalled();
+  });
+
+  // AC-5: the management affordance is gated on the caller's chat role.
+  it("hides the manage control from a non-admin", async () => {
+    identity.role = "member";
+    renderPage();
+    await screen.findByText("general");
+    expect(screen.queryByLabelText("manage channels")).toBeNull();
+  });
+
+  it("shows the manage control to an admin", async () => {
+    identity.role = "admin";
+    renderPage();
+    await screen.findByText("general");
+    expect(await screen.findByLabelText("manage channels")).toBeTruthy();
   });
 });
