@@ -155,7 +155,7 @@ async fn epic_parent_create_patch_validate_filter_and_orphan() {
         .await
         .expect("epic");
     // create_task returns the raw row; the human key is computed by enrich.
-    let epic = nook_control::services::tasks::enrich_one(&pool, "http://x", epic)
+    let epic = nook_control::services::tasks::enrich_one(&pool, "http://x", UserId::new(), epic)
         .await
         .expect("enrich epic");
     let epic_key = epic.key.clone().expect("epic key"); // e.g. B123-1
@@ -347,7 +347,7 @@ async fn private_child_does_not_leak_through_epic() {
         .create_task(tenant, board, Some(a), req("Epic", Some("epic"), None))
         .await
         .expect("epic");
-    let epic = nook_control::services::tasks::enrich_one(&pool, "http://x", epic)
+    let epic = nook_control::services::tasks::enrich_one(&pool, "http://x", UserId::new(), epic)
         .await
         .expect("enrich");
     let epic_key = epic.key.clone().expect("key");
@@ -416,6 +416,54 @@ async fn private_child_does_not_leak_through_epic() {
     assert!(
         a_ids.contains(&secret_child.id),
         "the owner still sees their private child under the epic"
+    );
+
+    let _ = sqlx::query("DELETE FROM tenants WHERE id = $1 AND slug <> 'dev'")
+        .bind(tenant)
+        .execute(&pool)
+        .await;
+}
+
+/// MAIN-86 AC-1/AC-2: the MCP task mutations (`set_task_parent`,
+/// `set_task_description`) resolve a task's board provider instead of hardwiring
+/// `LocalBoardProvider`. This guards the resolution path itself — the board→
+/// provider join a task is mutated through, and that the resolved key yields a
+/// live provider from the registry — so a rename of the column or the provider
+/// key can never silently send MCP writes through the wrong (or no) provider.
+#[tokio::test]
+async fn mcp_task_mutations_resolve_the_boards_provider() {
+    let Some(pool) = test_pool().await else {
+        eprintln!("skipping provider-resolution test — no DATABASE_URL");
+        return;
+    };
+    let state = AppState::new(pool.clone(), test_config(), None).await;
+    let tenant = make_tenant(&pool).await;
+    let board = make_board(&pool, tenant).await;
+    let provider = state.kanban.get("local").expect("local provider");
+    let task = provider
+        .create_task(tenant, board, None, req("a task", None, None))
+        .await
+        .expect("create");
+
+    // The exact resolution `McpBackend::provider_for_task` performs: a task's
+    // board carries the provider string that decides which provider mutates it.
+    let (resolved,): (String,) = sqlx::query_as(
+        "SELECT b.provider FROM boards b
+         JOIN tasks t ON t.board_id = b.id
+         WHERE t.id = $1 AND t.tenant_id = $2",
+    )
+    .bind(task.id)
+    .bind(tenant)
+    .fetch_one(&pool)
+    .await
+    .expect("resolve provider");
+    assert_eq!(
+        resolved, "local",
+        "a local board's task resolves to the local provider"
+    );
+    assert!(
+        state.kanban.get(&resolved).is_some(),
+        "the resolved provider string yields a live provider from the registry"
     );
 
     let _ = sqlx::query("DELETE FROM tenants WHERE id = $1 AND slug <> 'dev'")

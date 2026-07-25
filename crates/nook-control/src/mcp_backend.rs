@@ -101,6 +101,33 @@ impl McpBackend {
         }
         Ok(op.message)
     }
+
+    /// Resolve the `KanbanProvider` that owns a task — look up the task's
+    /// board, read its `provider` string, and get the instance from the
+    /// registry, exactly as `create_task` does for a new task. The single
+    /// resolver every MCP task *mutation* routes through, so none hardwires
+    /// `LocalBoardProvider` and each task is mutated through its own board's
+    /// provider the moment a non-local one exists (MAIN-86 AC-1/AC-2).
+    async fn provider_for_task(
+        &self,
+        tenant: TenantId,
+        task_id: TaskId,
+    ) -> anyhow::Result<std::sync::Arc<dyn crate::services::kanban::KanbanProvider>> {
+        let (provider,): (String,) = sqlx::query_as(
+            "SELECT b.provider FROM boards b
+             JOIN tasks t ON t.board_id = b.id
+             WHERE t.id = $1 AND t.tenant_id = $2",
+        )
+        .bind(task_id)
+        .bind(tenant)
+        .fetch_optional(&self.state.db)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("no such task"))?;
+        self.state
+            .kanban
+            .get(&provider)
+            .ok_or_else(|| anyhow::anyhow!("provider {provider:?} missing"))
+    }
 }
 
 #[async_trait]
@@ -482,12 +509,13 @@ impl NookBackend for McpBackend {
         task: String,
         description: String,
     ) -> anyhow::Result<TaskItem> {
-        use crate::services::kanban::{KanbanProvider, LocalBoardProvider, ProviderError};
+        use crate::services::kanban::ProviderError;
         let tenant = self.tenant().await?;
         let id = crate::services::tasks::resolve_id(&self.state.db, tenant, &task).await?;
-        let provider = LocalBoardProvider {
-            db: self.state.db.clone(),
-        };
+        // Through the task's OWN board provider, not a hardwired local one
+        // (MAIN-86 AC-2).
+        let provider = self.provider_for_task(tenant, id).await?;
+        let viewer = self.user().await?;
         // Read-guard-retry: base the write on the version just read, and on a
         // concurrent edit re-read and try again a bounded number of times, so an
         // agent's body edit never silently clobbers a human's change (AC-3).
@@ -525,6 +553,7 @@ impl NookBackend for McpBackend {
                     return Ok(crate::services::tasks::enrich_one(
                         &self.state.db,
                         &self.state.cfg.public_base_url,
+                        viewer,
                         t,
                     )
                     .await?);
@@ -601,6 +630,7 @@ impl NookBackend for McpBackend {
 
     async fn release_task(&self, task: String) -> anyhow::Result<TaskItem> {
         let tenant = self.tenant().await?;
+        let viewer = self.user().await?;
         let id = crate::services::tasks::resolve_id(&self.state.db, tenant, &task).await?;
         let t: TaskItem = sqlx::query_as(
             "UPDATE tasks SET assignee_user_id = NULL, updated_at = now()
@@ -613,10 +643,13 @@ impl NookBackend for McpBackend {
         self.state
             .registry
             .publish(tenant, nook_proto::UiEvent::TaskChanged { task_id: id });
-        Ok(
-            crate::services::tasks::enrich_one(&self.state.db, &self.state.cfg.public_base_url, t)
-                .await?,
+        Ok(crate::services::tasks::enrich_one(
+            &self.state.db,
+            &self.state.cfg.public_base_url,
+            viewer,
+            t,
         )
+        .await?)
     }
 
     async fn comment_task(
@@ -708,6 +741,7 @@ impl NookBackend for McpBackend {
 
     async fn set_priority(&self, task: String, priority: i32) -> anyhow::Result<TaskItem> {
         let tenant = self.tenant().await?;
+        let viewer = self.user().await?;
         let id = crate::services::tasks::resolve_id(&self.state.db, tenant, &task).await?;
         let t: TaskItem = sqlx::query_as(
             "UPDATE tasks SET priority = $3, updated_at = now()
@@ -721,10 +755,13 @@ impl NookBackend for McpBackend {
         self.state
             .registry
             .publish(tenant, nook_proto::UiEvent::TaskChanged { task_id: id });
-        Ok(
-            crate::services::tasks::enrich_one(&self.state.db, &self.state.cfg.public_base_url, t)
-                .await?,
+        Ok(crate::services::tasks::enrich_one(
+            &self.state.db,
+            &self.state.cfg.public_base_url,
+            viewer,
+            t,
         )
+        .await?)
     }
 
     async fn set_task_parent(
@@ -732,12 +769,11 @@ impl NookBackend for McpBackend {
         task: String,
         parent: Option<String>,
     ) -> anyhow::Result<TaskItem> {
-        use crate::services::kanban::{KanbanProvider, LocalBoardProvider};
         let tenant = self.tenant().await?;
         let id = crate::services::tasks::resolve_id(&self.state.db, tenant, &task).await?;
-        let provider = LocalBoardProvider {
-            db: self.state.db.clone(),
-        };
+        // Through the task's OWN board provider, not a hardwired local one
+        // (MAIN-86 AC-1).
+        let provider = self.provider_for_task(tenant, id).await?;
         // Through the provider so the epic validation (same board, type=epic,
         // no nesting) applies. The tool always changes the parent: `Some(value)`
         // files under that epic, `None` detaches — both are an explicit change.
@@ -765,10 +801,13 @@ impl NookBackend for McpBackend {
         self.state
             .registry
             .publish(tenant, nook_proto::UiEvent::TaskChanged { task_id: id });
-        Ok(
-            crate::services::tasks::enrich_one(&self.state.db, &self.state.cfg.public_base_url, t)
-                .await?,
+        Ok(crate::services::tasks::enrich_one(
+            &self.state.db,
+            &self.state.cfg.public_base_url,
+            viewer,
+            t,
         )
+        .await?)
     }
 
     async fn link_tasks(

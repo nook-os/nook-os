@@ -394,7 +394,7 @@ pub async fn detail(
     if !tasks::visible_to(&task, viewer) {
         return Err(ApiError::NotFound);
     }
-    let task = tasks::enrich_one(&state.db, &state.cfg.public_base_url, task).await?;
+    let task = tasks::enrich_one(&state.db, &state.cfg.public_base_url, viewer, task).await?;
 
     let related = related_tasks(state, viewer, id).await?;
     let blocked_by: Vec<RelatedTask> = related

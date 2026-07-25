@@ -174,7 +174,7 @@ pub async fn pick(
     f: TaskFilter,
 ) -> ApiResult<Vec<TaskItem>> {
     let rows = query_rows(&state.db, tenant, viewer, &f).await?;
-    tasks::enrich(&state.db, &state.cfg.public_base_url, rows)
+    tasks::enrich(&state.db, &state.cfg.public_base_url, viewer, rows)
         .await
         .map_err(Into::into)
 }
@@ -480,7 +480,7 @@ pub async fn claim_inner(
         .registry
         .publish(tenant, nook_proto::UiEvent::TaskChanged { task_id: id });
 
-    tasks::enrich_one(&state.db, &state.cfg.public_base_url, task)
+    tasks::enrich_one(&state.db, &state.cfg.public_base_url, claimant, task)
         .await
         .map_err(Into::into)
 }
@@ -509,7 +509,7 @@ pub async fn release(
         nook_proto::UiEvent::TaskChanged { task_id: id },
     );
     Ok(Json(
-        tasks::enrich_one(&state.db, &state.cfg.public_base_url, task).await?,
+        tasks::enrich_one(&state.db, &state.cfg.public_base_url, auth.user_id, task).await?,
     ))
 }
 
