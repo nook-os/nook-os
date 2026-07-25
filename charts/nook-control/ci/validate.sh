@@ -102,6 +102,68 @@ else
   fail=1
 fi
 
+# ── Dev-mode, log level, and mail config (MAIN-62) ───────────────────────────
+echo "==> helm template (authDevMode + logLevel + mail)"
+cfgout="$(render "${min[@]}" \
+  --set config.appEnv=dev \
+  --set config.authDevMode=true \
+  --set config.logLevel=debug \
+  --set config.mail.provider=postmark \
+  --set config.mail.from='NookOS <no-reply@nook.example.com>' \
+  --set config.mail.sendEnabled=true \
+  --set config.mail.notificationsEnabled=true \
+  --set config.mail.maxPerMonth=100 \
+  --set config.mail.smtpHost=smtp.example.com \
+  --set config.mail.smtpPort=587 \
+  --set config.mail.smtpTls=starttls \
+  --set config.mail.smtpUsername=nook \
+  --set config.mail.postmarkApiUrl=https://api.postmarkapp.com \
+  --set secretKeys.smtpPassword=SMTP_PASSWORD \
+  --set secretKeys.postmarkToken=POSTMARK_TOKEN)"
+
+cneed() {
+  local label="$1" pattern="$2" want="$3" got
+  got="$(grep -cE "$pattern" <<<"$cfgout" || true)"
+  if [ "$got" -ne "$want" ]; then
+    echo "  FAIL: $label — expected $want, got $got"
+    fail=1
+  else
+    echo "  ok:   $label ($got)"
+  fi
+}
+
+cneed "AUTH_DEV_MODE rendered"       'AUTH_DEV_MODE: "true"' 1
+cneed "RUST_LOG rendered"            'RUST_LOG: "debug"' 1
+cneed "MAIL_PROVIDER"                'MAIL_PROVIDER: "postmark"' 1
+cneed "MAIL_FROM"                    'MAIL_FROM: ' 1
+cneed "MAIL_SEND_ENABLED"            'MAIL_SEND_ENABLED: "true"' 1
+cneed "MAIL_NOTIFICATIONS_ENABLED"   'MAIL_NOTIFICATIONS_ENABLED: "true"' 1
+cneed "MAIL_MAX_PER_MONTH"           'MAIL_MAX_PER_MONTH: "100"' 1
+cneed "SMTP_HOST/PORT/TLS/USERNAME"  'SMTP_(HOST|PORT|TLS|USERNAME): ' 4
+cneed "POSTMARK_API_URL"             'POSTMARK_API_URL: ' 1
+cneed "SMTP_PASSWORD secretKeyRef"   'name: SMTP_PASSWORD' 1
+cneed "POSTMARK_TOKEN secretKeyRef"  'name: POSTMARK_TOKEN' 1
+
+# The dev-mode hatch must be refused in production — the chart mirrors the
+# control plane, which will not boot on that combo.
+devguard="$(render "${min[@]}" --set config.authDevMode=true --set config.appEnv=production 2>&1 || true)"
+if grep -q 'authDevMode=true is incompatible' <<<"$devguard"; then
+  echo "  ok:   authDevMode=true + appEnv=production is refused"
+else
+  echo "  FAIL: authDevMode=true + appEnv=production was not refused"
+  fail=1
+fi
+
+# Additive: with none of the new keys set, the manifest is what it was before —
+# every new env key omitted, so no MAIL_/RUST_LOG/AUTH_DEV_MODE lines appear.
+baseout="$(render "${min[@]}")"
+if grep -qE 'AUTH_DEV_MODE|RUST_LOG|MAIL_|SMTP_PASSWORD|POSTMARK_' <<<"$baseout"; then
+  echo "  FAIL: a new env key leaked into the default render (breaks additive-ness)"
+  fail=1
+else
+  echo "  ok:   default render omits every new key (additive)"
+fi
+
 if [ "$fail" -ne 0 ]; then
   echo "chart validation FAILED"
   exit 1

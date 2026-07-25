@@ -100,11 +100,24 @@ secretKeys:
   s3AccessKeyId: ""
   # -- Secret key holding the S3 secret access key. Env: NOOK_S3_SECRET_ACCESS_KEY. "" to omit.
   s3SecretAccessKey: ""
+  # -- Secret key holding the SMTP password. Env: SMTP_PASSWORD. "" to omit.
+  smtpPassword: ""
+  # -- Secret key holding the Postmark server token. Env: POSTMARK_TOKEN. "" to omit.
+  postmarkToken: ""
 
 # ── Non-secret config (rendered into a ConfigMap) ────────────────────────────
 config:
   # -- APP_ENV. Use "production" in real deployments (disables the dev-login hatch).
   appEnv: production
+  # -- AUTH_DEV_MODE: the dev-login hatch. false (default) is omitted from the
+  #    manifest — the control plane defaults to off. Rendering `true` with
+  #    appEnv=production FAILS to render, mirroring config.rs which refuses to
+  #    boot on that combo. Only ever true for a non-production install.
+  authDevMode: false
+  # -- RUST_LOG: a bare level ("info", "debug", "warn") or a full EnvFilter
+  #    directive ("nook_control=debug,info"). Empty (default) omits the key, so
+  #    the control plane keeps its own "info" default.
+  logLevel: ""
   # -- PUBLIC_BASE_URL: the external URL a person reaches the UI at (usually https://<ingress.host>).
   publicBaseUrl: ""
   # -- WEB_ORIGIN: allowed browser origin (usually the same as publicBaseUrl).
@@ -131,6 +144,33 @@ config:
     region: ""
     # -- NOOK_S3_PATH_STYLE.
     pathStyle: true
+  # ── Mail (non-secret) ──────────────────────────────────────────────────────
+  # Every key here is optional and OMITTED when unset, so the control-plane
+  # defaults apply (capture provider, sending off). The SMTP password and
+  # Postmark token are secrets, wired via secretKeys.smtpPassword/postmarkToken.
+  mail:
+    # -- MAIL_PROVIDER: "capture" | "smtp" | "postmark". Empty → control-plane default (capture, delivers nothing).
+    provider: ""
+    # -- MAIL_FROM: the From address for outbound mail (e.g. "NookOS <no-reply@example.com>").
+    from: ""
+    # -- MAIL_SEND_ENABLED: the master send switch. false (default) is omitted → control-plane default (off).
+    sendEnabled: false
+    # -- MAIL_NOTIFICATIONS_ENABLED: also send notification emails. false (default) is omitted → off.
+    notificationsEnabled: false
+    # -- MAIL_MAX_PER_MONTH: cap on real sends per month. Empty → control-plane default (uncapped).
+    maxPerMonth: ""
+    # -- MAIL_MAX_PER_DAY: cap on real sends per day. Empty → control-plane default (uncapped).
+    maxPerDay: ""
+    # -- SMTP_HOST: the SMTP relay host (provider=smtp).
+    smtpHost: ""
+    # -- SMTP_PORT: the SMTP relay port.
+    smtpPort: ""
+    # -- SMTP_TLS: "none" | "starttls" | "implicit".
+    smtpTls: ""
+    # -- SMTP_USERNAME: the SMTP auth user (the password is secretKeys.smtpPassword).
+    smtpUsername: ""
+    # -- POSTMARK_API_URL: override the Postmark endpoint (the token is secretKeys.postmarkToken).
+    postmarkApiUrl: ""
 
 # ── Services ─────────────────────────────────────────────────────────────────
 service:
