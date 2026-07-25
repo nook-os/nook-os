@@ -21,6 +21,23 @@ env:
   REGISTRY: ghcr.io
 
 jobs:
+  # ------------------------------------------------------------------- guard
+  #
+  # The committed `[workspace.package] version` in Cargo.toml is the source of
+  # truth for the agent version nodes self-update to. A tag that disagrees ships
+  # images that self-report the wrong version, so the control plane tells nodes
+  # to stay where they are and nobody rolls forward (MAIN-88). Everything that
+  # builds or publishes `needs: guard`, so a mismatched tag publishes NOTHING.
+  guard:
+    name: version guard
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - name: Tag version must match Cargo.toml [workspace.package] version
+        run: scripts/check-release-version.sh "${{ inputs.tag || github.ref_name }}"
+
   # ---------------------------------------------------------------- binaries
   #
   # Built natively wherever a runner of that architecture exists — cross
@@ -33,6 +50,7 @@ jobs:
   # self-hosters are actually running.
   binaries:
     name: nook (${{ matrix.target }})
+    needs: guard
     strategy:
       fail-fast: false
       matrix:
@@ -129,6 +147,7 @@ jobs:
   # against the platform it runs on, so each one is built on that platform.
   desktop:
     name: desktop (${{ matrix.label }})
+    needs: guard
     strategy:
       fail-fast: false
       matrix:
@@ -327,6 +346,7 @@ jobs:
   # a five-minute build into forty.
   images:
     name: ${{ matrix.image }} (${{ matrix.arch }})
+    needs: guard
     strategy:
       fail-fast: false
       matrix:
