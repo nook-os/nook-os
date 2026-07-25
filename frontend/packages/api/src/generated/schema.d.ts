@@ -2937,6 +2937,12 @@ export interface components {
              *     because a filer knows `agent-ready`, not its uuid.
              */
             labels?: string[];
+            /**
+             * @description File this task under an epic (MAIN-81): a uuid OR a key (`NOOK-7`),
+             *     tenant-scoped. Must resolve to a `type='epic'` task on the same board.
+             *     Omitted → top-level.
+             */
+            parent?: string | null;
             /** Format: int32 */
             priority?: number | null;
             title: string;
@@ -3108,6 +3114,23 @@ export interface components {
             node_id: components["schemas"]["NodeId"];
             /** Format: date-time */
             not_after: string;
+        };
+        /**
+         * @description One child ticket of an epic, for the epic's detail (MAIN-81). `done`/`total`
+         *     is derivable by the reader: a child is done when its `column_type` is
+         *     `completed` or `canceled`.
+         */
+        EpicChild: {
+            /** Format: date-time */
+            archived_at?: string | null;
+            /** @description The column TYPE the child sits in — so progress is derivable inline. */
+            column_type: string;
+            id: components["schemas"]["TaskId"];
+            key?: string | null;
+            /** Format: int32 */
+            priority: number;
+            title: string;
+            type: string;
         };
         /**
          * @description Everything produces events. Kind is an open dotted string:
@@ -3930,6 +3953,11 @@ export interface components {
             blocked_by: components["schemas"]["RelatedTask"][];
             /** @description Tasks waiting on this one. */
             blocking: components["schemas"]["RelatedTask"][];
+            /**
+             * @description When this task is an epic, the tickets filed under it (MAIN-81). Empty
+             *     for a non-epic or a childless epic.
+             */
+            children?: components["schemas"]["EpicChild"][];
             comments: components["schemas"]["TaskComment"][];
             /**
              * @description Derived from the blockers' column types, never stored — a stored flag
@@ -3979,6 +4007,13 @@ export interface components {
              *     before keys existed and not yet backfilled.
              */
             number?: number | null;
+            /**
+             * @description The parent epic's human key (`NOOK-7`), when this task has a parent.
+             *     Computed like `key`, so a reader can show "under NOOK-7" without a second
+             *     lookup (MAIN-81).
+             */
+            parent_key?: string | null;
+            parent_task_id?: null | components["schemas"]["TaskId"];
             /** Format: int32 */
             position: number;
             pr_url?: string | null;
@@ -4294,6 +4329,12 @@ export interface components {
              *     it absent and behaves exactly as before (MAIN-36).
              */
             expected_updated_at?: string | null;
+            /**
+             * @description Re-file under an epic, or detach (MAIN-81). Absent = unchanged, `null` =
+             *     detach (become top-level), a uuid/key = move under that epic (validated
+             *     like `create`). Tri-state for the same reason `workspace_id` is.
+             */
+            parent?: string | null;
             /** Format: int32 */
             position?: number | null;
             /** Format: int32 */
@@ -7461,6 +7502,12 @@ export interface operations {
                 type?: string[];
                 /** @description Filter on the derived blocker state. */
                 is_blocked?: boolean;
+                /**
+                 * @description An epic's children (MAIN-81): a uuid or key (`NOOK-7`). Returns the tasks
+                 *     whose `parent_task_id` is that epic, across every column (an epic's
+                 *     tickets span backlog and board), still respecting `archived`.
+                 */
+                parent?: string;
                 workspace?: string;
                 /**
                  * @description Free-text search: case-insensitive substring across the task's title,

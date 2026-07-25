@@ -33,6 +33,7 @@ fn no_change() -> UpdateTaskRequest {
         type_: None,
         visibility: None,
         workspace_id: None,
+        parent: None,
         expected_updated_at: None,
     }
 }
@@ -109,6 +110,7 @@ async fn new_task(
                 priority: None,
                 type_: None,
                 visibility: None,
+                parent: None,
                 labels: vec![],
             },
         )
@@ -130,6 +132,7 @@ async fn workspace_can_be_set_changed_and_cleared() {
     let updated = provider
         .update_task(
             tenant,
+            None,
             task.id,
             UpdateTaskRequest {
                 workspace_id: Some(Some(ws_a)),
@@ -144,6 +147,7 @@ async fn workspace_can_be_set_changed_and_cleared() {
     let updated = provider
         .update_task(
             tenant,
+            None,
             task.id,
             UpdateTaskRequest {
                 workspace_id: Some(Some(ws_b)),
@@ -159,6 +163,7 @@ async fn workspace_can_be_set_changed_and_cleared() {
     let updated = provider
         .update_task(
             tenant,
+            None,
             task.id,
             UpdateTaskRequest {
                 workspace_id: Some(None),
@@ -184,6 +189,7 @@ async fn an_absent_workspace_leaves_the_existing_one_alone() {
     let updated = provider
         .update_task(
             tenant,
+            None,
             task.id,
             UpdateTaskRequest {
                 title: Some("renamed".into()),
@@ -232,6 +238,7 @@ async fn expected_updated_at_guards_the_body() {
     let ok = provider
         .update_task(
             tenant,
+            None,
             task.id,
             UpdateTaskRequest {
                 description: Some("first edit".into()),
@@ -248,6 +255,7 @@ async fn expected_updated_at_guards_the_body() {
     let err = provider
         .update_task(
             tenant,
+            None,
             task.id,
             UpdateTaskRequest {
                 description: Some("clobber".into()),
@@ -268,7 +276,7 @@ async fn expected_updated_at_guards_the_body() {
         other => panic!("expected 409 Conflict, got {other:?}"),
     }
     let after = provider
-        .update_task(tenant, task.id, no_change())
+        .update_task(tenant, None, task.id, no_change())
         .await
         .expect("still there");
     assert_eq!(
@@ -281,6 +289,7 @@ async fn expected_updated_at_guards_the_body() {
     let unguarded = provider
         .update_task(
             tenant,
+            None,
             task.id,
             UpdateTaskRequest {
                 description: Some("unguarded".into()),
@@ -295,6 +304,7 @@ async fn expected_updated_at_guards_the_body() {
     let missing = provider
         .update_task(
             tenant,
+            None,
             nook_types::TaskId(uuid::Uuid::now_v7()),
             UpdateTaskRequest {
                 description: Some("x".into()),
@@ -325,6 +335,7 @@ async fn two_edits_from_one_base_version_the_second_conflicts() {
     let first = provider
         .update_task(
             tenant,
+            None,
             task.id,
             UpdateTaskRequest {
                 description: Some("A wins".into()),
@@ -336,6 +347,7 @@ async fn two_edits_from_one_base_version_the_second_conflicts() {
     let second = provider
         .update_task(
             tenant,
+            None,
             task.id,
             UpdateTaskRequest {
                 description: Some("B loses".into()),

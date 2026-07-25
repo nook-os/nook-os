@@ -176,6 +176,24 @@ curl -s -X POST "$NOOK_SERVER/api/v1/tasks/<blocker-uuid>/relations" \
 Verify the direction landed right: fetch the DEPENDENT and confirm it reports
 `is_blocked: true` with the blocker in its `blocked_by` list.
 
+## Epics
+
+An **epic** (`type: "epic"`) is a tracker that other tickets hang off. To file a
+ticket under one, set `"parent"` in the issue JSON to the epic's key or uuid —
+the parent must be a `type='epic'` task **on the same board**, and an epic
+itself never has a parent (no nesting):
+
+```json
+{ "title": "...", "type": "task", "parent": "NOOK-7", ... }
+```
+
+When you spec a **chain** off an epic — decomposing it into the small buildable
+issues the epic tracks — set `"parent"` on **every** child so the whole chain is
+listable and the epic shows its progress. List an epic's tickets any time with
+`GET /api/v1/tasks?parent=NOOK-7` (a uuid or key), and `nook task NOOK-7` shows
+the epic's `children` array directly. Re-file or detach later with the `parent`
+field on a PATCH to `/api/v1/tasks/{id}` (`"parent": null` detaches).
+
 ## Hard rule
 
 Never apply the `agent-ready` label. The user applies it on the board after a

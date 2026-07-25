@@ -55,6 +55,65 @@ fn validate_visibility(v: Option<&str>) -> ApiResult<()> {
     Ok(())
 }
 
+/// Resolve and validate a `parent` reference (MAIN-81 AC-2). The parent must
+/// resolve (uuid or key, tenant-scoped) to a `type='epic'` task on the SAME
+/// board that the caller can SEE (MAIN-76: a private epic the caller neither
+/// created nor is assigned is refused as unfound, so parenting cannot confirm
+/// its existence), and the task being parented must not itself be an epic (no
+/// nesting, which also makes cycles impossible). Every failure is a 400 naming
+/// the rule.
+async fn validate_parent(
+    db: &sqlx::PgPool,
+    tenant: TenantId,
+    viewer: UserId,
+    board: BoardId,
+    parent_ref: &str,
+    self_is_epic: bool,
+) -> ApiResult<TaskId> {
+    if self_is_epic {
+        return Err(ApiError::BadRequest(
+            "an epic cannot have a parent — epics do not nest".into(),
+        ));
+    }
+    let parent_id = crate::services::tasks::resolve_id(db, tenant, parent_ref)
+        .await
+        .map_err(|_| {
+            ApiError::BadRequest(format!(
+                "parent {parent_ref:?} is not a task in this tenant"
+            ))
+        })?;
+    let parent: Option<TaskItem> =
+        sqlx::query_as("SELECT * FROM tasks WHERE id = $1 AND tenant_id = $2")
+            .bind(parent_id)
+            .bind(tenant)
+            .fetch_optional(db)
+            .await
+            .map_err(ApiError::from)?;
+    let parent = parent.ok_or_else(|| {
+        ApiError::BadRequest(format!(
+            "parent {parent_ref:?} is not a task in this tenant"
+        ))
+    })?;
+    // A private epic the caller cannot see is treated as not a task in this
+    // tenant — parenting must not leak or confirm it (MAIN-76).
+    if !crate::services::tasks::visible_to(&parent, viewer) {
+        return Err(ApiError::BadRequest(format!(
+            "parent {parent_ref:?} is not a task in this tenant"
+        )));
+    }
+    if parent.type_ != "epic" {
+        return Err(ApiError::BadRequest(format!(
+            "parent {parent_ref:?} is not an epic — a task can only hang off a type='epic' task"
+        )));
+    }
+    if parent.board_id != board {
+        return Err(ApiError::BadRequest(
+            "parent epic is on a different board — a task and its epic must share a board".into(),
+        ));
+    }
+    Ok(parent_id)
+}
+
 #[async_trait]
 pub trait KanbanProvider: Send + Sync {
     fn id(&self) -> &'static str;
@@ -69,9 +128,12 @@ pub trait KanbanProvider: Send + Sync {
         created_by: Option<UserId>,
         req: CreateTaskRequest,
     ) -> ProviderResult<TaskItem>;
+    // `viewer` (MAIN-76/81): the caller, for the parent-epic visibility check
+    // when `req.parent` sets a new parent. `None` for a non-user caller.
     async fn update_task(
         &self,
         tenant: TenantId,
+        viewer: Option<UserId>,
         task: TaskId,
         req: UpdateTaskRequest,
     ) -> ProviderResult<TaskItem>;
@@ -137,6 +199,25 @@ impl KanbanProvider for LocalBoardProvider {
     ) -> ProviderResult<TaskItem> {
         validate_task_type(req.type_.as_deref())?;
         validate_visibility(req.visibility.as_deref())?;
+        // Resolve + validate the epic parent, if any (MAIN-81). Done before the
+        // insert transaction so a bad parent is a clean 400, not a rolled-back
+        // half-write. The creator is the viewer for the visibility check; a
+        // non-user caller (created_by None) sees only non-private epics.
+        let viewer = created_by.unwrap_or(UserId(uuid::Uuid::nil()));
+        let parent_task_id = match req.parent.as_deref() {
+            Some(p) => Some(
+                validate_parent(
+                    &self.db,
+                    tenant,
+                    viewer,
+                    board,
+                    p,
+                    req.type_.as_deref() == Some("epic"),
+                )
+                .await?,
+            ),
+            None => None,
+        };
         // Explicit id wins; then a semantic type, which is what automation
         // knows; then the board's first column.
         let column_id: ColumnId = match (req.column_id, req.column_type.as_deref()) {
@@ -181,8 +262,8 @@ impl KanbanProvider for LocalBoardProvider {
         let task: TaskItem = sqlx::query_as(
             "INSERT INTO tasks (id, tenant_id, board_id, column_id, title, description,
                                 position, workspace_id, priority, type, number,
-                                visibility, created_by)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) RETURNING *",
+                                visibility, created_by, parent_task_id)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14) RETURNING *",
         )
         .bind(TaskId::new())
         .bind(tenant)
@@ -199,6 +280,7 @@ impl KanbanProvider for LocalBoardProvider {
         // Omitted → the column DEFAULT ('team'), reproducing today's behaviour.
         .bind(req.visibility.as_deref().unwrap_or("team"))
         .bind(created_by)
+        .bind(parent_task_id)
         .fetch_one(&mut *tx)
         .await
         .map_err(ApiError::from)?;
@@ -240,26 +322,74 @@ impl KanbanProvider for LocalBoardProvider {
     async fn update_task(
         &self,
         tenant: TenantId,
+        viewer: Option<UserId>,
         task: TaskId,
         req: UpdateTaskRequest,
     ) -> ProviderResult<TaskItem> {
         validate_task_type(req.type_.as_deref())?;
         validate_visibility(req.visibility.as_deref())?;
-        // A type given instead of an id is resolved against the task's OWN
-        // board — the caller knows "move it to started", not which board this
-        // task happens to live on.
+
+        // Load the task's current type/board/parent once — the column-type
+        // resolution, the epic-retype guard, and the parent validation all need
+        // it, and one read keeps them consistent.
+        let (cur_type, cur_board, cur_parent): (String, BoardId, Option<TaskId>) = sqlx::query_as(
+            "SELECT type, board_id, parent_task_id FROM tasks WHERE id = $1 AND tenant_id = $2",
+        )
+        .bind(task)
+        .bind(tenant)
+        .fetch_optional(&self.db)
+        .await
+        .map_err(ApiError::from)?
+        .ok_or(ApiError::NotFound)?;
+
+        // AC-3: changing an epic's type away from `epic` while it still has
+        // children is refused (naming the count) — the children would be
+        // orphaned onto a non-epic parent.
+        if cur_type == "epic" && req.type_.as_deref().is_some_and(|t| t != "epic") {
+            let (children,): (i64,) =
+                sqlx::query_as("SELECT count(*) FROM tasks WHERE parent_task_id = $1")
+                    .bind(task)
+                    .fetch_one(&self.db)
+                    .await
+                    .map_err(ApiError::from)?;
+            if children > 0 {
+                return Err(ApiError::BadRequest(format!(
+                    "cannot change this epic's type: it still has {children} child ticket(s) — \
+                     detach them first"
+                ))
+                .into());
+            }
+        }
+
+        // Parent tri-state (AC-2/AC-3): absent = leave, null = detach, a ref =
+        // validate + set. `self_is_epic` is the EFFECTIVE type after this patch.
+        let effective_is_epic = req.type_.as_deref().unwrap_or(&cur_type) == "epic";
+        let viewer = viewer.unwrap_or(UserId(uuid::Uuid::nil()));
+        let (set_parent, parent_val): (bool, Option<TaskId>) = match &req.parent {
+            None => (false, None),
+            Some(None) => (true, None),
+            Some(Some(p)) => (
+                true,
+                Some(
+                    validate_parent(&self.db, tenant, viewer, cur_board, p, effective_is_epic)
+                        .await?,
+                ),
+            ),
+        };
+        // An epic may not KEEP a parent: retyping to epic while it has one (and
+        // not detaching it in the same patch) is refused (AC-2).
+        if effective_is_epic && cur_parent.is_some() && !(set_parent && parent_val.is_none()) {
+            return Err(ApiError::BadRequest(
+                "an epic cannot have a parent — detach it before making it an epic".into(),
+            )
+            .into());
+        }
+
+        // A type given instead of an id is resolved against the task's OWN board.
         let column_id = match (req.column_id, req.column_type.as_deref()) {
             (Some(c), _) => Some(c),
             (None, Some(ct)) => {
-                let (board,): (BoardId,) =
-                    sqlx::query_as("SELECT board_id FROM tasks WHERE id = $1 AND tenant_id = $2")
-                        .bind(task)
-                        .bind(tenant)
-                        .fetch_optional(&self.db)
-                        .await
-                        .map_err(ApiError::from)?
-                        .ok_or(ApiError::NotFound)?;
-                Some(crate::services::tasks::column_of_type(&self.db, board, ct).await?)
+                Some(crate::services::tasks::column_of_type(&self.db, cur_board, ct).await?)
             }
             (None, None) => None,
         };
@@ -283,6 +413,7 @@ impl KanbanProvider for LocalBoardProvider {
                 workspace_id = CASE WHEN $9 THEN $10 ELSE workspace_id END,
                 type = COALESCE($12, type),
                 visibility = COALESCE($13, visibility),
+                parent_task_id = CASE WHEN $14 THEN $15 ELSE parent_task_id END,
                 updated_at = now()
              WHERE id = $1 AND tenant_id = $2
                AND ($11::timestamptz IS NULL OR updated_at = $11)
@@ -303,6 +434,9 @@ impl KanbanProvider for LocalBoardProvider {
         .bind(req.type_.as_deref())
         // $13: absent leaves the visibility unchanged (COALESCE); validated above.
         .bind(req.visibility.as_deref())
+        // $14/$15: the parent tri-state (set flag + value); validated above.
+        .bind(set_parent)
+        .bind(parent_val)
         .fetch_optional(&self.db)
         .await
         .map_err(ApiError::from)?;
@@ -362,6 +496,7 @@ macro_rules! stub_provider {
             async fn update_task(
                 &self,
                 _: TenantId,
+                _: Option<UserId>,
                 _: TaskId,
                 _: UpdateTaskRequest,
             ) -> ProviderResult<TaskItem> {

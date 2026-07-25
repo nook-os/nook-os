@@ -585,6 +585,11 @@ pub struct TaskItem {
     #[serde(default)]
     pub created_by: Option<UserId>,
     pub workspace_id: Option<WorkspaceId>,
+    /// The epic this task hangs off, or `None` for a top-level task (MAIN-81).
+    /// The parent is always a `type='epic'` task on the same board; an epic
+    /// never has a parent (no nesting). Cleared to `None` if the epic is deleted.
+    #[serde(default)]
+    pub parent_task_id: Option<TaskId>,
     /// Node the triage scheduler chose (or you forced) to run this work.
     pub assigned_node_id: Option<NodeId>,
     pub branch: Option<String>,
@@ -612,6 +617,12 @@ pub struct TaskItem {
     #[serde(default)]
     #[sqlx(skip)]
     pub url: Option<String>,
+    /// The parent epic's human key (`NOOK-7`), when this task has a parent.
+    /// Computed like `key`, so a reader can show "under NOOK-7" without a second
+    /// lookup (MAIN-81).
+    #[serde(default)]
+    #[sqlx(skip)]
+    pub parent_key: Option<String>,
     /// Every label on this task. Populated by one query for a whole board
     /// rather than one per task.
     #[serde(default)]
@@ -709,6 +720,24 @@ pub struct RelatedTask {
     pub column_type: String,
 }
 
+/// One child ticket of an epic, for the epic's detail (MAIN-81). `done`/`total`
+/// is derivable by the reader: a child is done when its `column_type` is
+/// `completed` or `canceled`.
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
+pub struct EpicChild {
+    pub id: TaskId,
+    #[serde(default)]
+    pub key: Option<String>,
+    pub title: String,
+    #[serde(rename = "type")]
+    #[sqlx(rename = "type")]
+    pub type_: String,
+    pub priority: i32,
+    /// The column TYPE the child sits in — so progress is derivable inline.
+    pub column_type: String,
+    pub archived_at: Option<DateTime<Utc>>,
+}
+
 #[derive(Debug, Clone, Deserialize, ToSchema)]
 pub struct CreateRelationRequest {
     pub to_task: TaskId,
@@ -729,6 +758,10 @@ pub struct TaskDetail {
     /// Derived from the blockers' column types, never stored — a stored flag
     /// would drift the moment a blocker moved.
     pub is_blocked: bool,
+    /// When this task is an epic, the tickets filed under it (MAIN-81). Empty
+    /// for a non-epic or a childless epic.
+    #[serde(default)]
+    pub children: Vec<EpicChild>,
 }
 
 /// `POST /tasks/{id}/claim` — take the work without racing another agent.
@@ -1309,6 +1342,11 @@ pub struct CreateTaskRequest {
     /// defaults to `team`; an invalid value is rejected.
     #[serde(default)]
     pub visibility: Option<String>,
+    /// File this task under an epic (MAIN-81): a uuid OR a key (`NOOK-7`),
+    /// tenant-scoped. Must resolve to a `type='epic'` task on the same board.
+    /// Omitted → top-level.
+    #[serde(default)]
+    pub parent: Option<String>,
     /// Label NAMES, created for the tenant if new. Names rather than ids
     /// because a filer knows `agent-ready`, not its uuid.
     #[serde(default)]
@@ -1346,6 +1384,12 @@ pub struct UpdateTaskRequest {
     /// leaves it unchanged; an invalid value is rejected.
     #[serde(default)]
     pub visibility: Option<String>,
+    /// Re-file under an epic, or detach (MAIN-81). Absent = unchanged, `null` =
+    /// detach (become top-level), a uuid/key = move under that epic (validated
+    /// like `create`). Tri-state for the same reason `workspace_id` is.
+    #[serde(default, deserialize_with = "double_option")]
+    #[schema(value_type = Option<String>, nullable)]
+    pub parent: Option<Option<String>>,
     /// Optimistic-concurrency precondition. When set, the update applies only
     /// if the task's current `updated_at` still equals this; a mismatch makes
     /// NO change and returns `409 Conflict` (the body changed under the caller).

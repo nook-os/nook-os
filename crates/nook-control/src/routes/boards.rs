@@ -234,7 +234,7 @@ pub async fn update_task(
         .kanban
         .get(&provider)
         .ok_or(ApiError::NotFound)?
-        .update_task(auth.tenant_id, id, req)
+        .update_task(auth.tenant_id, Some(auth.user_id), id, req)
         .await
         .map_err(provider_err)?;
 

@@ -321,6 +321,7 @@ impl NookBackend for McpBackend {
         &self,
         title: String,
         description: Option<String>,
+        parent: Option<String>,
     ) -> anyhow::Result<TaskItem> {
         let tenant = self.tenant().await?;
         let boards = self.state.kanban.all_boards(tenant).await?;
@@ -348,6 +349,7 @@ impl NookBackend for McpBackend {
                     type_: None,
                     // Omitted → `team`, the tenant-visible default (MAIN-76).
                     visibility: None,
+                    parent,
                     // Never `agent-ready`: an agent that could label its own
                     // work ready would be approving it, and that gate is the
                     // load-bearing safety property of the whole loop.
@@ -510,9 +512,12 @@ impl NookBackend for McpBackend {
                 type_: None,
                 visibility: None,
                 workspace_id: None,
+                parent: None,
                 expected_updated_at: Some(cur.updated_at),
             };
-            match provider.update_task(tenant, id, req).await {
+            // No parent change here, so the viewer only gates a parent check
+            // that never runs — None is safe.
+            match provider.update_task(tenant, None, id, req).await {
                 Ok(t) => {
                     self.state
                         .registry
@@ -558,6 +563,7 @@ impl NookBackend for McpBackend {
                 // Type filtering isn't exposed over MCP's pick (parity with q).
                 type_: Vec::new(),
                 is_blocked: f.is_blocked,
+                parent: f.parent,
                 workspace: None,
                 q: None,
                 // Archived work is off the board and never pickable over MCP either.
@@ -710,6 +716,50 @@ impl NookBackend for McpBackend {
         .bind(priority.clamp(0, 4))
         .fetch_one(&self.state.db)
         .await?;
+        self.state
+            .registry
+            .publish(tenant, nook_proto::UiEvent::TaskChanged { task_id: id });
+        Ok(
+            crate::services::tasks::enrich_one(&self.state.db, &self.state.cfg.public_base_url, t)
+                .await?,
+        )
+    }
+
+    async fn set_task_parent(
+        &self,
+        task: String,
+        parent: Option<String>,
+    ) -> anyhow::Result<TaskItem> {
+        use crate::services::kanban::{KanbanProvider, LocalBoardProvider};
+        let tenant = self.tenant().await?;
+        let id = crate::services::tasks::resolve_id(&self.state.db, tenant, &task).await?;
+        let provider = LocalBoardProvider {
+            db: self.state.db.clone(),
+        };
+        // Through the provider so the epic validation (same board, type=epic,
+        // no nesting) applies. The tool always changes the parent: `Some(value)`
+        // files under that epic, `None` detaches — both are an explicit change.
+        let req = UpdateTaskRequest {
+            title: None,
+            description: None,
+            column_id: None,
+            column_type: None,
+            position: None,
+            assignee_user_id: None,
+            priority: None,
+            type_: None,
+            visibility: None,
+            workspace_id: None,
+            parent: Some(parent),
+            expected_updated_at: None,
+        };
+        // The caller is the viewer, so a parent that is a private epic they
+        // cannot see is refused (MAIN-76/81).
+        let viewer = self.user().await?;
+        let t = provider
+            .update_task(tenant, Some(viewer), id, req)
+            .await
+            .map_err(|e| anyhow::anyhow!(e.to_string()))?;
         self.state
             .registry
             .publish(tenant, nook_proto::UiEvent::TaskChanged { task_id: id });
