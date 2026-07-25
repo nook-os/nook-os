@@ -169,8 +169,7 @@ pub async fn install_script(State(state): State<AppState>, headers: HeaderMap) -
             // whatever shipped most recently — otherwise a fresh install's
             // first act is to update itself.
             &release_base_url(&state.cfg.releases_repo, VERSION),
-        )
-        .replace("@@VERSION@@", VERSION);
+        );
     (
         StatusCode::OK,
         [
@@ -254,43 +253,37 @@ mod tests {
         );
     }
 
-    /// The k8s hand-off (MAIN-25) is served, its chart version is substituted
-    /// from this control plane's own version like every other placeholder, and
-    /// it leaves the binary install paths intact (AC-3, AC-5).
+    /// The `--k8s` path installs the verified binary and hands off to
+    /// `nook k8s init` (MAIN-55 AC-6) — the wizard now owns the values file and
+    /// the install commands, so the installer no longer writes YAML or prints a
+    /// helm line itself. The binary install paths stay intact (AC-6).
     #[test]
-    fn the_installer_offers_the_k8s_handoff_with_a_pinned_chart_version() {
-        // The raw installer carries the k8s path and the version placeholder.
+    fn the_installer_hands_k8s_off_to_the_binary_wizard() {
         assert!(INSTALL_SH.contains("--k8s"), "the k8s flag");
         assert!(
-            INSTALL_SH.contains("oci://ghcr.io/nook-os/charts/nook-control"),
-            "the published chart coordinates"
-        );
-        assert!(
-            INSTALL_SH.contains("nook-values.yaml"),
-            "writes a starter values file"
-        );
-        assert!(
-            INSTALL_SH.contains("CHART_VERSION=\"@@VERSION@@\""),
-            "the chart version is a substituted placeholder (AC-3)"
+            INSTALL_SH.contains("k8s init"),
+            "the installer hands off to the `nook k8s init` wizard"
         );
 
-        // Served, @@VERSION@@ becomes this control plane's version — the same
-        // substitution `install_script` does — so the printed helm command is
-        // pinned to the release serving the installer.
-        let served = INSTALL_SH.replace("@@VERSION@@", VERSION);
+        // The old static hand-off is gone: no heredoc values file, no helm line
+        // baked into the shell, no chart-version placeholder.
         assert!(
-            served.contains(&format!("CHART_VERSION=\"{VERSION}\"")),
-            "the served installer pins the chart version"
+            !INSTALL_SH.contains("nook-values.yaml"),
+            "the static starter values file was removed (AC-6)"
         );
         assert!(
-            !served.contains("@@VERSION@@"),
-            "no version placeholder survives substitution"
+            !INSTALL_SH.contains("oci://ghcr.io/nook-os/charts/nook-control"),
+            "the helm command now comes from the binary, not the installer"
+        );
+        assert!(
+            !INSTALL_SH.contains("@@VERSION@@"),
+            "the chart-version placeholder was removed with the heredoc"
         );
 
-        // AC-5: the binary install paths are untouched by the additive k8s path.
+        // The binary install paths are untouched by the k8s rewrite.
         for marker in ["--node", "--control-plane", "server init", "set -- setup"] {
             assert!(
-                served.contains(marker),
+                INSTALL_SH.contains(marker),
                 "the binary install path lost {marker:?}"
             );
         }

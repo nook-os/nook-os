@@ -241,6 +241,9 @@ enum Command {
     /// Control-plane administration.
     #[command(subcommand)]
     Server(ServerCommand),
+    /// Kubernetes: generate a Helm values file and print the install commands.
+    #[command(subcommand)]
+    K8s(K8sCommand),
     /// Run the agent (persistent connection to the control plane).
     Run {
         /// LOCAL DEV ONLY: allow an unencrypted/unverified control plane.
@@ -560,6 +563,41 @@ async fn main() -> Result<()> {
             version: version.unwrap_or_else(|| format!("v{}", env!("CARGO_PKG_VERSION"))),
             dry_run,
         }),
+        Command::K8s(K8sCommand::Init {
+            release,
+            namespace,
+            host,
+            public_base_url,
+            web_origin,
+            ingress_class,
+            secret_name,
+            agent,
+            agent_url,
+            agent_tls_secret,
+            chart_version,
+        }) => {
+            let home = std::env::var("HOME").context("HOME is not set")?;
+            wizard::k8s::init(wizard::k8s::InitOptions {
+                release,
+                namespace,
+                host,
+                public_base_url,
+                web_origin,
+                ingress_class,
+                secret_name,
+                // Supplying an agent address or its TLS Secret is meaningless
+                // unless the listener is on, so either implies --agent.
+                agent: agent || agent_url.is_some() || agent_tls_secret.is_some(),
+                agent_url,
+                agent_tls_secret,
+                chart_version,
+                // The chart's version equals the release tag WITHOUT the `v`
+                // (the release workflow stamps it that way), so the bare crate
+                // version is the right default pin — not the v-prefixed image tag.
+                default_chart_version: env!("CARGO_PKG_VERSION").to_string(),
+                nook_dir: std::path::PathBuf::from(home).join(".nook"),
+            })
+        }
         Command::Update => update_binary().await,
         Command::Run {
             insecure_skip_verify,
@@ -759,6 +797,52 @@ enum ServerCommand {
         /// Print what would be written and exit.
         #[arg(long)]
         dry_run: bool,
+    },
+}
+
+#[derive(clap::Subcommand)]
+enum K8sCommand {
+    /// Write ~/.nook/k8s/<release>/values.yaml for a NookOS control plane and
+    /// print the exact `kubectl create secret` + `helm install` commands.
+    ///
+    /// A hand-off, not an install: it never runs helm or kubectl and writes no
+    /// secret material. With a terminal it prompts (flags pre-seed the answers);
+    /// with none it runs from the flags and requires --host.
+    Init {
+        /// Helm release name; also the per-release values folder. Default: nook.
+        #[arg(long)]
+        release: Option<String>,
+        /// Kubernetes namespace. Default: nook.
+        #[arg(long)]
+        namespace: Option<String>,
+        /// The external host that routes to NookOS. Required without a terminal.
+        #[arg(long)]
+        host: Option<String>,
+        /// PUBLIC_BASE_URL. Default: https://<host>.
+        #[arg(long)]
+        public_base_url: Option<String>,
+        /// WEB_ORIGIN. Default: the public base URL.
+        #[arg(long)]
+        web_origin: Option<String>,
+        /// ingressClassName. Empty leaves it unset (cluster default).
+        #[arg(long)]
+        ingress_class: Option<String>,
+        /// Name of the Kubernetes Secret the chart reads. Default: nook-control-secrets.
+        #[arg(long)]
+        secret_name: Option<String>,
+        /// Enable the agent mTLS listener so external nodes can join.
+        #[arg(long)]
+        agent: bool,
+        /// Agent listener public address (host:8081). Implies --agent.
+        #[arg(long)]
+        agent_url: Option<String>,
+        /// Name of the TLS Secret holding the agent cert. Implies --agent.
+        #[arg(long)]
+        agent_tls_secret: Option<String>,
+        /// Chart version to pin (helm --version). Empty pulls the latest chart.
+        /// Defaults to this binary's build version.
+        #[arg(long)]
+        chart_version: Option<String>,
     },
 }
 
