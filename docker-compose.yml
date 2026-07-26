@@ -109,7 +109,7 @@ services:
       SMTP_HOST: mailpit
       SMTP_PORT: "1025"
       SMTP_TLS: none
-      SMTP_FROM: "NookOS (dev) <no-reply@nook.local>"
+      SMTP_FROM: "NookOS dev <no-reply@nook.local>"
     ports:
       - "8080:8080"
       - "8081:8081"
