@@ -7,6 +7,23 @@
 //! providing a database.
 //!
 //! So: connect, migrate, and refuse to skip anywhere that says it is CI.
+//!
+//! ## Isolation convention (MAIN-93) — READ THIS BEFORE ASSERTING
+//!
+//! Every test shares ONE long-lived dev database, aged and full of other
+//! tenants' rows, and test binaries run concurrently. So:
+//!
+//! - **Never assert on global counts** (`SELECT count(*)` over a whole table,
+//!   `rows.len() == N` for an unscoped query). Scope every query and assertion
+//!   to rows THIS test created — its own tenant / person / ids.
+//! - **Never walk a global list to exhaustion.** A cursor/pagination test must
+//!   stop once it has collected its own rows, not page until `next_cursor` is
+//!   `None` — the global list is effectively unbounded here.
+//! - **Never assume the DB is empty or that you are its only writer.** Filter,
+//!   don't count; and don't `DELETE FROM <shared table>` to "reset" it.
+//!
+//! The rule is "scope your assertions to your own data," not "give every test
+//! its own database" — there is deliberately no per-test DB isolation.
 
 use sqlx::PgPool;
 

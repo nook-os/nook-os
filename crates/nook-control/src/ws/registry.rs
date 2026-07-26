@@ -213,8 +213,24 @@ impl Registry {
     }
 
     /// The listener calls this once its Postgres `LISTEN` is live.
+    ///
+    /// `send_replace`, not `send`: the readiness watch is held with no permanent
+    /// receiver (`watch::channel(false).0`), so `send` would be a no-op whenever
+    /// no caller happens to be awaiting `bus_ready()` at that instant, losing the
+    /// signal. `send_replace` updates the stored value unconditionally, so a
+    /// later `bus_ready()` reads the truth (MAIN-93 AC-2).
     pub(crate) fn mark_bus_ready(&self) {
-        let _ = self.bus_ready.send(true);
+        self.bus_ready.send_replace(true);
+    }
+
+    /// The listener calls this the moment its connection drops, BEFORE it loops
+    /// to reconnect. Without it, `bus_ready()` keeps reporting `true` through the
+    /// reconnect window even though no `LISTEN` is live, so a caller proceeds and
+    /// its NOTIFY is lost (MAIN-93 AC-2). Readiness is re-signalled only once the
+    /// new `LISTEN` completes. `send_replace` for the same reason as above — the
+    /// clear must land even when nobody is currently awaiting readiness.
+    pub(crate) fn mark_bus_unready(&self) {
+        self.bus_ready.send_replace(false);
     }
 
     /// Resolve once this instance's bus listener is actually listening, so a
@@ -944,6 +960,30 @@ mod agent_state_tests {
             r.set_agent_state(t, s, Some(1), "waiting"),
             "new window is a change"
         );
+    }
+
+    /// The bus-readiness re-arm (MAIN-93 AC-2): readiness is cleared when the
+    /// listener drops and only re-signalled once it re-LISTENs, so `bus_ready()`
+    /// never reports `true` during a window with no active listener. Exercised
+    /// directly over the watch, without a real Postgres LISTEN.
+    #[tokio::test]
+    async fn bus_readiness_re_arms_across_a_listener_drop() {
+        let r = Registry::new();
+        assert!(
+            !r.bus_ready().await,
+            "starts unready before the first LISTEN"
+        );
+        r.mark_bus_ready();
+        assert!(r.bus_ready().await, "ready once LISTEN is live");
+        // The listener connection drops → readiness must clear immediately.
+        r.mark_bus_unready();
+        assert!(
+            !r.bus_ready().await,
+            "unready during the reconnect window — the hole is closed"
+        );
+        // The reconnect completes its new LISTEN → ready again.
+        r.mark_bus_ready();
+        assert!(r.bus_ready().await, "ready again after re-LISTEN");
     }
 
     #[test]

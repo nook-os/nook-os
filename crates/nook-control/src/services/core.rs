@@ -836,14 +836,21 @@ mod db_tests {
         assert!(p1.rows.len() <= 2, "page is bounded by the limit");
         assert!(p1.next_cursor.is_some(), "a full page carries a cursor");
 
-        // Walk every page for this tenant via the cursor and collect our ids.
+        // Walk pages via the cursor and collect our ids, stopping once we have
+        // all of OUR rows — NOT paging the global list to exhaustion (MAIN-93
+        // AC-1). `operator_audit_page` is deployment-wide by design (NG-1), so
+        // on the shared dev DB the global list is effectively unbounded; our
+        // five rows are the newest, so a bounded walk reaches them in the first
+        // pages. Walking to `next_cursor == None` tripped the guard once the DB
+        // held more than ~40 audit rows.
         let mut collected = Vec::new();
         collected.extend(seen);
         let mut cursor = p1.next_cursor;
         let mut guard = 0;
-        while let Some(after) = cursor {
+        while cursor.is_some() && collected.len() < ids.len() {
+            let after = cursor.take().unwrap();
             guard += 1;
-            assert!(guard < 20, "cursor did not terminate");
+            assert!(guard < 20, "cursor did not reach our rows");
             let page = operator_audit_page(&db, None, Some(after), 2)
                 .await
                 .unwrap();
@@ -919,17 +926,25 @@ mod db_tests {
             return;
         };
         let t = tenant(&db, "audit-end").await;
-        let only = event(&db, t, "operator.audit", "user").await;
+        // A kind unique to this run, so the searched list is EXACTLY our rows —
+        // the shared dev DB holds many other `operator.*` events, and searching
+        // the common "operator.audit" would fill a 50-row page and never end
+        // (MAIN-93 AC-3). It still starts `operator.` so it is an operator event.
+        let kind = format!("operator.audit_end_{}", uuid::Uuid::now_v7().simple());
+        let only = event(&db, t, &kind, "user").await;
 
-        // A page larger than the (single) result: short page, no cursor.
-        let page = operator_audit_page(&db, Some("operator.audit".into()), None, 50)
+        // Search by that unique token: a list of exactly one row, so the page is
+        // short and the cursor is null.
+        let page = operator_audit_page(&db, Some(kind.clone()), None, 50)
             .await
             .unwrap();
-        assert!(page.rows.iter().any(|r| r.id == only));
-        // (Other tenants' rows may share the kind; what matters is the cursor is
-        // null whenever the page did not fill to the limit.)
         assert!(
-            page.rows.len() < 50,
+            page.rows.iter().any(|r| r.id == only),
+            "our row is in the page"
+        );
+        assert_eq!(page.rows.len(), 1, "only our unique-kind row matches");
+        assert!(
+            (page.rows.len() as i64) < 50,
             "the page did not fill, so there is no next page"
         );
         assert!(page.next_cursor.is_none(), "a short page ends the list");

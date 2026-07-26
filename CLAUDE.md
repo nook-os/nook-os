@@ -27,6 +27,13 @@ volume with cargo-watch, so it is both correctly configured and already warm.
 `NOOK_REQUIRE_DB=1` is set for you. Without it, every test needing Postgres
 returns early and the suite reports success having executed almost nothing.
 
+**Isolation convention: scope every assertion to rows the test created.** The
+tests share one long-lived, aged dev DB (full of other tenants' rows) and run
+concurrently. Never assert on global counts (`SELECT count(*)` over a whole
+table, `len() == N` on an unscoped query) and never walk a paginated/cursor list
+to global exhaustion — filter to your own tenant/person/ids and stop once you
+have your own rows. There is no per-test DB isolation by design (MAIN-93).
+
 ## Database workflow (bootstrap phase)
 
 - **Migrations are append-only.** `0001_init.sql` is the whole schema and is frozen. Schema changes are NEW numbered files starting at `0002_…`.
