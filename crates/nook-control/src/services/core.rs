@@ -3,6 +3,7 @@
 use chrono::{DateTime, Utc};
 use nook_types::*;
 use sqlx::PgPool;
+use uuid::Uuid;
 
 use crate::error::ApiResult;
 
@@ -134,6 +135,105 @@ pub async fn list_sessions(
     Ok(q.fetch_all(db).await?)
 }
 
+/// Who may see which activity events (MAIN-134). A tenant owner/admin — and a
+/// node credential, whose feed is unchanged — sees the whole tenant's activity
+/// (the audit view). A member sees only events they caused (`actor_id` is one of
+/// their user ids, across every tenant they act in), events on a node they own,
+/// or events on a session they created.
+///
+/// The SAME resolved sets drive both the REST list (bound as arrays into the
+/// `WHERE`) and the live bus (`allows`, evaluated per connection), so the
+/// Activity page and its live push can never disagree — a list-only filter would
+/// leak through the bus, which is exactly what the page's live buffer renders.
+pub enum ActivityScope {
+    /// Owner/admin/node: the unfiltered tenant feed.
+    All,
+    /// A member: only their own actions and their own resources' events. The
+    /// sets are resolved once (at request time for the list, at connect time for
+    /// the bus); a resource acquired mid-connection is picked up on the UI's
+    /// next reconnect. Fails closed — empty sets mean "see nothing", never "all".
+    Member {
+        user_ids: Vec<Uuid>,
+        node_ids: Vec<Uuid>,
+        session_ids: Vec<Uuid>,
+    },
+}
+
+impl ActivityScope {
+    /// Resolve the caller's activity scope from their role and owned resources.
+    pub async fn load(
+        db: &PgPool,
+        tenant: TenantId,
+        auth: &crate::auth::AuthCtx,
+    ) -> ApiResult<Self> {
+        // A node credential is not a person watching a feed — unchanged tenant
+        // view. (The role query lives here, not in shared auth code, so this
+        // stays independent of MAIN-132's is_tenant_admin.)
+        if !matches!(auth.principal, crate::auth::Principal::User) {
+            return Ok(Self::All);
+        }
+        let role: Option<(String,)> =
+            sqlx::query_as("SELECT role FROM users WHERE id = $1 AND tenant_id = $2")
+                .bind(auth.user_id)
+                .bind(tenant)
+                .fetch_optional(db)
+                .await?;
+        if matches!(
+            role.as_ref().map(|(r,)| r.as_str()),
+            Some("owner") | Some("admin")
+        ) {
+            return Ok(Self::All);
+        }
+        // A member: their person's user ids, the nodes that person owns, and the
+        // sessions those user ids created.
+        let person: Uuid = sqlx::query_scalar("SELECT person_id FROM users WHERE id = $1")
+            .bind(auth.user_id)
+            .fetch_one(db)
+            .await?;
+        let user_ids: Vec<Uuid> = sqlx::query_scalar("SELECT id FROM users WHERE person_id = $1")
+            .bind(person)
+            .fetch_all(db)
+            .await?;
+        let node_ids: Vec<Uuid> = sqlx::query_scalar(
+            "SELECT id FROM nodes WHERE tenant_id = $1 AND owner_person_id = $2",
+        )
+        .bind(tenant)
+        .bind(person)
+        .fetch_all(db)
+        .await?;
+        let session_ids: Vec<Uuid> = sqlx::query_scalar(
+            "SELECT id FROM sessions WHERE tenant_id = $1 AND created_by = ANY($2)",
+        )
+        .bind(tenant)
+        .bind(&user_ids)
+        .fetch_all(db)
+        .await?;
+        Ok(Self::Member {
+            user_ids,
+            node_ids,
+            session_ids,
+        })
+    }
+
+    /// Does this event reach the caller? The bus applies this per connection; the
+    /// list binds the same sets into SQL. `All` sees everything; a member sees an
+    /// event caused by them, on their node, or on their session.
+    pub fn allows(&self, e: &Event) -> bool {
+        match self {
+            Self::All => true,
+            Self::Member {
+                user_ids,
+                node_ids,
+                session_ids,
+            } => {
+                e.actor_id.is_some_and(|a| user_ids.contains(&a))
+                    || e.node_id.is_some_and(|n| node_ids.contains(&n.0))
+                    || e.session_id.is_some_and(|s| session_ids.contains(&s.0))
+            }
+        }
+    }
+}
+
 pub async fn events_page(
     db: &PgPool,
     tenant: TenantId,
@@ -141,24 +241,37 @@ pub async fn events_page(
     kind_prefix: Option<String>,
     before: Option<DateTime<Utc>>,
     limit: i64,
+    scope: &ActivityScope,
 ) -> ApiResult<EventsPage> {
     let limit = limit.clamp(1, 200);
-    let events: Vec<Event> = sqlx::query_as(
+    // The list filter is the SQL twin of `ActivityScope::allows`, bound from the
+    // same resolved sets — so page and bus enforce one rule (MAIN-134).
+    let mut sql = String::from(
         "SELECT * FROM events
          WHERE tenant_id = $1
            AND ($2::uuid IS NULL OR workspace_id = $2)
            AND ($3::text IS NULL OR kind LIKE $3 || '%')
-           AND ($4::timestamptz IS NULL OR occurred_at < $4)
-         ORDER BY occurred_at DESC, id DESC
-         LIMIT $5",
-    )
-    .bind(tenant)
-    .bind(workspace)
-    .bind(kind_prefix)
-    .bind(before)
-    .bind(limit)
-    .fetch_all(db)
-    .await?;
+           AND ($4::timestamptz IS NULL OR occurred_at < $4)",
+    );
+    if matches!(scope, ActivityScope::Member { .. }) {
+        sql.push_str(" AND (actor_id = ANY($6) OR node_id = ANY($7) OR session_id = ANY($8))");
+    }
+    sql.push_str(" ORDER BY occurred_at DESC, id DESC LIMIT $5");
+    let mut q = sqlx::query_as(&sql)
+        .bind(tenant)
+        .bind(workspace)
+        .bind(kind_prefix)
+        .bind(before)
+        .bind(limit);
+    if let ActivityScope::Member {
+        user_ids,
+        node_ids,
+        session_ids,
+    } = scope
+    {
+        q = q.bind(user_ids).bind(node_ids).bind(session_ids);
+    }
+    let events: Vec<Event> = q.fetch_all(db).await?;
     let next_cursor = if events.len() as i64 == limit {
         events.last().map(|e| e.occurred_at)
     } else {

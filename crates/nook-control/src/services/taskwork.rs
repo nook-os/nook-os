@@ -109,6 +109,9 @@ pub async fn dispatch(
         state,
         tenant,
         EventDraft::new("task.dispatched")
+            // Attribute the dispatch to its acting user, like every other
+            // lifecycle event, so activity scoping can place it (MAIN-134 AC-3).
+            .actor("user", viewer.0)
             .payload(serde_json::json!({ "task_id": task_id, "node_id": node })),
     )
     .await;
