@@ -89,12 +89,15 @@ export function useAnchoredMenu(
         close();
       }
     };
-    window.addEventListener("mousedown", away);
+    // Capture phase: a modal (or any ancestor) that stops mousedown propagation
+    // would otherwise swallow the click before this window-level listener saw it,
+    // and the menu would never close on an outside click. Capture runs first.
+    window.addEventListener("mousedown", away, true);
 
     return () => {
       window.removeEventListener("scroll", track, true);
       window.removeEventListener("resize", track);
-      window.removeEventListener("mousedown", away);
+      window.removeEventListener("mousedown", away, true);
     };
   }, [open, measure, close]);
 
