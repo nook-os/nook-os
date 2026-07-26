@@ -145,7 +145,8 @@ impl NookBackend for McpBackend {
 
     async fn list_sessions(&self, active_only: bool) -> anyhow::Result<Vec<Session>> {
         let tenant = self.tenant().await?;
-        Ok(core::list_sessions(&self.state.db, tenant, None, active_only).await?)
+        // MCP acts tenant-wide, not as one member — all sessions (MAIN-133).
+        Ok(core::list_sessions(&self.state.db, tenant, None, active_only, None).await?)
     }
 
     async fn start_session(

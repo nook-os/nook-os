@@ -113,23 +113,40 @@ pub async fn list_nodes(
     .await?)
 }
 
+/// List a tenant's sessions, optionally scoped to a single creator (MAIN-133).
+/// `creator = Some(user)` returns only sessions that user started — a member's
+/// own view, which naturally excludes `created_by NULL` (legacy/MCP) rows since
+/// `NULL = user` is never true. `creator = None` returns all sessions (the
+/// owner/admin metadata view, and the unchanged view MCP/dispatcher get). This
+/// is the metadata/list layer only; content access stays with `session_guard`.
 pub async fn list_sessions(
     db: &PgPool,
     tenant: TenantId,
     workspace: Option<WorkspaceId>,
     active_only: bool,
+    creator: Option<UserId>,
 ) -> ApiResult<Vec<Session>> {
     let mut sql = String::from("SELECT * FROM sessions WHERE tenant_id = $1");
+    let mut n = 1;
     if workspace.is_some() {
-        sql.push_str(" AND workspace_id = $2");
+        n += 1;
+        sql.push_str(&format!(" AND workspace_id = ${n}"));
+    }
+    if creator.is_some() {
+        n += 1;
+        sql.push_str(&format!(" AND created_by = ${n}"));
     }
     if active_only {
         sql.push_str(" AND status IN ('starting', 'running', 'detached')");
     }
     sql.push_str(" ORDER BY created_at DESC");
+    // Binds follow the same order the placeholders were numbered above.
     let mut q = sqlx::query_as(&sql).bind(tenant);
     if let Some(w) = workspace {
         q = q.bind(w);
+    }
+    if let Some(c) = creator {
+        q = q.bind(c);
     }
     Ok(q.fetch_all(db).await?)
 }

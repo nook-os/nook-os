@@ -45,6 +45,28 @@ pub struct SessionsQuery {
     pub active: Option<bool>,
 }
 
+/// Whether this caller sees every session's metadata, or only their own
+/// (MAIN-133). A tenant owner/admin sees all — for capacity and audit — as does
+/// a node credential, whose tenant-wide view is unchanged. A plain member sees
+/// only sessions they started. The role query lives here rather than in shared
+/// auth code so this listing scope stays independent of the node-visibility
+/// work (MAIN-132), which introduces a shared `is_tenant_admin`.
+async fn sees_all_sessions(state: &AppState, auth: &AuthCtx) -> ApiResult<bool> {
+    if !matches!(auth.principal, crate::auth::Principal::User) {
+        return Ok(true);
+    }
+    let role: Option<(String,)> =
+        sqlx::query_as("SELECT role FROM users WHERE id = $1 AND tenant_id = $2")
+            .bind(auth.user_id)
+            .bind(auth.tenant_id)
+            .fetch_optional(&state.db)
+            .await?;
+    Ok(matches!(
+        role.as_ref().map(|(r,)| r.as_str()),
+        Some("owner") | Some("admin")
+    ))
+}
+
 #[utoipa::path(get, path = "/api/v1/sessions",
     operation_id = "list_sessions",
     params(SessionsQuery),
@@ -54,12 +76,19 @@ pub async fn list(
     auth: AuthCtx,
     Query(q): Query<SessionsQuery>,
 ) -> ApiResult<Json<Vec<Session>>> {
+    // Members are scoped to the sessions they created; admins/nodes see all.
+    let creator = if sees_all_sessions(&state, &auth).await? {
+        None
+    } else {
+        Some(auth.user_id)
+    };
     Ok(Json(
         core::list_sessions(
             &state.db,
             auth.tenant_id,
             q.workspace_id,
             q.active.unwrap_or(false),
+            creator,
         )
         .await?,
     ))
