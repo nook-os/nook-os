@@ -1121,6 +1121,10 @@ table.nook-table tr.clickable { cursor: pointer; }
 .backlog-row:hover { background: var(--nook-bg-raised); }
 .backlog-row.selected { background: var(--nook-bg-raised); box-shadow: inset 2px 0 0 var(--nook-accent); }
 .backlog-row.blocked { opacity: 0.55; }
+/* An archived/done epic child stays under its epic, dimmed — a record of
+   finished work, not a live row. The class was applied but never styled. */
+.backlog-row.archived { opacity: 0.5; }
+.backlog-row.archived .backlog-row-title { text-decoration: line-through; }
 .backlog-row-title { color: var(--nook-fg-bright); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .backlog-row-preview {
   flex: 1;
@@ -1153,10 +1157,15 @@ table.nook-table tr.clickable { cursor: pointer; }
 /* A child's status chip: column type or "archived". */
 .backlog-status {
   font-size: 10px;
-  padding: 0 5px;
+  padding: 0 6px;
   border-radius: 8px;
-  background: var(--nook-border-bright);
-  color: var(--nook-fg-faint);
+  /* Was faint-on-bright (#4b5058 on #3a3f46) — near-invisible. Readable chip:
+     bright text on a subtle fill. */
+  background: var(--nook-selection);
+  color: var(--nook-fg);
+  border: 1px solid var(--nook-border-bright);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
   flex: 0 0 auto;
 }
 
@@ -3719,20 +3728,31 @@ a.toast-main:hover .toast-title { text-decoration: underline; }
 .type-select-trigger {
   display: inline-flex;
   align-items: center;
+  justify-content: center;
   gap: 4px;
-  background: transparent;
-  border: 1px solid transparent;
+  /* A comfortable click target — icon-only, it was a few px tall and near
+     impossible to hit. A visible resting box makes it read as a button too. */
+  min-height: 26px;
+  padding: 3px 8px;
+  background: var(--nook-bg-raised);
+  border: 1px solid var(--nook-border-bright);
   border-radius: var(--nook-radius);
-  padding: 1px 4px;
   cursor: pointer;
   font: inherit;
 }
 .type-select-trigger:hover { border-color: var(--nook-border-bright); }
-/* Portalled to <body> by useAnchoredMenu; the positioned (position:fixed)
-   element is the OUTER .type-menu-portal, so the z-index that lifts it above the
+/* The trigger box itself inherits the picked type's colour (icon + a subtle
+   toned border) — no nested pill. */
+.type-select-trigger.err { color: var(--nook-err); border-color: color-mix(in srgb, var(--nook-err) 35%, transparent); }
+.type-select-trigger.accent { color: var(--nook-accent); border-color: color-mix(in srgb, var(--nook-accent) 35%, transparent); }
+.type-select-trigger.info { color: var(--nook-info); border-color: color-mix(in srgb, var(--nook-info) 35%, transparent); }
+.type-select-trigger.ok { color: var(--nook-ok); border-color: color-mix(in srgb, var(--nook-ok) 35%, transparent); }
+.type-select-trigger.dim { color: var(--nook-fg-dim); border-color: var(--nook-border-bright); }
+.type-select-trigger .type-select-caret { color: var(--nook-fg-faint); flex: none; }
+/* The positioned (position:fixed) element useAnchoredMenu portals to <body> is
+   the OUTER .type-menu-portal, so the z-index that lifts the dropdown above the
    modal (backdrop z-index 200) must live here — a z-index on the static
-   .type-menu does nothing. Without it the dropdown renders behind the
-   task-detail panel and looks like it never opened. Matches .sel-menu. */
+   .type-menu does nothing, and the menu renders behind the task-detail panel. */
 .type-menu-portal {
   z-index: 500;
 }
@@ -3741,17 +3761,31 @@ a.toast-main:hover .toast-title { text-decoration: underline; }
   flex-direction: column;
   padding: 4px;
   gap: 2px;
-  /* Opaque, or the title/description behind reads through the dropdown. */
+  /* An opaque panel, or the title/description behind it reads through the
+     dropdown (it is portalled over the modal). Matches .sel-menu / .label-menu. */
   background: var(--nook-bg-panel);
   border: 1px solid var(--nook-border-bright);
   border-radius: var(--nook-radius);
   box-shadow: 0 10px 30px rgba(0, 0, 0, 0.55);
 }
+/* Bitbucket-style "Change work type" header above the options. */
+.type-menu-head {
+  padding: 3px 10px 6px;
+  margin-bottom: 2px;
+  border-bottom: 1px solid var(--nook-border);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--nook-fg-faint);
+  white-space: nowrap;
+}
 .type-menu-item {
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 4px 8px;
+  gap: 8px;
+  padding: 6px 10px;
+  min-width: 150px;
   border: 0;
   border-radius: var(--nook-radius);
   background: transparent;
@@ -3762,8 +3796,17 @@ a.toast-main:hover .toast-title { text-decoration: underline; }
   cursor: pointer;
 }
 .type-menu-item:hover,
-.type-menu-item.active { background: var(--nook-selection); }
+.type-menu-item.active { background: var(--nook-bg-raised); }
 .type-menu-item.current { box-shadow: inset 2px 0 0 var(--nook-accent); }
+/* Plain rows: the type icon carries the colour, the label is neutral text — no
+   nested pill/badge. */
+.type-menu-icon { flex: none; }
+.type-menu-label { color: var(--nook-fg); }
+.type-menu-item.err .type-menu-icon { color: var(--nook-err); }
+.type-menu-item.accent .type-menu-icon { color: var(--nook-accent); }
+.type-menu-item.info .type-menu-icon { color: var(--nook-info); }
+.type-menu-item.ok .type-menu-icon { color: var(--nook-ok); }
+.type-menu-item.dim .type-menu-icon { color: var(--nook-fg-dim); }
 
 /* The type control row sits just above the title in the task detail. */
 .task-type-row { margin-bottom: 4px; }

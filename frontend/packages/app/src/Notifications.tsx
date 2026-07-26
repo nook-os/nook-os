@@ -70,18 +70,18 @@ const TONE: Record<string, string> = {
   error: "err",
 };
 
-/** Errors stay until dismissed; everything else fades. */
-function lifetimeMs(level: string): number | null {
-  return level === "error" ? null : level === "warning" ? 12000 : 7000;
+/** How long a toast lingers before it fades on its own. An error lingers
+ *  longest — a failed save is worth noticing — but still clears rather than
+ *  sitting on screen forever; the X dismisses it sooner. */
+function lifetimeMs(level: string): number {
+  return level === "error" ? 12000 : level === "warning" ? 10000 : 7000;
 }
 
 function Toast({ n }: { n: Notification }) {
   const dismiss = useToasts((s) => s.dismiss);
 
   useEffect(() => {
-    const ms = lifetimeMs(n.level);
-    if (ms === null) return;
-    const t = setTimeout(() => dismiss(n.id), ms);
+    const t = setTimeout(() => dismiss(n.id), lifetimeMs(n.level));
     return () => clearTimeout(t);
   }, [n.id, n.level, dismiss]);
 

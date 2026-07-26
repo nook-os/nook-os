@@ -996,10 +996,23 @@ export function BoardPage() {
         (a.created_at < b.created_at ? -1 : 1),
     );
 
-  // The Backlog tab grouped by epic (MAIN-83). Epics and their children come from
-  // the same `visible` set; the epic picker/menu use the unfiltered epic list so
-  // you can always file under any epic.
-  const backlogGroups = groupByEpic(visible, colTypeById);
+  // The Backlog tab grouped by epic (MAIN-83). An epic's children stay visible
+  // UNDER their epic even when archived/done — dimmed, not hidden — so an epic
+  // keeps showing the work it has finished until the epic itself is archived or
+  // its queue is done. Everything else (the epics themselves, the "No epic"
+  // bucket, the kanban board) still respects the archive toggle via `visible`.
+  // So group over `visible` PLUS any archived task that is a child of an epic and
+  // is not already in `visible` (it would be, with the toggle on).
+  const epicIds = new Set(detail.tasks.filter((t) => t.type === "epic").map((t) => t.id));
+  const inVisible = new Set(visible.map((t) => t.id));
+  const archivedEpicChildren = detail.tasks.filter(
+    (t) =>
+      !inVisible.has(t.id) &&
+      t.archived_at &&
+      t.parent_task_id &&
+      epicIds.has(t.parent_task_id),
+  );
+  const backlogGroups = groupByEpic([...visible, ...archivedEpicChildren], colTypeById);
   const epics = detail.tasks.filter((t) => t.type === "epic");
 
   const addTask = async (columnId: string, title: string) => {
