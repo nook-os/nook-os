@@ -162,7 +162,14 @@ async fn serve(db: sqlx::PgPool, cfg: Config) -> Result<()> {
     tracing::info!(%bind, "control plane listening");
 
     let drain_rx = shutdown_rx.clone();
-    let serve = axum::serve(listener, router).with_graceful_shutdown(async move {
+    // `into_make_service_with_connect_info` exposes the peer socket address to
+    // handlers via `ConnectInfo<SocketAddr>` — the invite-preview rate limiter's
+    // client-IP resolver needs the real peer to decide whether to believe XFF.
+    let serve = axum::serve(
+        listener,
+        router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(async move {
         wait_for_shutdown(drain_rx).await;
         tracing::info!("shutting down — releasing node leases");
         // Nodes we own reconnect elsewhere and re-lease; mark them offline

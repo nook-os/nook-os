@@ -59,6 +59,33 @@ macro_rules! oidc_client {
 pub struct LoginParams {
     /// Path to return to after login; must be app-relative.
     next: Option<String>,
+    /// An OIDC `prompt` hint to forward to the IdP. WHITELISTED: only the exact
+    /// value `create` is passed through (so the invite landing can ask an IdP to
+    /// open its sign-up screen); anything else is dropped, never reflected.
+    prompt: Option<String>,
+    /// An OIDC `login_hint` (an email to pre-fill at the IdP). Forwarded only
+    /// when it looks like a plausible address; otherwise dropped, so this cannot
+    /// become an open reflector for arbitrary strings.
+    login_hint: Option<String>,
+}
+
+/// A `login_hint` we are willing to forward: a plausible email — one `@`, a dot
+/// after it, no whitespace, and non-empty on both sides. Deliberately lax (real
+/// validation is the IdP's job) but enough to refuse junk.
+fn plausible_email(s: &str) -> bool {
+    let s = s.trim();
+    if s.is_empty() || s.chars().any(char::is_whitespace) {
+        return false;
+    }
+    match s.split_once('@') {
+        Some((local, domain)) => {
+            !local.is_empty()
+                && domain.contains('.')
+                && !domain.starts_with('.')
+                && !domain.ends_with('.')
+        }
+        None => false,
+    }
 }
 
 /// GET /api/v1/auth/login — redirect to the configured IdP.
@@ -84,6 +111,22 @@ pub async fn login(
             auth_req = auth_req.add_scope(Scope::new(scope.to_string()));
         }
     }
+
+    // Forward `prompt=create` so the invite landing's "Create account" action
+    // lands the invitee on the IdP's sign-up screen. Whitelisted to that one
+    // value; any other prompt is ignored. IdPs that don't understand it fall
+    // back to their normal screen, so the flow still works.
+    if params.prompt.as_deref() == Some("create") {
+        auth_req = auth_req.add_extra_param("prompt", "create");
+    }
+    // Forward a pre-fill email hint, but only a plausible one — never an
+    // arbitrary string reflected to the IdP.
+    if let Some(hint) = params.login_hint.as_deref().map(str::trim) {
+        if plausible_email(hint) {
+            auth_req = auth_req.add_extra_param("login_hint", hint);
+        }
+    }
+
     let (auth_url, csrf, nonce) = auth_req.set_pkce_challenge(pkce_challenge).url();
 
     let next = params
@@ -614,6 +657,48 @@ mod tests {
             .split("\npub async fn ")
             .next()
             .expect("handler body")
+    }
+
+    #[test]
+    fn login_hint_is_only_forwarded_for_a_plausible_email() {
+        use super::plausible_email;
+        assert!(plausible_email("ryan@example.com"));
+        assert!(plausible_email("a.b+c@sub.example.co"));
+        // Junk and reflector bait are refused.
+        assert!(!plausible_email("not-an-email"));
+        assert!(!plausible_email("no-domain@"));
+        assert!(!plausible_email("@no-local.com"));
+        assert!(!plausible_email("spaces in@it.com"));
+        assert!(!plausible_email("trailing@dot."));
+        assert!(!plausible_email("nodot@localhost"));
+        assert!(!plausible_email(""));
+    }
+
+    /// The login handler must whitelist `prompt` to exactly `create` and only
+    /// forward a validated `login_hint` — asserted at the source, because a
+    /// reflected arbitrary prompt/hint is invisible in a happy-path test.
+    #[test]
+    fn login_forwards_only_whitelisted_prompt_and_validated_hint() {
+        let src = include_str!("auth.rs");
+        let body = src
+            .split("pub async fn login(")
+            .nth(1)
+            .expect("login handler")
+            .split("\npub async fn ")
+            .next()
+            .expect("handler body");
+        assert!(
+            body.contains("Some(\"create\")"),
+            "prompt must be whitelisted to exactly \"create\""
+        );
+        assert!(
+            body.contains("plausible_email(hint)"),
+            "login_hint must be validated before it is forwarded"
+        );
+        assert!(
+            body.contains("add_extra_param"),
+            "the params must reach the authorize request"
+        );
     }
 
     #[test]

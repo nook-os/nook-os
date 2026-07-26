@@ -170,6 +170,29 @@ pub struct Config {
     pub mail_max_per_month: Option<i64>,
     /// Optional daily cap, same semantics as the monthly one. Unset by default.
     pub mail_max_per_day: Option<i64>,
+
+    // ── Trusted reverse proxies ─────────────────────────────────────────
+    /// CIDRs whose `X-Forwarded-For` header we believe. Empty by default, which
+    /// means NO proxy is trusted and the peer socket IP is always the client —
+    /// the safe default, because an attacker who can set XFF must not be able to
+    /// spoof their source for the per-IP rate limiter. Set `NOOK_TRUSTED_PROXIES`
+    /// (comma-separated CIDRs) to the edge proxy's address range when one fronts
+    /// this service. See `crate::client_ip::resolve_client_ip`.
+    pub trusted_proxies: Vec<ipnet::IpNet>,
+}
+
+/// Parse one entry of `NOOK_TRUSTED_PROXIES`: a CIDR (`10.0.0.0/8`) or a bare
+/// address (`10.0.0.5`, taken as a single host). Unparseable entries are
+/// dropped rather than failing the boot — a typo in one proxy must not take the
+/// whole service down, and a dropped entry only ever narrows what we trust.
+fn parse_trusted_proxy(s: &str) -> Option<ipnet::IpNet> {
+    let s = s.trim();
+    if s.is_empty() {
+        return None;
+    }
+    s.parse::<ipnet::IpNet>()
+        .ok()
+        .or_else(|| s.parse::<std::net::IpAddr>().ok().map(ipnet::IpNet::from))
 }
 
 fn env_opt(key: &str) -> Option<String> {
@@ -262,6 +285,11 @@ impl Config {
                     .unwrap_or(100),
             ),
             mail_max_per_day: env_opt("MAIL_MAX_PER_DAY").and_then(|v| v.parse().ok()),
+
+            // No proxy is trusted unless named, so XFF is ignored by default.
+            trusted_proxies: env_opt("NOOK_TRUSTED_PROXIES")
+                .map(|v| v.split(',').filter_map(parse_trusted_proxy).collect())
+                .unwrap_or_default(),
         };
 
         if cfg.is_production() && cfg.auth_dev_mode {
@@ -352,6 +380,7 @@ impl Config {
             mail_notifications_enabled: false,
             mail_max_per_month: Some(100),
             mail_max_per_day: None,
+            trusted_proxies: Vec::new(),
         }
     }
 }

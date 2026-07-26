@@ -34,6 +34,10 @@ pub struct AppState {
     pub mcp_auth_cache: Arc<dashmap::DashMap<u64, std::time::Instant>>,
     /// Per-tenant budget for `POST /notify`, which node tokens may call.
     pub notify_limit: Arc<crate::services::notify::RateLimiter>,
+    /// Per-IP budget for the UNAUTHENTICATED invite preview. Keyed by a uuid
+    /// derived from the resolved client IP (see `crate::client_ip`), so a
+    /// signed-out endpoint that does real DB work cannot be hammered anonymously.
+    pub preview_limit: Arc<crate::services::notify::RateLimiter>,
     cookie_key: Key,
 }
 
@@ -66,6 +70,7 @@ impl AppState {
             oidc: oidc.map(Arc::new),
             mcp_auth_cache: Arc::new(dashmap::DashMap::new()),
             notify_limit: Arc::new(Default::default()),
+            preview_limit: Arc::new(Default::default()),
             cookie_key,
         }
     }

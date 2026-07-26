@@ -202,6 +202,26 @@ pub struct AcceptInviteResult {
     pub message: String,
 }
 
+/// Unauthenticated preview of an invite, so the `/accept` landing can name who
+/// invited a signed-out visitor into which tenant before they sign in.
+///
+/// Every non-usable token — missing, expired, revoked, or already accepted —
+/// returns the SAME `valid: false` shell with empty fields, so the response
+/// reveals nothing that distinguishes them. The email is MASKED
+/// (`r…@example.com`): enough for the invitee to recognise their own address,
+/// not enough to harvest it.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
+pub struct InvitePreview {
+    /// The token is pending and unexpired — the landing may show the invite.
+    pub valid: bool,
+    /// Inviting tenant's display name. Empty when `valid` is false.
+    pub tenant: String,
+    /// Inviter's display name. Empty when `valid` is false.
+    pub inviter: String,
+    /// The invitee's email, masked. Empty when `valid` is false.
+    pub email: String,
+}
+
 /// Unauthenticated sign-in capabilities, so the login screen only offers what
 /// this instance actually supports.
 /// Hand an identity provider's ID token to the control plane, get one of ours.

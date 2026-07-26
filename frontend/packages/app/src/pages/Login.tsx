@@ -13,7 +13,17 @@ function messageOf(error: unknown, fallback: string): string {
   return fallback;
 }
 
+/** Where to land after signing in: the `next` query param when it is a safe
+ *  app-relative path, else the root. Preserving it is what carries an invitee
+ *  back to `/accept?token=…` through a full sign-in (MAIN-97 AC-3/AC-6). */
+function safeNext(): string {
+  const next = new URLSearchParams(window.location.search).get("next");
+  return next && next.startsWith("/") && !next.startsWith("//") ? next : "/";
+}
+
 export function Login() {
+  // Where a successful sign-in returns to — read once, at render.
+  const next = safeNext();
   // Only offer sign-in methods this instance actually supports.
   const { data: providers } = useQuery({
     queryKey: ["auth", "providers"],
@@ -61,7 +71,9 @@ export function Login() {
       body: email ? { email, display_name: email.split("@")[0] } : {},
     });
     if (!error && response.ok) {
-      window.location.href = "/";
+      // Return to where sign-in was requested from (e.g. an invite), not
+      // unconditionally to the root, so the location is not discarded (AC-3).
+      window.location.href = next;
       return;
     }
     setError(messageOf(error, "Dev sign-in failed"));
@@ -103,7 +115,9 @@ export function Login() {
       );
       return;
     }
-    window.location.reload();
+    // Land back on the originally requested page (the invite, say) rather than
+    // reloading in place, so `next` is preserved through a local sign-in (AC-6).
+    window.location.href = next;
   };
 
   const nothingAvailable =
@@ -169,7 +183,10 @@ export function Login() {
         {showLocal && providers?.oidc && <div className="login-or">or</div>}
 
         {providers?.oidc && (
-          <a className="btn" href="/api/v1/auth/login">
+          <a
+            className="btn"
+            href={`/api/v1/auth/login?next=${encodeURIComponent(next)}`}
+          >
             Sign in with your identity provider
           </a>
         )}
