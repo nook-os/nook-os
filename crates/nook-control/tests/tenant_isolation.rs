@@ -332,10 +332,79 @@ async fn node_tokens_are_confined_to_their_own_machine() {
         node.require_node_self(other_id).is_err(),
         "a node token reached another machine: lateral movement is open"
     );
+    // `require_node_self` still waves a human through — it is the MANAGEMENT
+    // confinement (kill/rescan/update/delete), and driving other nodes there is
+    // the whole point of the control plane. It is no longer the SPAWN gate.
     assert!(
         human.require_node_self(other_id).is_ok(),
-        "driving other nodes is what the control plane is for"
+        "management ops still let a human act on any node in their tenant",
     );
+
+    // MAIN-130: the inverted expectation. `require_node_self` used to be the
+    // authority for STARTING A SESSION too, so any human sailed onto any node —
+    // the spawn vuln. Spawning now goes through `require_node_owner`, which
+    // refuses a human on a node they do not own. Asserted here against a real
+    // node, with the comprehensive owner/member/admin/ownerless/MCP matrix in
+    // tests/node_owner.rs.
+    let Some(pool) = test_pool().await else {
+        return;
+    };
+    let _guard = SERIAL.lock().await;
+    let state = AppState::new(pool.clone(), test_config(), None).await;
+
+    let tenant = TenantId(Uuid::now_v7());
+    sqlx::query("INSERT INTO tenants (id, name, slug) VALUES ($1, $2, $2)")
+        .bind(tenant)
+        .bind(format!("iso-{}", tenant.0.simple()))
+        .execute(&pool)
+        .await
+        .expect("tenant");
+    // A member whose person owns NO node, and a node owned by someone else.
+    let member = UserId(Uuid::now_v7());
+    sqlx::query(
+        "INSERT INTO users (id, tenant_id, person_id, display_name, email, role)
+         VALUES ($1, $2, $3, 'M', $4, 'member')",
+    )
+    .bind(member)
+    .bind(tenant)
+    .bind(Uuid::now_v7())
+    .bind(format!("m-{}@example.test", member.0.simple()))
+    .execute(&pool)
+    .await
+    .expect("member");
+    let their_node = NodeId(Uuid::now_v7());
+    sqlx::query(
+        "INSERT INTO nodes (id, tenant_id, name, node_token_hash, status, owner_person_id)
+         VALUES ($1, $2, $3, $4, 'offline', $5)",
+    )
+    .bind(their_node)
+    .bind(tenant)
+    .bind(format!("nd-{}", their_node.0.simple()))
+    .bind(format!("h-{}", their_node.0.simple()))
+    .bind(Uuid::now_v7()) // owned by a different person
+    .execute(&pool)
+    .await
+    .expect("node");
+
+    let member_ctx = AuthCtx {
+        session_id: AuthSessionId(Uuid::nil()),
+        user_id: member,
+        tenant_id: tenant,
+        principal: Principal::User,
+        cookie_session: false,
+    };
+    assert!(
+        member_ctx
+            .require_node_owner(&state, their_node)
+            .await
+            .is_err(),
+        "MAIN-130: a human must be refused starting a session on a node they do not own",
+    );
+
+    let _ = sqlx::query("DELETE FROM tenants WHERE id = $1")
+        .bind(tenant)
+        .execute(&pool)
+        .await;
 }
 
 /// MAIN-29: an OIDC login whose IdP asserts `email_verified=true` stamps the
