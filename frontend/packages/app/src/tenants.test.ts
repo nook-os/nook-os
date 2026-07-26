@@ -12,6 +12,7 @@ const tenant = (id: string, name: string, current: boolean): TenantMembership =>
 });
 
 const me = (tenants: TenantMembership[]): MeResponse => ({
+  person_id: "p1",
   user: {
     id: "u1",
     tenant_id: tenants.find((t) => t.current)?.id ?? "t1",

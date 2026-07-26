@@ -18,6 +18,13 @@ export function NodesPage() {
     queryKey: ["nodes"],
     queryFn: async () => (await api.GET("/api/v1/nodes")).data ?? [],
   });
+  // The caller's person id, so we can mirror the server's rule (MAIN-132): a
+  // node you own is spawnable; a teammate's is manage-only. Same `["me"]` key
+  // the rest of the app shares, so this rides the existing fetch.
+  const { data: me } = useQuery({
+    queryKey: ["me"],
+    queryFn: async () => (await api.GET("/api/v1/auth/me")).data ?? null,
+  });
   // What this control plane expects every agent to be — the same string it
   // sends in `RegisterAck`, so the column shows the comparison the node makes
   // rather than a second opinion about it.
@@ -56,7 +63,7 @@ export function NodesPage() {
         }
       >
         {(nodes ?? []).length === 0 ? (
-          <Empty>No nodes. Add one and run `nook join` on that machine.</Empty>
+          <Empty>No machines yet — run `nook join` on a computer to add one.</Empty>
         ) : (
           <table className="nook-table">
             <thead>
@@ -77,6 +84,11 @@ export function NodesPage() {
               {(nodes ?? []).map((n) => {
                 const caps = n.capabilities as Record<string, unknown>;
                 const status = nodeStatus[n.id] ?? n.status;
+                // Only the owner may open a session on a node (MAIN-130); an
+                // admin viewing a teammate's node still gets manage (update /
+                // remove), just no terminal. Gate on ownership, not role, so it
+                // reads correctly for members and admins alike.
+                const owned = n.owner_person_id === me?.person_id;
                 return (
                   <tr key={n.id}>
                     <td>
@@ -129,7 +141,7 @@ export function NodesPage() {
                           justifyContent: "flex-end",
                         }}
                       >
-                      {status === "online" && (
+                      {status === "online" && owned && (
                         <button
                           className="btn small"
                           title={`open a shell on ${n.name}`}

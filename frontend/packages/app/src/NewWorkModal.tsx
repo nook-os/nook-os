@@ -61,6 +61,13 @@ function NewWorkModal() {
     queryKey: ["nodes"],
     queryFn: async () => (await api.GET("/api/v1/nodes")).data ?? [],
   });
+  // Own vs. teammate's: the server refuses a session start on a node you don't
+  // own (MAIN-130), so a non-owned node is never a spawn target. Same `["me"]`
+  // key the rest of the app uses — this rides the existing fetch (MAIN-132).
+  const { data: me } = useQuery({
+    queryKey: ["me"],
+    queryFn: async () => (await api.GET("/api/v1/auth/me")).data ?? null,
+  });
   const { data: workspaces } = useQuery({
     queryKey: ["workspaces"],
     queryFn: async () => (await api.GET("/api/v1/workspaces")).data ?? [],
@@ -70,7 +77,13 @@ function NewWorkModal() {
     queryFn: async () => (await api.GET("/api/v1/git-credentials")).data ?? [],
   });
 
-  const online = (nodes ?? []).filter((n) => n.status === "online");
+  // Starting work here IS a spawn, so only offer nodes the caller owns — a
+  // teammate's node would be refused server-side (MAIN-130). Members only ever
+  // receive their own nodes anyway; the ownership gate makes it correct for an
+  // admin who also sees the fleet.
+  const online = (nodes ?? []).filter(
+    (n) => n.status === "online" && n.owner_person_id === me?.person_id,
+  );
   const q = query.trim();
 
   // New-tab intent: URL → clone, otherwise → new project.
@@ -443,12 +456,21 @@ function NewWorkModal() {
                 <span className="faint"> · Auto → {effectiveNode.name}</span>
               )}
             </label>
-            <select className="input" value={nodeId} onChange={(e) => setNodeId(e.target.value)}>
-              <option value={AUTO}>Auto (best available)</option>
-              {eligibleNodes.map((n) => (
-                <option key={n.id} value={n.id}>{n.name} · {n.platform}</option>
-              ))}
-            </select>
+            {(nodes ?? []).length === 0 ? (
+              // No machine to run on — browse-only, so explain rather than
+              // showing an empty picker that can't start anything (MAIN-132).
+              <div className="empty" style={{ height: "auto", padding: 14 }}>
+                No machines yet — run <span className="mono">nook join</span> on a
+                computer to add one.
+              </div>
+            ) : (
+              <select className="input" value={nodeId} onChange={(e) => setNodeId(e.target.value)}>
+                <option value={AUTO}>Auto (best available)</option>
+                {eligibleNodes.map((n) => (
+                  <option key={n.id} value={n.id}>{n.name} · {n.platform}</option>
+                ))}
+              </select>
+            )}
           </div>
 
           <div className="field">
