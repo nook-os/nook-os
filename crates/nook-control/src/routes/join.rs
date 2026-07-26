@@ -22,6 +22,42 @@ pub fn random_token(prefix: &str, len: usize) -> String {
     format!("{prefix}{body}")
 }
 
+/// The PERSON who should own a node enrolled with this token (MAIN-119): the
+/// token's minter (`join_tokens.created_by` → `users.person_id`), falling back
+/// to the tenant owner's person when the token recorded no minter (a legacy
+/// token) or the minter's user row is gone. `None` only when the tenant has no
+/// owner-role user to fall back to — the same guarantee the backfill makes.
+async fn owner_person(
+    db: &sqlx::PgPool,
+    tenant: TenantId,
+    minter: Option<uuid::Uuid>,
+) -> Option<uuid::Uuid> {
+    if let Some(user) = minter {
+        let person: Option<(uuid::Uuid,)> =
+            sqlx::query_as("SELECT person_id FROM users WHERE id = $1 AND tenant_id = $2")
+                .bind(user)
+                .bind(tenant)
+                .fetch_optional(db)
+                .await
+                .ok()
+                .flatten();
+        if let Some((p,)) = person {
+            return Some(p);
+        }
+    }
+    // Fallback: the tenant owner's person.
+    sqlx::query_as::<_, (uuid::Uuid,)>(
+        "SELECT person_id FROM users WHERE tenant_id = $1 AND role = 'owner'
+         ORDER BY created_at LIMIT 1",
+    )
+    .bind(tenant)
+    .fetch_optional(db)
+    .await
+    .ok()
+    .flatten()
+    .map(|(p,)| p)
+}
+
 /// POST /api/v1/nodes/join-tokens — mint a token to enroll a new machine.
 #[utoipa::path(post, path = "/api/v1/nodes/join-tokens",
     responses((status = 200, body = CreateJoinTokenResponse)))]
@@ -79,17 +115,22 @@ pub async fn join(
     State(state): State<AppState>,
     Json(req): Json<JoinRequest>,
 ) -> ApiResult<Json<JoinResponse>> {
-    let row: Option<(JoinTokenId, TenantId)> = sqlx::query_as(
+    let row: Option<(JoinTokenId, TenantId, Option<uuid::Uuid>)> = sqlx::query_as(
         "UPDATE join_tokens SET used_at = now()
          WHERE token_hash = $1 AND expires_at > now()
-         RETURNING id, tenant_id",
+         RETURNING id, tenant_id, created_by",
     )
     .bind(hash_token(&req.token))
     .fetch_optional(&state.db)
     .await?;
-    let Some((_, tenant_id)) = row else {
+    let Some((_, tenant_id, created_by)) = row else {
         return Err(ApiError::Unauthorized);
     };
+
+    // The person who minted the token owns the node (MAIN-119) — recorded, not
+    // yet enforced. On a re-join of an existing node COALESCE keeps whatever
+    // owner is already recorded, so a re-enroll never silently transfers it.
+    let owner = owner_person(&state.db, tenant_id, created_by).await;
 
     let name = if req.name.trim().is_empty() {
         req.hostname.clone()
@@ -99,12 +140,13 @@ pub async fn join(
     let node_token = random_token("nook_node_", 40);
 
     let (node_id,): (NodeId,) = sqlx::query_as(
-        "INSERT INTO nodes (id, tenant_id, name, hostname, platform, node_token_hash, status)
-         VALUES ($1, $2, $3, $4, $5, $6, 'offline')
+        "INSERT INTO nodes (id, tenant_id, name, hostname, platform, node_token_hash, status, owner_person_id)
+         VALUES ($1, $2, $3, $4, $5, $6, 'offline', $7)
          ON CONFLICT (tenant_id, name) DO UPDATE SET
             hostname = EXCLUDED.hostname,
             platform = EXCLUDED.platform,
             node_token_hash = EXCLUDED.node_token_hash,
+            owner_person_id = COALESCE(nodes.owner_person_id, EXCLUDED.owner_person_id),
             updated_at = now()
          RETURNING id",
     )
@@ -114,6 +156,7 @@ pub async fn join(
     .bind(&req.hostname)
     .bind(&req.platform)
     .bind(hash_token(&node_token))
+    .bind(owner)
     .fetch_one(&state.db)
     .await?;
 
@@ -153,18 +196,20 @@ pub async fn enroll(
 ) -> ApiResult<Json<EnrollResponse>> {
     // Spend the token first: a CSR that fails to sign must not leave a token
     // usable for a second attempt by someone else.
-    let row: Option<(uuid::Uuid, uuid::Uuid)> = sqlx::query_as(
+    let row: Option<(uuid::Uuid, uuid::Uuid, Option<uuid::Uuid>)> = sqlx::query_as(
         "UPDATE join_tokens SET used_at = now()
          WHERE token_hash = $1 AND expires_at > now()
-         RETURNING id, tenant_id",
+         RETURNING id, tenant_id, created_by",
     )
     .bind(hash_token(&req.token))
     .fetch_optional(&state.db)
     .await?;
-    let Some((_, tenant_uuid)) = row else {
+    let Some((_, tenant_uuid, created_by)) = row else {
         return Err(ApiError::Unauthorized);
     };
     let tenant = TenantId(tenant_uuid);
+    // The token minter owns the node (MAIN-119), else the tenant owner.
+    let owner = owner_person(&state.db, tenant, created_by).await;
 
     // Lazily mint the tenant's CA on first enrolment. Only ever when there is
     // none — never as a silent replacement for one that failed to load.
@@ -177,9 +222,11 @@ pub async fn enroll(
     let name = req.name.unwrap_or_else(|| "node".to_string());
     let node_id = uuid::Uuid::now_v7();
     let node_id: uuid::Uuid = sqlx::query_scalar(
-        "INSERT INTO nodes (id, tenant_id, name, node_token_hash, status)
-         VALUES ($1, $2, $3, $4, 'offline')
-         ON CONFLICT (tenant_id, name) DO UPDATE SET updated_at = now()
+        "INSERT INTO nodes (id, tenant_id, name, node_token_hash, status, owner_person_id)
+         VALUES ($1, $2, $3, $4, 'offline', $5)
+         ON CONFLICT (tenant_id, name) DO UPDATE SET
+            owner_person_id = COALESCE(nodes.owner_person_id, EXCLUDED.owner_person_id),
+            updated_at = now()
          RETURNING id",
     )
     .bind(node_id)
@@ -188,6 +235,7 @@ pub async fn enroll(
     // The node token stays for now as the transitional credential; the
     // certificate supersedes it once the handshake is wired.
     .bind(crate::seed::hash_token(&format!("enroll-{node_id}")))
+    .bind(owner)
     .fetch_one(&state.db)
     .await?;
 

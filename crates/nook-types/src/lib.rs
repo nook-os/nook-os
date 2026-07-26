@@ -399,6 +399,9 @@ pub struct Node {
     pub resources: serde_json::Value,
     pub status: String,
     pub last_seen_at: Option<DateTime<Utc>>,
+    /// The person who owns this node — its join-token minter, else the tenant
+    /// owner (MAIN-119). Recorded and returned, not yet enforced anywhere.
+    pub owner_person_id: Option<Uuid>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

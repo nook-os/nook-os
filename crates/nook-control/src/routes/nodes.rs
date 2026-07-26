@@ -38,7 +38,7 @@ pub async fn get_one(
 ) -> ApiResult<Json<Node>> {
     let node: Option<Node> = sqlx::query_as(
         "SELECT id, tenant_id, name, hostname, platform, capabilities, resources, status,
-                last_seen_at, created_at, updated_at
+                last_seen_at, owner_person_id, created_at, updated_at
          FROM nodes WHERE tenant_id = $1 AND id = $2",
     )
     .bind(auth.tenant_id)

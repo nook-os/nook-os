@@ -94,7 +94,7 @@ pub async fn get_workspace(
 pub async fn list_nodes(db: &PgPool, tenant: TenantId) -> ApiResult<Vec<Node>> {
     Ok(sqlx::query_as(
         "SELECT id, tenant_id, name, hostname, platform, capabilities, resources, status,
-                last_seen_at, created_at, updated_at
+                last_seen_at, owner_person_id, created_at, updated_at
          FROM nodes WHERE tenant_id = $1 ORDER BY name",
     )
     .bind(tenant)

@@ -3563,6 +3563,12 @@ export interface components {
             /** Format: date-time */
             last_seen_at?: string | null;
             name: string;
+            /**
+             * Format: uuid
+             * @description The person who owns this node — its join-token minter, else the tenant
+             *     owner (MAIN-119). Recorded and returned, not yet enforced anywhere.
+             */
+            owner_person_id?: string | null;
             platform: string;
             /** @description Latest heartbeat resource sample (see `NodeResources`); `{}` until first. */
             resources: unknown;
