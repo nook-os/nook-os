@@ -203,6 +203,10 @@ pub(crate) fn start(
                         }
                     }
                     Err(e) => {
+                        // Clear readiness FIRST: from here until the reconnect's
+                        // new LISTEN is live there is no active listener, so
+                        // bus_ready() must not keep reporting true (MAIN-93 AC-2).
+                        listen_registry.mark_bus_unready();
                         tracing::warn!(error = %e, "bus listener dropped — reconnecting");
                         break;
                     }

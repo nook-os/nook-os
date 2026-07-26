@@ -9,6 +9,23 @@ use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
+/// Create the `chat` schema, tolerating the concurrent-creation race (MAIN-93).
+/// `CREATE SCHEMA IF NOT EXISTS` is NOT atomic: this test binary runs alongside
+/// the other chat test binaries, and the loser of a `pg_namespace` insert race
+/// gets `23505` even though the schema now exists. A duplicate is success. (The
+/// service's own `ensure_chat_schema` is `pub(crate)` and unreachable from an
+/// integration test, so this mirrors it locally.)
+async fn ensure_chat_schema(db: &sqlx::PgPool) {
+    match sqlx::query("CREATE SCHEMA IF NOT EXISTS chat")
+        .execute(db)
+        .await
+    {
+        Ok(_) => {}
+        Err(e) if e.as_database_error().and_then(|d| d.code()).as_deref() == Some("23505") => {}
+        Err(e) => panic!("create chat schema: {e}"),
+    }
+}
+
 #[tokio::test]
 async fn chat_migrations_apply_into_an_isolated_schema() {
     if std::env::var("NOOK_REQUIRE_DB").ok().as_deref() != Some("1") {
@@ -29,10 +46,7 @@ async fn chat_migrations_apply_into_an_isolated_schema() {
         .await
         .unwrap();
 
-    sqlx::query("CREATE SCHEMA IF NOT EXISTS chat")
-        .execute(&db)
-        .await
-        .unwrap();
+    ensure_chat_schema(&db).await;
     MIGRATOR.run(&db).await.unwrap();
 
     // chat_channels lives in the `chat` schema, with the owner_type CHECK.

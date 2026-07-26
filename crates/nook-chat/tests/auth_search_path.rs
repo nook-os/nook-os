@@ -27,6 +27,22 @@ async fn pool(url: &str, search_path: &str) -> PgPool {
         .unwrap()
 }
 
+/// Create the `chat` schema, tolerating the concurrent-creation race (MAIN-93):
+/// `CREATE SCHEMA IF NOT EXISTS` is not atomic, so the loser of a `pg_namespace`
+/// insert race between the chat test binaries gets `23505` though the schema now
+/// exists — a duplicate is success. Mirrors the service's `ensure_chat_schema`,
+/// which is unreachable from an integration test.
+async fn ensure_chat_schema(db: &PgPool) {
+    match sqlx::query("CREATE SCHEMA IF NOT EXISTS chat")
+        .execute(db)
+        .await
+    {
+        Ok(_) => {}
+        Err(e) if e.as_database_error().and_then(|d| d.code()).as_deref() == Some("23505") => {}
+        Err(e) => panic!("create chat schema: {e}"),
+    }
+}
+
 /// Seed a tenant + user + live session + membership in `public`, returning the
 /// session id. Explicitly schema-qualified so setup does not itself depend on the
 /// search_path under test.
@@ -90,10 +106,7 @@ async fn resolve_session_resolves_public_auth_tables_on_the_chat_first_pool() {
     // as production has them, rather than hand-maintaining table DDL that could
     // drift. The `chat` schema must also exist for a `chat,public` pool to connect.
     let bootstrap = pool(&url, "public").await;
-    sqlx::query("CREATE SCHEMA IF NOT EXISTS chat")
-        .execute(&bootstrap)
-        .await
-        .unwrap();
+    ensure_chat_schema(&bootstrap).await;
     nook_control::MIGRATOR
         .run(&bootstrap)
         .await
