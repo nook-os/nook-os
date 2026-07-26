@@ -329,6 +329,7 @@ pub async fn dev_login(
             jar.add(session_cookie(&state, session_id)),
             Json(MeResponse {
                 tenants: memberships_for(&state.db, user.id, tenant.id).await?,
+                person_id: crate::auth::person_id_of(&state, user.id).await?,
                 user,
                 tenant,
                 capability: Default::default(),
@@ -362,6 +363,7 @@ pub async fn dev_login(
         jar.add(session_cookie(&state, session_id)),
         Json(MeResponse {
             tenants: memberships_for(&state.db, user.id, tenant.id).await?,
+            person_id: crate::auth::person_id_of(&state, user.id).await?,
             user,
             tenant,
             capability: Default::default(),
@@ -409,6 +411,7 @@ pub async fn me(State(state): State<AppState>, auth: AuthCtx) -> ApiResult<Json<
         capability: capability_of(&state, &auth).await,
         tenants: cached_memberships_for(&*state.cache, &state.db, auth.user_id, auth.tenant_id)
             .await?,
+        person_id: crate::auth::person_id_of(&state, auth.user_id).await?,
         user,
         tenant,
     }))
@@ -553,6 +556,7 @@ pub async fn switch_tenant(
             switched.tenant_id,
         )
         .await?,
+        person_id: crate::auth::person_id_of(&state, switched.user_id).await?,
         user,
         tenant,
     }))

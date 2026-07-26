@@ -110,6 +110,7 @@ pub async fn bootstrap(
         Json(MeResponse {
             tenants: crate::services::identity::memberships_for(&state.db, user.id, tenant.id)
                 .await?,
+            person_id: crate::auth::person_id_of(&state, user.id).await?,
             user,
             tenant,
             capability: Default::default(),
@@ -145,6 +146,7 @@ pub async fn login(
         Json(MeResponse {
             tenants: crate::services::identity::memberships_for(&state.db, user.id, tenant.id)
                 .await?,
+            person_id: crate::auth::person_id_of(&state, user.id).await?,
             user,
             tenant,
             capability: Default::default(),

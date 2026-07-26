@@ -293,6 +293,10 @@ enum Command {
 
     /// List resources from the control plane, kubectl-style:
     /// `nook get nodes`, `nook get sessions`, `nook get secrets`.
+    ///
+    /// `nook get nodes` lists the machines you can see: your own, or — if you
+    /// are a tenant owner/admin — the whole fleet (MAIN-132). The control plane
+    /// scopes it by your role; there is no client flag to widen it.
     Get {
         /// nodes | sessions | workspaces | secrets | tasks | events | themes
         resource: String,

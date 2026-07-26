@@ -91,13 +91,24 @@ pub async fn get_workspace(
     }
 }
 
-pub async fn list_nodes(db: &PgPool, tenant: TenantId) -> ApiResult<Vec<Node>> {
+/// List a tenant's nodes, optionally scoped to a single owner person (MAIN-132).
+/// `owner = Some(person)` returns only that person's nodes (a member's own
+/// view); `owner = None` returns the whole fleet (owner/admin, and node tokens
+/// whose view is unchanged).
+pub async fn list_nodes(
+    db: &PgPool,
+    tenant: TenantId,
+    owner: Option<uuid::Uuid>,
+) -> ApiResult<Vec<Node>> {
     Ok(sqlx::query_as(
         "SELECT id, tenant_id, name, hostname, platform, capabilities, resources, status,
                 last_seen_at, owner_person_id, created_at, updated_at
-         FROM nodes WHERE tenant_id = $1 ORDER BY name",
+         FROM nodes
+         WHERE tenant_id = $1 AND ($2::uuid IS NULL OR owner_person_id = $2)
+         ORDER BY name",
     )
     .bind(tenant)
+    .bind(owner)
     .fetch_all(db)
     .await?)
 }

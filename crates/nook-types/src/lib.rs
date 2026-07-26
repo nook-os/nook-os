@@ -141,6 +141,11 @@ pub struct ChangeMemberRoleRequest {
 pub struct MeResponse {
     pub user: User,
     pub tenant: Tenant,
+    /// The caller's person id — the cross-tenant identity a node's
+    /// `owner_person_id` is keyed on. Exposed so the UI can mirror the
+    /// server's node-visibility rule (own vs. teammate's) without a second
+    /// request (MAIN-132). The tenant role rides on `user.role`.
+    pub person_id: Uuid,
     /// Every tenant this person belongs to (from `tenant_members`), with the
     /// active one marked `current`. Carried on `me` so the UI can render a
     /// tenant switcher without a second request. A person in exactly one tenant

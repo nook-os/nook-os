@@ -197,6 +197,26 @@ impl AuthCtx {
         }
     }
 
+    /// Is this caller a tenant owner or admin? The boolean form of
+    /// `require_tenant_admin`, for scoping a listing rather than gating an
+    /// action (MAIN-132): a member sees only their own resources, an admin the
+    /// whole tenant. A node credential is not a role-holder — `false`.
+    pub async fn is_tenant_admin(&self, state: &AppState) -> Result<bool, ApiError> {
+        if !matches!(self.principal, Principal::User) {
+            return Ok(false);
+        }
+        let role: Option<(String,)> =
+            sqlx::query_as("SELECT role FROM users WHERE id = $1 AND tenant_id = $2")
+                .bind(self.user_id)
+                .bind(self.tenant_id)
+                .fetch_optional(&state.db)
+                .await?;
+        Ok(matches!(
+            role.as_ref().map(|(r,)| r.as_str()),
+            Some("owner") | Some("admin")
+        ))
+    }
+
     /// Refuse machine credentials.
     ///
     /// For operations that grant lasting power rather than doing today's work:
