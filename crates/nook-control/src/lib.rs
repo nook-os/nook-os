@@ -2,6 +2,7 @@ pub mod agent_tls;
 pub mod auth;
 pub mod ca;
 pub mod cache;
+pub mod client_ip;
 pub mod config;
 pub mod crypto;
 pub mod error;

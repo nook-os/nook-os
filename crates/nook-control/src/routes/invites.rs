@@ -4,9 +4,12 @@
 //! switcher immediately offers it). Emailing the link is MAIN-7 — here it is
 //! returned by the API and copied in the UI.
 
-use axum::extract::{Path, State};
+use axum::extract::{ConnectInfo, Path, Query, State};
+use axum::http::HeaderMap;
 use axum::Json;
 use nook_types::*;
+use serde::Deserialize;
+use std::net::SocketAddr;
 
 use crate::auth::AuthCtx;
 use crate::error::{ApiError, ApiResult};
@@ -43,6 +46,22 @@ fn esc(s: &str) -> String {
         .replace('<', "&lt;")
         .replace('>', "&gt;")
         .replace('"', "&quot;")
+}
+
+/// Mask an email for the unauthenticated preview: keep the first character of
+/// the local part and the whole domain, replace the rest of the local part with
+/// `…`. `ryan@example.com` → `r…@example.com`. Enough for an invitee to
+/// recognise their own address, not enough to harvest one from a link. Pure, so
+/// the masking rule is unit-testable.
+fn mask_email(email: &str) -> String {
+    match email.split_once('@') {
+        Some((local, domain)) if !local.is_empty() && !domain.is_empty() => {
+            let first = local.chars().next().unwrap_or('*');
+            format!("{first}…@{domain}")
+        }
+        // Not an address we can split — mask the whole thing rather than leak it.
+        _ => "…".into(),
+    }
 }
 
 /// Compose the invite email: subject, plain-text body, and a minimal HTML body
@@ -506,6 +525,80 @@ pub async fn accept_core(
     })
 }
 
+#[derive(Deserialize)]
+pub struct PreviewParams {
+    pub token: String,
+}
+
+/// `GET /api/v1/invites/preview?token=…` — UNAUTHENTICATED (MAIN-97 AC-1).
+///
+/// Lets the signed-out `/accept` landing say "«Inviter» invited you to «tenant»"
+/// before the visitor authenticates, so the invite is not lost to a generic
+/// login screen. Returns the tenant name, inviter name, a MASKED invitee email,
+/// and validity — but ONLY for a pending, unexpired token.
+///
+/// Every other token (missing, expired, revoked, accepted) returns the SAME
+/// generic `valid: false` shell: no field distinguishes them, and the handler
+/// does the SAME three queries regardless of the outcome so timing does not
+/// leak which case it was.
+///
+/// Rate-limited per client IP (resolved via `crate::client_ip`, which only
+/// believes `X-Forwarded-For` from a configured trusted proxy) → 429, because
+/// an unauthenticated endpoint that touches the database must not be a free
+/// anonymous amplifier.
+#[utoipa::path(get, path = "/api/v1/invites/preview",
+    operation_id = "preview_invite",
+    params(("token" = String, Query,)),
+    responses((status = 200, body = InvitePreview), (status = 429)))]
+pub async fn preview(
+    State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Query(params): Query<PreviewParams>,
+) -> ApiResult<Json<InvitePreview>> {
+    // Resolve the real client IP, honoring XFF only from a trusted proxy, then
+    // spend one token from that IP's bucket. A stable uuid derived from the IP
+    // reuses the tenant-keyed limiter without a second limiter type.
+    let xff = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok());
+    let client_ip = crate::client_ip::resolve_client_ip(peer.ip(), xff, &state.cfg.trusted_proxies);
+    let ip_key = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_DNS, client_ip.to_string().as_bytes());
+    if !state.preview_limit.allow(TenantId(ip_key)) {
+        return Err(ApiError::TooManyRequests(
+            "too many invite lookups from your address — try again shortly".into(),
+        ));
+    }
+
+    // One lookup by token hash. `invited_by` is nullable, and validity is
+    // computed in SQL so the row is the same shape whatever the status.
+    let row: Option<(TenantId, String, Option<uuid::Uuid>, bool)> = sqlx::query_as(
+        "SELECT tenant_id, email, invited_by, (status = 'pending' AND expires_at > now())
+         FROM invites WHERE token_hash = $1",
+    )
+    .bind(hash_token(&params.token))
+    .fetch_optional(&state.db)
+    .await?;
+
+    // Do the SAME follow-up work regardless of whether the token was found or
+    // usable, so a missing/expired/revoked/accepted token cannot be told apart
+    // by timing. A missing row resolves the two name lookups against nil ids
+    // (both return their neutral fallbacks), which we then discard.
+    let (tenant_id, email, inviter_id, valid) =
+        row.unwrap_or((TenantId(uuid::Uuid::nil()), String::new(), None, false));
+    let tenant = tenant_display_name(&state, tenant_id).await;
+    let inviter = inviter_display_name(&state, inviter_id.unwrap_or_else(uuid::Uuid::nil)).await;
+
+    if !valid {
+        // The generic invalid response — identical for every non-usable token.
+        return Ok(Json(InvitePreview::default()));
+    }
+    Ok(Json(InvitePreview {
+        valid: true,
+        tenant,
+        inviter,
+        email: mask_email(&email),
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     /// Source guards: create/list/revoke are admin-gated; owner is not invitable.
@@ -534,8 +627,19 @@ mod tests {
         assert!(super::validated_role(None).is_ok(), "defaults to member");
     }
 
-    use super::{classify_invite_send, invite_email, send_invite_email, InviteMailLog};
+    use super::{classify_invite_send, invite_email, mask_email, send_invite_email, InviteMailLog};
     use crate::mailer::SendOutcome;
+
+    #[test]
+    fn mask_email_keeps_first_char_and_domain_only() {
+        assert_eq!(mask_email("ryan@example.com"), "r…@example.com");
+        // A single-char local part still only shows that one char.
+        assert_eq!(mask_email("a@b.co"), "a…@b.co");
+        // Something that isn't an address is masked wholesale, never leaked.
+        assert_eq!(mask_email("not-an-email"), "…");
+        assert_eq!(mask_email("@nope.com"), "…");
+        assert_eq!(mask_email("nolocal@"), "…");
+    }
 
     #[test]
     fn invite_send_is_classified_honestly() {

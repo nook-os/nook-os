@@ -372,5 +372,6 @@ fn test_config() -> nook_control::config::Config {
         mail_notifications_enabled: false,
         mail_max_per_month: Some(100),
         mail_max_per_day: None,
+        trusted_proxies: Vec::new(),
     }
 }

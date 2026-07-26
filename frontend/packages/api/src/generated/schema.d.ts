@@ -523,6 +523,39 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/invites/preview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * `GET /api/v1/invites/preview?token=…` — UNAUTHENTICATED (MAIN-97 AC-1).
+         * @description Lets the signed-out `/accept` landing say "«Inviter» invited you to «tenant»"
+         *     before the visitor authenticates, so the invite is not lost to a generic
+         *     login screen. Returns the tenant name, inviter name, a MASKED invitee email,
+         *     and validity — but ONLY for a pending, unexpired token.
+         *
+         *     Every other token (missing, expired, revoked, accepted) returns the SAME
+         *     generic `valid: false` shell: no field distinguishes them, and the handler
+         *     does the SAME three queries regardless of the outcome so timing does not
+         *     leak which case it was.
+         *
+         *     Rate-limited per client IP (resolved via `crate::client_ip`, which only
+         *     believes `X-Forwarded-For` from a configured trusted proxy) → 429, because
+         *     an unauthenticated endpoint that touches the database must not be a free
+         *     anonymous amplifier.
+         */
+        get: operations["preview_invite"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/labels": {
         parameters: {
             query?: never;
@@ -3346,6 +3379,26 @@ export interface components {
             /** @description `pending` | `accepted` | `revoked`. */
             status: string;
         };
+        /**
+         * @description Unauthenticated preview of an invite, so the `/accept` landing can name who
+         *     invited a signed-out visitor into which tenant before they sign in.
+         *
+         *     Every non-usable token — missing, expired, revoked, or already accepted —
+         *     returns the SAME `valid: false` shell with empty fields, so the response
+         *     reveals nothing that distinguishes them. The email is MASKED
+         *     (`r…@example.com`): enough for the invitee to recognise their own address,
+         *     not enough to harvest it.
+         */
+        InvitePreview: {
+            /** @description The invitee's email, masked. Empty when `valid` is false. */
+            email: string;
+            /** @description Inviter's display name. Empty when `valid` is false. */
+            inviter: string;
+            /** @description Inviting tenant's display name. Empty when `valid` is false. */
+            tenant: string;
+            /** @description The token is pending and unexpired — the landing may show the invite. */
+            valid: boolean;
+        };
         /** @description Sent by `nook join` (unauthenticated; the join token IS the credential). */
         JoinRequest: {
             hostname: string;
@@ -5589,6 +5642,33 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["AcceptInviteResult"];
                 };
+            };
+        };
+    };
+    preview_invite: {
+        parameters: {
+            query: {
+                token: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["InvitePreview"];
+                };
+            };
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
         };
     };

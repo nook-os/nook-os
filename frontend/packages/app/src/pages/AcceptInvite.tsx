@@ -1,16 +1,24 @@
-// The invite accept landing (MAIN-6). Someone opens the link they were sent,
-// which carries `?token=…`. They are already through the auth gate by the time
-// they reach here, so we know who they are; accepting consumes the token and
-// (on a match) adds them to the inviting tenant, keeping their own.
+// The invite accept landing (MAIN-6, extended by MAIN-97).
 //
-// Every outcome is a plain success page: a good token joins the tenant, and a
-// bad/expired/wrong-email one declines with the server's message and leaves
-// them in their own tenant — never an error screen, because "this link was for
-// a different address" is an answer, not a fault.
+// Someone opens the link they were sent, which carries `?token=…`. Two worlds
+// meet here:
+//
+//  • SIGNED IN — we already know who they are, so accepting consumes the token
+//    and (on a match) adds them to the inviting tenant, keeping their own. Every
+//    outcome is a plain success page: a good token joins, a bad/expired/wrong-
+//    email one declines with the server's message. The one decline we surface
+//    specially is an UNVERIFIED email (AC-5): that is fixable by checking the
+//    inbox, not a dead end.
+//
+//  • SIGNED OUT — the generic login screen would lose the token, stranding the
+//    invitee. Instead we preview the invite (unauthenticated) and, for a valid
+//    token, show "«Inviter» invited you to «tenant»" with sign-in / create-
+//    account actions that carry `next=/accept?token=…` back through auth
+//    (MAIN-97). An invalid token shows the same generic state the preview does.
 import React from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useNavigate, useSearchParams } from "react-router-dom";
-import { CheckCircle2, Info, MailX } from "lucide-react";
+import { Link, useNavigate, useSearchParams } from "react-router-dom";
+import { CheckCircle2, Info, MailX, MailWarning } from "lucide-react";
 import { api } from "@nookos/api";
 import { Empty, Panel } from "@nookos/ui";
 
@@ -20,17 +28,21 @@ export function AcceptInvitePage() {
   const navigate = useNavigate();
   const qc = useQueryClient();
 
-  const { data: me } = useQuery({
+  const { data: me, isLoading: meLoading } = useQuery({
     queryKey: ["me"],
     queryFn: async () => (await api.GET("/api/v1/auth/me")).data ?? null,
   });
+  const signedIn = !!me;
 
-  // Consume the token exactly once, as soon as we know it. Keyed on the token
-  // so re-accepting is a no-op success on the server (idempotent), which means
-  // a refresh here is harmless.
-  const { data: result, isLoading, isError } = useQuery({
+  // Signed-in path: consume the token exactly once, keyed on the token so a
+  // refresh is a harmless idempotent no-op on the server.
+  const {
+    data: result,
+    isLoading: accepting,
+    isError,
+  } = useQuery({
     queryKey: ["accept-invite", token],
-    enabled: !!token,
+    enabled: !!token && signedIn,
     retry: false,
     queryFn: async () => {
       const { data, error } = await api.POST("/api/v1/invites/accept", {
@@ -41,6 +53,28 @@ export function AcceptInvitePage() {
     },
   });
 
+  // Signed-out path: preview the invite (unauthenticated) so the landing can
+  // name who invited whom before sign-in.
+  const { data: preview, isLoading: previewLoading } = useQuery({
+    queryKey: ["invite-preview", token],
+    enabled: !!token && !signedIn && !meLoading,
+    retry: false,
+    queryFn: async () =>
+      (
+        await api.GET("/api/v1/invites/preview", {
+          params: { query: { token } },
+        })
+      ).data ?? null,
+  });
+
+  // Which sign-in methods this instance offers, so the landing never shows a
+  // dead button.
+  const { data: providers } = useQuery({
+    queryKey: ["auth", "providers"],
+    queryFn: async () => (await api.GET("/api/v1/auth/providers")).data,
+    enabled: !signedIn,
+  });
+
   if (!token) {
     return (
       <CenteredPanel title="Invite">
@@ -48,7 +82,41 @@ export function AcceptInvitePage() {
       </CenteredPanel>
     );
   }
-  if (isLoading) {
+
+  // ── Signed out: the invite landing ────────────────────────────────────────
+  if (!signedIn) {
+    if (meLoading || previewLoading) {
+      return (
+        <CenteredPanel title="Invite">
+          <Empty>Checking your invite…</Empty>
+        </CenteredPanel>
+      );
+    }
+    if (!preview || !preview.valid) {
+      return (
+        <CenteredPanel title="Invite">
+          <Empty>
+            This invitation is no longer valid. Ask whoever invited you to send a
+            fresh link.
+          </Empty>
+        </CenteredPanel>
+      );
+    }
+    return (
+      <InviteLanding
+        token={token}
+        tenant={preview.tenant}
+        inviter={preview.inviter}
+        email={preview.email}
+        oidc={providers?.oidc === true}
+        local={providers?.local === true}
+        dev={providers?.dev_login === true}
+      />
+    );
+  }
+
+  // ── Signed in: the auto-accept flow ───────────────────────────────────────
+  if (accepting) {
     return (
       <CenteredPanel title="Invite">
         <Empty>Checking your invite…</Empty>
@@ -75,19 +143,44 @@ export function AcceptInvitePage() {
     navigate("/board");
   };
 
+  // A decline for an UNVERIFIED email is not a dead end — the IdP has (or will)
+  // send a verification email, and the same link works once it is confirmed.
+  const unverified =
+    !result.accepted && /verify your email/i.test(result.message);
+
   return (
     <CenteredPanel title={result.accepted ? "You're in" : "Invite"}>
       <div style={{ padding: 16, display: "grid", gap: 12, placeItems: "start" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
           {result.accepted ? (
             <CheckCircle2 size={18} className="ok" />
+          ) : unverified ? (
+            <MailWarning size={18} className="muted" />
           ) : (
             <MailX size={18} className="muted" />
           )}
-          <strong>{result.message}</strong>
+          <strong>
+            {unverified
+              ? "Verify your email to accept this invite"
+              : result.message}
+          </strong>
         </div>
 
-        {me && !result.accepted && (
+        {unverified && (
+          <p className="muted small" style={{ margin: 0 }}>
+            <Info size={11} /> Check your inbox for a verification email from your
+            identity provider, confirm your address
+            {me?.user.email ? (
+              <>
+                {" "}
+                (<span className="bright">{me.user.email}</span>)
+              </>
+            ) : null}
+            , then open this invite link again.
+          </p>
+        )}
+
+        {me && !result.accepted && !unverified && (
           <p className="muted small" style={{ margin: 0 }}>
             <Info size={11} /> You are signed in as{" "}
             <span className="bright">{me.user.email}</span>. If the invite was
@@ -99,6 +192,86 @@ export function AcceptInvitePage() {
         <button className="btn primary small" onClick={proceed}>
           {result.accepted ? "Go to the board" : "Continue"}
         </button>
+      </div>
+    </CenteredPanel>
+  );
+}
+
+/** The signed-out landing: who invited you, and how to get back here after
+ *  authenticating. Every action carries `next=/accept?token=…` so the token
+ *  survives the round trip through the IdP or the login screen (AC-3). */
+function InviteLanding({
+  token,
+  tenant,
+  inviter,
+  email,
+  oidc,
+  local,
+  dev,
+}: {
+  token: string;
+  tenant: string;
+  inviter: string;
+  email: string;
+  oidc: boolean;
+  local: boolean;
+  dev: boolean;
+}) {
+  const acceptPath = `/accept?token=${encodeURIComponent(token)}`;
+  const enc = encodeURIComponent(acceptPath);
+  // OIDC sign-in / create-account go straight to the backend authorize flow,
+  // which round-trips through the IdP and returns to `next`.
+  const oidcSignIn = `/api/v1/auth/login?next=${enc}`;
+  // Create account: ask the IdP to open its sign-up screen. We do NOT pass a
+  // login_hint — the preview only holds a MASKED email (privacy), so there is
+  // no full address to hint with; `prompt=create` alone is the correct minimum,
+  // and IdPs that ignore it still work.
+  const oidcCreate = `${oidcSignIn}&prompt=create`;
+  // Local / dev sign-in reuses the full login screen, which itself decides what
+  // is usable; `next` carries the invitee back here afterwards.
+  const passwordSignIn = `/login?next=${enc}`;
+
+  return (
+    <CenteredPanel title="You're invited">
+      <div style={{ padding: 16, display: "grid", gap: 16, placeItems: "start" }}>
+        <div>
+          <p style={{ margin: 0, fontSize: 15 }}>
+            <strong className="bright">{inviter}</strong> invited you to{" "}
+            <strong className="bright">{tenant}</strong>.
+          </p>
+          <p className="muted small" style={{ margin: "6px 0 0" }}>
+            Invited as <span className="mono">{email}</span>. Sign in with that
+            address to accept.
+          </p>
+        </div>
+
+        <div style={{ display: "grid", gap: 8, width: "100%", maxWidth: 320 }}>
+          {oidc && (
+            <>
+              <a className="btn primary" href={oidcSignIn}>
+                Sign in to accept
+              </a>
+              <a className="btn" href={oidcCreate}>
+                Create an account
+              </a>
+            </>
+          )}
+          {!oidc && (local || dev) && (
+            <Link className="btn primary" to={passwordSignIn}>
+              Sign in to accept
+            </Link>
+          )}
+          {oidc && (local || dev) && (
+            <Link className="btn small" to={passwordSignIn}>
+              Other sign-in options
+            </Link>
+          )}
+          {!oidc && !local && !dev && (
+            <Empty>
+              No sign-in method is configured on this instance yet.
+            </Empty>
+          )}
+        </div>
       </div>
     </CenteredPanel>
   );

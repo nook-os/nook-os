@@ -120,6 +120,8 @@ pub fn build_router(state: AppState) -> Router {
             post(invites::resend),
         )
         .route("/invites/accept", post(invites::accept))
+        // Unauthenticated: the signed-out /accept landing reads it (MAIN-97).
+        .route("/invites/preview", get(invites::preview))
         .route(
             "/workspaces",
             get(workspaces::list).post(workspaces::create),

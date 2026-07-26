@@ -1121,6 +1121,41 @@
         }
       }
     },
+    "/api/v1/invites/preview": {
+      "get": {
+        "tags": [
+          "crate::routes::invites"
+        ],
+        "summary": "`GET /api/v1/invites/preview?token=…` — UNAUTHENTICATED (MAIN-97 AC-1).",
+        "description": "Lets the signed-out `/accept` landing say \"«Inviter» invited you to «tenant»\"\nbefore the visitor authenticates, so the invite is not lost to a generic\nlogin screen. Returns the tenant name, inviter name, a MASKED invitee email,\nand validity — but ONLY for a pending, unexpired token.\n\nEvery other token (missing, expired, revoked, accepted) returns the SAME\ngeneric `valid: false` shell: no field distinguishes them, and the handler\ndoes the SAME three queries regardless of the outcome so timing does not\nleak which case it was.\n\nRate-limited per client IP (resolved via `crate::client_ip`, which only\nbelieves `X-Forwarded-For` from a configured trusted proxy) → 429, because\nan unauthenticated endpoint that touches the database must not be a free\nanonymous amplifier.",
+        "operationId": "preview_invite",
+        "parameters": [
+          {
+            "name": "token",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InvitePreview"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": ""
+          }
+        }
+      }
+    },
     "/api/v1/labels": {
       "get": {
         "tags": [
@@ -8157,6 +8192,34 @@
           "status": {
             "type": "string",
             "description": "`pending` | `accepted` | `revoked`."
+          }
+        }
+      },
+      "InvitePreview": {
+        "type": "object",
+        "description": "Unauthenticated preview of an invite, so the `/accept` landing can name who\ninvited a signed-out visitor into which tenant before they sign in.\n\nEvery non-usable token — missing, expired, revoked, or already accepted —\nreturns the SAME `valid: false` shell with empty fields, so the response\nreveals nothing that distinguishes them. The email is MASKED\n(`r…@example.com`): enough for the invitee to recognise their own address,\nnot enough to harvest it.",
+        "required": [
+          "valid",
+          "tenant",
+          "inviter",
+          "email"
+        ],
+        "properties": {
+          "email": {
+            "type": "string",
+            "description": "The invitee's email, masked. Empty when `valid` is false."
+          },
+          "inviter": {
+            "type": "string",
+            "description": "Inviter's display name. Empty when `valid` is false."
+          },
+          "tenant": {
+            "type": "string",
+            "description": "Inviting tenant's display name. Empty when `valid` is false."
+          },
+          "valid": {
+            "type": "boolean",
+            "description": "The token is pending and unexpired — the landing may show the invite."
           }
         }
       },

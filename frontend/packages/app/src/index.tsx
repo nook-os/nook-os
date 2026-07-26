@@ -123,7 +123,13 @@ function AuthGate() {
         onDone={() => refetch()}
       />
     ) : (
-      <Login />
+      // Signed out in the browser. The invite landing renders WITHOUT auth so an
+      // invitee sees who invited them and a sign-in that carries the token back
+      // (MAIN-97); every other path still lands on the login screen.
+      <Routes>
+        <Route path="/accept" element={<AcceptInvitePage />} />
+        <Route path="*" element={<Login />} />
+      </Routes>
     );
 
   return (
