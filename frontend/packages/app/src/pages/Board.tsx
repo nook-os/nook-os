@@ -27,6 +27,7 @@ import {
 import { api, type TaskItem } from "@nookos/api";
 import { AutomationDialog } from "./BoardAutomation";
 import { BoardBacklog } from "./BoardBacklog";
+import { useBacklogSelection } from "./backlogSelection";
 import { Empty, Panel, Pill, TypeBadge, TYPE_META } from "@nookos/ui";
 import { useNewWork } from "../newwork";
 import { askChoice, askConfirm, askForm, askText, notify } from "../dialogs";
@@ -774,6 +775,23 @@ export function BoardPage() {
   const filter = React.useMemo(() => parseFilter(params), [params]);
   const setFilter = (f: BoardFilter) =>
     setParams((prev) => writeFilter(new URLSearchParams(prev), f));
+
+  // Bulk selection on the Backlog tab (MAIN-123). It lives in a store so the
+  // toolbar count and later bulk actions read one source. It must NEVER outlive
+  // the rows it points at: clear it whenever the filter changes (rows appear or
+  // vanish) or the backlog tab is left (AC-5) — a stale selection can't be
+  // allowed to act on rows the user can no longer see.
+  const selected = useBacklogSelection((s) => s.selected);
+  const toggleSelect = useBacklogSelection((s) => s.toggle);
+  const clearSelection = useBacklogSelection((s) => s.clear);
+  const filterKey = serializeFilter(filter).toString();
+  React.useEffect(() => {
+    if (filter.view !== "backlog") clearSelection();
+  }, [filter.view, clearSelection]);
+  React.useEffect(() => {
+    // Any filter edit invalidates the selection — the visible row set changed.
+    clearSelection();
+  }, [filterKey, clearSelection]);
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 4 } }),
   );
@@ -1190,7 +1208,8 @@ export function BoardPage() {
               groups={backlogGroups}
               colTypeById={colTypeById}
               wsName={wsName}
-              selectedId={openTask}
+              activeId={openTask}
+              selected={selected}
               blockedIds={blockedIds}
               canSendToBoard={!!unstartedColumn}
               onAddEpic={addEpic}
@@ -1198,6 +1217,7 @@ export function BoardPage() {
               onAddBacklog={(title) => backlogColumn && addTask(backlogColumn.id, title)}
               onOpen={setOpenTask}
               onMenu={(t, anchor) => setMenu({ task: t, anchor })}
+              onToggleSelect={toggleSelect}
               onSendToBoard={sendToBoard}
               onDispatch={dispatchTask}
             />
