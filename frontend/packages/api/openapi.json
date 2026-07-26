@@ -8593,6 +8593,14 @@
           "name": {
             "type": "string"
           },
+          "owner_person_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The person who owns this node — its join-token minter, else the tenant\nowner (MAIN-119). Recorded and returned, not yet enforced anywhere."
+          },
           "platform": {
             "type": "string"
           },
