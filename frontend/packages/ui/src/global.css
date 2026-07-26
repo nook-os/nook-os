@@ -1121,6 +1121,10 @@ table.nook-table tr.clickable { cursor: pointer; }
 .backlog-row:hover { background: var(--nook-bg-raised); }
 .backlog-row.selected { background: var(--nook-bg-raised); box-shadow: inset 2px 0 0 var(--nook-accent); }
 .backlog-row.blocked { opacity: 0.55; }
+/* An archived/done epic child stays under its epic, dimmed — a record of
+   finished work, not a live row. The class was applied but never styled. */
+.backlog-row.archived { opacity: 0.5; }
+.backlog-row.archived .backlog-row-title { text-decoration: line-through; }
 .backlog-row-title { color: var(--nook-fg-bright); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .backlog-row-preview {
   flex: 1;
@@ -1153,10 +1157,15 @@ table.nook-table tr.clickable { cursor: pointer; }
 /* A child's status chip: column type or "archived". */
 .backlog-status {
   font-size: 10px;
-  padding: 0 5px;
+  padding: 0 6px;
   border-radius: 8px;
-  background: var(--nook-border-bright);
-  color: var(--nook-fg-faint);
+  /* Was faint-on-bright (#4b5058 on #3a3f46) — near-invisible. Readable chip:
+     bright text on a subtle fill. */
+  background: var(--nook-selection);
+  color: var(--nook-fg);
+  border: 1px solid var(--nook-border-bright);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
   flex: 0 0 auto;
 }
 

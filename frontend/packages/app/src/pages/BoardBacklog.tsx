@@ -199,8 +199,9 @@ function EpicGroup({
   return (
     <div className="backlog-epic">
       {/* Clicking the head opens the epic's detail like any other row; the
-         chevron is its own button so collapsing stays separate from opening
-         (the head used to only toggle, so an epic could never be opened). */}
+         chevron is its own button so collapsing the group stays separate from
+         opening it (MAIN-83 — the head used to only toggle, so an epic could
+         never be opened). */}
       <div
         className="backlog-epic-head"
         onClick={() => onOpen(epic.key ?? epic.id)}
