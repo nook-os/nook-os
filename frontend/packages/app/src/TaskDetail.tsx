@@ -23,7 +23,6 @@ import {
   MarkdownEditor,
   EditableMarkdown,
   Select,
-  TypeBadge,
   TYPE_META,
   useAnchoredMenu,
 } from "@nookos/ui";
@@ -594,21 +593,24 @@ function TypeSelect({
   const [open, setOpen] = useState(false);
   const close = useCallback(() => setOpen(false), []);
   const { hostRef, portal } = useAnchoredMenu(open, close, {
-    height: TYPE_META.length * 30 + 8,
+    height: TYPE_META.length * 34 + 42,
   });
   const current = value ?? "task";
+  const cur = TYPE_META.find((t) => t.value === current) ?? TYPE_META[0];
   const menu = portal(
     <div className="type-menu">
+      <div className="type-menu-head">Change work type</div>
       {TYPE_META.map((t) => (
         <button
           key={t.value}
-          className={`type-menu-item${t.value === current ? " current" : ""}`}
+          className={`type-menu-item ${t.tone}${t.value === current ? " current" : ""}`}
           onClick={() => {
             if (t.value !== current) onChange(t.value);
             setOpen(false);
           }}
         >
-          <TypeBadge type={t.value} />
+          <t.Icon size={14} className="type-menu-icon" />
+          <span className="type-menu-label">{t.label}</span>
         </button>
       ))}
     </div>,
@@ -617,13 +619,14 @@ function TypeSelect({
   return (
     <div ref={hostRef} className="task-type-row">
       <button
-        className="type-select-trigger"
-        aria-label="issue type"
+        className={`type-select-trigger ${cur.tone}`}
+        aria-label={`work type: ${cur.label}`}
+        title={cur.label}
         aria-haspopup="menu"
         onClick={() => setOpen((v) => !v)}
       >
-        <TypeBadge type={value} />
-        <ChevronDown size={12} />
+        <cur.Icon size={14} />
+        <ChevronDown size={11} className="type-select-caret" />
       </button>
       {menu}
     </div>
