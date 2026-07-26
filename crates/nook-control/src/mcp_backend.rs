@@ -294,8 +294,16 @@ impl NookBackend for McpBackend {
             Some(w) => Some(self.resolve_workspace(tenant, &w).await?),
             None => None,
         };
-        let page =
-            core::events_page(&self.state.db, tenant, workspace_id, None, None, limit).await?;
+        let page = core::events_page(
+            &self.state.db,
+            tenant,
+            workspace_id,
+            None,
+            None,
+            limit,
+            &core::ActivityScope::All,
+        )
+        .await?;
         Ok(page.events)
     }
 

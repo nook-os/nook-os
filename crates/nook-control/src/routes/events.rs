@@ -27,6 +27,9 @@ pub async fn list(
     auth: AuthCtx,
     Query(q): Query<EventsQuery>,
 ) -> ApiResult<Json<EventsPage>> {
+    // Members see their own activity; owner/admin get the full audit feed. The
+    // same scope filters the live bus, so page and push agree (MAIN-134).
+    let scope = core::ActivityScope::load(&state.db, auth.tenant_id, &auth).await?;
     Ok(Json(
         core::events_page(
             &state.db,
@@ -35,6 +38,7 @@ pub async fn list(
             q.kind,
             q.before,
             q.limit.unwrap_or(50),
+            &scope,
         )
         .await?,
     ))
