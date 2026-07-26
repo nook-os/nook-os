@@ -80,6 +80,7 @@ pub async fn dispatch(
     state: &AppState,
     tenant: TenantId,
     viewer: UserId,
+    user: Option<UserId>,
     task_id: TaskId,
 ) -> ApiResult<TaskItem> {
     let task = load_task(state, tenant, task_id).await?;
@@ -87,7 +88,11 @@ pub async fn dispatch(
     if !crate::services::tasks::visible_to(&task, viewer) {
         return Err(ApiError::NotFound);
     }
-    let node = crate::services::schedule::pick(state, tenant, task.workspace_id).await?;
+    // Auto-placement is confined to the requester's OWN nodes (MAIN-131): `user`
+    // is the acting identity (None on the MCP path, which then has no eligible
+    // node rather than a tenant-wide pick), distinct from `viewer`, which the
+    // MCP path fills with the tenant owner for visibility only.
+    let node = crate::services::schedule::pick(state, tenant, user, task.workspace_id).await?;
     let todo = column_id(state, task.board_id, "Todo", 1).await?;
 
     let updated: TaskItem = sqlx::query_as(

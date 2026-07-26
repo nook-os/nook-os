@@ -24,7 +24,10 @@ pub async fn node(
     auth: AuthCtx,
     Query(q): Query<ScheduleQuery>,
 ) -> ApiResult<Json<ScheduledNode>> {
-    let node_id = schedule::pick(&state, auth.tenant_id, q.workspace_id).await?;
+    // The New Work "Auto" picker resolves only nodes the session user owns
+    // (MAIN-131), matching where a session may actually start.
+    let node_id =
+        schedule::pick(&state, auth.tenant_id, Some(auth.user_id), q.workspace_id).await?;
     let (node_name,): (String,) = sqlx::query_as("SELECT name FROM nodes WHERE id = $1")
         .bind(node_id)
         .fetch_one(&state.db)

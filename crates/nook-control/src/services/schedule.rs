@@ -1,22 +1,45 @@
 //! Resource-aware node placement (the "Auto" default). Wraps
 //! `nook_dispatcher::pick_node` with the online-node + workspace-affinity
 //! logic shared by triage dispatch and the New Work "Auto" option.
+//!
+//! Placement is confined to the requester's OWN machines (MAIN-131): a session
+//! only ever starts on a node you own (MAIN-130), so auto-dispatch must not
+//! route work onto a teammate's node — that would only manufacture a guaranteed
+//! 403 at start-work. The ownership filter here is the up-front half of that
+//! rule; the spawn guard is the enforcing half.
 
-use nook_types::{NodeId, NodeResources, TenantId, WorkspaceId};
+use nook_types::{NodeId, NodeResources, TenantId, UserId, WorkspaceId};
+use uuid::Uuid;
 
 use crate::error::{ApiError, ApiResult};
 use crate::state::AppState;
 
-/// Online nodes with their latest resource sample.
-pub async fn online_nodes(
+/// The person behind a user — the identity a node's `owner_person_id` is keyed
+/// on. Resolved locally so scheduling carries no dependency on other modules'
+/// identity plumbing.
+async fn person_of(state: &AppState, user: UserId) -> ApiResult<Option<Uuid>> {
+    let row: Option<(Uuid,)> = sqlx::query_as("SELECT person_id FROM users WHERE id = $1")
+        .bind(user)
+        .fetch_optional(&state.db)
+        .await?;
+    Ok(row.map(|(p,)| p))
+}
+
+/// Online nodes **owned by `person`**, with their latest resource sample. The
+/// ownership predicate is the candidate gate (MAIN-131): a node someone else
+/// owns is never a candidate, however well-resourced or idle it is.
+async fn owned_online_nodes(
     state: &AppState,
     tenant: TenantId,
+    person: Uuid,
 ) -> ApiResult<Vec<(NodeId, NodeResources)>> {
-    let rows: Vec<(NodeId, serde_json::Value)> =
-        sqlx::query_as("SELECT id, resources FROM nodes WHERE tenant_id = $1")
-            .bind(tenant)
-            .fetch_all(&state.db)
-            .await?;
+    let rows: Vec<(NodeId, serde_json::Value)> = sqlx::query_as(
+        "SELECT id, resources FROM nodes WHERE tenant_id = $1 AND owner_person_id = $2",
+    )
+    .bind(tenant)
+    .bind(person)
+    .fetch_all(&state.db)
+    .await?;
     Ok(rows
         .into_iter()
         .filter(|(id, _)| state.registry.node_online(*id))
@@ -24,19 +47,44 @@ pub async fn online_nodes(
         .collect())
 }
 
-/// Pick the best online node. When a workspace is given, prefer nodes that
-/// already have it checked out (so worktrees/sessions land where the repo is);
-/// otherwise rank across all online nodes.
+/// The error a caller surfaces when placement finds nothing: no online node the
+/// requester owns. One message for every dead end — no acting person (MCP), no
+/// owned node at all, or none of them online — because they are the same
+/// outcome to the person waiting: get a machine of your own online first.
+fn no_eligible() -> ApiError {
+    ApiError::BadRequest("no eligible node of yours is online".into())
+}
+
+/// Pick the best online node the acting person owns. When a workspace is given,
+/// prefer owned nodes that already have it checked out (so worktrees/sessions
+/// land where the repo is); otherwise rank across all owned online nodes.
+///
+/// `actor` is the acting user, or `None` when the caller has no per-user
+/// identity — today only the MCP dispatch path, whose work is unattributed.
+/// A `None` actor has no person and therefore no eligible node: it is refused,
+/// never widened to tenant-wide selection (MAIN-131 AC-2).
 pub async fn pick(
     state: &AppState,
     tenant: TenantId,
+    actor: Option<UserId>,
     workspace: Option<WorkspaceId>,
 ) -> ApiResult<NodeId> {
-    let all = online_nodes(state, tenant).await?;
+    let Some(person) = (match actor {
+        Some(u) => person_of(state, u).await?,
+        None => None,
+    }) else {
+        return Err(no_eligible());
+    };
+
+    let all = owned_online_nodes(state, tenant, person).await?;
     if all.is_empty() {
-        return Err(ApiError::BadRequest("no online node available".into()));
+        return Err(no_eligible());
     }
 
+    // Workspace affinity, preserved WITHIN the owned set: prefer an owned node
+    // that hosts the checkout, but never fall back to an unowned one — `among`
+    // and the final ranking both draw only from `all`, which is already
+    // ownership-filtered (AC-3).
     if let Some(ws) = workspace {
         let hosts: Vec<(NodeId,)> = sqlx::query_as(
             "SELECT DISTINCT node_id FROM node_workspaces WHERE tenant_id = $1 AND workspace_id = $2",
@@ -57,6 +105,5 @@ pub async fn pick(
         }
     }
 
-    nook_dispatcher::pick_node(&all)
-        .ok_or_else(|| ApiError::BadRequest("no online node available".into()))
+    nook_dispatcher::pick_node(&all).ok_or_else(no_eligible)
 }
