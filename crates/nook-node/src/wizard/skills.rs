@@ -13,8 +13,29 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
-/// The skill itself, compiled in.
-const SKILL: &str = include_str!("../../../../skills/nookos/SKILL.md");
+/// The skills that ship inside the binary and install as first-class citizens —
+/// the fleet-driving `nookos` skill plus the loop skills (spec, build, review,
+/// epic). Embedded rather than read from a repo: the whole point of `nook skills
+/// install` is that nobody had to clone anything.
+const EMBEDDED: &[(&str, &str)] = &[
+    ("nookos", include_str!("../../../../skills/nookos/SKILL.md")),
+    (
+        "nook-spec",
+        include_str!("../../../../skills/nook-spec/SKILL.md"),
+    ),
+    (
+        "nook-build",
+        include_str!("../../../../skills/nook-build/SKILL.md"),
+    ),
+    (
+        "nook-review",
+        include_str!("../../../../skills/nook-review/SKILL.md"),
+    ),
+    (
+        "nook-epic",
+        include_str!("../../../../skills/nook-epic/SKILL.md"),
+    ),
+];
 
 /// Where a given agent keeps its skills.
 struct Target {
@@ -95,8 +116,12 @@ fn detect_in(h: &Path) -> Vec<Target> {
     found
 }
 
-fn write_skill(root: &Path) -> Result<PathBuf> {
-    write_named(root, "nookos", SKILL)
+/// Write every embedded skill into `root` as `<name>/SKILL.md`, one file each.
+fn write_embedded(root: &Path) -> Result<Vec<PathBuf>> {
+    EMBEDDED
+        .iter()
+        .map(|(name, content)| write_named(root, name, content))
+        .collect()
 }
 
 fn write_named(root: &Path, name: &str, content: &str) -> Result<PathBuf> {
@@ -162,8 +187,9 @@ pub fn safe_name(name: &str) -> Result<&str> {
 /// not special-cased.
 pub fn install(dir: Option<PathBuf>, quiet: bool) -> Result<()> {
     if let Some(d) = dir {
-        let p = write_skill(&d)?;
-        println!("✓ {}", p.display());
+        for p in write_embedded(&d)? {
+            println!("✓ {}", p.display());
+        }
         return Ok(());
     }
 
@@ -181,18 +207,22 @@ pub fn install(dir: Option<PathBuf>, quiet: bool) -> Result<()> {
     let mut count = 0;
     for t in &targets {
         for root in &t.roots {
-            let p = write_skill(root)?;
-            count += 1;
-            if !quiet {
-                println!("✓ {} → {}", t.name, p.display());
+            for p in write_embedded(root)? {
+                count += 1;
+                if !quiet {
+                    println!("✓ {} → {}", t.name, p.display());
+                }
             }
         }
     }
     println!(
-        "\nInstalled the NookOS skill in {count} location(s) across {} agent(s).",
+        "\nInstalled {} NookOS skills ({count} file(s)) across {} agent(s).",
+        EMBEDDED.len(),
         targets.len()
     );
-    println!("Your agents can now start and drive sessions across the fleet.");
+    println!(
+        "Your agents can now spec, build, review, drive epics, and run sessions across the fleet."
+    );
     Ok(())
 }
 
@@ -205,13 +235,33 @@ mod tests {
     /// exists, and an agent handed a stub fails in a way nobody traces back
     /// here.
     #[test]
-    fn the_embedded_skill_looks_like_the_real_one() {
-        assert!(SKILL.len() > 1000, "suspiciously short: {}", SKILL.len());
-        assert!(SKILL.contains("nook"), "does not mention the CLI");
-        assert!(
-            SKILL.starts_with("---") || SKILL.starts_with('#'),
-            "skills need frontmatter or a heading"
+    fn the_embedded_skills_look_like_the_real_ones() {
+        // All five ship, in order, and each is a real document rather than an
+        // empty file — an `include_str!` at the wrong path still compiles if the
+        // file exists, and an agent handed a stub fails in a way nobody traces
+        // back here.
+        let names: Vec<&str> = EMBEDDED.iter().map(|(n, _)| *n).collect();
+        assert_eq!(
+            names,
+            [
+                "nookos",
+                "nook-spec",
+                "nook-build",
+                "nook-review",
+                "nook-epic"
+            ]
         );
+        for (name, content) in EMBEDDED {
+            assert!(
+                content.len() > 500,
+                "{name} suspiciously short: {}",
+                content.len()
+            );
+            assert!(
+                content.starts_with("---") || content.starts_with('#'),
+                "{name} needs frontmatter or a heading"
+            );
+        }
     }
 
     /// The name RULES are tested in `nook-proto`, where they live. What this
@@ -265,14 +315,19 @@ mod tests {
     }
 
     #[test]
-    fn writing_creates_the_named_subdirectory() {
+    fn writing_creates_a_named_subdirectory_per_embedded_skill() {
         let dir = std::env::temp_dir().join(format!("nook-skills-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let p = write_skill(&dir).unwrap();
-        assert_eq!(p, dir.join("nookos/SKILL.md"));
-        assert_eq!(std::fs::read_to_string(&p).unwrap(), SKILL);
+        let paths = write_embedded(&dir).unwrap();
+        // One `<name>/SKILL.md` per embedded skill.
+        assert_eq!(paths.len(), EMBEDDED.len());
+        for (name, content) in EMBEDDED {
+            let p = dir.join(name).join("SKILL.md");
+            assert!(paths.contains(&p), "{name} was not written");
+            assert_eq!(std::fs::read_to_string(&p).unwrap(), *content);
+        }
         // Idempotent: installing twice must not fail or duplicate.
-        assert_eq!(write_skill(&dir).unwrap(), p);
+        assert_eq!(write_embedded(&dir).unwrap(), paths);
 
         // A taught skill lands under its own name, so two skills cannot
         // overwrite each other.
