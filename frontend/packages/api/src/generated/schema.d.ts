@@ -3514,6 +3514,14 @@ export interface components {
              *     than rendering a button that 403s.
              */
             capability?: components["schemas"]["Capability"];
+            /**
+             * Format: uuid
+             * @description The caller's person id — the cross-tenant identity a node's
+             *     `owner_person_id` is keyed on. Exposed so the UI can mirror the
+             *     server's node-visibility rule (own vs. teammate's) without a second
+             *     request (MAIN-132). The tenant role rides on `user.role`.
+             */
+            person_id: string;
             tenant: components["schemas"]["Tenant"];
             /**
              * @description Every tenant this person belongs to (from `tenant_members`), with the

@@ -21,10 +21,32 @@ pub(crate) async fn node_tenant(state: &AppState, id: NodeId) -> ApiResult<nook_
     row.map(|(t,)| t).ok_or(ApiError::NotFound)
 }
 
+/// Which owner a node listing is scoped to (MAIN-132): `Some(person)` restricts
+/// it to a member's own machines, `None` is the whole-fleet view an owner/admin
+/// gets — and the unchanged view a node token gets (AC-1). Fails closed: if a
+/// user's person cannot be resolved, they are scoped to a person that owns
+/// nothing rather than shown the fleet.
+async fn visibility_scope(state: &AppState, auth: &AuthCtx) -> ApiResult<Option<uuid::Uuid>> {
+    if !matches!(auth.principal, crate::auth::Principal::User) {
+        return Ok(None); // node token: current behavior, unchanged
+    }
+    if auth.is_tenant_admin(state).await? {
+        return Ok(None);
+    }
+    Ok(Some(
+        crate::auth::person_id_of(state, auth.user_id)
+            .await
+            .unwrap_or(uuid::Uuid::nil()),
+    ))
+}
+
 #[utoipa::path(get, path = "/api/v1/nodes",
     operation_id = "list_nodes", responses((status = 200, body = [Node])))]
 pub async fn list(State(state): State<AppState>, auth: AuthCtx) -> ApiResult<Json<Vec<Node>>> {
-    Ok(Json(core::list_nodes(&state.db, auth.tenant_id).await?))
+    let scope = visibility_scope(&state, &auth).await?;
+    Ok(Json(
+        core::list_nodes(&state.db, auth.tenant_id, scope).await?,
+    ))
 }
 
 #[utoipa::path(get, path = "/api/v1/nodes/{id}",
@@ -45,7 +67,15 @@ pub async fn get_one(
     .bind(id)
     .fetch_optional(&state.db)
     .await?;
-    node.map(Json).ok_or(ApiError::NotFound)
+    let node = node.ok_or(ApiError::NotFound)?;
+    // A member may only see a node they own; a non-owned id is a 404, not a 403,
+    // so it is indistinguishable from a node that does not exist (MAIN-132 AC-1).
+    if let Some(person) = visibility_scope(&state, &auth).await? {
+        if node.owner_person_id != Some(person) {
+            return Err(ApiError::NotFound);
+        }
+    }
+    Ok(Json(node))
 }
 
 #[utoipa::path(delete, path = "/api/v1/nodes/{id}",

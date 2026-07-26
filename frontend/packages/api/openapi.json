@@ -8460,12 +8460,18 @@
         "description": "The signed-in caller with their tenant.",
         "required": [
           "user",
-          "tenant"
+          "tenant",
+          "person_id"
         ],
         "properties": {
           "capability": {
             "$ref": "#/components/schemas/Capability",
             "description": "What this caller may do, so a UI can hide what it cannot offer rather\nthan rendering a button that 403s."
+          },
+          "person_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The caller's person id — the cross-tenant identity a node's\n`owner_person_id` is keyed on. Exposed so the UI can mirror the\nserver's node-visibility rule (own vs. teammate's) without a second\nrequest (MAIN-132). The tenant role rides on `user.role`."
           },
           "tenant": {
             "$ref": "#/components/schemas/Tenant"
