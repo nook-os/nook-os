@@ -124,12 +124,7 @@ pub(crate) async fn ensure_chat_schema(pool: &sqlx::PgPool) -> Result<(), sqlx::
         .await
     {
         Ok(_) => Ok(()),
-        Err(e)
-            if e.as_database_error()
-                .and_then(|d| d.code())
-                .as_deref()
-                == Some("23505") =>
-        {
+        Err(e) if e.as_database_error().and_then(|d| d.code()).as_deref() == Some("23505") => {
             Ok(())
         }
         Err(e) => Err(e),
