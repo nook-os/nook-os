@@ -1,0 +1,4 @@
+# Throwaway scratch area — ignore everything here except this file, so the
+# directory exists in the repo but its contents are never committed.
+*
+!.gitignore

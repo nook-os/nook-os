@@ -35,3 +35,7 @@ frontend/apps/desktop/src-tauri/gen/
 deploy/dev-certs/agent.key
 
 certs/
+# hack/ is tracked (dev scripts live there); only its scratch area is ignored,
+# via hack/scratch/.gitignore.
+hack/scratch/*
+!hack/scratch/.gitignore

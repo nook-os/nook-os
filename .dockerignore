@@ -10,3 +10,4 @@ frontend/**/dist
 .env.local
 docker-compose.prod.yml
 certs/
+hack/
