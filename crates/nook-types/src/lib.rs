@@ -1633,6 +1633,30 @@ pub struct RemoveWorktreeRequest {
     pub path: String,
 }
 
+/// One checkout's on-disk move: where it was and where it now lives (MAIN-107).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct MigratePathPair {
+    pub old: String,
+    pub new: String,
+}
+
+/// Rewrite a node's durable path records after `nook migrate-workspaces` has
+/// moved its checkouts on disk (MAIN-107). This is a coordinated rename, NOT a
+/// rediscovery: `node_workspaces.path` and `tasks.worktree_path` are rewritten
+/// in one transaction with row identity preserved, so no checkout looks new,
+/// no `.env` is re-delivered, and no `worktree_path` goes stale.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct MigratePathsRequest {
+    pub pairs: Vec<MigratePathPair>,
+}
+
+/// How many rows the coordinated rewrite touched, per table.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct MigratePathsResponse {
+    pub node_workspaces_updated: u32,
+    pub tasks_updated: u32,
+}
+
 /// Renaming a session (tabs are named things people recognize).
 #[derive(Debug, Clone, Deserialize, ToSchema)]
 pub struct UpdateSessionRequest {

@@ -320,6 +320,20 @@ enum Command {
         name: String,
     },
 
+    /// Migrate this machine's checkouts from the flat legacy workspace root
+    /// into this control plane's per-control-plane slugged root.
+    ///
+    /// Dry-run by default: prints the plan (old → new for every checkout, its
+    /// worktrees included) and changes nothing. `--apply` performs the moves,
+    /// tells the control plane to rewrite its path records, and points
+    /// `node.toml` at the slugged root. `--apply` refuses while `nook run` is
+    /// live — stop the agent first.
+    MigrateWorkspaces {
+        /// Perform the migration instead of only printing the plan.
+        #[arg(long)]
+        apply: bool,
+    },
+
     /// Act as yourself rather than as this machine, so the CLI can drive the
     /// whole fleet: `nook login --token nook_user_…`.
     Login {
@@ -730,6 +744,10 @@ async fn main() -> Result<()> {
             let cfg = NodeConfig::load()?;
             // Reaches sessions that already exist (mouse/scrollback/clipboard).
             tmux::apply_server_defaults();
+            // Mark this agent live so `nook migrate-workspaces --apply` refuses
+            // to move checkouts while discovery could report a half-moved tree
+            // (MAIN-107 AC-2). Removed on clean exit; stale copies are ignored.
+            let _pidfile = config::PidFile::write()?;
             conn::run(cfg).await
         }
         Command::Status => status().await,
@@ -740,6 +758,7 @@ async fn main() -> Result<()> {
         } => cli::get(&resource, name.as_deref(), json).await,
         Command::Import { path, link } => cli::import(path.as_deref(), link).await,
         Command::Delete { resource, name } => cli::delete(&resource, &name).await,
+        Command::MigrateWorkspaces { apply } => cli::migrate_workspaces(apply).await,
         Command::Login { token, server } => match token {
             Some(t) => cli::login(&t, server.as_deref()).await,
             None => cli::login_with_provider(server.as_deref()).await,

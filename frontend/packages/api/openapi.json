@@ -1623,6 +1623,54 @@
         }
       }
     },
+    "/api/v1/nodes/{id}/migrate-paths": {
+      "post": {
+        "tags": [
+          "crate::routes::nodes"
+        ],
+        "summary": "Coordinated path rewrite after `nook migrate-workspaces` moves a node's\ncheckouts into the per-control-plane slugged root (MAIN-107 AC-4).",
+        "description": "The node has already moved the directories on disk and now needs the two\ndurable path records — `node_workspaces.path` and `tasks.worktree_path` —\npointed at the new locations. Doing that through ordinary discovery would be\ndestructive: the reconcile deletes rows whose path is no longer reported and\nre-inserts the new paths as brand-new checkouts, which announces a fresh\n`.env` delivery and drops the `worktree_path` a running task depends on. So\nthis rewrites the paths in place, in ONE transaction, preserving row\nidentity: nothing looks new, nothing is re-delivered, nothing goes stale.\n\nThe pairs are `{old, new}` on-disk paths. Every UPDATE is pinned to this\nnode (`node_id`/`worktree_node_id = $id`), so a caller cannot rewrite\nanother node's rows even if it names their paths — and any `old` path that\ndoes not currently belong to this node is refused outright rather than\nsilently doing nothing.",
+        "operationId": "migrate_node_paths",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MigratePathsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MigratePathsResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "a path does not belong to this node"
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      }
+    },
     "/api/v1/nodes/{id}/projects": {
       "post": {
         "tags": [
@@ -8431,6 +8479,57 @@
           },
           "user": {
             "$ref": "#/components/schemas/User"
+          }
+        }
+      },
+      "MigratePathPair": {
+        "type": "object",
+        "description": "One checkout's on-disk move: where it was and where it now lives (MAIN-107).",
+        "required": [
+          "old",
+          "new"
+        ],
+        "properties": {
+          "new": {
+            "type": "string"
+          },
+          "old": {
+            "type": "string"
+          }
+        }
+      },
+      "MigratePathsRequest": {
+        "type": "object",
+        "description": "Rewrite a node's durable path records after `nook migrate-workspaces` has\nmoved its checkouts on disk (MAIN-107). This is a coordinated rename, NOT a\nrediscovery: `node_workspaces.path` and `tasks.worktree_path` are rewritten\nin one transaction with row identity preserved, so no checkout looks new,\nno `.env` is re-delivered, and no `worktree_path` goes stale.",
+        "required": [
+          "pairs"
+        ],
+        "properties": {
+          "pairs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MigratePathPair"
+            }
+          }
+        }
+      },
+      "MigratePathsResponse": {
+        "type": "object",
+        "description": "How many rows the coordinated rewrite touched, per table.",
+        "required": [
+          "node_workspaces_updated",
+          "tasks_updated"
+        ],
+        "properties": {
+          "node_workspaces_updated": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "tasks_updated": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
           }
         }
       },

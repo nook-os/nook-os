@@ -245,6 +245,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/managed/skills", get(managed::list_skills))
         .route("/managed/hooks", get(managed::get_hooks))
         .route("/nodes/{id}/rescan", post(nodes::rescan))
+        .route("/nodes/{id}/migrate-paths", post(nodes::migrate_paths))
         .route("/nodes/{id}/update", post(nodes::update))
         .route("/nodes/{id}/terminal", post(sessions::open_terminal))
         .route("/nodes/{id}/clone", post(gitops::clone_repo))

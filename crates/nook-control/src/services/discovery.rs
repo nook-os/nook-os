@@ -203,6 +203,88 @@ pub async fn reconcile(
     Ok(())
 }
 
+/// Coordinated path rewrite for `nook migrate-workspaces` (MAIN-107 AC-4).
+///
+/// The counterpart to [`reconcile`]: where reconcile is destructive by path —
+/// a checkout that stops being reported is DELETED and its new location is a
+/// brand-new row — this rewrites the two durable path records in place, in one
+/// transaction, preserving row identity. That is the whole point of a migration
+/// that renames directories: no checkout should look new (which would announce
+/// a fresh `.env` delivery), and no task's `worktree_path` should go stale.
+///
+/// Every write is pinned to `node_id`, so a caller can only ever move rows that
+/// belong to the node it is acting as. And an `old` path that is not currently
+/// a checkout of this node is refused BEFORE any write — a mistake, or an
+/// attempt to name another node's paths, aborts the whole request rather than
+/// silently updating nothing.
+pub async fn migrate_paths(
+    db: &sqlx::PgPool,
+    node_id: NodeId,
+    pairs: &[nook_types::MigratePathPair],
+) -> ApiResult<nook_types::MigratePathsResponse> {
+    // Nothing to do is success (the CLI's already-migrated node sends none).
+    if pairs.is_empty() {
+        return Ok(nook_types::MigratePathsResponse {
+            node_workspaces_updated: 0,
+            tasks_updated: 0,
+        });
+    }
+
+    // Belonging check, before any write.
+    let olds: Vec<String> = pairs.iter().map(|p| p.old.clone()).collect();
+    let mine: Vec<(String,)> =
+        sqlx::query_as("SELECT path FROM node_workspaces WHERE node_id = $1 AND path = ANY($2)")
+            .bind(node_id)
+            .bind(&olds)
+            .fetch_all(db)
+            .await?;
+    let mine: std::collections::HashSet<String> = mine.into_iter().map(|(p,)| p).collect();
+    if let Some(stray) = olds.iter().find(|p| !mine.contains(*p)) {
+        return Err(crate::error::ApiError::BadRequest(format!(
+            "{stray} is not a checkout of this node — refusing to rewrite paths \
+             that do not belong to it"
+        )));
+    }
+
+    // One transaction: every path record moves together or none does. `path` on
+    // node_workspaces and `worktree_path` on tasks are the only two durable
+    // on-disk path records (0001_init). Row ids are never touched.
+    let mut tx = db.begin().await?;
+    let mut node_workspaces_updated: u32 = 0;
+    let mut tasks_updated: u32 = 0;
+    for pair in pairs {
+        let nw = sqlx::query(
+            "UPDATE node_workspaces SET path = $3, last_scanned_at = now()
+             WHERE node_id = $1 AND path = $2",
+        )
+        .bind(node_id)
+        .bind(&pair.old)
+        .bind(&pair.new)
+        .execute(&mut *tx)
+        .await?;
+        node_workspaces_updated += nw.rows_affected() as u32;
+
+        // A task's worktree lives on a specific node; scope the rewrite to this
+        // one so an identical relative path on another machine is never touched.
+        let t = sqlx::query(
+            "UPDATE tasks SET worktree_path = $3, updated_at = now()
+             WHERE worktree_node_id = $1 AND worktree_path = $2",
+        )
+        .bind(node_id)
+        .bind(&pair.old)
+        .bind(&pair.new)
+        .execute(&mut *tx)
+        .await?;
+        tasks_updated += t.rows_affected() as u32;
+    }
+    tx.commit().await?;
+
+    Ok(nook_types::MigratePathsResponse {
+        node_workspaces_updated,
+        tasks_updated,
+    })
+}
+
 async fn create_workspace_for(
     state: &AppState,
     tenant: TenantId,
