@@ -135,6 +135,25 @@ async fn cleanup(db: &PgPool, tenant: TenantId) {
         .await;
 }
 
+/// A node with a chosen (or NULL) owner, so the spawn guard can be exercised
+/// directly without a join.
+async fn insert_node(db: &PgPool, tenant: TenantId, owner: Option<Uuid>) -> NodeId {
+    let id = NodeId::new();
+    sqlx::query(
+        "INSERT INTO nodes (id, tenant_id, name, node_token_hash, status, owner_person_id)
+         VALUES ($1, $2, $3, $4, 'offline', $5)",
+    )
+    .bind(id)
+    .bind(tenant)
+    .bind(format!("n-{}", id.0.simple()))
+    .bind(format!("h-{}", id.0.simple())) // unique — node_token_hash is UNIQUE
+    .bind(owner)
+    .execute(db)
+    .await
+    .expect("node");
+    id
+}
+
 #[tokio::test]
 async fn join_sets_owner_to_the_minter_or_tenant_owner() {
     let Some(pool) = test_pool().await else {
@@ -257,11 +276,12 @@ async fn backfill_fills_ownerless_nodes_with_the_tenant_owner() {
     let node = NodeId::new();
     sqlx::query(
         "INSERT INTO nodes (id, tenant_id, name, node_token_hash, status)
-         VALUES ($1, $2, $3, 'x', 'offline')",
+         VALUES ($1, $2, $3, $4, 'offline')",
     )
     .bind(node)
     .bind(tenant)
     .bind(format!("legacy-{}", node.0.simple()))
+    .bind(format!("h-{}", node.0.simple()))
     .execute(&pool)
     .await
     .expect("ownerless node");
@@ -285,6 +305,148 @@ async fn backfill_fills_ownerless_nodes_with_the_tenant_owner() {
         owner_of(&pool, node).await,
         Some(owner_person),
         "backfill resolves the tenant owner's person"
+    );
+
+    cleanup(&pool, tenant).await;
+}
+
+// ── MAIN-130: session-start authorization (owner-only, no exceptions) ─────────
+
+/// The shared guard: a session spawns only for the person who owns the node.
+/// The owner passes; a member, an admin, and an ownerless node all refuse; and
+/// the MCP path (no acting identity) is refused rather than run as the tenant
+/// owner.
+#[tokio::test]
+async fn spawn_guard_is_owner_only_with_no_role_bypass() {
+    let Some(pool) = test_pool().await else {
+        return;
+    };
+    let state = AppState::new(pool.clone(), test_config(), None).await;
+    let tenant = new_tenant(&pool).await;
+    let (owner, owner_person) = add_user(&pool, tenant, "owner").await;
+    let (member, _) = add_user(&pool, tenant, "member").await;
+    let (admin, _) = add_user(&pool, tenant, "admin").await;
+
+    let node = insert_node(&pool, tenant, Some(owner_person)).await;
+
+    // The owner may spawn.
+    assert!(
+        nook_control::auth::require_person_owns_node(&state, tenant, Some(owner), node)
+            .await
+            .is_ok(),
+        "the node's owner must be allowed to start a session"
+    );
+    // A member who does not own it is refused — this is the vuln, closed.
+    assert!(
+        nook_control::auth::require_person_owns_node(&state, tenant, Some(member), node)
+            .await
+            .is_err(),
+        "a non-owner member reached a teammate's machine"
+    );
+    // An admin gets NO bypass (NG-3, AC-2).
+    assert!(
+        nook_control::auth::require_person_owns_node(&state, tenant, Some(admin), node)
+            .await
+            .is_err(),
+        "admin/owner roles must not bypass node ownership"
+    );
+    // The MCP path carries no acting identity → refused, never the tenant owner.
+    assert!(
+        nook_control::auth::require_person_owns_node(&state, tenant, None, node)
+            .await
+            .is_err(),
+        "a session with no acting identity (MCP) must be refused (AC-3)"
+    );
+
+    // An ownerless node refuses everyone, including the tenant owner.
+    let orphan = insert_node(&pool, tenant, None).await;
+    assert!(
+        nook_control::auth::require_person_owns_node(&state, tenant, Some(owner), orphan)
+            .await
+            .is_err(),
+        "an ownerless node must refuse everyone"
+    );
+
+    cleanup(&pool, tenant).await;
+}
+
+/// The two direct session-spawn routes refuse a non-owner. The guard runs
+/// before any session machinery, so a member is turned away by
+/// `POST /sessions` and `POST /nodes/{id}/terminal` alike.
+#[tokio::test]
+async fn session_routes_refuse_a_non_owner() {
+    use axum::extract::Path;
+    use axum::Json;
+
+    let Some(pool) = test_pool().await else {
+        return;
+    };
+    let state = AppState::new(pool.clone(), test_config(), None).await;
+    let tenant = new_tenant(&pool).await;
+    let (_owner, owner_person) = add_user(&pool, tenant, "owner").await;
+    let (member, _) = add_user(&pool, tenant, "member").await;
+    let node = insert_node(&pool, tenant, Some(owner_person)).await;
+
+    // POST /sessions as the member → refused before create_session.
+    let created = nook_control::routes::sessions::create(
+        State(state.clone()),
+        auth(member, tenant),
+        Json(CreateSessionRequest {
+            workspace_id: WorkspaceId::new(),
+            node_id: node,
+            runtime: "bash".into(),
+            name: None,
+            path: None,
+        }),
+    )
+    .await;
+    assert!(
+        created.is_err(),
+        "a non-owner must not be able to start a session via POST /sessions"
+    );
+
+    // POST /nodes/{id}/terminal as the member → refused.
+    let opened = nook_control::routes::sessions::open_terminal(
+        State(state.clone()),
+        auth(member, tenant),
+        Path(node),
+        None,
+    )
+    .await;
+    assert!(
+        opened.is_err(),
+        "a non-owner must not be able to open a terminal via /nodes/{{id}}/terminal"
+    );
+
+    cleanup(&pool, tenant).await;
+}
+
+/// A node credential keeps its machine-only confinement at the spawn routes —
+/// it may act on itself, not on a peer (AC-4). This is the same lateral-movement
+/// boundary `require_node_self` guards, preserved through the new owner guard.
+#[tokio::test]
+async fn a_node_credential_still_reaches_only_itself() {
+    let Some(pool) = test_pool().await else {
+        return;
+    };
+    let state = AppState::new(pool.clone(), test_config(), None).await;
+    let tenant = new_tenant(&pool).await;
+    let self_id = NodeId::new();
+    let other_id = NodeId::new();
+    let node_ctx = AuthCtx {
+        session_id: AuthSessionId(Uuid::nil()),
+        user_id: UserId(self_id.0),
+        tenant_id: tenant,
+        principal: Principal::Node(self_id),
+        cookie_session: false,
+    };
+    assert!(
+        node_ctx.require_node_owner(&state, self_id).await.is_ok(),
+        "a node must still be able to act on itself"
+    );
+    assert!(
+        node_ctx.require_node_owner(&state, other_id).await.is_err(),
+        "a node token must not reach another machine"
     );
 
     cleanup(&pool, tenant).await;

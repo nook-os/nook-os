@@ -141,6 +141,35 @@ impl AuthCtx {
         }
     }
 
+    /// Confine a SESSION SPAWN to the machine's owner (MAIN-130).
+    ///
+    /// `require_node_self` waved every signed-in human straight through, so any
+    /// invited member could open a shell/agent on a teammate's box. Starting a
+    /// session is running a program on that machine, so it now requires that the
+    /// caller's PERSON owns the node (`nodes.owner_person_id`, set at join by
+    /// MAIN-119). There is no admin or owner bypass — the epic's rule is
+    /// ownership, full stop.
+    ///
+    /// A node credential keeps its existing machine-only confinement — that
+    /// lateral-movement boundary is unchanged (AC-4); this only tightens the
+    /// human path from "any user" to "the owner".
+    pub async fn require_node_owner(
+        &self,
+        state: &AppState,
+        node_id: nook_types::NodeId,
+    ) -> Result<(), ApiError> {
+        if let Principal::Node(self_id) = self.principal {
+            return if self_id == node_id {
+                Ok(())
+            } else {
+                Err(ApiError::ForbiddenMsg(
+                    "a node token can only act on its own machine".into(),
+                ))
+            };
+        }
+        require_person_owns_node(state, self.tenant_id, Some(self.user_id), node_id).await
+    }
+
     /// Require a tenant owner or admin.
     ///
     /// CA lifecycle — generating, staging, promoting, retiring, revoking a node
@@ -181,6 +210,63 @@ impl AuthCtx {
                 "a node token cannot do this — sign in as a user".into(),
             )),
         }
+    }
+}
+
+/// The person behind a user row — the cross-tenant identity that outlives any
+/// single tenant membership. Promoted here from the notebook (MAIN-130) so the
+/// notebook and the node-ownership check resolve the person exactly one way.
+pub async fn person_id_of(state: &AppState, user_id: UserId) -> Result<Uuid, ApiError> {
+    let row: Option<(Uuid,)> = sqlx::query_as("SELECT person_id FROM users WHERE id = $1")
+        .bind(user_id)
+        .fetch_optional(&state.db)
+        .await?;
+    row.map(|(p,)| p).ok_or(ApiError::NotFound)
+}
+
+/// Spawn authorization: a session starts on a machine only for the PERSON who
+/// owns it (MAIN-130). The single chokepoint the HTTP session routes and
+/// `start_work` (HTTP + MCP) all call, so the rule has one definition.
+///
+/// `actor` is the acting user, or `None` when the caller carries no per-user
+/// identity — today only the MCP path, whose sessions are `created_by = NULL`.
+/// A `None` actor is REFUSED rather than run as the tenant owner: MCP per-user
+/// identity (MAIN-102) has to land before MCP can spawn (AC-3). An ownerless
+/// node (`owner_person_id IS NULL`) refuses everyone. A node absent from the
+/// caller's tenant is a 404, not a 403 — the same not-found the routes already
+/// give, so ownership does not become an existence oracle.
+pub async fn require_person_owns_node(
+    state: &AppState,
+    tenant: TenantId,
+    actor: Option<UserId>,
+    node_id: nook_types::NodeId,
+) -> Result<(), ApiError> {
+    let Some(actor) = actor else {
+        return Err(ApiError::ForbiddenMsg(
+            "starting a session needs an acting identity; the MCP path has none \
+             until per-user MCP identity lands (MAIN-102), and it must not run as \
+             the tenant owner"
+                .into(),
+        ));
+    };
+    let owner: Option<(Option<Uuid>,)> =
+        sqlx::query_as("SELECT owner_person_id FROM nodes WHERE id = $1 AND tenant_id = $2")
+            .bind(node_id)
+            .bind(tenant)
+            .fetch_optional(&state.db)
+            .await?;
+    let Some((owner,)) = owner else {
+        return Err(ApiError::NotFound);
+    };
+    let person = person_id_of(state, actor).await?;
+    match owner {
+        Some(o) if o == person => Ok(()),
+        // Ownerless, or owned by someone else — either way, not yours. The
+        // message names the rule so a mis-dispatch (MAIN-131 handing over an
+        // unowned node) reads as exactly this and is debuggable (AC-6).
+        _ => Err(ApiError::ForbiddenMsg(
+            "sessions start only on your own machines".into(),
+        )),
     }
 }
 

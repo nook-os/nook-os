@@ -87,8 +87,10 @@ pub async fn create(
     auth: AuthCtx,
     Json(req): Json<CreateSessionRequest>,
 ) -> ApiResult<Json<Session>> {
-    // Starting a session is running a program on that machine.
-    auth.require_node_self(req.node_id)?;
+    // Starting a session is running a program on that machine — only on one you
+    // own (MAIN-130). Replaces the old require_node_self, which let any signed-in
+    // member spawn on a teammate's node.
+    auth.require_node_owner(&state, req.node_id).await?;
     let session = core::create_session(&state, auth.tenant_id, Some(auth.user_id), req).await?;
     Ok(Json(session))
 }
@@ -106,8 +108,9 @@ pub async fn open_terminal(
     Path(node_id): Path<NodeId>,
     body: Option<Json<CreateTerminalRequest>>,
 ) -> ApiResult<Json<Session>> {
-    // Same rule as any session: running a shell on a machine is acting on it.
-    auth.require_node_self(node_id)?;
+    // Same rule as any session: running a shell on a machine is acting on it,
+    // so it is confined to the node's owner (MAIN-130).
+    auth.require_node_owner(&state, node_id).await?;
     let req = body.map(|Json(r)| r).unwrap_or(CreateTerminalRequest {
         runtime: None,
         name: None,

@@ -34,11 +34,8 @@ use crate::state::AppState;
 /// looks identical whichever tenant they signed into (AC-3). This is the whole
 /// access model: scope every query by the value this returns and nothing else.
 async fn person_id_for(state: &AppState, auth: &AuthCtx) -> ApiResult<Uuid> {
-    let row: Option<(Uuid,)> = sqlx::query_as("SELECT person_id FROM users WHERE id = $1")
-        .bind(auth.user_id)
-        .fetch_optional(&state.db)
-        .await?;
-    row.map(|(p,)| p).ok_or(ApiError::NotFound)
+    // One definition, shared with the node-ownership guard (MAIN-130).
+    crate::auth::person_id_of(state, auth.user_id).await
 }
 
 /// The most a title or folder name may be — measured after trim, by Unicode
