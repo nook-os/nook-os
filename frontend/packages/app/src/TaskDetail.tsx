@@ -15,6 +15,7 @@ import {
   Link2,
   MoreHorizontal,
   ChevronDown,
+  Check,
 } from "lucide-react";
 import { api, type TaskLabel, type RelatedTask } from "@nookos/api";
 import {
@@ -609,6 +610,7 @@ function TypeSelect({
           }}
         >
           <TypeBadge type={t.value} />
+          {t.value === current && <Check size={13} className="type-menu-check" />}
         </button>
       ))}
     </div>,

@@ -898,6 +898,14 @@ export function BoardPage() {
 
   const refresh = () => queryClient.invalidateQueries({ queryKey: ["boards"] });
 
+  // Every hook is called unconditionally, ABOVE the early returns below. A
+  // `useState` placed after `if (!board) return` (MAIN-99) is a Rules-of-Hooks
+  // violation: the hook count changes when the `boards` query toggles
+  // unresolved<->resolved — which `setType`'s `invalidateQueries(["boards"])`
+  // forces — and React throws "Rendered more hooks than during the previous
+  // render", white-screening the whole board.
+  const [showAutomation, setShowAutomation] = useState(false);
+
   if (!board) {
     return (
       <div className="nook-grid" style={{ gridTemplateColumns: "1fr" }}>
@@ -950,7 +958,6 @@ export function BoardPage() {
   };
 
   const bust = () => queryClient.invalidateQueries({ queryKey: ["boards"] });
-  const [showAutomation, setShowAutomation] = useState(false);
 
   const blockedIds = new Set((blockedList ?? []).map((t) => t.id));
   // When a filter is on, the API decides what is visible; otherwise show the

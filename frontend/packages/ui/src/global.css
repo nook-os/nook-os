@@ -3732,13 +3732,14 @@ a.toast-main:hover .toast-title { text-decoration: underline; }
   display: flex;
   flex-direction: column;
   padding: 4px;
-  gap: 2px;
+  gap: 1px;
+  min-width: 156px;
 }
 .type-menu-item {
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 4px 8px;
+  gap: 8px;
+  padding: 5px 8px;
   border: 0;
   border-radius: var(--nook-radius);
   background: transparent;
@@ -3748,9 +3749,32 @@ a.toast-main:hover .toast-title { text-decoration: underline; }
   text-align: left;
   cursor: pointer;
 }
+/* Inside the menu the type reads as a clean icon + label, not a boxed pill:
+   the bordered `.type-badge` chrome belongs on the collapsed trigger, not on
+   every option, where it looked like a row of floating pillboxes (MAIN-99
+   AC-5). The row itself carries the hover/selection affordance. */
+.type-menu-item .type-badge {
+  border: none;
+  padding: 0;
+  height: auto;
+  background: transparent;
+}
+.type-menu-item .type-badge-label {
+  color: var(--nook-fg);
+}
 .type-menu-item:hover,
-.type-menu-item.active { background: var(--nook-selection); }
-.type-menu-item.current { box-shadow: inset 2px 0 0 var(--nook-accent); }
+.type-menu-item.active {
+  background: var(--nook-selection);
+}
+/* The current type is marked by a trailing check rather than an edge bar. */
+.type-menu-item.current .type-badge-label {
+  color: var(--nook-accent);
+}
+.type-menu-check {
+  margin-left: auto;
+  flex: none;
+  color: var(--nook-accent);
+}
 
 /* The type control row sits just above the title in the task detail. */
 .task-type-row { margin-bottom: 4px; }
