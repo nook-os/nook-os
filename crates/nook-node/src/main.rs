@@ -1257,10 +1257,22 @@ async fn join(spec: JoinSpec) -> Result<()> {
     // An explicit root (--workspace-root, a config file's workspace_roots, or the
     // docker entrypoint's NOOK_WORKSPACE_ROOT → --workspace-root) always wins;
     // only the DEFAULT becomes per-control-plane (MAIN-58 AC-1/AC-2).
-    let workspace_roots = if spec.workspace_roots.is_empty() {
-        vec![crate::config::default_workspace_root(&server)]
-    } else {
+    let workspace_roots = if !spec.workspace_roots.is_empty() {
+        // An explicit root (flag / config file / NOOK_WORKSPACE_ROOT) always wins.
         spec.workspace_roots
+    } else if let Some(existing) = NodeConfig::load()
+        .ok()
+        .filter(|c| !c.workspace_roots.is_empty())
+    {
+        // Re-joining an already-configured node with no explicit root: carry the
+        // roots the previous config established. A bare `nook join` must NOT
+        // rebuild node.toml onto the per-cp default and silently relocate the
+        // root out from under every existing checkout (data-orphaning bug).
+        existing.workspace_roots
+    } else {
+        // A genuine first join with no explicit root: the per-control-plane
+        // default (MAIN-58 AC-1/AC-2).
+        vec![crate::config::default_workspace_root(&server)]
     };
     let cfg = NodeConfig {
         server,

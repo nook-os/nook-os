@@ -344,7 +344,7 @@ pub async fn connect_once(cfg: &NodeConfig) -> Result<()> {
                     .workspace_roots
                     .first()
                     .cloned()
-                    .unwrap_or_else(|| "~/workspace".into());
+                    .unwrap_or_else(|| crate::config::default_workspace_root(&cfg.server));
                 let roots = cfg.workspace_roots.clone();
                 tokio::task::spawn_blocking(move || {
                     let outcome = crate::gitops::clone_repo(
@@ -521,7 +521,7 @@ pub async fn connect_once(cfg: &NodeConfig) -> Result<()> {
                     .workspace_roots
                     .first()
                     .cloned()
-                    .unwrap_or_else(|| "~/workspace".into());
+                    .unwrap_or_else(|| crate::config::default_workspace_root(&cfg.server));
                 let roots = cfg.workspace_roots.clone();
                 tokio::task::spawn_blocking(move || {
                     let outcome = crate::gitops::init_project(&root, &name);
