@@ -10,11 +10,15 @@ import { TypeBadge } from "@nookos/ui";
 
 import { priorityMeta, previewText } from "../taskmeta";
 import type { BacklogGroups, EpicSection } from "./Board";
+import { nextCollapsed, selectableRowIds, useBacklogSelection } from "./backlogSelection";
 
 const COLLAPSE_KEY = "nook.backlog.collapsed";
 
 /// Collapse state that survives a reload (MAIN-83 AC-1), keyed by epic id in
-/// localStorage. Returns the set of collapsed ids and a toggle.
+/// localStorage. Returns the set of collapsed ids and a toggle. The toggle rule
+/// is the pure `nextCollapsed` helper so collapse is one definition — the
+/// chevron icon/title and the body render both read the SAME set, so they can
+/// never desync (MAIN-123 AC-4).
 function useCollapsed(): [Set<string>, (id: string) => void] {
   const [ids, setIds] = useState<Set<string>>(() => {
     try {
@@ -25,9 +29,7 @@ function useCollapsed(): [Set<string>, (id: string) => void] {
   });
   const toggle = (id: string) =>
     setIds((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
+      const next = nextCollapsed(prev, id);
       try {
         localStorage.setItem(COLLAPSE_KEY, JSON.stringify([...next]));
       } catch {
@@ -86,11 +88,14 @@ function BacklogRow({
   task,
   workspaceName,
   status,
+  active,
+  selectable,
   selected,
   blocked,
   readOnly,
   onOpen,
   onMenu,
+  onToggleSelect,
   onSendToBoard,
   onDispatch,
 }: {
@@ -98,12 +103,19 @@ function BacklogRow({
   workspaceName?: string;
   /** Status chip (column type or `archived`); omitted for the flat "No epic" rows. */
   status?: string;
+  /** This row's task is the currently-OPEN card — drives the open-highlight.
+   *  Distinct from `selected`, which is the bulk-selection checkbox state. */
+  active: boolean;
+  /** Whether this row carries a selection checkbox (MAIN-123 AC-1). */
+  selectable: boolean;
+  /** Whether this row is checked in the bulk selection. */
   selected: boolean;
   blocked: boolean;
   /** An on-board child: opens the detail, no inline actions (MAIN-83 AC-2). */
   readOnly?: boolean;
   onOpen: () => void;
   onMenu: (anchor: { x: number; y: number }) => void;
+  onToggleSelect: () => void;
   onSendToBoard?: () => void;
   onDispatch?: () => void;
 }) {
@@ -111,9 +123,24 @@ function BacklogRow({
   const prio = priorityMeta(task.priority ?? 0);
   return (
     <div
-      className={`backlog-row${selected ? " selected" : ""}${blocked ? " blocked" : ""}${task.archived_at ? " archived" : ""}`}
+      className={`backlog-row${active ? " active" : ""}${selected ? " selected" : ""}${blocked ? " blocked" : ""}${task.archived_at ? " archived" : ""}`}
       onClick={onOpen}
     >
+      {selectable && (
+        <input
+          type="checkbox"
+          className="backlog-row-check"
+          checked={selected}
+          // stopPropagation so ticking the box neither opens the card (the row's
+          // onClick) nor lets the click bubble anywhere else (MAIN-123 AC-1).
+          onClick={(e) => e.stopPropagation()}
+          onChange={(e) => {
+            e.stopPropagation();
+            onToggleSelect();
+          }}
+          title="select"
+        />
+      )}
       {!!task.priority && (
         <span className="card-prio" style={{ color: prio.color }} title={`priority: ${prio.label}`}>
           {prio.mark}
@@ -170,13 +197,15 @@ function EpicGroup({
   section,
   colTypeById,
   wsName,
-  selectedId,
+  activeId,
+  selected,
   blockedIds,
   canSendToBoard,
   collapsed,
   onToggle,
   onOpen,
   onMenu,
+  onToggleSelect,
   onSendToBoard,
   onDispatch,
   onAddChild,
@@ -184,13 +213,17 @@ function EpicGroup({
   section: EpicSection;
   colTypeById: Map<string, string | undefined>;
   wsName: Map<string, string>;
-  selectedId: string | null;
+  /** The currently-open task id/key — drives the open-highlight, not selection. */
+  activeId: string | null;
+  /** The bulk-selection set (task ids). */
+  selected: Set<string>;
   blockedIds: Set<string>;
   canSendToBoard: boolean;
   collapsed: boolean;
   onToggle: () => void;
   onOpen: (key: string) => void;
   onMenu: (task: TaskItem, anchor: { x: number; y: number }) => void;
+  onToggleSelect: (taskId: string) => void;
   onSendToBoard: (taskId: string) => void;
   onDispatch: (taskId: string) => void;
   onAddChild: (epicId: string, title: string) => void;
@@ -256,11 +289,14 @@ function EpicGroup({
                   task={t}
                   workspaceName={t.workspace_id ? wsName.get(t.workspace_id) : undefined}
                   status={statusOf(t, colTypeById)}
-                  selected={selectedId === t.key || selectedId === t.id}
+                  active={activeId === t.key || activeId === t.id}
+                  selectable
+                  selected={selected.has(t.id)}
                   blocked={blockedIds.has(t.id)}
                   readOnly={onBoard}
                   onOpen={() => onOpen(t.key ?? t.id)}
                   onMenu={(anchor) => onMenu(t, anchor)}
+                  onToggleSelect={() => onToggleSelect(t.id)}
                   onSendToBoard={canSendToBoard ? () => onSendToBoard(t.id) : undefined}
                   onDispatch={() => onDispatch(t.id)}
                 />
@@ -282,7 +318,8 @@ export function BoardBacklog({
   groups,
   colTypeById,
   wsName,
-  selectedId,
+  activeId,
+  selected,
   blockedIds,
   canSendToBoard,
   onAddEpic,
@@ -290,13 +327,17 @@ export function BoardBacklog({
   onAddBacklog,
   onOpen,
   onMenu,
+  onToggleSelect,
   onSendToBoard,
   onDispatch,
 }: {
   groups: BacklogGroups;
   colTypeById: Map<string, string | undefined>;
   wsName: Map<string, string>;
-  selectedId: string | null;
+  /** The currently-open task id/key — the open-highlight, NOT the selection. */
+  activeId: string | null;
+  /** The bulk-selection set (task ids), sourced from the selection store. */
+  selected: Set<string>;
   blockedIds: Set<string>;
   canSendToBoard: boolean;
   onAddEpic: (title: string) => void;
@@ -304,14 +345,56 @@ export function BoardBacklog({
   onAddBacklog: (title: string) => void;
   onOpen: (key: string) => void;
   onMenu: (task: TaskItem, anchor: { x: number; y: number }) => void;
+  onToggleSelect: (taskId: string) => void;
   onSendToBoard: (taskId: string) => void;
   onDispatch: (taskId: string) => void;
 }) {
   const [collapsed, toggle] = useCollapsed();
+  // Select-all and clear come straight from the store: they replace the whole
+  // set at once, so there's no per-row callback to thread for them.
+  const setSelection = useBacklogSelection((s) => s.setSelection);
+  const clear = useBacklogSelection((s) => s.clear);
   const empty = groups.epics.length === 0 && groups.noEpic.length === 0;
+
+  // Every currently-VISIBLE selectable row — respects filters (already applied
+  // to `groups`) and collapsed epics (their hidden children drop out). This is
+  // exactly what select-all targets and what the "all selected?" check reads.
+  const visibleIds = selectableRowIds(groups, collapsed);
+  const allSelected =
+    visibleIds.length > 0 && visibleIds.every((id) => selected.has(id));
+  const toggleAll = () => {
+    if (allSelected) clear();
+    else setSelection(visibleIds);
+  };
+
   return (
     <div className="backlog">
       <BacklogComposer onAdd={onAddEpic} placeholder="New epic…" label="epic" />
+
+      {/* Select-all + the bulk-action toolbar shell (MAIN-123 AC-2/AC-3). The
+         toolbar has no actions yet — just the count and a clear — those arrive
+         in a later ticket. */}
+      <div className="backlog-select-toolbar">
+        <label className="backlog-select-all" title="select all visible rows">
+          <input
+            type="checkbox"
+            className="backlog-row-check"
+            checked={allSelected}
+            disabled={visibleIds.length === 0}
+            onChange={toggleAll}
+          />
+          all
+        </label>
+        {selected.size >= 1 && (
+          <div className="backlog-select-actions">
+            <span className="backlog-select-count">{selected.size} selected</span>
+            <button className="btn small" onClick={clear} title="clear selection">
+              clear
+            </button>
+          </div>
+        )}
+      </div>
+
       {empty && <div className="board-no-matches faint small">The backlog is empty.</div>}
 
       {groups.epics.map((section) => (
@@ -320,13 +403,15 @@ export function BoardBacklog({
           section={section}
           colTypeById={colTypeById}
           wsName={wsName}
-          selectedId={selectedId}
+          activeId={activeId}
+          selected={selected}
           blockedIds={blockedIds}
           canSendToBoard={canSendToBoard}
           collapsed={collapsed.has(section.epic.id)}
           onToggle={() => toggle(section.epic.id)}
           onOpen={onOpen}
           onMenu={onMenu}
+          onToggleSelect={onToggleSelect}
           onSendToBoard={onSendToBoard}
           onDispatch={onDispatch}
           onAddChild={onAddChild}
@@ -345,10 +430,13 @@ export function BoardBacklog({
               key={t.id}
               task={t}
               workspaceName={t.workspace_id ? wsName.get(t.workspace_id) : undefined}
-              selected={selectedId === t.key || selectedId === t.id}
+              active={activeId === t.key || activeId === t.id}
+              selectable
+              selected={selected.has(t.id)}
               blocked={blockedIds.has(t.id)}
               onOpen={() => onOpen(t.key ?? t.id)}
               onMenu={(anchor) => onMenu(t, anchor)}
+              onToggleSelect={() => onToggleSelect(t.id)}
               onSendToBoard={canSendToBoard ? () => onSendToBoard(t.id) : undefined}
               onDispatch={() => onDispatch(t.id)}
             />

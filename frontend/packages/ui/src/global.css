@@ -1119,8 +1119,13 @@ table.nook-table tr.clickable { cursor: pointer; }
   font-size: 12px;
 }
 .backlog-row:hover { background: var(--nook-bg-raised); }
-.backlog-row.selected { background: var(--nook-bg-raised); box-shadow: inset 2px 0 0 var(--nook-accent); }
+/* `.active` is the OPEN-card highlight (this row's task is the open detail);
+   `.selected` is the bulk-selection state (MAIN-123) — two distinct visuals. */
+.backlog-row.active { background: var(--nook-bg-raised); box-shadow: inset 2px 0 0 var(--nook-accent); }
+.backlog-row.selected { background: color-mix(in srgb, var(--nook-accent) 12%, transparent); }
 .backlog-row.blocked { opacity: 0.55; }
+/* Small, left-aligned selection checkbox tinted to the amber accent. */
+.backlog-row-check { accent-color: var(--nook-accent); width: 12px; height: 12px; margin: 0; flex: 0 0 auto; cursor: pointer; }
 /* An archived/done epic child stays under its epic, dimmed — a record of
    finished work, not a live row. The class was applied but never styled. */
 .backlog-row.archived { opacity: 0.5; }
@@ -1168,6 +1173,29 @@ table.nook-table tr.clickable { cursor: pointer; }
   letter-spacing: 0.03em;
   flex: 0 0 auto;
 }
+
+/* Bulk-selection shell (MAIN-123): a thin, dense bar under the epic composer
+   holding the select-all control and — once ≥1 row is checked — the count and
+   a clear button. No bulk actions yet; those arrive in a later ticket. */
+.backlog-select-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 10px;
+  border-bottom: 1px solid var(--nook-border);
+  font-size: 11px;
+}
+.backlog-select-all {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--nook-fg);
+  cursor: pointer;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+.backlog-select-actions { margin-left: auto; display: inline-flex; align-items: center; gap: 8px; }
+.backlog-select-count { color: var(--nook-accent); font-weight: 600; }
 
 .board-split {
   display: flex;
