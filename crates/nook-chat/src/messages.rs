@@ -160,10 +160,7 @@ mod tests {
             .connect_with(opts)
             .await
             .ok()?;
-        sqlx::query("CREATE SCHEMA IF NOT EXISTS chat")
-            .execute(&db)
-            .await
-            .ok()?;
+        crate::ensure_chat_schema(&db).await.ok()?;
         crate::MIGRATOR.run(&db).await.ok()?;
         Some(AppState {
             db,

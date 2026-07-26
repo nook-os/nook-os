@@ -261,10 +261,7 @@ mod tests {
         }
         let url = std::env::var("DATABASE_URL").ok()?;
         let bootstrap = pool(&url, "public").await;
-        sqlx::query("CREATE SCHEMA IF NOT EXISTS chat")
-            .execute(&bootstrap)
-            .await
-            .unwrap();
+        crate::ensure_chat_schema(&bootstrap).await.unwrap();
         nook_control::MIGRATOR.run(&bootstrap).await.unwrap();
         let db = pool(&url, "chat,public").await;
         crate::MIGRATOR.run(&db).await.unwrap();

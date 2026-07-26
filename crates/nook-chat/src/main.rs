@@ -74,9 +74,7 @@ async fn main() -> anyhow::Result<()> {
         .connect_with(opts)
         .await?;
     // The schema must exist before the migrator creates chat._sqlx_migrations.
-    sqlx::query("CREATE SCHEMA IF NOT EXISTS chat")
-        .execute(&db)
-        .await?;
+    ensure_chat_schema(&db).await?;
     MIGRATOR.run(&db).await?;
 
     // Live fan-out: a local per-channel broadcast registry, plus a Postgres
@@ -111,6 +109,26 @@ async fn main() -> anyhow::Result<()> {
         .with_graceful_shutdown(shutdown_signal())
         .await?;
     Ok(())
+}
+
+/// Create the `chat` schema, tolerating the concurrent-creation race.
+///
+/// `CREATE SCHEMA IF NOT EXISTS` is NOT atomic: two callers — parallel tests, or
+/// two chat instances booting at once — can both pass the existence check and
+/// then race the `pg_namespace` insert, and the loser gets `23505`
+/// (unique_violation) even though `IF NOT EXISTS` was asked for. The schema
+/// exists either way, so a duplicate is success, not an error.
+pub(crate) async fn ensure_chat_schema(pool: &sqlx::PgPool) -> Result<(), sqlx::Error> {
+    match sqlx::query("CREATE SCHEMA IF NOT EXISTS chat")
+        .execute(pool)
+        .await
+    {
+        Ok(_) => Ok(()),
+        Err(e) if e.as_database_error().and_then(|d| d.code()).as_deref() == Some("23505") => {
+            Ok(())
+        }
+        Err(e) => Err(e),
+    }
 }
 
 /// Readiness: the DB is reachable. Mirrors the control plane's `/healthz`.
