@@ -81,6 +81,46 @@ impl NodeConfig {
     }
 }
 
+/// Where `nook run` records its PID while the agent is live (MAIN-107 AC-2).
+///
+/// Beside `node.toml`, in the config/state dir. It exists so
+/// `nook migrate-workspaces --apply` can refuse to move checkouts out from
+/// under a running agent: a periodic or gitop-triggered discovery mid-move
+/// would report a half-emptied tree, and the reconcile deletes every
+/// `node_workspaces` row whose path is no longer reported.
+pub fn pidfile_path() -> Result<PathBuf> {
+    if let Ok(dir) = std::env::var("NOOK_CONFIG_DIR") {
+        return Ok(PathBuf::from(dir).join("agent.pid"));
+    }
+    let home = std::env::var("HOME").context("HOME is not set")?;
+    Ok(PathBuf::from(home).join(".config/nook/agent.pid"))
+}
+
+/// The pidfile `nook run` holds for its lifetime. Best-effort: it is written on
+/// start and removed on a clean exit, but a crash or a hard kill leaves it
+/// behind — which is why the reader is stale-PID tolerant rather than trusting
+/// the file's mere existence.
+pub struct PidFile {
+    path: PathBuf,
+}
+
+impl PidFile {
+    pub fn write() -> Result<Self> {
+        let path = pidfile_path()?;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&path, std::process::id().to_string())?;
+        Ok(Self { path })
+    }
+}
+
+impl Drop for PidFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
 /// A person's credential for this CLI, at `~/.config/nook/auth.toml`.
 ///
 /// Kept apart from `node.toml` on purpose: node.toml is the machine's identity,

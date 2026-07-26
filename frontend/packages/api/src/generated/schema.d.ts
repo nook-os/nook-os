@@ -818,6 +818,40 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/nodes/{id}/migrate-paths": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Coordinated path rewrite after `nook migrate-workspaces` moves a node's
+         *     checkouts into the per-control-plane slugged root (MAIN-107 AC-4).
+         * @description The node has already moved the directories on disk and now needs the two
+         *     durable path records — `node_workspaces.path` and `tasks.worktree_path` —
+         *     pointed at the new locations. Doing that through ordinary discovery would be
+         *     destructive: the reconcile deletes rows whose path is no longer reported and
+         *     re-inserts the new paths as brand-new checkouts, which announces a fresh
+         *     `.env` delivery and drops the `worktree_path` a running task depends on. So
+         *     this rewrites the paths in place, in ONE transaction, preserving row
+         *     identity: nothing looks new, nothing is re-delivered, nothing goes stale.
+         *
+         *     The pairs are `{old, new}` on-disk paths. Every UPDATE is pinned to this
+         *     node (`node_id`/`worktree_node_id = $id`), so a caller cannot rewrite
+         *     another node's rows even if it names their paths — and any `old` path that
+         *     does not currently belong to this node is refused outright rather than
+         *     silently doing nothing.
+         */
+        post: operations["migrate_node_paths"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/nodes/{id}/projects": {
         parameters: {
             query?: never;
@@ -3490,6 +3524,28 @@ export interface components {
             tenants?: components["schemas"]["TenantMembership"][];
             user: components["schemas"]["User"];
         };
+        /** @description One checkout's on-disk move: where it was and where it now lives (MAIN-107). */
+        MigratePathPair: {
+            new: string;
+            old: string;
+        };
+        /**
+         * @description Rewrite a node's durable path records after `nook migrate-workspaces` has
+         *     moved its checkouts on disk (MAIN-107). This is a coordinated rename, NOT a
+         *     rediscovery: `node_workspaces.path` and `tasks.worktree_path` are rewritten
+         *     in one transaction with row identity preserved, so no checkout looks new,
+         *     no `.env` is re-delivered, and no `worktree_path` goes stale.
+         */
+        MigratePathsRequest: {
+            pairs: components["schemas"]["MigratePathPair"][];
+        };
+        /** @description How many rows the coordinated rewrite touched, per table. */
+        MigratePathsResponse: {
+            /** Format: int32 */
+            node_workspaces_updated: number;
+            /** Format: int32 */
+            tasks_updated: number;
+        };
         MoveTaskRequest: {
             column: string;
         };
@@ -6086,6 +6142,44 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["OpResponse"];
                 };
+            };
+        };
+    };
+    migrate_node_paths: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["MigratePathsRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MigratePathsResponse"];
+                };
+            };
+            /** @description a path does not belong to this node */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
         };
     };
