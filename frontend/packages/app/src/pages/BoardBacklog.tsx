@@ -198,11 +198,35 @@ function EpicGroup({
   const { epic, children, done, total } = section;
   return (
     <div className="backlog-epic">
-      <div className="backlog-epic-head" onClick={onToggle}>
-        {collapsed ? <ChevronRight size={13} /> : <ChevronDown size={13} />}
+      {/* Clicking the head opens the epic's detail like any other row; the
+         chevron is its own button so collapsing stays separate from opening
+         (the head used to only toggle, so an epic could never be opened). */}
+      <div
+        className="backlog-epic-head"
+        onClick={() => onOpen(epic.key ?? epic.id)}
+      >
+        <button
+          className="card-menu-btn"
+          title={collapsed ? "expand" : "collapse"}
+          onClick={(e) => {
+            e.stopPropagation();
+            onToggle();
+          }}
+        >
+          {collapsed ? <ChevronRight size={13} /> : <ChevronDown size={13} />}
+        </button>
         <TypeBadge type="epic" compact />
         <span className="card-key mono">{epic.key ?? ""}</span>
         <span className="backlog-epic-title">{epic.title}</span>
+        {(epic.labels ?? []).map((l) => (
+          <span
+            key={l.id}
+            className="card-label"
+            style={{ borderColor: l.color, color: l.color }}
+          >
+            {l.name}
+          </span>
+        ))}
         <span className="backlog-epic-progress faint" title="done / total children">
           {done}/{total}
         </span>

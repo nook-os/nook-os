@@ -3728,11 +3728,24 @@ a.toast-main:hover .toast-title { text-decoration: underline; }
   font: inherit;
 }
 .type-select-trigger:hover { border-color: var(--nook-border-bright); }
+/* Portalled to <body> by useAnchoredMenu; the positioned (position:fixed)
+   element is the OUTER .type-menu-portal, so the z-index that lifts it above the
+   modal (backdrop z-index 200) must live here — a z-index on the static
+   .type-menu does nothing. Without it the dropdown renders behind the
+   task-detail panel and looks like it never opened. Matches .sel-menu. */
+.type-menu-portal {
+  z-index: 500;
+}
 .type-menu {
   display: flex;
   flex-direction: column;
   padding: 4px;
   gap: 2px;
+  /* Opaque, or the title/description behind reads through the dropdown. */
+  background: var(--nook-bg-panel);
+  border: 1px solid var(--nook-border-bright);
+  border-radius: var(--nook-radius);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.55);
 }
 .type-menu-item {
   display: flex;
