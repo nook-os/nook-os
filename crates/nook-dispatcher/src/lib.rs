@@ -145,3 +145,57 @@ impl DispatcherBackend for LlmDispatcher {
         Err(DispatchError::NotConfigured("llm"))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Resources with the three fields the ranking reads (free mem = total-used,
+    /// then load, then sessions); cpu is not consulted.
+    fn res(used: u64, total: u64, load: f64, sessions: u32) -> NodeResources {
+        NodeResources {
+            cpu_percent: 0.0,
+            mem_used: used,
+            mem_total: total,
+            load_avg1: load,
+            active_sessions: sessions,
+        }
+    }
+
+    #[test]
+    fn empty_candidates_pick_nothing() {
+        assert_eq!(pick_node(&[]), None);
+    }
+
+    #[test]
+    fn most_free_memory_wins() {
+        let a = NodeId::new(); // 4 GB free
+        let b = NodeId::new(); // 8 GB free — best, despite higher load
+        let picked = pick_node(&[(a, res(4, 8, 0.1, 0)), (b, res(4, 12, 5.0, 9))]);
+        assert_eq!(
+            picked,
+            Some(b),
+            "the node with the most free memory is chosen"
+        );
+    }
+
+    #[test]
+    fn ties_on_memory_break_to_lowest_load() {
+        let a = NodeId::new(); // same free mem, load 3.0
+        let b = NodeId::new(); // same free mem, load 0.5 — wins
+        let picked = pick_node(&[(a, res(2, 10, 3.0, 0)), (b, res(2, 10, 0.5, 0))]);
+        assert_eq!(picked, Some(b), "equal memory → the lower-load node wins");
+    }
+
+    #[test]
+    fn ties_on_memory_and_load_break_to_fewest_sessions() {
+        let a = NodeId::new(); // 5 sessions
+        let b = NodeId::new(); // 1 session — wins
+        let picked = pick_node(&[(a, res(2, 10, 1.0, 5)), (b, res(2, 10, 1.0, 1))]);
+        assert_eq!(
+            picked,
+            Some(b),
+            "equal memory and load → the node with the fewest sessions wins"
+        );
+    }
+}

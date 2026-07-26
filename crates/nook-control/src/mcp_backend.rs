@@ -453,7 +453,10 @@ impl NookBackend for McpBackend {
             .parse()
             .map_err(|_| anyhow::anyhow!("bad task id"))?;
         let viewer = self.user().await?;
-        Ok(crate::services::taskwork::dispatch(&self.state, tenant, viewer, id).await?)
+        // MCP carries no per-user identity, so it has no acting person to place
+        // work for: `None` → the no-eligible-node error, never a tenant-wide
+        // pick onto a machine the caller does not own (MAIN-131 AC-2).
+        Ok(crate::services::taskwork::dispatch(&self.state, tenant, viewer, None, id).await?)
     }
 
     async fn start_work(
