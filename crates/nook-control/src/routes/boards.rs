@@ -308,7 +308,7 @@ pub async fn update_task(
 /// returns it to its column. Emits the usual TaskChanged so other viewers
 /// update live (AC-7). Archived tasks remain resolvable by id/key, so this can
 /// unarchive one that is no longer on the board.
-async fn set_archived(
+pub(crate) async fn set_archived(
     state: &AppState,
     auth: &AuthCtx,
     ident: &str,
@@ -734,7 +734,7 @@ pub async fn delete_column(
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
 
-async fn provider_for_board(
+pub(crate) async fn provider_for_board(
     state: &AppState,
     tenant: TenantId,
     board: BoardId,

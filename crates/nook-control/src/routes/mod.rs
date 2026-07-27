@@ -1,5 +1,6 @@
 pub mod auth;
 pub mod boards;
+pub mod bulk;
 pub mod dispatcher;
 pub mod dist;
 pub mod events;
@@ -330,6 +331,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/tasks/{id}/submit-pr", post(taskwork::submit_pr))
         .route("/tasks/{id}/prune-worktree", post(taskwork::prune_worktree))
         .route("/tasks/{id}/move", post(taskwork::move_task))
+        .route("/tasks/bulk", post(bulk::bulk_tasks))
         .route("/sessions", get(sessions::list).post(sessions::create))
         // Before `/sessions/{id}` so the literal path is not captured as an id.
         .route("/sessions/agent-states", get(sessions::agent_states))

@@ -27,7 +27,7 @@ import {
 import { api, type TaskItem } from "@nookos/api";
 import { AutomationDialog } from "./BoardAutomation";
 import { BoardBacklog } from "./BoardBacklog";
-import { useBacklogSelection } from "./backlogSelection";
+import { summarizeBulk, useBacklogSelection } from "./backlogSelection";
 import {
   Empty,
   Panel,
@@ -1066,6 +1066,7 @@ export function BoardPage() {
   const selected = useBacklogSelection((s) => s.selected);
   const toggleSelect = useBacklogSelection((s) => s.toggle);
   const clearSelection = useBacklogSelection((s) => s.clear);
+  const setSelection = useBacklogSelection((s) => s.setSelection);
   const filterKey = serializeFilter(filter).toString();
   React.useEffect(() => {
     if (filter.view !== "backlog") clearSelection();
@@ -1395,6 +1396,27 @@ export function BoardPage() {
     await api.POST("/api/v1/tasks/{id}/dispatch", { params: { path: { id: taskId } } });
     bust();
   };
+  // One bulk action over the current selection (MAIN-154). One call, one action;
+  // the server returns a per-id result. On FULL success (nothing skipped) clear
+  // the selection; on a PARTIAL keep exactly the skipped rows selected so the
+  // user can see/retry them (AC-4). The board refreshes through the SAME
+  // `bust()` every single-task mutation already uses — the server also publishes
+  // a `TaskChanged` per task, but busting `["boards"]` is the board's own refresh
+  // path. Returns the one-line summary for the toolbar to show, or null on a
+  // no-op / failure.
+  const applyBulk = async (action: string, value?: string): Promise<string | null> => {
+    const ids = [...selected];
+    if (ids.length === 0) return null;
+    const { data } = await api.POST("/api/v1/tasks/bulk", {
+      body: { task_ids: ids, action, value },
+    });
+    bust();
+    if (!data) return null;
+    const { skippedIds, message } = summarizeBulk(data);
+    if (data.skipped === 0) clearSelection();
+    else setSelection(skippedIds);
+    return message;
+  };
   const addColumn = async () => {
     const name = await askText({
       title: "New column",
@@ -1548,6 +1570,9 @@ export function BoardPage() {
               onToggleSelect={toggleSelect}
               onSendToBoard={sendToBoard}
               onDispatch={dispatchTask}
+              columns={detail.columns}
+              members={filterMembers}
+              onBulk={applyBulk}
             />
           ) : (
             <div className="board-split">

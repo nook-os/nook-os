@@ -5,12 +5,16 @@
 // fetch as the kanban tab; no new endpoint. Rows reuse the card helpers.
 import React, { useState } from "react";
 import { ArrowRight, ChevronDown, ChevronRight, MoreHorizontal, Plus, Rocket } from "lucide-react";
-import { type TaskItem } from "@nookos/api";
+import { type BoardColumn, type TaskItem } from "@nookos/api";
 import { TypeBadge } from "@nookos/ui";
 
-import { priorityMeta, previewText } from "../taskmeta";
+import { priorityMeta, previewText, PRIORITIES } from "../taskmeta";
 import type { BacklogGroups, EpicSection } from "./Board";
 import { nextCollapsed, selectableRowIds, useBacklogSelection } from "./backlogSelection";
+
+// The task types a bulk "set type" can pick — epic is deliberately absent: an
+// epic is a container, not a workable type, and the backend rejects it (MAIN-154).
+const BULK_TYPES = ["task", "bug", "story", "chore"] as const;
 
 const COLLAPSE_KEY = "nook.backlog.collapsed";
 
@@ -330,6 +334,9 @@ export function BoardBacklog({
   onToggleSelect,
   onSendToBoard,
   onDispatch,
+  columns,
+  members,
+  onBulk,
 }: {
   groups: BacklogGroups;
   colTypeById: Map<string, string | undefined>;
@@ -348,6 +355,13 @@ export function BoardBacklog({
   onToggleSelect: (taskId: string) => void;
   onSendToBoard: (taskId: string) => void;
   onDispatch: (taskId: string) => void;
+  /** The board's columns — the "move to column" target list (value = `type`). */
+  columns: BoardColumn[];
+  /** Tenant members for the assignee dropdown (id = the user uuid to assign). */
+  members: { id: string; name: string }[];
+  /** Apply one bulk action over the current selection; resolves to the one-line
+   *  summary to show (or null on a no-op / failure). */
+  onBulk: (action: string, value?: string) => Promise<string | null>;
 }) {
   const [collapsed, toggle] = useCollapsed();
   // Select-all and clear come straight from the store: they replace the whole
@@ -355,6 +369,23 @@ export function BoardBacklog({
   const setSelection = useBacklogSelection((s) => s.setSelection);
   const clear = useBacklogSelection((s) => s.clear);
   const empty = groups.epics.length === 0 && groups.noEpic.length === 0;
+
+  // The last bulk call's one-line summary, and a busy flag so the controls lock
+  // while a call is in flight (a second click would act on a selection the first
+  // call is about to change out from under it). The summary lives here — not in
+  // the store — so it survives the selection being cleared on full success.
+  const [summary, setSummary] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const runBulk = async (action: string, value?: string) => {
+    if (busy) return;
+    setBusy(true);
+    try {
+      const msg = await onBulk(action, value);
+      if (msg !== null) setSummary(msg);
+    } finally {
+      setBusy(false);
+    }
+  };
 
   // Every currently-VISIBLE selectable row — respects filters (already applied
   // to `groups`) and collapsed epics (their hidden children drop out). This is
@@ -371,9 +402,11 @@ export function BoardBacklog({
     <div className="backlog">
       <BacklogComposer onAdd={onAddEpic} placeholder="New epic…" label="epic" />
 
-      {/* Select-all + the bulk-action toolbar shell (MAIN-123 AC-2/AC-3). The
-         toolbar has no actions yet — just the count and a clear — those arrive
-         in a later ticket. */}
+      {/* Select-all + the bulk-action toolbar (MAIN-123 AC-2/AC-3, MAIN-154).
+         With ≥1 row selected it carries the six bulk actions: agent-ready
+         on/off, move-to-column, priority, type, assignee, archive. Each acts on
+         the whole selection in one call; the selects are "action" selects — a
+         constant value="" so they snap back to their placeholder after firing. */}
       <div className="backlog-select-toolbar">
         <label className="backlog-select-all" title="select all visible rows">
           <input
@@ -388,11 +421,113 @@ export function BoardBacklog({
         {selected.size >= 1 && (
           <div className="backlog-select-actions">
             <span className="backlog-select-count">{selected.size} selected</span>
-            <button className="btn small" onClick={clear} title="clear selection">
+
+            <span className="backlog-bulk-group" title="toggle the agent-ready label">
+              <span className="faint">agent-ready</span>
+              <button
+                className="btn small"
+                disabled={busy}
+                onClick={() => runBulk("agent_ready", "on")}
+              >
+                on
+              </button>
+              <button
+                className="btn small"
+                disabled={busy}
+                onClick={() => runBulk("agent_ready", "off")}
+              >
+                off
+              </button>
+            </span>
+
+            <select
+              className="task-select"
+              value=""
+              disabled={busy}
+              title="move to column"
+              onChange={(e) => e.target.value && runBulk("move_column", e.target.value)}
+            >
+              <option value="">move to…</option>
+              {columns.map((c) => (
+                <option key={c.id} value={c.type}>
+                  {c.name}
+                </option>
+              ))}
+            </select>
+
+            <select
+              className="task-select"
+              value=""
+              disabled={busy}
+              title="set priority"
+              onChange={(e) => e.target.value !== "" && runBulk("priority", e.target.value)}
+            >
+              <option value="">priority…</option>
+              {PRIORITIES.map((p) => (
+                <option key={p.value} value={String(p.value)}>
+                  {p.label}
+                </option>
+              ))}
+            </select>
+
+            <select
+              className="task-select"
+              value=""
+              disabled={busy}
+              title="set type"
+              onChange={(e) => e.target.value && runBulk("type", e.target.value)}
+            >
+              <option value="">type…</option>
+              {BULK_TYPES.map((t) => (
+                <option key={t} value={t}>
+                  {t}
+                </option>
+              ))}
+            </select>
+
+            <select
+              className="task-select"
+              value=""
+              disabled={busy}
+              title="set assignee"
+              onChange={(e) => {
+                const v = e.target.value;
+                if (!v) return;
+                // "Unassign" sends an empty value; the backend reads that as clear.
+                runBulk("assignee", v === "__unassign__" ? "" : v);
+              }}
+            >
+              <option value="">assign…</option>
+              <option value="__unassign__">Unassign</option>
+              {members.map((m) => (
+                <option key={m.id} value={m.id}>
+                  {m.name}
+                </option>
+              ))}
+            </select>
+
+            <button
+              className="btn small"
+              disabled={busy}
+              onClick={() => runBulk("archive")}
+              title="archive selected"
+            >
+              archive
+            </button>
+
+            <button
+              className="btn small"
+              onClick={() => {
+                clear();
+                setSummary(null);
+              }}
+              title="clear selection"
+            >
               clear
             </button>
           </div>
         )}
+        {summary && <span className="backlog-select-summary faint">{summary}</span>}
       </div>
 
       {empty && <div className="board-no-matches faint small">The backlog is empty.</div>}
