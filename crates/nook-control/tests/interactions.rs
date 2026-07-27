@@ -79,6 +79,54 @@ async fn claimed_job(
     id
 }
 
+/// A job on `target`, executed by `node`, in the given lifecycle state — the
+/// bridging tests need a `running` job (the state a mid-run ask fires from).
+async fn job_in_state(
+    db: &PgPool,
+    tenant: TenantId,
+    user: UserId,
+    target: TaskId,
+    node: NodeId,
+    state: &str,
+) -> JobId {
+    let id = JobId::new();
+    sqlx::query(
+        "INSERT INTO loop_jobs (id, tenant_id, kind, target_task_id, requested_by, state, executor_node_id)
+         VALUES ($1,$2,'spec',$3,$4,$5,$6)",
+    )
+    .bind(id)
+    .bind(tenant)
+    .bind(target)
+    .bind(user)
+    .bind(state)
+    .bind(node)
+    .execute(db)
+    .await
+    .expect("job");
+    id
+}
+
+/// The job's current lifecycle state, read straight from the row — what a
+/// restarted control plane would see, since the pause is database state.
+async fn job_state(db: &PgPool, id: JobId) -> String {
+    sqlx::query_scalar("SELECT state FROM loop_jobs WHERE id = $1")
+        .bind(id)
+        .fetch_one(db)
+        .await
+        .expect("job state")
+}
+
+/// The concatenated transcript content for a job, oldest first.
+async fn transcript_text(db: &PgPool, id: JobId) -> String {
+    let lines: Vec<String> =
+        sqlx::query_scalar("SELECT content FROM loop_job_transcript WHERE job_id = $1 ORDER BY id")
+            .bind(id)
+            .fetch_all(db)
+            .await
+            .expect("transcript");
+    lines.join("\n")
+}
+
 async fn node(db: &PgPool, tenant: TenantId) -> NodeId {
     let id = NodeId::new();
     sqlx::query(
@@ -462,6 +510,120 @@ async fn a_node_pulls_its_own_answer_even_on_a_private_card() {
         matches!(as_user, Err(ApiError::NotFound)),
         "the same user, not acting as the requesting node, is still refused"
     );
+
+    bed.teardown().await;
+}
+
+// ── Job bridging (MAIN-162) ──────────────────────────────────────────────────
+
+#[tokio::test]
+async fn a_job_scoped_ask_pauses_and_the_answer_resumes_the_run() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let tenant = bed.tenant("ix").await;
+    let (user, _p) = bed.user(tenant, "owner").await;
+    let t = task(&bed.pool, tenant, user, "team").await;
+    let runner = node(&bed.pool, tenant).await;
+    // A RUNNING job — the state a mid-run ask fires from.
+    let job = job_in_state(&bed.pool, tenant, user, t, runner, "running").await;
+    let state = bed.app_state().await;
+
+    // The executor raises a job-scoped ask → the job pauses (AC-1) and the
+    // question lands on the transcript.
+    let created = interactions::create(
+        &state,
+        tenant,
+        &node_ctx(tenant, user, runner),
+        CreateInteractionRequest {
+            job_id: Some(job),
+            choices: Some(vec!["Postgres".into(), "Redis".into()]),
+            ..ask("Which store?")
+        },
+    )
+    .await
+    .expect("the executor raises the pause");
+    assert_eq!(created.state, "pending");
+
+    // Pause is DATABASE state — a restarted CP would read it straight from the row.
+    assert_eq!(
+        job_state(&bed.pool, job).await,
+        "waiting_on_human",
+        "a job-scoped ask pauses the run (persisted)"
+    );
+    let after_ask = transcript_text(&bed.pool, job).await;
+    assert!(
+        after_ask.contains("Which store?") && after_ask.contains("Postgres, Redis"),
+        "the question (with choices) is on the transcript: {after_ask:?}"
+    );
+
+    // A human answers → the run resumes to running (AC-1) and the answer is
+    // recorded on the transcript.
+    interactions::answer(&state, tenant, user, created.id, "Postgres".into())
+        .await
+        .expect("answer");
+    assert_eq!(
+        job_state(&bed.pool, job).await,
+        "running",
+        "answering resumes the paused run"
+    );
+    assert!(
+        transcript_text(&bed.pool, job)
+            .await
+            .contains("answered: Postgres"),
+        "the answer is on the transcript"
+    );
+
+    bed.teardown().await;
+}
+
+#[tokio::test]
+async fn failing_a_job_cancels_its_pending_ask_and_answering_reports_it() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let tenant = bed.tenant("ix").await;
+    let (user, _p) = bed.user(tenant, "owner").await;
+    let t = task(&bed.pool, tenant, user, "team").await;
+    let runner = node(&bed.pool, tenant).await;
+    let job = job_in_state(&bed.pool, tenant, user, t, runner, "running").await;
+    let state = bed.app_state().await;
+
+    let created = interactions::create(
+        &state,
+        tenant,
+        &node_ctx(tenant, user, runner),
+        CreateInteractionRequest {
+            job_id: Some(job),
+            ..ask("continue?")
+        },
+    )
+    .await
+    .expect("pause raised");
+    assert_eq!(job_state(&bed.pool, job).await, "waiting_on_human");
+
+    // The job fails (a node reporting failure) → its pending ask is canceled
+    // (AC-3), because a paused ask on dead work is moot.
+    nook_control::services::jobs::finish(&state, tenant, job, false, "the run crashed")
+        .await
+        .expect("finish");
+    let reloaded = interactions::get(&state, tenant, &node_ctx(tenant, user, runner), created.id)
+        .await
+        .expect("get");
+    assert_eq!(
+        reloaded.state, "canceled",
+        "the job's failure cancels its ask"
+    );
+
+    // Answering the now-canceled ask reports it clearly — not "already answered".
+    let err = interactions::answer(&state, tenant, user, created.id, "go".into()).await;
+    match err {
+        Err(ApiError::Conflict(msg)) => assert!(
+            msg.contains("canceled"),
+            "the conflict names the cancellation, not a stale answer: {msg:?}"
+        ),
+        other => panic!("expected a canceled-report conflict, got {other:?}"),
+    }
 
     bed.teardown().await;
 }

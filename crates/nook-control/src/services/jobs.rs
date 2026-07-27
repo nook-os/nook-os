@@ -221,7 +221,39 @@ pub async fn transition(
         .map(|t| is_private(&t))
         .unwrap_or(true);
     record_job_event(state, tenant, "job.state_changed", &updated, private).await;
+
+    // MAIN-162: a job that fails or is canceled cancels any pending interaction
+    // it raised — a paused human ask on dead work is moot. (A human who then
+    // answers the now-canceled ask is told so clearly; see `interactions::answer`.)
+    if matches!(to, "failed" | "canceled") {
+        crate::services::interactions::cancel_for_job(state, tenant, id).await;
+    }
     Ok(updated)
+}
+
+/// Pause a RUNNING job on a human interaction (MAIN-162): `running →
+/// waiting_on_human`, persisted so the pause survives CP/node restarts. A no-op
+/// for a job not currently running (already paused, or a state where no ask can
+/// fire), so raising an interaction never fails on job state.
+pub async fn pause_for_human(state: &AppState, tenant: TenantId, id: JobId) -> ApiResult<()> {
+    let job = load(state, tenant, id).await?;
+    if job.state == "running" {
+        transition(state, tenant, id, "waiting_on_human").await?;
+    }
+    Ok(())
+}
+
+/// Resume a PAUSED job once its interaction is answered (MAIN-162):
+/// `waiting_on_human → running`. A no-op if the job is not paused (already
+/// resumed, canceled, or never paused), so answering never fails on job state.
+/// If the executor node is gone the resumed run cannot continue there — that
+/// dead-executor case is surfaced by the caller and reaped by MAIN-164.
+pub async fn resume_from_human(state: &AppState, tenant: TenantId, id: JobId) -> ApiResult<()> {
+    let job = load(state, tenant, id).await?;
+    if job.state == "waiting_on_human" {
+        transition(state, tenant, id, "running").await?;
+    }
+    Ok(())
 }
 
 /// Cancel a job from any non-terminal state (AC-5). A no-op-style 200 if it is

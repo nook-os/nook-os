@@ -1,7 +1,7 @@
 ---
 name: nook-spec
-description: "Interview the user about a raw idea until confident, then file a build-ready issue on the NookOS board. Use when asked to run the loop's spec interview, draft a queue-ready issue, or plan a feature. Interactive — requires the user present; never run unattended."
-version: 1.0.0
+description: "Interview the user about a raw idea until confident, then file a build-ready issue on the NookOS board. Use when asked to run the loop's spec interview, draft a queue-ready issue, or plan a feature. A human answers — live at the terminal, or asynchronously when run as a detached loop job; never fully unattended."
+version: 1.1.0
 author: NookOS
 license: MIT
 platforms: [linux, macos]
@@ -30,6 +30,34 @@ nook tasks --json    # proves the board is reachable
 If `whoami` fails or reports a node token, stop and tell the user to mint a
 user token in the NookOS UI (Settings → Access tokens) and run
 `nook login --token nook_user_…`. Do not continue without it.
+
+## How you ask — terminal, job, or unattended
+
+Every place this skill asks a human — the interview rounds (§2) and the go-ahead
+before filing (§4) — routes through one of three channels, chosen by your run
+context. The interview logic, gates, and flow are **byte-identical** across all
+three; only the ask *primitive* changes:
+
+- **Human at a terminal** (`NOOK_JOB_ID` is NOT in the environment): ask
+  interactively, exactly as today — `AskUserQuestion` rounds, and show the full
+  draft and wait for a go-ahead in chat.
+- **Detached loop job** (`NOOK_JOB_ID` is set — a spec job is running you on an
+  executor node): you have no terminal, but a human answers asynchronously.
+  Raise each question as a durable interaction and block on it:
+
+  ```bash
+  nook interactions ask --wait "Which store backs sessions — Postgres or Redis?" \
+    --choice Postgres --choice Redis
+  ```
+
+  `--wait` auto-anchors to this job via `NOOK_JOB_ID` — which pauses the job to
+  `waiting_on_human` and resumes it when the answer lands — blocks until a human
+  answers from any surface, then prints the answer to stdout. Use it for the
+  interview rounds **and** the final go-ahead before filing. Never assume an
+  answer.
+- **Unattended, no job** (no terminal and no `NOOK_JOB_ID`): there is no one to
+  ask and nothing to pause on. Do not guess a product decision — file nothing,
+  report that the spec needs a human, and end.
 
 ## 1. Research before asking
 
