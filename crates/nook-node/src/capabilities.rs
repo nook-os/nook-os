@@ -84,6 +84,7 @@ pub fn detect() -> Capabilities {
                 .as_deref(),
         ),
         shared_operator: shared_operator(),
+        runtime_auth: crate::runtime_auth::probe_all(),
     }
 }
 
