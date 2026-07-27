@@ -177,7 +177,7 @@ pub struct Config {
     /// the safe default, because an attacker who can set XFF must not be able to
     /// spoof their source for the per-IP rate limiter. Set `NOOK_TRUSTED_PROXIES`
     /// (comma-separated CIDRs) to the edge proxy's address range when one fronts
-    /// this service. See `crate::client_ip::resolve_client_ip`.
+    /// this service. Resolved by nook-control's client-IP helper.
     pub trusted_proxies: Vec<ipnet::IpNet>,
 }
 
@@ -326,8 +326,13 @@ impl Config {
 
     /// A Config with everything defaulted, for unit tests that need one without
     /// touching the process environment. Mirrors the `from_env` defaults.
-    #[cfg(test)]
-    pub(crate) fn for_test() -> Self {
+    ///
+    /// Compiled for this crate's own tests and, via the `test-support` feature,
+    /// for downstream crates' tests (nook-control enables it as a dev-dep) —
+    /// the split in MAIN-146 moved this out of nook-control, so its tests can no
+    /// longer reach a `#[cfg(test)]`-only helper here.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn for_test() -> Self {
         Self {
             app_env: "test".into(),
             bind: "127.0.0.1:0".into(),

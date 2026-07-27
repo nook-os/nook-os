@@ -1,23 +1,25 @@
 pub mod agent_tls;
 pub mod auth;
 pub mod ca;
-pub mod cache;
 pub mod client_ip;
-pub mod config;
 pub mod crypto;
 pub mod error;
 pub mod events;
-pub mod mailer;
 pub mod mcp_backend;
 pub mod openapi;
 pub mod routes;
 pub mod seed;
 pub mod services;
 pub mod state;
-pub mod storage;
 pub mod ws;
 
-pub use config::Config;
+// Config parsing and the cache / storage / mail providers now live in
+// `nook-infra` (MAIN-146). They are re-exported at their original module paths
+// so every `crate::config` / `crate::cache` / `crate::storage` / `crate::mailer`
+// call site inside this crate keeps resolving unchanged.
+pub use nook_infra::{cache, config, mailer, storage};
+
+pub use nook_infra::Config;
 pub use state::AppState;
 
 // `sqlx::migrate!` embeds the migration set at COMPILE time, so adding a new
