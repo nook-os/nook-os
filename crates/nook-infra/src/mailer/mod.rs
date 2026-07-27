@@ -60,6 +60,51 @@ impl Category {
             Category::Notification => "notification",
         }
     }
+
+    /// Parse the wire form (see [`as_str`](Category::as_str)). Anything
+    /// unrecognized is treated as `Transactional` — the safe default, since a
+    /// transactional message is one a user is actively waiting on.
+    pub fn parse(s: &str) -> Category {
+        match s {
+            "notification" => Category::Notification,
+            _ => Category::Transactional,
+        }
+    }
+}
+
+/// The queue `work_type` for an email send (MAIN-149).
+pub const EMAIL_WORK_TYPE: &str = "email.send";
+
+/// A rendered email queued for delivery (MAIN-149). The control plane renders
+/// the message and enqueues this as an `email.send` job; the worker deserializes
+/// it and drives the configured mail provider. The queue treats it as opaque
+/// bytes (JSON by convention). `category` is the wire form of [`Category`].
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct EmailJob {
+    pub to: String,
+    pub subject: String,
+    pub text_body: String,
+    #[serde(default)]
+    pub html_body: Option<String>,
+    pub category: String,
+}
+
+impl EmailJob {
+    pub fn new(
+        to: impl Into<String>,
+        subject: impl Into<String>,
+        text_body: impl Into<String>,
+        html_body: Option<String>,
+        category: Category,
+    ) -> Self {
+        Self {
+            to: to.into(),
+            subject: subject.into(),
+            text_body: text_body.into(),
+            html_body,
+            category: category.as_str().into(),
+        }
+    }
 }
 
 /// Whether `name` is a provider this build understands (config validates it at
