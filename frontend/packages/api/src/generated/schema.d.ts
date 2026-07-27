@@ -1816,6 +1816,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/tasks/bulk": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["bulk_tasks"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/tasks/{id}": {
         parameters: {
             query?: never;
@@ -2928,6 +2944,39 @@ export interface components {
         };
         /** Format: uuid */
         BoardId: string;
+        /**
+         * @description The outcome for one task in a bulk batch: `ok`, or `skipped` with a reason
+         *     (an epic that can't take the action, or an id the caller cannot see).
+         */
+        BulkTaskItemResult: {
+            /** @description The id/key exactly as supplied in the request. */
+            id: string;
+            reason?: string | null;
+            /** @description `ok` | `skipped`. */
+            status: string;
+        };
+        /**
+         * @description One bulk action applied to a batch of backlog tasks (MAIN-154). One action
+         *     per call; the server loops with one transaction per task and returns a
+         *     per-id result. `action` is one of `agent_ready` | `move_column` | `priority`
+         *     | `type` | `assignee` | `archive`; `value` carries the action's argument
+         *     (e.g. `on`/`off`, a column type, `0`–`4`, a task type, a user uuid or empty
+         *     to unassign) and is absent for `archive`.
+         */
+        BulkTaskRequest: {
+            action: string;
+            task_ids: string[];
+            value?: string | null;
+        };
+        /**
+         * @description The result of a bulk action: one entry per requested id, plus counts for the
+         *     UI's one-line summary ("14 updated, 2 skipped").
+         */
+        BulkTaskResponse: {
+            results: components["schemas"]["BulkTaskItemResult"][];
+            skipped: number;
+            updated: number;
+        };
         /**
          * @description What a node reports about itself on registration. The control plane never
          *     inspects a machine — the node describes its own capabilities.
@@ -8199,6 +8248,35 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["TaskItem"][];
                 };
+            };
+        };
+    };
+    bulk_tasks: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["BulkTaskRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BulkTaskResponse"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
         };
     };

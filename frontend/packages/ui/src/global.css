@@ -1271,8 +1271,20 @@ table.nook-table tr.clickable { cursor: pointer; }
   text-transform: uppercase;
   letter-spacing: 0.03em;
 }
-.backlog-select-actions { margin-left: auto; display: inline-flex; align-items: center; gap: 8px; }
+.backlog-select-actions {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
 .backlog-select-count { color: var(--nook-accent); font-weight: 600; }
+/* One labelled cluster inside the bulk toolbar (agent-ready on/off). */
+.backlog-bulk-group { display: inline-flex; align-items: center; gap: 4px; }
+.backlog-select-toolbar .task-select { font-size: 11px; padding: 1px 4px; }
+/* The one-line result summary ("14 updated, 2 skipped: …") — sits at the far
+   right and survives the selection clearing on a full success. */
+.backlog-select-summary { margin-left: auto; white-space: nowrap; }
 
 .board-split {
   display: flex;

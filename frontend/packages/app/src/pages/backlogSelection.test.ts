@@ -4,8 +4,10 @@ import type { BacklogGroups, EpicSection } from "./Board";
 import {
   nextCollapsed,
   selectableRowIds,
+  summarizeBulk,
   useBacklogSelection,
 } from "./backlogSelection";
+import type { BulkTaskResponse } from "@nookos/api";
 
 // Minimal fixtures — rows only need the fields the helpers touch.
 const task = (id: string, type = "task"): TaskItem =>
@@ -65,6 +67,52 @@ describe("nextCollapsed", () => {
     expect([...input]).toEqual(["e1"]); // input untouched
     expect(out.has("e1")).toBe(true);
     expect(out.has("e2")).toBe(true);
+  });
+});
+
+describe("summarizeBulk", () => {
+  const res = (
+    results: { id: string; status: string; reason?: string | null }[],
+  ): BulkTaskResponse => ({
+    results,
+    updated: results.filter((r) => r.status === "ok").length,
+    skipped: results.filter((r) => r.status === "skipped").length,
+  });
+
+  it("on full success reports only the updated count and keeps nothing selected", () => {
+    const out = summarizeBulk(res([
+      { id: "a", status: "ok" },
+      { id: "b", status: "ok" },
+    ]));
+    expect(out.message).toBe("2 updated");
+    expect(out.skippedIds).toEqual([]);
+  });
+
+  it("on partial success keeps the skipped ids and dedupes distinct reasons", () => {
+    const out = summarizeBulk(res([
+      { id: "a", status: "ok" },
+      { id: "b", status: "ok" },
+      { id: "e1", status: "skipped", reason: "epics are containers" },
+      { id: "e2", status: "skipped", reason: "epics are containers" },
+    ]));
+    expect(out.skippedIds).toEqual(["e1", "e2"]);
+    expect(out.message).toBe("2 updated, 2 skipped: epics are containers");
+  });
+
+  it("joins several distinct skip reasons", () => {
+    const out = summarizeBulk(res([
+      { id: "a", status: "skipped", reason: "epics are containers" },
+      { id: "b", status: "skipped", reason: "not found" },
+    ]));
+    expect(out.message).toBe("0 updated, 2 skipped: epics are containers; not found");
+  });
+
+  it("omits the reason clause when skipped rows carry no reason", () => {
+    const out = summarizeBulk(res([
+      { id: "a", status: "ok" },
+      { id: "b", status: "skipped" },
+    ]));
+    expect(out.message).toBe("1 updated, 1 skipped");
   });
 });
 

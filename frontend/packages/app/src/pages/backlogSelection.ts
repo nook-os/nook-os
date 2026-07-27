@@ -5,6 +5,7 @@
 // rule lives here as a pure helper so collapse is one definition and the AC-4
 // "no desync" guarantee is unit-testable.
 import { create } from "zustand";
+import type { BulkTaskResponse } from "@nookos/api";
 import type { BacklogGroups } from "./Board";
 
 /// The ids eligible for selection given the current groups and collapse state
@@ -35,6 +36,39 @@ export function nextCollapsed(collapsed: Set<string>, id: string): Set<string> {
   if (next.has(id)) next.delete(id);
   else next.add(id);
   return next;
+}
+
+/// The two things a bulk call's result tells the UI (MAIN-154 AC-4): which rows
+/// to KEEP selected (the skipped ones) and a one-line summary to show. On full
+/// success the message is just "N updated"; on a partial the skipped count and
+/// the DISTINCT skip reasons are appended ("14 updated, 2 skipped: epics are
+/// containers"). Pure so the "keep skipped rows / dedupe reasons" rule is one
+/// definition and unit-testable, independent of the fetch.
+export interface BulkSummary {
+  /** The ids the server skipped — kept selected so the user can retry/adjust. */
+  skippedIds: string[];
+  /** The one-line toolbar summary. */
+  message: string;
+}
+
+export function summarizeBulk(res: BulkTaskResponse): BulkSummary {
+  const skippedRows = res.results.filter((r) => r.status === "skipped");
+  const skippedIds = skippedRows.map((r) => r.id);
+  let message = `${res.updated} updated`;
+  if (res.skipped > 0) {
+    // Distinct reasons only — the same "epics are containers" repeated per row
+    // is one fact, not fourteen. Order-preserving dedupe via a Set.
+    const reasons = [
+      ...new Set(
+        skippedRows
+          .map((r) => (r.reason ?? "").trim())
+          .filter((r) => r.length > 0),
+      ),
+    ];
+    const why = reasons.length ? `: ${reasons.join("; ")}` : "";
+    message += `, ${res.skipped} skipped${why}`;
+  }
+  return { skippedIds, message };
 }
 
 interface BacklogSelectionState {

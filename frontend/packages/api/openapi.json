@@ -4117,6 +4117,39 @@
         }
       }
     },
+    "/api/v1/tasks/bulk": {
+      "post": {
+        "tags": [
+          "crate::routes::bulk"
+        ],
+        "operationId": "bulk_tasks",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BulkTaskRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BulkTaskResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": ""
+          }
+        }
+      }
+    },
     "/api/v1/tasks/{id}": {
       "get": {
         "tags": [
@@ -6824,6 +6857,80 @@
       "BoardId": {
         "type": "string",
         "format": "uuid"
+      },
+      "BulkTaskItemResult": {
+        "type": "object",
+        "description": "The outcome for one task in a bulk batch: `ok`, or `skipped` with a reason\n(an epic that can't take the action, or an id the caller cannot see).",
+        "required": [
+          "id",
+          "status"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "The id/key exactly as supplied in the request."
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status": {
+            "type": "string",
+            "description": "`ok` | `skipped`."
+          }
+        }
+      },
+      "BulkTaskRequest": {
+        "type": "object",
+        "description": "One bulk action applied to a batch of backlog tasks (MAIN-154). One action\nper call; the server loops with one transaction per task and returns a\nper-id result. `action` is one of `agent_ready` | `move_column` | `priority`\n| `type` | `assignee` | `archive`; `value` carries the action's argument\n(e.g. `on`/`off`, a column type, `0`–`4`, a task type, a user uuid or empty\nto unassign) and is absent for `archive`.",
+        "required": [
+          "task_ids",
+          "action"
+        ],
+        "properties": {
+          "action": {
+            "type": "string"
+          },
+          "task_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "value": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "BulkTaskResponse": {
+        "type": "object",
+        "description": "The result of a bulk action: one entry per requested id, plus counts for the\nUI's one-line summary (\"14 updated, 2 skipped\").",
+        "required": [
+          "results",
+          "updated",
+          "skipped"
+        ],
+        "properties": {
+          "results": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/BulkTaskItemResult"
+            }
+          },
+          "skipped": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "updated": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
       },
       "Capabilities": {
         "type": "object",

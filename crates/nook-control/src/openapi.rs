@@ -128,6 +128,7 @@ use utoipa::OpenApi;
         crate::routes::boards::update_task,
         crate::routes::boards::delete_task,
         crate::routes::boards::archive_task,
+        crate::routes::bulk::bulk_tasks,
         crate::routes::boards::unarchive_task,
         crate::routes::boards::archive_completed_in_column,
         crate::routes::boards::update_board,

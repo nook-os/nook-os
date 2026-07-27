@@ -1552,6 +1552,41 @@ pub struct UpdateTaskRequest {
     pub expected_updated_at: Option<DateTime<Utc>>,
 }
 
+/// One bulk action applied to a batch of backlog tasks (MAIN-154). One action
+/// per call; the server loops with one transaction per task and returns a
+/// per-id result. `action` is one of `agent_ready` | `move_column` | `priority`
+/// | `type` | `assignee` | `archive`; `value` carries the action's argument
+/// (e.g. `on`/`off`, a column type, `0`–`4`, a task type, a user uuid or empty
+/// to unassign) and is absent for `archive`.
+#[derive(Debug, Clone, Deserialize, ToSchema)]
+pub struct BulkTaskRequest {
+    pub task_ids: Vec<String>,
+    pub action: String,
+    #[serde(default)]
+    pub value: Option<String>,
+}
+
+/// The outcome for one task in a bulk batch: `ok`, or `skipped` with a reason
+/// (an epic that can't take the action, or an id the caller cannot see).
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct BulkTaskItemResult {
+    /// The id/key exactly as supplied in the request.
+    pub id: String,
+    /// `ok` | `skipped`.
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// The result of a bulk action: one entry per requested id, plus counts for the
+/// UI's one-line summary ("14 updated, 2 skipped").
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct BulkTaskResponse {
+    pub results: Vec<BulkTaskItemResult>,
+    pub updated: usize,
+    pub skipped: usize,
+}
+
 /// Deserialize a field that can be absent, null, or a value.
 ///
 /// `Option<Option<T>>` on its own does not do this: serde applies a JSON
