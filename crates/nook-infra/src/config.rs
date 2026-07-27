@@ -119,6 +119,13 @@ pub struct Config {
     /// name here, not inference. See `crate::cache`.
     pub cache_provider: String,
 
+    // ── Queue provider ──────────────────────────────────────────────────
+    /// Which durable-work-queue backend to use, chosen by name — `database`
+    /// (default) or the reserved-but-unbuilt `redis` / `sqs`. Explicit, like
+    /// the cache: a queue is a deployment decision, and a hosted broker later
+    /// means a new name here, not inference. See `crate::queue`.
+    pub queue_provider: String,
+
     // ── Email (mail provider) ───────────────────────────────────────────
     /// Which mail transport to use, chosen by name — `smtp` or `capture`.
     /// Explicit, like `NOOK_ARTIFACT_STORE`, rather than inferred from whether
@@ -256,6 +263,8 @@ impl Config {
 
             cache_provider: env_opt("NOOK_CACHE_PROVIDER").unwrap_or_else(|| "memory".into()),
 
+            queue_provider: env_opt("NOOK_QUEUE_PROVIDER").unwrap_or_else(|| "database".into()),
+
             mail_provider: env_opt("MAIL_PROVIDER").unwrap_or_else(|| "capture".into()),
             smtp_host: env_opt("SMTP_HOST"),
             smtp_port: env_opt("SMTP_PORT")
@@ -299,6 +308,10 @@ impl Config {
         // but unbuilt — refuse it at boot with a pointed message rather than
         // silently handing back a per-process cache someone asked to be shared.
         crate::cache::validate_provider(&cfg.cache_provider)?;
+        // Same story for the queue: `redis`/`sqs` are reserved but unbuilt, so
+        // refuse them at boot rather than silently draining a single-node table
+        // a deployment believed was a shared broker.
+        crate::queue::validate_provider(&cfg.queue_provider)?;
         // An unknown mail provider is a misconfiguration worth stopping for,
         // rather than silently falling through to some default and dropping mail.
         if !crate::mailer::is_known_provider(&cfg.mail_provider) {
@@ -369,6 +382,7 @@ impl Config {
             s3_secret_access_key: None,
             s3_path_style: true,
             cache_provider: "memory".into(),
+            queue_provider: "database".into(),
             mail_provider: "capture".into(),
             smtp_host: None,
             smtp_port: 587,

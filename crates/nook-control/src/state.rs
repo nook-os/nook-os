@@ -29,6 +29,10 @@ pub struct AppState {
     /// A swappable key/value cache — in-memory today. First consumer: the
     /// per-person tenants list `/auth/me` carries. Decided by config at boot.
     pub cache: Arc<dyn crate::cache::Cache>,
+    /// The durable work queue — the zero-infra Postgres backend today. Anything
+    /// in the control plane enqueues through here; there is no worker draining
+    /// it yet (MAIN-147). Decided by config at boot.
+    pub queue: Arc<dyn crate::queue::Queue>,
     /// Recently validated MCP bearer tokens (hash → validated-at), so OIDC
     /// access-token checks don't hit the IdP's userinfo endpoint per request.
     pub mcp_auth_cache: Arc<dashmap::DashMap<u64, std::time::Instant>>,
@@ -57,10 +61,14 @@ impl AppState {
         ));
         // A swappable key/value cache; first consumer is the tenants list (MAIN-27).
         let cache: Arc<dyn crate::cache::Cache> = Arc::from(crate::cache::from_config(&cfg));
+        // The durable work queue; database-backed today (MAIN-147).
+        let queue: Arc<dyn crate::queue::Queue> =
+            Arc::from(crate::queue::from_config(&cfg, db.clone()));
         Self {
             artifacts,
             mailer,
             cache,
+            queue,
             kanban: Arc::new(KanbanRegistry::new(db.clone())),
             registry: Arc::new(Registry::new()),
             dispatcher: Arc::new(RuleBasedDispatcher),

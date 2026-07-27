@@ -2593,13 +2593,14 @@ dependencies = [
 
 [[package]]
 name = "nook-infra"
-version = "0.4.17"
+version = "0.4.18"
 dependencies = [
  "anyhow",
  "async-trait",
  "aws-config",
  "aws-credential-types",
  "aws-sdk-s3",
+ "chrono",
  "dashmap",
  "ipnet",
  "lettre",
