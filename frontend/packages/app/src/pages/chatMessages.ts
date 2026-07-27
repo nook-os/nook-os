@@ -25,7 +25,9 @@ function toView(m: ChatMessage, names: Record<string, string>): ChatViewMessage 
   return {
     id: m.id,
     authorId: m.author_id,
-    authorName: names[m.author_id],
+    // Prefer the server-resolved display name (works cross-tenant in org
+    // channels — MAIN-112 AC-4); fall back to the local map ("You" for me).
+    authorName: names[m.author_id] ?? m.author_name ?? undefined,
     body: m.body,
     createdAt: m.created_at,
   };

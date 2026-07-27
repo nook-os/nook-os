@@ -2314,12 +2314,15 @@ pub struct DispatchItem {
 // tenant scope is enforced server-side), so org channels are a later addition
 // with no shape change. `id`s are UUID v7 so history keysets on them.
 
-/// A chat channel visible to a tenant member.
+/// A chat channel visible to a member.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct ChatChannel {
     pub id: Uuid,
     pub name: String,
     pub slug: String,
+    /// `"tenant"` (shared by a tenant, the default) or `"org"` (shared across
+    /// every tenant under an org — MAIN-112). Drives the org badge in the UI.
+    pub owner_type: String,
     /// Archived channels are hidden from the default list and refuse new posts.
     pub archived: bool,
     pub created_at: DateTime<Utc>,
@@ -2332,6 +2335,10 @@ pub struct ChatMessage {
     pub id: Uuid,
     pub channel_id: Uuid,
     pub author_id: Uuid,
+    /// The author's display name, resolved from `public.users` by `author_id` —
+    /// so an org channel shows names for authors in other tenants (MAIN-112
+    /// AC-4). `None` only if the author row is gone.
+    pub author_name: Option<String>,
     pub body: String,
     pub created_at: DateTime<Utc>,
 }
@@ -2348,6 +2355,10 @@ pub struct ChatMessagePage {
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct CreateChatChannel {
     pub name: String,
+    /// `"tenant"` (default) or `"org"`. An org channel is owned by the caller's
+    /// tenant's org and needs tenant owner/admin to create (MAIN-112 AC-3).
+    #[serde(default)]
+    pub owner: Option<String>,
 }
 
 /// Rename and/or archive a channel. Absent fields are left unchanged.

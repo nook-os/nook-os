@@ -193,6 +193,11 @@ export function ChatPage() {
             >
               <span className="chat-channel-hash">#</span>
               {c.name}
+              {c.owner_type === "org" && (
+                <span className="chat-channel-org" title="Shared across your org">
+                  org
+                </span>
+              )}
             </button>
           ))
         )}
@@ -203,6 +208,11 @@ export function ChatPage() {
             <>
               <span className="chat-channel-hash">#</span>
               {activeChannel.name}
+              {activeChannel.owner_type === "org" && (
+                <span className="chat-channel-org" title="Shared across your org">
+                  org
+                </span>
+              )}
             </>
           ) : (
             "Select a channel"

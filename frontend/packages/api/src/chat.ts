@@ -100,9 +100,16 @@ export function me(): Promise<ChatMe> {
   return chatGet<ChatMe>("/me");
 }
 
-/** Create a channel (admin only server-side; the UI hides it for non-admins). */
-export function createChannel(name: string): Promise<ChatChannel> {
-  const body: CreateChatChannel = { name };
+/**
+ * Create a channel (admin only server-side; the UI hides it for non-admins).
+ * `owner` is "tenant" (default — shared by your team) or "org" (shared across
+ * every tenant under your org — MAIN-112).
+ */
+export function createChannel(
+  name: string,
+  owner: "tenant" | "org" = "tenant",
+): Promise<ChatChannel> {
+  const body: CreateChatChannel = { name, owner };
   return chatWrite<ChatChannel>("POST", "/channels", body);
 }
 

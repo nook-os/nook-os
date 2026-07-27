@@ -20,6 +20,9 @@ export function ChannelManager({ onClose }: { onClose: () => void }) {
   const [name, setName] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  // Who the new channel belongs to: "tenant" (your team, default) or "org"
+  // (shared across every tenant under your org — MAIN-112 AC-4).
+  const [owner, setOwner] = useState<"tenant" | "org">("tenant");
 
   const q = useQuery({
     // A superset key of the sidebar's ["chat","channels"]: invalidating that
@@ -42,7 +45,7 @@ export function ChannelManager({ onClose }: { onClose: () => void }) {
     setBusy(true);
     setError(null);
     try {
-      await createChannel(trimmed);
+      await createChannel(trimmed, owner);
       setName("");
       refresh();
     } catch (e) {
@@ -105,6 +108,15 @@ export function ChannelManager({ onClose }: { onClose: () => void }) {
                 if (e.key === "Enter") void create();
               }}
             />
+            <select
+              className="chan-owner-select"
+              value={owner}
+              aria-label="channel owner"
+              onChange={(e) => setOwner(e.target.value as "tenant" | "org")}
+            >
+              <option value="tenant">My team</option>
+              <option value="org">My org</option>
+            </select>
             <button className="btn small primary" onClick={create} disabled={busy}>
               <Plus size={12} /> create
             </button>

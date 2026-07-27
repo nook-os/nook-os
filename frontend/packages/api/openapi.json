@@ -7313,11 +7313,12 @@
       },
       "ChatChannel": {
         "type": "object",
-        "description": "A chat channel visible to a tenant member.",
+        "description": "A chat channel visible to a member.",
         "required": [
           "id",
           "name",
           "slug",
+          "owner_type",
           "archived",
           "created_at"
         ],
@@ -7336,6 +7337,10 @@
           },
           "name": {
             "type": "string"
+          },
+          "owner_type": {
+            "type": "string",
+            "description": "`\"tenant\"` (shared by a tenant, the default) or `\"org\"` (shared across\nevery tenant under an org — MAIN-112). Drives the org badge in the UI."
           },
           "slug": {
             "type": "string"
@@ -7356,6 +7361,13 @@
           "author_id": {
             "type": "string",
             "format": "uuid"
+          },
+          "author_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The author's display name, resolved from `public.users` by `author_id` —\nso an org channel shows names for authors in other tenants (MAIN-112\nAC-4). `None` only if the author row is gone."
           },
           "body": {
             "type": "string"
@@ -7577,6 +7589,13 @@
         "properties": {
           "name": {
             "type": "string"
+          },
+          "owner": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`\"tenant\"` (default) or `\"org\"`. An org channel is owned by the caller's\ntenant's org and needs tenant owner/admin to create (MAIN-112 AC-3)."
           }
         }
       },
