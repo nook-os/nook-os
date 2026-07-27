@@ -279,3 +279,162 @@ async fn me_carries_role_and_person_id() {
 
     cleanup(&pool, tenant).await;
 }
+
+// ── MAIN-135: shared nodes (owner-set flag + team visibility) ─────────────────
+
+/// An ownerless node (owner_person_id NULL), for the "cannot share" case.
+async fn add_ownerless_node(db: &PgPool, tenant: TenantId) -> NodeId {
+    let id = NodeId::new();
+    sqlx::query(
+        "INSERT INTO nodes (id, tenant_id, name, node_token_hash, status)
+         VALUES ($1, $2, $3, $4, 'offline')",
+    )
+    .bind(id)
+    .bind(tenant)
+    .bind(format!("n-{}", id.0.simple()))
+    .bind(format!("h-{}", id.0.simple()))
+    .execute(db)
+    .await
+    .expect("ownerless node");
+    id
+}
+
+async fn set_shared(
+    state: &AppState,
+    ctx: AuthCtx,
+    node: NodeId,
+    shared: bool,
+) -> Result<Node, nook_control::error::ApiError> {
+    nook_control::routes::nodes::set_shared(
+        State(state.clone()),
+        ctx,
+        Path(node),
+        axum::Json(SetSharedRequest { shared }),
+    )
+    .await
+    .map(|j| j.0)
+}
+
+async fn member_sees(state: &AppState, member: UserId, tenant: TenantId, node: NodeId) -> bool {
+    nook_control::routes::nodes::list(State(state.clone()), user_ctx(member, tenant))
+        .await
+        .expect("list")
+        .0
+        .iter()
+        .any(|n| n.id == node)
+}
+
+#[tokio::test]
+async fn sharing_a_node_makes_it_visible_to_the_team_and_unsharing_reverts() {
+    let Some(pool) = test_pool().await else {
+        eprintln!("skipping shared-node test — no DATABASE_URL");
+        return;
+    };
+    let state = AppState::new(pool.clone(), test_config(), None).await;
+    let tenant = new_tenant(&pool).await;
+    let (owner, owner_person) = add_user(&pool, tenant, "owner").await;
+    let (member, _member_person) = add_user(&pool, tenant, "member").await;
+    let node = add_node(&pool, tenant, owner_person).await;
+
+    // Before sharing: the member cannot see the owner's node (MAIN-132).
+    assert!(
+        !member_sees(&state, member, tenant, node).await,
+        "an unshared, non-owned node is invisible to the member"
+    );
+    assert!(
+        nook_control::routes::nodes::get_one(
+            State(state.clone()),
+            user_ctx(member, tenant),
+            Path(node)
+        )
+        .await
+        .is_err(),
+        "single-get of an unshared, non-owned node 404s"
+    );
+
+    // The owner shares it.
+    let updated = set_shared(&state, user_ctx(owner, tenant), node, true)
+        .await
+        .expect("owner may share their node");
+    assert!(updated.shared, "the flag is set");
+
+    // Now the member sees it in the list and single-get (AC-4).
+    assert!(
+        member_sees(&state, member, tenant, node).await,
+        "a shared node is visible to the team"
+    );
+    assert!(
+        nook_control::routes::nodes::get_one(
+            State(state.clone()),
+            user_ctx(member, tenant),
+            Path(node)
+        )
+        .await
+        .is_ok(),
+        "single-get of a shared node succeeds for the team"
+    );
+
+    // Unsharing reverts visibility (AC-6).
+    set_shared(&state, user_ctx(owner, tenant), node, false)
+        .await
+        .expect("owner may unshare");
+    assert!(
+        !member_sees(&state, member, tenant, node).await,
+        "unsharing removes the node from the member's view again"
+    );
+
+    cleanup(&pool, tenant).await;
+}
+
+#[tokio::test]
+async fn only_the_owner_may_toggle_shared() {
+    let Some(pool) = test_pool().await else {
+        return;
+    };
+    let state = AppState::new(pool.clone(), test_config(), None).await;
+    let tenant = new_tenant(&pool).await;
+    let (owner, owner_person) = add_user(&pool, tenant, "owner").await;
+    let (member, _) = add_user(&pool, tenant, "member").await;
+    let (admin, _) = add_user(&pool, tenant, "admin").await;
+
+    // A shared node the member can SEE but does not own → 403 on toggle.
+    let shared_node = add_node(&pool, tenant, owner_person).await;
+    set_shared(&state, user_ctx(owner, tenant), shared_node, true)
+        .await
+        .expect("owner shares");
+    assert!(
+        set_shared(&state, user_ctx(member, tenant), shared_node, false)
+            .await
+            .is_err(),
+        "a non-owner who can see the node still cannot toggle it (403)"
+    );
+
+    // A node the member CANNOT see (not owned, not shared) → 404, no oracle.
+    let hidden_node = add_node(&pool, tenant, owner_person).await;
+    assert!(
+        set_shared(&state, user_ctx(member, tenant), hidden_node, true)
+            .await
+            .is_err(),
+        "toggling an invisible node is refused (404 — no existence oracle)"
+    );
+
+    // An admin who is not the owner is refused — ownership, not role (AC-2).
+    assert!(
+        set_shared(&state, user_ctx(admin, tenant), shared_node, false)
+            .await
+            .is_err(),
+        "an admin who does not own the node cannot share it"
+    );
+
+    // An ownerless node cannot be shared — nobody to consent (AC-3). Toggle as
+    // the admin, who (unscoped) passes visibility and is caught by the owner gate.
+    let orphan = add_ownerless_node(&pool, tenant).await;
+    assert!(
+        set_shared(&state, user_ctx(admin, tenant), orphan, true)
+            .await
+            .is_err(),
+        "an ownerless node cannot be shared"
+    );
+
+    cleanup(&pool, tenant).await;
+}

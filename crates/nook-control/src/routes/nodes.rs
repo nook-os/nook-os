@@ -60,7 +60,7 @@ pub async fn get_one(
 ) -> ApiResult<Json<Node>> {
     let node: Option<Node> = sqlx::query_as(
         "SELECT id, tenant_id, name, hostname, platform, capabilities, resources, status,
-                last_seen_at, owner_person_id, created_at, updated_at
+                last_seen_at, owner_person_id, shared, created_at, updated_at
          FROM nodes WHERE tenant_id = $1 AND id = $2",
     )
     .bind(auth.tenant_id)
@@ -68,13 +68,91 @@ pub async fn get_one(
     .fetch_optional(&state.db)
     .await?;
     let node = node.ok_or(ApiError::NotFound)?;
-    // A member may only see a node they own; a non-owned id is a 404, not a 403,
-    // so it is indistinguishable from a node that does not exist (MAIN-132 AC-1).
+    // A member sees a node they own OR one the team has been given (`shared`,
+    // MAIN-135); anything else is a 404, not a 403, so it is indistinguishable
+    // from a node that does not exist (MAIN-132's no-existence-oracle rule).
     if let Some(person) = visibility_scope(&state, &auth).await? {
-        if node.owner_person_id != Some(person) {
+        if node.owner_person_id != Some(person) && !node.shared {
             return Err(ApiError::NotFound);
         }
     }
+    Ok(Json(node))
+}
+
+/// POST /api/v1/nodes/{id}/shared — the owner designates their machine as
+/// team-usable, or takes it back (MAIN-135).
+///
+/// Ownership, not role: only the person who owns the node may toggle it — an
+/// admin who is not the owner is refused (403), because nobody volunteers
+/// someone else's hardware. A node the caller cannot even see is a 404 (no
+/// existence oracle, matching `get_one`); a visible node they do not own is a
+/// 403; a node with no owner cannot be shared at all (nothing to consent).
+///
+/// This parallels the `require_person_owns_node` chokepoint (person == owner),
+/// but adds the visibility 404-vs-403 distinction the session guard does not
+/// need, and carries share-specific messages.
+#[utoipa::path(post, path = "/api/v1/nodes/{id}/shared",
+    operation_id = "set_node_shared",
+    params(("id" = String, Path,)),
+    request_body = SetSharedRequest,
+    responses((status = 200, body = Node), (status = 403), (status = 404)))]
+pub async fn set_shared(
+    State(state): State<AppState>,
+    auth: AuthCtx,
+    Path(id): Path<NodeId>,
+    Json(req): Json<SetSharedRequest>,
+) -> ApiResult<Json<Node>> {
+    // A person designates a machine; a node credential is not a person.
+    auth.require_user()?;
+
+    let row: Option<(Option<uuid::Uuid>, bool)> = sqlx::query_as(
+        "SELECT owner_person_id, shared FROM nodes WHERE id = $1 AND tenant_id = $2",
+    )
+    .bind(id)
+    .bind(auth.tenant_id)
+    .fetch_optional(&state.db)
+    .await?;
+    let Some((owner_person, is_shared)) = row else {
+        return Err(ApiError::NotFound);
+    };
+
+    let me = crate::auth::person_id_of(&state, auth.user_id).await?;
+
+    // Visibility first: a member who can't see the node (not theirs, not shared)
+    // gets the same 404 an unknown id gets — the toggle must not confirm it
+    // exists. An admin (unscoped) skips this and is caught by the owner check.
+    if let Some(scope_person) = visibility_scope(&state, &auth).await? {
+        let visible = owner_person == Some(scope_person) || is_shared;
+        if !visible {
+            return Err(ApiError::NotFound);
+        }
+    }
+
+    // Only the OWNER may toggle. An ownerless node has nobody to consent (AC-3).
+    match owner_person {
+        None => {
+            return Err(ApiError::ForbiddenMsg(
+                "this machine has no owner, so no one can share it".into(),
+            ))
+        }
+        Some(o) if o != me => {
+            return Err(ApiError::ForbiddenMsg(
+                "only the machine's owner can share it".into(),
+            ))
+        }
+        Some(_) => {}
+    }
+
+    let node: Node = sqlx::query_as(
+        "UPDATE nodes SET shared = $3, updated_at = now() WHERE id = $1 AND tenant_id = $2
+         RETURNING id, tenant_id, name, hostname, platform, capabilities, resources, status,
+                   last_seen_at, owner_person_id, shared, created_at, updated_at",
+    )
+    .bind(id)
+    .bind(auth.tenant_id)
+    .bind(req.shared)
+    .fetch_one(&state.db)
+    .await?;
     Ok(Json(node))
 }
 

@@ -1769,6 +1769,54 @@
         }
       }
     },
+    "/api/v1/nodes/{id}/shared": {
+      "post": {
+        "tags": [
+          "crate::routes::nodes"
+        ],
+        "summary": "POST /api/v1/nodes/{id}/shared — the owner designates their machine as\nteam-usable, or takes it back (MAIN-135).",
+        "description": "Ownership, not role: only the person who owns the node may toggle it — an\nadmin who is not the owner is refused (403), because nobody volunteers\nsomeone else's hardware. A node the caller cannot even see is a 404 (no\nexistence oracle, matching `get_one`); a visible node they do not own is a\n403; a node with no owner cannot be shared at all (nothing to consent).\n\nThis parallels the `require_person_owns_node` chokepoint (person == owner),\nbut adds the visibility 404-vs-403 distinction the session guard does not\nneed, and carries share-specific messages.",
+        "operationId": "set_node_shared",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetSharedRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Node"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": ""
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      }
+    },
     "/api/v1/nodes/{id}/terminal": {
       "post": {
         "tags": [
@@ -8574,6 +8622,7 @@
           "capabilities",
           "resources",
           "status",
+          "shared",
           "created_at",
           "updated_at"
         ],
@@ -8605,13 +8654,17 @@
               "null"
             ],
             "format": "uuid",
-            "description": "The person who owns this node — its join-token minter, else the tenant\nowner (MAIN-119). Recorded and returned, not yet enforced anywhere."
+            "description": "The person who owns this node — its join-token minter, else the tenant\nowner (MAIN-119). Session-start is confined to this person (MAIN-130)."
           },
           "platform": {
             "type": "string"
           },
           "resources": {
             "description": "Latest heartbeat resource sample (see `NodeResources`); `{}` until first."
+          },
+          "shared": {
+            "type": "boolean",
+            "description": "Whether the owner has designated this node team-usable (MAIN-135). A\nshared node is VISIBLE to the whole team; it is not yet usable by them —\nsession-start stays owner-only until a later unit of the epic."
           },
           "status": {
             "type": "string"
@@ -9821,6 +9874,18 @@
           },
           "field": {
             "type": "string"
+          }
+        }
+      },
+      "SetSharedRequest": {
+        "type": "object",
+        "description": "Toggle a node's `shared` designation (MAIN-135). Owner-only at the route.",
+        "required": [
+          "shared"
+        ],
+        "properties": {
+          "shared": {
+            "type": "boolean"
           }
         }
       },

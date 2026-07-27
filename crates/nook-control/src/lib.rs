@@ -28,5 +28,5 @@ pub use state::AppState;
 // 0007_email_verification_tokens, 0008_mail_sends, 0009_task_type,
 // 0010_review_column, 0011_user_notebook, 0012_task_visibility,
 // 0013_task_parent, 0014_managed_content, 0015_board_automation,
-// 0016_node_owner.
+// 0016_node_owner, 0017_node_shared.
 pub static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");

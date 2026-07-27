@@ -244,6 +244,7 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route("/managed/skills", get(managed::list_skills))
         .route("/managed/hooks", get(managed::get_hooks))
+        .route("/nodes/{id}/shared", post(nodes::set_shared))
         .route("/nodes/{id}/rescan", post(nodes::rescan))
         .route("/nodes/{id}/migrate-paths", post(nodes::migrate_paths))
         .route("/nodes/{id}/update", post(nodes::update))
