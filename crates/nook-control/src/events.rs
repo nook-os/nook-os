@@ -153,6 +153,11 @@ pub fn catalog() -> Vec<nook_types::NotificationKind> {
             "Skill install failed",
             "A node could not install a skill.",
         ),
+        k(
+            "hooks.install_failed",
+            "Hooks install failed",
+            "A node could not apply the managed hook set.",
+        ),
     ]
 }
 
@@ -252,6 +257,9 @@ pub fn notable(base_url: &str, event: &Event) -> Option<crate::services::notify:
                 ))
         }
         "skill.install_failed" => Draft::new("A node could not learn a skill")
+            .level("error")
+            .body(text("error").unwrap_or_default().to_string()),
+        "hooks.install_failed" => Draft::new("A node could not apply the managed hooks")
             .level("error")
             .body(text("error").unwrap_or_default().to_string()),
         // Unreachable: the catalog gate above rejects any kind not phrased here.

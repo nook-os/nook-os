@@ -191,6 +191,21 @@ pub async fn managed_skills_as_install(
         .collect())
 }
 
+/// The managed hook set, expressed in the `ControlToNode::InstallHooks` shape a
+/// node applies (MAIN-105 AC-3). `None` when the store has no hooks row, so
+/// connect-replay simply sends nothing rather than an empty push.
+pub async fn managed_hooks_as_install(
+    db: &sqlx::PgPool,
+) -> Result<Option<nook_proto::ControlToNode>, sqlx::Error> {
+    let row: Option<(String, String)> = sqlx::query_as(
+        "SELECT content, sha256 FROM managed_content WHERE kind = 'hooks' AND name = $1",
+    )
+    .bind(HOOKS_NAME)
+    .fetch_optional(db)
+    .await?;
+    Ok(row.map(|(content, sha256)| nook_proto::ControlToNode::InstallHooks { content, sha256 }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -227,6 +242,23 @@ mod tests {
         assert_eq!(json["data"]["name"], name);
         assert_eq!(json["data"]["sha256"], sha256);
         assert_eq!(json["data"]["content"], content);
+    }
+
+    /// The stored hooks row maps onto the `InstallHooks` payload connect-replay
+    /// pushes (MAIN-105 AC-3): content and sha survive unchanged, tagged as the
+    /// wire message a node decodes.
+    #[test]
+    fn managed_hooks_round_trip_into_install_hooks() {
+        let content = hooks_content();
+        let sha256 = digest(&content);
+        let msg = nook_proto::ControlToNode::InstallHooks {
+            content: content.clone(),
+            sha256: sha256.clone(),
+        };
+        let json = serde_json::to_value(&msg).unwrap();
+        assert_eq!(json["type"], "install_hooks");
+        assert_eq!(json["data"]["content"], content);
+        assert_eq!(json["data"]["sha256"], sha256);
     }
 
     /// The hooks body is the apply-ready settings.json fragment (AC-4): valid

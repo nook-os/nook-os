@@ -293,6 +293,27 @@ async fn handle_message(
                 Err(e) => tracing::warn!(node = %name, error = %e, "cannot sync skills"),
             }
 
+            // Then the MANAGED store (MAIN-105 AC-3): the nookos skill and the
+            // hook set the deployment ships. Global content, not tenant-scoped —
+            // replayed to every node on connect, so a machine that was offline
+            // when a new default shipped converges here. The node skips writes
+            // whose sha it already has, so the steady state is free.
+            match crate::routes::managed::managed_skills_as_install(&state.db).await {
+                Ok(msgs) => {
+                    for m in msgs {
+                        _tx.send(m).await.ok();
+                    }
+                }
+                Err(e) => tracing::warn!(node = %name, error = %e, "cannot sync managed skills"),
+            }
+            match crate::routes::managed::managed_hooks_as_install(&state.db).await {
+                Ok(Some(m)) => {
+                    _tx.send(m).await.ok();
+                }
+                Ok(None) => {}
+                Err(e) => tracing::warn!(node = %name, error = %e, "cannot sync managed hooks"),
+            }
+
             state.registry.publish(
                 tenant,
                 UiEvent::NodeStatus {
@@ -369,6 +390,30 @@ async fn handle_message(
                     "skill": skill,
                     "agents": agents,
                     "paths": paths,
+                    "error": error,
+                })),
+            )
+            .await;
+        }
+        NodeToControl::HooksInstalled { path, error } => {
+            // Same contract as SkillInstalled (MAIN-105 AC-5): a failure is a
+            // recorded event that flows through notable→notification, a success
+            // is logged to activity. No per-node table — events are the record.
+            if let Some(e) = &error {
+                tracing::warn!(node = %name, error = %e, "node could not apply managed hooks");
+            }
+            events::record(
+                state,
+                tenant,
+                EventDraft::new(if error.is_some() {
+                    "hooks.install_failed"
+                } else {
+                    "hooks.installed"
+                })
+                .actor("node", node_id.0)
+                .node(node_id)
+                .payload(serde_json::json!({
+                    "path": path,
                     "error": error,
                 })),
             )

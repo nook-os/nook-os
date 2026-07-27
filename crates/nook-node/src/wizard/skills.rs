@@ -124,10 +124,21 @@ fn write_embedded(root: &Path) -> Result<Vec<PathBuf>> {
         .collect()
 }
 
+/// Whether writing `content` to `path` would change anything — false when the
+/// file already holds exactly it. This is the sha-skip (MAIN-105 AC-4): the
+/// store hashes this same string, so content equality IS sha equality, and a
+/// reconnect that replays the whole managed set rewrites nothing already current.
+fn needs_write(path: &Path, content: &str) -> bool {
+    !std::fs::read_to_string(path).is_ok_and(|existing| existing == content)
+}
+
 fn write_named(root: &Path, name: &str, content: &str) -> Result<PathBuf> {
     let dir = root.join(name);
-    std::fs::create_dir_all(&dir).with_context(|| format!("cannot create {}", dir.display()))?;
     let path = dir.join("SKILL.md");
+    if !needs_write(&path, content) {
+        return Ok(path);
+    }
+    std::fs::create_dir_all(&dir).with_context(|| format!("cannot create {}", dir.display()))?;
     std::fs::write(&path, content).with_context(|| format!("cannot write {}", path.display()))?;
     Ok(path)
 }
@@ -353,6 +364,22 @@ mod tests {
 
         assert!(ours.join("SKILL.md").is_file(), "ours is removable");
         assert!(!theirs.join("SKILL.md").exists(), "no SKILL.md → not ours");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// The sha-skip (AC-4): a file that already holds the pushed content does not
+    /// need rewriting, so connect-replay of the managed set is free.
+    #[test]
+    fn needs_write_is_the_sha_skip() {
+        let base = std::env::temp_dir().join(format!("nook-skills-{}", uuid::Uuid::now_v7()));
+        let path = base.join("SKILL.md");
+        // Nonexistent → must write.
+        assert!(needs_write(&path, "hello"));
+        std::fs::create_dir_all(&base).unwrap();
+        std::fs::write(&path, "hello").unwrap();
+        // Same content → skip; different content → write.
+        assert!(!needs_write(&path, "hello"), "identical content must skip");
+        assert!(needs_write(&path, "changed"), "new content must write");
         let _ = std::fs::remove_dir_all(&base);
     }
 }

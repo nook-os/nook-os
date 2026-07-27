@@ -118,6 +118,124 @@ pub fn install(dry_run: bool) -> Result<()> {
     Ok(())
 }
 
+/// The nook marker an entry carries, if any — re-keying removal to the pushed
+/// content rather than the compile-time set. A nook-managed hook command embeds
+/// exactly one marker: a notify by its `--kind <kind>`, a state report by its
+/// `agent-state <value>` (see `nook_proto::hooks::marker`). A user's own hook
+/// carries neither, so it is not "ours" and survives the merge.
+fn marker_of(entry: &Value) -> Option<String> {
+    let cmd = entry
+        .get("hooks")?
+        .as_array()?
+        .first()?
+        .get("command")?
+        .as_str()?;
+    if let Some(rest) = cmd.split("agent-state ").nth(1) {
+        let value = rest.split_whitespace().next()?;
+        return Some(format!("agent-state {value}"));
+    }
+    if let Some(rest) = cmd.split("--kind ").nth(1) {
+        let kind = rest.split_whitespace().next()?;
+        return Some(format!("--kind {kind}"));
+    }
+    None
+}
+
+/// What applying a pushed hooks fragment did.
+#[derive(Debug)]
+pub struct HooksApply {
+    /// The settings file targeted.
+    pub path: PathBuf,
+    /// False when the file already carried this exact managed set, so nothing
+    /// was written (AC-4 — connect-replay is a no-op).
+    pub wrote: bool,
+}
+
+/// Merge a control-plane-pushed managed hooks fragment into the user's
+/// `settings.json` (MAIN-105 AC-2).
+///
+/// Same merge semantics as [`install`], but re-keyed to the PUSHED content
+/// rather than the compile-time `HOOKS`: for every event the fragment carries,
+/// the nook-managed entries already in the file (identified by their marker) are
+/// dropped and the pushed entries put in their place, while the user's own hooks
+/// and every other setting are left untouched. Applying the same fragment twice
+/// is byte-identical, and when the file already carries this exact set nothing is
+/// written at all — the sha-skip AC-4 asks for, expressed as the natural
+/// checksum of a merge: the resulting bytes are unchanged.
+///
+/// A missing file is created; an existing file that is not valid JSON is a
+/// reported error (the caller keeps the node running — AC-2), never a silent
+/// overwrite of something a person may have hand-edited.
+pub fn apply_pushed(fragment_json: &str) -> Result<HooksApply> {
+    let path = home()?.join(".claude/settings.json");
+    let original = std::fs::read_to_string(&path).ok();
+
+    match merged_settings(original.as_deref(), fragment_json)? {
+        // Already carries this exact set — write nothing (AC-4).
+        None => Ok(HooksApply { path, wrote: false }),
+        Some(rendered) => {
+            if let Some(dir) = path.parent() {
+                std::fs::create_dir_all(dir)?;
+            }
+            std::fs::write(&path, &rendered)
+                .with_context(|| format!("cannot write {}", path.display()))?;
+            Ok(HooksApply { path, wrote: true })
+        }
+    }
+}
+
+/// The pure merge, split out so it is testable without touching `$HOME`: given
+/// the current `settings.json` text (if the file exists) and the pushed fragment
+/// JSON, return the text to write — or `None` when the file already carries this
+/// exact managed set, so the caller writes nothing. Invalid current JSON, or a
+/// malformed fragment, is an error.
+fn merged_settings(current: Option<&str>, fragment_json: &str) -> Result<Option<String>> {
+    let fragment: Value =
+        serde_json::from_str(fragment_json).context("pushed hooks fragment is not valid JSON")?;
+    let frag_hooks = fragment
+        .as_object()
+        .context("pushed hooks fragment is not an object")?;
+
+    let mut root: Value = match current {
+        Some(text) if !text.trim().is_empty() => {
+            serde_json::from_str(text).context("settings.json is not valid JSON — fix it first")?
+        }
+        _ => json!({}),
+    };
+
+    let hooks = root
+        .as_object_mut()
+        .context("settings.json is not an object")?
+        .entry("hooks")
+        .or_insert_with(|| json!({}));
+    let hooks = hooks
+        .as_object_mut()
+        .context("`hooks` in settings.json is not an object")?;
+
+    for (event, pushed_list) in frag_hooks {
+        let pushed_entries = pushed_list
+            .as_array()
+            .with_context(|| format!("pushed hooks.{event} is not an array"))?;
+        let list = hooks
+            .entry(event.clone())
+            .or_insert_with(|| json!([]))
+            .as_array_mut()
+            .with_context(|| format!("`hooks.{event}` in settings.json is not an array"))?;
+        // Drop nook-managed entries (keep the user's), then put the pushed set
+        // in their place — replace, never duplicate (AC-2).
+        list.retain(|e| marker_of(e).is_none());
+        for e in pushed_entries {
+            list.push(e.clone());
+        }
+    }
+
+    let rendered = serde_json::to_string_pretty(&root)? + "\n";
+    if current == Some(rendered.as_str()) {
+        return Ok(None);
+    }
+    Ok(Some(rendered))
+}
+
 /// Remove them again.
 pub fn uninstall() -> Result<()> {
     let path = home()?.join(".claude/settings.json");
@@ -182,5 +300,136 @@ mod tests {
             let n = list.iter().filter(|e| is_ours(e, &marker(h))).count();
             assert_eq!(n, 1, "{} / {} has {n} entries", h.event, marker(h));
         }
+    }
+
+    // ── MAIN-105: applying a PUSHED fragment (control-plane delivery) ─────────
+
+    use nook_proto::hooks::claude_settings_fragment;
+
+    fn fragment_json() -> String {
+        serde_json::to_string_pretty(&claude_settings_fragment()).unwrap()
+    }
+
+    /// A fresh machine (no settings file) gains exactly the managed set.
+    #[test]
+    fn apply_to_a_fresh_file_writes_the_managed_set() {
+        let out = merged_settings(None, &fragment_json())
+            .unwrap()
+            .expect("a fresh file must be written");
+        let root: Value = serde_json::from_str(&out).unwrap();
+        let hooks = root["hooks"].as_object().unwrap();
+        for h in HOOKS {
+            let list = hooks[h.event].as_array().unwrap();
+            assert!(
+                list.iter().any(|e| is_ours(e, &marker(h))),
+                "{} missing after apply",
+                h.event
+            );
+        }
+    }
+
+    /// The user's own hooks and settings survive the merge; only nook entries
+    /// are (re)placed.
+    #[test]
+    fn apply_preserves_user_entries_and_settings() {
+        let user = json!({
+            "model": "opus",
+            "hooks": {
+                // A user's own Stop hook — no nook marker, must survive.
+                "Stop": [{ "matcher": "", "hooks": [{ "type": "command", "command": "echo mine" }] }],
+                "PreToolUse": [{ "matcher": "", "hooks": [{ "type": "command", "command": "echo pre" }] }]
+            }
+        });
+        let text = serde_json::to_string_pretty(&user).unwrap() + "\n";
+        let out = merged_settings(Some(&text), &fragment_json())
+            .unwrap()
+            .expect("a change is expected");
+        let root: Value = serde_json::from_str(&out).unwrap();
+        // Untouched settings and a whole untouched event.
+        assert_eq!(root["model"], "opus");
+        assert_eq!(root["hooks"]["PreToolUse"].as_array().unwrap().len(), 1);
+        // The user's Stop hook is still there, alongside the two managed ones.
+        let stop = root["hooks"]["Stop"].as_array().unwrap();
+        assert!(
+            stop.iter().any(|e| e["hooks"][0]["command"] == "echo mine"),
+            "user's own Stop hook was lost"
+        );
+        assert_eq!(
+            stop.iter().filter(|e| marker_of(e).is_some()).count(),
+            2,
+            "Stop must carry exactly the two managed entries (finished + idle)"
+        );
+    }
+
+    /// Applying the same fragment twice yields a byte-identical file, and the
+    /// second apply is a no-op (nothing to write) — AC-2 + AC-4.
+    #[test]
+    fn double_apply_is_byte_identical_and_the_second_is_a_noop() {
+        let once = merged_settings(None, &fragment_json()).unwrap().unwrap();
+        // Re-applying to the just-written file changes nothing.
+        let twice = merged_settings(Some(&once), &fragment_json()).unwrap();
+        assert!(
+            twice.is_none(),
+            "re-applying the same fragment must not rewrite the file"
+        );
+    }
+
+    /// A new managed set REPLACES the old nook entries rather than stacking them.
+    #[test]
+    fn apply_replaces_stale_managed_entries() {
+        // Start from a file carrying a DIFFERENT (old) managed Stop entry.
+        let old = json!({
+            "hooks": {
+                "Stop": [{ "matcher": "", "hooks": [{ "type": "command",
+                    "command": "nook notify \"old\" --kind agent.finished || true" }] }]
+            }
+        });
+        let text = serde_json::to_string_pretty(&old).unwrap() + "\n";
+        let out = merged_settings(Some(&text), &fragment_json())
+            .unwrap()
+            .unwrap();
+        let root: Value = serde_json::from_str(&out).unwrap();
+        let stop = root["hooks"]["Stop"].as_array().unwrap();
+        // The old finished-entry is gone; exactly one finished entry remains.
+        assert_eq!(
+            stop.iter()
+                .filter(|e| is_ours(e, "--kind agent.finished"))
+                .count(),
+            1,
+            "the stale managed entry was not replaced"
+        );
+        assert!(
+            !out.contains("\"old\""),
+            "the old managed command must not survive"
+        );
+    }
+
+    /// An existing file that is not valid JSON is an error — never a silent
+    /// overwrite of something a person may have hand-edited (AC-2).
+    #[test]
+    fn apply_reports_invalid_existing_json() {
+        let err = merged_settings(Some("{ not json"), &fragment_json())
+            .expect_err("invalid settings.json must be an error");
+        assert!(
+            format!("{err:#}").contains("not valid JSON"),
+            "unexpected error: {err:#}"
+        );
+    }
+
+    /// `marker_of` recognises nook-managed entries and leaves the user's alone —
+    /// the re-keying that keeps a merge from eating someone's own hooks.
+    #[test]
+    fn marker_of_distinguishes_managed_from_user_entries() {
+        let managed = json!({ "hooks": [{ "type": "command",
+            "command": "nook notify \"x\" --kind agent.finished || true" }] });
+        let state = json!({ "hooks": [{ "type": "command",
+            "command": "nook agent-state idle >/dev/null 2>&1 || true" }] });
+        let mine = json!({ "hooks": [{ "type": "command", "command": "echo hi" }] });
+        assert_eq!(
+            marker_of(&managed).as_deref(),
+            Some("--kind agent.finished")
+        );
+        assert_eq!(marker_of(&state).as_deref(), Some("agent-state idle"));
+        assert_eq!(marker_of(&mine), None);
     }
 }

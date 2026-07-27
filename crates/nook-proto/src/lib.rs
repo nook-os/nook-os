@@ -63,6 +63,18 @@ pub enum NodeToControl {
         #[serde(default)]
         error: Option<String>,
     },
+    /// What happened when this node tried to merge the managed hook set into
+    /// `settings.json`. Mirrors `SkillInstalled`'s contract: failure is
+    /// reported, never fatal — a bad merge (unreadable/invalid file) is a
+    /// recorded error and the node keeps running (MAIN-105).
+    HooksInstalled {
+        /// The settings file written (or that the merge targeted), for an
+        /// operator who wants to go and look.
+        path: String,
+        /// Present only on failure; the node keeps running either way.
+        #[serde(default)]
+        error: Option<String>,
+    },
     SessionStarted {
         session_id: SessionId,
         tmux_session: String,
@@ -177,6 +189,19 @@ pub enum ControlToNode {
         /// Of the content. The node skips the write when what is on disk
         /// already matches, so reconnect-driven convergence is free rather
         /// than rewriting every skill on every machine on every reconnect.
+        sha256: String,
+    },
+    /// Merge the managed hook set into Claude Code's `settings.json`.
+    ///
+    /// Beside `InstallSkill`: same push-the-content model (a node already has an
+    /// authenticated channel; the fragment is a few hundred bytes), same
+    /// skip-when-the-sha-matches convergence. `content` is the JSON settings
+    /// fragment the control plane holds; `sha256` is of that content, so a node
+    /// whose file already carries this exact managed set writes nothing on
+    /// reconnect. User-owned hook entries are preserved on merge — only the
+    /// nook-managed ones (each marked) are replaced (MAIN-105).
+    InstallHooks {
+        content: String,
         sha256: String,
     },
     /// The tenant's trust bundle changed — usually a CA was staged.
@@ -545,5 +570,67 @@ mod skill_name_tests {
                 assert!(!content.contains(stale), "{name} still references {stale}");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod wire_tests {
+    use super::*;
+
+    /// The MAIN-105 push variant round-trips: adjacently tagged, sha travels
+    /// with the content, and nothing is lost across serialize→deserialize.
+    #[test]
+    fn install_hooks_round_trips() {
+        let msg = ControlToNode::InstallHooks {
+            content: r#"{"Stop":[]}"#.into(),
+            sha256: "abc123".into(),
+        };
+        let json = serde_json::to_value(&msg).unwrap();
+        assert_eq!(json["type"], "install_hooks");
+        assert_eq!(json["data"]["sha256"], "abc123");
+        let back: ControlToNode = serde_json::from_value(json).unwrap();
+        assert!(
+            matches!(back, ControlToNode::InstallHooks { content, sha256 }
+                if content == r#"{"Stop":[]}"# && sha256 == "abc123")
+        );
+    }
+
+    /// The report variant round-trips, and `error` defaults to absent (a
+    /// success) exactly as `SkillInstalled`'s does.
+    #[test]
+    fn hooks_installed_round_trips_and_error_defaults() {
+        let ok = NodeToControl::HooksInstalled {
+            path: "/home/u/.claude/settings.json".into(),
+            error: None,
+        };
+        let json = serde_json::to_value(&ok).unwrap();
+        assert_eq!(json["type"], "hooks_installed");
+        let back: NodeToControl = serde_json::from_value(json).unwrap();
+        assert!(matches!(
+            back,
+            NodeToControl::HooksInstalled { error: None, .. }
+        ));
+
+        // An older/absent `error` field deserializes as a success, not a parse
+        // error — the failure-is-optional contract.
+        let minimal = serde_json::json!({
+            "type": "hooks_installed",
+            "data": { "path": "/x" }
+        });
+        let back: NodeToControl = serde_json::from_value(minimal).unwrap();
+        assert!(matches!(
+            back,
+            NodeToControl::HooksInstalled { error: None, .. }
+        ));
+
+        let failed = NodeToControl::HooksInstalled {
+            path: String::new(),
+            error: Some("settings.json is not valid JSON".into()),
+        };
+        let json = serde_json::to_value(&failed).unwrap();
+        let back: NodeToControl = serde_json::from_value(json).unwrap();
+        assert!(
+            matches!(back, NodeToControl::HooksInstalled { error: Some(e), .. } if e.contains("valid JSON"))
+        );
     }
 }
