@@ -8329,6 +8329,31 @@
           }
         }
       },
+      "DmSummary": {
+        "type": "object",
+        "description": "A direct-message conversation the caller belongs to (MAIN-113). The UI names\nit by its *other* participants' display names — DM channels carry no\nhuman-facing channel name of their own.",
+        "required": [
+          "id",
+          "created_at",
+          "participants"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "participants": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PersonRef"
+            }
+          }
+        }
+      },
       "EmailVerificationStatus": {
         "type": "object",
         "description": "Whether the signed-in user's email is verified, and whether a local\nverification round-trip applies to them (MAIN-30).",
@@ -9896,6 +9921,22 @@
           }
         }
       },
+      "OpenDmRequest": {
+        "type": "object",
+        "description": "Open (or reuse) a DM with these persons — the creator is always included, so\nthe effective set is `{caller} ∪ person_ids`, 2–8 people (MAIN-113 AC-2).",
+        "required": [
+          "person_ids"
+        ],
+        "properties": {
+          "person_ids": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        }
+      },
       "OpenSecretRequest": {
         "type": "object",
         "description": "Unlocking a protected secret.",
@@ -10210,6 +10251,23 @@
           },
           "slug": {
             "type": "string"
+          }
+        }
+      },
+      "PersonRef": {
+        "type": "object",
+        "description": "A person the caller may address in a DM (MAIN-113 AC-4): the stable\ncross-tenant `person_id` and a display name resolved from `public.users`.",
+        "required": [
+          "person_id",
+          "display_name"
+        ],
+        "properties": {
+          "display_name": {
+            "type": "string"
+          },
+          "person_id": {
+            "type": "string",
+            "format": "uuid"
           }
         }
       },
