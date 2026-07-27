@@ -28,9 +28,10 @@ ARG CLAUDE_VERSION=2.1.220
 ARG CODEX_VERSION=0.145.0
 ARG COPILOT_VERSION=1.0.75
 # Hermes ships its own install script (no npm/version manifest to pin against);
-# HERMES_REF is the single pin lever. Set it to an immutable release tag for a
-# reproducible build — `stable` is the movable default for convenience.
-ARG HERMES_REF=stable
+# HERMES_REF is the single pin lever. Pinned to an immutable release TAG — never
+# a movable ref like `stable`/`main` — so the shipped build is reproducible
+# (NousResearch/hermes-agent releases). Override to bump.
+ARG HERMES_REF=v2026.7.20
 
 # Base tools: the node image's set (ca-certificates, curl, git, tmux, bash,
 # procps) plus what the runtime installers need (a C toolchain some npm deps
