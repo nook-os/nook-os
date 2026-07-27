@@ -225,10 +225,28 @@ pub async fn list_notes(
     Query(query): Query<NoteListQuery>,
 ) -> ApiResult<Json<Vec<UserNoteSummary>>> {
     let person = person_id_for(&state, &auth).await?;
-    let q = query.q.unwrap_or_default();
-    // The folder path ("Work/Ideas") is built with a recursive CTE scoped to the
-    // person, so search covers the plaintext path as well as the title (AC-6).
-    // Body content is encrypted and deliberately NOT searchable.
+    Ok(Json(
+        list_notes_for(&state, person, query.q.as_deref().unwrap_or_default()).await?,
+    ))
+}
+
+// ── Person-scoped service paths ────────────────────────────────────────────
+// The six functions below take a resolved `person` (a `users.person_id`) and
+// carry all the validation / encryption / decrypt logic. The route handlers
+// above resolve the person from `AuthCtx` and delegate here; the MCP notebook
+// tools (MAIN-102) resolve the person from the caller's own OIDC identity and
+// call the identical functions, so both surfaces share one implementation
+// (never fresh SQL) and MAIN-84's name/cycle rules and the seal exclusion apply
+// to both.
+
+/// List a person's note summaries, optionally filtered by a case-insensitive
+/// substring over title + folder path (`q` empty = all). Bodies stay encrypted
+/// and are never searched.
+pub(crate) async fn list_notes_for(
+    state: &AppState,
+    person: Uuid,
+    q: &str,
+) -> ApiResult<Vec<UserNoteSummary>> {
     let rows: Vec<UserNoteSummary> = sqlx::query_as(
         r#"
         WITH RECURSIVE folder_path AS (
@@ -254,10 +272,10 @@ pub async fn list_notes(
         "#,
     )
     .bind(person)
-    .bind(&q)
+    .bind(q)
     .fetch_all(&state.db)
     .await?;
-    Ok(Json(rows))
+    Ok(rows)
 }
 
 #[utoipa::path(get, path = "/api/v1/notebook/notes/{id}",
@@ -270,15 +288,23 @@ pub async fn get_note(
     Path(id): Path<UserNoteId>,
 ) -> ApiResult<Json<UserNote>> {
     let person = person_id_for(&state, &auth).await?;
+    Ok(Json(get_note_for(&state, person, id).await?))
+}
+
+/// Fetch and decrypt one of the person's notes (404 if not theirs). A sealed
+/// note comes back with `content_md: None` and its still-client-encrypted blob.
+pub(crate) async fn get_note_for(
+    state: &AppState,
+    person: Uuid,
+    id: UserNoteId,
+) -> ApiResult<UserNote> {
     let row: Option<NoteRow> =
         sqlx::query_as("SELECT * FROM user_notes WHERE id = $1 AND person_id = $2")
             .bind(id)
             .bind(person)
             .fetch_optional(&state.db)
             .await?;
-    row.ok_or(ApiError::NotFound)?
-        .into_note(&state.vault)
-        .map(Json)
+    row.ok_or(ApiError::NotFound)?.into_note(&state.vault)
 }
 
 #[utoipa::path(post, path = "/api/v1/notebook/notes",
@@ -291,9 +317,19 @@ pub async fn create_note(
     Json(req): Json<CreateUserNote>,
 ) -> ApiResult<Json<UserNote>> {
     let person = person_id_for(&state, &auth).await?;
+    Ok(Json(create_note_for(&state, person, req).await?))
+}
+
+/// Create a note for the person: validates the title (MAIN-84), checks folder
+/// ownership, encrypts the body, and returns the decrypted note.
+pub(crate) async fn create_note_for(
+    state: &AppState,
+    person: Uuid,
+    req: CreateUserNote,
+) -> ApiResult<UserNote> {
     validate_name(&req.title, "note title")?;
     if let Some(folder) = req.folder_id {
-        owned_folder(&state, person, folder).await?;
+        owned_folder(state, person, folder).await?;
     }
     let enc = state
         .vault
@@ -310,7 +346,7 @@ pub async fn create_note(
     .bind(&enc)
     .fetch_one(&state.db)
     .await?;
-    row.into_note(&state.vault).map(Json)
+    row.into_note(&state.vault)
 }
 
 #[utoipa::path(patch, path = "/api/v1/notebook/notes/{id}",
@@ -325,6 +361,17 @@ pub async fn update_note(
     Json(req): Json<UpdateUserNote>,
 ) -> ApiResult<Json<UserNote>> {
     let person = person_id_for(&state, &auth).await?;
+    Ok(Json(update_note_for(&state, person, id, req).await?))
+}
+
+/// Update one of the person's notes (title / body / move). Enforces the
+/// title-blank and seal-body rules; encrypts a new body only when supplied.
+pub(crate) async fn update_note_for(
+    state: &AppState,
+    person: Uuid,
+    id: UserNoteId,
+    req: UpdateUserNote,
+) -> ApiResult<UserNote> {
     // A blank title on update is a 400, not a silent COALESCE no-op (AC-2); an
     // omitted title (None) still leaves the name unchanged.
     if let Some(title) = &req.title {
@@ -332,7 +379,7 @@ pub async fn update_note(
     }
     // A move must target one of the person's own folders (or root).
     if let Some(Some(folder)) = req.folder_id {
-        owned_folder(&state, person, folder).await?;
+        owned_folder(state, person, folder).await?;
     }
     // A sealed note's body may only change through the seal contract — a plain
     // body PATCH would overwrite the client's sealed blob with server-encrypted
@@ -384,9 +431,7 @@ pub async fn update_note(
     .bind(folder_val)
     .fetch_optional(&state.db)
     .await?;
-    row.ok_or(ApiError::NotFound)?
-        .into_note(&state.vault)
-        .map(Json)
+    row.ok_or(ApiError::NotFound)?.into_note(&state.vault)
 }
 
 #[utoipa::path(delete, path = "/api/v1/notebook/notes/{id}",
@@ -399,6 +444,16 @@ pub async fn delete_note(
     Path(id): Path<UserNoteId>,
 ) -> ApiResult<axum::http::StatusCode> {
     let person = person_id_for(&state, &auth).await?;
+    delete_note_for(&state, person, id).await?;
+    Ok(axum::http::StatusCode::NO_CONTENT)
+}
+
+/// Delete one of the person's notes; `NotFound` if it isn't theirs.
+pub(crate) async fn delete_note_for(
+    state: &AppState,
+    person: Uuid,
+    id: UserNoteId,
+) -> ApiResult<()> {
     let done = sqlx::query("DELETE FROM user_notes WHERE id = $1 AND person_id = $2")
         .bind(id)
         .bind(person)
@@ -407,7 +462,7 @@ pub async fn delete_note(
     if done.rows_affected() == 0 {
         return Err(ApiError::NotFound);
     }
-    Ok(axum::http::StatusCode::NO_CONTENT)
+    Ok(())
 }
 
 // ── Folders ──────────────────────────────────────────────────────────────────
@@ -420,12 +475,20 @@ pub async fn list_folders(
     auth: AuthCtx,
 ) -> ApiResult<Json<Vec<UserNoteFolder>>> {
     let person = person_id_for(&state, &auth).await?;
+    Ok(Json(list_folders_for(&state, person).await?))
+}
+
+/// List the person's folders (read-only; alphabetical).
+pub(crate) async fn list_folders_for(
+    state: &AppState,
+    person: Uuid,
+) -> ApiResult<Vec<UserNoteFolder>> {
     let folders: Vec<UserNoteFolder> =
         sqlx::query_as("SELECT * FROM user_note_folders WHERE person_id = $1 ORDER BY name")
             .bind(person)
             .fetch_all(&state.db)
             .await?;
-    Ok(Json(folders))
+    Ok(folders)
 }
 
 #[utoipa::path(post, path = "/api/v1/notebook/folders",
