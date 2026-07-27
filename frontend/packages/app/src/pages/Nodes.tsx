@@ -304,9 +304,36 @@ const AUTH_LABEL: Record<AuthProfile["state"], string> = {
  *  its login state — never a credential-file guess — and reports one profile per
  *  auth target. This surfaces those states; launching the login flow from here
  *  is the follow-up (AC-2/AC-4). */
-function AgentAuthPanel({ node }: { node: { capabilities: unknown } }) {
+function AgentAuthPanel({ node }: { node: { id: string; capabilities: unknown } }) {
+  const navigate = useNavigate();
   const profiles =
     ((node.capabilities as { runtime_auth?: AuthProfile[] })?.runtime_auth ?? []);
+
+  // Launch the runtime's login flow in a session on this node and open it live
+  // (MAIN-126 AC-2). A warning first, because on a shared machine the credential
+  // becomes usable by everyone allowed to run there.
+  const authorize = async (p: AuthProfile) => {
+    const ok = await askConfirm({
+      title: `Authorize ${p.label}?`,
+      description:
+        "Opens the runtime's login flow in a live session on this machine — follow the device code / URL it prints to sign in, and paste back any code it asks for. On a shared machine, the resulting credential is usable by everyone allowed to run there.",
+      confirmLabel: "open login",
+    });
+    if (!ok) return;
+    const { data, error } = await api.POST("/api/v1/nodes/{id}/authorize", {
+      params: { path: { id: node.id } },
+      body: { runtime: p.runtime },
+    });
+    if (error || !data) {
+      await notify("Couldn't start authorization", JSON.stringify(error));
+      return;
+    }
+    // The existing live session view renders the code/URL and takes input; the
+    // node re-probes on its next connect/heartbeat, so returning here shows the
+    // refreshed status without a manual reload.
+    navigate(`/sessions/${data.id}`);
+  };
+
   return (
     <Panel title="Agent authorization">
       {profiles.length === 0 ? (
@@ -321,8 +348,23 @@ function AgentAuthPanel({ node }: { node: { capabilities: unknown } }) {
               <tr key={p.id}>
                 <td className="bright">{p.label}</td>
                 <td className="muted mono">{p.identity ?? ""}</td>
-                <td style={{ textAlign: "right" }}>
-                  <Pill tone={AUTH_TONE[p.state]}>{AUTH_LABEL[p.state]}</Pill>
+                <td style={{ textAlign: "right", whiteSpace: "nowrap" }}>
+                  <span
+                    style={{
+                      display: "inline-flex",
+                      gap: 8,
+                      alignItems: "center",
+                      justifyContent: "flex-end",
+                    }}
+                  >
+                    <Pill tone={AUTH_TONE[p.state]}>{AUTH_LABEL[p.state]}</Pill>
+                    {/* A runtime that isn't installed can't be logged in. */}
+                    {p.state !== "unavailable" && (
+                      <button className="btn small" onClick={() => authorize(p)}>
+                        {p.state === "authorized" ? "re-authorize" : "authorize"}
+                      </button>
+                    )}
+                  </span>
                 </td>
               </tr>
             ))}

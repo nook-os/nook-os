@@ -560,3 +560,96 @@ async fn shared_node_relaxes_use_but_not_management() {
 
     cleanup(&pool, tenant).await;
 }
+
+// ── MAIN-126: node-scoped authorize gate ─────────────────────────────────────
+
+/// A PERSONAL node is authorizable only by its owner; a SHARED node only by a
+/// node-manager. Unauthorized callers are refused (403) BEFORE anything is
+/// launched; an authorized caller passes the gate (and here fails only because
+/// the test node is offline — never a 403).
+#[tokio::test]
+async fn authorize_is_owner_only_for_personal_and_manager_only_for_shared() {
+    use axum::extract::Path;
+    let Some(pool) = test_pool().await else {
+        return;
+    };
+    let state = AppState::new(pool.clone(), test_config(), None).await;
+    let tenant = new_tenant(&pool).await;
+    let (owner, owner_person) = add_user(&pool, tenant, "owner").await;
+    let (member, _) = add_user(&pool, tenant, "member").await;
+    let node = insert_node(&pool, tenant, Some(owner_person)).await;
+
+    let req = || {
+        Json(AuthorizeRuntimeRequest {
+            runtime: "claude".into(),
+        })
+    };
+    let forbidden = |e: &nook_control::error::ApiError| {
+        matches!(
+            e,
+            nook_control::error::ApiError::Forbidden
+                | nook_control::error::ApiError::ForbiddenMsg(_)
+        )
+    };
+
+    // Personal node: a non-owner member is refused.
+    let denied = nook_control::routes::nodes::authorize(
+        State(state.clone()),
+        auth(member, tenant),
+        Path(node),
+        req(),
+    )
+    .await;
+    assert!(
+        denied.as_ref().err().is_some_and(forbidden),
+        "a non-owner must not authorize a personal node: {denied:?}"
+    );
+    // The owner passes the gate — the only failure is the offline node, not a 403.
+    let owner_try = nook_control::routes::nodes::authorize(
+        State(state.clone()),
+        auth(owner, tenant),
+        Path(node),
+        req(),
+    )
+    .await;
+    assert!(
+        owner_try.as_ref().err().is_some_and(|e| !forbidden(e)),
+        "the owner passes the personal-node gate: {owner_try:?}"
+    );
+
+    // Shared node: it now takes a node-manager, not the owner-as-person.
+    set_shared_flag(&pool, node, true).await;
+    let member_shared = nook_control::routes::nodes::authorize(
+        State(state.clone()),
+        auth(member, tenant),
+        Path(node),
+        req(),
+    )
+    .await;
+    assert!(
+        member_shared.as_ref().err().is_some_and(forbidden),
+        "a member without node.manage must not authorize a shared node: {member_shared:?}"
+    );
+    // Grant node.manage (operator role) → passes the gate.
+    sqlx::query(
+        "INSERT INTO role_bindings (id, subject_type, subject_id, role_key, scope_type, scope_id)
+         VALUES (gen_random_uuid(), 'user', $1, 'operator', 'deployment', NULL)",
+    )
+    .bind(member.0)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let member_admin = nook_control::routes::nodes::authorize(
+        State(state.clone()),
+        auth(member, tenant),
+        Path(node),
+        req(),
+    )
+    .await;
+    assert!(
+        member_admin.as_ref().err().is_some_and(|e| !forbidden(e)),
+        "a node-manager passes the shared-node gate: {member_admin:?}"
+    );
+
+    cleanup(&pool, tenant).await;
+}

@@ -204,9 +204,48 @@ pub fn new_session(
     if !runtime_available(command) {
         anyhow::bail!("runtime '{command}' is not installed on this node");
     }
+    spawn(name, cwd, cols, rows, &login_command(command), session_id)
+}
+
+/// Start a runtime's LOGIN flow in a session (MAIN-126): the same PTY machinery
+/// as `new_session`, but the pane runs `<runtime> <login_args>` (e.g. `claude
+/// auth login`) rather than the bare runtime. `login_args` is the ALLOWLISTED
+/// subcommand the node chose — never a wire value. Runs in the home directory,
+/// through the login shell, so it sees the same environment loop sessions do.
+pub fn new_auth_session(
+    name: &str,
+    cwd: &str,
+    cols: u16,
+    rows: u16,
+    runtime: &str,
+    login_args: &str,
+    session_id: &str,
+) -> Result<()> {
+    if !std::path::Path::new(cwd).is_dir() {
+        anyhow::bail!("home directory {cwd} does not exist on this node");
+    }
+    if !runtime_available(runtime) {
+        anyhow::bail!("runtime '{runtime}' is not installed on this node");
+    }
+    // `exec` binds the pane to the login command, so quitting it ends the
+    // session — which is the "authorization done, clean up" signal (AC-4).
+    let launch = format!("{} -l -i -c 'exec {runtime} {login_args}'", login_shell());
+    spawn(name, cwd, cols, rows, &launch, session_id)
+}
+
+/// The shared tmux `new-session` spawn: create a detached session running
+/// `launch`, with the UTF-8 locale, the session-id env, and the sizing/rename
+/// options both entry points want.
+fn spawn(
+    name: &str,
+    cwd: &str,
+    cols: u16,
+    rows: u16,
+    launch: &str,
+    session_id: &str,
+) -> Result<()> {
     apply_server_defaults();
-    let launch = login_command(command);
-    let command = launch.as_str();
+    let command = launch;
     tmux(&[
         "new-session",
         "-d",

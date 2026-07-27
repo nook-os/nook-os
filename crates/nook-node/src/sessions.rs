@@ -81,7 +81,7 @@ impl Manager {
                 return self.session_failed(session_id, e.to_string());
             }
         }
-        match self.attach_pty(session_id, &tmux_name, cols, rows) {
+        match self.attach_pty(session_id, &tmux_name, cols, rows, false) {
             Ok(()) => {
                 let _ = self.out.try_send(NodeToControl::SessionStarted {
                     session_id,
@@ -92,13 +92,48 @@ impl Manager {
         }
     }
 
-    /// Spawn the persistent `tmux attach` PTY and its pump threads.
+    /// Start a runtime's LOGIN flow in a session (MAIN-126). Like `start`, but
+    /// the pane runs the runtime's ALLOWLISTED login command (the node picks it,
+    /// never the caller) in the home directory, so a headless node can be
+    /// device-authorized from the UI: the code/URL renders and any pasted-back
+    /// code reaches the CLI through the ordinary session input path.
+    pub fn start_auth(&mut self, session_id: SessionId, runtime: &str, cols: u16, rows: u16) {
+        let Some(login_args) = crate::runtime_auth::login_args(runtime) else {
+            return self.session_failed(session_id, format!("no login flow known for '{runtime}'"));
+        };
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/".into());
+        let tmux_name = format!("{}{}", tmux::SESSION_PREFIX, session_id.0.simple());
+        self.sessions.remove(&session_id);
+        if !tmux::session_exists(&tmux_name) {
+            let sid = session_id.0.to_string();
+            if let Err(e) =
+                tmux::new_auth_session(&tmux_name, &home, cols, rows, runtime, login_args, &sid)
+            {
+                return self.session_failed(session_id, e.to_string());
+            }
+        }
+        match self.attach_pty(session_id, &tmux_name, cols, rows, true) {
+            Ok(()) => {
+                let _ = self.out.try_send(NodeToControl::SessionStarted {
+                    session_id,
+                    tmux_session: tmux_name,
+                });
+            }
+            Err(e) => self.session_failed(session_id, e.to_string()),
+        }
+    }
+
+    /// Spawn the persistent `tmux attach` PTY and its pump threads. `is_auth`
+    /// marks a login/authorize session (MAIN-126): when it exits, the node
+    /// re-probes runtime authorization and pushes the fresh set, so the panel
+    /// reflects the new state without a reconnect.
     fn attach_pty(
         &mut self,
         session_id: SessionId,
         tmux_name: &str,
         cols: u16,
         rows: u16,
+        is_auth: bool,
     ) -> Result<()> {
         if self.sessions.contains_key(&session_id) {
             return Ok(()); // already attached
@@ -181,6 +216,13 @@ impl Manager {
                     session_id,
                     exit_code: None,
                 });
+                // An authorize session just ended — re-probe and push the fresh
+                // auth state so the panel flips without waiting for a reconnect
+                // (MAIN-126 AC-4).
+                if is_auth {
+                    let profiles = crate::runtime_auth::probe_all();
+                    let _ = out.blocking_send(NodeToControl::RuntimeAuthStatus { profiles });
+                }
             }
         });
 
@@ -233,7 +275,7 @@ impl Manager {
             }
             // Re-establish at the session's creation size; the browser's
             // FitAddon sends a ResizeSession moments later to correct it.
-            if let Err(e) = self.attach_pty(session_id, &name, 120, 32) {
+            if let Err(e) = self.attach_pty(session_id, &name, 120, 32, false) {
                 return self.session_failed(session_id, e.to_string());
             }
         }

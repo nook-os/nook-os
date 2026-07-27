@@ -31,6 +31,9 @@ struct Adapter {
     label: &'static str,
     runtime: &'static str,
     probe: &'static str,
+    /// The allowlisted LOGIN subcommand — the flow the Authorize button runs in
+    /// a session (MAIN-126). Fixed here; never taken from the wire.
+    login: &'static str,
     parse: fn(code: Option<i32>, stdout: &str) -> (AuthState, Option<String>),
 }
 
@@ -43,6 +46,7 @@ const ADAPTERS: &[Adapter] = &[
         label: "Claude Code",
         runtime: "claude",
         probe: "auth status",
+        login: "auth login",
         parse: parse_claude,
     },
     Adapter {
@@ -50,9 +54,20 @@ const ADAPTERS: &[Adapter] = &[
         label: "Hermes → Nous Portal",
         runtime: "hermes",
         probe: "portal status",
+        login: "setup --portal",
         parse: parse_hermes_portal,
     },
 ];
+
+/// The allowlisted login subcommand for a runtime, if we know one — the ONLY
+/// thing a node will run for an authorize request, chosen here and never from
+/// the wire (MAIN-126). `None` for an unknown runtime → refuse to launch.
+pub fn login_args(runtime: &str) -> Option<&'static str> {
+    ADAPTERS
+        .iter()
+        .find(|a| a.runtime == runtime)
+        .map(|a| a.login)
+}
 
 /// Probe every allowlisted profile, in registry order. Best-effort and never
 /// fatal — this runs during capability detection on connect.

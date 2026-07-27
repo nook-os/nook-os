@@ -6,7 +6,7 @@
 //! a future optimization). All enums are adjacently tagged for clean
 //! generated TypeScript.
 
-use nook_types::{Capabilities, NodeId, SessionId};
+use nook_types::{AuthProfile, Capabilities, NodeId, SessionId};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
@@ -86,6 +86,13 @@ pub enum NodeToControl {
     SessionExited {
         session_id: SessionId,
         exit_code: Option<i32>,
+    },
+    /// Freshly re-probed runtime authorization (MAIN-126). The node re-runs its
+    /// probes when an authorize login flow ends and pushes the new set, so the
+    /// Nodes UI flips a profile to `authorized` right away rather than waiting
+    /// for the next reconnect's `Register`.
+    RuntimeAuthStatus {
+        profiles: Vec<AuthProfile>,
     },
     /// A session could not be started at all — the checkout is gone, the
     /// runtime isn't installed, tmux refused. Distinct from `Error` because it
@@ -222,6 +229,18 @@ pub enum ControlToNode {
         session_id: SessionId,
         runtime: String,
         workspace_path: String,
+        cols: u16,
+        rows: u16,
+    },
+    /// Start a runtime's LOGIN flow in a session, so a headless node can be
+    /// authorized from the UI (MAIN-126). The node — never the caller — chooses
+    /// the allowlisted login command for `runtime` (e.g. `claude auth login`);
+    /// `runtime` is only the key into that fixed table. The session then streams
+    /// and takes input exactly like any other, so the device code/URL is
+    /// readable and any pasted-back code reaches the CLI.
+    StartAuthSession {
+        session_id: SessionId,
+        runtime: String,
         cols: u16,
         rows: u16,
     },
@@ -592,6 +611,44 @@ mod wire_tests {
         assert!(
             matches!(back, ControlToNode::InstallHooks { content, sha256 }
                 if content == r#"{"Stop":[]}"# && sha256 == "abc123")
+        );
+    }
+
+    /// The re-probe push round-trips (MAIN-126 AC-4).
+    #[test]
+    fn runtime_auth_status_round_trips() {
+        let msg = NodeToControl::RuntimeAuthStatus {
+            profiles: vec![AuthProfile {
+                id: "claude".into(),
+                label: "Claude Code".into(),
+                runtime: "claude".into(),
+                state: nook_types::AuthState::Authorized,
+                identity: Some("pm@example.com".into()),
+            }],
+        };
+        let json = serde_json::to_value(&msg).unwrap();
+        assert_eq!(json["type"], "runtime_auth_status");
+        let back: NodeToControl = serde_json::from_value(json).unwrap();
+        assert!(
+            matches!(back, NodeToControl::RuntimeAuthStatus { profiles } if profiles.len() == 1 && profiles[0].state == nook_types::AuthState::Authorized)
+        );
+    }
+
+    /// The authorize-launch variant round-trips as an adjacently-tagged message.
+    #[test]
+    fn start_auth_session_round_trips() {
+        let msg = ControlToNode::StartAuthSession {
+            session_id: SessionId::new(),
+            runtime: "claude".into(),
+            cols: 120,
+            rows: 32,
+        };
+        let json = serde_json::to_value(&msg).unwrap();
+        assert_eq!(json["type"], "start_auth_session");
+        assert_eq!(json["data"]["runtime"], "claude");
+        let back: ControlToNode = serde_json::from_value(json).unwrap();
+        assert!(
+            matches!(back, ControlToNode::StartAuthSession { runtime, .. } if runtime == "claude")
         );
     }
 

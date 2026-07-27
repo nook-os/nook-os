@@ -5,6 +5,7 @@ import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { Unicode11Addon } from "@xterm/addon-unicode11";
 import { ClipboardAddon } from "@xterm/addon-clipboard";
+import { WebLinksAddon } from "@xterm/addon-web-links";
 import "@xterm/xterm/css/xterm.css";
 import { terminalTheme, useTheme } from "./theme";
 
@@ -79,6 +80,15 @@ export function TerminalView({
     // as OSC 52 — this routes them into the system clipboard, so a mouse
     // drag-select inside tmux IS a copy.
     term.loadAddon(new ClipboardAddon());
+    // Make URLs printed in the terminal clickable — the device-authorization
+    // flow prints a login URL that has to be openable from the session view
+    // (MAIN-126). Opens in a new tab, referrer stripped.
+    term.loadAddon(
+      new WebLinksAddon((event, uri) => {
+        event.preventDefault();
+        window.open(uri, "_blank", "noopener,noreferrer");
+      }),
+    );
     term.open(host);
     // Switch width tables only AFTER open() — before the render service exists
     // the version setter's re-wrap throws reading renderer `dimensions`.

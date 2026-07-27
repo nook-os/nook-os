@@ -830,6 +830,31 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/nodes/{id}/authorize": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * `POST /api/v1/nodes/{id}/authorize` — launch a runtime's login flow in a
+         *     session on the node so it can be device-authorized from the UI (MAIN-126).
+         * @description Node-scoped authorization: a PERSONAL node may be authorized only by its
+         *     owner; a SHARED / operator node only by a node-manager (an org admin) —
+         *     authorizing a shared machine makes that runtime credential available to
+         *     every workload already permitted to run there, so it is not one person's
+         *     call. The node, not the caller, chooses the login command to run.
+         */
+        post: operations["authorize_runtime"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/nodes/{id}/clone": {
         parameters: {
             query?: never;
@@ -2831,6 +2856,14 @@ export interface components {
          * @enum {string}
          */
         AuthState: "authorized" | "not_authorized" | "unknown" | "unavailable";
+        /**
+         * @description Launch a runtime's login flow on a node (MAIN-126). The node maps `runtime`
+         *     to an allowlisted login command; the caller never supplies arguments.
+         */
+        AuthorizeRuntimeRequest: {
+            /** @description The runtime to authorize — `claude`, `hermes`. */
+            runtime: string;
+        };
         /** @description Who holds what, for the roles table. */
         BindingRow: {
             /** Format: date-time */
@@ -6290,6 +6323,43 @@ export interface operations {
         requestBody?: never;
         responses: {
             204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    authorize_runtime: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AuthorizeRuntimeRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Session"];
+                };
+            };
+            403: {
                 headers: {
                     [name: string]: unknown;
                 };
