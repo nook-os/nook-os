@@ -1,0 +1,42 @@
+[package]
+name = "nook-infra"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "nook_infra"
+path = "src/lib.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+tracing = { workspace = true }
+tokio = { workspace = true }
+serde_json = { workspace = true }
+sqlx = { workspace = true }
+dashmap = { workspace = true }
+sha2 = { workspace = true }
+uuid = { workspace = true }
+# CIDR matching for the trusted-proxy config list (parsed here; the client-IP
+# resolver that consults it stays in nook-control).
+ipnet = "2"
+reqwest = { workspace = true }
+lettre = { workspace = true }
+aws-config = { workspace = true }
+aws-sdk-s3 = { workspace = true }
+aws-credential-types = { workspace = true }
+
+[features]
+# Exposes `Config::for_test()` to downstream crates' tests. Off in normal
+# builds, so the helper never ships in a release binary.
+test-support = []
+
+[dev-dependencies]
+# The mailer guard's DB-integration test builds its schema from the control
+# plane's migration set, which stays owned by nook-control (MAIN-146 NG-2).
+# Cargo allows a dependency cycle when it runs only through dev-dependencies:
+# nook-control depends on nook-infra normally, nook-infra depends on
+# nook-control only for tests. A downstream worker linking nook-infra never
+# pulls nook-control in, so the shared crate stays lightweight.
+nook-control = { workspace = true }

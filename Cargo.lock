@@ -2533,9 +2533,6 @@ dependencies = [
  "anyhow",
  "argon2",
  "async-trait",
- "aws-config",
- "aws-credential-types",
- "aws-sdk-s3",
  "aws-smithy-types",
  "axum",
  "axum-extra",
@@ -2551,9 +2548,9 @@ dependencies = [
  "hyper 1.10.1",
  "hyper-util",
  "ipnet",
- "lettre",
  "nook-auth",
  "nook-dispatcher",
+ "nook-infra",
  "nook-mcp",
  "nook-proto",
  "nook-types",
@@ -2592,6 +2589,28 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.19",
+]
+
+[[package]]
+name = "nook-infra"
+version = "0.4.17"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "aws-config",
+ "aws-credential-types",
+ "aws-sdk-s3",
+ "dashmap",
+ "ipnet",
+ "lettre",
+ "nook-control",
+ "reqwest",
+ "serde_json",
+ "sha2 0.10.9",
+ "sqlx",
+ "tokio",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]

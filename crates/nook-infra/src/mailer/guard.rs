@@ -242,7 +242,9 @@ mod tests {
             .connect(&url)
             .await
             .ok()?;
-        crate::MIGRATOR.run(&db).await.ok()?;
+        // MAIN-146 NG-2: the migration set stays owned by nook-control. This
+        // crate pulls it in as a dev-dependency only to build the test schema.
+        nook_control::MIGRATOR.run(&db).await.ok()?;
         Some(db)
     }
 

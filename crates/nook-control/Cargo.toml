@@ -18,6 +18,7 @@ nook-proto = { workspace = true }
 nook-dispatcher = { workspace = true }
 nook-mcp = { workspace = true }
 nook-auth = { workspace = true }
+nook-infra = { workspace = true }
 tokio = { workspace = true }
 axum = { workspace = true }
 axum-extra = { workspace = true }
@@ -43,10 +44,8 @@ dashmap = { workspace = true }
 async-trait = { workspace = true }
 futures-util = { workspace = true }
 reqwest = { workspace = true }
-lettre = { workspace = true }
-aws-config = { workspace = true }
-aws-sdk-s3 = { workspace = true }
-aws-credential-types = { workspace = true }
+# lettre / aws-config / aws-sdk-s3 / aws-credential-types moved to nook-infra
+# with the mail and storage providers (MAIN-146).
 aws-smithy-types = { workspace = true }
 clap = { workspace = true }
 base64 = { workspace = true }
@@ -69,4 +68,9 @@ cookie = { workspace = true }
 # CIDR matching for the trusted-proxy list the client-IP resolver consults.
 # Pinned to the version already resolved in Cargo.lock.
 ipnet = "2"
+
+[dev-dependencies]
+# Tests here build a defaulted Config via nook-infra's test-support helper,
+# which moved out with the config module in MAIN-146.
+nook-infra = { workspace = true, features = ["test-support"] }
 
