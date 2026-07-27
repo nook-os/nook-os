@@ -1,0 +1,82 @@
+{{- if and .Values.worker.enabled .Values.autoscaling.keda.enabled }}
+{{- include "nook-control.requireSecret" . }}
+{{- $ka := .Values.autoscaling.keda -}}
+{{- $sk := .Values.secretKeys -}}
+{{- $authSecret := default .Values.existingSecret $ka.triggerAuthSecret -}}
+{{- $provider := .Values.queue.provider -}}
+{{- $name := include "nook-control.componentName" (dict "root" . "component" "worker") -}}
+# KEDA autoscaling for the worker (MAIN-153). KEDA must be installed in the
+# cluster (the chart does NOT install it, NG-1). The trigger is matched to the
+# queue provider: a Postgres row count, a Redis list length, or SQS queue depth.
+{{- if or (eq $provider "database") (eq $provider "redis") (and (eq $provider "sqs") (eq .Values.queue.sqs.credentialsMode "secret")) }}
+apiVersion: keda.sh/v1alpha1
+kind: TriggerAuthentication
+metadata:
+  name: {{ $name }}-auth
+  labels:
+    {{- include "nook-control.labels" . | nindent 4 }}
+spec:
+  secretTargetRef:
+    {{- if eq $provider "database" }}
+    - parameter: connection
+      name: {{ $authSecret }}
+      key: {{ $sk.databaseUrl }}
+    {{- else if eq $provider "redis" }}
+    - parameter: address
+      name: {{ $authSecret }}
+      key: {{ $sk.redisUrl }}
+    {{- else if eq $provider "sqs" }}
+    - parameter: awsAccessKeyID
+      name: {{ $authSecret }}
+      key: {{ $sk.awsAccessKeyId }}
+    - parameter: awsSecretAccessKey
+      name: {{ $authSecret }}
+      key: {{ $sk.awsSecretAccessKey }}
+    {{- end }}
+---
+{{- end }}
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "nook-control.labels" . | nindent 4 }}
+    app.kubernetes.io/component: worker
+spec:
+  scaleTargetRef:
+    name: {{ $name }}
+  minReplicaCount: {{ $ka.minReplicas }}
+  maxReplicaCount: {{ $ka.maxReplicas }}
+  pollingInterval: {{ $ka.pollingInterval }}
+  cooldownPeriod: {{ $ka.cooldownPeriod }}
+  triggers:
+    {{- if eq $provider "database" }}
+    # Scale on ready (visible, unlocked) rows waiting in the queue table.
+    - type: postgresql
+      metadata:
+        query: "SELECT count(*) FROM work_queue WHERE locked_until IS NULL OR locked_until < now()"
+        targetQueryValue: {{ $ka.targetQueueLength | quote }}
+      authenticationRef:
+        name: {{ $name }}-auth
+    {{- else if eq $provider "redis" }}
+    - type: redis
+      metadata:
+        listName: {{ .Values.queue.redis.listName | quote }}
+        listLength: {{ $ka.targetQueueLength | quote }}
+      authenticationRef:
+        name: {{ $name }}-auth
+    {{- else if eq $provider "sqs" }}
+    - type: aws-sqs-queue
+      metadata:
+        queueURL: {{ .Values.queue.sqs.queueUrl | quote }}
+        queueLength: {{ $ka.targetQueueLength | quote }}
+        awsRegion: {{ .Values.queue.sqs.region | quote }}
+        {{- if eq .Values.queue.sqs.credentialsMode "irsa" }}
+        identityOwner: operator
+        {{- end }}
+      {{- if eq .Values.queue.sqs.credentialsMode "secret" }}
+      authenticationRef:
+        name: {{ $name }}-auth
+      {{- end }}
+    {{- end }}
+{{- end }}

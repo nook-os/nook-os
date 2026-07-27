@@ -79,6 +79,91 @@ web:
       add:
         - NET_BIND_SERVICE
 
+# ── Queue worker (drains the durable work queue, MAIN-153) ───────────────────
+worker:
+  # -- Deploy the worker. Off leaves the chart exactly as it was (additive).
+  enabled: false
+  image:
+    # -- Container registry for the worker image.
+    registry: ghcr.io
+    # -- Worker image repository.
+    repository: nook-os/nook-worker
+    # -- Image tag. Empty ("") defaults to the chart's appVersion.
+    tag: ""
+    # -- Image pull policy.
+    pullPolicy: IfNotPresent
+  # -- Static replica count. Ignored when autoscaling.keda.enabled (KEDA owns it).
+  replicas: 1
+  # -- NOOK_WORK_TYPES allow-list (comma-separated). Empty = every handler's type.
+  workTypes: ""
+  # -- Resource requests/limits for the worker container.
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: "1"
+      memory: 256Mi
+  # -- Extra environment (list of {name,value}) merged into the worker container.
+  extraEnv: []
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 10001
+    runAsGroup: 10001
+    fsGroup: 10001
+    seccompProfile:
+      type: RuntimeDefault
+  securityContext:
+    runAsNonRoot: true
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop:
+        - ALL
+
+# ── Queue provider (MAIN-153) ────────────────────────────────────────────────
+# The implementation the control plane AND the worker drain. `database` is the
+# zero-infra default (drains the Postgres `work_queue`); `redis` and `sqs` are
+# reserved names the chart renders ahead of the binary — the worker refuses them
+# at boot until those providers ship (matches the reserved-name design), but the
+# manifests and KEDA triggers are ready.
+queue:
+  # -- NOOK_QUEUE_PROVIDER: "database" | "redis" | "sqs".
+  provider: database
+  redis:
+    # -- The Redis list KEDA watches (redis provider). REDIS URL comes from the
+    #    Secret via secretKeys.redisUrl.
+    listName: "nook:work_queue"
+  sqs:
+    # -- NOOK_SQS_QUEUE_URL (sqs provider).
+    queueUrl: ""
+    # -- NOOK_SQS_REGION.
+    region: ""
+    # -- Credentials: "irsa" (pod IAM role, no secret) | "secret" (AWS keys from
+    #    the Secret via secretKeys.awsAccessKeyId / awsSecretAccessKey).
+    credentialsMode: irsa
+
+# ── Worker autoscaling via KEDA (optional, MAIN-153) ─────────────────────────
+# KEDA must be installed in the cluster first — the chart does NOT install it
+# (NG-1). When disabled (default) the worker uses worker.replicas.
+autoscaling:
+  keda:
+    # -- Render a KEDA ScaledObject to scale the worker on queue depth.
+    enabled: false
+    minReplicas: 1
+    maxReplicas: 10
+    # -- How often KEDA polls the trigger, in seconds.
+    pollingInterval: 30
+    # -- How long to wait before scaling back to minReplicas, in seconds.
+    cooldownPeriod: 300
+    # -- The ready-depth each replica should keep up with. KEDA scales so
+    #    (queue depth / target) ≈ replica count, bounded by min/max.
+    targetQueueLength: "20"
+    # -- Name of a Secret holding the trigger's connection string, wired via a
+    #    KEDA TriggerAuthentication. For `database` its key is the Postgres
+    #    connection URL; for `redis` the Redis address. Defaults to existingSecret.
+    triggerAuthSecret: ""
+
 # ── Secrets (BY REFERENCE — the chart creates no Secret) ─────────────────────
 # Name of a pre-existing Kubernetes Secret holding the values below. REQUIRED.
 # The chart wires env vars from it with secretKeyRef and never stores secret
@@ -104,6 +189,14 @@ secretKeys:
   smtpPassword: ""
   # -- Secret key holding the Postmark server token. Env: POSTMARK_TOKEN. "" to omit.
   postmarkToken: ""
+  # -- Secret key holding the Redis URL (queue.provider=redis). Env: NOOK_REDIS_URL. "" to omit.
+  redisUrl: ""
+  # -- Secret key holding the AWS access key id (queue.provider=sqs, credentialsMode=secret).
+  #    Env: AWS_ACCESS_KEY_ID. "" to omit (e.g. IRSA).
+  awsAccessKeyId: ""
+  # -- Secret key holding the AWS secret access key (sqs + credentialsMode=secret).
+  #    Env: AWS_SECRET_ACCESS_KEY. "" to omit.
+  awsSecretAccessKey: ""
 
 # ── Non-secret config (rendered into a ConfigMap) ────────────────────────────
 config:

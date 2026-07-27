@@ -175,6 +175,43 @@ to it):
   so nginx forwards raw TCP. (This is L4 TCP forwarding, distinct from the
   HTTP Ingress the chart renders for the API/UI.)
 
+## Queue worker & autoscaling (MAIN-153)
+
+The **worker** drains the durable work queue (email sends today; more later). It
+is off by default and additive — the chart renders exactly as before until you
+enable it:
+
+```bash
+helm upgrade --install nook . \
+  --set worker.enabled=true \
+  --set queue.provider=database \
+  --set worker.replicas=2
+```
+
+`queue.provider` (`database` | `redis` | `sqs`) is read by the control plane and
+the worker alike (`NOOK_QUEUE_PROVIDER`). **`database` is the only provider the
+binary runs today**; `redis` and `sqs` are reserved names — the chart renders
+their env and KEDA triggers ahead of the implementation, but a worker started on
+one refuses to boot until that provider ships. Provider connection material
+comes from the `existingSecret` (`secretKeys.redisUrl`, `secretKeys.awsAccessKeyId`
+/ `awsSecretAccessKey`); SQS can instead use pod identity
+(`queue.sqs.credentialsMode=irsa`, the default). Scope the worker to specific
+work types with `worker.workTypes` (`NOOK_WORK_TYPES`).
+
+### KEDA autoscaling (optional)
+
+Set `autoscaling.keda.enabled=true` to scale the worker on queue depth. This
+renders a `ScaledObject` (and a `TriggerAuthentication`) whose trigger matches
+the provider — a PostgreSQL row count on `work_queue`, a Redis list length, or
+SQS queue depth — and KEDA then owns the replica count (`worker.replicas` is
+ignored).
+
+> **KEDA must already be installed in the cluster** — this chart does **not**
+> install it (see <https://keda.sh/docs/latest/deploy/>). Without KEDA the
+> `keda.sh/v1alpha1` objects have no controller and do nothing.
+
+The `ci/validate.sh` render matrix covers all three providers × KEDA on/off.
+
 ## Security
 
 Both pods run non-root with dropped capabilities and a `RuntimeDefault` seccomp

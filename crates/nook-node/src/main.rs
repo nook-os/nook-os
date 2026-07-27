@@ -689,6 +689,20 @@ async fn main() -> Result<()> {
             mail_smtp_tls,
             mail_smtp_username,
             mail_postmark_api_url,
+            queue_provider,
+            redis_url,
+            redis_list_name,
+            sqs_queue_url,
+            sqs_region,
+            sqs_credentials_mode,
+            aws_access_key_id,
+            aws_secret_access_key,
+            worker,
+            worker_replicas,
+            worker_work_types,
+            keda,
+            keda_min_replicas,
+            keda_max_replicas,
         }) => {
             let home = std::env::var("HOME").context("HOME is not set")?;
             // Any OIDC/mail field implies its branch is on, mirroring how an agent
@@ -698,6 +712,23 @@ async fn main() -> Result<()> {
                 || oidc_client_id.is_some()
                 || oidc_client_secret.is_some()
                 || oidc_device_client_id.is_some();
+            // A queue-specific flag picks the provider when it was left implicit,
+            // the same way an --oidc-* flag turns OIDC on: --redis-url means redis,
+            // any SQS field means sqs.
+            let queue_provider = queue_provider.or_else(|| {
+                if redis_url.is_some() || redis_list_name.is_some() {
+                    Some("redis".to_string())
+                } else if sqs_queue_url.is_some()
+                    || sqs_region.is_some()
+                    || sqs_credentials_mode.is_some()
+                    || aws_access_key_id.is_some()
+                    || aws_secret_access_key.is_some()
+                {
+                    Some("sqs".to_string())
+                } else {
+                    None
+                }
+            });
             wizard::k8s::init(wizard::k8s::InitOptions {
                 release,
                 namespace,
@@ -734,6 +765,27 @@ async fn main() -> Result<()> {
                 mail_smtp_tls,
                 mail_smtp_username,
                 mail_postmark_api_url,
+                queue_provider,
+                redis_url,
+                redis_list_name,
+                sqs_queue_url,
+                sqs_region,
+                sqs_credentials_mode,
+                aws_access_key_id,
+                aws_secret_access_key,
+                // Supplying a worker/KEDA field is meaningless unless the worker
+                // is on, so any of them implies --worker.
+                worker: worker
+                    || worker_replicas.is_some()
+                    || worker_work_types.is_some()
+                    || keda
+                    || keda_min_replicas.is_some()
+                    || keda_max_replicas.is_some(),
+                worker_replicas,
+                worker_work_types,
+                keda,
+                keda_min_replicas,
+                keda_max_replicas,
                 // The chart's version equals the release tag WITHOUT the `v`
                 // (the release workflow stamps it that way), so the bare crate
                 // version is the right default pin — not the v-prefixed image tag.
@@ -1097,6 +1149,51 @@ enum K8sCommand {
         /// POSTMARK_API_URL override (provider=postmark).
         #[arg(long)]
         mail_postmark_api_url: Option<String>,
+        /// NOOK_QUEUE_PROVIDER: "database" (default) | "redis" | "sqs". Implied by
+        /// any queue flag below.
+        #[arg(long)]
+        queue_provider: Option<String>,
+        /// Redis URL (provider=redis) → the printed secret command only. Implies
+        /// --queue-provider redis.
+        #[arg(long)]
+        redis_url: Option<String>,
+        /// Redis list KEDA watches (provider=redis). Blank uses the chart default.
+        #[arg(long)]
+        redis_list_name: Option<String>,
+        /// NOOK_SQS_QUEUE_URL (provider=sqs). Implies --queue-provider sqs.
+        #[arg(long)]
+        sqs_queue_url: Option<String>,
+        /// NOOK_SQS_REGION (provider=sqs). Implies --queue-provider sqs.
+        #[arg(long)]
+        sqs_region: Option<String>,
+        /// SQS credentials: "irsa" (default, pod IAM role) | "secret" (AWS keys).
+        #[arg(long)]
+        sqs_credentials_mode: Option<String>,
+        /// AWS access key id (sqs + secret mode) → the printed secret command only.
+        #[arg(long)]
+        aws_access_key_id: Option<String>,
+        /// AWS secret access key (sqs + secret mode) → the printed secret command only.
+        #[arg(long)]
+        aws_secret_access_key: Option<String>,
+        /// Deploy the queue worker. Implied by any --worker-* or --keda* flag.
+        #[arg(long)]
+        worker: bool,
+        /// Worker replica count (worker.replicas). Default: 1.
+        #[arg(long)]
+        worker_replicas: Option<String>,
+        /// NOOK_WORK_TYPES allow-list (comma-separated). Empty = every type.
+        #[arg(long)]
+        worker_work_types: Option<String>,
+        /// Autoscale the worker with KEDA (must be installed in-cluster). Implies
+        /// --worker.
+        #[arg(long)]
+        keda: bool,
+        /// KEDA minimum replicas. Default: 1.
+        #[arg(long)]
+        keda_min_replicas: Option<String>,
+        /// KEDA maximum replicas. Default: 10.
+        #[arg(long)]
+        keda_max_replicas: Option<String>,
     },
 }
 
