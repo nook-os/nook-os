@@ -14,7 +14,7 @@ import {
   useQuery,
   useQueryClient,
 } from "@tanstack/react-query";
-import { Boxes, Check, FolderGit2, Loader, Mail, Plus, Send, Trash2 } from "lucide-react";
+import { Boxes, Check, FolderGit2, Loader, Mail, Send, Trash2 } from "lucide-react";
 import {
   api,
   type Invite,
@@ -235,6 +235,46 @@ function MembersRoster() {
   );
 }
 
+/** The tone of a relative-expiry label (MAIN-121 AC-5): calm while there is
+ *  plenty of time, `warn` inside the final day, `err` once it has lapsed. */
+export type ExpiryTone = "muted" | "warn" | "err";
+
+/**
+ * Pure relative-expiry formatter (MAIN-121 AC-5). Given an ISO timestamp and a
+ * reference `now` (ms), returns the label to show and its tone:
+ *
+ *   • past or exactly at expiry → "expired", `err`
+ *   • under 24h left           → "expires in Nh", `warn`
+ *   • a day or more left        → "expires in Nd", `muted`
+ *
+ * `now` is a parameter (not `Date.now()` inside) so it is deterministic and
+ * unit-testable. Kept pure — no DOM, no clock — for exactly that reason.
+ */
+export function expiryLabel(
+  expiresAt: string,
+  now: number = Date.now(),
+): { text: string; tone: ExpiryTone } {
+  const ms = new Date(expiresAt).getTime() - now;
+  // At or past the deadline reads the same to the person: the link is dead.
+  if (ms <= 0) return { text: "expired", tone: "err" };
+  const hours = ms / 3_600_000;
+  if (hours < 24) {
+    // Floor, never round, so we never show "expires in 24h" in the warn band
+    // (that is the day band); clamp to 1h so a sub-hour invite is not "0h".
+    return { text: `expires in ${Math.max(1, Math.floor(hours))}h`, tone: "warn" };
+  }
+  return { text: `expires in ${Math.floor(hours / 24)}d`, tone: "muted" };
+}
+
+/** Token-var colour for an expiry tone — theme-driven, no new theme keys. */
+function expiryToneColor(tone: ExpiryTone): string {
+  return tone === "err"
+    ? "var(--nook-err)"
+    : tone === "warn"
+      ? "var(--nook-warn)"
+      : "var(--nook-fg-dim)";
+}
+
 /** Pending invites for the active tenant. Owners/admins only; a plain member
  *  does not see this section at all (they cannot list or create). */
 function TeamInvites() {
@@ -258,12 +298,16 @@ function TeamInvites() {
       ).data ?? [],
   });
 
-  const [adding, setAdding] = React.useState(false);
   const [email, setEmail] = React.useState("");
   const [role, setRole] = React.useState("member");
   // The accept URL the API returns once, on create/resend. Client-side only:
   // after a refresh it is gone, which is correct — the token is never returned
-  // again. Keyed by invite id so it attaches to the right row.
+  // again. A create surfaces its link beneath the composer (AC-4); a resend
+  // surfaces its link on that invite's own row (AC-5), keyed by invite id.
+  const [createdLink, setCreatedLink] = React.useState<{
+    email: string;
+    url: string;
+  } | null>(null);
   const [freshLinks, setFreshLinks] = React.useState<Record<string, string>>({});
 
   const bust = () => qc.invalidateQueries({ queryKey: ["invites", tenantId] });
@@ -277,10 +321,10 @@ function TeamInvites() {
         }),
       ),
     onSuccess: (inv) => {
-      setAdding(false);
+      // Clear the composer for the next invite; show the fresh link beneath it.
       setEmail("");
       setRole("member");
-      if (inv.accept_url) setFreshLinks((m) => ({ ...m, [inv.id]: inv.accept_url! }));
+      setCreatedLink(inv.accept_url ? { email: inv.email, url: inv.accept_url } : null);
       bust();
       toast(`Invite sent to ${inv.email}`);
     },
@@ -333,68 +377,68 @@ function TeamInvites() {
 
   if (!canManage) return null;
 
+  const create = () => {
+    if (createMutation.isPending || !email.includes("@")) return;
+    createMutation.mutate({ email: email.trim(), role });
+  };
+
   return (
-    <Panel
-      title="Invites"
-      actions={
-        !adding && (
-          <button className="btn small" onClick={() => setAdding(true)}>
-            <Plus size={12} /> invite
-          </button>
-        )
-      }
-    >
+    <Panel title="Invites">
       <div style={{ padding: 10, display: "grid", gap: 10 }} className="small">
+        {/* Always-visible composer (AC-4): email + role + invite on one line. */}
+        <div className="invite-composer">
+          <input
+            className="input invite-composer-email"
+            type="email"
+            value={email}
+            placeholder="person@example.com"
+            autoComplete="off"
+            aria-label="Invite email"
+            onChange={(e) => setEmail(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") create();
+            }}
+          />
+          <Select
+            value={role}
+            onChange={setRole}
+            ariaLabel="Invite role"
+            options={[
+              { value: "member", label: "member" },
+              { value: "admin", label: "admin" },
+            ]}
+          />
+          <button
+            className="btn primary"
+            onClick={create}
+            disabled={createMutation.isPending || !email.includes("@")}
+          >
+            {createMutation.isPending ? (
+              <>
+                <Loader size={12} className="spin" /> inviting…
+              </>
+            ) : (
+              "invite"
+            )}
+          </button>
+        </div>
+
+        {/* The just-created invite's link, beneath the composer (AC-4). */}
+        {createdLink && (
+          <div className="invite-fresh">
+            <span className="faint small">
+              Invite link for <span className="bright">{createdLink.email}</span> —
+              share it if the email does not arrive.
+            </span>
+            <CopyRow value={createdLink.url} />
+          </div>
+        )}
+
         <p className="muted" style={{ margin: 0 }}>
           Bring someone into <span className="bright">{me?.tenant.name}</span>.
           They join by opening the link and signing in as the invited email —
           keeping their own tenant, and gaining this one.
         </p>
-
-        {adding && (
-          <div className="chan-form">
-            <div className="chan-row">
-              <span className="faint small">Email</span>
-              <input
-                className="chan-input"
-                type="email"
-                value={email}
-                placeholder="person@example.com"
-                autoComplete="off"
-                onChange={(e) => setEmail(e.target.value)}
-              />
-            </div>
-            <div className="chan-row">
-              <span className="faint small">Role</span>
-              <Select
-                value={role}
-                onChange={setRole}
-                options={[
-                  { value: "member", label: "member" },
-                  { value: "admin", label: "admin" },
-                ]}
-              />
-            </div>
-            <div className="chan-actions">
-              <button className="btn small" onClick={() => setAdding(false)}>
-                cancel
-              </button>
-              <button
-                className="btn small primary"
-                onClick={() => createMutation.mutate({ email: email.trim(), role })}
-                disabled={createMutation.isPending || !email.includes("@")}
-              >
-                {createMutation.isPending ? (
-                  <>
-                    <Loader size={12} className="spin" /> creating…
-                  </>
-                ) : (
-                  "create invite"
-                )}
-              </button>
-            </div>
-          </div>
-        )}
 
         {(invites ?? []).length === 0 ? (
           <Empty>
@@ -409,6 +453,7 @@ function TeamInvites() {
                 const revoking =
                   revokeMutation.isPending && revokeMutation.variables?.id === inv.id;
                 const link = freshLinks[inv.id];
+                const exp = expiryLabel(inv.expires_at);
                 return (
                   <React.Fragment key={inv.id}>
                     <tr>
@@ -416,8 +461,11 @@ function TeamInvites() {
                       <td>
                         <Pill tone={inv.role === "admin" ? "warn" : "dim"}>{inv.role}</Pill>
                       </td>
-                      <td className="muted">
-                        expires {new Date(inv.expires_at).toLocaleDateString()}
+                      <td
+                        style={{ color: expiryToneColor(exp.tone) }}
+                        title={new Date(inv.expires_at).toLocaleString()}
+                      >
+                        {exp.text}
                       </td>
                       <td style={{ textAlign: "right", whiteSpace: "nowrap" }}>
                         <button

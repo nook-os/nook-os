@@ -754,6 +754,12 @@ code,
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  /* App-wide "// Title" treatment (MAIN-121): the title text glows bright; the
+     "// " prefix carries the theme accent. Both drive off theme tokens so a
+     server-driven theme controls the colours and the glow through its own
+     vars — no per-page overrides, no hardcoded colours. */
+  color: var(--nook-fg-bright);
+  text-shadow: var(--nook-glow);
 }
 .nook-panel-actions {
   flex: none;
@@ -761,8 +767,9 @@ code,
 
 .nook-panel-heading::before {
   content: "// ";
-  color: var(--nook-fg-faint);
+  color: var(--nook-accent);
   letter-spacing: 0;
+  text-shadow: var(--nook-glow);
 }
 
 .nook-panel-body {
@@ -953,6 +960,76 @@ table.nook-table tr.clickable { cursor: pointer; }
   color: var(--nook-fg-bright);
   text-shadow: var(--nook-glow-strong);
   font-family: var(--nook-font-mono);
+}
+
+/* ── Invite / accept cards (MAIN-121) ───────────────────────────────────────
+   The signed-out invite landing and every signed-in accept outcome render as a
+   raised card in the Login page's style. `.invite-screen` is the full-viewport
+   frame for the signed-out landing (AC-2); `.invite-shell` centres the card in
+   whatever container it sits in — the app-shell content area when signed in, or
+   the standalone router root when signed out — WITHOUT taking the viewport
+   height (AC-3). The card itself reuses the login-box tokens. */
+.invite-screen {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: var(--nook-bg);
+}
+
+.invite-shell {
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  overflow: auto;
+}
+
+.invite-card {
+  width: min(560px, 100%);
+  border: 1px solid var(--nook-border-bright);
+  border-radius: var(--nook-radius);
+  background: var(--nook-bg-panel);
+  box-shadow: var(--nook-glow);
+  padding: 24px 28px;
+  display: grid;
+  gap: 16px;
+}
+
+.invite-card-title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: var(--nook-fg-bright);
+  text-shadow: var(--nook-glow);
+  font-family: var(--nook-font-mono);
+}
+
+/* The always-visible invite composer (MAIN-121 AC-4): email + role + button on
+   one line at the top of the Invites panel. */
+.invite-composer {
+  display: flex;
+  gap: 8px;
+  align-items: stretch;
+}
+.invite-composer-email {
+  flex: 1;
+  min-width: 0;
+}
+.invite-composer .sel {
+  flex: none;
+  width: 120px;
+}
+.invite-composer .btn {
+  flex: none;
+}
+/* The fresh accept link surfaced beneath the composer after a create. */
+.invite-fresh {
+  display: grid;
+  gap: 6px;
 }
 
 /* ── Kanban ─────────────────────────────────────────────────────────────── */

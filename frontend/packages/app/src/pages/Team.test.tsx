@@ -23,7 +23,7 @@ vi.mock("../dialogs", () => ({
   CopyRow: ({ value }: { value: string }) => <div data-testid="copy-row">{value}</div>,
 }));
 
-import { TeamPage } from "./Team";
+import { TeamPage, expiryLabel } from "./Team";
 import { api } from "@nookos/api";
 
 const mock = api as unknown as {
@@ -108,9 +108,9 @@ describe("TeamPage", () => {
     // Owner sees the Invites panel.
     expect(await screen.findByText("Invites")).toBeTruthy();
 
-    await userEvent.click(screen.getByText("invite"));
+    // The composer is always visible now (AC-4) — no "+ invite" toggle to open.
     await userEvent.type(screen.getByPlaceholderText("person@example.com"), "new@x.test");
-    await userEvent.click(screen.getByText("create invite"));
+    await userEvent.click(screen.getByRole("button", { name: "invite" }));
 
     // Success toast pushed through the shared store (no modal).
     await waitFor(() =>
@@ -141,5 +141,48 @@ describe("TeamPage", () => {
     expect(pushSpy).not.toHaveBeenCalledWith(
       expect.objectContaining({ title: "Invite revoked" }),
     );
+  });
+});
+
+// The pure relative-expiry formatter (MAIN-121 AC-5). A reference `now` is
+// passed in, so these are deterministic — no wall clock.
+describe("expiryLabel", () => {
+  const NOW = Date.parse("2026-07-27T12:00:00Z");
+  const H = 3_600_000;
+  const D = 24 * H;
+  const at = (deltaMs: number) => new Date(NOW + deltaMs).toISOString();
+
+  it("shows days with a muted tone when a day or more remains", () => {
+    expect(expiryLabel(at(6 * D), NOW)).toEqual({ text: "expires in 6d", tone: "muted" });
+    expect(expiryLabel(at(3 * D + 5 * H), NOW)).toEqual({
+      text: "expires in 3d",
+      tone: "muted",
+    });
+  });
+
+  it("shows hours with a warn tone under 24h", () => {
+    expect(expiryLabel(at(3 * H), NOW)).toEqual({ text: "expires in 3h", tone: "warn" });
+    expect(expiryLabel(at(23 * H), NOW)).toEqual({ text: "expires in 23h", tone: "warn" });
+  });
+
+  it("treats exactly 24h as a day — the warn/day boundary", () => {
+    expect(expiryLabel(at(24 * H), NOW)).toEqual({ text: "expires in 1d", tone: "muted" });
+    // Just under 24h stays in the warn band and never rounds up to "24h".
+    expect(expiryLabel(at(24 * H - 1), NOW)).toEqual({
+      text: "expires in 23h",
+      tone: "warn",
+    });
+  });
+
+  it("clamps a sub-hour invite to 1h rather than 0h", () => {
+    expect(expiryLabel(at(30 * 60_000), NOW)).toEqual({
+      text: "expires in 1h",
+      tone: "warn",
+    });
+  });
+
+  it("reports expired (err) at and past expiry", () => {
+    expect(expiryLabel(at(0), NOW)).toEqual({ text: "expired", tone: "err" });
+    expect(expiryLabel(at(-5 * H), NOW)).toEqual({ text: "expired", tone: "err" });
   });
 });

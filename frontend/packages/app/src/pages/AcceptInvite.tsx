@@ -20,7 +20,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { CheckCircle2, Info, MailCheck, MailX, MailWarning } from "lucide-react";
 import { api } from "@nookos/api";
-import { Empty, Panel } from "@nookos/ui";
+import { Empty } from "@nookos/ui";
 
 export function AcceptInvitePage() {
   const [params] = useSearchParams();
@@ -77,9 +77,9 @@ export function AcceptInvitePage() {
 
   if (!token) {
     return (
-      <CenteredPanel title="Invite">
+      <CenteredCard title="Invite">
         <Empty>This link is missing its token.</Empty>
-      </CenteredPanel>
+      </CenteredCard>
     );
   }
 
@@ -87,19 +87,19 @@ export function AcceptInvitePage() {
   if (!signedIn) {
     if (meLoading || previewLoading) {
       return (
-        <CenteredPanel title="Invite">
+        <CenteredCard title="Invite">
           <Empty>Checking your invite…</Empty>
-        </CenteredPanel>
+        </CenteredCard>
       );
     }
     if (!preview || !preview.valid) {
       return (
-        <CenteredPanel title="Invite">
+        <CenteredCard title="Invite">
           <Empty>
             This invitation is no longer valid. Ask whoever invited you to send a
             fresh link.
           </Empty>
-        </CenteredPanel>
+        </CenteredCard>
       );
     }
     return (
@@ -118,16 +118,16 @@ export function AcceptInvitePage() {
   // ── Signed in: the auto-accept flow ───────────────────────────────────────
   if (accepting) {
     return (
-      <CenteredPanel title="Invite">
+      <CenteredCard title="Invite">
         <Empty>Checking your invite…</Empty>
-      </CenteredPanel>
+      </CenteredCard>
     );
   }
   if (isError || !result) {
     return (
-      <CenteredPanel title="Invite">
+      <CenteredCard title="Invite">
         <Empty>Could not process this invite. Try the link again.</Empty>
-      </CenteredPanel>
+      </CenteredCard>
     );
   }
 
@@ -149,8 +149,8 @@ export function AcceptInvitePage() {
     !result.accepted && /verify your email/i.test(result.message);
 
   return (
-    <CenteredPanel title={result.accepted ? "You're in" : "Invite"}>
-      <div style={{ padding: 16, display: "grid", gap: 12, placeItems: "start" }}>
+    <CenteredCard title={result.accepted ? "You're in" : "Invite"}>
+      <div style={{ display: "grid", gap: 12, placeItems: "start" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
           {result.accepted ? (
             <CheckCircle2 size={18} className="ok" />
@@ -193,7 +193,7 @@ export function AcceptInvitePage() {
           {result.accepted ? "Go to the board" : "Continue"}
         </button>
       </div>
-    </CenteredPanel>
+    </CenteredCard>
   );
 }
 
@@ -241,8 +241,8 @@ function InviteLanding({
   const canCreateLocal = localStatus?.available === true;
 
   return (
-    <CenteredPanel title="You're invited">
-      <div style={{ padding: 16, display: "grid", gap: 16, placeItems: "start" }}>
+    <CenteredCard title="You're invited" fullViewport wordmark>
+      <div style={{ display: "grid", gap: 16, placeItems: "start" }}>
         <div>
           <p style={{ margin: 0, fontSize: 15 }}>
             <strong className="bright">{inviter}</strong> invited you to{" "}
@@ -293,7 +293,7 @@ function InviteLanding({
           />
         )}
       </div>
-    </CenteredPanel>
+    </CenteredCard>
   );
 }
 
@@ -445,17 +445,34 @@ function CreateAccountForm({
   );
 }
 
-function CenteredPanel({
+/**
+ * The raised card every accept/invite state renders in (MAIN-121 AC-2/AC-3),
+ * styled like the Login box off the shared theme tokens.
+ *
+ *  • `fullViewport` frames the signed-out landing edge-to-edge (`.invite-screen`,
+ *    no app shell around it); otherwise the card centres in whatever container
+ *    it sits in (`.invite-shell`) — the app-shell content area when signed in —
+ *    WITHOUT taking the viewport height.
+ *  • `wordmark` tops the card with the "◆ nook@os" wordmark (reusing the
+ *    `.login-title` treatment), which the signed-out landing carries.
+ */
+function CenteredCard({
   title,
+  fullViewport = false,
+  wordmark = false,
   children,
 }: {
-  title: string;
+  title?: string;
+  fullViewport?: boolean;
+  wordmark?: boolean;
   children: React.ReactNode;
 }) {
   return (
-    <div style={{ display: "grid", placeItems: "center", padding: 24 }}>
-      <div style={{ width: "min(560px, 100%)" }}>
-        <Panel title={title}>{children}</Panel>
+    <div className={fullViewport ? "invite-screen" : "invite-shell"}>
+      <div className="invite-card">
+        {wordmark && <div className="login-title">◆ nook@os</div>}
+        {title && <h1 className="invite-card-title">{title}</h1>}
+        {children}
       </div>
     </div>
   );
