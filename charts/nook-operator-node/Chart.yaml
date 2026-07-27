@@ -1,0 +1,23 @@
+apiVersion: v2
+name: nook-operator-node
+description: >-
+  The NookOS shared operator node (MAIN-125): an in-cluster node container
+  shipped with the loop toolchain (claude, hermes, codex, copilot) preinstalled,
+  joined to the control plane non-interactively at first boot. Persistent volumes
+  for node identity, checkouts, and the tmux runtime; join token by reference.
+type: application
+# Chart version — bump on chart changes. appVersion tracks the NookOS release
+# whose operator-node image this chart defaults to. On a `v*` release the
+# workflow stamps both to the tag (without the `v`), matching the image tags.
+version: 0.1.0
+appVersion: "0.4.10"
+kubeVersion: ">=1.23.0-0"
+home: https://github.com/nook-os/nook-os
+sources:
+  - https://github.com/nook-os/nook-os
+maintainers:
+  - name: NookOS
+keywords:
+  - nookos
+  - operator-node
+  - developer-platform

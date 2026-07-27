@@ -375,6 +375,13 @@ pub struct Capabilities {
     /// leaves the machine). Add it as a deploy key to clone private repos.
     #[serde(default)]
     pub ssh_public_key: Option<String>,
+    /// Whether this node is the deployment's shared operator node — a machine
+    /// the stack ships (MAIN-125) rather than a person's own. Reported so later
+    /// executor selection can tell it apart from personal nodes; surfaced in
+    /// `nook get nodes` and the Nodes UI. Set by `NOOK_SHARED_OPERATOR` on that
+    /// container; false everywhere else.
+    #[serde(default)]
+    pub shared_operator: bool,
 }
 
 /// Live resource sample a node reports on each heartbeat, so both humans and

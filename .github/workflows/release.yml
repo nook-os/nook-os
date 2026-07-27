@@ -353,7 +353,7 @@ jobs:
         # An `include:` whose keys all match an existing axis fills in extra
         # fields on the matching combinations — which is how `runner` and
         # `dockerfile` attach here without inventing standalone jobs.
-        image: [control, node, web, chat]
+        image: [control, node, operator-node, web, chat]
         arch: [amd64, arm64]
         include:
           - arch: amd64
@@ -364,6 +364,8 @@ jobs:
             dockerfile: deploy/docker/control.Dockerfile
           - image: node
             dockerfile: deploy/docker/node.Dockerfile
+          - image: operator-node
+            dockerfile: deploy/docker/operator-node.Dockerfile
           - image: web
             dockerfile: deploy/docker/web-prod.Dockerfile
           - image: chat
@@ -414,7 +416,7 @@ jobs:
     timeout-minutes: 45
     strategy:
       matrix:
-        image: [control, node, web, chat]
+        image: [control, node, operator-node, web, chat]
     steps:
       - uses: actions/download-artifact@v4
         with:

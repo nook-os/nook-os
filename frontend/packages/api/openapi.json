@@ -6743,6 +6743,10 @@
             },
             "description": "Detected runtime executables: \"claude\", \"hermes\", \"codex\", \"bash\", ..."
           },
+          "shared_operator": {
+            "type": "boolean",
+            "description": "Whether this node is the deployment's shared operator node — a machine\nthe stack ships (MAIN-125) rather than a person's own. Reported so later\nexecutor selection can tell it apart from personal nodes; surfaced in\n`nook get nodes` and the Nodes UI. Set by `NOOK_SHARED_OPERATOR` on that\ncontainer; false everywhere else."
+          },
           "ssh_public_key": {
             "type": [
               "string",

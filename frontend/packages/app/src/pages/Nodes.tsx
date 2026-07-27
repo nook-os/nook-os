@@ -116,6 +116,21 @@ export function NodesPage() {
                           </Pill>
                         </>
                       )}
+                      {/* The deployment's shared operator node (MAIN-125): a
+                          machine the stack ships with the loop toolchain, not a
+                          person's own. Surfaced so it is distinguishable from
+                          personal nodes at a glance. */}
+                      {(caps.shared_operator as boolean) && (
+                        <>
+                          {" "}
+                          <Pill
+                            tone="accent"
+                            title="the deployment's shared operator node — ships with the loop toolchain"
+                          >
+                            operator
+                          </Pill>
+                        </>
+                      )}
                     </td>
                     <td>
                       <Pill tone={statusTone(status)}>{status}</Pill>

@@ -186,6 +186,43 @@ services:
       control-plane:
         condition: service_healthy
 
+  # The shared operator node (MAIN-125). Opt-in: `docker compose --profile
+  # operator up operator-node` — the default dev stack skips it, so nobody pays
+  # to build the full loop toolchain (claude/hermes/codex/copilot) just to run
+  # the app. It joins the dev control plane exactly as a real operator node
+  # joins prod; identity, checkouts, and tmux live on named volumes so a restart
+  # keeps them (AC-5).
+  operator-node:
+    profiles: ["operator"]
+    build:
+      context: .
+      dockerfile: deploy/docker/operator-node.Dockerfile
+    environment:
+      NOOK_SERVER: http://control-plane:8080
+      NOOK_JOIN_TOKEN: ${NOOK_DEV_JOIN_TOKEN:-}
+      NOOK_NODE_NAME: dev-operator
+      NOOK_WORKSPACE_ROOT: /workspace
+      # Plain http:// on the container network — same dev-only hatch the node
+      # service uses; refused outright when APP_ENV=production.
+      NOOK_INSECURE: "1"
+      NOOK_SHARED_OPERATOR: "1"
+      # Put the tmux runtime (its socket dir) on a named volume — tmux honours
+      # TMUX_TMPDIR, and nook shells out to tmux inheriting this env.
+      TMUX_TMPDIR: /var/lib/nook/tmux
+      RUST_LOG: nook=info
+    volumes:
+      # Node identity + generated SSH key: a restart re-attaches as the SAME
+      # node instead of re-joining as a new one (AC-5).
+      - operator-config:/root/.config/nook
+      # Cloned repos / worktrees: a restart keeps the checkouts (AC-5).
+      - operator-workspaces:/workspace
+      # tmux runtime dir (AC-2/AC-5). The socket file persists; note a container
+      # stop still terminates the tmux server process itself.
+      - operator-tmux:/var/lib/nook/tmux
+    depends_on:
+      control-plane:
+        condition: service_healthy
+
   web:
     image: node:22-slim
     working_dir: /app/frontend
@@ -210,4 +247,7 @@ volumes:
   cargo-target-node:
   demo-workspaces:
   node-config:
+  operator-config:
+  operator-workspaces:
+  operator-tmux:
   web-node-modules:

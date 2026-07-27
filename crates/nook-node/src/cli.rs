@@ -563,6 +563,7 @@ fn columns(resource: &str, first: &Value) -> Vec<&'static str> {
             "name",
             "status",
             "platform",
+            "capabilities.shared_operator",
             "capabilities.agent_version",
             "capabilities.cpus",
             "capabilities.memory",
@@ -617,6 +618,16 @@ fn render_value(key: &str, v: &Value) -> String {
             .filter(|b| *b > 0.0)
             .map(|b| format!("{:.0}G", b / 1024.0_f64.powi(3)))
             .unwrap_or_else(|| "-".into()),
+        // A boolean capability flag reads better as a mark than as
+        // `true`/`false`: the shared-operator designation (MAIN-125) shows in
+        // its column only on the machines that carry it, "-" everywhere else.
+        Value::Bool(b) if key.ends_with("shared_operator") => {
+            if *b {
+                "operator".into()
+            } else {
+                "-".into()
+            }
+        }
         Value::Array(a) if a.is_empty() => "-".into(),
         // A JSON array of runtimes reads as `["bash","zsh"]`; the quotes and
         // brackets are noise in a column that is already labelled.
