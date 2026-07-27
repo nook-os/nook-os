@@ -241,10 +241,10 @@ async fn dead_letter(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::queue::contract::{self, DeadInspect};
 
-    // The queue tests share the long-lived dev DB with every other suite, so
-    // each scopes strictly to rows it created: a unique `work_type` per test
-    // and a fresh `tenant_id`, then `receive`d by that type. No global counts.
+    // The queue tests share the long-lived dev DB; each contract runner scopes
+    // to a unique `work_type` so parallel/shared rows never collide.
     async fn queue() -> Option<DbQueue> {
         if std::env::var("NOOK_REQUIRE_DB").ok().as_deref() != Some("1") {
             return None;
@@ -261,235 +261,67 @@ mod tests {
         Some(DbQueue::new(db))
     }
 
-    fn unique_type(tag: &str) -> String {
-        format!("test.{tag}.{}", Uuid::now_v7())
+    /// Reads the dead-letter table for the parameterized contract runners.
+    struct DbDead(sqlx::PgPool);
+    #[async_trait::async_trait]
+    impl DeadInspect for DbDead {
+        async fn dead_count(&self, work_type: &str) -> i64 {
+            sqlx::query_as::<_, (i64,)>("SELECT count(*) FROM work_queue_dead WHERE work_type = $1")
+                .bind(work_type)
+                .fetch_one(&self.0)
+                .await
+                .unwrap()
+                .0
+        }
+        async fn dead_reason(&self, id: Uuid) -> Option<String> {
+            sqlx::query_as::<_, (String,)>("SELECT reason FROM work_queue_dead WHERE id = $1")
+                .bind(id)
+                .fetch_optional(&self.0)
+                .await
+                .unwrap()
+                .map(|r| r.0)
+        }
     }
 
-    fn work(ty: &str) -> NewWork {
-        NewWork::new(Uuid::now_v7(), ty, b"{\"hello\":1}".to_vec())
-    }
-
-    async fn dead_count(q: &DbQueue, ty: &str) -> i64 {
-        sqlx::query_as::<_, (i64,)>("SELECT count(*) FROM work_queue_dead WHERE work_type = $1")
-            .bind(ty)
-            .fetch_one(&q.db)
-            .await
-            .unwrap()
-            .0
+    macro_rules! skip_or {
+        () => {{
+            let Some(q) = queue().await else {
+                eprintln!("skipping — no DATABASE_URL");
+                return;
+            };
+            let dead = DbDead(q.db.clone());
+            (q, dead)
+        }};
     }
 
     #[tokio::test]
     async fn enqueue_receive_ack_round_trip() {
-        let Some(q) = queue().await else {
-            eprintln!("skipping enqueue_receive_ack_round_trip — no DATABASE_URL");
-            return;
-        };
-        let ty = unique_type("rt");
-        let id = q.enqueue(work(&ty)).await.unwrap();
-
-        let got = q
-            .receive(std::slice::from_ref(&ty), 10, Duration::from_secs(30))
-            .await
-            .unwrap();
-        assert_eq!(got.len(), 1, "the one enqueued message is delivered");
-        assert_eq!(got[0].id, id);
-        assert_eq!(got[0].attempts, 1, "first delivery counts as attempt 1");
-        assert_eq!(got[0].payload, b"{\"hello\":1}");
-
-        // Locked now — a second receive within the window sees nothing.
-        let again = q
-            .receive(std::slice::from_ref(&ty), 10, Duration::from_secs(30))
-            .await
-            .unwrap();
-        assert!(again.is_empty(), "a locked message is not redelivered");
-
-        q.ack(id).await.unwrap();
-        let after = q
-            .receive(std::slice::from_ref(&ty), 10, Duration::from_secs(30))
-            .await
-            .unwrap();
-        assert!(after.is_empty(), "an acked message is gone for good");
+        let (q, _d) = skip_or!();
+        contract::enqueue_receive_ack_round_trip(&q).await;
     }
-
     #[tokio::test]
     async fn visibility_expiry_redelivers() {
-        let Some(q) = queue().await else {
-            eprintln!("skipping visibility_expiry_redelivers — no DATABASE_URL");
-            return;
-        };
-        let ty = unique_type("vis");
-        let id = q.enqueue(work(&ty)).await.unwrap();
-
-        let first = q
-            .receive(std::slice::from_ref(&ty), 10, Duration::from_millis(300))
-            .await
-            .unwrap();
-        assert_eq!(first.len(), 1);
-        assert_eq!(first[0].attempts, 1);
-
-        // Still within the visibility window: invisible.
-        let locked = q
-            .receive(std::slice::from_ref(&ty), 10, Duration::from_secs(30))
-            .await
-            .unwrap();
-        assert!(locked.is_empty(), "invisible until the window elapses");
-
-        tokio::time::sleep(Duration::from_millis(600)).await;
-
-        let second = q
-            .receive(std::slice::from_ref(&ty), 10, Duration::from_secs(30))
-            .await
-            .unwrap();
-        assert_eq!(second.len(), 1, "reappears after visibility expiry");
-        assert_eq!(second[0].id, id);
-        assert_eq!(second[0].attempts, 2, "redelivery counts as attempt 2");
-        q.ack(id).await.unwrap();
+        let (q, _d) = skip_or!();
+        contract::visibility_expiry_redelivers(&q).await;
     }
-
     #[tokio::test]
-    async fn nack_requeue_redelivers_and_nack_dead_retires() {
-        let Some(q) = queue().await else {
-            eprintln!("skipping nack_requeue_redelivers_and_nack_dead_retires — no DATABASE_URL");
-            return;
-        };
-        // requeue → visible again
-        let ty = unique_type("requeue");
-        let id = q.enqueue(work(&ty)).await.unwrap();
-        q.receive(std::slice::from_ref(&ty), 10, Duration::from_secs(30))
-            .await
-            .unwrap();
-        q.nack(id, Nack::Requeue).await.unwrap();
-        let back = q
-            .receive(std::slice::from_ref(&ty), 10, Duration::from_secs(30))
-            .await
-            .unwrap();
-        assert_eq!(back.len(), 1, "a requeued message is immediately visible");
-        assert_eq!(back[0].attempts, 2);
-        q.ack(id).await.unwrap();
-
-        // dead → retired now, with the reason
-        let dty = unique_type("nackdead");
-        let did = q.enqueue(work(&dty)).await.unwrap();
-        q.receive(std::slice::from_ref(&dty), 10, Duration::from_secs(30))
-            .await
-            .unwrap();
-        q.nack(did, Nack::Dead("handler said boom".into()))
-            .await
-            .unwrap();
-        let gone = q
-            .receive(std::slice::from_ref(&dty), 10, Duration::from_secs(30))
-            .await
-            .unwrap();
-        assert!(gone.is_empty(), "a dead-nacked message leaves the queue");
-        assert_eq!(dead_count(&q, &dty).await, 1, "it lands in the dead table");
-        let reason: String =
-            sqlx::query_as::<_, (String,)>("SELECT reason FROM work_queue_dead WHERE id = $1")
-                .bind(did)
-                .fetch_one(&q.db)
-                .await
-                .unwrap()
-                .0;
-        assert_eq!(reason, "handler said boom");
+    async fn nack_requeue_and_dead() {
+        let (q, d) = skip_or!();
+        contract::nack_requeue_and_dead(&q, &d).await;
     }
-
     #[tokio::test]
     async fn max_attempts_exhaustion_dead_letters() {
-        let Some(q) = queue().await else {
-            eprintln!("skipping max_attempts_exhaustion_dead_letters — no DATABASE_URL");
-            return;
-        };
-        let ty = unique_type("exhaust");
-        let id = q.enqueue(work(&ty).max_attempts(1)).await.unwrap();
-
-        // Attempt 1 is delivered; requeueing it pushes attempts to the cap.
-        let first = q
-            .receive(std::slice::from_ref(&ty), 10, Duration::from_secs(30))
-            .await
-            .unwrap();
-        assert_eq!(first.len(), 1);
-        assert_eq!(first[0].attempts, 1);
-        q.nack(id, Nack::Requeue).await.unwrap();
-
-        // Next receive finds attempts == max_attempts → dead, not delivered.
-        let exhausted = q
-            .receive(std::slice::from_ref(&ty), 10, Duration::from_secs(30))
-            .await
-            .unwrap();
-        assert!(exhausted.is_empty(), "no delivery past the attempt cap");
-        assert_eq!(dead_count(&q, &ty).await, 1, "the row is dead-lettered");
-        let reason: String =
-            sqlx::query_as::<_, (String,)>("SELECT reason FROM work_queue_dead WHERE id = $1")
-                .bind(id)
-                .fetch_one(&q.db)
-                .await
-                .unwrap()
-                .0;
-        assert_eq!(reason, "max attempts exhausted");
+        let (q, d) = skip_or!();
+        contract::max_attempts_exhaustion_dead_letters(&q, &d).await;
     }
-
     #[tokio::test]
     async fn receive_filters_by_type() {
-        let Some(q) = queue().await else {
-            eprintln!("skipping receive_filters_by_type — no DATABASE_URL");
-            return;
-        };
-        let a = unique_type("filterA");
-        let b = unique_type("filterB");
-        let ida = q.enqueue(work(&a)).await.unwrap();
-        let idb = q.enqueue(work(&b)).await.unwrap();
-
-        let only_a = q
-            .receive(std::slice::from_ref(&a), 10, Duration::from_secs(30))
-            .await
-            .unwrap();
-        assert_eq!(only_a.len(), 1, "only the requested type is delivered");
-        assert_eq!(only_a[0].id, ida);
-        assert_eq!(only_a[0].work_type, a);
-
-        q.ack(ida).await.unwrap();
-        // b was never touched by the type-filtered receive.
-        let only_b = q
-            .receive(std::slice::from_ref(&b), 10, Duration::from_secs(30))
-            .await
-            .unwrap();
-        assert_eq!(only_b.len(), 1);
-        assert_eq!(only_b[0].id, idb);
-        q.ack(idb).await.unwrap();
+        let (q, _d) = skip_or!();
+        contract::receive_filters_by_type(&q).await;
     }
-
     #[tokio::test]
     async fn concurrent_receivers_never_double_deliver() {
-        let Some(q) = queue().await else {
-            eprintln!("skipping concurrent_receivers_never_double_deliver — no DATABASE_URL");
-            return;
-        };
-        let ty = unique_type("contention");
-        const N: usize = 12;
-        for _ in 0..N {
-            q.enqueue(work(&ty)).await.unwrap();
-        }
-
-        // Two receivers drain the same type at the same time, each with a long
-        // visibility so nothing expires mid-test. SKIP LOCKED must partition the
-        // rows between them — no id may appear in both, and together they must
-        // see exactly N.
-        let types = vec![ty.clone()];
-        let (left, right) = tokio::join!(
-            q.receive(&types, N, Duration::from_secs(30)),
-            q.receive(&types, N, Duration::from_secs(30)),
-        );
-        let left = left.unwrap();
-        let right = right.unwrap();
-
-        let mut ids: Vec<Uuid> = left.iter().chain(right.iter()).map(|e| e.id).collect();
-        let total = ids.len();
-        ids.sort();
-        ids.dedup();
-        assert_eq!(ids.len(), total, "no message delivered to both receivers");
-        assert_eq!(total, N, "between them the two receivers drain every row");
-
-        for id in ids {
-            q.ack(id).await.unwrap();
-        }
+        let (q, _d) = skip_or!();
+        contract::concurrent_receivers_never_double_deliver(&q).await;
     }
 }

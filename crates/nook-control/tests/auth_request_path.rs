@@ -57,6 +57,7 @@ fn test_config() -> nook_control::config::Config {
         s3_path_style: true,
         cache_provider: "memory".into(),
         queue_provider: "database".into(),
+        redis_url: None,
         mail_provider: "capture".into(),
         smtp_host: None,
         smtp_port: 587,

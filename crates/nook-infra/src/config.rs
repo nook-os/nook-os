@@ -125,6 +125,9 @@ pub struct Config {
     /// the cache: a queue is a deployment decision, and a hosted broker later
     /// means a new name here, not inference. See `crate::queue`.
     pub queue_provider: String,
+    /// `NOOK_REDIS_URL` — the Redis connection for the redis queue provider (and
+    /// the future redis cache). Required when `queue_provider = redis`.
+    pub redis_url: Option<String>,
 
     // ── Email (mail provider) ───────────────────────────────────────────
     /// Which mail transport to use, chosen by name — `smtp` or `capture`.
@@ -264,6 +267,7 @@ impl Config {
             cache_provider: env_opt("NOOK_CACHE_PROVIDER").unwrap_or_else(|| "memory".into()),
 
             queue_provider: env_opt("NOOK_QUEUE_PROVIDER").unwrap_or_else(|| "database".into()),
+            redis_url: env_opt("NOOK_REDIS_URL"),
 
             mail_provider: env_opt("MAIL_PROVIDER").unwrap_or_else(|| "capture".into()),
             smtp_host: env_opt("SMTP_HOST"),
@@ -312,6 +316,7 @@ impl Config {
         // refuse them at boot rather than silently draining a single-node table
         // a deployment believed was a shared broker.
         crate::queue::validate_provider(&cfg.queue_provider)?;
+        check_redis_queue(&cfg.queue_provider, cfg.redis_url.as_deref())?;
         // An unknown mail provider is a misconfiguration worth stopping for,
         // rather than silently falling through to some default and dropping mail.
         if !crate::mailer::is_known_provider(&cfg.mail_provider) {
@@ -383,6 +388,7 @@ impl Config {
             s3_path_style: true,
             cache_provider: "memory".into(),
             queue_provider: "database".into(),
+            redis_url: None,
             mail_provider: "capture".into(),
             smtp_host: None,
             smtp_port: 587,
@@ -401,5 +407,45 @@ impl Config {
             mail_max_per_day: None,
             trusted_proxies: Vec::new(),
         }
+    }
+}
+
+/// A `redis` queue provider needs a present, **parseable** `NOOK_REDIS_URL`.
+///
+/// A malformed URL refuses boot rather than letting `queue::from_config`
+/// silently fall back to the database backend — a silent swap would split-brain
+/// work routing (some producers on redis, some on postgres) and contradicts the
+/// queue module's boot-refusal principle. `RedisClient::open` validates the URL
+/// syntactically without connecting, so this is a cheap, offline check.
+fn check_redis_queue(provider: &str, redis_url: Option<&str>) -> Result<()> {
+    if provider != "redis" {
+        return Ok(());
+    }
+    let Some(url) = redis_url else {
+        anyhow::bail!(
+            "NOOK_QUEUE_PROVIDER=redis requires NOOK_REDIS_URL to be set (the Redis connection)"
+        );
+    };
+    crate::redis_client::RedisClient::open(url)
+        .context("NOOK_QUEUE_PROVIDER=redis but NOOK_REDIS_URL is malformed")?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod queue_config_tests {
+    use super::check_redis_queue;
+
+    #[test]
+    fn redis_provider_requires_a_present_parseable_url() {
+        // Non-redis providers never look at the URL.
+        assert!(check_redis_queue("database", None).is_ok());
+        assert!(check_redis_queue("database", Some("nonsense")).is_ok());
+        // redis: a missing URL refuses boot.
+        assert!(check_redis_queue("redis", None).is_err());
+        // redis: a MALFORMED URL refuses boot (the review defect) — never a
+        // silent fall-back to database.
+        assert!(check_redis_queue("redis", Some("not-a-redis-url")).is_err());
+        // redis: a valid URL boots.
+        assert!(check_redis_queue("redis", Some("redis://redis:6379")).is_ok());
     }
 }
