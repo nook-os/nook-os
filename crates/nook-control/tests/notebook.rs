@@ -6,6 +6,7 @@ use axum::extract::{Path, Query, State};
 use axum::Json;
 use nook_control::auth::{AuthCtx, Principal};
 use nook_control::config::Config;
+use nook_control::crypto;
 use nook_control::error::ApiError;
 use nook_control::routes::notebook;
 use nook_control::routes::notebook::NoteListQuery;
@@ -161,7 +162,12 @@ async fn notebook_is_person_scoped_encrypted_and_reparents() {
     .await
     .expect("create note")
     .0;
-    assert_eq!(note.content_md, "# secret plans", "get-back is decrypted");
+    assert_eq!(
+        note.content_md.as_deref(),
+        Some("# secret plans"),
+        "get-back is decrypted"
+    );
+    assert!(!note.sealed, "a fresh note is not sealed");
     assert_eq!(note.folder_id, Some(folder.id));
 
     // ── At rest it is ciphertext (AC-2) ─────────────────────────────────────
@@ -275,7 +281,8 @@ async fn notebook_is_person_scoped_encrypted_and_reparents() {
     .0;
     assert_eq!(moved.folder_id, None, "moved to root");
     assert_eq!(
-        moved.content_md, "# revised",
+        moved.content_md.as_deref(),
+        Some("# revised"),
         "body re-encrypted + decrypted"
     );
 
@@ -653,4 +660,292 @@ fn operator_routes_never_touch_the_notebook() {
         !op.contains("user_notes") && !op.contains("user_note_folders"),
         "operator.rs must never query the person-owned notebook tables"
     );
+}
+
+// ── MAIN-100: person vault + zero-knowledge seal contract ──────────────────────
+
+fn b64e(bytes: &[u8]) -> String {
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD.encode(bytes)
+}
+
+fn b64d(s: &str) -> Vec<u8> {
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD
+        .decode(s.as_bytes())
+        .expect("base64")
+}
+
+/// Build a seal request from a client blob (fabricated with the same primitive
+/// the browser would use) + the app password that authorizes it.
+fn seal_req(sealed: &crypto::Sealed, passphrase: &str) -> SealNoteRequest {
+    SealNoteRequest {
+        salt: b64e(&sealed.salt),
+        verifier: b64e(&sealed.verifier),
+        ciphertext: b64e(&sealed.ciphertext),
+        passphrase: passphrase.into(),
+    }
+}
+
+fn pass_req(passphrase: &str) -> SetVaultPassphraseRequest {
+    SetVaultPassphraseRequest {
+        passphrase: passphrase.into(),
+    }
+}
+
+/// The seal contract end to end: set-once person vault, seal (server never sees
+/// plaintext), sealed read returns a blob not the body, a body PATCH on a sealed
+/// note 409s while title edits/search keep working, unseal round-trips back to a
+/// normal note, and every new endpoint is person-scoped (MAIN-100 AC-1..AC-6).
+#[tokio::test]
+async fn notebook_person_vault_and_seal_contract() {
+    let _serial = SERIAL.lock().await;
+    let Some(pool) = test_pool().await else {
+        eprintln!("skipping notebook seal test — no DATABASE_URL");
+        return;
+    };
+    let state = AppState::new(pool.clone(), test_config(), None).await;
+
+    let a_sub = format!("seal-a-{}", Uuid::now_v7().simple());
+    let b_sub = format!("seal-b-{}", Uuid::now_v7().simple());
+    let (a_user, a_tenant) = login_identity(&state, claims(&a_sub, "Ana"))
+        .await
+        .expect("ana signs in");
+    let (b_user, b_tenant) = login_identity(&state, claims(&b_sub, "Ben"))
+        .await
+        .expect("ben signs in");
+    let a = auth(a_user.id, a_tenant.id);
+    let b = auth(b_user.id, b_tenant.id);
+    let pass = "correct horse staple";
+
+    // ── Person vault: unset → too-short → set → set-once conflict → verify ────
+    let st = notebook::vault_status(State(state.clone()), a)
+        .await
+        .expect("status")
+        .0;
+    assert!(!st.configured, "no vault yet");
+
+    let short =
+        notebook::set_vault_passphrase(State(state.clone()), a, Json(pass_req("short"))).await;
+    assert!(matches!(short, Err(ApiError::BadRequest(_))), "min 8 chars");
+
+    let set = notebook::set_vault_passphrase(State(state.clone()), a, Json(pass_req(pass)))
+        .await
+        .expect("set")
+        .0;
+    assert!(set.configured);
+
+    let again = notebook::set_vault_passphrase(State(state.clone()), a, Json(pass_req(pass))).await;
+    assert!(matches!(again, Err(ApiError::Conflict(_))), "set once only");
+
+    notebook::verify_vault_passphrase(State(state.clone()), a, Json(pass_req(pass)))
+        .await
+        .expect("verify accepts the right password");
+    let bad =
+        notebook::verify_vault_passphrase(State(state.clone()), a, Json(pass_req("nope"))).await;
+    assert!(
+        matches!(bad, Err(ApiError::Forbidden)),
+        "wrong password → 403"
+    );
+
+    // ── Sealing with no vault → 428 (B has not set one) ──────────────────────
+    let b_note = notebook::create_note(State(state.clone()), b, Json(mk_note("B", "b body", None)))
+        .await
+        .expect("b note")
+        .0;
+    let junk = crypto::seal_with_passphrase(b"x", "whatever").unwrap();
+    let setup = notebook::seal_note(
+        State(state.clone()),
+        b,
+        Path(b_note.id),
+        Json(seal_req(&junk, "whatever")),
+    )
+    .await;
+    assert!(
+        matches!(setup, Err(ApiError::SetupRequired(_))),
+        "no vault → 428 SetupRequired"
+    );
+
+    // ── Seal A's note with a client blob (server never sees plaintext) ───────
+    let note = notebook::create_note(
+        State(state.clone()),
+        a,
+        Json(mk_note("Plans", "# plaintext body", None)),
+    )
+    .await
+    .expect("note")
+    .0;
+    let plaintext = b"# sealed body \xE2\x9C\x93".to_vec(); // non-ascii byte on purpose
+    let sealed = crypto::seal_with_passphrase(&plaintext, pass).unwrap();
+
+    let wrong = notebook::seal_note(
+        State(state.clone()),
+        a,
+        Path(note.id),
+        Json(seal_req(&sealed, "not the pass")),
+    )
+    .await;
+    assert!(
+        matches!(wrong, Err(ApiError::Forbidden)),
+        "wrong app password → 403"
+    );
+
+    let out = notebook::seal_note(
+        State(state.clone()),
+        a,
+        Path(note.id),
+        Json(seal_req(&sealed, pass)),
+    )
+    .await
+    .expect("seal")
+    .0;
+    assert!(out.sealed, "now sealed");
+    assert!(
+        out.content_md.is_none(),
+        "a sealed response carries no plaintext"
+    );
+    let blob = out.blob.expect("blob present");
+    assert_eq!(blob.iterations, crypto::KDF_ITERATIONS);
+    assert_eq!(
+        b64d(&blob.salt),
+        sealed.salt,
+        "the blob echoes the seal salt"
+    );
+
+    // ── At rest: the vault layer peels only to the SEALED ciphertext, which the
+    //    server cannot open; only the passphrase does ─────────────────────────
+    let stored: Vec<u8> = sqlx::query_scalar("SELECT content_enc FROM user_notes WHERE id = $1")
+        .bind(note.id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let unwrapped = state.vault.decrypt(&stored).unwrap();
+    assert_ne!(
+        unwrapped, plaintext,
+        "the vault layer alone never yields plaintext"
+    );
+    let blob_ct = b64d(&blob.ciphertext);
+    assert_eq!(blob_ct, unwrapped, "read blob == stored sealed ciphertext");
+    let opened =
+        crypto::open_with_passphrase(&blob_ct, &sealed.salt, &sealed.verifier, pass).unwrap();
+    assert_eq!(opened, plaintext, "only the passphrase opens it");
+
+    // ── Reading it back: sealed:true + blob, no content_md (AC-4) ─────────────
+    let got = notebook::get_note(State(state.clone()), a, Path(note.id))
+        .await
+        .expect("get")
+        .0;
+    assert!(got.sealed && got.content_md.is_none() && got.blob.is_some());
+
+    // ── Body PATCH on a sealed note 409s; a title edit still works (AC-4/5) ────
+    let body_patch = notebook::update_note(
+        State(state.clone()),
+        a,
+        Path(note.id),
+        Json(UpdateUserNote {
+            content_md: Some("hijack".into()),
+            ..Default::default()
+        }),
+    )
+    .await;
+    assert!(
+        matches!(body_patch, Err(ApiError::Conflict(_))),
+        "body PATCH on sealed → 409"
+    );
+    let retitled = notebook::update_note(
+        State(state.clone()),
+        a,
+        Path(note.id),
+        Json(UpdateUserNote {
+            title: Some("Renamed".into()),
+            ..Default::default()
+        }),
+    )
+    .await
+    .expect("retitle")
+    .0;
+    assert!(retitled.sealed, "a title edit keeps a note sealed");
+
+    // ── Title search still finds the sealed note, marked sealed (AC-5) ────────
+    let hits = notebook::list_notes(
+        State(state.clone()),
+        a,
+        Query(NoteListQuery {
+            q: Some("Renamed".into()),
+        }),
+    )
+    .await
+    .expect("search")
+    .0;
+    assert!(
+        hits.iter().any(|n| n.id == note.id && n.sealed),
+        "search finds the sealed note by title and marks it sealed"
+    );
+
+    // ── Cross-person isolation: B (own vault set) cannot seal/unseal A's note ─
+    let _ =
+        notebook::set_vault_passphrase(State(state.clone()), b, Json(pass_req("ben pass word")))
+            .await
+            .expect("b vault");
+    // B's blob is consistent with B's own password, so the seal passes its blob
+    // check and fails only on person scoping — proving the isolation, not the
+    // blob guard.
+    let b_blob = crypto::seal_with_passphrase(b"ben body", "ben pass word").unwrap();
+    let b_seals_a = notebook::seal_note(
+        State(state.clone()),
+        b,
+        Path(note.id),
+        Json(seal_req(&b_blob, "ben pass word")),
+    )
+    .await;
+    assert!(
+        matches!(b_seals_a, Err(ApiError::NotFound)),
+        "B cannot seal A's note"
+    );
+    let b_unseals_a = notebook::unseal_note(
+        State(state.clone()),
+        b,
+        Path(note.id),
+        Json(UnsealNoteRequest {
+            content_md: "x".into(),
+            passphrase: "ben pass word".into(),
+        }),
+    )
+    .await;
+    assert!(
+        matches!(b_unseals_a, Err(ApiError::NotFound)),
+        "B cannot unseal A's note"
+    );
+
+    // ── Unseal round-trips back to a normal server-encrypted note (AC-3) ──────
+    let recovered = String::from_utf8(opened).unwrap();
+    let un = notebook::unseal_note(
+        State(state.clone()),
+        a,
+        Path(note.id),
+        Json(UnsealNoteRequest {
+            content_md: recovered.clone(),
+            passphrase: pass.into(),
+        }),
+    )
+    .await
+    .expect("unseal")
+    .0;
+    assert!(!un.sealed, "back to unsealed");
+    assert_eq!(un.content_md.as_deref(), Some(recovered.as_str()));
+    let after: Vec<u8> = sqlx::query_scalar("SELECT content_enc FROM user_notes WHERE id = $1")
+        .bind(note.id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        state.vault.decrypt_string(&after).unwrap(),
+        recovered,
+        "the note is server-readable again after unsealing"
+    );
+
+    let _ = sqlx::query("DELETE FROM tenants WHERE id = ANY($1) AND slug <> 'dev'")
+        .bind(vec![a_tenant.id, b_tenant.id])
+        .execute(&pool)
+        .await;
 }
