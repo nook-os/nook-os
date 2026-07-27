@@ -73,54 +73,26 @@ impl Cache for MemoryCache {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cache::contract;
 
+    #[tokio::test]
+    async fn absent_key_is_a_miss() {
+        contract::absent_key_is_a_miss(&MemoryCache::new()).await;
+    }
     #[tokio::test]
     async fn set_then_get_round_trips_the_bytes() {
-        let c = MemoryCache::new();
-        assert_eq!(
-            c.get("k").await.unwrap(),
-            None,
-            "absent key is a clean miss"
-        );
-        c.set("k", b"hello".to_vec(), Duration::from_secs(60))
-            .await
-            .unwrap();
-        assert_eq!(c.get("k").await.unwrap(), Some(b"hello".to_vec()));
+        contract::set_then_get_round_trips_the_bytes(&MemoryCache::new()).await;
     }
-
-    #[tokio::test]
-    async fn an_entry_expires_after_its_ttl() {
-        let c = MemoryCache::new();
-        c.set("k", b"v".to_vec(), Duration::from_millis(10))
-            .await
-            .unwrap();
-        assert_eq!(c.get("k").await.unwrap(), Some(b"v".to_vec()));
-        tokio::time::sleep(Duration::from_millis(25)).await;
-        assert_eq!(c.get("k").await.unwrap(), None, "the TTL backstop fired");
-    }
-
-    #[tokio::test]
-    async fn delete_removes_the_entry_and_is_a_noop_when_absent() {
-        let c = MemoryCache::new();
-        c.set("k", b"v".to_vec(), Duration::from_secs(60))
-            .await
-            .unwrap();
-        c.delete("k").await.unwrap();
-        assert_eq!(c.get("k").await.unwrap(), None);
-        // Deleting again — and deleting a key that never existed — must not error.
-        c.delete("k").await.unwrap();
-        c.delete("never").await.unwrap();
-    }
-
     #[tokio::test]
     async fn set_overwrites_an_existing_entry() {
-        let c = MemoryCache::new();
-        c.set("k", b"one".to_vec(), Duration::from_secs(60))
-            .await
-            .unwrap();
-        c.set("k", b"two".to_vec(), Duration::from_secs(60))
-            .await
-            .unwrap();
-        assert_eq!(c.get("k").await.unwrap(), Some(b"two".to_vec()));
+        contract::set_overwrites_an_existing_entry(&MemoryCache::new()).await;
+    }
+    #[tokio::test]
+    async fn delete_removes_the_entry_and_is_a_noop_when_absent() {
+        contract::delete_removes_the_entry_and_is_a_noop_when_absent(&MemoryCache::new()).await;
+    }
+    #[tokio::test]
+    async fn an_entry_expires_after_its_ttl() {
+        contract::an_entry_expires_after_its_ttl(&MemoryCache::new()).await;
     }
 }

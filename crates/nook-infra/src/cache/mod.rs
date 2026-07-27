@@ -14,13 +14,12 @@
 //! - **memory** — an in-process, TTL-aware map. The default, and all a
 //!   single-instance deployment needs.
 //!
-//! - **redis** is a RESERVED name with no implementation here (NG-1). The four
-//!   operations are deliberately redis-native — `GET`, `SETEX`, `DEL` — so the
-//!   day a `RedisCache` lands it drops in behind this trait with nothing else
-//!   changing. Selecting it today fails at boot with a clear "not built yet"
-//!   error rather than silently falling back, because a deployment that asked
-//!   for a shared cache and silently got a per-process one would be a
-//!   correctness surprise, not a convenience.
+//! - **redis** — a shared, cross-instance cache over the client from the
+//!   redis-queue card (MAIN-150). The four operations are redis-native —
+//!   `GET`, `SET … PX`, `DEL` — so it drops in behind this trait with nothing
+//!   else changing. Selecting it needs `NOOK_REDIS_URL`; a missing or malformed
+//!   URL refuses boot (in `Config::from_env`) rather than silently handing back
+//!   a per-process cache someone asked to be shared.
 //!
 //! Values are opaque bytes: callers serialize (JSON today) and the cache never
 //! looks inside, so a redis backend stores the identical bytes. Keys are
@@ -34,9 +33,9 @@ use anyhow::Result;
 use async_trait::async_trait;
 
 pub mod memory;
+pub mod redis;
 
-/// The provider names this build understands. `redis` is listed — it is a
-/// known, reserved name — but is not implemented here (NG-1).
+/// The provider names this build understands.
 pub const PROVIDERS: &[&str] = &["memory", "redis"];
 
 #[async_trait]
@@ -63,15 +62,12 @@ pub fn is_known_provider(name: &str) -> bool {
 }
 
 /// Validate the configured provider at boot, mirroring the `mail_provider`
-/// check in `Config::from_env`. `redis` is known but unbuilt, so it earns its
-/// own message pointing at the working default rather than a generic "unknown".
+/// check in `Config::from_env`. Both providers are built; the redis-specific
+/// requirement (a present, parseable `NOOK_REDIS_URL`) is enforced separately in
+/// `Config::from_env`.
 pub fn validate_provider(name: &str) -> Result<()> {
     match name {
-        "memory" => Ok(()),
-        "redis" => anyhow::bail!(
-            "NOOK_CACHE_PROVIDER=redis is reserved but not built yet — \
-             use `memory` (the default) until a redis backend ships"
-        ),
+        "memory" | "redis" => Ok(()),
         other => anyhow::bail!(
             "NOOK_CACHE_PROVIDER must be one of [{}] — got {other:?}",
             PROVIDERS.join(", ")
@@ -81,17 +77,102 @@ pub fn validate_provider(name: &str) -> Result<()> {
 
 /// Build the cache this instance is configured for.
 ///
-/// Only `memory` is constructible today; `redis` is rejected earlier by
-/// `validate_provider` (called from `Config::from_env`), so by the time we get
-/// here the provider is valid and anything but a recognised name falls back to
-/// memory rather than panicking a boot that already passed validation.
+/// `redis` builds a lazily-connecting client (`open` is sync + non-connecting).
+/// `Config::from_env` has already refused boot for a missing or unparseable
+/// `NOOK_REDIS_URL`, so the fall-throughs below are unreachable defense-in-depth,
+/// not a live degradation path — a running redis cache that later goes down
+/// degrades per-request (a miss), it does not fall back to memory mid-flight.
 pub fn from_config(cfg: &crate::config::Config) -> Box<dyn Cache> {
-    // Only `memory` is constructible; `redis` was rejected by `validate_provider`
-    // at boot, so any provider reaching here resolves to the in-memory backend.
-    let _ = cfg.cache_provider.as_str();
+    if cfg.cache_provider == "redis" {
+        match cfg.redis_url.as_deref() {
+            Some(url) => match crate::redis_client::RedisClient::open(url) {
+                Ok(client) => {
+                    let cache = redis::RedisCache::new(client);
+                    tracing::info!(cache = %cache.describe(), "cache provider");
+                    return Box::new(cache);
+                }
+                Err(e) => tracing::error!(
+                    error = %e,
+                    "NOOK_CACHE_PROVIDER=redis but NOOK_REDIS_URL is unusable — falling back to memory"
+                ),
+            },
+            None => tracing::error!(
+                "NOOK_CACHE_PROVIDER=redis but NOOK_REDIS_URL is unset — falling back to memory"
+            ),
+        }
+    }
     let cache = memory::MemoryCache::new();
     tracing::info!(cache = %cache.describe(), "cache provider");
     Box::new(cache)
+}
+
+/// The one cache contract, run against every backend (AC-3).
+///
+/// The `Cache` trait is the whole surface, so these runners take `&dyn Cache`
+/// and the memory and redis test modules are thin wrappers that build their
+/// backend and call these — both prove the identical behaviour. Keys are unique
+/// per call so the shared test Redis (and parallel runs) never collide.
+#[cfg(test)]
+pub(crate) mod contract {
+    use super::Cache;
+    use std::time::Duration;
+
+    fn key(tag: &str) -> String {
+        format!("nooktest:{tag}:{}", uuid::Uuid::now_v7())
+    }
+
+    pub async fn absent_key_is_a_miss(c: &dyn Cache) {
+        assert_eq!(
+            c.get(&key("absent")).await.unwrap(),
+            None,
+            "an absent key is a clean miss"
+        );
+    }
+
+    pub async fn set_then_get_round_trips_the_bytes(c: &dyn Cache) {
+        let k = key("roundtrip");
+        c.set(&k, b"hello".to_vec(), Duration::from_secs(60))
+            .await
+            .unwrap();
+        assert_eq!(c.get(&k).await.unwrap(), Some(b"hello".to_vec()));
+    }
+
+    pub async fn set_overwrites_an_existing_entry(c: &dyn Cache) {
+        let k = key("overwrite");
+        c.set(&k, b"one".to_vec(), Duration::from_secs(60))
+            .await
+            .unwrap();
+        c.set(&k, b"two".to_vec(), Duration::from_secs(60))
+            .await
+            .unwrap();
+        assert_eq!(c.get(&k).await.unwrap(), Some(b"two".to_vec()));
+    }
+
+    pub async fn delete_removes_the_entry_and_is_a_noop_when_absent(c: &dyn Cache) {
+        let k = key("delete");
+        c.set(&k, b"v".to_vec(), Duration::from_secs(60))
+            .await
+            .unwrap();
+        c.delete(&k).await.unwrap();
+        assert_eq!(c.get(&k).await.unwrap(), None);
+        // Deleting again — and deleting a key that never existed — must not error.
+        c.delete(&k).await.unwrap();
+        c.delete(&key("never")).await.unwrap();
+    }
+
+    pub async fn an_entry_expires_after_its_ttl(c: &dyn Cache) {
+        let k = key("expiry");
+        c.set(&k, b"v".to_vec(), Duration::from_millis(250))
+            .await
+            .unwrap();
+        assert_eq!(
+            c.get(&k).await.unwrap(),
+            Some(b"v".to_vec()),
+            "present before the TTL"
+        );
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert_eq!(c.get(&k).await.unwrap(), None, "gone after the TTL");
+    }
 }
 
 #[cfg(test)]
@@ -99,18 +180,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn redis_is_known_but_refused_with_a_pointed_message() {
+    fn both_providers_are_accepted_and_unknown_is_rejected() {
         assert!(is_known_provider("redis"));
-        let err = validate_provider("redis").unwrap_err().to_string();
-        assert!(err.contains("not built yet"), "{err}");
-        assert!(
-            err.contains("memory"),
-            "points at the working default: {err}"
-        );
-    }
-
-    #[test]
-    fn memory_is_accepted_and_unknown_is_rejected() {
+        assert!(validate_provider("redis").is_ok(), "redis is built now");
         assert!(validate_provider("memory").is_ok());
         assert!(!is_known_provider("elasticache"));
         assert!(validate_provider("elasticache").is_err());
