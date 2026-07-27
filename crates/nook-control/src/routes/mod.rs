@@ -7,6 +7,7 @@ pub mod events;
 pub mod feedback;
 pub mod gitops;
 pub mod health;
+pub mod interactions;
 pub mod invites;
 pub mod jobs;
 pub mod join;
@@ -338,6 +339,13 @@ pub fn build_router(state: AppState) -> Router {
         .route("/jobs/{id}", get(jobs::get))
         .route("/jobs/{id}/cancel", post(jobs::cancel))
         .route("/jobs/{id}/rerun", post(jobs::rerun))
+        .route(
+            "/interactions",
+            get(interactions::list_pending).post(interactions::create),
+        )
+        .route("/interactions/{id}", get(interactions::get))
+        .route("/interactions/{id}/answer", post(interactions::answer))
+        .route("/interactions/{id}/cancel", post(interactions::cancel))
         .route("/sessions", get(sessions::list).post(sessions::create))
         // Before `/sessions/{id}` so the literal path is not captured as an id.
         .route("/sessions/agent-states", get(sessions::agent_states))

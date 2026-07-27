@@ -168,6 +168,11 @@ pub fn catalog() -> Vec<nook_types::NotificationKind> {
             "Loop job updated",
             "A loop job changed state (running, waiting, finished, or failed).",
         ),
+        k(
+            "interaction.created",
+            "Human input needed",
+            "A loop job or ticket is waiting on a person to answer.",
+        ),
     ]
 }
 
@@ -310,6 +315,19 @@ pub fn notable(base_url: &str, event: &Event) -> Option<crate::services::notify:
                 text("kind").unwrap_or("loop"),
                 if state.is_empty() { "updated" } else { state }
             ))
+        }
+        // A durable interaction on a PRIVATE card is not notable: the prompt
+        // could reveal the card's existence or content (mirrors the job rule).
+        // The activity event still records; only the bell is gated.
+        "interaction.created" if is_private_target(event) => return None,
+        // A human is needed (MAIN-159). Warning level — someone should act. The
+        // prompt is the body (bounded); the tail deep-links to the subject card
+        // via the payload's `task_id` when there is one, else to activity.
+        "interaction.created" => {
+            let prompt = text("prompt").unwrap_or("A response is needed");
+            Draft::new("Human input needed")
+                .level("warning")
+                .body(prompt.chars().take(140).collect::<String>())
         }
         // Unreachable: the catalog gate above rejects any kind not phrased here.
         _ => return None,

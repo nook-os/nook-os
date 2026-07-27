@@ -2192,6 +2192,106 @@ pub async fn operator_org_create(name: &str, slug: Option<&str>) -> Result<()> {
     Ok(())
 }
 
+/// `nook interactions ask <prompt>` — raise a durable question for a human.
+///
+/// The ask is persisted server-side and answerable from any surface, so with
+/// `--wait` this process can block on a human decision across a dropped
+/// connection without losing it. Auto-scopes to the calling session/job from
+/// `NOOK_SESSION_ID` / `NOOK_JOB_ID` when the flags are not passed.
+pub async fn interactions_ask(
+    prompt: &str,
+    choices: &[String],
+    wait: bool,
+    job: Option<&str>,
+    task: Option<&str>,
+) -> Result<()> {
+    let client = Client::from_config()?;
+
+    let mut body = serde_json::Map::new();
+    body.insert("prompt".into(), Value::String(prompt.to_string()));
+    if !choices.is_empty() {
+        body.insert("choices".into(), serde_json::json!(choices));
+    }
+    // A flag wins; otherwise fall back to the environment an in-session
+    // executor exports, so its ask auto-anchors to its own job.
+    if let Some(job_id) = job
+        .map(str::to_string)
+        .or_else(|| std::env::var("NOOK_JOB_ID").ok())
+    {
+        body.insert("job_id".into(), Value::String(job_id));
+    }
+    if let Some(task_id) = task.map(str::to_string) {
+        body.insert("task_id".into(), Value::String(task_id));
+    }
+    if let Ok(session_id) = std::env::var("NOOK_SESSION_ID") {
+        body.insert("session_id".into(), Value::String(session_id));
+    }
+
+    let r = client
+        .post("/api/v1/interactions", Value::Object(body))
+        .await?;
+    let interaction: nook_types::Interaction =
+        serde_json::from_value(r).context("unexpected interaction response")?;
+    let id = interaction.id.to_string();
+    println!(
+        "{} asked {}",
+        crate::style::ok_c("✓"),
+        crate::style::bold(&id)
+    );
+
+    if !wait {
+        return Ok(());
+    }
+
+    // Poll for the answer. A human's decision can take a while, so the deadline
+    // is generous; a fixed 2s interval mirrors `exec`.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60 * 60);
+    while std::time::Instant::now() < deadline {
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        let r = client.get(&format!("/api/v1/interactions/{id}")).await?;
+        let current: nook_types::Interaction =
+            serde_json::from_value(r).context("unexpected interaction response")?;
+        match current.state.as_str() {
+            "pending" => continue,
+            "canceled" => {
+                println!("{} interaction was canceled", crate::style::dim("·"));
+                return Ok(());
+            }
+            _ => {
+                let answer = current.response.unwrap_or_default();
+                println!("{}", crate::style::reply(&answer));
+                // Plain to stdout as well, so a caller/script can capture it.
+                println!("{answer}");
+                return Ok(());
+            }
+        }
+    }
+
+    println!(
+        "{} timed out waiting for an answer — it is still pending as {}",
+        crate::style::dim("·"),
+        id
+    );
+    Ok(())
+}
+
+/// `nook interactions answer <id> <response>` — resolve a pending ask.
+pub async fn interactions_answer(id: &str, response: &str) -> Result<()> {
+    let client = Client::from_config()?;
+    client
+        .post(
+            &format!("/api/v1/interactions/{id}/answer"),
+            serde_json::json!({ "response": response }),
+        )
+        .await?;
+    println!(
+        "{} answered {}",
+        crate::style::ok_c("✓"),
+        crate::style::bold(id)
+    );
+    Ok(())
+}
+
 /// Stage a new certificate authority for a tenant.
 ///
 /// Staging only, deliberately. Machines learn the new CA on their next renewal;

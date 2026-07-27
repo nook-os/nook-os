@@ -353,6 +353,13 @@ pub enum ControlToNode {
         checkout_path: String,
         name: String,
     },
+    /// A human answered a durable interaction this node requested (MAIN-159).
+    /// Pushed to the executor so a waiting run is unblocked without polling;
+    /// `request_id` is the interaction id the `nook interactions ask` raised.
+    InteractionAnswer {
+        request_id: String,
+        answer: String,
+    },
     Ping,
 }
 
@@ -409,6 +416,14 @@ pub enum UiEvent {
     /// panel is the whole issue.
     TaskChanged {
         task_id: nook_types::TaskId,
+    },
+    /// A durable interaction was raised, answered, or canceled (MAIN-159).
+    /// Carries only the subject ticket id (when any), the same "what you have is
+    /// stale" contract as `TaskChanged`: the client refetches the pending list
+    /// and, if a ticket is named, that ticket's interactions.
+    InteractionChanged {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        task_id: Option<nook_types::TaskId>,
     },
 }
 

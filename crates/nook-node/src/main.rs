@@ -184,6 +184,13 @@ enum Command {
     /// Who may run this deployment.
     #[command(subcommand)]
     Operator(OperatorCommand),
+    /// Durable human interactions: ask a human a question, answer one.
+    ///
+    /// An ask is persisted, announced over channels, and answerable from any
+    /// surface — so a paused loop job or an in-session agent can wait on a
+    /// human decision without losing it to a dropped connection (MAIN-159).
+    #[command(subcommand)]
+    Interactions(InteractionsCommand),
     /// Tell the fleet something happened.
     ///
     /// Fans out to every connected UI and every configured channel (Slack,
@@ -572,6 +579,16 @@ async fn main() -> Result<()> {
         Command::Operator(OperatorCommand::Node { node, remove }) => {
             cli::operator_node(&node, remove).await
         }
+        Command::Interactions(InteractionsCommand::Ask {
+            prompt,
+            choices,
+            wait,
+            job,
+            task,
+        }) => cli::interactions_ask(&prompt, &choices, wait, job.as_deref(), task.as_deref()).await,
+        Command::Interactions(InteractionsCommand::Answer { id, response }) => {
+            cli::interactions_answer(&id, &response).await
+        }
         Command::Notify {
             title,
             body,
@@ -886,6 +903,39 @@ enum OperatorCommand {
         /// Remove the record entirely rather than revoking its certificate.
         #[arg(long)]
         remove: bool,
+    },
+}
+
+#[derive(clap::Subcommand)]
+enum InteractionsCommand {
+    /// Ask a human a question and persist it. Prints the interaction id.
+    ///
+    /// Auto-scopes to the calling session/job from `NOOK_SESSION_ID` and
+    /// `NOOK_JOB_ID` when set, so an in-session executor's ask is anchored to
+    /// its own work without passing ids by hand. With `--wait`, blocks until a
+    /// human answers (or cancels), then prints the answer to stdout.
+    Ask {
+        /// The question to put to a human.
+        prompt: String,
+        /// A structured choice the answer is expected to be one of (repeatable).
+        #[arg(long = "choice")]
+        choices: Vec<String>,
+        /// Block until answered (or canceled), then print the response.
+        #[arg(long)]
+        wait: bool,
+        /// The loop job this pauses on. Defaults to `NOOK_JOB_ID`.
+        #[arg(long)]
+        job: Option<String>,
+        /// The ticket to anchor to when there is no job. Ignored if `job` is set.
+        #[arg(long)]
+        task: Option<String>,
+    },
+    /// Answer a pending interaction.
+    Answer {
+        /// The interaction id.
+        id: String,
+        /// The response.
+        response: String,
     },
 }
 

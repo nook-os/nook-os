@@ -3368,6 +3368,44 @@ a.toast-main:hover .toast-title { text-decoration: underline; }
   overflow-wrap: anywhere;
 }
 
+/* ── Durable interactions (MAIN-159) ────────────────────────────────────── */
+
+/* One pending ask — in the top-bar panel and inline on a ticket. */
+.ixn-item {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--nook-border);
+  border-left: 2px solid var(--nook-accent);
+}
+.ixn-prompt {
+  color: var(--nook-fg-bright);
+  font-size: 12px;
+  margin-bottom: 6px;
+  overflow-wrap: anywhere;
+}
+.ixn-choices {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-bottom: 6px;
+}
+.ixn-reply { display: flex; gap: 4px; }
+.ixn-input {
+  flex: 1;
+  min-width: 0;
+  height: 24px;
+  padding: 0 6px;
+  background: var(--nook-bg-input, var(--nook-bg-raised));
+  border: 1px solid var(--nook-border);
+  border-radius: var(--nook-radius);
+  color: var(--nook-fg);
+  font: inherit;
+  font-size: 11px;
+}
+.ixn-input:focus {
+  outline: none;
+  border-color: var(--nook-accent);
+}
+
 /* ── Notification channels ──────────────────────────────────────────────── */
 
 .chan-wrap { display: flex; flex-direction: column; gap: 8px; padding: 10px 12px; }

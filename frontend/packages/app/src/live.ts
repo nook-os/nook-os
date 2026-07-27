@@ -147,6 +147,18 @@ export function startLive(queryClient: QueryClient) {
       // exactly the view somebody is looking at.
       queryClient.invalidateQueries({ queryKey: ["task"] });
       queryClient.invalidateQueries({ queryKey: ["tasks"] });
+    } else if (event.type === "interaction_changed") {
+      // A durable interaction was raised, answered, or canceled (MAIN-159).
+      // Same "what you have is stale" contract as `task_changed`: refetch the
+      // pending list, and — when a ticket is named — that ticket's own pending
+      // interactions and the ticket itself.
+      queryClient.invalidateQueries({ queryKey: ["interactions", "pending"] });
+      if (event.data.task_id) {
+        queryClient.invalidateQueries({
+          queryKey: ["interactions", "task", event.data.task_id],
+        });
+        queryClient.invalidateQueries({ queryKey: ["task", event.data.task_id] });
+      }
     } else if (event.type === "activity") {
       useLive.setState((s) => ({
         activity: [event.data.event, ...s.activity].slice(0, ACTIVITY_BUFFER),

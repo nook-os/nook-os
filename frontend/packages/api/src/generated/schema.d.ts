@@ -499,6 +499,70 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/interactions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["interaction_list_pending"];
+        put?: never;
+        post: operations["interaction_create"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/interactions/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["interaction_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/interactions/{id}/answer": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["interaction_answer"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/interactions/{id}/cancel": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["interaction_cancel"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/invites/accept": {
         parameters: {
             query?: never;
@@ -2931,6 +2995,10 @@ export interface components {
             /** Format: int32 */
             window?: number | null;
         };
+        /** @description Answer a pending interaction — the one endpoint the CLI and web both call. */
+        AnswerInteractionRequest: {
+            response: string;
+        };
         /** @description Terminal attach socket messages (browser → control plane). */
         AttachClientMessage: {
             data: {
@@ -3367,6 +3435,18 @@ export interface components {
             /** @description Paste an existing private key (OpenSSH PEM)… */
             private_key?: string | null;
         };
+        /**
+         * @description Create an interaction — the executor-scoped ask behind `nook interactions
+         *     ask`. When `job_id` is set the creating node must be that job's executor
+         *     (anti-spoof, AC-4); the subject ticket is then the job's target.
+         */
+        CreateInteractionRequest: {
+            choices?: string[] | null;
+            job_id?: null | components["schemas"]["JobId"];
+            prompt: string;
+            session_id?: null | components["schemas"]["SessionId"];
+            task_id?: null | components["schemas"]["TaskId"];
+        };
         CreateInviteRequest: {
             email: string;
             /** @description `member` | `admin`. `owner` is never invitable (NG-3). */
@@ -3785,6 +3865,33 @@ export interface components {
         InitProjectRequest: {
             name: string;
         };
+        /**
+         * @description A pending/answered/canceled ask for a human. Its subject (a job and/or the
+         *     ticket it is anchored to) governs who may see and answer it.
+         */
+        Interaction: {
+            /** Format: date-time */
+            answered_at?: string | null;
+            answered_by?: null | components["schemas"]["UserId"];
+            /** @description Optional structured choices the answer is expected to be one of. */
+            choices?: string[] | null;
+            /** Format: date-time */
+            created_at: string;
+            id: components["schemas"]["InteractionId"];
+            job_id?: null | components["schemas"]["JobId"];
+            prompt: string;
+            requested_by_node_id?: null | components["schemas"]["NodeId"];
+            requested_by_session_id?: null | components["schemas"]["SessionId"];
+            response?: string | null;
+            /** @description `pending` | `answered` | `canceled`. */
+            state: string;
+            task_id?: null | components["schemas"]["TaskId"];
+            tenant_id: components["schemas"]["TenantId"];
+            /** Format: date-time */
+            updated_at: string;
+        };
+        /** Format: uuid */
+        InteractionId: string;
         /**
          * @description A pending/accepted/revoked invitation into a tenant. `accept_url` is set only
          *     on the create response (the link to hand out); the token is never listed.
@@ -5031,6 +5138,18 @@ export interface components {
             };
             /** @enum {string} */
             type: "task_changed";
+        } | {
+            /**
+             * @description A durable interaction was raised, answered, or canceled (MAIN-159).
+             *     Carries only the subject ticket id (when any), the same "what you have is
+             *     stale" contract as `TaskChanged`: the client refetches the pending list
+             *     and, if a ticket is named, that ticket's interactions.
+             */
+            data: {
+                task_id?: null | components["schemas"]["TaskId"];
+            };
+            /** @enum {string} */
+            type: "interaction_changed";
         };
         /**
          * @description Unseal a note (MAIN-100): the client decrypted the sealed body locally and
@@ -6252,6 +6371,115 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+        };
+    };
+    interaction_list_pending: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Interaction"][];
+                };
+            };
+        };
+    };
+    interaction_create: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateInteractionRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Interaction"];
+                };
+            };
+        };
+    };
+    interaction_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Interaction"];
+                };
+            };
+        };
+    };
+    interaction_answer: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AnswerInteractionRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Interaction"];
+                };
+            };
+        };
+    };
+    interaction_cancel: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Interaction"];
+                };
             };
         };
     };

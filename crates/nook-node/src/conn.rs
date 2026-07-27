@@ -694,6 +694,13 @@ pub async fn connect_once(cfg: &NodeConfig) -> Result<()> {
                     Err(e) => tracing::warn!(skill = %name, error = %e, "cannot forget skill"),
                 }
             }
+            ControlToNode::InteractionAnswer { request_id, answer } => {
+                // MAIN-159: a human answered an interaction this node raised. The waiting
+                // `nook interactions ask --wait` process pulls the answer over REST; this
+                // push is logged here as the delivery hook a future in-session bridge
+                // (MAIN-162) builds on — this slice does not forward it into the PTY (NG).
+                tracing::info!(%request_id, answer_len = answer.len(), "interaction answered (pushed)");
+            }
         }
     }
 

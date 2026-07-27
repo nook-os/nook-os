@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 import { NotificationBell } from "./Notifications";
+import { PendingInteractions } from "./Interactions";
 import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
@@ -296,6 +297,7 @@ export function Shell({ me }: { me: MeResponse }) {
           ))}
         </nav>
         <div className="nook-topbar-right">
+          <PendingInteractions />
           <NotificationBell />
           {/* Feedback lives here, spelled out, not just as one more unlabelled
               icon in the rail — you can't tell us what's wrong with a thing
