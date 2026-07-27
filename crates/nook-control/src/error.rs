@@ -30,6 +30,12 @@ pub enum ApiError {
     /// can tell "you must do X first" apart from "you sent nonsense".
     #[error("{0}")]
     SetupRequired(String),
+    /// A dependency the request needs is temporarily unreachable and the server
+    /// is already retrying — a 503 rather than a 400 so a client knows the
+    /// request was fine and trying again shortly will work. Today: the IdP is
+    /// down and OIDC discovery has not yet succeeded (MAIN-169 AC-2).
+    #[error("{0}")]
+    ServiceUnavailable(String),
     #[error(transparent)]
     Db(#[from] sqlx::Error),
     #[error(transparent)]
@@ -47,6 +53,7 @@ impl IntoResponse for ApiError {
             ApiError::Conflict(m) => (StatusCode::CONFLICT, m.clone()),
             ApiError::TooManyRequests(m) => (StatusCode::TOO_MANY_REQUESTS, m.clone()),
             ApiError::SetupRequired(m) => (StatusCode::PRECONDITION_REQUIRED, m.clone()),
+            ApiError::ServiceUnavailable(m) => (StatusCode::SERVICE_UNAVAILABLE, m.clone()),
             ApiError::Db(sqlx::Error::RowNotFound) => (StatusCode::NOT_FOUND, "not found".into()),
             ApiError::Db(e) => {
                 tracing::error!(error = %e, "database error");

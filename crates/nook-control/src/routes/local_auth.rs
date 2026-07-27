@@ -221,11 +221,21 @@ pub async fn change_password(
 pub async fn status(State(state): State<AppState>) -> ApiResult<Json<LocalAuthStatus>> {
     let tenant = default_tenant(&state).await?;
     let mode = local_auth::mode_of(&state.db, tenant.id).await?;
+    // Break-glass signal (MAIN-169 AC-5): does this tenant have any existing
+    // local credential that could sign in during an OIDC outage? Scoped to the
+    // local sign-in tenant — the one the password form authenticates against.
+    let (local_creds,): (i64,) = sqlx::query_as(
+        "SELECT count(*) FROM users WHERE tenant_id = $1 AND password_hash IS NOT NULL",
+    )
+    .bind(tenant.id)
+    .fetch_one(&state.db)
+    .await?;
     Ok(Json(LocalAuthStatus {
         // Undecided, or already committed to local.
         available: !matches!(mode, Some(AuthMode::Oidc)),
         // Nobody has claimed this instance yet: show the create-owner form.
         needs_bootstrap: user_count(&state).await? == 0,
         mode: mode.map(|m| m.as_str().to_string()),
+        has_local_credentials: local_creds > 0,
     }))
 }

@@ -94,10 +94,28 @@ pub async fn login(
     Query(params): Query<LoginParams>,
     jar: PrivateCookieJar,
 ) -> ApiResult<impl IntoResponse> {
-    let oidc = state
-        .oidc
-        .clone()
-        .ok_or_else(|| ApiError::BadRequest("OIDC is not configured on this instance".into()))?;
+    // Configured-and-usable → go. Configured-but-degraded → attempt discovery
+    // on the spot so a just-recovered IdP works in this very request, ahead of
+    // the background retry; if it is still unreachable, an explicit 503 — never
+    // a silent fall-through to another sign-in method (MAIN-169 AC-2).
+    let oidc = match state.oidc.current() {
+        Some(c) => c,
+        None if state.oidc.configured() => match state.oidc.discover_now().await {
+            Ok(Some(c)) => c,
+            _ => {
+                return Err(ApiError::ServiceUnavailable(
+                    "the identity provider is unreachable — the server is retrying, \
+                     please try again in a moment"
+                        .into(),
+                ))
+            }
+        },
+        None => {
+            return Err(ApiError::BadRequest(
+                "OIDC is not configured on this instance".into(),
+            ))
+        }
+    };
     let client = oidc_client!(state, oidc);
 
     let (pkce_challenge, pkce_verifier) = PkceCodeChallenge::new_random_sha256();
@@ -192,7 +210,7 @@ pub async fn callback(
 
     let oidc = state
         .oidc
-        .clone()
+        .current()
         .ok_or_else(|| ApiError::BadRequest("OIDC is not configured on this instance".into()))?;
     let client = oidc_client!(state, oidc);
 
@@ -381,7 +399,11 @@ pub async fn dev_login(
 )]
 pub async fn providers(State(state): State<AppState>) -> Json<nook_types::AuthProviders> {
     Json(nook_types::AuthProviders {
-        oidc: state.oidc.is_some(),
+        // Three observable states (MAIN-169 AC-3): not configured (`oidc:false,
+        // oidc_degraded:false`), configured-and-usable (`oidc:true`), and
+        // configured-but-unreachable (`oidc:false, oidc_degraded:true`).
+        oidc: state.oidc.current().is_some(),
+        oidc_degraded: state.oidc.degraded(),
         dev_login: state.cfg.auth_dev_mode && !state.cfg.is_production(),
         // Always offered: an instance with no identity provider still needs a
         // way in, and `/auth/local/status` says whether it is usable here.

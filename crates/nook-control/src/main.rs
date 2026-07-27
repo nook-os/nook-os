@@ -84,6 +84,31 @@ async fn serve(db: sqlx::PgPool, cfg: Config) -> Result<()> {
     let is_production = cfg.is_production();
     let grace = std::time::Duration::from_secs(cfg.shutdown_grace_secs);
     let state = AppState::new(db, cfg, oidc).await;
+
+    // If OIDC is configured but the boot-time discovery failed (the IdP was
+    // unreachable), keep retrying in the background with backoff so login
+    // recovers on its own — no container restart (MAIN-169 AC-1). A successful
+    // login also triggers an immediate on-demand attempt; this task is the
+    // unattended path. We do not re-discover after success (NG-4).
+    if state.oidc.degraded() {
+        let oidc = state.oidc.clone();
+        tokio::spawn(async move {
+            let mut backoff = std::time::Duration::from_secs(2);
+            let max = std::time::Duration::from_secs(30);
+            while oidc.degraded() {
+                tokio::time::sleep(backoff).await;
+                match oidc.discover_now().await {
+                    // Success logs INFO with the issuer inside `discover_now`.
+                    Ok(_) => break,
+                    Err(e) => {
+                        tracing::debug!(error = %e, "OIDC discovery retry failed — will retry");
+                        backoff = (backoff * 2).min(max);
+                    }
+                }
+            }
+        });
+    }
+
     // Join the cross-instance bus (LISTEN/NOTIFY): makes N control-plane
     // replicas cooperate. On a single instance it's a no-op fast path.
     state.registry.start_bus(state.db.clone());

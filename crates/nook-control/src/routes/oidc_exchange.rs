@@ -31,7 +31,7 @@ pub async fn exchange(
 ) -> ApiResult<Json<OidcExchangeResponse>> {
     let oidc = state
         .oidc
-        .as_ref()
+        .current()
         .ok_or_else(|| ApiError::BadRequest("this instance has no identity provider".into()))?;
 
     // Verify against the client the token was ISSUED to, which for a native

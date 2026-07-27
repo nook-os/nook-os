@@ -3012,8 +3012,19 @@ export interface components {
             device_client_id?: string | null;
             /** @description Username and password held in this database. */
             local?: boolean;
-            /** @description An OIDC identity provider is configured. */
+            /**
+             * @description An OIDC identity provider is configured AND usable (discovery has
+             *     succeeded). False both when no IdP is configured and when one is
+             *     configured but currently unreachable — `oidc_degraded` tells those apart.
+             */
             oidc: boolean;
+            /**
+             * @description An OIDC identity provider is configured but its discovery document is
+             *     currently unreachable (MAIN-169). The login page shows a retry notice
+             *     where the IdP button sits, and never presents a local password form as
+             *     though it were the instance's only sign-in method.
+             */
+            oidc_degraded?: boolean;
             /**
              * @description The identity provider itself, for clients that must talk to it
              *     directly.
@@ -3847,6 +3858,13 @@ export interface components {
         LocalAuthStatus: {
             /** @description Local sign-in is possible: the tenant is undecided, or already local. */
             available: boolean;
+            /**
+             * @description At least one user on this instance has a local password set. This is the
+             *     break-glass signal (MAIN-169 AC-5): during an OIDC outage the login page
+             *     offers the password form ONLY when an existing local credential can use
+             *     it — never registration, and never on an instance that has none.
+             */
+            has_local_credentials?: boolean;
             /** @description "oidc" | "local" | null when nobody has signed in yet. */
             mode?: string | null;
             /** @description No account exists yet, so the first visitor can claim this instance. */
