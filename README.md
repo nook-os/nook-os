@@ -2,6 +2,12 @@
 
 > **The open workspace operating system for modern software teams.**
 
+> **⚠️ Beta Notice**
+>
+> NookOS is currently in **beta**. It is under active development and breaking changes should be expected. APIs, database schemas, CLI commands, configuration, and internal architecture may change between releases without backward compatibility.
+>
+> It is intended for evaluation, experimentation, and self-hosting by early adopters—not yet for production workloads where stability guarantees are required. If you encounter bugs or rough edges, please open an issue.
+
 NookOS is a self-hosted control plane for development work. It doesn't replace your editor, Git, or your AI — it coordinates everything around them: machines, workspaces, tmux-backed sessions, AI runtimes, kanban, and activity, in one place. See [PLAN.md](PLAN.md) for the full vision.
 
 Apache-2.0. Self-hosted. No telemetry, no account, no phone-home.
