@@ -11,6 +11,7 @@ members = [
     "crates/nook-mcp",
     "crates/nook-node",
     "crates/nook-openapi-gen",
+    "crates/nook-worker",
 ]
 
 [workspace.package]

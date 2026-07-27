@@ -160,6 +160,34 @@ services:
       retries: 100
       start_period: 300s
 
+  # The queue worker (MAIN-148): a long-running background process that drains
+  # the durable queue and runs a handler per work_type. No HTTP surface, so no
+  # port and no healthcheck — cargo-watch rebuilds it on save like the others,
+  # and it shares the control plane's cargo target so it stays warm.
+  worker:
+    build:
+      context: .
+      dockerfile: deploy/docker/dev-rust.Dockerfile
+    command: cargo watch --poll -w crates -w Cargo.toml -w Cargo.lock -x 'run -p nook-worker'
+    working_dir: /app
+    env_file: .env
+    environment:
+      DATABASE_URL: postgres://nook:nook@postgres:5432/nook
+      # The zero-infra provider; the same env name the control plane reads.
+      NOOK_QUEUE_PROVIDER: ${NOOK_QUEUE_PROVIDER:-database}
+      # Unset = every registered handler's type (just `noop` today). Set a
+      # comma-separated allow-list to scope one worker to certain work types.
+      NOOK_WORK_TYPES: ${NOOK_WORK_TYPES:-}
+      CARGO_TARGET_DIR: /app/target-docker
+      RUST_LOG: ${RUST_LOG:-nook_worker=info,info}
+    volumes:
+      - .:/app
+      - cargo-registry:/usr/local/cargo/registry
+      - cargo-target:/app/target-docker
+    depends_on:
+      postgres:
+        condition: service_healthy
+
   node:
     build:
       context: .
