@@ -219,8 +219,10 @@ pub fn validate_provider(name: &str) -> Result<()> {
 /// to the database backend rather than panicking a boot that already validated.
 pub fn from_config(cfg: &crate::config::Config, db: sqlx::PgPool) -> Box<dyn Queue> {
     // `redis` builds a lazily-connecting client (open is sync + non-connecting).
-    // A missing/unusable URL degrades to the database backend with a loud error
-    // rather than refusing to boot — the same choice `storage`/`mailer` make.
+    // `Config::from_env` has already refused boot for a missing or unparseable
+    // `NOOK_REDIS_URL` (a silent swap to database would split-brain work
+    // routing), so the fall-throughs below are unreachable defense-in-depth, not
+    // a live degradation path.
     if cfg.queue_provider == "redis" {
         match cfg.redis_url.as_deref() {
             Some(url) => match crate::redis_client::RedisClient::open(url) {

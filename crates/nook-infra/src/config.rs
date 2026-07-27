@@ -316,11 +316,7 @@ impl Config {
         // refuse them at boot rather than silently draining a single-node table
         // a deployment believed was a shared broker.
         crate::queue::validate_provider(&cfg.queue_provider)?;
-        if cfg.queue_provider == "redis" && cfg.redis_url.is_none() {
-            anyhow::bail!(
-                "NOOK_QUEUE_PROVIDER=redis requires NOOK_REDIS_URL to be set (the Redis connection)"
-            );
-        }
+        check_redis_queue(&cfg.queue_provider, cfg.redis_url.as_deref())?;
         // An unknown mail provider is a misconfiguration worth stopping for,
         // rather than silently falling through to some default and dropping mail.
         if !crate::mailer::is_known_provider(&cfg.mail_provider) {
@@ -411,5 +407,45 @@ impl Config {
             mail_max_per_day: None,
             trusted_proxies: Vec::new(),
         }
+    }
+}
+
+/// A `redis` queue provider needs a present, **parseable** `NOOK_REDIS_URL`.
+///
+/// A malformed URL refuses boot rather than letting `queue::from_config`
+/// silently fall back to the database backend — a silent swap would split-brain
+/// work routing (some producers on redis, some on postgres) and contradicts the
+/// queue module's boot-refusal principle. `RedisClient::open` validates the URL
+/// syntactically without connecting, so this is a cheap, offline check.
+fn check_redis_queue(provider: &str, redis_url: Option<&str>) -> Result<()> {
+    if provider != "redis" {
+        return Ok(());
+    }
+    let Some(url) = redis_url else {
+        anyhow::bail!(
+            "NOOK_QUEUE_PROVIDER=redis requires NOOK_REDIS_URL to be set (the Redis connection)"
+        );
+    };
+    crate::redis_client::RedisClient::open(url)
+        .context("NOOK_QUEUE_PROVIDER=redis but NOOK_REDIS_URL is malformed")?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod queue_config_tests {
+    use super::check_redis_queue;
+
+    #[test]
+    fn redis_provider_requires_a_present_parseable_url() {
+        // Non-redis providers never look at the URL.
+        assert!(check_redis_queue("database", None).is_ok());
+        assert!(check_redis_queue("database", Some("nonsense")).is_ok());
+        // redis: a missing URL refuses boot.
+        assert!(check_redis_queue("redis", None).is_err());
+        // redis: a MALFORMED URL refuses boot (the review defect) — never a
+        // silent fall-back to database.
+        assert!(check_redis_queue("redis", Some("not-a-redis-url")).is_err());
+        // redis: a valid URL boots.
+        assert!(check_redis_queue("redis", Some("redis://redis:6379")).is_ok());
     }
 }
