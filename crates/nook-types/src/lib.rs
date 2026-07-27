@@ -2115,6 +2115,10 @@ pub struct LoopJob {
     pub executor_node_id: Option<NodeId>,
     /// The job this one re-runs (AC-5); `None` for an original.
     pub predecessor_job_id: Option<JobId>,
+    /// Why the job could not yet be placed on an executor (MAIN-160): the
+    /// specific gate that failed while it waits `queued`. `None` once claimed.
+    #[serde(default)]
+    pub queued_reason: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

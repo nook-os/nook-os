@@ -8,6 +8,7 @@
 
 use nook_types::*;
 use serde_json::json;
+use uuid::Uuid;
 
 use crate::error::{ApiError, ApiResult};
 use crate::events::{self, EventDraft};
@@ -21,6 +22,13 @@ pub const WORK_TYPE: &str = "loop.job";
 /// The two job kinds this slice knows. `spec` fills in a ticket; `decompose`
 /// breaks an epic into children.
 const KINDS: [&str; 2] = ["spec", "decompose"];
+
+/// The runtime a loop job needs authorized on its executor (MAIN-160). Both
+/// kinds drive the `nook-spec` / `nook-epic` skills under Claude Code, so the
+/// executor must report the `claude` runtime `authorized` (MAIN-126). A single
+/// constant because this slice has no other runtime; a future job kind that
+/// needs a different one would carry it on the job.
+pub const LOOP_RUNTIME: &str = "claude";
 
 /// Terminal states have no outgoing transition — a job there is finished and
 /// can only be re-run as a fresh job (AC-5).
@@ -328,4 +336,146 @@ async fn record_job_event(
             })),
     )
     .await;
+}
+
+// ── Executor selection (MAIN-160) ────────────────────────────────────────────
+
+/// Place a queued job on an eligible executor, or leave it queued with the
+/// specific reason it could not be placed.
+///
+/// Eligibility (AC-1): an ONLINE node in the tenant that reports the loop
+/// runtime `authorized` (MAIN-126), preferring one **owned by the requester**
+/// over the **shared operator** (`shared_operator` in the node's capabilities).
+/// No one else's machine is ever eligible.
+///
+/// The claim is atomic (AC-2): the `UPDATE ... WHERE state = 'queued'` moves
+/// exactly one caller from `queued` to `claimed` and stamps `executor_node_id`,
+/// so two consumers racing the same job cannot both win — the loser sees zero
+/// rows and reads back the winner's result. When nothing is eligible (AC-3) the
+/// job stays `queued` and `queued_reason` records which gate failed, to be
+/// re-evaluated the next time the job is looked at (a node may have come
+/// online). Idempotent: a job already past `queued` is returned unchanged.
+pub async fn select_executor(
+    state: &AppState,
+    tenant: TenantId,
+    job_id: JobId,
+) -> ApiResult<LoopJob> {
+    let job = load(state, tenant, job_id).await?;
+    if job.state != "queued" {
+        return Ok(job); // already claimed/terminal — nothing to place.
+    }
+
+    // The person the requester is — a node's ownership keys on the person, not
+    // the per-tenant user (MAIN-130).
+    let person: Option<Uuid> = sqlx::query_scalar("SELECT person_id FROM users WHERE id = $1")
+        .bind(job.requested_by)
+        .fetch_optional(&state.db)
+        .await?;
+    let Some(person) = person else {
+        return set_queued_reason(state, job_id, "the requester has no person identity").await;
+    };
+
+    // The best eligible node: owned-and-online-and-authorized first, else the
+    // online authorized shared operator. `@>` containment tests the operator
+    // flag; the EXISTS scans the reported auth profiles for our runtime.
+    let node: Option<NodeId> = sqlx::query_scalar(
+        "SELECT id FROM nodes
+         WHERE tenant_id = $1
+           AND status = 'online'
+           AND (owner_person_id = $2 OR capabilities @> '{\"shared_operator\":true}')
+           AND EXISTS (
+                 SELECT 1
+                 FROM jsonb_array_elements(COALESCE(capabilities->'runtime_auth', '[]'::jsonb)) e
+                 WHERE e->>'runtime' = $3 AND e->>'state' = 'authorized'
+               )
+         ORDER BY (owner_person_id = $2) DESC NULLS LAST, id
+         LIMIT 1",
+    )
+    .bind(tenant)
+    .bind(person)
+    .bind(LOOP_RUNTIME)
+    .fetch_optional(&state.db)
+    .await?;
+
+    let Some(node) = node else {
+        let reason = no_executor_reason(state, tenant, person).await?;
+        return set_queued_reason(state, job_id, &reason).await;
+    };
+
+    // Atomic claim: only the caller that flips `queued` -> `claimed` wins.
+    let claimed: Option<LoopJob> = sqlx::query_as(
+        "UPDATE loop_jobs
+            SET executor_node_id = $2, state = 'claimed', queued_reason = NULL, updated_at = now()
+          WHERE id = $1 AND state = 'queued'
+          RETURNING *",
+    )
+    .bind(job_id)
+    .bind(node)
+    .fetch_optional(&state.db)
+    .await?;
+
+    match claimed {
+        Some(job) => {
+            let private = load_target(state, tenant, job.target_task_id)
+                .await
+                .map(|t| is_private(&t))
+                .unwrap_or(true);
+            record_job_event(state, tenant, "job.state_changed", &job, private).await;
+            Ok(job)
+        }
+        // Lost the race — another consumer claimed it. Return the current row.
+        None => load(state, tenant, job_id).await,
+    }
+}
+
+/// Phrase the specific gate that blocked placement (AC-3): distinguishes "no
+/// node of yours is online" from "your online nodes aren't authorized" from "no
+/// operator available", so the UI can tell the PM what to do.
+async fn no_executor_reason(state: &AppState, tenant: TenantId, person: Uuid) -> ApiResult<String> {
+    let owned_online: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM nodes
+         WHERE tenant_id = $1 AND owner_person_id = $2 AND status = 'online'",
+    )
+    .bind(tenant)
+    .bind(person)
+    .fetch_one(&state.db)
+    .await?;
+    let operator_online: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM nodes
+         WHERE tenant_id = $1 AND status = 'online'
+           AND capabilities @> '{\"shared_operator\":true}'",
+    )
+    .bind(tenant)
+    .fetch_one(&state.db)
+    .await?;
+
+    Ok(match (owned_online, operator_online) {
+        (0, 0) => "no eligible executor: you have no node online and no shared operator is available".into(),
+        (0, _) => format!(
+            "no eligible executor: you have no node online, and the shared operator is not authorized for the {LOOP_RUNTIME} runtime"
+        ),
+        (_, 0) => format!(
+            "no eligible executor: your online node(s) are not authorized for the {LOOP_RUNTIME} runtime, and no shared operator is available"
+        ),
+        _ => format!(
+            "no eligible executor: no online node (yours or the shared operator) is authorized for the {LOOP_RUNTIME} runtime"
+        ),
+    })
+}
+
+/// Record why a job stays queued, without changing its state. A no-op guard on
+/// `state = 'queued'` so a concurrent claim is never clobbered by a stale
+/// reason write.
+async fn set_queued_reason(state: &AppState, job_id: JobId, reason: &str) -> ApiResult<LoopJob> {
+    sqlx::query("UPDATE loop_jobs SET queued_reason = $2, updated_at = now() WHERE id = $1 AND state = 'queued'")
+        .bind(job_id)
+        .bind(reason)
+        .execute(&state.db)
+        .await?;
+    // Return the current row (its state is still queued unless a claim raced in).
+    sqlx::query_as("SELECT * FROM loop_jobs WHERE id = $1")
+        .bind(job_id)
+        .fetch_one(&state.db)
+        .await
+        .map_err(Into::into)
 }
