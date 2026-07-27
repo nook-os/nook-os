@@ -72,6 +72,9 @@ mod tests {
             author_id: Uuid::now_v7(),
             author_name: None,
             body: "hi".into(),
+            parent_message_id: None,
+            reply_count: 0,
+            last_reply_at: None,
             created_at: Utc::now(),
         }
     }

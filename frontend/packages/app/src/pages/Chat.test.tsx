@@ -45,6 +45,19 @@ vi.mock("@nookos/api", () => ({
     body,
     created_at: "2026-07-25T10:00:05Z",
   })),
+  // MAIN-114: opening a thread fetches the parent + its replies. The parent here
+  // is the history message "old message"; the thread starts empty.
+  messageThread: vi.fn(async () => ({
+    parent: {
+      id: "h1",
+      author_id: "u-bob",
+      channel_id: "c1",
+      body: "old message",
+      created_at: "2026-07-25T09:30:00Z",
+    },
+    replies: [],
+    next_cursor: null,
+  })),
   connectChatSocket: vi.fn((_channel: string, onMessage: (m: unknown) => void) => {
     liveCallback = onMessage;
     return dispose;
@@ -141,5 +154,20 @@ describe("ChatPage", () => {
     renderPage();
     await screen.findByText("general");
     expect(await screen.findByLabelText("manage channels")).toBeTruthy();
+  });
+
+  // MAIN-114 AC-5: opening a message's thread mounts the thread panel beside the
+  // channel view — the parent is pinned and its (empty) reply list renders.
+  it("opens the thread panel from a message's reply affordance", async () => {
+    renderPage();
+    await screen.findByText("old message");
+
+    await userEvent.click(await screen.findByLabelText("Reply in thread"));
+
+    // The panel appeared: its close control, pinned parent, and empty reply list.
+    expect(await screen.findByLabelText("Close thread")).toBeTruthy();
+    expect(await screen.findByText("No replies yet.")).toBeTruthy();
+    // The parent body now shows in both the channel stream and the pinned parent.
+    await waitFor(() => expect(screen.getAllByText("old message")).toHaveLength(2));
   });
 });

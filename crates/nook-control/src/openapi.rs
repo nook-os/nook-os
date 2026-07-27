@@ -382,6 +382,7 @@ use utoipa::OpenApi;
         nook_types::ChatChannel,
         nook_types::ChatMessage,
         nook_types::ChatMessagePage,
+        nook_types::ChatThread,
         nook_types::CreateChatChannel,
         nook_types::UpdateChatChannel,
         nook_types::PostChatMessage,

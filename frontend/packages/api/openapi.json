@@ -7670,6 +7670,27 @@
           "id": {
             "type": "string",
             "format": "uuid"
+          },
+          "last_reply_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When the latest reply landed, for ordering/preview; `None` with no replies."
+          },
+          "parent_message_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The message this one replies to, if any (MAIN-114). `None` for a top-level\nmessage; a set value is always a top-level parent (one level, no nesting)."
+          },
+          "reply_count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "How many replies this message has — populated for parents in channel\nhistory so the UI can show a thread affordance without an N+1 (AC-3). `0`\nfor a reply or a childless message."
           }
         }
       },
@@ -7720,6 +7741,33 @@
           }
         ],
         "description": "What the chat websocket pushes to a subscribed client (AC-3). Adjacently\ntagged for clean generated TypeScript, like the node protocol."
+      },
+      "ChatThread": {
+        "type": "object",
+        "description": "A message thread (MAIN-114): the parent message plus a keyset page of its\nreplies. Replies page newest-first on id like channel history — pass the last\nreply's id as `before=` for the next (older) page; the client orders them\noldest-first for reading.",
+        "required": [
+          "parent",
+          "replies"
+        ],
+        "properties": {
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "`None` when the oldest reply has been reached."
+          },
+          "parent": {
+            "$ref": "#/components/schemas/ChatMessage"
+          },
+          "replies": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ChatMessage"
+            }
+          }
+        }
       },
       "ClaimTaskRequest": {
         "type": "object",
@@ -10642,13 +10690,20 @@
       },
       "PostChatMessage": {
         "type": "object",
-        "description": "Post a message to a channel.",
+        "description": "Post a message to a channel. `parent_message_id`, when set, makes this a\nthreaded reply (MAIN-114) — the parent must be in the same channel and must\nnot itself be a reply (one level, no nesting).",
         "required": [
           "body"
         ],
         "properties": {
           "body": {
             "type": "string"
+          },
+          "parent_message_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
           }
         }
       },

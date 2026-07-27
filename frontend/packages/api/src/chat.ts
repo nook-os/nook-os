@@ -12,6 +12,7 @@ type Schemas = components["schemas"];
 type ChatChannel = Schemas["ChatChannel"];
 type ChatMessage = Schemas["ChatMessage"];
 type ChatMessagePage = Schemas["ChatMessagePage"];
+export type ChatThread = Schemas["ChatThread"];
 type CreateChatChannel = Schemas["CreateChatChannel"];
 type UpdateChatChannel = Schemas["UpdateChatChannel"];
 export type DmSummary = Schemas["DmSummary"];
@@ -160,13 +161,32 @@ export function channelHistory(
 }
 
 /**
+ * A page of a message's thread (MAIN-114): the parent plus its replies,
+ * newest-first, keyset-paginated exactly like channel history — pass the
+ * previous page's `next_cursor` as `before` to walk into older replies.
+ */
+export function messageThread(
+  messageId: string,
+  before?: string | null,
+  limit = 50,
+): Promise<ChatThread> {
+  const params = new URLSearchParams({ limit: String(limit) });
+  if (before) params.set("before", before);
+  return chatGet<ChatThread>(`/messages/${messageId}/thread?${params}`);
+}
+
+/**
  * Post a message. A failure is reported through the shared write-failure path
  * (so it surfaces like any other failed write) AND rethrown, so an optimistic
  * caller can roll back and offer a retry.
+ *
+ * Pass `parentMessageId` to post a threaded reply (MAIN-114) — the server
+ * requires the parent to be in this same channel and to be top-level itself.
  */
 export async function postMessage(
   channelId: string,
   body: string,
+  parentMessageId?: string,
 ): Promise<ChatMessage> {
   const path = `${CHAT_PREFIX}/channels/${channelId}/messages`;
   let res: Response;
@@ -175,7 +195,9 @@ export async function postMessage(
       method: "POST",
       headers: { ...authHeaders(), "Content-Type": "application/json" },
       credentials: "same-origin",
-      body: JSON.stringify({ body }),
+      body: JSON.stringify(
+        parentMessageId ? { body, parent_message_id: parentMessageId } : { body },
+      ),
     });
   } catch (err) {
     // The request never left — offline, or a webview refusing the body.

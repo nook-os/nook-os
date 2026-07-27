@@ -33,7 +33,8 @@ use uuid::Uuid;
 
 /// Chat's own migration set, embedded at compile time — applied into the `chat`
 /// schema, so it never touches the control plane's `public._sqlx_migrations`.
-/// Embedded: 0001_chat_init, 0002_chat_channel_archive, 0003_chat_dm.
+/// Embedded: 0001_chat_init, 0002_chat_channel_archive, 0003_chat_dm,
+/// 0004_chat_threads.
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
 #[derive(Clone)]
@@ -101,6 +102,9 @@ async fn main() -> anyhow::Result<()> {
             "/api/channels/{id}/messages",
             get(messages::history).post(messages::post),
         )
+        // A message's thread: the parent plus a keyset page of its replies
+        // (MAIN-114 AC-2), authorized on the parent's channel.
+        .route("/api/messages/{id}/thread", get(messages::thread))
         .route("/api/channels/{id}/ws", get(ws::subscribe))
         // Direct messages (MAIN-113): open-or-create + list the caller's DMs,
         // and the org-scoped people picker that feeds the new-DM affordance.
