@@ -6481,6 +6481,40 @@
         ],
         "description": "Terminal attach socket messages (control plane → browser)."
       },
+      "AuthProfile": {
+        "type": "object",
+        "description": "One agent-authorization profile as reported by a node (MAIN-126). A profile\nis a runtime-specific authentication target, not just a runtime: a runtime\nwith several providers (Hermes) contributes one profile per provider it\nsupports here.",
+        "required": [
+          "id",
+          "label",
+          "runtime",
+          "state"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Stable identifier, e.g. `claude` or `hermes-portal`."
+          },
+          "identity": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The signed-in account, when the probe reports one."
+          },
+          "label": {
+            "type": "string",
+            "description": "Human label, e.g. `Claude Code` or `Hermes → Nous Portal`."
+          },
+          "runtime": {
+            "type": "string",
+            "description": "The runtime executable this profile authorizes (`claude`, `hermes`)."
+          },
+          "state": {
+            "$ref": "#/components/schemas/AuthState"
+          }
+        }
+      },
       "AuthProviders": {
         "type": "object",
         "required": [
@@ -6522,6 +6556,16 @@
             "description": "The identity provider itself, for clients that must talk to it\ndirectly.\n\nA desktop app cannot receive the browser redirect this control plane\nregistered, so it uses the device authorization grant against the IdP.\nIt learns where to go from here rather than from its own configuration:\nthe operator sets the IdP up once, on the server, and every client\nfollows."
           }
         }
+      },
+      "AuthState": {
+        "type": "string",
+        "description": "The authorization state of one runtime profile (MAIN-126). Four states, kept\ndistinct on purpose: `Unavailable` (the runtime binary is not installed) is\nnot the same as `NotAuthorized` (installed, probe says signed out), and\nneither is `Unknown` (the probe failed or its output was unrecognised) —\nonly a probe that positively confirms a login is `Authorized`.",
+        "enum": [
+          "authorized",
+          "not_authorized",
+          "unknown",
+          "unavailable"
+        ]
       },
       "BindingRow": {
         "type": "object",
@@ -6735,6 +6779,13 @@
           },
           "platform": {
             "type": "string"
+          },
+          "runtime_auth": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AuthProfile"
+            },
+            "description": "Agent authorization profiles this node reports (MAIN-126): one per\nruntime-specific auth target (Claude Code, Hermes → Nous Portal, …), each\nwith a state probed from the runtime's own CLI — never inferred from a\ncredential file. Empty when nothing to authorize is installed."
           },
           "runtimes": {
             "type": "array",

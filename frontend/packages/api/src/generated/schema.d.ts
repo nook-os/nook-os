@@ -2745,6 +2745,23 @@ export interface components {
             /** @enum {string} */
             type: "size";
         };
+        /**
+         * @description One agent-authorization profile as reported by a node (MAIN-126). A profile
+         *     is a runtime-specific authentication target, not just a runtime: a runtime
+         *     with several providers (Hermes) contributes one profile per provider it
+         *     supports here.
+         */
+        AuthProfile: {
+            /** @description Stable identifier, e.g. `claude` or `hermes-portal`. */
+            id: string;
+            /** @description The signed-in account, when the probe reports one. */
+            identity?: string | null;
+            /** @description Human label, e.g. `Claude Code` or `Hermes → Nous Portal`. */
+            label: string;
+            /** @description The runtime executable this profile authorizes (`claude`, `hermes`). */
+            runtime: string;
+            state: components["schemas"]["AuthState"];
+        };
         AuthProviders: {
             /** @description The dev/CI escape hatch is enabled (never in production). */
             dev_login: boolean;
@@ -2777,6 +2794,15 @@ export interface components {
              */
             oidc_issuer?: string | null;
         };
+        /**
+         * @description The authorization state of one runtime profile (MAIN-126). Four states, kept
+         *     distinct on purpose: `Unavailable` (the runtime binary is not installed) is
+         *     not the same as `NotAuthorized` (installed, probe says signed out), and
+         *     neither is `Unknown` (the probe failed or its output was unrecognised) —
+         *     only a probe that positively confirms a login is `Authorized`.
+         * @enum {string}
+         */
+        AuthState: "authorized" | "not_authorized" | "unknown" | "unavailable";
         /** @description Who holds what, for the roles table. */
         BindingRow: {
             /** Format: date-time */
@@ -2862,6 +2888,13 @@ export interface components {
             /** Format: int64 */
             memory: number;
             platform: string;
+            /**
+             * @description Agent authorization profiles this node reports (MAIN-126): one per
+             *     runtime-specific auth target (Claude Code, Hermes → Nous Portal, …), each
+             *     with a state probed from the runtime's own CLI — never inferred from a
+             *     credential file. Empty when nothing to authorize is installed.
+             */
+            runtime_auth?: components["schemas"]["AuthProfile"][];
             /** @description Detected runtime executables: "claude", "hermes", "codex", "bash", ... */
             runtimes?: string[];
             /**

@@ -10,6 +10,7 @@ mod enroll;
 mod gitops;
 mod pinning;
 mod resources;
+mod runtime_auth;
 mod selfupdate;
 mod sessions;
 mod ssh;

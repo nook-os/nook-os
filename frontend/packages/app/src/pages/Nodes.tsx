@@ -278,6 +278,61 @@ export function NodesPage() {
   );
 }
 
+/** One agent-authorization profile the node reported. */
+type AuthProfile = {
+  id: string;
+  label: string;
+  runtime: string;
+  state: "authorized" | "not_authorized" | "unknown" | "unavailable";
+  identity?: string | null;
+};
+
+const AUTH_TONE: Record<AuthProfile["state"], "ok" | "warn" | "dim"> = {
+  authorized: "ok",
+  not_authorized: "warn",
+  unknown: "dim",
+  unavailable: "dim",
+};
+const AUTH_LABEL: Record<AuthProfile["state"], string> = {
+  authorized: "authorized",
+  not_authorized: "not authorized",
+  unknown: "unknown",
+  unavailable: "unavailable",
+};
+
+/** Agent authorization (MAIN-126): the node probes each runtime's own CLI for
+ *  its login state — never a credential-file guess — and reports one profile per
+ *  auth target. This surfaces those states; launching the login flow from here
+ *  is the follow-up (AC-2/AC-4). */
+function AgentAuthPanel({ node }: { node: { capabilities: unknown } }) {
+  const profiles =
+    ((node.capabilities as { runtime_auth?: AuthProfile[] })?.runtime_auth ?? []);
+  return (
+    <Panel title="Agent authorization">
+      {profiles.length === 0 ? (
+        <Empty>
+          No agent runtimes to authorize on this machine — install claude or
+          hermes and reconnect.
+        </Empty>
+      ) : (
+        <table className="nook-table">
+          <tbody>
+            {profiles.map((p) => (
+              <tr key={p.id}>
+                <td className="bright">{p.label}</td>
+                <td className="muted mono">{p.identity ?? ""}</td>
+                <td style={{ textAlign: "right" }}>
+                  <Pill tone={AUTH_TONE[p.state]}>{AUTH_LABEL[p.state]}</Pill>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </Panel>
+  );
+}
+
 export function NodeDetail() {
   const { id } = useParams<{ id: string }>();
   const { data: node } = useQuery({
@@ -351,6 +406,7 @@ export function NodeDetail() {
         </div>
         <NodeFacts node={node} />
       </Panel>
+      <AgentAuthPanel node={node} />
       <Panel title="Workspaces on this node">
         {here.length === 0 ? (
           <Empty>Nothing discovered here yet.</Empty>

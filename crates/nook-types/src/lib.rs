@@ -382,6 +382,44 @@ pub struct Capabilities {
     /// container; false everywhere else.
     #[serde(default)]
     pub shared_operator: bool,
+    /// Agent authorization profiles this node reports (MAIN-126): one per
+    /// runtime-specific auth target (Claude Code, Hermes → Nous Portal, …), each
+    /// with a state probed from the runtime's own CLI — never inferred from a
+    /// credential file. Empty when nothing to authorize is installed.
+    #[serde(default)]
+    pub runtime_auth: Vec<AuthProfile>,
+}
+
+/// The authorization state of one runtime profile (MAIN-126). Four states, kept
+/// distinct on purpose: `Unavailable` (the runtime binary is not installed) is
+/// not the same as `NotAuthorized` (installed, probe says signed out), and
+/// neither is `Unknown` (the probe failed or its output was unrecognised) —
+/// only a probe that positively confirms a login is `Authorized`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthState {
+    Authorized,
+    NotAuthorized,
+    Unknown,
+    Unavailable,
+}
+
+/// One agent-authorization profile as reported by a node (MAIN-126). A profile
+/// is a runtime-specific authentication target, not just a runtime: a runtime
+/// with several providers (Hermes) contributes one profile per provider it
+/// supports here.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct AuthProfile {
+    /// Stable identifier, e.g. `claude` or `hermes-portal`.
+    pub id: String,
+    /// Human label, e.g. `Claude Code` or `Hermes → Nous Portal`.
+    pub label: String,
+    /// The runtime executable this profile authorizes (`claude`, `hermes`).
+    pub runtime: String,
+    pub state: AuthState,
+    /// The signed-in account, when the probe reports one.
+    #[serde(default)]
+    pub identity: Option<String>,
 }
 
 /// Live resource sample a node reports on each heartbeat, so both humans and
