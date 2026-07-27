@@ -27,12 +27,19 @@ volume with cargo-watch, so it is both correctly configured and already warm.
 `NOOK_REQUIRE_DB=1` is set for you. Without it, every test needing Postgres
 returns early and the suite reports success having executed almost nothing.
 
-**Isolation convention: scope every assertion to rows the test created.** The
-tests share one long-lived, aged dev DB (full of other tenants' rows) and run
-concurrently. Never assert on global counts (`SELECT count(*)` over a whole
-table, `len() == N` on an unscoped query) and never walk a paginated/cursor list
-to global exhaustion — filter to your own tenant/person/ids and stop once you
-have your own rows. There is no per-test DB isolation by design (MAIN-93).
+**Isolation model: a private database per test (`nook_testkit::TestBed`).** Every
+DB-backed test opens `let Some(mut bed) = TestBed::new().await else { return };`,
+which creates a fresh uniquely-named database, migrates and seeds it, and drops
+it whole at `bed.teardown().await` (Drop is a safety-net on panic). Use
+`bed.pool`, `bed.app_state().await`, and the entity helpers (`bed.tenant`/`user`/
+`node`/`workspace`); `NOOK_KEEP_TEST_DATA=1` keeps a database for debugging.
+Because each test owns its database, they run in parallel with no contention and
+a test may add a migration freely — nothing a test does ever touches the shared
+dev DB's ledger (MAIN-166 retired the old shared-`test_pool` path, so this is
+enforced by compilation: there is no API to migrate or write the shared dev DB
+from a test). The shared `DATABASE_URL` database serves only the running dev
+stack. (Global-count assertions still make no sense — but that's ordinary test
+hygiene now, not a shared-DB workaround.)
 
 ## Database workflow (bootstrap phase)
 

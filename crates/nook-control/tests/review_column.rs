@@ -6,12 +6,10 @@
 //! Needs a running Postgres (the dev stack's works): set `DATABASE_URL`.
 
 use nook_control::services::tasks::column_of_type;
+use nook_testkit::TestBed;
 use nook_types::{BoardId, TenantId};
 use sqlx::PgPool;
 use uuid::Uuid;
-
-mod common;
-use common::test_pool;
 
 async fn make_board(db: &PgPool) -> BoardId {
     let tenant = TenantId(Uuid::now_v7());
@@ -98,74 +96,84 @@ async fn run_backfill(db: &PgPool, board: BoardId) {
 
 #[tokio::test]
 async fn review_is_a_valid_type_and_resolves_by_type() {
-    let Some(db) = test_pool().await else {
+    let Some(mut bed) = TestBed::new().await else {
         eprintln!("skipping review_is_a_valid_type — no DATABASE_URL");
         return;
     };
-    let board = make_board(&db).await;
+    let board = make_board(&bed.pool).await;
     // The widened CHECK (AC-1) admits 'review'; this insert would fail otherwise.
-    add_col(&db, board, "In Progress", 0, "started").await;
-    add_col(&db, board, "In Review", 1, "review").await;
-    add_col(&db, board, "Done", 2, "completed").await;
+    add_col(&bed.pool, board, "In Progress", 0, "started").await;
+    add_col(&bed.pool, board, "In Review", 1, "review").await;
+    add_col(&bed.pool, board, "Done", 2, "completed").await;
 
-    let review = column_of_type(&db, board, "review")
+    let review = column_of_type(&bed.pool, board, "review")
         .await
         .expect("review resolves");
-    let by_pos = cols(&db, board).await;
+    let by_pos = cols(&bed.pool, board).await;
     // The resolved id is the review-typed column.
     assert_eq!(by_pos[1].2, "review");
     assert_eq!(by_pos[1].0, "In Review");
     let review_row: (String,) = sqlx::query_as("SELECT type FROM board_columns WHERE id = $1")
         .bind(review)
-        .fetch_one(&db)
+        .fetch_one(&bed.pool)
         .await
         .unwrap();
     assert_eq!(review_row.0, "review");
+
+    bed.teardown().await;
 }
 
 #[tokio::test]
 async fn submit_pr_resolution_prefers_review_then_falls_back_to_completed() {
-    let Some(db) = test_pool().await else {
+    let Some(mut bed) = TestBed::new().await else {
         eprintln!("skipping submit_pr_resolution — no DATABASE_URL");
         return;
     };
     // A board WITH a review column: review resolves (submit_pr parks here).
-    let with_review = make_board(&db).await;
-    add_col(&db, with_review, "In Progress", 0, "started").await;
-    add_col(&db, with_review, "In Review", 1, "review").await;
-    add_col(&db, with_review, "Done", 2, "completed").await;
-    assert!(column_of_type(&db, with_review, "review").await.is_ok());
+    let with_review = make_board(&bed.pool).await;
+    add_col(&bed.pool, with_review, "In Progress", 0, "started").await;
+    add_col(&bed.pool, with_review, "In Review", 1, "review").await;
+    add_col(&bed.pool, with_review, "Done", 2, "completed").await;
+    assert!(column_of_type(&bed.pool, with_review, "review")
+        .await
+        .is_ok());
 
     // A board WITHOUT one: review errors and the fallback (completed) resolves —
     // exactly the chain submit_pr walks.
-    let no_review = make_board(&db).await;
-    add_col(&db, no_review, "In Progress", 0, "started").await;
-    add_col(&db, no_review, "Done", 1, "completed").await;
+    let no_review = make_board(&bed.pool).await;
+    add_col(&bed.pool, no_review, "In Progress", 0, "started").await;
+    add_col(&bed.pool, no_review, "Done", 1, "completed").await;
     assert!(
-        column_of_type(&db, no_review, "review").await.is_err(),
+        column_of_type(&bed.pool, no_review, "review")
+            .await
+            .is_err(),
         "a board with no review column has none to resolve"
     );
     assert!(
-        column_of_type(&db, no_review, "completed").await.is_ok(),
+        column_of_type(&bed.pool, no_review, "completed")
+            .await
+            .is_ok(),
         "so submit_pr falls back to the completed column"
     );
+
+    bed.teardown().await;
 }
 
 #[tokio::test]
 async fn backfill_inserts_one_review_before_completed_and_is_idempotent() {
-    let Some(db) = test_pool().await else {
+    let Some(mut bed) = TestBed::new().await else {
         eprintln!("skipping backfill — no DATABASE_URL");
         return;
     };
     // A pre-review board: Triage/Todo/In Progress/Done at 0..3.
-    let board = make_board(&db).await;
-    add_col(&db, board, "Triage", 0, "backlog").await;
-    add_col(&db, board, "Todo", 1, "unstarted").await;
-    add_col(&db, board, "In Progress", 2, "started").await;
-    add_col(&db, board, "Done", 3, "completed").await;
+    let board = make_board(&bed.pool).await;
+    add_col(&bed.pool, board, "Triage", 0, "backlog").await;
+    add_col(&bed.pool, board, "Todo", 1, "unstarted").await;
+    add_col(&bed.pool, board, "In Progress", 2, "started").await;
+    add_col(&bed.pool, board, "Done", 3, "completed").await;
 
-    run_backfill(&db, board).await;
-    let after = cols(&db, board).await;
+    run_backfill(&bed.pool, board).await;
+    let after = cols(&bed.pool, board).await;
     // Exactly one review column, positioned immediately before completed (AC-2).
     let review: Vec<_> = after.iter().filter(|c| c.2 == "review").collect();
     assert_eq!(review.len(), 1, "exactly one review column");
@@ -178,12 +186,14 @@ async fn backfill_inserts_one_review_before_completed_and_is_idempotent() {
     );
 
     // Idempotent: a second run adds nothing.
-    run_backfill(&db, board).await;
-    let again = cols(&db, board).await;
+    run_backfill(&bed.pool, board).await;
+    let again = cols(&bed.pool, board).await;
     assert_eq!(
         again.iter().filter(|c| c.2 == "review").count(),
         1,
         "re-running the backfill is a no-op"
     );
     assert_eq!(again.len(), after.len(), "no duplicate columns on re-run");
+
+    bed.teardown().await;
 }

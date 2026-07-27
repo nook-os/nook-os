@@ -18,16 +18,13 @@
 //!
 //! ## Isolation model
 //!
-//! Each `TestBed` owns a private database, so tests need **no** scope-to-own-rows
-//! discipline and run in **parallel** without contending — the unique database
-//! name per test is the isolation. `NOOK_KEEP_TEST_DATA=1` keeps the database
-//! (and its rows) around for debugging instead of dropping it.
-//!
-//! The bare [`test_pool`] below is the legacy path for the suites not yet
-//! migrated (NG-1): it connects to the shared `DATABASE_URL` database, where the
-//! **MAIN-93 doctrine still applies** — scope every assertion to rows you
-//! created, never global counts, never a shared-table sweep. Those suites move
-//! onto `TestBed` (and shed that discipline) card by card.
+//! Private database per test is the **only** model (MAIN-166 retired the shared
+//! path). Each `TestBed` owns its own database, so tests need **no**
+//! scope-to-own-rows discipline and run in **parallel** without contending — the
+//! unique database name per test is the isolation, and a test may migrate freely
+//! (a new migration never touches the shared dev ledger). `NOOK_KEEP_TEST_DATA=1`
+//! keeps the database around for debugging instead of dropping it. The shared
+//! `DATABASE_URL` database now serves only the running dev stack, never tests.
 
 use anyhow::{Context, Result};
 use nook_control::state::AppState;
@@ -35,30 +32,6 @@ use nook_infra::Config;
 use nook_types::{NodeId, TenantId, UserId, WorkspaceId};
 use sqlx::{Connection, PgConnection, PgPool};
 use uuid::Uuid;
-
-/// Connect to `DATABASE_URL` and bring the schema up to date — the exact
-/// semantics `tests/common/mod.rs` had, preserved for the ~27 suites that still
-/// share the one database (NG-1).
-///
-/// `None` means "no database configured, skip this test" — legitimate on a
-/// developer's machine, and a hard failure when `NOOK_REQUIRE_DB` is set,
-/// because a silent skip in CI is indistinguishable from a passing test.
-pub async fn test_pool() -> Option<PgPool> {
-    let Ok(url) = std::env::var("DATABASE_URL") else {
-        assert!(
-            std::env::var("NOOK_REQUIRE_DB").is_err(),
-            "NOOK_REQUIRE_DB is set but DATABASE_URL is not - these tests would \
-             have skipped silently and reported success"
-        );
-        return None;
-    };
-    let pool = PgPool::connect(&url).await.ok()?;
-    nook_control::MIGRATOR
-        .run(&pool)
-        .await
-        .expect("migrations must apply to the test database");
-    Some(pool)
-}
 
 /// A prepared, **private** test world: a freshly created, migrated, and seeded
 /// database plus opt-in setup surfaces, dropped whole at teardown.
@@ -78,8 +51,8 @@ pub struct TestBed {
 
 impl TestBed {
     /// Create a fresh private database, migrate and seed it. `None` to skip when
-    /// there is no `DATABASE_URL` (hard-fails under `NOOK_REQUIRE_DB`, same rule
-    /// as [`test_pool`]).
+    /// there is no `DATABASE_URL` (a silent skip; hard-fails under
+    /// `NOOK_REQUIRE_DB`, so a missing DB in CI is a failure, not a false pass).
     pub async fn new() -> Option<TestBed> {
         let Ok(base_url) = std::env::var("DATABASE_URL") else {
             assert!(

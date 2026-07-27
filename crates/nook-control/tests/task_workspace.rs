@@ -13,12 +13,10 @@
 //! Needs a running Postgres (the dev stack's works): set `DATABASE_URL`.
 
 use nook_control::services::kanban::{KanbanProvider, LocalBoardProvider};
+use nook_testkit::TestBed;
 use nook_types::{BoardId, CreateTaskRequest, TenantId, UpdateTaskRequest, WorkspaceId};
 use sqlx::PgPool;
 use uuid::Uuid;
-
-mod common;
-use common::test_pool;
 
 /// An update that touches nothing, so each test states only what it changes.
 fn no_change() -> UpdateTaskRequest {
@@ -120,9 +118,13 @@ async fn new_task(
 
 #[tokio::test]
 async fn workspace_can_be_set_changed_and_cleared() {
-    let Some(db) = test_pool().await else { return };
-    let (tenant, board, ws_a, ws_b) = fixture(&db).await;
-    let provider = LocalBoardProvider { db: db.clone() };
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let (tenant, board, ws_a, ws_b) = fixture(&bed.pool).await;
+    let provider = LocalBoardProvider {
+        db: bed.pool.clone(),
+    };
 
     // Filed with no workspace — the state every ticket on the board was in.
     let task = new_task(&provider, tenant, board, None).await;
@@ -173,13 +175,19 @@ async fn workspace_can_be_set_changed_and_cleared() {
         .await
         .expect("clear");
     assert_eq!(updated.workspace_id, None);
+
+    bed.teardown().await;
 }
 
 #[tokio::test]
 async fn an_absent_workspace_leaves_the_existing_one_alone() {
-    let Some(db) = test_pool().await else { return };
-    let (tenant, board, ws_a, _) = fixture(&db).await;
-    let provider = LocalBoardProvider { db: db.clone() };
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let (tenant, board, ws_a, _) = fixture(&bed.pool).await;
+    let provider = LocalBoardProvider {
+        db: bed.pool.clone(),
+    };
 
     let task = new_task(&provider, tenant, board, Some(ws_a)).await;
     assert_eq!(task.workspace_id, Some(ws_a));
@@ -200,6 +208,8 @@ async fn an_absent_workspace_leaves_the_existing_one_alone() {
         .expect("retitle");
     assert_eq!(updated.title, "renamed");
     assert_eq!(updated.workspace_id, Some(ws_a));
+
+    bed.teardown().await;
 }
 
 /// The wire format, which is where the three cases are easiest to collapse
@@ -229,9 +239,13 @@ async fn expected_updated_at_guards_the_body() {
     use nook_control::error::ApiError;
     use nook_control::services::kanban::ProviderError;
 
-    let Some(db) = test_pool().await else { return };
-    let (tenant, board, _a, _b) = fixture(&db).await;
-    let provider = LocalBoardProvider { db: db.clone() };
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let (tenant, board, _a, _b) = fixture(&bed.pool).await;
+    let provider = LocalBoardProvider {
+        db: bed.pool.clone(),
+    };
     let task = new_task(&provider, tenant, board, None).await;
 
     // Matching version → applies.
@@ -318,6 +332,8 @@ async fn expected_updated_at_guards_the_body() {
         matches!(missing, ProviderError::Api(ApiError::NotFound)),
         "a guarded update to a missing task is 404, not 409"
     );
+
+    bed.teardown().await;
 }
 
 /// Two edits from the SAME base version: the first wins, the second gets 409.
@@ -326,9 +342,13 @@ async fn two_edits_from_one_base_version_the_second_conflicts() {
     use nook_control::error::ApiError;
     use nook_control::services::kanban::ProviderError;
 
-    let Some(db) = test_pool().await else { return };
-    let (tenant, board, _a, _b) = fixture(&db).await;
-    let provider = LocalBoardProvider { db: db.clone() };
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let (tenant, board, _a, _b) = fixture(&bed.pool).await;
+    let provider = LocalBoardProvider {
+        db: bed.pool.clone(),
+    };
     let task = new_task(&provider, tenant, board, None).await;
     let base = task.updated_at;
 
@@ -362,4 +382,6 @@ async fn two_edits_from_one_base_version_the_second_conflicts() {
         matches!(second, Err(ProviderError::Api(ApiError::Conflict(_)))),
         "the second edit from the same base version conflicts (409)"
     );
+
+    bed.teardown().await;
 }

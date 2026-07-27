@@ -11,12 +11,10 @@ use std::sync::Arc;
 use nook_control::agent_tls;
 use nook_control::ca;
 use nook_control::crypto::Vault;
+use nook_testkit::TestBed;
 use nook_types::TenantId;
 use sqlx::PgPool;
 use uuid::Uuid;
-
-mod common;
-use common::test_pool;
 
 fn vault() -> Vault {
     Vault::from_env("test-session-secret-that-is-long-enough-000000").expect("vault")
@@ -85,16 +83,18 @@ fn server_cert() -> (String, String, String) {
 /// the control plane recovers exactly which machine it is.
 #[tokio::test]
 async fn a_client_certificate_survives_the_handshake_and_identifies_the_node() {
-    let Some(pool) = test_pool().await else {
+    let Some(mut bed) = TestBed::new().await else {
         return;
     };
     // rustls needs a process-wide crypto provider; ignore a second install.
     let _ = rustls::crypto::ring::default_provider().install_default();
 
-    let tenant = seed_tenant(&pool).await;
-    ca::generate(&pool, &vault(), tenant, true).await.unwrap();
-    let node = seed_node(&pool, tenant).await;
-    let (client_cert, client_key) = issue_client_cert(&pool, tenant, node).await;
+    let tenant = seed_tenant(&bed.pool).await;
+    ca::generate(&bed.pool, &vault(), tenant, true)
+        .await
+        .unwrap();
+    let node = seed_node(&bed.pool, tenant).await;
+    let (client_cert, client_key) = issue_client_cert(&bed.pool, tenant, node).await;
 
     // Stand up the real acceptor with a real certificate on disk.
     let dir = std::env::temp_dir().join(format!("nook-mtls-{}", Uuid::now_v7().simple()));
@@ -154,15 +154,12 @@ async fn a_client_certificate_survives_the_handshake_and_identifies_the_node() {
     let presented = server.await.unwrap().expect("server saw a client cert");
 
     // And that certificate resolves to the node we issued it to.
-    let id = ca::verify_node_cert(&pool, &presented).await.unwrap();
+    let id = ca::verify_node_cert(&bed.pool, &presented).await.unwrap();
     assert_eq!(id.node_id, node);
     assert_eq!(id.tenant_id, tenant.0);
 
     let _ = std::fs::remove_dir_all(&dir);
-    let _ = sqlx::query("DELETE FROM tenants WHERE id = $1")
-        .bind(tenant)
-        .execute(&pool)
-        .await;
+    bed.teardown().await;
 }
 
 /// A cert-less client still completes the handshake — a machine that has not
