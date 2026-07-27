@@ -8,6 +8,8 @@ import {
   isBacklogTask,
   groupByEpic,
   epicOptions,
+  activeChips,
+  isFilterActive,
   type BoardFilter,
 } from "./pages/Board";
 
@@ -176,6 +178,74 @@ describe("which tab a task belongs to (MAIN-82 AC-1/AC-5)", () => {
     expect(isBacklogTask("review", "bug")).toBe(false);
     // Unknown/absent types default to the Board tab (only backlog/epic leave it).
     expect(isBacklogTask(undefined, undefined)).toBe(false);
+  });
+});
+
+describe("active-filter chips (MAIN-110 AC-2/AC-3/AC-4)", () => {
+  const empty: BoardFilter = {
+    label: [],
+    not_label: [],
+    type: [],
+    visibility: [],
+    assignee: "any",
+    priority: null,
+    blocked: null,
+    workspace: null,
+    showArchived: false,
+    q: "",
+    view: "board",
+  };
+  const ws = [{ id: "ws1", name: "nook-os" }];
+
+  it("an empty filter has no chips and is not active", () => {
+    expect(activeChips(empty, ws)).toEqual([]);
+    expect(isFilterActive(empty)).toBe(false);
+  });
+
+  it("search alone is active but is NOT a chip (excluded from the count)", () => {
+    const f = { ...empty, q: "postmark" };
+    expect(activeChips(f, ws)).toEqual([]); // search has its own box
+    expect(isFilterActive(f)).toBe(true);
+  });
+
+  it("a workspace-only filter counts as active (fixes the old gap) — AC-4", () => {
+    const f = { ...empty, workspace: "ws1" };
+    const chips = activeChips(f, ws);
+    expect(chips.map((c) => c.label)).toEqual(["nook-os"]); // resolved name
+    expect(isFilterActive(f)).toBe(true);
+  });
+
+  it("an archived-only filter counts as active — AC-4", () => {
+    const f = { ...empty, showArchived: true };
+    expect(activeChips(f, ws).map((c) => c.key)).toEqual(["archived"]);
+    expect(isFilterActive(f)).toBe(true);
+  });
+
+  it("an excluded label chip is negated and distinct from an included one", () => {
+    const f = { ...empty, label: ["urgent"], not_label: ["blocked"] };
+    const chips = activeChips(f, ws);
+    const inc = chips.find((c) => c.label === "urgent")!;
+    const exc = chips.find((c) => c.label === "blocked")!;
+    expect(inc.negated).toBeFalsy();
+    expect(exc.negated).toBe(true);
+  });
+
+  it("removing a chip clears only that one filter", () => {
+    const f = {
+      ...empty,
+      label: ["a", "b"],
+      type: ["bug"],
+      assignee: "me" as const,
+      workspace: "ws1",
+    };
+    const chips = activeChips(f, ws);
+    // one chip per value: 2 labels + 1 type + assignee + workspace = 5
+    expect(chips).toHaveLength(5);
+    const removeA = chips.find((c) => c.key === "label:a")!;
+    expect(removeA.next.label).toEqual(["b"]); // only "a" gone
+    expect(removeA.next.type).toEqual(["bug"]); // everything else intact
+    const removeWs = chips.find((c) => c.key === "ws")!;
+    expect(removeWs.next.workspace).toBeNull();
   });
 });
 

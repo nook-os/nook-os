@@ -34,6 +34,7 @@ import {
   Pill,
   TypeBadge,
   TYPE_META,
+  useAnchoredMenu,
   VisibilityBadge,
   VISIBILITY_META,
 } from "@nookos/ui";
@@ -401,7 +402,9 @@ function BoardSearch({
   );
 }
 
-/** The filter strip. Drives the same query an agent's pick step uses. */
+/** The filter strip (MAIN-110): compact by default — search box, one removable
+ *  chip per active filter, a `Filters` button that opens a popover holding every
+ *  control, and a clear-all. Drives the same query an agent's pick step uses. */
 function Filters({
   labels,
   workspaces,
@@ -413,9 +416,25 @@ function Filters({
   value: BoardFilter;
   onChange: (f: BoardFilter) => void;
 }) {
+  const [open, setOpen] = React.useState(false);
+  const [labelQuery, setLabelQuery] = React.useState("");
+  // The popover is anchored outside the strip's overflow, like the other board
+  // pickers, so it is not clipped by the panel.
+  const { hostRef, portal } = useAnchoredMenu(open, () => setOpen(false), {
+    height: 420,
+  });
+  // Esc closes (outside-click is handled by the anchored-menu hook) — AC-2.
+  React.useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpen(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [open]);
+
   // Each label cycles include → exclude → off. Three states in one control,
-  // because include and exclude are the same question asked twice and two rows
-  // of chips would double the strip's height to say no more.
+  // because include and exclude are the same question asked twice.
   const cycle = (name: string) => {
     if (value.label.includes(name)) {
       onChange({
@@ -445,148 +464,227 @@ function Filters({
         ? value.visibility.filter((x) => x !== v)
         : [...value.visibility, v],
     });
-  const active =
-    value.label.length > 0 ||
-    value.not_label.length > 0 ||
-    value.type.length > 0 ||
-    value.visibility.length > 0 ||
-    value.assignee !== "any" ||
-    value.priority !== null ||
-    value.blocked !== null ||
-    value.q.length > 0;
+
+  const chips = activeChips(value, workspaces);
+  const anyActive = isFilterActive(value);
+  // Clear-all resets to empty but keeps the current TAB (AC-4); the open task
+  // rides in a separate URL key that writeFilter never touches.
+  const clearAll = () => onChange({ ...EMPTY_FILTER, view: value.view });
+
+  // A long label list gets a search box inside the popover (AC-5).
+  const q = labelQuery.trim().toLowerCase();
+  const shownLabels =
+    labels.length > 10 && q ? labels.filter((l) => l.name.toLowerCase().includes(q)) : labels;
 
   return (
     <div className="board-filters">
-      <BoardSearch value={value.q} onSearch={(q) => onChange({ ...value, q })} />
-      <span className="faint small">labels</span>
-      {labels.map((l) => {
-        const inc = value.label.includes(l.name);
-        const exc = value.not_label.includes(l.name);
-        return (
-          <button
-            key={l.id}
-            className={`task-chip ${inc ? "on" : ""} ${exc ? "off" : ""}`}
-            style={inc ? { borderColor: l.color, color: l.color } : undefined}
-            onClick={() => cycle(l.name)}
-            title={inc ? "click to exclude" : exc ? "click to clear" : "click to require"}
-          >
-            {exc ? "−" : inc ? "+" : ""}
-            {l.name}
-          </button>
-        );
-      })}
+      <BoardSearch value={value.q} onSearch={(qq) => onChange({ ...value, q: qq })} />
 
-      <span className="filter-sep" />
-      <span className="faint small">type</span>
-      {TYPE_META.map((t) => {
-        const on = value.type.includes(t.value);
-        return (
-          <button
-            key={t.value}
-            className={`task-chip type-chip ${on ? "on" : ""}`}
-            aria-pressed={on}
-            onClick={() => toggleType(t.value)}
-            title={on ? `click to clear ${t.label}` : `filter to ${t.label}`}
-          >
-            <TypeBadge type={t.value} compact />
-            {t.label}
-          </button>
-        );
-      })}
+      {/* One removable chip per active filter (AC-3). An excluded label reads
+          distinctly (−name, struck through) from an included one. */}
+      {chips.map((c) => (
+        <button
+          key={c.key}
+          className={`task-chip filter-chip ${c.negated ? "off" : "on"}`}
+          onClick={() => onChange(c.next)}
+          title="remove this filter"
+        >
+          {c.negated ? "−" : ""}
+          {c.label}
+          <span className="filter-chip-x">×</span>
+        </button>
+      ))}
 
-      <span className="filter-sep" />
-      <span className="faint small">visibility</span>
-      {VISIBILITY_META.map((v) => {
-        const on = value.visibility.includes(v.value);
-        return (
-          <button
-            key={v.value}
-            className={`task-chip type-chip ${on ? "on" : ""}`}
-            aria-pressed={on}
-            onClick={() => toggleVisibility(v.value)}
-            title={on ? `click to clear ${v.label}` : `filter to ${v.label}`}
-          >
-            <VisibilityBadge visibility={v.value} compact />
-            {v.label}
-          </button>
-        );
-      })}
+      <div ref={hostRef} style={{ display: "inline-flex" }}>
+        <button
+          className="btn small"
+          aria-expanded={open}
+          aria-haspopup="dialog"
+          onClick={() => setOpen((o) => !o)}
+        >
+          Filters
+          {chips.length > 0 && <span className="filter-badge">{chips.length}</span>}
+        </button>
+      </div>
 
-      <span className="filter-sep" />
-      <span className="faint small">assignee</span>
-      <select
-        className="task-select"
-        value={value.assignee}
-        onChange={(e) => onChange({ ...value, assignee: e.target.value as BoardFilter["assignee"] })}
-      >
-        <option value="any">any</option>
-        <option value="none">unclaimed</option>
-        <option value="me">mine</option>
-      </select>
-
-      <span className="faint small">priority</span>
-      <select
-        className="task-select"
-        value={value.priority ?? ""}
-        onChange={(e) =>
-          onChange({ ...value, priority: e.target.value === "" ? null : Number(e.target.value) })
-        }
-      >
-        <option value="">any</option>
-        {PRIORITIES.map((p) => (
-          <option key={p.value} value={p.value}>
-            {p.label}
-          </option>
-        ))}
-      </select>
-
-      <button
-        className={`task-chip ${value.blocked === false ? "on" : value.blocked === true ? "off" : ""}`}
-        onClick={() =>
-          onChange({
-            ...value,
-            blocked: value.blocked === null ? false : value.blocked === false ? true : null,
-          })
-        }
-        title="cycle: any → unblocked only → blocked only"
-      >
-        {value.blocked === false ? "unblocked" : value.blocked === true ? "blocked" : "any block state"}
-      </button>
-
-      {workspaces.length > 1 && (
-        <>
-          <span className="filter-sep" />
-          <span className="faint small">workspace</span>
-          <select
-            className="task-select"
-            value={value.workspace ?? ""}
-            onChange={(e) =>
-              onChange({ ...value, workspace: e.target.value === "" ? null : e.target.value })
-            }
-          >
-            <option value="">all</option>
-            {workspaces.map((w) => (
-              <option key={w.id} value={w.id}>
-                {w.name}
-              </option>
-            ))}
-          </select>
-        </>
-      )}
-
-      <span className="filter-sep" />
-      <button
-        className={`task-chip ${value.showArchived ? "on" : ""}`}
-        onClick={() => onChange({ ...value, showArchived: !value.showArchived })}
-        title="show archived tasks (dimmed) in their columns"
-      >
-        show archived
-      </button>
-
-      {active && (
-        <button className="btn small" onClick={() => onChange(EMPTY_FILTER)}>
+      {anyActive && (
+        <button className="btn small" onClick={clearAll}>
           clear
         </button>
+      )}
+
+      {portal(
+        <div
+          className="filters-popover"
+          role="dialog"
+          aria-label="Filters"
+          // Keep clicks inside from bubbling to a listener that might close it.
+          onMouseDown={(e) => e.stopPropagation()}
+        >
+          <div className="filters-group">
+            <div className="filters-group-head">
+              <span className="faint small">labels</span>
+              <span className="faint small filters-legend">+ include · − exclude · click again to clear</span>
+            </div>
+            {labels.length > 10 && (
+              <input
+                className="board-search filters-label-search"
+                type="search"
+                value={labelQuery}
+                placeholder="Filter labels…"
+                aria-label="Filter the label list"
+                onChange={(e) => setLabelQuery(e.target.value)}
+              />
+            )}
+            <div className="filters-chips">
+              {shownLabels.map((l) => {
+                const inc = value.label.includes(l.name);
+                const exc = value.not_label.includes(l.name);
+                return (
+                  <button
+                    key={l.id}
+                    className={`task-chip ${inc ? "on" : ""} ${exc ? "off" : ""}`}
+                    style={inc ? { borderColor: l.color, color: l.color } : undefined}
+                    onClick={() => cycle(l.name)}
+                    title={inc ? "click to exclude" : exc ? "click to clear" : "click to require"}
+                  >
+                    {exc ? "−" : inc ? "+" : ""}
+                    {l.name}
+                  </button>
+                );
+              })}
+              {shownLabels.length === 0 && <span className="faint small">no matching labels</span>}
+            </div>
+          </div>
+
+          <div className="filters-group">
+            <span className="faint small">type</span>
+            <div className="filters-chips">
+              {TYPE_META.map((t) => {
+                const on = value.type.includes(t.value);
+                return (
+                  <button
+                    key={t.value}
+                    className={`task-chip type-chip ${on ? "on" : ""}`}
+                    aria-pressed={on}
+                    onClick={() => toggleType(t.value)}
+                    title={on ? `click to clear ${t.label}` : `filter to ${t.label}`}
+                  >
+                    <TypeBadge type={t.value} compact />
+                    {t.label}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          <div className="filters-group">
+            <span className="faint small">visibility</span>
+            <div className="filters-chips">
+              {VISIBILITY_META.map((v) => {
+                const on = value.visibility.includes(v.value);
+                return (
+                  <button
+                    key={v.value}
+                    className={`task-chip type-chip ${on ? "on" : ""}`}
+                    aria-pressed={on}
+                    onClick={() => toggleVisibility(v.value)}
+                    title={on ? `click to clear ${v.label}` : `filter to ${v.label}`}
+                  >
+                    <VisibilityBadge visibility={v.value} compact />
+                    {v.label}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          <div className="filters-group filters-row">
+            <label className="filters-field">
+              <span className="faint small">assignee</span>
+              <select
+                className="task-select"
+                value={value.assignee}
+                onChange={(e) =>
+                  onChange({ ...value, assignee: e.target.value as BoardFilter["assignee"] })
+                }
+              >
+                <option value="any">any</option>
+                <option value="none">unclaimed</option>
+                <option value="me">mine</option>
+              </select>
+            </label>
+
+            <label className="filters-field">
+              <span className="faint small">priority</span>
+              <select
+                className="task-select"
+                value={value.priority ?? ""}
+                onChange={(e) =>
+                  onChange({
+                    ...value,
+                    priority: e.target.value === "" ? null : Number(e.target.value),
+                  })
+                }
+              >
+                <option value="">any</option>
+                {PRIORITIES.map((p) => (
+                  <option key={p.value} value={p.value}>
+                    {p.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            {workspaces.length > 1 && (
+              <label className="filters-field">
+                <span className="faint small">workspace</span>
+                <select
+                  className="task-select"
+                  value={value.workspace ?? ""}
+                  onChange={(e) =>
+                    onChange({ ...value, workspace: e.target.value === "" ? null : e.target.value })
+                  }
+                >
+                  <option value="">all</option>
+                  {workspaces.map((w) => (
+                    <option key={w.id} value={w.id}>
+                      {w.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            )}
+          </div>
+
+          <div className="filters-group filters-row">
+            <button
+              className={`task-chip ${value.blocked === false ? "on" : value.blocked === true ? "off" : ""}`}
+              onClick={() =>
+                onChange({
+                  ...value,
+                  blocked: value.blocked === null ? false : value.blocked === false ? true : null,
+                })
+              }
+              title="cycle: any → unblocked only → blocked only"
+            >
+              {value.blocked === false
+                ? "unblocked"
+                : value.blocked === true
+                  ? "blocked"
+                  : "any block state"}
+            </button>
+
+            <button
+              className={`task-chip ${value.showArchived ? "on" : ""}`}
+              onClick={() => onChange({ ...value, showArchived: !value.showArchived })}
+              title="show archived tasks (dimmed) in their columns"
+            >
+              show archived
+            </button>
+          </div>
+        </div>,
+        "filters-popover-host",
       )}
     </div>
   );
@@ -778,6 +876,75 @@ export function writeFilter(next: URLSearchParams, f: BoardFilter): URLSearchPar
  *  that `parseFilter` inverts. */
 export function serializeFilter(f: BoardFilter): URLSearchParams {
   return writeFilter(new URLSearchParams(), f);
+}
+
+/** One active filter, as an inline chip: a display label, whether it is an
+ *  exclusion (an excluded label reads `−name` and struck through), and the
+ *  filter that results from removing JUST this one (MAIN-110 AC-3). */
+export interface FilterChip {
+  key: string;
+  label: string;
+  negated?: boolean;
+  next: BoardFilter;
+}
+
+/** Every active filter as its own chip, in a stable order (MAIN-110 AC-1/AC-3).
+ *  Search is deliberately NOT a chip — it has its own always-visible box and is
+ *  excluded from the count (AC-2). `workspaces` only resolves the workspace
+ *  chip's display name; the chip is present whenever a workspace is set. Pure,
+ *  so "which chips are active" / the active count are unit-tested. */
+export function activeChips(
+  f: BoardFilter,
+  workspaces: { id: string; name: string }[],
+): FilterChip[] {
+  const chips: FilterChip[] = [];
+  for (const l of f.label)
+    chips.push({ key: `label:${l}`, label: l, next: { ...f, label: f.label.filter((x) => x !== l) } });
+  for (const l of f.not_label)
+    chips.push({
+      key: `xlabel:${l}`,
+      label: l,
+      negated: true,
+      next: { ...f, not_label: f.not_label.filter((x) => x !== l) },
+    });
+  for (const t of f.type)
+    chips.push({ key: `type:${t}`, label: t, next: { ...f, type: f.type.filter((x) => x !== t) } });
+  for (const v of f.visibility)
+    chips.push({ key: `vis:${v}`, label: v, next: { ...f, visibility: f.visibility.filter((x) => x !== v) } });
+  if (f.assignee !== "any")
+    chips.push({
+      key: "assignee",
+      label: f.assignee === "me" ? "mine" : "unclaimed",
+      next: { ...f, assignee: "any" },
+    });
+  if (f.priority !== null)
+    chips.push({
+      key: "priority",
+      label: PRIORITIES.find((p) => p.value === f.priority)?.label ?? `priority ${f.priority}`,
+      next: { ...f, priority: null },
+    });
+  if (f.blocked !== null)
+    chips.push({
+      key: "blocked",
+      label: f.blocked ? "blocked" : "unblocked",
+      next: { ...f, blocked: null },
+    });
+  if (f.workspace)
+    chips.push({
+      key: "ws",
+      label: workspaces.find((w) => w.id === f.workspace)?.name ?? "workspace",
+      next: { ...f, workspace: null },
+    });
+  if (f.showArchived)
+    chips.push({ key: "archived", label: "archived", next: { ...f, showArchived: false } });
+  return chips;
+}
+
+/** Whether ANY filter is active — the clear-all gate. Unlike the old inline
+ *  check it counts a workspace-only or archived-only filter (MAIN-110 AC-4), and
+ *  it includes search because clear-all resets that too. */
+export function isFilterActive(f: BoardFilter): boolean {
+  return activeChips(f, []).length > 0 || f.q.length > 0;
 }
 
 /** Whether a task shows on the board given the archive toggle: archived tasks
