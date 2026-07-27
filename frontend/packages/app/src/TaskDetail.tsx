@@ -29,6 +29,7 @@ import {
 } from "@nookos/ui";
 import { PRIORITIES } from "./taskmeta";
 import { toggleTaskCheckbox } from "./taskCheckbox";
+import { TaskInteractions } from "./Interactions";
 
 /** The "no workspace" option's value. `Select` needs a string, and an empty
  *  one cannot collide with a uuid. */
@@ -337,6 +338,11 @@ export function TaskDetail({
             onToggle={toggleLabel}
             onCreate={createLabel}
           />
+
+          {/* An agent blocked on a question is the most time-sensitive thing on
+              a ticket, so its ask sits above the spec, not buried below it. Only
+              renders when there is at least one pending interaction (MAIN-159). */}
+          <TaskInteractions taskId={taskId} />
 
           <div className="task-section">
             <div className="task-section-h">

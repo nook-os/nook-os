@@ -65,6 +65,7 @@ id_type!(
     UserNoteFolderId,
     JobId,
     JobTranscriptId,
+    InteractionId,
 );
 
 // ── Tenancy ──────────────────────────────────────────────────────────────────
@@ -2164,6 +2165,68 @@ pub struct LoopJobDetail {
 pub struct CreateLoopJobRequest {
     pub kind: String,
     pub target_task_id: TaskId,
+}
+
+// ── Interactions (MAIN-159) ──────────────────────────────────────────────────
+//
+// A durable human interaction: an explicit ask, persisted with authorization,
+// announced over channels (transport only), answerable from any surface,
+// resumable. Subject-generic by design — a loop job and/or a ticket — so the
+// loop-jobs chain is the first consumer, not the only one.
+
+/// A pending/answered/canceled ask for a human. Its subject (a job and/or the
+/// ticket it is anchored to) governs who may see and answer it.
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
+pub struct Interaction {
+    pub id: InteractionId,
+    pub tenant_id: TenantId,
+    /// The loop job this pauses on, if any (the MAIN-127 chain is the first
+    /// consumer). `None` for a subject-only or standalone ask.
+    pub job_id: Option<JobId>,
+    /// The ticket the interaction is anchored to — the subject visibility that
+    /// governs who may answer. Derived from a job's target when a job is named.
+    pub task_id: Option<TaskId>,
+    pub prompt: String,
+    /// Optional structured choices the answer is expected to be one of.
+    #[serde(default)]
+    pub choices: Option<Vec<String>>,
+    /// `pending` | `answered` | `canceled`.
+    pub state: String,
+    /// The executor node that requested it, if any (the anti-spoof anchor).
+    pub requested_by_node_id: Option<NodeId>,
+    /// The session that requested it, if any.
+    pub requested_by_session_id: Option<SessionId>,
+    /// The user whose answer won — set once, by the first authorized answer.
+    pub answered_by: Option<UserId>,
+    pub response: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub answered_at: Option<DateTime<Utc>>,
+}
+
+/// Create an interaction — the executor-scoped ask behind `nook interactions
+/// ask`. When `job_id` is set the creating node must be that job's executor
+/// (anti-spoof, AC-4); the subject ticket is then the job's target.
+#[derive(Debug, Clone, Deserialize, ToSchema)]
+pub struct CreateInteractionRequest {
+    pub prompt: String,
+    #[serde(default)]
+    pub choices: Option<Vec<String>>,
+    #[serde(default)]
+    pub job_id: Option<JobId>,
+    /// Anchor directly to a ticket when there is no job. Ignored when `job_id`
+    /// is set (the job's target wins).
+    #[serde(default)]
+    pub task_id: Option<TaskId>,
+    /// The requesting session, carried from `NOOK_SESSION_ID` when present.
+    #[serde(default)]
+    pub session_id: Option<SessionId>,
+}
+
+/// Answer a pending interaction — the one endpoint the CLI and web both call.
+#[derive(Debug, Clone, Deserialize, ToSchema)]
+pub struct AnswerInteractionRequest {
+    pub response: String,
 }
 
 #[derive(Debug, Clone, Deserialize, ToSchema)]

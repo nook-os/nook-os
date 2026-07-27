@@ -4,6 +4,7 @@
 pub mod core;
 pub mod discovery;
 pub mod identity;
+pub mod interactions;
 pub mod job_dispatch;
 pub mod jobs;
 pub mod kanban;

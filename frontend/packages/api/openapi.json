@@ -1090,6 +1090,157 @@
         }
       }
     },
+    "/api/v1/interactions": {
+      "get": {
+        "tags": [
+          "crate::routes::interactions"
+        ],
+        "operationId": "interaction_list_pending",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Interaction"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "crate::routes::interactions"
+        ],
+        "operationId": "interaction_create",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateInteractionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Interaction"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/interactions/{id}": {
+      "get": {
+        "tags": [
+          "crate::routes::interactions"
+        ],
+        "operationId": "interaction_get",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Interaction"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/interactions/{id}/answer": {
+      "post": {
+        "tags": [
+          "crate::routes::interactions"
+        ],
+        "operationId": "interaction_answer",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AnswerInteractionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Interaction"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/interactions/{id}/cancel": {
+      "post": {
+        "tags": [
+          "crate::routes::interactions"
+        ],
+        "operationId": "interaction_cancel",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Interaction"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/invites/accept": {
       "post": {
         "tags": [
@@ -6747,6 +6898,18 @@
           }
         }
       },
+      "AnswerInteractionRequest": {
+        "type": "object",
+        "description": "Answer a pending interaction — the one endpoint the CLI and web both call.",
+        "required": [
+          "response"
+        ],
+        "properties": {
+          "response": {
+            "type": "string"
+          }
+        }
+      },
       "AttachClientMessage": {
         "oneOf": [
           {
@@ -7771,6 +7934,59 @@
               "null"
             ],
             "description": "Paste an existing private key (OpenSSH PEM)…"
+          }
+        }
+      },
+      "CreateInteractionRequest": {
+        "type": "object",
+        "description": "Create an interaction — the executor-scoped ask behind `nook interactions\nask`. When `job_id` is set the creating node must be that job's executor\n(anti-spoof, AC-4); the subject ticket is then the job's target.",
+        "required": [
+          "prompt"
+        ],
+        "properties": {
+          "choices": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            }
+          },
+          "job_id": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/JobId"
+              }
+            ]
+          },
+          "prompt": {
+            "type": "string"
+          },
+          "session_id": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/SessionId",
+                "description": "The requesting session, carried from `NOOK_SESSION_ID` when present."
+              }
+            ]
+          },
+          "task_id": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/TaskId",
+                "description": "Anchor directly to a ticket when there is no job. Ignored when `job_id`\nis set (the job's target wins)."
+              }
+            ]
           }
         }
       },
@@ -8888,6 +9104,123 @@
             "type": "string"
           }
         }
+      },
+      "Interaction": {
+        "type": "object",
+        "description": "A pending/answered/canceled ask for a human. Its subject (a job and/or the\nticket it is anchored to) governs who may see and answer it.",
+        "required": [
+          "id",
+          "tenant_id",
+          "prompt",
+          "state",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "answered_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "answered_by": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/UserId",
+                "description": "The user whose answer won — set once, by the first authorized answer."
+              }
+            ]
+          },
+          "choices": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "Optional structured choices the answer is expected to be one of."
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "id": {
+            "$ref": "#/components/schemas/InteractionId"
+          },
+          "job_id": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/JobId",
+                "description": "The loop job this pauses on, if any (the MAIN-127 chain is the first\nconsumer). `None` for a subject-only or standalone ask."
+              }
+            ]
+          },
+          "prompt": {
+            "type": "string"
+          },
+          "requested_by_node_id": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/NodeId",
+                "description": "The executor node that requested it, if any (the anti-spoof anchor)."
+              }
+            ]
+          },
+          "requested_by_session_id": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/SessionId",
+                "description": "The session that requested it, if any."
+              }
+            ]
+          },
+          "response": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "state": {
+            "type": "string",
+            "description": "`pending` | `answered` | `canceled`."
+          },
+          "task_id": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/TaskId",
+                "description": "The ticket the interaction is anchored to — the subject visibility that\ngoverns who may answer. Derived from a job's target when a job is named."
+              }
+            ]
+          },
+          "tenant_id": {
+            "$ref": "#/components/schemas/TenantId"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "InteractionId": {
+        "type": "string",
+        "format": "uuid"
       },
       "Invite": {
         "type": "object",
@@ -11910,6 +12243,38 @@
                 "type": "string",
                 "enum": [
                   "task_changed"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "A durable interaction was raised, answered, or canceled (MAIN-159).\nCarries only the subject ticket id (when any), the same \"what you have is\nstale\" contract as `TaskChanged`: the client refetches the pending list\nand, if a ticket is named, that ticket's interactions.",
+            "required": [
+              "data",
+              "type"
+            ],
+            "properties": {
+              "data": {
+                "type": "object",
+                "description": "A durable interaction was raised, answered, or canceled (MAIN-159).\nCarries only the subject ticket id (when any), the same \"what you have is\nstale\" contract as `TaskChanged`: the client refetches the pending list\nand, if a ticket is named, that ticket's interactions.",
+                "properties": {
+                  "task_id": {
+                    "oneOf": [
+                      {
+                        "type": "null"
+                      },
+                      {
+                        "$ref": "#/components/schemas/TaskId"
+                      }
+                    ]
+                  }
+                }
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "interaction_changed"
                 ]
               }
             }
