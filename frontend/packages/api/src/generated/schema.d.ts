@@ -556,6 +556,34 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/invites/register": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * `POST /api/v1/invites/register` — create a LOCAL account against a pending
+         *     invite (MAIN-98). Unauthenticated: possession of the invite link is the
+         *     ticket. The account is created with the INVITE's email (never the client's),
+         *     unverified; a verification email is sent; the invite stays pending, because
+         *     registration and acceptance are separate steps (AC-1/AC-5).
+         * @description Anti-enumeration (AC-3): every failure that could reveal whether an email
+         *     already has an account returns the SAME generic, success-shaped result — a
+         *     duplicate email is indistinguishable from a fresh registration. A bad or
+         *     duplicate USERNAME is reported, because that is about the username the
+         *     invitee chose and leaks nothing about the invite's email. Rate-limited per IP.
+         */
+        post: operations["register_invite"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/labels": {
         parameters: {
             query?: never;
@@ -3988,6 +4016,27 @@ export interface components {
             passphrase: string;
         };
         /**
+         * @description Register a local account against a pending invite (MAIN-98). The email is
+         *     never here — it comes from the invite, so a client cannot register an
+         *     address it was not invited as. Username and password follow the ordinary
+         *     local-account rules; registration creates the account but does NOT accept the
+         *     invite (that stays a separate, verified step).
+         */
+        RegisterInviteRequest: {
+            name: string;
+            password: string;
+            token: string;
+            username: string;
+        };
+        /**
+         * @description The outcome of an invite registration. Deliberately generic and identical
+         *     whether or not an account already existed for the invite's email, so the
+         *     endpoint never discloses whether an address is registered (AC-3).
+         */
+        RegisterInviteResult: {
+            message: string;
+        };
+        /**
          * @description The other end of a relation, with enough to render it without a second
          *     fetch.
          */
@@ -5818,6 +5867,41 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["InvitePreview"];
                 };
+            };
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    register_invite: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RegisterInviteRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RegisterInviteResult"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             429: {
                 headers: {

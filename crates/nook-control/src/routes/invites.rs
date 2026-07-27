@@ -11,7 +11,7 @@ use nook_types::*;
 use serde::Deserialize;
 use std::net::SocketAddr;
 
-use crate::auth::AuthCtx;
+use crate::auth::{AuthCtx, IdentityCtx};
 use crate::error::{ApiError, ApiResult};
 use crate::seed::hash_token;
 use crate::services::identity::email_is_verified;
@@ -378,13 +378,27 @@ pub async fn resend(
     responses((status = 200, body = AcceptInviteResult)))]
 pub async fn accept(
     State(state): State<AppState>,
-    auth: AuthCtx,
+    id: IdentityCtx,
     Json(req): Json<AcceptInviteRequest>,
 ) -> ApiResult<Json<AcceptInviteResult>> {
-    auth.require_user()?;
-    Ok(Json(
-        accept_core(&state.db, auth.user_id.0, auth.tenant_id, &req.token).await?,
-    ))
+    // Identity-only (MAIN-98): a local invitee reaches this route signed in but
+    // not yet a member of any tenant. `accept_core` still enforces every check —
+    // pending+unexpired invite, email match, verified email, invited role.
+    let result = accept_core(&state.db, id.user_id.0, id.tenant_id, &req.token).await?;
+
+    // A local invitee's session points at the tenant they registered in, where
+    // until now they had no membership. On a successful accept move the cookie
+    // session onto the accepted tenant, so their very next request is
+    // member-scoped. Scoped to the memberless case, so an ordinary member
+    // accepting from their own tenant (the OIDC flow) keeps its session.
+    if result.accepted && id.cookie_session && !id.is_member {
+        let _ = sqlx::query("UPDATE sessions_auth SET tenant_id = $2 WHERE id = $1")
+            .bind(id.session_id.0)
+            .bind(result.tenant_id)
+            .execute(&state.db)
+            .await;
+    }
+    Ok(Json(result))
 }
 
 /// The accept logic, split from the handler so it can be tested against a real
@@ -597,6 +611,115 @@ pub async fn preview(
         inviter,
         email: mask_email(&email),
     }))
+}
+
+/// `POST /api/v1/invites/register` — create a LOCAL account against a pending
+/// invite (MAIN-98). Unauthenticated: possession of the invite link is the
+/// ticket. The account is created with the INVITE's email (never the client's),
+/// unverified; a verification email is sent; the invite stays pending, because
+/// registration and acceptance are separate steps (AC-1/AC-5).
+///
+/// Anti-enumeration (AC-3): every failure that could reveal whether an email
+/// already has an account returns the SAME generic, success-shaped result — a
+/// duplicate email is indistinguishable from a fresh registration. A bad or
+/// duplicate USERNAME is reported, because that is about the username the
+/// invitee chose and leaks nothing about the invite's email. Rate-limited per IP.
+#[utoipa::path(post, path = "/api/v1/invites/register",
+    operation_id = "register_invite",
+    request_body = RegisterInviteRequest,
+    responses((status = 200, body = RegisterInviteResult), (status = 400), (status = 429)))]
+pub async fn register(
+    State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Json(req): Json<RegisterInviteRequest>,
+) -> ApiResult<Json<RegisterInviteResult>> {
+    // Per-IP rate limit — an unauthenticated, account-creating endpoint must not
+    // be a free anonymous amplifier (reuses the preview limiter, IP-keyed).
+    let xff = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok());
+    let client_ip = crate::client_ip::resolve_client_ip(peer.ip(), xff, &state.cfg.trusted_proxies);
+    let ip_key = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_DNS, client_ip.to_string().as_bytes());
+    if !state.preview_limit.allow(TenantId(ip_key)) {
+        return Err(ApiError::TooManyRequests(
+            "too many attempts from your address — try again shortly".into(),
+        ));
+    }
+
+    let generic = || {
+        Ok(Json(RegisterInviteResult {
+            message:
+                "If the invite is valid, check your email to verify your account, then sign in."
+                    .into(),
+        }))
+    };
+
+    // The invite: tenant, the email the account MUST use, the role acceptance
+    // will apply, and whether it is pending + unexpired.
+    let invite: Option<(TenantId, String, String, bool)> = sqlx::query_as(
+        "SELECT tenant_id, email, role, (status = 'pending' AND expires_at > now())
+         FROM invites WHERE token_hash = $1",
+    )
+    .bind(hash_token(&req.token))
+    .fetch_optional(&state.db)
+    .await?;
+    let Some((tenant, email, role, true)) = invite else {
+        return Err(ApiError::BadRequest(
+            "this invite link is not valid or has expired".into(),
+        ));
+    };
+
+    // Local registration only where local auth is available — never on an
+    // OIDC-claimed tenant (AC-3/NG-2).
+    use crate::services::local_auth::{self, AuthMode};
+    if matches!(
+        local_auth::mode_of(&state.db, tenant).await?,
+        Some(AuthMode::Oidc)
+    ) {
+        return Err(ApiError::BadRequest(
+            "this instance signs in through an identity provider; local registration is unavailable"
+                .into(),
+        ));
+    }
+
+    // Anti-enumeration: if an account already exists for the invite's email, do
+    // not create or touch anything and return the SAME generic result a fresh
+    // registration returns (AC-3). Hash the password anyway so timing matches.
+    let exists: Option<(uuid::Uuid,)> = sqlx::query_as(
+        "SELECT id FROM users WHERE tenant_id = $1 AND lower(email) = lower($2) LIMIT 1",
+    )
+    .bind(tenant)
+    .bind(&email)
+    .fetch_optional(&state.db)
+    .await?;
+    if exists.is_some() {
+        let _ = crate::auth::password::hash(&req.password);
+        return generic();
+    }
+
+    // Create the local account — invite's email, unverified, NO membership. A
+    // duplicate/invalid username is a clean 400 (about the chosen username).
+    let user = local_auth::register_invited(
+        &state.db,
+        tenant,
+        &req.username,
+        &email,
+        &req.name,
+        &req.password,
+        &role,
+    )
+    .await?;
+
+    // Send the verification email (best-effort; a mail failure is neither fatal
+    // nor disclosed). The invite is deliberately left pending (AC-5).
+    let _ = crate::routes::verify_email::request_core(&state, user.id).await;
+    crate::events::record(
+        &state,
+        tenant,
+        crate::events::EventDraft::new("invite.registered").actor("user", user.id.0),
+    )
+    .await;
+
+    generic()
 }
 
 #[cfg(test)]

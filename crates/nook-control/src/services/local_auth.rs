@@ -83,19 +83,25 @@ pub async fn claim_mode(db: &PgPool, tenant: TenantId, want: AuthMode) -> ApiRes
     }
 }
 
-/// Sign in with a username and password.
+/// Sign in with a username **or email** and password (MAIN-98).
+///
+/// A local invitee picks a username but is known to their teammates by the email
+/// the invite named, so either signs them in — the UI offers "Username or
+/// email". The identifier is matched case-insensitively against both columns;
+/// existing username sign-in is unchanged.
 pub async fn login(
     db: &PgPool,
     tenant: TenantId,
-    username: &str,
+    identifier: &str,
     supplied: &str,
 ) -> ApiResult<(User, Tenant)> {
     let row: Option<(UserId, Option<String>)> = sqlx::query_as(
         "SELECT id, password_hash FROM users
-         WHERE tenant_id = $1 AND lower(username) = lower($2)",
+         WHERE tenant_id = $1
+           AND (lower(username) = lower($2) OR lower(email) = lower($2))",
     )
     .bind(tenant)
-    .bind(username)
+    .bind(identifier)
     .fetch_optional(db)
     .await?;
 
@@ -182,6 +188,52 @@ pub async fn create(
     .execute(db)
     .await?;
 
+    Ok(user)
+}
+
+/// Create a local account for an invitee, WITHOUT granting tenant membership
+/// (MAIN-98). The opposite of `create`, whose whole job is to make a member: an
+/// invitee registers, verifies, and signs in as a real user with a session but
+/// no `tenant_members` row, then `accept_core` does the joining as a separate,
+/// verified step. The account carries the invite's `role`, but that grants
+/// nothing until acceptance writes the membership — every tenant-scoped route
+/// still refuses a non-member.
+///
+/// The email is the caller's responsibility to take from the invite, never from
+/// the client. Username follows the ordinary rules; a duplicate is a clean 400.
+pub async fn register_invited(
+    db: &PgPool,
+    tenant: TenantId,
+    username: &str,
+    email: &str,
+    display_name: &str,
+    plaintext: &str,
+    role: &str,
+) -> ApiResult<User> {
+    let username = username.trim();
+    validate_username(username).map_err(ApiError::BadRequest)?;
+    let hash = password::hash(plaintext).map_err(|e| ApiError::BadRequest(e.to_string()))?;
+
+    let user: User = sqlx::query_as(
+        "INSERT INTO users (id, tenant_id, display_name, email, username, password_hash, role)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)
+         RETURNING *",
+    )
+    .bind(UserId::new())
+    .bind(tenant)
+    .bind(display_name)
+    .bind(email)
+    .bind(username)
+    .bind(&hash)
+    .bind(role)
+    .fetch_one(db)
+    .await
+    .map_err(|e| match &e {
+        sqlx::Error::Database(d) if d.is_unique_violation() => {
+            ApiError::BadRequest(format!("the username '{username}' is already taken"))
+        }
+        _ => ApiError::from(e),
+    })?;
     Ok(user)
 }
 

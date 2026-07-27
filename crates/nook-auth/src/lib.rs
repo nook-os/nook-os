@@ -73,6 +73,29 @@ pub fn hash_token(token: &str) -> String {
 /// session) stays distinct from 403 (grant revoked) — the exact shape the
 /// control plane's `AuthCtx` used before this was extracted.
 pub async fn resolve_session(pool: &PgPool, session_id: Uuid) -> Result<Resolved, AuthError> {
+    let (resolved, is_member) = resolve_session_identity(pool, session_id).await?;
+    // The membership check is what separates 401 (no/expired session) from 403
+    // (session fine, but no grant on its tenant) — see `AuthError`.
+    if !is_member {
+        return Err(AuthError::Forbidden);
+    }
+    Ok(resolved)
+}
+
+/// Resolve a session to its caller WITHOUT requiring tenant membership, also
+/// reporting whether they are a member of the session's tenant.
+///
+/// For the narrow set of routes a signed-in person may reach before they belong
+/// to any tenant — today only accepting an invite (MAIN-98): a local invitee
+/// registers, verifies, and signs in with a real session but no `tenant_members`
+/// row, then accepts. Every ordinary tenant-scoped route stays on
+/// [`resolve_session`], which still 403s a non-member; this is the deliberate,
+/// single exception, and it returns `is_member` so the caller can still tell the
+/// difference rather than being handed a bare identity.
+pub async fn resolve_session_identity(
+    pool: &PgPool,
+    session_id: Uuid,
+) -> Result<(Resolved, bool), AuthError> {
     let row: Option<(Uuid, Uuid, bool)> = sqlx::query_as(
         "SELECT sa.user_id, sa.tenant_id,
                 EXISTS(SELECT 1 FROM tenant_members m
@@ -87,15 +110,15 @@ pub async fn resolve_session(pool: &PgPool, session_id: Uuid) -> Result<Resolved
     .await?;
 
     let (user_id, tenant_id, is_member) = row.ok_or(AuthError::Unauthorized)?;
-    if !is_member {
-        return Err(AuthError::Forbidden);
-    }
-    Ok(Resolved {
-        session_id,
-        user_id,
-        tenant_id,
-        cookie_session: true,
-    })
+    Ok((
+        Resolved {
+            session_id,
+            user_id,
+            tenant_id,
+            cookie_session: true,
+        },
+        is_member,
+    ))
 }
 
 /// Resolve a `nook_user_` bearer token, refreshing its last-used timestamp.
