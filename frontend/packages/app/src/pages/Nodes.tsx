@@ -84,14 +84,14 @@ export function NodesPage() {
               {(nodes ?? []).map((n) => {
                 const caps = n.capabilities as Record<string, unknown>;
                 const status = nodeStatus[n.id] ?? n.status;
-                // Only the owner may open a session on a node (MAIN-130) — so
-                // `terminal`/`share` are owner-only. Fleet MANAGEMENT
+                // `terminal` is offered on a node you own OR one shared with the
+                // team (MAIN-136); `share` stays owner-only. Fleet MANAGEMENT
                 // (update/remove) stays with the owner or a tenant admin, as it
-                // was before shared nodes existed: now that a member can see a
-                // teammate's `shared` node (MAIN-135), it must render read-only
-                // for them — no manage buttons — while an admin keeps them
-                // (MAIN-132's admin-fleet-management). The server enforces all
-                // of this; this only hides what would 403.
+                // was before shared nodes existed: a member seeing a teammate's
+                // `shared` node (MAIN-135) gets the terminal but no manage
+                // buttons — read-only — while an admin keeps them (MAIN-132's
+                // admin-fleet-management). The server enforces all of this; this
+                // only hides what would 403.
                 const owned = n.owner_person_id === me?.person_id;
                 const canManage =
                   owned ||
@@ -110,7 +110,7 @@ export function NodesPage() {
                           {" "}
                           <Pill
                             tone="accent"
-                            title="visible to the whole team; not yet a spawn target for them"
+                            title="visible to the whole team and usable by them — anyone can start a session here"
                           >
                             shared
                           </Pill>
@@ -160,7 +160,7 @@ export function NodesPage() {
                           justifyContent: "flex-end",
                         }}
                       >
-                      {status === "online" && owned && (
+                      {status === "online" && (owned || n.shared) && (
                         <button
                           className="btn small"
                           title={`open a shell on ${n.name}`}

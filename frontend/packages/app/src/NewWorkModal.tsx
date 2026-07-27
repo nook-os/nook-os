@@ -77,12 +77,14 @@ function NewWorkModal() {
     queryFn: async () => (await api.GET("/api/v1/git-credentials")).data ?? [],
   });
 
-  // Starting work here IS a spawn, so only offer nodes the caller owns — a
-  // teammate's node would be refused server-side (MAIN-130). Members only ever
-  // receive their own nodes anyway; the ownership gate makes it correct for an
-  // admin who also sees the fleet.
+  // Starting work here IS a spawn, so offer nodes the caller may run on: their
+  // own, OR a node its owner has shared with the team (MAIN-136, widening the
+  // MAIN-130 owner-only rule). A teammate's *unshared* node stays refused
+  // server-side, so it is not offered here.
   const online = (nodes ?? []).filter(
-    (n) => n.status === "online" && n.owner_person_id === me?.person_id,
+    (n) =>
+      n.status === "online" &&
+      (n.owner_person_id === me?.person_id || n.shared),
   );
   const q = query.trim();
 
@@ -466,9 +468,18 @@ function NewWorkModal() {
             ) : (
               <select className="input" value={nodeId} onChange={(e) => setNodeId(e.target.value)}>
                 <option value={AUTO}>Auto (best available)</option>
-                {eligibleNodes.map((n) => (
-                  <option key={n.id} value={n.id}>{n.name} · {n.platform}</option>
-                ))}
+                {eligibleNodes.map((n) => {
+                  // A shared node belongs to a teammate — label it so nobody
+                  // mistakes it for their own machine (MAIN-136 AC-3).
+                  const sharedTag =
+                    n.shared && n.owner_person_id !== me?.person_id ? " · shared" : "";
+                  return (
+                    <option key={n.id} value={n.id}>
+                      {n.name} · {n.platform}
+                      {sharedTag}
+                    </option>
+                  );
+                })}
               </select>
             )}
           </div>

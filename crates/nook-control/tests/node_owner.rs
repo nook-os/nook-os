@@ -135,6 +135,16 @@ async fn cleanup(db: &PgPool, tenant: TenantId) {
         .await;
 }
 
+/// Set (or clear) a node's `shared` flag, scoped to the one row (MAIN-136).
+async fn set_shared_flag(db: &PgPool, node: NodeId, shared: bool) {
+    sqlx::query("UPDATE nodes SET shared = $2 WHERE id = $1")
+        .bind(node)
+        .bind(shared)
+        .execute(db)
+        .await
+        .expect("set shared");
+}
+
 /// A node with a chosen (or NULL) owner, so the spawn guard can be exercised
 /// directly without a join.
 async fn insert_node(db: &PgPool, tenant: TenantId, owner: Option<Uuid>) -> NodeId {
@@ -447,6 +457,105 @@ async fn a_node_credential_still_reaches_only_itself() {
     assert!(
         node_ctx.require_node_owner(&state, other_id).await.is_err(),
         "a node token must not reach another machine"
+    );
+
+    cleanup(&pool, tenant).await;
+}
+
+// ── MAIN-136: shared nodes are usable (owner-or-shared), management owner-only ──
+
+/// The asymmetry the epic step is about: a member may START a session on a node
+/// its owner has SHARED, but may never MANAGE it. Owner-or-shared for use;
+/// owner-only for the share toggle. Sharing grants no bypass of the
+/// missing-identity rule, so the no-actor MCP path is refused even on a shared
+/// node. Unsharing turns new starts away again (existing sessions untouched).
+#[tokio::test]
+async fn shared_node_relaxes_use_but_not_management() {
+    use axum::extract::Path;
+
+    let Some(pool) = test_pool().await else {
+        return;
+    };
+    let state = AppState::new(pool.clone(), test_config(), None).await;
+    let tenant = new_tenant(&pool).await;
+    let (owner, owner_person) = add_user(&pool, tenant, "owner").await;
+    let (member, _) = add_user(&pool, tenant, "member").await;
+    let node = insert_node(&pool, tenant, Some(owner_person)).await;
+
+    // Unshared: only the owner may use it. The member is refused, and the
+    // message now names shared machines as the exception (AC-1).
+    assert!(
+        nook_control::auth::require_person_may_use_node(&state, tenant, Some(owner), node)
+            .await
+            .is_ok(),
+        "the owner may always use their own node"
+    );
+    let refused =
+        nook_control::auth::require_person_may_use_node(&state, tenant, Some(member), node)
+            .await
+            .expect_err("a member cannot use an UNSHARED teammate node");
+    assert!(
+        format!("{refused:?}").contains("shared"),
+        "the refusal names shared machines as the exception, got {refused:?}"
+    );
+
+    // Share it → the member may now use it, via the free helper AND the AuthCtx
+    // method the session-start routes actually call.
+    set_shared_flag(&pool, node, true).await;
+    assert!(
+        nook_control::auth::require_person_may_use_node(&state, tenant, Some(member), node)
+            .await
+            .is_ok(),
+        "a member may use a SHARED teammate node (AC-2)"
+    );
+    assert!(
+        auth(member, tenant)
+            .require_node_may_use(&state, node)
+            .await
+            .is_ok(),
+        "the session-route method also allows a member on a shared node"
+    );
+    assert!(
+        nook_control::auth::require_person_may_use_node(&state, tenant, Some(owner), node)
+            .await
+            .is_ok(),
+        "the owner is unaffected by sharing"
+    );
+    // Sharing grants NO bypass of the missing-identity rule: MCP (None) refused.
+    assert!(
+        nook_control::auth::require_person_may_use_node(&state, tenant, None, node)
+            .await
+            .is_err(),
+        "a shared node still refuses the no-actor MCP path (AC-1)"
+    );
+
+    // NG-1: the member can USE the shared node but cannot MANAGE it — the share
+    // toggle stays owner-only even though the member now sees and uses it.
+    let toggled = nook_control::routes::nodes::set_shared(
+        State(state.clone()),
+        auth(member, tenant),
+        Path(node),
+        Json(SetSharedRequest { shared: false }),
+    )
+    .await;
+    assert!(
+        toggled.is_err(),
+        "a non-owner must not toggle sharing, even on a node shared with them (NG-1)"
+    );
+    let still: bool = sqlx::query_scalar("SELECT shared FROM nodes WHERE id = $1")
+        .bind(node)
+        .fetch_one(&pool)
+        .await
+        .expect("shared flag");
+    assert!(still, "the refused toggle must not have unshared the node");
+
+    // Unshare → the member's NEW starts are refused again (AC-2).
+    set_shared_flag(&pool, node, false).await;
+    assert!(
+        nook_control::auth::require_person_may_use_node(&state, tenant, Some(member), node)
+            .await
+            .is_err(),
+        "unsharing refuses the member's new session starts again (AC-2)"
     );
 
     cleanup(&pool, tenant).await;

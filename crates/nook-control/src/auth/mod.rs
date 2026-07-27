@@ -170,6 +170,31 @@ impl AuthCtx {
         require_person_owns_node(state, self.tenant_id, Some(self.user_id), node_id).await
     }
 
+    /// Session-start authorization: the caller may run on this machine if they
+    /// OWN it or it is SHARED (MAIN-136). The user-facing counterpart of
+    /// `require_node_owner`, used by the session-start routes so a member can
+    /// use a teammate's shared node — while management stays owner-only (NG-1).
+    ///
+    /// A node credential keeps its existing machine-only confinement unchanged:
+    /// a node token acts on its own machine and nothing else — sharing is a
+    /// human affordance, not a lateral-movement widening.
+    pub async fn require_node_may_use(
+        &self,
+        state: &AppState,
+        node_id: nook_types::NodeId,
+    ) -> Result<(), ApiError> {
+        if let Principal::Node(self_id) = self.principal {
+            return if self_id == node_id {
+                Ok(())
+            } else {
+                Err(ApiError::ForbiddenMsg(
+                    "a node token can only act on its own machine".into(),
+                ))
+            };
+        }
+        require_person_may_use_node(state, self.tenant_id, Some(self.user_id), node_id).await
+    }
+
     /// Require a tenant owner or admin.
     ///
     /// CA lifecycle — generating, staging, promoting, retiring, revoking a node
@@ -286,6 +311,57 @@ pub async fn require_person_owns_node(
         // unowned node) reads as exactly this and is debuggable (AC-6).
         _ => Err(ApiError::ForbiddenMsg(
             "sessions start only on your own machines".into(),
+        )),
+    }
+}
+
+/// Session-start authorization that also allows a SHARED node (MAIN-136). Same
+/// shape and same hard edges as [`require_person_owns_node`], but a node with
+/// `shared = true` is usable by any member of the tenant, not only its owner —
+/// the epic's "team-usable" step. This relaxes USE only; node *management*
+/// (share/unshare, update, remove) stays strictly owner-gated via
+/// `require_person_owns_node`/`require_node_owner` (NG-1).
+///
+/// The edges are unchanged: a `None` actor (the MCP path) is REFUSED — sharing
+/// grants no bypass of the missing-per-user-identity rule (MAIN-102); a node
+/// absent from the caller's tenant is a 404, not a 403 (no existence oracle);
+/// and a non-shared node the caller does not own is refused, now with a message
+/// that names shared machines as the exception.
+pub async fn require_person_may_use_node(
+    state: &AppState,
+    tenant: TenantId,
+    actor: Option<UserId>,
+    node_id: nook_types::NodeId,
+) -> Result<(), ApiError> {
+    let Some(actor) = actor else {
+        return Err(ApiError::ForbiddenMsg(
+            "starting a session needs an acting identity; the MCP path has none \
+             until per-user MCP identity lands (MAIN-102), and it must not run as \
+             the tenant owner"
+                .into(),
+        ));
+    };
+    let row: Option<(Option<Uuid>, bool)> = sqlx::query_as(
+        "SELECT owner_person_id, shared FROM nodes WHERE id = $1 AND tenant_id = $2",
+    )
+    .bind(node_id)
+    .bind(tenant)
+    .fetch_optional(&state.db)
+    .await?;
+    let Some((owner, shared)) = row else {
+        return Err(ApiError::NotFound);
+    };
+    // Shared is a team grant: any member of the tenant may run here. (A node
+    // with no owner cannot be shared — 0017's invariant — so `shared` already
+    // implies a consenting owner.)
+    if shared {
+        return Ok(());
+    }
+    let person = person_id_of(state, actor).await?;
+    match owner {
+        Some(o) if o == person => Ok(()),
+        _ => Err(ApiError::ForbiddenMsg(
+            "sessions start only on your own or shared machines".into(),
         )),
     }
 }

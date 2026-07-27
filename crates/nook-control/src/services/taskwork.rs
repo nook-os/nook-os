@@ -165,13 +165,14 @@ pub async fn start_work(
         .or(task.assigned_node_id)
         .ok_or_else(|| ApiError::BadRequest("no node — dispatch the task or pick one".into()))?;
 
-    // Spawn authorization (MAIN-130): a session starts only on a node the acting
-    // PERSON owns — the one chokepoint both the HTTP route and MCP reach. `user`
-    // is None on the MCP path, which is refused until it carries a per-user
+    // Spawn authorization (MAIN-130, relaxed for shared nodes in MAIN-136): a
+    // session starts on a node the acting PERSON owns OR one shared with the
+    // team — the one chokepoint both the HTTP route and MCP reach. `user` is
+    // None on the MCP path, which is refused until it carries a per-user
     // identity (AC-3); when auto-dispatch (MAIN-131) hands over a node the
-    // requester does not own, this same 403 is the visible result (AC-6). Runs
+    // requester does not own, an unshared node still 403s here (AC-6). Runs
     // before the worktree op so an unauthorized start leaves nothing behind.
-    crate::auth::require_person_owns_node(state, tenant, user, node_id).await?;
+    crate::auth::require_person_may_use_node(state, tenant, user, node_id).await?;
 
     let workspace_id = req
         .workspace_id
