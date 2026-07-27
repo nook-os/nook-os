@@ -186,14 +186,17 @@ services:
       control-plane:
         condition: service_healthy
 
-  # The shared operator node (MAIN-125). Opt-in: `docker compose --profile
-  # operator up operator-node` — the default dev stack skips it, so nobody pays
-  # to build the full loop toolchain (claude/hermes/codex/copilot) just to run
-  # the app. It joins the dev control plane exactly as a real operator node
-  # joins prod; identity, checkouts, and tmux live on named volumes so a restart
-  # keeps them (AC-5).
+  # The shared operator node (MAIN-125) — a FIRST-CLASS member of the dev stack
+  # (MAIN-140): plain `docker compose up` / `./run.sh` builds and boots it with
+  # everything else, because the loop features landing on it (cached clones,
+  # spec-from-operator, the jobs queue) can only be exercised with it present.
+  # The FIRST build is slow — the image installs the pinned agent runtimes
+  # (claude/hermes/codex/copilot) — but later builds ride the Docker layer cache.
+  # Don't want the container? `docker compose up -d --scale operator-node=0`.
+  # It joins the dev control plane exactly as a real operator node joins prod
+  # (via NOOK_DEV_JOIN_TOKEN, seeded by the control plane from .env); identity,
+  # checkouts, and tmux live on named volumes so a restart re-attaches (AC-5).
   operator-node:
-    profiles: ["operator"]
     build:
       context: .
       dockerfile: deploy/docker/operator-node.Dockerfile

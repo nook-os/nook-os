@@ -7,7 +7,7 @@ cd "$(dirname "$0")/.."
 
 case "${1:-restart}" in
   restart) docker compose restart control-plane ;;
-  logs) docker compose logs -f --tail=100 control-plane node ;;
+  logs) docker compose logs -f --tail=100 control-plane node operator-node ;;
   up) docker compose up -d --build ;;
   *) echo "usage: dev-server.sh [restart|logs|up]"; exit 1 ;;
 esac

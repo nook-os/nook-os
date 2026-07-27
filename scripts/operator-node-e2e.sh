@@ -40,7 +40,7 @@ cleanup() {
     return
   fi
   echo "==> Tearing down"
-  "${COMPOSE[@]}" --profile operator down -v >/dev/null 2>&1 || true
+  "${COMPOSE[@]}" down -v >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 
@@ -78,7 +78,7 @@ for _ in $(seq 1 120); do
 done
 
 echo "==> Building and starting the operator node"
-"${COMPOSE[@]}" --profile operator up -d --build operator-node
+"${COMPOSE[@]}" up -d --build operator-node
 
 # 1 + 2: it joins, comes online, and is marked shared.
 wait_for "operator node ONLINE" \
@@ -95,7 +95,7 @@ echo "==> Node id before restart: $NODE_ID_BEFORE"
 
 # 3: restart the container; identity persists on the config volume.
 echo "==> Restarting the operator node"
-"${COMPOSE[@]}" --profile operator restart operator-node
+"${COMPOSE[@]}" restart operator-node
 wait_for "operator node ONLINE again" \
   "SELECT status FROM nodes WHERE name = '$NODE_NAME'" \
   "online" 90
