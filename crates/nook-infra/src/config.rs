@@ -125,6 +125,9 @@ pub struct Config {
     /// the cache: a queue is a deployment decision, and a hosted broker later
     /// means a new name here, not inference. See `crate::queue`.
     pub queue_provider: String,
+    /// `NOOK_REDIS_URL` — the Redis connection for the redis queue provider (and
+    /// the future redis cache). Required when `queue_provider = redis`.
+    pub redis_url: Option<String>,
 
     // ── Email (mail provider) ───────────────────────────────────────────
     /// Which mail transport to use, chosen by name — `smtp` or `capture`.
@@ -264,6 +267,7 @@ impl Config {
             cache_provider: env_opt("NOOK_CACHE_PROVIDER").unwrap_or_else(|| "memory".into()),
 
             queue_provider: env_opt("NOOK_QUEUE_PROVIDER").unwrap_or_else(|| "database".into()),
+            redis_url: env_opt("NOOK_REDIS_URL"),
 
             mail_provider: env_opt("MAIL_PROVIDER").unwrap_or_else(|| "capture".into()),
             smtp_host: env_opt("SMTP_HOST"),
@@ -312,6 +316,11 @@ impl Config {
         // refuse them at boot rather than silently draining a single-node table
         // a deployment believed was a shared broker.
         crate::queue::validate_provider(&cfg.queue_provider)?;
+        if cfg.queue_provider == "redis" && cfg.redis_url.is_none() {
+            anyhow::bail!(
+                "NOOK_QUEUE_PROVIDER=redis requires NOOK_REDIS_URL to be set (the Redis connection)"
+            );
+        }
         // An unknown mail provider is a misconfiguration worth stopping for,
         // rather than silently falling through to some default and dropping mail.
         if !crate::mailer::is_known_provider(&cfg.mail_provider) {
@@ -383,6 +392,7 @@ impl Config {
             s3_path_style: true,
             cache_provider: "memory".into(),
             queue_provider: "database".into(),
+            redis_url: None,
             mail_provider: "capture".into(),
             smtp_host: None,
             smtp_port: 587,

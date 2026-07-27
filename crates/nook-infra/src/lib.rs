@@ -8,6 +8,7 @@ pub mod cache;
 pub mod config;
 pub mod mailer;
 pub mod queue;
+pub mod redis_client;
 pub mod storage;
 
 pub use config::Config;

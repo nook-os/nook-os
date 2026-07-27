@@ -49,6 +49,19 @@ services:
              mc mb --ignore-existing local/nook-artifacts &&
              echo 'bucket ready'"
 
+  # Redis — the reserved queue/cache backend (MAIN-150). Not the default; the
+  # control plane and worker stay on `database` unless NOOK_QUEUE_PROVIDER=redis
+  # is set. Present so the redis provider can be exercised locally and in tests.
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
   # Mailpit — a live dev inbox. Outbound mail (email verification, invites) is
   # sent over SMTP to :1025 and read in the web UI at http://localhost:8025.
   # Ephemeral by design (NG-4): the inbox is not persisted across `down`.

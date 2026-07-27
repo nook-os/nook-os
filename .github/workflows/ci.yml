@@ -27,9 +27,18 @@ jobs:
         options: >-
           --health-cmd "pg_isready -U nook"
           --health-interval 5s --health-timeout 5s --health-retries 10
+      # Redis for the redis queue provider's contract tests (MAIN-150). Without
+      # NOOK_TEST_REDIS_URL those tests skip; here they run against a real Redis.
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 5s --health-retries 10
     env:
       DATABASE_URL: postgres://nook:nook@localhost:5432/nook
       NOOK_REQUIRE_DB: "1"
+      NOOK_TEST_REDIS_URL: redis://localhost:6379
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
