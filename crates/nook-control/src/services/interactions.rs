@@ -193,7 +193,8 @@ pub async fn get(
         caller.principal,
         Principal::Node(nid) if interaction.requested_by_node_id == Some(nid)
     );
-    if !is_requester && !subject_visible(state, tenant, caller.user_id, interaction.task_id).await? {
+    if !is_requester && !subject_visible(state, tenant, caller.user_id, interaction.task_id).await?
+    {
         return Err(ApiError::NotFound);
     }
     Ok(interaction)

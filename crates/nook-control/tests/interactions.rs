@@ -9,7 +9,6 @@
 use nook_control::auth::{AuthCtx, Principal};
 use nook_control::error::ApiError;
 use nook_control::services::interactions;
-use nook_control::state::AppState;
 use nook_types::*;
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -445,9 +444,14 @@ async fn a_node_pulls_its_own_answer_even_on_a_private_card() {
 
     // The requesting node pulls its own answer — despite having no user identity
     // that could see the private card. This is what `ask --wait` relies on.
-    let pulled = interactions::get(&state, tenant, &node_ctx(tenant, node_user, runner), created.id)
-        .await
-        .expect("the requesting node pulls its answer");
+    let pulled = interactions::get(
+        &state,
+        tenant,
+        &node_ctx(tenant, node_user, runner),
+        created.id,
+    )
+    .await
+    .expect("the requesting node pulls its answer");
     assert_eq!(pulled.state, "answered");
     assert_eq!(pulled.response.as_deref(), Some("go"));
 
