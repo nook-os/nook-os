@@ -308,15 +308,26 @@ impl Config {
         if cfg.is_production() && cfg.auth_dev_mode {
             anyhow::bail!("AUTH_DEV_MODE must not be enabled when APP_ENV=production");
         }
-        // A cache provider is selected the same way, and `redis` is reserved
-        // but unbuilt — refuse it at boot with a pointed message rather than
-        // silently handing back a per-process cache someone asked to be shared.
+        // The cache provider is selected the same way; an unknown name is a
+        // misconfiguration worth stopping for.
         crate::cache::validate_provider(&cfg.cache_provider)?;
-        // Same story for the queue: `redis`/`sqs` are reserved but unbuilt, so
-        // refuse them at boot rather than silently draining a single-node table
-        // a deployment believed was a shared broker.
+        // Same story for the queue: `sqs` is reserved but unbuilt, so refuse it
+        // at boot rather than silently draining a single-node table a deployment
+        // believed was a shared broker.
         crate::queue::validate_provider(&cfg.queue_provider)?;
-        check_redis_queue(&cfg.queue_provider, cfg.redis_url.as_deref())?;
+        // Either selecting `redis` needs a present, parseable NOOK_REDIS_URL —
+        // refuse boot on a missing/malformed one rather than silently falling
+        // back to the local backend.
+        check_redis_url(
+            cfg.queue_provider == "redis",
+            "NOOK_QUEUE_PROVIDER",
+            cfg.redis_url.as_deref(),
+        )?;
+        check_redis_url(
+            cfg.cache_provider == "redis",
+            "NOOK_CACHE_PROVIDER",
+            cfg.redis_url.as_deref(),
+        )?;
         // An unknown mail provider is a misconfiguration worth stopping for,
         // rather than silently falling through to some default and dropping mail.
         if !crate::mailer::is_known_provider(&cfg.mail_provider) {
@@ -410,42 +421,45 @@ impl Config {
     }
 }
 
-/// A `redis` queue provider needs a present, **parseable** `NOOK_REDIS_URL`.
+/// A component selecting the `redis` provider needs a present, **parseable**
+/// `NOOK_REDIS_URL`.
 ///
-/// A malformed URL refuses boot rather than letting `queue::from_config`
-/// silently fall back to the database backend — a silent swap would split-brain
-/// work routing (some producers on redis, some on postgres) and contradicts the
-/// queue module's boot-refusal principle. `RedisClient::open` validates the URL
-/// syntactically without connecting, so this is a cheap, offline check.
-fn check_redis_queue(provider: &str, redis_url: Option<&str>) -> Result<()> {
-    if provider != "redis" {
+/// A malformed URL refuses boot rather than letting `from_config` silently fall
+/// back to the local backend — a silent swap would split-brain queue work
+/// routing (some producers on redis, some on postgres), or hand back a
+/// per-process cache someone asked to be shared, and contradicts the
+/// boot-refusal principle both modules follow. `RedisClient::open` validates the
+/// URL syntactically without connecting, so this is a cheap, offline check.
+/// `env_name` is the selecting env var, so the error names the right knob.
+fn check_redis_url(uses_redis: bool, env_name: &str, redis_url: Option<&str>) -> Result<()> {
+    if !uses_redis {
         return Ok(());
     }
     let Some(url) = redis_url else {
-        anyhow::bail!(
-            "NOOK_QUEUE_PROVIDER=redis requires NOOK_REDIS_URL to be set (the Redis connection)"
-        );
+        anyhow::bail!("{env_name}=redis requires NOOK_REDIS_URL to be set (the Redis connection)");
     };
     crate::redis_client::RedisClient::open(url)
-        .context("NOOK_QUEUE_PROVIDER=redis but NOOK_REDIS_URL is malformed")?;
+        .with_context(|| format!("{env_name}=redis but NOOK_REDIS_URL is malformed"))?;
     Ok(())
 }
 
 #[cfg(test)]
 mod queue_config_tests {
-    use super::check_redis_queue;
+    use super::check_redis_url;
 
     #[test]
     fn redis_provider_requires_a_present_parseable_url() {
-        // Non-redis providers never look at the URL.
-        assert!(check_redis_queue("database", None).is_ok());
-        assert!(check_redis_queue("database", Some("nonsense")).is_ok());
-        // redis: a missing URL refuses boot.
-        assert!(check_redis_queue("redis", None).is_err());
-        // redis: a MALFORMED URL refuses boot (the review defect) — never a
-        // silent fall-back to database.
-        assert!(check_redis_queue("redis", Some("not-a-redis-url")).is_err());
+        // A component that isn't on redis never looks at the URL.
+        assert!(check_redis_url(false, "NOOK_QUEUE_PROVIDER", None).is_ok());
+        assert!(check_redis_url(false, "NOOK_CACHE_PROVIDER", Some("nonsense")).is_ok());
+        // redis: a missing URL refuses boot — for either component.
+        assert!(check_redis_url(true, "NOOK_QUEUE_PROVIDER", None).is_err());
+        assert!(check_redis_url(true, "NOOK_CACHE_PROVIDER", None).is_err());
+        // redis: a MALFORMED URL refuses boot — never a silent fall-back.
+        assert!(check_redis_url(true, "NOOK_QUEUE_PROVIDER", Some("not-a-redis-url")).is_err());
+        assert!(check_redis_url(true, "NOOK_CACHE_PROVIDER", Some("not-a-redis-url")).is_err());
         // redis: a valid URL boots.
-        assert!(check_redis_queue("redis", Some("redis://redis:6379")).is_ok());
+        assert!(check_redis_url(true, "NOOK_QUEUE_PROVIDER", Some("redis://redis:6379")).is_ok());
+        assert!(check_redis_url(true, "NOOK_CACHE_PROVIDER", Some("redis://redis:6379")).is_ok());
     }
 }
