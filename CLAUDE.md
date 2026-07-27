@@ -2,7 +2,7 @@
 
 ## Dev loop — DOCKER FIRST
 
-- **Everything runs in containers.** `docker compose up -d` (or `./run.sh` for a clean recreate) starts postgres, control plane, node, and web. Source is bind-mounted; **cargo watch runs INSIDE the control-plane and node containers** and rebuilds on save. Vite hot-reloads in the web container. Never run the services host-native.
+- **Everything runs in containers.** `docker compose up -d` (or `./run.sh` for a clean recreate) starts postgres, control plane, node, the **operator node** (the shared loop machine — MAIN-125/140; its first build is slow, then layer-cached; skip it with `--scale operator-node=0`), and web. Source is bind-mounted; **cargo watch runs INSIDE the control-plane and node containers** and rebuilds on save. Vite hot-reloads in the web container. Never run the services host-native.
 - Edit → save → the container rebuilds automatically. Poll `http://localhost:8080/healthz` to know the control plane is back.
 - `./scripts/dev-server.sh logs` tails the Rust services; `restart` force-restarts the control plane.
 - **Dev email goes to Mailpit.** The dev control plane is wired `MAIL_PROVIDER=smtp` → `mailpit:1025`, so verification and invite emails land in a live inbox — read them at `http://localhost:8025`. Prod is unaffected (shipped default is `MAIL_PROVIDER` unset → `capture`, which delivers nothing).

@@ -26,6 +26,17 @@ else
   say "cargo/pnpm not found — skipping type-gen (committed generated types will be used)"
 fi
 
+# The operator node ships in the default stack now (MAIN-140); it joins with
+# NOOK_DEV_JOIN_TOKEN. An .env predating that token would leave it unable to
+# join, so warn loudly — but never stop the stack over it.
+dev_join_token="$(grep -E '^NOOK_DEV_JOIN_TOKEN=' .env 2>/dev/null | tail -1 | cut -d= -f2-)"
+if [ -z "$dev_join_token" ]; then
+  printf '\033[31m▲ NOOK_DEV_JOIN_TOKEN is unset/empty in .env\033[0m\n' >&2
+  echo "  The operator node will start but cannot join the control plane." >&2
+  echo "  Set NOOK_DEV_JOIN_TOKEN in .env (see .env.example) and re-run, or" >&2
+  echo "  run without it: docker compose up -d --scale operator-node=0" >&2
+fi
+
 say "Building and starting the stack..."
 docker compose up --build -d
 

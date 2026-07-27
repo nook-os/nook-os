@@ -29,17 +29,35 @@ export NOOK_SHARED_OPERATOR=${NOOK_SHARED_OPERATOR:-1}
 
 # Join is operator-driven (a deploy-provisioned token), never self-service.
 # Preferred: mount a TOML join config at /etc/nook/join.toml. Fallback: env.
+#
+# A missing token must NOT crash the machine that ships in every dev stack now
+# (MAIN-140): if there is no existing identity, no join.toml, and no token, say
+# LOUDLY and exactly why the operator can't join, then stop — the rest of the
+# stack is unaffected, and `docker compose logs operator-node` shows the reason.
 if [ ! -f "$HOME/.config/nook/node.toml" ]; then
   if [ -f /etc/nook/join.toml ]; then
     nook join --config /etc/nook/join.toml --workspace-root "$ROOT"
-  else
-    : "${NOOK_SERVER:?set NOOK_SERVER (or mount /etc/nook/join.toml)}"
-    : "${NOOK_JOIN_TOKEN:?set NOOK_JOIN_TOKEN (create one in the UI or POST /api/v1/nodes/join-tokens)}"
+  elif [ -n "${NOOK_JOIN_TOKEN:-}" ] && [ -n "${NOOK_SERVER:-}" ]; then
     nook join \
       --server "$NOOK_SERVER" \
       --token "$NOOK_JOIN_TOKEN" \
       --name "${NOOK_NODE_NAME:-operator-$(hostname)}" \
       --workspace-root "$ROOT"
+  else
+    echo "═══════════════════════════════════════════════════════════════════" >&2
+    echo "operator node: cannot join — NOT joining, container will stop." >&2
+    echo >&2
+    if [ -z "${NOOK_JOIN_TOKEN:-}" ]; then
+      echo "  NOOK_JOIN_TOKEN is empty. In the dev stack it comes from" >&2
+      echo "  NOOK_DEV_JOIN_TOKEN in your .env — set it (see .env.example) and" >&2
+      echo "  re-run ./run.sh, or mint a token in the UI / POST" >&2
+      echo "  /api/v1/nodes/join-tokens." >&2
+    fi
+    [ -z "${NOOK_SERVER:-}" ] && echo "  NOOK_SERVER is unset." >&2
+    echo >&2
+    echo "  The rest of the stack is running normally without the operator." >&2
+    echo "═══════════════════════════════════════════════════════════════════" >&2
+    exit 0
   fi
 fi
 
