@@ -245,6 +245,7 @@ pub fn new_auth_session(
 /// `new_session`, but `NOOK_JOB_ID` is injected into the session environment
 /// alongside `NOOK_SESSION_ID` so anything running inside — the `nook` CLI, the
 /// finish hook — can tie its output back to the loop job that owns it.
+#[allow(clippy::too_many_arguments)]
 pub fn new_job_session(
     name: &str,
     cwd: &str,

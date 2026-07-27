@@ -623,8 +623,12 @@ async fn handle_message(
             content,
         } => {
             if let Ok(id) = job_id.parse::<uuid::Uuid>() {
-                let _ = crate::services::jobs::append_transcript(
+                // Scoped to THIS node's own job (security): a node token cannot
+                // inject into another executor's transcript.
+                let _ = crate::services::jobs::transcript_from_node(
                     state,
+                    tenant,
+                    node_id,
                     nook_types::JobId(id),
                     &source,
                     &content,
@@ -640,9 +644,12 @@ async fn handle_message(
             message,
         } => {
             if let Ok(id) = job_id.parse::<uuid::Uuid>() {
-                let _ = crate::services::jobs::finish(
+                // Scoped to THIS node's own job (security): a node token cannot
+                // complete or fail another executor's job.
+                let _ = crate::services::jobs::finish_from_node(
                     state,
                     tenant,
+                    node_id,
                     nook_types::JobId(id),
                     ok,
                     &message,

@@ -646,3 +646,60 @@ async fn fail_with(state: &AppState, tenant: TenantId, id: JobId, reason: &str) 
     let _ = transition(state, tenant, id, "failed").await;
     Ok(())
 }
+
+/// Is `node` the executor the job was placed on? The gate for accepting a node's
+/// streamed transcript / finish (MAIN-161 security): a node token is scoped to
+/// its OWN runs, so it must not be able to inject into or terminate another
+/// executor's job. `false` for a missing job, an unplaced one, or a mismatch.
+async fn is_executor(
+    state: &AppState,
+    tenant: TenantId,
+    id: JobId,
+    node: NodeId,
+) -> ApiResult<bool> {
+    let exec: Option<Option<NodeId>> = sqlx::query_scalar(
+        "SELECT executor_node_id FROM loop_jobs WHERE id = $1 AND tenant_id = $2",
+    )
+    .bind(id)
+    .bind(tenant)
+    .fetch_optional(&state.db)
+    .await?;
+    Ok(matches!(exec, Some(Some(n)) if n == node))
+}
+
+/// Append a transcript line reported by a node — ONLY for a job that node is
+/// actually executing. A line for someone else's job (or a spoof) is dropped
+/// with a warning, never applied (MAIN-161 security).
+pub async fn transcript_from_node(
+    state: &AppState,
+    tenant: TenantId,
+    node: NodeId,
+    id: JobId,
+    source: &str,
+    content: &str,
+) -> ApiResult<()> {
+    if !is_executor(state, tenant, id, node).await? {
+        tracing::warn!(job = %id.0, node = %node.0, "node streamed transcript for a job it does not execute — dropped");
+        return Ok(());
+    }
+    append_transcript(state, id, source, content).await?;
+    Ok(())
+}
+
+/// Apply a node's `JobFinished` — ONLY for a job that node is actually
+/// executing, so a node token cannot complete or fail another executor's job
+/// (MAIN-161 security).
+pub async fn finish_from_node(
+    state: &AppState,
+    tenant: TenantId,
+    node: NodeId,
+    id: JobId,
+    ok: bool,
+    message: &str,
+) -> ApiResult<()> {
+    if !is_executor(state, tenant, id, node).await? {
+        tracing::warn!(job = %id.0, node = %node.0, "node reported finish for a job it does not execute — dropped");
+        return Ok(());
+    }
+    finish(state, tenant, id, ok, message).await
+}

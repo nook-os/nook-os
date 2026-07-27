@@ -7,7 +7,6 @@
 //! Needs Postgres: `DATABASE_URL` (`NOOK_REQUIRE_DB=1` in the suite).
 
 use nook_control::services::jobs;
-use nook_control::state::AppState;
 use nook_control::ws::registry::NodeHandle;
 use nook_types::*;
 use sqlx::PgPool;
@@ -388,6 +387,49 @@ async fn resolve_repo_prefers_the_executor_then_falls_back() {
         .await
         .expect("resolve");
     assert!(fallback.is_some(), "falls back to another node's remote");
+
+    bed.teardown().await;
+}
+
+#[tokio::test]
+async fn a_node_cannot_touch_a_job_it_does_not_execute() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let tenant = bed.tenant("lje").await;
+    let target = task_with_key(&bed.pool, tenant, "ACME", 12).await;
+    let runner = node(&bed.pool, tenant).await;
+    let intruder = node(&bed.pool, tenant).await;
+    let j = job(&bed.pool, tenant, target, None, "running", Some(runner)).await;
+    let state = bed.app_state().await;
+
+    // An intruder node's transcript + finish are dropped (security): a node token
+    // is scoped to its own runs.
+    jobs::transcript_from_node(&state, tenant, intruder, j, "agent", "evil injection")
+        .await
+        .expect("call returns ok");
+    jobs::finish_from_node(&state, tenant, intruder, j, false, "spoofed kill")
+        .await
+        .expect("call returns ok");
+    assert_eq!(
+        load(&bed.pool, j).await.state,
+        "running",
+        "intruder cannot end it"
+    );
+    assert!(
+        transcript_text(&bed.pool, j).await.is_empty(),
+        "intruder cannot inject a transcript line"
+    );
+
+    // The actual executor's transcript + finish are applied.
+    jobs::transcript_from_node(&state, tenant, runner, j, "agent", "real output")
+        .await
+        .expect("executor transcript");
+    assert!(transcript_text(&bed.pool, j).await.contains("real output"));
+    jobs::finish_from_node(&state, tenant, runner, j, true, "")
+        .await
+        .expect("executor finish");
+    assert_eq!(load(&bed.pool, j).await.state, "completed");
 
     bed.teardown().await;
 }

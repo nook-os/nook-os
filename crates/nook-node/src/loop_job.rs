@@ -431,8 +431,9 @@ fn drive_session(
         let ok = exit_is_ok(status);
         let tail = tail_str.trim_end();
         let reason = match status {
-            Some(code) if code != 0 => format!("agent exited with status {code}"),
-            _ => "loop session ended".to_string(),
+            Some(0) => "loop session ended".to_string(),
+            Some(code) => format!("agent exited with status {code}"),
+            None => "session ended abnormally — no exit status recorded (killed)".to_string(),
         };
         let message = if tail.is_empty() {
             reason
@@ -451,11 +452,13 @@ fn read_exit_status(path: &Path) -> Option<i32> {
     raw?.split_whitespace().next()?.parse::<i32>().ok()
 }
 
-/// A job succeeded unless the runtime wrote a non-zero exit status (AC-4). An
-/// absent status is not proof of failure (the timeout and node-disconnect paths
-/// cover the crashes that leave none), so it counts as a clean end.
+/// A job succeeded only if the launched shell recorded a **zero** exit status
+/// (AC-4). The shell writes `$?` on ANY normal end of the runtime — zero or not —
+/// so an ABSENT status is not "unknown", it is abnormal death: the session was
+/// killed before the shell could write it (external `tmux kill`, OOM, the node
+/// tearing the pane down). That is a failure, not a clean end.
 fn exit_is_ok(status: Option<i32>) -> bool {
-    matches!(status, None | Some(0))
+    matches!(status, Some(0))
 }
 
 #[cfg(test)]
@@ -464,13 +467,14 @@ mod tests {
 
     #[test]
     fn exit_status_decides_success_honestly() {
-        // A written non-zero code is a failure (AC-4)…
+        // Only a recorded zero is success…
+        assert!(exit_is_ok(Some(0)));
+        // …a non-zero code is a failure…
         assert!(!exit_is_ok(Some(1)));
         assert!(!exit_is_ok(Some(137)));
-        // …zero is success, and an absent/unknowable status is not proof of
-        // failure (killed / never written — covered by timeout & disconnect).
-        assert!(exit_is_ok(Some(0)));
-        assert!(exit_is_ok(None));
+        // …and an ABSENT status is abnormal death (the shell always writes $? on
+        // a normal end), so it is a failure too — not a false completion.
+        assert!(!exit_is_ok(None));
     }
 
     #[test]
