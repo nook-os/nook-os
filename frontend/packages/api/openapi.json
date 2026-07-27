@@ -1194,6 +1194,126 @@
         }
       }
     },
+    "/api/v1/jobs": {
+      "post": {
+        "tags": [
+          "crate::routes::jobs"
+        ],
+        "operationId": "job_create",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateLoopJobRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LoopJobDetail"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/jobs/{id}": {
+      "get": {
+        "tags": [
+          "crate::routes::jobs"
+        ],
+        "operationId": "job_get",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LoopJobDetail"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/jobs/{id}/cancel": {
+      "post": {
+        "tags": [
+          "crate::routes::jobs"
+        ],
+        "operationId": "job_cancel",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LoopJob"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/jobs/{id}/rerun": {
+      "post": {
+        "tags": [
+          "crate::routes::jobs"
+        ],
+        "operationId": "job_rerun",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LoopJobDetail"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/labels": {
       "get": {
         "tags": [
@@ -7716,6 +7836,22 @@
           }
         }
       },
+      "CreateLoopJobRequest": {
+        "type": "object",
+        "description": "Open a job against a ticket or epic. `decompose` requires the target to be a\n`type='epic'` task; `spec` targets any task. The workspace is derived from\nthe target, and `requested_by` from the caller.",
+        "required": [
+          "kind",
+          "target_task_id"
+        ],
+        "properties": {
+          "kind": {
+            "type": "string"
+          },
+          "target_task_id": {
+            "$ref": "#/components/schemas/TaskId"
+          }
+        }
+      },
       "CreateNoteRequest": {
         "type": "object",
         "required": [
@@ -8796,6 +8932,14 @@
           }
         }
       },
+      "JobId": {
+        "type": "string",
+        "format": "uuid"
+      },
+      "JobTranscriptId": {
+        "type": "string",
+        "format": "uuid"
+      },
       "JoinRequest": {
         "type": "object",
         "description": "Sent by `nook join` (unauthenticated; the join token IS the credential).",
@@ -8933,6 +9077,135 @@
           },
           "username": {
             "type": "string"
+          }
+        }
+      },
+      "LoopJob": {
+        "type": "object",
+        "description": "A loop job's lifecycle position. `queued` on create; `completed`, `failed`,\nand `canceled` are terminal. The service layer enforces which transitions\nare legal — the wire type just carries the current value.",
+        "required": [
+          "id",
+          "tenant_id",
+          "kind",
+          "target_task_id",
+          "requested_by",
+          "state",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "executor_node_id": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/NodeId",
+                "description": "The node that claimed the job (MAIN-160); `None` until then."
+              }
+            ]
+          },
+          "id": {
+            "$ref": "#/components/schemas/JobId"
+          },
+          "kind": {
+            "type": "string",
+            "description": "`spec` (fill in a ticket) or `decompose` (break down an epic)."
+          },
+          "predecessor_job_id": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/JobId",
+                "description": "The job this one re-runs (AC-5); `None` for an original."
+              }
+            ]
+          },
+          "requested_by": {
+            "$ref": "#/components/schemas/UserId"
+          },
+          "state": {
+            "type": "string",
+            "description": "One of `queued|claimed|running|waiting_on_human|completed|failed|canceled`."
+          },
+          "target_task_id": {
+            "$ref": "#/components/schemas/TaskId",
+            "description": "The ticket a spec job targets, or the epic a decompose job breaks down."
+          },
+          "tenant_id": {
+            "$ref": "#/components/schemas/TenantId"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "workspace_id": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/WorkspaceId"
+              }
+            ]
+          }
+        }
+      },
+      "LoopJobDetail": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/LoopJob"
+          },
+          {
+            "type": "object",
+            "required": [
+              "transcript"
+            ],
+            "properties": {
+              "transcript": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/LoopJobTranscriptEntry"
+                }
+              }
+            }
+          }
+        ],
+        "description": "A job with its transcript — the read model behind `GET /api/v1/jobs/{id}`."
+      },
+      "LoopJobTranscriptEntry": {
+        "type": "object",
+        "description": "One append-only transcript line on a job — the conversation/output captured\nwhere the work lives. Written by the executor (MAIN-161); read here.",
+        "required": [
+          "id",
+          "job_id",
+          "source",
+          "content",
+          "at"
+        ],
+        "properties": {
+          "at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "content": {
+            "type": "string"
+          },
+          "id": {
+            "$ref": "#/components/schemas/JobTranscriptId"
+          },
+          "job_id": {
+            "$ref": "#/components/schemas/JobId"
+          },
+          "source": {
+            "type": "string",
+            "description": "`system` | `agent` | `human` — where the line came from."
           }
         }
       },

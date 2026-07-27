@@ -8,6 +8,7 @@ pub mod feedback;
 pub mod gitops;
 pub mod health;
 pub mod invites;
+pub mod jobs;
 pub mod join;
 pub mod labels;
 pub mod local_auth;
@@ -332,6 +333,11 @@ pub fn build_router(state: AppState) -> Router {
         .route("/tasks/{id}/prune-worktree", post(taskwork::prune_worktree))
         .route("/tasks/{id}/move", post(taskwork::move_task))
         .route("/tasks/bulk", post(bulk::bulk_tasks))
+        // Loop jobs (MAIN-127): detached spec/decompose work riding the queue.
+        .route("/jobs", post(jobs::create))
+        .route("/jobs/{id}", get(jobs::get))
+        .route("/jobs/{id}/cancel", post(jobs::cancel))
+        .route("/jobs/{id}/rerun", post(jobs::rerun))
         .route("/sessions", get(sessions::list).post(sessions::create))
         // Before `/sessions/{id}` so the literal path is not captured as an id.
         .route("/sessions/agent-states", get(sessions::agent_states))

@@ -63,6 +63,8 @@ id_type!(
     GitCredentialId,
     UserNoteId,
     UserNoteFolderId,
+    JobId,
+    JobTranscriptId,
 );
 
 // ── Tenancy ──────────────────────────────────────────────────────────────────
@@ -2085,6 +2087,65 @@ pub struct GitCredential {
     pub kind: String,
     pub public_key: String,
     pub created_at: DateTime<Utc>,
+}
+
+// ── Loop jobs (MAIN-127) ─────────────────────────────────────────────────────
+//
+// A durable unit of detached loop work — a spec interview or an epic
+// decomposition — that rides the generic work queue. This slice is the record
+// and its lifecycle only; executor selection, node execution and interaction
+// bridging are later tickets in the chain.
+
+/// A loop job's lifecycle position. `queued` on create; `completed`, `failed`,
+/// and `canceled` are terminal. The service layer enforces which transitions
+/// are legal — the wire type just carries the current value.
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
+pub struct LoopJob {
+    pub id: JobId,
+    pub tenant_id: TenantId,
+    /// `spec` (fill in a ticket) or `decompose` (break down an epic).
+    pub kind: String,
+    /// The ticket a spec job targets, or the epic a decompose job breaks down.
+    pub target_task_id: TaskId,
+    pub workspace_id: Option<WorkspaceId>,
+    pub requested_by: UserId,
+    /// One of `queued|claimed|running|waiting_on_human|completed|failed|canceled`.
+    pub state: String,
+    /// The node that claimed the job (MAIN-160); `None` until then.
+    pub executor_node_id: Option<NodeId>,
+    /// The job this one re-runs (AC-5); `None` for an original.
+    pub predecessor_job_id: Option<JobId>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// One append-only transcript line on a job — the conversation/output captured
+/// where the work lives. Written by the executor (MAIN-161); read here.
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
+pub struct LoopJobTranscriptEntry {
+    pub id: JobTranscriptId,
+    pub job_id: JobId,
+    /// `system` | `agent` | `human` — where the line came from.
+    pub source: String,
+    pub content: String,
+    pub at: DateTime<Utc>,
+}
+
+/// A job with its transcript — the read model behind `GET /api/v1/jobs/{id}`.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct LoopJobDetail {
+    #[serde(flatten)]
+    pub job: LoopJob,
+    pub transcript: Vec<LoopJobTranscriptEntry>,
+}
+
+/// Open a job against a ticket or epic. `decompose` requires the target to be a
+/// `type='epic'` task; `spec` targets any task. The workspace is derived from
+/// the target, and `requested_by` from the caller.
+#[derive(Debug, Clone, Deserialize, ToSchema)]
+pub struct CreateLoopJobRequest {
+    pub kind: String,
+    pub target_task_id: TaskId,
 }
 
 #[derive(Debug, Clone, Deserialize, ToSchema)]

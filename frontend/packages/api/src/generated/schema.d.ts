@@ -584,6 +584,70 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/jobs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["job_create"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/jobs/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["job_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/jobs/{id}/cancel": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["job_cancel"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/jobs/{id}/rerun": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["job_rerun"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/labels": {
         parameters: {
             query?: never;
@@ -3324,6 +3388,15 @@ export interface components {
             color?: string | null;
             name: string;
         };
+        /**
+         * @description Open a job against a ticket or epic. `decompose` requires the target to be a
+         *     `type='epic'` task; `spec` targets any task. The workspace is derived from
+         *     the target, and `requested_by` from the caller.
+         */
+        CreateLoopJobRequest: {
+            kind: string;
+            target_task_id: components["schemas"]["TaskId"];
+        };
         CreateNoteRequest: {
             content_md: string;
             kind?: string | null;
@@ -3728,6 +3801,10 @@ export interface components {
             /** @description The token is pending and unexpired — the landing may show the invite. */
             valid: boolean;
         };
+        /** Format: uuid */
+        JobId: string;
+        /** Format: uuid */
+        JobTranscriptId: string;
         /** @description Sent by `nook join` (unauthenticated; the join token IS the credential). */
         JoinRequest: {
             hostname: string;
@@ -3772,6 +3849,46 @@ export interface components {
             email?: string | null;
             password: string;
             username: string;
+        };
+        /**
+         * @description A loop job's lifecycle position. `queued` on create; `completed`, `failed`,
+         *     and `canceled` are terminal. The service layer enforces which transitions
+         *     are legal — the wire type just carries the current value.
+         */
+        LoopJob: {
+            /** Format: date-time */
+            created_at: string;
+            executor_node_id?: null | components["schemas"]["NodeId"];
+            id: components["schemas"]["JobId"];
+            /** @description `spec` (fill in a ticket) or `decompose` (break down an epic). */
+            kind: string;
+            predecessor_job_id?: null | components["schemas"]["JobId"];
+            requested_by: components["schemas"]["UserId"];
+            /** @description One of `queued|claimed|running|waiting_on_human|completed|failed|canceled`. */
+            state: string;
+            /** @description The ticket a spec job targets, or the epic a decompose job breaks down. */
+            target_task_id: components["schemas"]["TaskId"];
+            tenant_id: components["schemas"]["TenantId"];
+            /** Format: date-time */
+            updated_at: string;
+            workspace_id?: null | components["schemas"]["WorkspaceId"];
+        };
+        /** @description A job with its transcript — the read model behind `GET /api/v1/jobs/{id}`. */
+        LoopJobDetail: components["schemas"]["LoopJob"] & {
+            transcript: components["schemas"]["LoopJobTranscriptEntry"][];
+        };
+        /**
+         * @description One append-only transcript line on a job — the conversation/output captured
+         *     where the work lives. Written by the executor (MAIN-161); read here.
+         */
+        LoopJobTranscriptEntry: {
+            /** Format: date-time */
+            at: string;
+            content: string;
+            id: components["schemas"]["JobTranscriptId"];
+            job_id: components["schemas"]["JobId"];
+            /** @description `system` | `agent` | `human` — where the line came from. */
+            source: string;
         };
         /**
          * @description A piece of centrally-managed fleet content — the managed `nookos` skill or
@@ -6169,6 +6286,92 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+        };
+    };
+    job_create: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateLoopJobRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LoopJobDetail"];
+                };
+            };
+        };
+    };
+    job_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LoopJobDetail"];
+                };
+            };
+        };
+    };
+    job_cancel: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LoopJob"];
+                };
+            };
+        };
+    };
+    job_rerun: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LoopJobDetail"];
+                };
             };
         };
     };

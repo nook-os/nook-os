@@ -4,6 +4,7 @@
 pub mod core;
 pub mod discovery;
 pub mod identity;
+pub mod jobs;
 pub mod kanban;
 pub mod local_auth;
 pub mod notify;

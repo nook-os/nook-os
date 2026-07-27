@@ -158,6 +158,16 @@ pub fn catalog() -> Vec<nook_types::NotificationKind> {
             "Hooks install failed",
             "A node could not apply the managed hook set.",
         ),
+        k(
+            "job.created",
+            "Loop job created",
+            "A spec or decompose job was queued.",
+        ),
+        k(
+            "job.state_changed",
+            "Loop job updated",
+            "A loop job changed state (running, waiting, finished, or failed).",
+        ),
     ]
 }
 
@@ -262,6 +272,29 @@ pub fn notable(base_url: &str, event: &Event) -> Option<crate::services::notify:
         "hooks.install_failed" => Draft::new("A node could not apply the managed hooks")
             .level("error")
             .body(text("error").unwrap_or_default().to_string()),
+        // A loop job was queued (MAIN-127 AC-4). Info level — the deep link at
+        // the tail points at the target card via the payload's `task_id`.
+        "job.created" => Draft::new("Loop job created").level("info").body(format!(
+            "A {} job was queued",
+            text("kind").unwrap_or("loop")
+        )),
+        // A loop job changed state. Level tracks the state: a failure is an
+        // error, a job now waiting on a human is a warning, completion a
+        // success, everything else informational.
+        "job.state_changed" => {
+            let state = text("state").unwrap_or_default();
+            let level = match state {
+                "failed" => "error",
+                "waiting_on_human" => "warning",
+                "completed" => "success",
+                _ => "info",
+            };
+            Draft::new("Loop job updated").level(level).body(format!(
+                "A {} job is now {}",
+                text("kind").unwrap_or("loop"),
+                if state.is_empty() { "updated" } else { state }
+            ))
+        }
         // Unreachable: the catalog gate above rejects any kind not phrased here.
         _ => return None,
     };
