@@ -10029,6 +10029,13 @@
           "updated_at": {
             "type": "string",
             "format": "date-time"
+          },
+          "updated_by": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Display name of whoever last taught it, resolved for the fleet-manager\npanel (MAIN-106). `None` when the user row is gone (e.g. left the tenant)."
           }
         }
       },

@@ -16,6 +16,7 @@ use axum::Json;
 use nook_types::*;
 use sha2::{Digest, Sha256};
 
+use crate::auth::perm::{Permission, Scope};
 use crate::auth::AuthCtx;
 use crate::error::{ApiError, ApiResult};
 use crate::state::AppState;
@@ -43,8 +44,11 @@ pub async fn list(
     auth: AuthCtx,
 ) -> ApiResult<Json<Vec<SkillSummary>>> {
     let rows: Vec<SkillSummary> = sqlx::query_as(
-        "SELECT id, name, sha256, length(content)::bigint AS size, updated_at
-         FROM skills WHERE tenant_id = $1 ORDER BY name",
+        "SELECT s.id, s.name, s.sha256, length(s.content)::bigint AS size, s.updated_at,
+                u.display_name AS updated_by
+         FROM skills s
+         LEFT JOIN users u ON u.id = s.updated_by
+         WHERE s.tenant_id = $1 ORDER BY s.name",
     )
     .bind(auth.tenant_id)
     .fetch_all(&state.db)
@@ -83,10 +87,18 @@ pub async fn teach(
     auth: AuthCtx,
     Json(req): Json<TeachRequest>,
 ) -> ApiResult<Json<TeachResponse>> {
-    // Writing files onto every machine in the fleet is an act on the fleet. A
-    // node token authenticates one machine reporting about itself, and must
-    // never be able to reprogram its peers.
-    auth.require_user()?;
+    // Writing files onto every machine in the fleet is an act on the fleet, so
+    // it takes `node.manage` on this tenant (MAIN-106 AC-4) — not merely being
+    // signed in. `require` refuses a node token first (a machine reporting about
+    // itself must never reprogram its peers), then checks the grant, so a
+    // manager's user token passes exactly as the CLI always did and a plain
+    // member now gets the same 403 the panel surfaces inline.
+    auth.require(
+        &state,
+        Permission::NodeManage,
+        Scope::Tenant(auth.tenant_id),
+    )
+    .await?;
 
     if req.content.trim().is_empty() {
         return Err(ApiError::BadRequest("that skill file is empty".into()));
@@ -124,7 +136,8 @@ pub async fn teach(
                sha256 = EXCLUDED.sha256,
                updated_at = now(),
                updated_by = EXCLUDED.updated_by
-         RETURNING id, name, sha256, length(content)::bigint AS size, updated_at",
+         RETURNING id, name, sha256, length(content)::bigint AS size, updated_at,
+           (SELECT display_name FROM users WHERE id = $6) AS updated_by",
     )
     .bind(uuid::Uuid::now_v7())
     .bind(auth.tenant_id)
@@ -176,7 +189,14 @@ pub async fn unteach(
     auth: AuthCtx,
     Path(name): Path<String>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    auth.require_user()?;
+    // Removing a skill from every machine is a fleet mutation like teaching one:
+    // `node.manage` on this tenant (MAIN-106 AC-4), node tokens refused.
+    auth.require(
+        &state,
+        Permission::NodeManage,
+        Scope::Tenant(auth.tenant_id),
+    )
+    .await?;
     let deleted = sqlx::query("DELETE FROM skills WHERE tenant_id = $1 AND name = $2")
         .bind(auth.tenant_id)
         .bind(&name)

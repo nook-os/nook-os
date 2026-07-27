@@ -4170,6 +4170,11 @@ export interface components {
             size: number;
             /** Format: date-time */
             updated_at: string;
+            /**
+             * @description Display name of whoever last taught it, resolved for the fleet-manager
+             *     panel (MAIN-106). `None` when the user row is gone (e.g. left the tenant).
+             */
+            updated_by?: string | null;
         };
         StartWorkRequest: {
             branch?: string | null;

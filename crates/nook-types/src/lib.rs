@@ -460,6 +460,10 @@ pub struct SkillSummary {
     /// Bytes, so the UI can show a size without holding the content.
     pub size: i64,
     pub updated_at: DateTime<Utc>,
+    /// Display name of whoever last taught it, resolved for the fleet-manager
+    /// panel (MAIN-106). `None` when the user row is gone (e.g. left the tenant).
+    #[serde(default)]
+    pub updated_by: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]

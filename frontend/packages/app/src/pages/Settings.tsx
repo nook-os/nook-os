@@ -12,13 +12,14 @@ import {
   DataList,
   DEFAULT_THEME,
   Empty,
+  Markdown,
   Panel,
   Pill,
   SearchInput,
   type DataColumn,
   type ThemeTokens,
 } from "@nookos/ui";
-import { KeyRound, Trash2 } from "lucide-react";
+import { Eye, KeyRound, Pencil, Plus, Trash2 } from "lucide-react";
 import { requireAppPassword, useAppPassword, whenSet } from "../apppassword";
 import { enrollPasskey, passkeysSupported } from "../passkey";
 import { askConfirm, askText, notify } from "../dialogs";
@@ -474,6 +475,217 @@ function EmailVerification() {
   );
 }
 
+/** The message a fan-out produced, phrased honestly: who got it now, and who
+ *  was offline (offline is normal — those converge on reconnect). */
+function fanoutText(r: { delivered_to?: string[]; offline?: string[] } | null): string {
+  const delivered = r?.delivered_to ?? [];
+  const offline = r?.offline ?? [];
+  const lines: string[] = [];
+  lines.push(
+    delivered.length
+      ? `Delivered to: ${delivered.join(", ")}`
+      : "No connected machines received it yet.",
+  );
+  if (offline.length) {
+    lines.push(
+      `Offline (they converge on reconnect): ${offline.join(", ")}`,
+    );
+  }
+  return lines.join("\n");
+}
+
+/** The server's error message, or a stringified fallback. NookOS ApiError
+ *  serialises as `{ error }`. */
+function errText(error: unknown): string {
+  if (error && typeof error === "object") {
+    const e = error as { error?: unknown; message?: unknown };
+    if (typeof e.error === "string") return e.error;
+    if (typeof e.message === "string") return e.message;
+  }
+  return JSON.stringify(error);
+}
+
+/** Taught skills — the one user-mutable skill surface (the managed set is
+ *  immutable and invisible here). List, view, edit, create, forget, over the
+ *  existing teach/unteach endpoints (MAIN-106). */
+function TaughtSkillsSettings() {
+  const queryClient = useQueryClient();
+  const { data: skills } = useQuery({
+    queryKey: ["skills"],
+    queryFn: async () => (await api.GET("/api/v1/skills")).data ?? [],
+  });
+  // Which skill's rendered body is expanded inline (the markdown-stack view).
+  const [open, setOpen] = React.useState<string | null>(null);
+  const { data: full } = useQuery({
+    queryKey: ["skill", open],
+    enabled: !!open,
+    queryFn: async () =>
+      (
+        await api.GET("/api/v1/skills/{name}", {
+          params: { path: { name: open as string } },
+        })
+      ).data ?? null,
+  });
+
+  const refresh = () => {
+    queryClient.invalidateQueries({ queryKey: ["skills"] });
+    if (open) queryClient.invalidateQueries({ queryKey: ["skill", open] });
+  };
+
+  // Create and update are the same teach upsert (AC-5). Returns whether it stuck.
+  const teach = async (name: string | null, content: string) => {
+    const { data, error } = await api.POST("/api/v1/skills", {
+      body: { name: name ?? undefined, content },
+    });
+    if (error || !data) {
+      await notify("Couldn't save that skill", errText(error));
+      return false;
+    }
+    refresh();
+    await notify(`Saved ${data.skill.name}`, fanoutText(data));
+    return true;
+  };
+
+  const create = async () => {
+    const name = await askText({
+      title: "New skill",
+      description: "A name (letters, numbers, dot, dash, underscore), or leave blank to read it from the file's frontmatter.",
+      label: "name",
+      placeholder: "code-review",
+      confirmLabel: "next",
+    });
+    if (name === null) return;
+    const content = await askText({
+      title: name ? `Content for ${name}` : "Skill content",
+      label: "SKILL.md",
+      multiline: true,
+      placeholder: "---\nname: code-review\ndescription: …\n---\n\n# …",
+      confirmLabel: "teach the fleet",
+    });
+    if (content === null || !content.trim()) return;
+    await teach(name.trim() || null, content);
+  };
+
+  const edit = async (name: string) => {
+    const cur = (
+      await api.GET("/api/v1/skills/{name}", { params: { path: { name } } })
+    ).data;
+    if (!cur) {
+      await notify("Couldn't open that skill", "It may have just been removed.");
+      return;
+    }
+    const content = await askText({
+      title: `Edit ${name}`,
+      label: "SKILL.md",
+      multiline: true,
+      value: cur.content,
+      confirmLabel: "save & re-teach",
+    });
+    if (content === null || content === cur.content) return;
+    await teach(name, content);
+  };
+
+  const forget = async (name: string) => {
+    const ok = await askConfirm({
+      title: `Forget ${name}?`,
+      description:
+        "Removes it from the store and every connected machine; offline machines converge by omission.",
+      confirmLabel: "forget",
+      danger: true,
+    });
+    if (!ok) return;
+    const { data, error } = await api.DELETE("/api/v1/skills/{name}", {
+      params: { path: { name } },
+    });
+    if (error) {
+      await notify("Couldn't forget that skill", errText(error));
+      return;
+    }
+    if (open === name) setOpen(null);
+    refresh();
+    await notify(
+      `Forgot ${name}`,
+      fanoutText(data as { delivered_to?: string[]; offline?: string[] } | null),
+    );
+  };
+
+  return (
+    <Panel
+      title="Taught skills"
+      actions={
+        <button className="btn primary small" onClick={create}>
+          <Plus size={12} /> new skill
+        </button>
+      }
+    >
+      {(skills ?? []).length === 0 ? (
+        <Empty>
+          Nothing taught yet. Teach one here, or from a machine with{" "}
+          <span className="mono">nook teach &lt;path&gt;</span>.
+        </Empty>
+      ) : (
+        <table className="nook-table">
+          <thead>
+            <tr>
+              <th>Skill</th>
+              <th>Size</th>
+              <th>Updated</th>
+              <th>By</th>
+              <th />
+            </tr>
+          </thead>
+          <tbody>
+            {(skills ?? []).map((s) => (
+              <React.Fragment key={s.id}>
+                <tr>
+                  <td className="bright mono">{s.name}</td>
+                  <td className="muted">{Math.max(1, Math.round(s.size / 1024))} KiB</td>
+                  <td className="muted">
+                    {new Date(s.updated_at).toLocaleDateString()}
+                  </td>
+                  <td className="muted">{s.updated_by ?? "—"}</td>
+                  <td style={{ textAlign: "right", whiteSpace: "nowrap" }}>
+                    <span style={{ display: "inline-flex", gap: 6, justifyContent: "flex-end" }}>
+                      <button
+                        className="btn small"
+                        title={open === s.name ? "hide" : "view"}
+                        onClick={() => setOpen(open === s.name ? null : s.name)}
+                      >
+                        <Eye size={12} /> {open === s.name ? "hide" : "view"}
+                      </button>
+                      <button className="btn small" title="edit" onClick={() => edit(s.name)}>
+                        <Pencil size={12} /> edit
+                      </button>
+                      <button className="btn small" title="forget" onClick={() => forget(s.name)}>
+                        <Trash2 size={12} /> forget
+                      </button>
+                    </span>
+                  </td>
+                </tr>
+                {open === s.name && (
+                  <tr>
+                    <td colSpan={5}>
+                      {full ? (
+                        <div style={{ padding: 8, maxHeight: 360, overflow: "auto" }}>
+                          <Markdown src={full.content} />
+                        </div>
+                      ) : (
+                        <div className="muted" style={{ padding: 8 }}>
+                          loading…
+                        </div>
+                      )}
+                    </td>
+                  </tr>
+                )}
+              </React.Fragment>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </Panel>
+  );
+}
+
 export function SettingsPage() {
   const queryClient = useQueryClient();
   const { data: themes } = useQuery({
@@ -545,6 +757,8 @@ export function SettingsPage() {
       <Panel title="Notifications">
         <NotificationSettings />
       </Panel>
+
+      <TaughtSkillsSettings />
 
       <OrgVisibility />
 
