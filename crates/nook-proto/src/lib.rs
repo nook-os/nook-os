@@ -126,6 +126,22 @@ pub enum NodeToControl {
         path: Option<String>,
         message: String,
     },
+    /// A chunk of a running loop job's output, appended to its transcript
+    /// (MAIN-161). `source` is `agent` for session output, `system` for the
+    /// node's own lifecycle notes. Never interpreted — recorded verbatim (NG-2).
+    JobTranscript {
+        job_id: String,
+        source: String,
+        content: String,
+    },
+    /// A loop job's session ended (MAIN-161). `ok=false` means it failed —
+    /// non-zero exit, a timeout, or a launch that never got going — and
+    /// `message` carries the reason / transcript tail for crash honesty (AC-4).
+    JobFinished {
+        job_id: String,
+        ok: bool,
+        message: String,
+    },
     Pong,
 }
 
@@ -359,6 +375,23 @@ pub enum ControlToNode {
     InteractionAnswer {
         request_id: String,
         answer: String,
+    },
+    /// Run a loop job on this node (MAIN-161): materialize the workspace from the
+    /// clone cache, make a per-job worktree, spawn the matching skill session
+    /// (`nook-spec`/`nook-epic`) pointed at `target_task_key` with `NOOK_JOB_ID`
+    /// set, stream output back as `JobTranscript`, and report `JobFinished`.
+    /// Everything the node needs is on the message — no DB round-trip.
+    RunLoopJob {
+        job_id: String,
+        /// `spec` | `decompose` — selects the skill.
+        kind: String,
+        /// The board key of the ticket the skill points at (e.g. `MAIN-42`).
+        target_task_key: String,
+        /// The clonable git remote, resolved by the control plane from the
+        /// executor's `node_workspaces` row.
+        repo_url: String,
+        /// The branch the per-job worktree is based on.
+        branch: String,
     },
     Ping,
 }

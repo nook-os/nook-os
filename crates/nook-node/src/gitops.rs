@@ -19,7 +19,11 @@ fn fail(message: impl Into<String>) -> OpOutcome {
     }
 }
 
-fn run_git(args: &[&str], cwd: Option<&Path>, ssh_key: Option<&Path>) -> Result<String, String> {
+pub(crate) fn run_git(
+    args: &[&str],
+    cwd: Option<&Path>,
+    ssh_key: Option<&Path>,
+) -> Result<String, String> {
     let mut cmd = Command::new("git");
     cmd.args(args);
     if let Some(cwd) = cwd {

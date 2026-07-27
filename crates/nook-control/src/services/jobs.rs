@@ -479,3 +479,227 @@ async fn set_queued_reason(state: &AppState, job_id: JobId, reason: &str) -> Api
         .await
         .map_err(Into::into)
 }
+
+// ── Node execution dispatch (MAIN-161) ───────────────────────────────────────
+
+/// The Claude Code skill each job kind runs. `decompose` breaks an epic down
+/// (`nook-epic`); everything else fills a ticket in (`nook-spec`).
+pub fn skill_for_kind(kind: &str) -> &'static str {
+    match kind {
+        "decompose" => "nook-epic",
+        _ => "nook-spec",
+    }
+}
+
+/// The target ticket's board key (e.g. `MAIN-42`) — what the skill is pointed
+/// at. Empty string if the row has vanished (the caller fails the job).
+async fn task_key(state: &AppState, tenant: TenantId, task_id: TaskId) -> ApiResult<String> {
+    let key: Option<String> = sqlx::query_scalar(
+        "SELECT b.key || '-' || t.number
+         FROM tasks t JOIN boards b ON b.id = t.board_id
+         WHERE t.id = $1 AND t.tenant_id = $2",
+    )
+    .bind(task_id)
+    .bind(tenant)
+    .fetch_optional(&state.db)
+    .await?;
+    Ok(key.unwrap_or_default())
+}
+
+/// Resolve a job's workspace to a clonable git remote + branch, preferring the
+/// executor node's own `node_workspaces` row and falling back to any node's row
+/// for that workspace. `None` when no row carries a usable remote — the node
+/// cannot derive it from a `workspace_id` alone.
+pub async fn resolve_repo(
+    state: &AppState,
+    workspace_id: WorkspaceId,
+    node: NodeId,
+) -> ApiResult<Option<(String, String)>> {
+    let row: Option<(Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT git_remote_url, git_branch FROM node_workspaces
+         WHERE workspace_id = $1 AND node_id = $2",
+    )
+    .bind(workspace_id)
+    .bind(node)
+    .fetch_optional(&state.db)
+    .await?;
+    let row = match row {
+        Some(r @ (Some(_), _)) => Some(r),
+        // The executor has no usable row — take any node's remote for the ws.
+        _ => {
+            sqlx::query_as(
+                "SELECT git_remote_url, git_branch FROM node_workspaces
+             WHERE workspace_id = $1 AND git_remote_url IS NOT NULL
+             LIMIT 1",
+            )
+            .bind(workspace_id)
+            .fetch_optional(&state.db)
+            .await?
+        }
+    };
+    Ok(
+        row.and_then(|(url, branch)| {
+            url.map(|u| (u, branch.unwrap_or_else(|| "main".to_string())))
+        }),
+    )
+}
+
+/// Hand a freshly-claimed job to its executor node to run (AC-1/AC-2), moving it
+/// `claimed`→`running`. Called by the dispatch consumer right after a successful
+/// claim. Fails the job honestly (AC-4) when there is nowhere to run it: no
+/// workspace, no known remote, or the node dropped between claim and dispatch.
+pub async fn dispatch_to_node(state: &AppState, tenant: TenantId, job: &LoopJob) -> ApiResult<()> {
+    let Some(node) = job.executor_node_id else {
+        return Ok(());
+    };
+    if job.state != "claimed" {
+        return Ok(()); // already dispatched (running) or terminal — idempotent.
+    }
+    let Some(workspace_id) = job.workspace_id else {
+        return fail_with(state, tenant, job.id, "the job has no workspace to run in").await;
+    };
+    let Some((repo_url, branch)) = resolve_repo(state, workspace_id, node).await? else {
+        return fail_with(
+            state,
+            tenant,
+            job.id,
+            "the workspace has no known git remote to clone",
+        )
+        .await;
+    };
+    let target_task_key = task_key(state, tenant, job.target_task_id).await?;
+
+    let sent = state.registry.send_to_node(
+        node,
+        nook_proto::ControlToNode::RunLoopJob {
+            job_id: job.id.0.to_string(),
+            kind: job.kind.clone(),
+            target_task_key,
+            repo_url,
+            branch,
+        },
+    );
+    if !sent {
+        return fail_with(
+            state,
+            tenant,
+            job.id,
+            "the executor node went offline before the job could start",
+        )
+        .await;
+    }
+    append_transcript(state, job.id, "system", "dispatched to executor node")
+        .await
+        .ok();
+    transition(state, tenant, job.id, "running").await?;
+    Ok(())
+}
+
+/// Apply a node's `JobFinished` (AC-2/AC-4): `completed` on success, else
+/// `failed` with the reason/tail preserved. Idempotent through `transition`.
+pub async fn finish(
+    state: &AppState,
+    tenant: TenantId,
+    id: JobId,
+    ok: bool,
+    message: &str,
+) -> ApiResult<()> {
+    if !ok && !message.trim().is_empty() {
+        append_transcript(state, id, "system", message).await.ok();
+    }
+    let _ = transition(state, tenant, id, if ok { "completed" } else { "failed" }).await;
+    Ok(())
+}
+
+/// Fail every job a node was executing when it disconnected (AC-4): the session
+/// died with the node. Terminal jobs are untouched (the guard in `transition`).
+pub async fn fail_stranded_for_node(
+    state: &AppState,
+    tenant: TenantId,
+    node: NodeId,
+) -> ApiResult<()> {
+    let stranded: Vec<JobId> = sqlx::query_scalar(
+        "SELECT id FROM loop_jobs
+         WHERE executor_node_id = $1 AND state IN ('claimed', 'running')",
+    )
+    .bind(node)
+    .fetch_all(&state.db)
+    .await?;
+    for id in stranded {
+        append_transcript(
+            state,
+            id,
+            "system",
+            "executor node disconnected — job failed",
+        )
+        .await
+        .ok();
+        let _ = transition(state, tenant, id, "failed").await;
+    }
+    Ok(())
+}
+
+/// Record a transcript line and fail the job — the common "nowhere to run it"
+/// path. Best-effort: a job already terminal is left as-is by `transition`.
+async fn fail_with(state: &AppState, tenant: TenantId, id: JobId, reason: &str) -> ApiResult<()> {
+    append_transcript(state, id, "system", reason).await.ok();
+    let _ = transition(state, tenant, id, "failed").await;
+    Ok(())
+}
+
+/// Is `node` the executor the job was placed on? The gate for accepting a node's
+/// streamed transcript / finish (MAIN-161 security): a node token is scoped to
+/// its OWN runs, so it must not be able to inject into or terminate another
+/// executor's job. `false` for a missing job, an unplaced one, or a mismatch.
+async fn is_executor(
+    state: &AppState,
+    tenant: TenantId,
+    id: JobId,
+    node: NodeId,
+) -> ApiResult<bool> {
+    let exec: Option<Option<NodeId>> = sqlx::query_scalar(
+        "SELECT executor_node_id FROM loop_jobs WHERE id = $1 AND tenant_id = $2",
+    )
+    .bind(id)
+    .bind(tenant)
+    .fetch_optional(&state.db)
+    .await?;
+    Ok(matches!(exec, Some(Some(n)) if n == node))
+}
+
+/// Append a transcript line reported by a node — ONLY for a job that node is
+/// actually executing. A line for someone else's job (or a spoof) is dropped
+/// with a warning, never applied (MAIN-161 security).
+pub async fn transcript_from_node(
+    state: &AppState,
+    tenant: TenantId,
+    node: NodeId,
+    id: JobId,
+    source: &str,
+    content: &str,
+) -> ApiResult<()> {
+    if !is_executor(state, tenant, id, node).await? {
+        tracing::warn!(job = %id.0, node = %node.0, "node streamed transcript for a job it does not execute — dropped");
+        return Ok(());
+    }
+    append_transcript(state, id, source, content).await?;
+    Ok(())
+}
+
+/// Apply a node's `JobFinished` — ONLY for a job that node is actually
+/// executing, so a node token cannot complete or fail another executor's job
+/// (MAIN-161 security).
+pub async fn finish_from_node(
+    state: &AppState,
+    tenant: TenantId,
+    node: NodeId,
+    id: JobId,
+    ok: bool,
+    message: &str,
+) -> ApiResult<()> {
+    if !is_executor(state, tenant, id, node).await? {
+        tracing::warn!(job = %id.0, node = %node.0, "node reported finish for a job it does not execute — dropped");
+        return Ok(());
+    }
+    finish(state, tenant, id, ok, message).await
+}

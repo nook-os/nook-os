@@ -8,6 +8,7 @@ mod device_login;
 mod discovery;
 mod enroll;
 mod gitops;
+mod loop_job;
 mod pinning;
 mod resources;
 mod runtime_auth;
