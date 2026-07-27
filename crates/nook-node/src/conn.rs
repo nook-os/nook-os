@@ -302,6 +302,17 @@ pub async fn connect_once(cfg: &NodeConfig) -> Result<()> {
                 };
                 manager.start(session_id, &runtime, &cwd, cols, rows)
             }
+            ControlToNode::StartAuthSession {
+                session_id,
+                runtime,
+                cols,
+                rows,
+            } => {
+                // The node picks the allowlisted login command for `runtime`;
+                // an unknown runtime fails the session rather than running
+                // anything (MAIN-126).
+                manager.start_auth(session_id, &runtime, cols, rows)
+            }
             ControlToNode::AttachSession {
                 session_id,
                 tmux_session,

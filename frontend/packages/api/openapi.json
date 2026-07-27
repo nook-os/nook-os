@@ -1583,6 +1583,54 @@
         }
       }
     },
+    "/api/v1/nodes/{id}/authorize": {
+      "post": {
+        "tags": [
+          "crate::routes::nodes"
+        ],
+        "summary": "`POST /api/v1/nodes/{id}/authorize` — launch a runtime's login flow in a\nsession on the node so it can be device-authorized from the UI (MAIN-126).",
+        "description": "Node-scoped authorization: a PERSONAL node may be authorized only by its\nowner; a SHARED / operator node only by a node-manager (an org admin) —\nauthorizing a shared machine makes that runtime credential available to\nevery workload already permitted to run there, so it is not one person's\ncall. The node, not the caller, chooses the login command to run.",
+        "operationId": "authorize_runtime",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AuthorizeRuntimeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Session"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": ""
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      }
+    },
     "/api/v1/nodes/{id}/clone": {
       "post": {
         "tags": [
@@ -6566,6 +6614,19 @@
           "unknown",
           "unavailable"
         ]
+      },
+      "AuthorizeRuntimeRequest": {
+        "type": "object",
+        "description": "Launch a runtime's login flow on a node (MAIN-126). The node maps `runtime`\nto an allowlisted login command; the caller never supplies arguments.",
+        "required": [
+          "runtime"
+        ],
+        "properties": {
+          "runtime": {
+            "type": "string",
+            "description": "The runtime to authorize — `claude`, `hermes`."
+          }
+        }
       },
       "BindingRow": {
         "type": "object",

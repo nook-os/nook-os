@@ -156,6 +156,63 @@ pub async fn set_shared(
     Ok(Json(node))
 }
 
+/// `POST /api/v1/nodes/{id}/authorize` — launch a runtime's login flow in a
+/// session on the node so it can be device-authorized from the UI (MAIN-126).
+///
+/// Node-scoped authorization: a PERSONAL node may be authorized only by its
+/// owner; a SHARED / operator node only by a node-manager (an org admin) —
+/// authorizing a shared machine makes that runtime credential available to
+/// every workload already permitted to run there, so it is not one person's
+/// call. The node, not the caller, chooses the login command to run.
+#[utoipa::path(post, path = "/api/v1/nodes/{id}/authorize",
+    operation_id = "authorize_runtime",
+    params(("id" = String, Path,)),
+    request_body = AuthorizeRuntimeRequest,
+    responses((status = 200, body = Session), (status = 403), (status = 404)))]
+pub async fn authorize(
+    State(state): State<AppState>,
+    auth: AuthCtx,
+    Path(id): Path<NodeId>,
+    Json(req): Json<AuthorizeRuntimeRequest>,
+) -> ApiResult<Json<Session>> {
+    use crate::auth::perm::{Permission, Scope};
+
+    let row: Option<(Option<uuid::Uuid>, bool, serde_json::Value)> = sqlx::query_as(
+        "SELECT owner_person_id, shared, capabilities FROM nodes WHERE id = $1 AND tenant_id = $2",
+    )
+    .bind(id)
+    .bind(auth.tenant_id)
+    .fetch_optional(&state.db)
+    .await?;
+    // Unknown/invisible node is a 404, not a 403 — no existence oracle.
+    let Some((_owner, shared, caps)) = row else {
+        return Err(ApiError::NotFound);
+    };
+    let is_operator = caps
+        .get("shared_operator")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    if shared || is_operator {
+        // Shared substrate → an admin, not one person (`node.manage`).
+        auth.require(
+            &state,
+            Permission::NodeManage,
+            Scope::Tenant(auth.tenant_id),
+        )
+        .await?;
+    } else {
+        // A personal node → only its owner.
+        crate::auth::require_person_owns_node(&state, auth.tenant_id, Some(auth.user_id), id)
+            .await?;
+    }
+
+    let session =
+        core::create_auth_session(&state, auth.tenant_id, Some(auth.user_id), id, &req.runtime)
+            .await?;
+    Ok(Json(session))
+}
+
 #[utoipa::path(delete, path = "/api/v1/nodes/{id}",
     operation_id = "delete_node",
     params(("id" = String, Path,)),

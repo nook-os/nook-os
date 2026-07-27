@@ -92,6 +92,37 @@ impl Manager {
         }
     }
 
+    /// Start a runtime's LOGIN flow in a session (MAIN-126). Like `start`, but
+    /// the pane runs the runtime's ALLOWLISTED login command (the node picks it,
+    /// never the caller) in the home directory, so a headless node can be
+    /// device-authorized from the UI: the code/URL renders and any pasted-back
+    /// code reaches the CLI through the ordinary session input path.
+    pub fn start_auth(&mut self, session_id: SessionId, runtime: &str, cols: u16, rows: u16) {
+        let Some(login_args) = crate::runtime_auth::login_args(runtime) else {
+            return self.session_failed(session_id, format!("no login flow known for '{runtime}'"));
+        };
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/".into());
+        let tmux_name = format!("{}{}", tmux::SESSION_PREFIX, session_id.0.simple());
+        self.sessions.remove(&session_id);
+        if !tmux::session_exists(&tmux_name) {
+            let sid = session_id.0.to_string();
+            if let Err(e) =
+                tmux::new_auth_session(&tmux_name, &home, cols, rows, runtime, login_args, &sid)
+            {
+                return self.session_failed(session_id, e.to_string());
+            }
+        }
+        match self.attach_pty(session_id, &tmux_name, cols, rows) {
+            Ok(()) => {
+                let _ = self.out.try_send(NodeToControl::SessionStarted {
+                    session_id,
+                    tmux_session: tmux_name,
+                });
+            }
+            Err(e) => self.session_failed(session_id, e.to_string()),
+        }
+    }
+
     /// Spawn the persistent `tmux attach` PTY and its pump threads.
     fn attach_pty(
         &mut self,

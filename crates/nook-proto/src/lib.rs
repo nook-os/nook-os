@@ -225,6 +225,18 @@ pub enum ControlToNode {
         cols: u16,
         rows: u16,
     },
+    /// Start a runtime's LOGIN flow in a session, so a headless node can be
+    /// authorized from the UI (MAIN-126). The node — never the caller — chooses
+    /// the allowlisted login command for `runtime` (e.g. `claude auth login`);
+    /// `runtime` is only the key into that fixed table. The session then streams
+    /// and takes input exactly like any other, so the device code/URL is
+    /// readable and any pasted-back code reaches the CLI.
+    StartAuthSession {
+        session_id: SessionId,
+        runtime: String,
+        cols: u16,
+        rows: u16,
+    },
     AttachSession {
         session_id: SessionId,
         /// The tmux session name (from the control plane's records) so a
@@ -592,6 +604,24 @@ mod wire_tests {
         assert!(
             matches!(back, ControlToNode::InstallHooks { content, sha256 }
                 if content == r#"{"Stop":[]}"# && sha256 == "abc123")
+        );
+    }
+
+    /// The authorize-launch variant round-trips as an adjacently-tagged message.
+    #[test]
+    fn start_auth_session_round_trips() {
+        let msg = ControlToNode::StartAuthSession {
+            session_id: SessionId::new(),
+            runtime: "claude".into(),
+            cols: 120,
+            rows: 32,
+        };
+        let json = serde_json::to_value(&msg).unwrap();
+        assert_eq!(json["type"], "start_auth_session");
+        assert_eq!(json["data"]["runtime"], "claude");
+        let back: ControlToNode = serde_json::from_value(json).unwrap();
+        assert!(
+            matches!(back, ControlToNode::StartAuthSession { runtime, .. } if runtime == "claude")
         );
     }
 

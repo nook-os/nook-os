@@ -1590,6 +1590,14 @@ pub struct CreateTerminalRequest {
     pub name: Option<String>,
 }
 
+/// Launch a runtime's login flow on a node (MAIN-126). The node maps `runtime`
+/// to an allowlisted login command; the caller never supplies arguments.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct AuthorizeRuntimeRequest {
+    /// The runtime to authorize — `claude`, `hermes`.
+    pub runtime: String,
+}
+
 /// The node the resource-aware scheduler chose for "Auto" placement.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct ScheduledNode {

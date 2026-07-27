@@ -702,6 +702,67 @@ pub async fn create_ad_hoc_session(
     Ok(session)
 }
 
+/// Start a runtime's LOGIN flow in a session on a node (MAIN-126). Like an
+/// ad-hoc terminal, but the node runs the runtime's allowlisted login command
+/// instead of a shell, so the device code/URL renders in the live session view
+/// and the flow completes as it would in a terminal. Authorization of WHO may do
+/// this is the caller's job (node-scoped); this only launches it.
+pub async fn create_auth_session(
+    state: &crate::state::AppState,
+    tenant: TenantId,
+    created_by: Option<UserId>,
+    node_id: NodeId,
+    runtime: &str,
+) -> ApiResult<Session> {
+    use crate::error::ApiError;
+
+    if !state.registry.node_online(node_id) {
+        return Err(ApiError::BadRequest("node is offline".into()));
+    }
+    let name = format!("authorize {runtime}");
+    let session: Session = sqlx::query_as(
+        "INSERT INTO sessions (id, tenant_id, workspace_id, node_id, name, runtime, status, created_by)
+         VALUES ($1, $2, NULL, $3, $4, $5, 'starting', $6) RETURNING *",
+    )
+    .bind(SessionId::new())
+    .bind(tenant)
+    .bind(node_id)
+    .bind(&name)
+    .bind(runtime)
+    .bind(created_by)
+    .fetch_one(&state.db)
+    .await?;
+
+    let sent = state.registry.send_to_node(
+        node_id,
+        nook_proto::ControlToNode::StartAuthSession {
+            session_id: session.id,
+            runtime: runtime.to_string(),
+            cols: 120,
+            rows: 32,
+        },
+    );
+    if !sent {
+        sqlx::query("UPDATE sessions SET status = 'error', updated_at = now() WHERE id = $1")
+            .bind(session.id)
+            .execute(&state.db)
+            .await?;
+        return Err(ApiError::BadRequest("node went offline".into()));
+    }
+
+    crate::events::record(
+        state,
+        tenant,
+        crate::events::EventDraft::new("session.created")
+            .node(node_id)
+            .session(session.id)
+            .payload(serde_json::json!({ "runtime": runtime, "name": name, "authorize": true })),
+    )
+    .await;
+
+    Ok(session)
+}
+
 pub async fn list_notes(
     db: &PgPool,
     tenant: TenantId,
