@@ -28,7 +28,7 @@ async fn main() -> Result<()> {
 
     // The worker does NOT run migrations — the control plane owns them
     // (MAIN-146 NG-2). It just connects to the schema they produced.
-    let queue: Arc<dyn queue::Queue> = Arc::from(queue::from_config(&cfg, db.clone()));
+    let queue: Arc<dyn queue::Queue> = Arc::from(queue::from_config(&cfg, db.clone()).await);
 
     // The mail provider, wrapped in the same send guards the control plane uses
     // (MAIN-52) — so moving sends onto the queue (MAIN-149) preserves the

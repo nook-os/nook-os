@@ -48,6 +48,7 @@ use uuid::Uuid;
 
 pub mod database;
 pub mod redis;
+pub mod sqs;
 
 /// The provider names this build understands. `database` and `redis` are
 /// implemented; `sqs` is a known, reserved name not built yet.
@@ -199,11 +200,7 @@ pub fn is_known_provider(name: &str) -> bool {
 /// message pointing at the working default rather than a generic "unknown".
 pub fn validate_provider(name: &str) -> Result<()> {
     match name {
-        "database" | "redis" => Ok(()),
-        "sqs" => anyhow::bail!(
-            "NOOK_QUEUE_PROVIDER=sqs is reserved but not built yet — \
-             use `database` (the default) or `redis`"
-        ),
+        "database" | "redis" | "sqs" => Ok(()),
         other => anyhow::bail!(
             "NOOK_QUEUE_PROVIDER must be one of [{}] — got {other:?}",
             PROVIDERS.join(", ")
@@ -217,7 +214,18 @@ pub fn validate_provider(name: &str) -> Result<()> {
 /// by `validate_provider` (called from `Config::from_env`), so by the time we
 /// get here the provider is valid and anything but a recognised name resolves
 /// to the database backend rather than panicking a boot that already validated.
-pub fn from_config(cfg: &crate::config::Config, db: sqlx::PgPool) -> Box<dyn Queue> {
+pub async fn from_config(cfg: &crate::config::Config, db: sqlx::PgPool) -> Box<dyn Queue> {
+    // `sqs` builds an AWS client and probes the queue; an unreachable queue is a
+    // fatal boot error (AC-3), consistent with how AppState::new `.expect()`s
+    // other fatal init (the vault). It never silently falls back — a deployment
+    // that asked for a shared broker and got a single-node table would split-brain.
+    if cfg.queue_provider == "sqs" {
+        let queue = sqs::SqsQueue::from_config(cfg)
+            .await
+            .expect("NOOK_QUEUE_PROVIDER=sqs but the SQS queue is unreachable at boot");
+        tracing::info!(queue = %queue.backend(), "queue provider");
+        return Box::new(queue);
+    }
     // `redis` builds a lazily-connecting client (open is sync + non-connecting).
     // `Config::from_env` has already refused boot for a missing or unparseable
     // `NOOK_REDIS_URL` (a silent swap to database would split-brain work
@@ -251,20 +259,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn sqs_is_known_but_refused_with_a_pointed_message() {
+    fn all_three_providers_are_accepted_and_unknown_is_rejected() {
         assert!(is_known_provider("sqs"));
-        let err = validate_provider("sqs").unwrap_err().to_string();
-        assert!(err.contains("not built yet"), "{err}");
-        assert!(
-            err.contains("database"),
-            "points at a working provider: {err}"
-        );
-    }
-
-    #[test]
-    fn database_and_redis_are_accepted_and_unknown_is_rejected() {
         assert!(validate_provider("database").is_ok());
         assert!(validate_provider("redis").is_ok());
+        assert!(validate_provider("sqs").is_ok(), "sqs is built now");
         assert!(!is_known_provider("kafka"));
         assert!(validate_provider("kafka").is_err());
     }
@@ -318,21 +317,22 @@ pub(crate) mod contract {
         assert!(after.is_empty(), "an acked message is gone for good");
     }
 
-    pub async fn visibility_expiry_redelivers(q: &dyn Queue) {
+    /// `vis` is the short visibility to test redelivery under. The database and
+    /// redis backends pass sub-second (`from_millis(300)`); SQS's visibility
+    /// timeout has one-second granularity, so it passes `from_secs(1)`. The
+    /// runner waits `2 * vis` for the window to lapse — hence the parameter (AC-2).
+    pub async fn visibility_expiry_redelivers(q: &dyn Queue, vis: Duration) {
         let ty = unique_type("vis");
         let id = q.enqueue(work(&ty)).await.unwrap();
 
-        let first = q
-            .receive(std::slice::from_ref(&ty), 10, Duration::from_millis(300))
-            .await
-            .unwrap();
+        let first = q.receive(std::slice::from_ref(&ty), 10, vis).await.unwrap();
         assert_eq!(first.len(), 1);
         assert_eq!(first[0].attempts, 1);
 
         let locked = q.receive(std::slice::from_ref(&ty), 10, VIS).await.unwrap();
         assert!(locked.is_empty(), "invisible until the window elapses");
 
-        tokio::time::sleep(Duration::from_millis(600)).await;
+        tokio::time::sleep(vis * 2).await;
 
         let second = q.receive(std::slice::from_ref(&ty), 10, VIS).await.unwrap();
         assert_eq!(second.len(), 1, "reappears after visibility expiry");

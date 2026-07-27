@@ -302,7 +302,7 @@ mod tests {
     #[tokio::test]
     async fn visibility_expiry_redelivers() {
         let (q, _d) = skip_or!();
-        contract::visibility_expiry_redelivers(&q).await;
+        contract::visibility_expiry_redelivers(&q, std::time::Duration::from_millis(300)).await;
     }
     #[tokio::test]
     async fn nack_requeue_and_dead() {
