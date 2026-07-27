@@ -18,6 +18,7 @@ sqlx = { workspace = true }
 dashmap = { workspace = true }
 sha2 = { workspace = true }
 uuid = { workspace = true }
+chrono = { workspace = true }
 # CIDR matching for the trusted-proxy config list (parsed here; the client-IP
 # resolver that consults it stays in nook-control).
 ipnet = "2"

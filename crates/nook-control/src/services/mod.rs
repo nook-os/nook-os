@@ -8,6 +8,7 @@ pub mod kanban;
 pub mod local_auth;
 pub mod notify;
 pub mod policy;
+pub mod queue;
 pub mod schedule;
 pub mod secrets;
 pub mod tasks;

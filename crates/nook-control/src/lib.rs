@@ -13,11 +13,11 @@ pub mod services;
 pub mod state;
 pub mod ws;
 
-// Config parsing and the cache / storage / mail providers now live in
-// `nook-infra` (MAIN-146). They are re-exported at their original module paths
-// so every `crate::config` / `crate::cache` / `crate::storage` / `crate::mailer`
-// call site inside this crate keeps resolving unchanged.
-pub use nook_infra::{cache, config, mailer, storage};
+// Config parsing and the cache / storage / mail / queue providers now live in
+// `nook-infra` (MAIN-146, MAIN-147). They are re-exported at their original
+// module paths so every `crate::config` / `crate::cache` / `crate::storage` /
+// `crate::mailer` / `crate::queue` call site inside this crate resolves.
+pub use nook_infra::{cache, config, mailer, queue, storage};
 
 pub use nook_infra::Config;
 pub use state::AppState;
@@ -30,5 +30,5 @@ pub use state::AppState;
 // 0007_email_verification_tokens, 0008_mail_sends, 0009_task_type,
 // 0010_review_column, 0011_user_notebook, 0012_task_visibility,
 // 0013_task_parent, 0014_managed_content, 0015_board_automation,
-// 0016_node_owner, 0017_node_shared.
+// 0016_node_owner, 0017_node_shared, 0018_work_queue.
 pub static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");

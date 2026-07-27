@@ -7,6 +7,7 @@
 pub mod cache;
 pub mod config;
 pub mod mailer;
+pub mod queue;
 pub mod storage;
 
 pub use config::Config;
