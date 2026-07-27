@@ -6,7 +6,7 @@
 //! a future optimization). All enums are adjacently tagged for clean
 //! generated TypeScript.
 
-use nook_types::{Capabilities, NodeId, SessionId};
+use nook_types::{AuthProfile, Capabilities, NodeId, SessionId};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
@@ -86,6 +86,13 @@ pub enum NodeToControl {
     SessionExited {
         session_id: SessionId,
         exit_code: Option<i32>,
+    },
+    /// Freshly re-probed runtime authorization (MAIN-126). The node re-runs its
+    /// probes when an authorize login flow ends and pushes the new set, so the
+    /// Nodes UI flips a profile to `authorized` right away rather than waiting
+    /// for the next reconnect's `Register`.
+    RuntimeAuthStatus {
+        profiles: Vec<AuthProfile>,
     },
     /// A session could not be started at all — the checkout is gone, the
     /// runtime isn't installed, tmux refused. Distinct from `Error` because it
@@ -604,6 +611,26 @@ mod wire_tests {
         assert!(
             matches!(back, ControlToNode::InstallHooks { content, sha256 }
                 if content == r#"{"Stop":[]}"# && sha256 == "abc123")
+        );
+    }
+
+    /// The re-probe push round-trips (MAIN-126 AC-4).
+    #[test]
+    fn runtime_auth_status_round_trips() {
+        let msg = NodeToControl::RuntimeAuthStatus {
+            profiles: vec![AuthProfile {
+                id: "claude".into(),
+                label: "Claude Code".into(),
+                runtime: "claude".into(),
+                state: nook_types::AuthState::Authorized,
+                identity: Some("pm@example.com".into()),
+            }],
+        };
+        let json = serde_json::to_value(&msg).unwrap();
+        assert_eq!(json["type"], "runtime_auth_status");
+        let back: NodeToControl = serde_json::from_value(json).unwrap();
+        assert!(
+            matches!(back, NodeToControl::RuntimeAuthStatus { profiles } if profiles.len() == 1 && profiles[0].state == nook_types::AuthState::Authorized)
         );
     }
 

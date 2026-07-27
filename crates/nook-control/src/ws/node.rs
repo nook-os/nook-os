@@ -419,6 +419,33 @@ async fn handle_message(
             )
             .await;
         }
+        NodeToControl::RuntimeAuthStatus { profiles } => {
+            // A re-probe after an authorize session (MAIN-126 AC-4): merge the
+            // fresh profiles into the node's stored capabilities and nudge the
+            // UI, so the Agent-authorization panel flips to `authorized` without
+            // waiting for the node to reconnect. The node stays online; the
+            // NodeStatus event is only the "refetch this node" signal the Nodes
+            // queries already listen for.
+            let value = serde_json::to_value(&profiles).unwrap_or_else(|_| serde_json::json!([]));
+            let _ = sqlx::query(
+                "UPDATE nodes
+                 SET capabilities = jsonb_set(capabilities, '{runtime_auth}', $2, true),
+                     updated_at = now()
+                 WHERE id = $1",
+            )
+            .bind(node_id)
+            .bind(&value)
+            .execute(&state.db)
+            .await;
+            state.registry.publish(
+                tenant,
+                UiEvent::NodeStatus {
+                    node_id,
+                    name: name.to_string(),
+                    status: "online".into(),
+                },
+            );
+        }
         NodeToControl::SessionStarted {
             session_id,
             tmux_session,
