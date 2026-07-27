@@ -153,6 +153,13 @@ pub async fn connect_once(cfg: &NodeConfig) -> Result<()> {
         .await
         .ok();
 
+    // Best-effort: on every (re)connect, prune loop-job worktrees orphaned by a
+    // crash or a node restart (MAIN-161 AC-4). Blocking git, non-fatal.
+    {
+        let cfg = cfg.clone();
+        tokio::task::spawn_blocking(move || crate::loop_job::reconcile(&cfg));
+    }
+
     // Heartbeat carries a live resource sample so triage/humans can see which
     // machine can take the work.
     let hb_tx = out_tx.clone();
@@ -685,6 +692,32 @@ pub async fn connect_once(cfg: &NodeConfig) -> Result<()> {
                     }
                 };
                 out_tx.send(report).await.ok();
+            }
+            ControlToNode::RunLoopJob {
+                job_id,
+                kind,
+                target_task_key,
+                repo_url,
+                branch,
+            } => {
+                // git + tmux + PTY are all blocking, so the runner lives on a
+                // blocking thread with its own cloned sender and config —
+                // mirroring the git-op arms above.
+                let tx = out_tx.clone();
+                let cfg = cfg.clone();
+                tokio::task::spawn_blocking(move || {
+                    crate::loop_job::run(
+                        cfg,
+                        tx,
+                        crate::loop_job::LoopJob {
+                            job_id,
+                            kind,
+                            target_task_key,
+                            repo_url,
+                            branch,
+                        },
+                    );
+                });
             }
             ControlToNode::ForgetSkill { name } => {
                 match crate::wizard::skills::forget_taught(&name) {

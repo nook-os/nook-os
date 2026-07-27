@@ -89,8 +89,18 @@ async fn handle(state: &AppState, item: &crate::queue::WorkEnvelope) {
                 )
                 .await;
         }
-        // Placed, or already claimed / gone terminal (e.g. canceled while
-        // queued): nothing more to do — let the item go.
+        // Freshly placed on an executor: hand it to that node to run (MAIN-161).
+        // `dispatch_to_node` is idempotent — a re-delivery of an already-running
+        // job (state no longer `claimed`) is a no-op — and fails the job itself
+        // if there is nowhere to run it, so we always ack.
+        Ok(job) if job.state == "claimed" => {
+            if let Err(e) = jobs::dispatch_to_node(state, tenant, &job).await {
+                tracing::warn!(job = %job_id, error = %e, "dispatching job to node failed");
+            }
+            let _ = state.queue.ack(item.id).await;
+        }
+        // Already running / gone terminal (e.g. canceled while queued): nothing
+        // more to do — let the item go.
         Ok(_) => {
             let _ = state.queue.ack(item.id).await;
         }

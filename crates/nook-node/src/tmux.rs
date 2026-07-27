@@ -204,7 +204,15 @@ pub fn new_session(
     if !runtime_available(command) {
         anyhow::bail!("runtime '{command}' is not installed on this node");
     }
-    spawn(name, cwd, cols, rows, &login_command(command), session_id)
+    spawn(
+        name,
+        cwd,
+        cols,
+        rows,
+        &login_command(command),
+        session_id,
+        &[],
+    )
 }
 
 /// Start a runtime's LOGIN flow in a session (MAIN-126): the same PTY machinery
@@ -230,12 +238,65 @@ pub fn new_auth_session(
     // `exec` binds the pane to the login command, so quitting it ends the
     // session — which is the "authorization done, clean up" signal (AC-4).
     let launch = format!("{} -l -i -c 'exec {runtime} {login_args}'", login_shell());
-    spawn(name, cwd, cols, rows, &launch, session_id)
+    spawn(name, cwd, cols, rows, &launch, session_id, &[])
+}
+
+/// Start a loop-job session (MAIN-161): the same PTY machinery as
+/// `new_session`, but `NOOK_JOB_ID` is injected into the session environment
+/// alongside `NOOK_SESSION_ID` so anything running inside — the `nook` CLI, the
+/// finish hook — can tie its output back to the loop job that owns it.
+pub fn new_job_session(
+    name: &str,
+    cwd: &str,
+    cols: u16,
+    rows: u16,
+    runtime: &str,
+    session_id: &str,
+    job_id: &str,
+    status_file: &str,
+) -> Result<()> {
+    if !std::path::Path::new(cwd).is_dir() {
+        anyhow::bail!("checkout {cwd} does not exist on this node");
+    }
+    if !runtime_available(runtime) {
+        anyhow::bail!("runtime '{runtime}' is not installed on this node");
+    }
+    spawn(
+        name,
+        cwd,
+        cols,
+        rows,
+        &job_launch_command(runtime, status_file),
+        session_id,
+        &[("NOOK_JOB_ID", job_id)],
+    )
+}
+
+/// A loop job's launch command: run the runtime, then write its exit status to
+/// `status_file`. Unlike [`login_command`]'s `exec`, the shell survives the
+/// runtime so it can record the code — tmux itself cannot surface an exit code
+/// (AC-4 crash honesty needs it), and reading a status file the shell wrote is
+/// not interpreting session output (NG-2). The pane still ends when the runtime
+/// returns, since the `-c` command completes.
+fn job_launch_command(runtime: &str, status_file: &str) -> String {
+    let shell = login_shell();
+    format!("{shell} -l -i -c '{runtime}; echo $? > {status_file}'")
+}
+
+/// Type a line into a session and press Enter — how a loop job drives its skill
+/// (e.g. `/nook-spec MAIN-42`) once the runtime is up. `-l` sends the text
+/// literally so slashes and spaces reach the runtime unmangled; Enter is a
+/// separate key press.
+pub fn send_keys(session: &str, line: &str) -> Result<()> {
+    tmux(&["send-keys", "-t", session, "-l", line])?;
+    tmux(&["send-keys", "-t", session, "Enter"])?;
+    Ok(())
 }
 
 /// The shared tmux `new-session` spawn: create a detached session running
-/// `launch`, with the UTF-8 locale, the session-id env, and the sizing/rename
-/// options both entry points want.
+/// `launch`, with the UTF-8 locale, the session-id env, the sizing/rename
+/// options every entry point wants, plus any `extra_env` a caller needs (a loop
+/// job's `NOOK_JOB_ID`, say).
 fn spawn(
     name: &str,
     cwd: &str,
@@ -243,10 +304,13 @@ fn spawn(
     rows: u16,
     launch: &str,
     session_id: &str,
+    extra_env: &[(&str, &str)],
 ) -> Result<()> {
     apply_server_defaults();
-    let command = launch;
-    tmux(&[
+    let cols_s = cols.to_string();
+    let rows_s = rows.to_string();
+    let sid = format!("NOOK_SESSION_ID={session_id}");
+    let mut args: Vec<&str> = vec![
         "new-session",
         "-d",
         "-s",
@@ -267,13 +331,20 @@ fn spawn(
         // name. Used to scope task claims to the checkout the agent is in, and
         // by the UI's agent-state signal.
         "-e",
-        &format!("NOOK_SESSION_ID={session_id}"),
-        "-x",
-        &cols.to_string(),
-        "-y",
-        &rows.to_string(),
-        command,
-    ])?;
+        &sid,
+    ];
+    // Owned strings for any extra env, kept alive alongside `args`.
+    let extra: Vec<String> = extra_env.iter().map(|(k, v)| format!("{k}={v}")).collect();
+    for pair in &extra {
+        args.push("-e");
+        args.push(pair);
+    }
+    args.push("-x");
+    args.push(&cols_s);
+    args.push("-y");
+    args.push(&rows_s);
+    args.push(launch);
+    tmux(&args)?;
     // Keep the pane around briefly on exit? No — session death IS the exit
     // signal. But do stop tmux from renaming sessions under us.
     let _ = tmux(&["set-option", "-t", name, "allow-rename", "off"]);

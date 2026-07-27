@@ -200,6 +200,10 @@ async fn handle(
     .bind(state.registry.instance_id())
     .execute(&state.db)
     .await;
+    // Any loop job this node was executing died with it — fail it honestly with
+    // its transcript tail preserved, rather than leaving it "running" forever
+    // (MAIN-161 AC-4). The node cleans the orphaned worktree on its next connect.
+    let _ = crate::services::jobs::fail_stranded_for_node(&state, tenant, node_id).await;
     state.registry.publish(
         tenant,
         UiEvent::NodeStatus {
@@ -609,6 +613,42 @@ async fn handle_message(
                 request_id,
                 crate::ws::registry::OpPayload { ok, path, message },
             );
+        }
+        // A running loop job streamed a chunk of output (MAIN-161). Appended to
+        // the transcript verbatim — never interpreted (NG-2). A bad id or a job
+        // that has since vanished is dropped, not fatal to the connection.
+        NodeToControl::JobTranscript {
+            job_id,
+            source,
+            content,
+        } => {
+            if let Ok(id) = job_id.parse::<uuid::Uuid>() {
+                let _ = crate::services::jobs::append_transcript(
+                    state,
+                    nook_types::JobId(id),
+                    &source,
+                    &content,
+                )
+                .await;
+            }
+        }
+        // A loop job's session ended (MAIN-161): completed on success, else
+        // failed with the tail preserved (AC-4).
+        NodeToControl::JobFinished {
+            job_id,
+            ok,
+            message,
+        } => {
+            if let Ok(id) = job_id.parse::<uuid::Uuid>() {
+                let _ = crate::services::jobs::finish(
+                    state,
+                    tenant,
+                    nook_types::JobId(id),
+                    ok,
+                    &message,
+                )
+                .await;
+            }
         }
         NodeToControl::Pong => {}
     }
