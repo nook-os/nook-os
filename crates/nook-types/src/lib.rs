@@ -196,6 +196,27 @@ pub struct AcceptInviteRequest {
     pub token: String,
 }
 
+/// Register a local account against a pending invite (MAIN-98). The email is
+/// never here — it comes from the invite, so a client cannot register an
+/// address it was not invited as. Username and password follow the ordinary
+/// local-account rules; registration creates the account but does NOT accept the
+/// invite (that stays a separate, verified step).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct RegisterInviteRequest {
+    pub token: String,
+    pub name: String,
+    pub username: String,
+    pub password: String,
+}
+
+/// The outcome of an invite registration. Deliberately generic and identical
+/// whether or not an account already existed for the invite's email, so the
+/// endpoint never discloses whether an address is registered (AC-3).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct RegisterInviteResult {
+    pub message: String,
+}
+
 /// The outcome of accepting (or failing to accept) an invite. Whichever tenant
 /// the person ends up in, the UI switches/refetches to it.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]

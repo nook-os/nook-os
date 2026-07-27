@@ -18,7 +18,7 @@
 import React from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
-import { CheckCircle2, Info, MailX, MailWarning } from "lucide-react";
+import { CheckCircle2, Info, MailCheck, MailX, MailWarning } from "lucide-react";
 import { api } from "@nookos/api";
 import { Empty, Panel } from "@nookos/ui";
 
@@ -231,6 +231,15 @@ function InviteLanding({
   // is usable; `next` carries the invitee back here afterwards.
   const passwordSignIn = `/login?next=${enc}`;
 
+  // Whether this instance can create local accounts *right now* (MAIN-98 AC-4).
+  // `/auth/providers` says local is configured; `/auth/local/status` says it is
+  // actually available to sign up against — the form is gated on the latter.
+  const { data: localStatus } = useQuery({
+    queryKey: ["auth", "local-status"],
+    queryFn: async () => (await api.GET("/api/v1/auth/local/status")).data ?? null,
+  });
+  const canCreateLocal = localStatus?.available === true;
+
   return (
     <CenteredPanel title="You're invited">
       <div style={{ padding: 16, display: "grid", gap: 16, placeItems: "start" }}>
@@ -272,8 +281,167 @@ function InviteLanding({
             </Empty>
           )}
         </div>
+
+        {/* Local instances: let the invitee make an account without leaving the
+            invite. OIDC instances hand account creation to the IdP above, so the
+            form only shows when local sign-up is actually available. */}
+        {canCreateLocal && (
+          <CreateAccountForm
+            token={token}
+            email={email}
+            signInPath={passwordSignIn}
+          />
+        )}
       </div>
     </CenteredPanel>
+  );
+}
+
+/**
+ * Create-account form on the invite landing (MAIN-98 AC-4). No email field —
+ * the address comes from the invite server-side; the masked invite email is
+ * shown read-only for context. On success the account exists but is unverified,
+ * so we point the invitee at their inbox and keep the sign-in action (with the
+ * token preserved) so they land back here after verifying.
+ */
+function CreateAccountForm({
+  token,
+  email,
+  signInPath,
+}: {
+  token: string;
+  email: string;
+  signInPath: string;
+}) {
+  const [name, setName] = React.useState("");
+  const [username, setUsername] = React.useState("");
+  const [password, setPassword] = React.useState("");
+  const [busy, setBusy] = React.useState(false);
+  const [error, setError] = React.useState<string | null>(null);
+  const [done, setDone] = React.useState(false);
+
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (busy) return;
+    setError(null);
+    setBusy(true);
+    const { error } = await api.POST("/api/v1/invites/register", {
+      body: { token, name, username, password },
+    });
+    setBusy(false);
+    if (error) {
+      // A bad or duplicate username comes back as `{ error }` — surface it
+      // inline rather than crashing.
+      setError(
+        (error as { error?: string })?.error ||
+          "Could not create your account. Try again.",
+      );
+      return;
+    }
+    setDone(true);
+  };
+
+  if (done) {
+    return (
+      <div
+        style={{
+          borderTop: "1px solid var(--nook-border)",
+          paddingTop: 12,
+          display: "grid",
+          gap: 10,
+          width: "100%",
+          maxWidth: 320,
+        }}
+      >
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <MailCheck size={16} className="ok" />
+          <strong>Account created</strong>
+        </div>
+        <p className="muted small" style={{ margin: 0 }}>
+          <Info size={11} /> Check your inbox for a verification email, confirm
+          your address, then sign in here to accept the invite.
+        </p>
+        <Link className="btn primary" to={signInPath}>
+          Sign in to accept
+        </Link>
+      </div>
+    );
+  }
+
+  return (
+    <form
+      onSubmit={submit}
+      style={{
+        borderTop: "1px solid var(--nook-border)",
+        paddingTop: 12,
+        display: "grid",
+        gap: 10,
+        width: "100%",
+        maxWidth: 320,
+      }}
+    >
+      <div>
+        <strong>Create an account</strong>
+        <p className="muted small" style={{ margin: "4px 0 0" }}>
+          Sign up as <span className="mono">{email}</span> to accept.
+        </p>
+      </div>
+
+      <div className="field">
+        <label>Name</label>
+        <input
+          className="input"
+          type="text"
+          autoComplete="name"
+          placeholder="Ada Lovelace"
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+        />
+      </div>
+
+      <div className="field">
+        <label>Username</label>
+        <input
+          className="input"
+          type="text"
+          autoComplete="username"
+          autoCapitalize="off"
+          autoCorrect="off"
+          spellCheck={false}
+          placeholder="ada"
+          value={username}
+          onChange={(e) => setUsername(e.target.value)}
+        />
+      </div>
+
+      <div className="field">
+        <label>Password</label>
+        <input
+          className="input"
+          type="password"
+          autoComplete="new-password"
+          autoCapitalize="off"
+          autoCorrect="off"
+          spellCheck={false}
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+        />
+      </div>
+
+      {error && (
+        <p className="err small" style={{ margin: 0 }} role="alert">
+          {error}
+        </p>
+      )}
+
+      <button
+        className="btn primary"
+        type="submit"
+        disabled={busy || !name.trim() || !username.trim() || !password}
+      >
+        {busy ? "Creating…" : "Create account"}
+      </button>
+    </form>
   );
 }
 

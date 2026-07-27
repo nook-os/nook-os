@@ -1156,6 +1156,44 @@
         }
       }
     },
+    "/api/v1/invites/register": {
+      "post": {
+        "tags": [
+          "crate::routes::invites"
+        ],
+        "summary": "`POST /api/v1/invites/register` — create a LOCAL account against a pending\ninvite (MAIN-98). Unauthenticated: possession of the invite link is the\nticket. The account is created with the INVITE's email (never the client's),\nunverified; a verification email is sent; the invite stays pending, because\nregistration and acceptance are separate steps (AC-1/AC-5).",
+        "description": "Anti-enumeration (AC-3): every failure that could reveal whether an email\nalready has an account returns the SAME generic, success-shaped result — a\nduplicate email is indistinguishable from a fresh registration. A bad or\nduplicate USERNAME is reported, because that is about the username the\ninvitee chose and leaks nothing about the invite's email. Rate-limited per IP.",
+        "operationId": "register_invite",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RegisterInviteRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RegisterInviteResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": ""
+          },
+          "429": {
+            "description": ""
+          }
+        }
+      }
+    },
     "/api/v1/labels": {
       "get": {
         "tags": [
@@ -9510,6 +9548,42 @@
           "passphrase": {
             "type": "string",
             "description": "The app password. Required, not optional: a `.env` moves between\nmachines, so it is sealed with something the server never stores\nbefore the app key wraps it. A database dump plus `SECRETS_KEY` must\nnever be enough to read one."
+          }
+        }
+      },
+      "RegisterInviteRequest": {
+        "type": "object",
+        "description": "Register a local account against a pending invite (MAIN-98). The email is\nnever here — it comes from the invite, so a client cannot register an\naddress it was not invited as. Username and password follow the ordinary\nlocal-account rules; registration creates the account but does NOT accept the\ninvite (that stays a separate, verified step).",
+        "required": [
+          "token",
+          "name",
+          "username",
+          "password"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "password": {
+            "type": "string"
+          },
+          "token": {
+            "type": "string"
+          },
+          "username": {
+            "type": "string"
+          }
+        }
+      },
+      "RegisterInviteResult": {
+        "type": "object",
+        "description": "The outcome of an invite registration. Deliberately generic and identical\nwhether or not an account already existed for the invite's email, so the\nendpoint never discloses whether an address is registered (AC-3).",
+        "required": [
+          "message"
+        ],
+        "properties": {
+          "message": {
+            "type": "string"
           }
         }
       },

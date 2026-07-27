@@ -436,6 +436,12 @@ impl FromRequestParts<AppState> for AuthCtx {
         // The query lives in `nook-auth` so the control plane and chat validate
         // sessions identically (MAIN-48 AC-4); see that crate for why the
         // membership check is a SELECT column rather than a WHERE clause.
+        //
+        // A memberless session is a real state now (MAIN-98: a local invitee who
+        // has signed in but not yet accepted). It stays a 403 here — distinct
+        // from the 401 an unauthenticated caller gets — so every tenant-scoped
+        // route refuses it; the ONE route that serves such a caller (accept) uses
+        // `IdentityCtx`, which resolves without the membership check.
         let r = nook_auth::resolve_session(&state.db, sid)
             .await
             .map_err(auth_err)?;
@@ -445,6 +451,76 @@ impl FromRequestParts<AppState> for AuthCtx {
             tenant_id: TenantId(r.tenant_id),
             principal: Principal::User,
             cookie_session: true,
+        })
+    }
+}
+
+/// A signed-in caller who may NOT yet belong to any tenant (MAIN-98).
+///
+/// The deliberate exception to `AuthCtx`'s "a session without a membership is a
+/// 403": the narrow set of routes a person can legitimately reach before they
+/// belong to a tenant — today only accepting an invite. A local invitee
+/// registers, verifies, and signs in with a real session but no `tenant_members`
+/// row; this context authenticates them so `accept_core` can do the joining,
+/// while every ordinary route keeps requiring `AuthCtx` (membership).
+///
+/// A node credential is refused: a machine does not accept invites.
+pub struct IdentityCtx {
+    pub session_id: AuthSessionId,
+    pub user_id: UserId,
+    pub tenant_id: TenantId,
+    pub cookie_session: bool,
+    /// Whether this caller is already a member of the session's tenant.
+    pub is_member: bool,
+}
+
+impl FromRequestParts<AppState> for IdentityCtx {
+    type Rejection = ApiError;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
+        // A user bearer token is minted for a tenant its owner belongs to, so it
+        // is always a member — resolve it and mark it so.
+        if let Some(bearer) = parts
+            .headers
+            .get(axum::http::header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.strip_prefix("Bearer "))
+        {
+            if bearer.starts_with(USER_TOKEN_PREFIX) {
+                let r = nook_auth::resolve_bearer(&state.db, bearer)
+                    .await
+                    .map_err(auth_err)?;
+                return Ok(IdentityCtx {
+                    session_id: AuthSessionId(r.session_id),
+                    user_id: UserId(r.user_id),
+                    tenant_id: TenantId(r.tenant_id),
+                    cookie_session: false,
+                    is_member: true,
+                });
+            }
+            // A node token is not a person; it cannot accept an invite.
+            return Err(ApiError::Unauthorized);
+        }
+
+        let jar = CookieJar::from_request_parts(parts, state)
+            .await
+            .map_err(|_| ApiError::Unauthorized)?;
+        let sid: Uuid = jar
+            .get(SESSION_COOKIE)
+            .and_then(|c| c.value().parse().ok())
+            .ok_or(ApiError::Unauthorized)?;
+        let (r, is_member) = nook_auth::resolve_session_identity(&state.db, sid)
+            .await
+            .map_err(auth_err)?;
+        Ok(IdentityCtx {
+            session_id: AuthSessionId(r.session_id),
+            user_id: UserId(r.user_id),
+            tenant_id: TenantId(r.tenant_id),
+            cookie_session: true,
+            is_member,
         })
     }
 }
