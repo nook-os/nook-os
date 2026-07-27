@@ -41,6 +41,16 @@ data:
   {{- with $c.oidc.deviceClientId }}
   OIDC_DEVICE_CLIENT_ID: {{ . | quote }}
   {{- end }}
+  # Queue provider (MAIN-153): read by the control plane and the worker alike.
+  NOOK_QUEUE_PROVIDER: {{ .Values.queue.provider | quote }}
+  {{- if eq .Values.queue.provider "sqs" }}
+  {{- with .Values.queue.sqs.queueUrl }}
+  NOOK_SQS_QUEUE_URL: {{ . | quote }}
+  {{- end }}
+  {{- with .Values.queue.sqs.region }}
+  NOOK_SQS_REGION: {{ . | quote }}
+  {{- end }}
+  {{- end }}
   NOOK_ARTIFACT_STORE: {{ $c.artifactStore | quote }}
   {{- with $c.s3.bucket }}
   NOOK_S3_BUCKET: {{ . | quote }}

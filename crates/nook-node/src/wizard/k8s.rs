@@ -74,6 +74,33 @@ pub struct InitOptions {
     pub mail_smtp_tls: Option<String>,
     pub mail_smtp_username: Option<String>,
     pub mail_postmark_api_url: Option<String>,
+    /// Work queue provider (MAIN-153): `database` (default) | `redis` | `sqs`.
+    /// Any queue/worker field below can imply the branch, mirroring mail.
+    pub queue_provider: Option<String>,
+    /// Secret: the Redis URL, printed only (NG-4). provider=redis.
+    pub redis_url: Option<String>,
+    /// Optional Redis list name KEDA watches; omitted leaves the chart default.
+    pub redis_list_name: Option<String>,
+    /// Non-secret SQS queue URL (provider=sqs).
+    pub sqs_queue_url: Option<String>,
+    /// AWS region (provider=sqs).
+    pub sqs_region: Option<String>,
+    /// SQS credential mode: `irsa` (default, no secret) | `secret`.
+    pub sqs_credentials_mode: Option<String>,
+    /// Secret: AWS access key id, printed only (NG-4). sqs + credentialsMode=secret.
+    pub aws_access_key_id: Option<String>,
+    /// Secret: AWS secret access key, printed only (NG-4). sqs + credentialsMode=secret.
+    pub aws_secret_access_key: Option<String>,
+    /// Deploy the queue worker (`worker.enabled`). Implied by any worker/KEDA field.
+    pub worker: bool,
+    /// Worker replica count (`worker.replicas`). Default 1 when the worker is on.
+    pub worker_replicas: Option<String>,
+    /// `NOOK_WORK_TYPES` allow-list (`worker.workTypes`); empty = every type.
+    pub worker_work_types: Option<String>,
+    /// Autoscale the worker with KEDA (`autoscaling.keda.enabled`). Implies --worker.
+    pub keda: bool,
+    pub keda_min_replicas: Option<String>,
+    pub keda_max_replicas: Option<String>,
     /// The binary's own build version — the default pin (AC-3). Injected by main
     /// so tests do not depend on the crate version.
     pub default_chart_version: String,
@@ -118,6 +145,12 @@ struct Values {
     oidc: Option<OidcValues>,
     /// `None`/`capture` ⇒ no mail keys (chart default). Some ⇒ the mail block (AC-5).
     mail: Option<MailValues>,
+    /// `None` ⇒ the `database` default (chart default) ⇒ no `queue` block.
+    /// Some ⇒ a `redis`/`sqs` queue block (MAIN-153).
+    queue: Option<QueueValues>,
+    /// `None` ⇒ worker off (chart default) ⇒ no `worker`/`autoscaling` blocks.
+    /// Some ⇒ the worker block, carrying its optional KEDA autoscaling (MAIN-153).
+    worker: Option<WorkerValues>,
     /// Extra env injected via `controlPlane.extraEnv` — currently only a manual
     /// `OIDC_DEVICE_AUTHORIZATION_ENDPOINT` when discovery does not advertise one
     /// (AC-3). Kept general so the escape hatch is reusable. `(name, value)`.
@@ -152,6 +185,35 @@ struct MailValues {
     smtp_tls: Option<String>,
     smtp_username: Option<String>,
     postmark_api_url: Option<String>,
+}
+
+/// The non-secret half of a queue config (the Redis URL / AWS keys go to the
+/// secret command only, NG-4). `provider` is always `redis` or `sqs` here —
+/// `database` is the chart default and emits no block at all.
+struct QueueValues {
+    provider: String,
+    /// Optional Redis list name (provider=redis); `None` ⇒ chart default.
+    redis_list_name: Option<String>,
+    /// provider=sqs fields.
+    sqs_queue_url: Option<String>,
+    sqs_region: Option<String>,
+    /// `irsa` | `secret` (provider=sqs).
+    sqs_credentials_mode: Option<String>,
+}
+
+/// The worker deployment + its optional KEDA autoscaling (MAIN-153).
+struct WorkerValues {
+    replicas: String,
+    /// `NOOK_WORK_TYPES` allow-list; `None` ⇒ every type (key omitted).
+    work_types: Option<String>,
+    /// `None` ⇒ static `worker.replicas`; Some ⇒ an `autoscaling.keda` block.
+    keda: Option<KedaValues>,
+}
+
+/// The KEDA autoscaling bounds (`autoscaling.keda`, MAIN-153).
+struct KedaValues {
+    min_replicas: String,
+    max_replicas: String,
 }
 
 /// The install-time fields that are not Helm values but must survive a re-run.
@@ -538,9 +600,187 @@ pub fn run(opts: InitOptions, tty: Option<Tty>, discover: &Discover) -> Result<O
         None
     };
 
+    // ── work queue provider (MAIN-153) ──────────────────────────────────────
+    // Recommended = database (the chart default, zero extra infra) — no block.
+    // redis/sqs each carry their own (mostly non-secret) config; the Redis URL
+    // and the AWS keys are secrets, printed only (NG-4), never written.
+    let queue_seed = trimmed(opts.queue_provider.clone())
+        .or_else(|| existing.queue_provider.clone())
+        .map(|p| normalize_queue_provider(&p))
+        .unwrap_or_else(|| "database".into());
+    let queue_provider = match &mut tty {
+        Some(t) => {
+            let def = match queue_seed.as_str() {
+                "redis" => 1,
+                "sqs" => 2,
+                _ => 0,
+            };
+            let idx = t.choose(
+                "Work queue provider",
+                &[
+                    ("database", "drain the Postgres work queue — no extra infra"),
+                    ("redis", "drain a Redis list"),
+                    ("sqs", "drain an AWS SQS queue"),
+                ],
+                def,
+            )?;
+            ["database", "redis", "sqs"][idx].to_string()
+        }
+        None => queue_seed,
+    };
+    let mut redis_url: Option<String> = None;
+    let mut aws_access_key_id: Option<String> = None;
+    let mut aws_secret_access_key: Option<String> = None;
+    let queue = match queue_provider.as_str() {
+        "redis" => {
+            // Secret: printed only (NG-4). A secret-less non-interactive run wires
+            // the key and leaves the operator to put the value in the Secret.
+            redis_url = match &mut tty {
+                Some(t) => t.optional("Redis URL (NOOK_REDIS_URL)")?,
+                None => some_trimmed(opts.redis_url.clone().unwrap_or_default()),
+            };
+            let redis_list_name = resolve_optional(
+                &mut tty,
+                "Redis list KEDA watches (blank for the chart default)",
+                opts.redis_list_name.clone(),
+                existing.redis_list_name.clone(),
+            )?;
+            Some(QueueValues {
+                provider: "redis".into(),
+                redis_list_name,
+                sqs_queue_url: None,
+                sqs_region: None,
+                sqs_credentials_mode: None,
+            })
+        }
+        "sqs" => {
+            let sqs_queue_url = resolve_optional(
+                &mut tty,
+                "SQS queue URL (NOOK_SQS_QUEUE_URL)",
+                opts.sqs_queue_url.clone(),
+                existing.sqs_queue_url.clone(),
+            )?;
+            let sqs_region = resolve_optional(
+                &mut tty,
+                "AWS region (NOOK_SQS_REGION)",
+                opts.sqs_region.clone(),
+                existing.sqs_region.clone(),
+            )?;
+            let creds_seed = trimmed(opts.sqs_credentials_mode.clone())
+                .or_else(|| existing.sqs_credentials_mode.clone())
+                .filter(|m| m == "irsa" || m == "secret")
+                .unwrap_or_else(|| "irsa".into());
+            let credentials_mode = match &mut tty {
+                Some(t) => {
+                    let idx = t.choose(
+                        "AWS credentials",
+                        &[
+                            ("irsa", "pod IAM role (IRSA) — no secret"),
+                            ("secret", "AWS access keys from the Secret"),
+                        ],
+                        if creds_seed == "secret" { 1 } else { 0 },
+                    )?;
+                    if idx == 1 { "secret" } else { "irsa" }.to_string()
+                }
+                None => creds_seed,
+            };
+            if credentials_mode == "secret" {
+                // Both secrets: printed only (NG-4).
+                aws_access_key_id = match &mut tty {
+                    Some(t) => t.optional("AWS access key id (AWS_ACCESS_KEY_ID)")?,
+                    None => some_trimmed(opts.aws_access_key_id.clone().unwrap_or_default()),
+                };
+                aws_secret_access_key = match &mut tty {
+                    Some(t) => t.optional("AWS secret access key (AWS_SECRET_ACCESS_KEY)")?,
+                    None => some_trimmed(opts.aws_secret_access_key.clone().unwrap_or_default()),
+                };
+            }
+            Some(QueueValues {
+                provider: "sqs".into(),
+                redis_list_name: None,
+                sqs_queue_url,
+                sqs_region,
+                sqs_credentials_mode: Some(credentials_mode),
+            })
+        }
+        // database (or anything else) ⇒ the chart default, no block.
+        _ => None,
+    };
+
+    // ── worker + autoscaling (MAIN-153) ─────────────────────────────────────
+    // Off leaves the chart as it was (additive). KEDA autoscaling nests under an
+    // enabled worker — scaling a worker that is not deployed is meaningless.
+    let worker_seed = opts.worker
+        || opts.worker_replicas.is_some()
+        || opts.worker_work_types.is_some()
+        || opts.keda
+        || opts.keda_min_replicas.is_some()
+        || opts.keda_max_replicas.is_some()
+        || existing.worker_enabled.unwrap_or(false);
+    let worker_enabled = match &mut tty {
+        Some(t) => t.confirm("Deploy the queue worker?", worker_seed)?,
+        None => worker_seed,
+    };
+    let worker = if worker_enabled {
+        let replicas = resolve(
+            &mut tty,
+            "Worker replica count",
+            opts.worker_replicas.clone(),
+            existing.worker_replicas.clone(),
+            "1".into(),
+        )?;
+        let work_types = resolve_optional(
+            &mut tty,
+            "NOOK_WORK_TYPES allow-list (comma-separated; blank = every type)",
+            opts.worker_work_types.clone(),
+            existing.worker_work_types.clone(),
+        )?;
+        let keda_seed = opts.keda
+            || opts.keda_min_replicas.is_some()
+            || opts.keda_max_replicas.is_some()
+            || existing.keda_enabled.unwrap_or(false);
+        let keda_on = match &mut tty {
+            Some(t) => t.confirm(
+                "Autoscale the worker with KEDA (KEDA must be installed in-cluster)?",
+                keda_seed,
+            )?,
+            None => keda_seed,
+        };
+        let keda = if keda_on {
+            let min_replicas = resolve(
+                &mut tty,
+                "KEDA minimum replicas",
+                opts.keda_min_replicas.clone(),
+                existing.keda_min_replicas.clone(),
+                "1".into(),
+            )?;
+            let max_replicas = resolve(
+                &mut tty,
+                "KEDA maximum replicas",
+                opts.keda_max_replicas.clone(),
+                existing.keda_max_replicas.clone(),
+                "10".into(),
+            )?;
+            Some(KedaValues {
+                min_replicas: min_replicas.trim().to_string(),
+                max_replicas: max_replicas.trim().to_string(),
+            })
+        } else {
+            None
+        };
+        Some(WorkerValues {
+            replicas: replicas.trim().to_string(),
+            work_types,
+            keda,
+        })
+    } else {
+        None
+    };
+
     // The chart wires a secret env only when its `secretKeys.*` name is non-empty,
-    // so enabling OIDC/mail must also set the key (independently of whether THIS
-    // run captured the value — a re-run often relies on a Secret already in place).
+    // so enabling OIDC/mail/redis/sqs must also set the key (independently of
+    // whether THIS run captured the value — a re-run often relies on a Secret
+    // already in place).
     let mut secret_keys: Vec<(&'static str, &'static str)> = Vec::new();
     if oidc.is_some() {
         secret_keys.push(("oidcClientSecret", "OIDC_CLIENT_SECRET"));
@@ -550,6 +790,16 @@ pub fn run(opts: InitOptions, tty: Option<Tty>, discover: &Discover) -> Result<O
             secret_keys.push(("postmarkToken", "POSTMARK_TOKEN"));
         } else {
             secret_keys.push(("smtpPassword", "SMTP_PASSWORD"));
+        }
+    }
+    if let Some(q) = &queue {
+        match q.provider.as_str() {
+            "redis" => secret_keys.push(("redisUrl", "NOOK_REDIS_URL")),
+            "sqs" if q.sqs_credentials_mode.as_deref() == Some("secret") => {
+                secret_keys.push(("awsAccessKeyId", "AWS_ACCESS_KEY_ID"));
+                secret_keys.push(("awsSecretAccessKey", "AWS_SECRET_ACCESS_KEY"));
+            }
+            _ => {}
         }
     }
 
@@ -640,6 +890,8 @@ pub fn run(opts: InitOptions, tty: Option<Tty>, discover: &Discover) -> Result<O
         agent_tls_secret,
         oidc,
         mail,
+        queue,
+        worker,
         extra_env,
         secret_keys,
     };
@@ -675,6 +927,11 @@ pub fn run(opts: InitOptions, tty: Option<Tty>, discover: &Discover) -> Result<O
         &session_secret(),
         oidc_client_secret.as_deref(),
         mail_token.as_deref(),
+        QueueSecrets {
+            redis_url: redis_url.as_deref(),
+            aws_access_key_id: aws_access_key_id.as_deref(),
+            aws_secret_access_key: aws_secret_access_key.as_deref(),
+        },
     );
     let helm_command = helm_command(&meta, &path);
 
@@ -786,6 +1043,16 @@ fn normalize_app_env(v: &str) -> String {
     match v.trim().to_ascii_lowercase().as_str() {
         "production" | "prod" => "production".into(),
         _ => "dev".into(),
+    }
+}
+
+/// Fold a queue-provider string to one of the three the chart accepts; anything
+/// unrecognised (including a blank) falls back to `database` (MAIN-153).
+fn normalize_queue_provider(v: &str) -> String {
+    match v.trim().to_ascii_lowercase().as_str() {
+        "redis" => "redis".into(),
+        "sqs" => "sqs".into(),
+        _ => "database".into(),
     }
 }
 
@@ -957,6 +1224,50 @@ fn render_values(v: &Values, m: &Meta) -> String {
     if let Some(ts) = &v.agent_tls_secret {
         s.push_str(&format!("  tlsSecret: {ts}\n"));
     }
+    // ── work queue (MAIN-153) ────────────────────────────────────────────────
+    // Only redis/sqs emit a block; database is the chart default. The Redis URL
+    // and AWS keys are NOT here — they live in the printed secret command (NG-4).
+    if let Some(q) = &v.queue {
+        s.push('\n');
+        s.push_str("queue:\n");
+        s.push_str(&format!("  provider: {}\n", q.provider));
+        if q.provider == "redis" {
+            if let Some(ln) = &q.redis_list_name {
+                s.push_str("  redis:\n");
+                s.push_str(&format!("    listName: \"{ln}\"\n"));
+            }
+        }
+        if q.provider == "sqs" {
+            s.push_str("  sqs:\n");
+            if let Some(u) = &q.sqs_queue_url {
+                s.push_str(&format!("    queueUrl: \"{u}\"\n"));
+            }
+            if let Some(r) = &q.sqs_region {
+                s.push_str(&format!("    region: \"{r}\"\n"));
+            }
+            if let Some(mode) = &q.sqs_credentials_mode {
+                s.push_str(&format!("    credentialsMode: {mode}\n"));
+            }
+        }
+    }
+    // ── worker + KEDA autoscaling (MAIN-153) ─────────────────────────────────
+    if let Some(w) = &v.worker {
+        s.push('\n');
+        s.push_str("worker:\n");
+        s.push_str("  enabled: true\n");
+        s.push_str(&format!("  replicas: {}\n", w.replicas));
+        if let Some(wt) = &w.work_types {
+            s.push_str(&format!("  workTypes: \"{wt}\"\n"));
+        }
+        if let Some(k) = &w.keda {
+            s.push('\n');
+            s.push_str("autoscaling:\n");
+            s.push_str("  keda:\n");
+            s.push_str("    enabled: true\n");
+            s.push_str(&format!("    minReplicas: {}\n", k.min_replicas));
+            s.push_str(&format!("    maxReplicas: {}\n", k.max_replicas));
+        }
+    }
     s
 }
 
@@ -971,7 +1282,13 @@ fn secret_command(
     session_secret: &str,
     oidc_client_secret: Option<&str>,
     mail_token: Option<&str>,
+    queue: QueueSecrets,
 ) -> String {
+    let QueueSecrets {
+        redis_url,
+        aws_access_key_id,
+        aws_secret_access_key,
+    } = queue;
     let mut s = format!(
         "kubectl create secret generic {secret} -n {ns} \\\n  \
          --from-literal=DATABASE_URL='postgres://USER:PASSWORD@HOST:5432/nook' \\\n  \
@@ -993,7 +1310,29 @@ fn secret_command(
         };
         s.push_str(&format!(" \\\n  --from-literal={key}='{token}'"));
     }
+    // Queue secrets (MAIN-153): the Redis URL (provider=redis) and the AWS keys
+    // (sqs + credentialsMode=secret) join here and ONLY here (NG-4). The literal
+    // keys match what `secretKeys.*` points the chart at.
+    if let Some(u) = redis_url.and_then(some_trimmed_str) {
+        s.push_str(&format!(" \\\n  --from-literal=NOOK_REDIS_URL='{u}'"));
+    }
+    if let Some(k) = aws_access_key_id.and_then(some_trimmed_str) {
+        s.push_str(&format!(" \\\n  --from-literal=AWS_ACCESS_KEY_ID='{k}'"));
+    }
+    if let Some(k) = aws_secret_access_key.and_then(some_trimmed_str) {
+        s.push_str(&format!(
+            " \\\n  --from-literal=AWS_SECRET_ACCESS_KEY='{k}'"
+        ));
+    }
     s
+}
+
+/// The queue secrets captured this run — printed only (NG-4). Grouped so
+/// [`secret_command`] stays a readable, few-argument builder.
+struct QueueSecrets<'a> {
+    redis_url: Option<&'a str>,
+    aws_access_key_id: Option<&'a str>,
+    aws_secret_access_key: Option<&'a str>,
 }
 
 /// Trim, returning `None` for an all-whitespace string — the `&str` twin of
@@ -1068,6 +1407,17 @@ struct Existing {
     mail_smtp_tls: Option<String>,
     mail_smtp_username: Option<String>,
     mail_postmark_api_url: Option<String>,
+    queue_provider: Option<String>,
+    redis_list_name: Option<String>,
+    sqs_queue_url: Option<String>,
+    sqs_region: Option<String>,
+    sqs_credentials_mode: Option<String>,
+    worker_enabled: Option<bool>,
+    worker_replicas: Option<String>,
+    worker_work_types: Option<String>,
+    keda_enabled: Option<bool>,
+    keda_min_replicas: Option<String>,
+    keda_max_replicas: Option<String>,
 }
 
 /// Parse back what a prior run wrote. The format is one we control — a flat set
@@ -1113,8 +1463,10 @@ fn parse_existing(text: &str) -> Existing {
     e.oidc_device_client_id = scalar(text, "deviceClientId");
     e.device_auth_endpoint = extra_env_value(text, "OIDC_DEVICE_AUTHORIZATION_ENDPOINT");
 
-    // Mail — the token was never stored (NG-4).
-    e.mail_provider = scalar(text, "provider");
+    // Mail — the token was never stored (NG-4). `provider` is a name shared with
+    // the queue block, so it must be read scoped to `mail:` (a flat scan would
+    // pick up whichever block came first).
+    e.mail_provider = nested_scalar(text, "mail:", "provider");
     e.mail_from = scalar(text, "from");
     e.mail_send_enabled = scalar(text, "sendEnabled").map(|v| v == "true");
     e.mail_notifications_enabled = scalar(text, "notificationsEnabled").map(|v| v == "true");
@@ -1125,7 +1477,61 @@ fn parse_existing(text: &str) -> Existing {
     e.mail_smtp_tls = scalar(text, "smtpTls");
     e.mail_smtp_username = scalar(text, "smtpUsername");
     e.mail_postmark_api_url = scalar(text, "postmarkApiUrl");
+
+    // Queue (MAIN-153) — the Redis URL / AWS keys were never stored (NG-4).
+    // `provider` is scoped to `queue:` (shared with mail); the rest are uniquely
+    // named. Absent queue block ⇒ database default.
+    e.queue_provider = nested_scalar(text, "queue:", "provider");
+    e.redis_list_name = scalar(text, "listName");
+    e.sqs_queue_url = scalar(text, "queueUrl");
+    e.sqs_region = scalar(text, "region");
+    e.sqs_credentials_mode = scalar(text, "credentialsMode");
+
+    // Worker + KEDA (MAIN-153). `enabled` is scoped to its block (agent, worker
+    // and keda all use the name); the replica counts are uniquely named.
+    e.worker_enabled = nested_scalar(text, "worker:", "enabled").map(|v| v == "true");
+    e.worker_replicas = nested_scalar(text, "worker:", "replicas");
+    e.worker_work_types = scalar(text, "workTypes");
+    e.keda_enabled = nested_scalar(text, "keda:", "enabled").map(|v| v == "true");
+    e.keda_min_replicas = scalar(text, "minReplicas");
+    e.keda_max_replicas = scalar(text, "maxReplicas");
     e
+}
+
+/// Read a `key:` nested inside the block introduced by `header` (a full trimmed
+/// line such as `"mail:"` or `"queue:"`). A bare name shared across blocks
+/// (`provider:` under both `mail:` and `queue:`, `enabled:` under `agent:`,
+/// `worker:` and `keda:`) would resolve to whichever block a flat [`scalar`] scan
+/// hit first, so those reads scope to their section. The scan runs from the
+/// header to the first line indented no deeper than it (the block's end).
+fn nested_scalar(text: &str, header: &str, key: &str) -> Option<String> {
+    let mut lines = text.lines();
+    while let Some(line) = lines.next() {
+        let t = line.trim_start();
+        if t.starts_with('#') {
+            continue;
+        }
+        if t == header {
+            let header_indent = line.len() - t.len();
+            for next in lines.by_ref() {
+                let nt = next.trim_start();
+                if nt.is_empty() || nt.starts_with('#') {
+                    continue;
+                }
+                let next_indent = next.len() - nt.len();
+                if next_indent <= header_indent {
+                    break; // dedented back out of the block
+                }
+                if let Some(rest) = nt.strip_prefix(key) {
+                    if let Some(val) = rest.strip_prefix(':') {
+                        return some_trimmed(val.trim().trim_matches('"').into());
+                    }
+                }
+            }
+            return None;
+        }
+    }
+    None
 }
 
 /// Recover an `extraEnv` value by its env name: find the `- name: NAME` line and
@@ -1203,6 +1609,20 @@ mod tests {
             mail_smtp_tls: None,
             mail_smtp_username: None,
             mail_postmark_api_url: None,
+            queue_provider: None,
+            redis_url: None,
+            redis_list_name: None,
+            sqs_queue_url: None,
+            sqs_region: None,
+            sqs_credentials_mode: None,
+            aws_access_key_id: None,
+            aws_secret_access_key: None,
+            worker: false,
+            worker_replicas: None,
+            worker_work_types: None,
+            keda: false,
+            keda_min_replicas: None,
+            keda_max_replicas: None,
             default_chart_version: "9.9.9".into(),
             nook_dir: dir.to_path_buf(),
         }
@@ -1705,6 +2125,256 @@ mod tests {
         assert!(err.to_string().contains("--oidc-issuer"));
     }
 
+    // ── the MAIN-153 branches: queue provider + worker/KEDA (AC-3) ───────────
+
+    #[test]
+    fn database_default_emits_no_queue_or_worker_block() {
+        let dir = tmp();
+        let out = run(
+            InitOptions {
+                host: Some("nook.example.com".into()),
+                ..base_opts(&dir)
+            },
+            None,
+            &no_probe,
+        )
+        .unwrap();
+        let text = std::fs::read_to_string(&out.path).unwrap();
+        // database is the chart default ⇒ no queue/worker/autoscaling overrides.
+        assert!(!text.contains("queue:"));
+        assert!(!text.contains("worker:"));
+        assert!(!text.contains("autoscaling:"));
+        assert!(!text.contains("NOOK_REDIS_URL"));
+        assert!(!out.secret_command.contains("NOOK_REDIS_URL"));
+        assert!(!out.secret_command.contains("AWS_"));
+    }
+
+    #[test]
+    fn redis_wires_the_secret_key_and_prints_the_url_only() {
+        let dir = tmp();
+        let out = run(
+            InitOptions {
+                host: Some("nook.example.com".into()),
+                queue_provider: Some("redis".into()),
+                redis_url: Some("redis://:pw@redis:6379/0".into()),
+                ..base_opts(&dir)
+            },
+            None,
+            &no_probe,
+        )
+        .unwrap();
+        let text = std::fs::read_to_string(&out.path).unwrap();
+        assert!(text.contains("queue:"));
+        assert!(text.contains("  provider: redis"));
+        // secretKeys wires the env; the URL itself is in the command, never on disk.
+        assert!(text.contains("  redisUrl: NOOK_REDIS_URL"));
+        assert!(out
+            .secret_command
+            .contains("--from-literal=NOOK_REDIS_URL='redis://:pw@redis:6379/0'"));
+        // NG-4: the URL is printed, never written.
+        assert!(!text.contains("redis://:pw@redis:6379/0"));
+        // No list name given ⇒ the redis sub-block is omitted (chart default).
+        assert!(!text.contains("listName"));
+    }
+
+    #[test]
+    fn redis_list_name_is_emitted_when_set() {
+        let dir = tmp();
+        let out = run(
+            InitOptions {
+                host: Some("nook.example.com".into()),
+                queue_provider: Some("redis".into()),
+                redis_list_name: Some("nook:jobs".into()),
+                ..base_opts(&dir)
+            },
+            None,
+            &no_probe,
+        )
+        .unwrap();
+        let text = std::fs::read_to_string(&out.path).unwrap();
+        assert!(text.contains("  redis:"));
+        assert!(text.contains("    listName: \"nook:jobs\""));
+    }
+
+    #[test]
+    fn sqs_irsa_writes_the_url_and_region_and_no_aws_secret() {
+        let dir = tmp();
+        let out = run(
+            InitOptions {
+                host: Some("nook.example.com".into()),
+                queue_provider: Some("sqs".into()),
+                sqs_queue_url: Some("https://sqs.us-east-1.amazonaws.com/1/q".into()),
+                sqs_region: Some("us-east-1".into()),
+                // credentials mode defaults to irsa
+                ..base_opts(&dir)
+            },
+            None,
+            &no_probe,
+        )
+        .unwrap();
+        let text = std::fs::read_to_string(&out.path).unwrap();
+        assert!(text.contains("  provider: sqs"));
+        assert!(text.contains("    queueUrl: \"https://sqs.us-east-1.amazonaws.com/1/q\""));
+        assert!(text.contains("    region: \"us-east-1\""));
+        assert!(text.contains("    credentialsMode: irsa"));
+        // IRSA ⇒ no AWS secret keys wired, none in the command.
+        assert!(!text.contains("awsAccessKeyId"));
+        assert!(!out.secret_command.contains("AWS_ACCESS_KEY_ID"));
+        assert!(!out.secret_command.contains("AWS_SECRET_ACCESS_KEY"));
+    }
+
+    #[test]
+    fn sqs_secret_mode_wires_aws_keys_and_prints_them_only() {
+        let dir = tmp();
+        let out = run(
+            InitOptions {
+                host: Some("nook.example.com".into()),
+                queue_provider: Some("sqs".into()),
+                sqs_queue_url: Some("https://sqs.eu-west-1.amazonaws.com/1/q".into()),
+                sqs_region: Some("eu-west-1".into()),
+                sqs_credentials_mode: Some("secret".into()),
+                aws_access_key_id: Some("AKIAEXAMPLE".into()),
+                aws_secret_access_key: Some("wJalrXUtnFEMI".into()),
+                ..base_opts(&dir)
+            },
+            None,
+            &no_probe,
+        )
+        .unwrap();
+        let text = std::fs::read_to_string(&out.path).unwrap();
+        assert!(text.contains("    credentialsMode: secret"));
+        assert!(text.contains("  awsAccessKeyId: AWS_ACCESS_KEY_ID"));
+        assert!(text.contains("  awsSecretAccessKey: AWS_SECRET_ACCESS_KEY"));
+        // Both AWS keys ride the command, never the file (NG-4).
+        assert!(out
+            .secret_command
+            .contains("--from-literal=AWS_ACCESS_KEY_ID='AKIAEXAMPLE'"));
+        assert!(out
+            .secret_command
+            .contains("--from-literal=AWS_SECRET_ACCESS_KEY='wJalrXUtnFEMI'"));
+        assert!(!text.contains("AKIAEXAMPLE"));
+        assert!(!text.contains("wJalrXUtnFEMI"));
+    }
+
+    #[test]
+    fn worker_enabled_renders_replicas_and_work_types() {
+        let dir = tmp();
+        let out = run(
+            InitOptions {
+                host: Some("nook.example.com".into()),
+                worker: true,
+                worker_replicas: Some("4".into()),
+                worker_work_types: Some("build,review".into()),
+                ..base_opts(&dir)
+            },
+            None,
+            &no_probe,
+        )
+        .unwrap();
+        let text = std::fs::read_to_string(&out.path).unwrap();
+        assert!(text.contains("worker:"));
+        assert!(text.contains("  enabled: true"));
+        assert!(text.contains("  replicas: 4"));
+        assert!(text.contains("  workTypes: \"build,review\""));
+        // No KEDA flag ⇒ no autoscaling block.
+        assert!(!text.contains("autoscaling:"));
+    }
+
+    #[test]
+    fn worker_defaults_to_one_replica_and_omits_work_types() {
+        let dir = tmp();
+        let out = run(
+            InitOptions {
+                host: Some("nook.example.com".into()),
+                worker: true,
+                ..base_opts(&dir)
+            },
+            None,
+            &no_probe,
+        )
+        .unwrap();
+        let text = std::fs::read_to_string(&out.path).unwrap();
+        assert!(text.contains("  replicas: 1"));
+        assert!(!text.contains("workTypes"));
+    }
+
+    #[test]
+    fn keda_enabled_renders_min_and_max_and_implies_worker() {
+        let dir = tmp();
+        // Only KEDA flags: the worker must be turned on for KEDA to mean anything.
+        let out = run(
+            InitOptions {
+                host: Some("nook.example.com".into()),
+                keda: true,
+                keda_min_replicas: Some("2".into()),
+                keda_max_replicas: Some("9".into()),
+                ..base_opts(&dir)
+            },
+            None,
+            &no_probe,
+        )
+        .unwrap();
+        let text = std::fs::read_to_string(&out.path).unwrap();
+        assert!(text.contains("worker:"));
+        assert!(text.contains("  enabled: true"));
+        assert!(text.contains("autoscaling:"));
+        assert!(text.contains("  keda:"));
+        assert!(text.contains("    enabled: true"));
+        assert!(text.contains("    minReplicas: 2"));
+        assert!(text.contains("    maxReplicas: 9"));
+    }
+
+    #[test]
+    fn rerun_prefills_queue_and_worker_from_the_saved_file() {
+        let dir = tmp();
+        run(
+            InitOptions {
+                host: Some("nook.example.com".into()),
+                queue_provider: Some("sqs".into()),
+                sqs_queue_url: Some("https://sqs.us-east-1.amazonaws.com/1/q".into()),
+                sqs_region: Some("us-east-1".into()),
+                sqs_credentials_mode: Some("secret".into()),
+                aws_access_key_id: Some("AKIAEXAMPLE".into()),
+                aws_secret_access_key: Some("shh".into()),
+                worker: true,
+                worker_replicas: Some("5".into()),
+                worker_work_types: Some("build".into()),
+                keda: true,
+                keda_min_replicas: Some("3".into()),
+                keda_max_replicas: Some("12".into()),
+                ..base_opts(&dir)
+            },
+            None,
+            &no_probe,
+        )
+        .unwrap();
+
+        // Re-run with ONLY --host: every non-secret queue/worker field survives.
+        let out = run(
+            InitOptions {
+                host: Some("nook.example.com".into()),
+                ..base_opts(&dir)
+            },
+            None,
+            &no_probe,
+        )
+        .unwrap();
+        let text = std::fs::read_to_string(&out.path).unwrap();
+        assert!(text.contains("  provider: sqs"));
+        assert!(text.contains("    region: \"us-east-1\""));
+        assert!(text.contains("    credentialsMode: secret"));
+        assert!(text.contains("  replicas: 5"));
+        assert!(text.contains("  workTypes: \"build\""));
+        assert!(text.contains("    minReplicas: 3"));
+        assert!(text.contains("    maxReplicas: 12"));
+        // secretKeys wiring survives so the operator's existing Secret still works…
+        assert!(text.contains("  awsAccessKeyId: AWS_ACCESS_KEY_ID"));
+        // …but the AWS secret values were never stored, so a bare re-run can't
+        // re-print them (NG-4).
+        assert!(!out.secret_command.contains("AKIAEXAMPLE"));
+        assert!(!text.contains("AKIAEXAMPLE"));
+    }
+
     #[test]
     fn parse_roundtrips_what_render_wrote() {
         let v = Values {
@@ -1738,6 +2408,21 @@ mod tests {
                 smtp_tls: Some("starttls".into()),
                 smtp_username: Some("mailer".into()),
                 postmark_api_url: None,
+            }),
+            queue: Some(QueueValues {
+                provider: "sqs".into(),
+                redis_list_name: None,
+                sqs_queue_url: Some("https://sqs.us-east-1.amazonaws.com/1/q".into()),
+                sqs_region: Some("us-east-1".into()),
+                sqs_credentials_mode: Some("secret".into()),
+            }),
+            worker: Some(WorkerValues {
+                replicas: "3".into(),
+                work_types: Some("build,review".into()),
+                keda: Some(KedaValues {
+                    min_replicas: "2".into(),
+                    max_replicas: "8".into(),
+                }),
             }),
             extra_env: vec![(
                 "OIDC_DEVICE_AUTHORIZATION_ENDPOINT".into(),
@@ -1785,5 +2470,20 @@ mod tests {
         assert_eq!(e.mail_smtp_port.as_deref(), Some("587"));
         assert_eq!(e.mail_smtp_tls.as_deref(), Some("starttls"));
         assert_eq!(e.mail_smtp_username.as_deref(), Some("mailer"));
+        // Queue + worker + KEDA round-trip (MAIN-153). `provider` reads scoped to
+        // its block, so the queue value is not shadowed by the mail one.
+        assert_eq!(e.queue_provider.as_deref(), Some("sqs"));
+        assert_eq!(
+            e.sqs_queue_url.as_deref(),
+            Some("https://sqs.us-east-1.amazonaws.com/1/q")
+        );
+        assert_eq!(e.sqs_region.as_deref(), Some("us-east-1"));
+        assert_eq!(e.sqs_credentials_mode.as_deref(), Some("secret"));
+        assert_eq!(e.worker_enabled, Some(true));
+        assert_eq!(e.worker_replicas.as_deref(), Some("3"));
+        assert_eq!(e.worker_work_types.as_deref(), Some("build,review"));
+        assert_eq!(e.keda_enabled, Some(true));
+        assert_eq!(e.keda_min_replicas.as_deref(), Some("2"));
+        assert_eq!(e.keda_max_replicas.as_deref(), Some("8"));
     }
 }

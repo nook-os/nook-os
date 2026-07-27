@@ -1,0 +1,119 @@
+{{- if .Values.worker.enabled }}
+{{- include "nook-control.requireSecret" . }}
+{{- $sk := .Values.secretKeys -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "nook-control.componentName" (dict "root" . "component" "worker") }}
+  labels:
+    {{- include "nook-control.labels" . | nindent 4 }}
+    app.kubernetes.io/component: worker
+spec:
+  # KEDA owns the replica count when autoscaling is on; otherwise it is static.
+  {{- if not .Values.autoscaling.keda.enabled }}
+  replicas: {{ .Values.worker.replicas }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "nook-control.componentSelectorLabels" (dict "root" . "component" "worker") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "nook-control.componentSelectorLabels" (dict "root" . "component" "worker") | nindent 8 }}
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "nook-control.serviceAccountName" . }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.worker.podSecurityContext | nindent 8 }}
+      containers:
+        - name: worker
+          image: {{ include "nook-control.workerImage" . }}
+          imagePullPolicy: {{ .Values.worker.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.worker.securityContext | nindent 12 }}
+          # The worker shares the control plane's non-secret config (queue
+          # provider, mail, log level). It never runs migrations.
+          envFrom:
+            - configMapRef:
+                name: {{ include "nook-control.fullname" . }}-config
+          env:
+            # Required secrets, by reference — never rendered into a manifest.
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.existingSecret }}
+                  key: {{ $sk.databaseUrl }}
+            - name: SESSION_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.existingSecret }}
+                  key: {{ $sk.sessionSecret }}
+            {{- if .Values.worker.workTypes }}
+            - name: NOOK_WORK_TYPES
+              value: {{ .Values.worker.workTypes | quote }}
+            {{- end }}
+            # The worker delivers email jobs, so it needs the mail secrets too.
+            {{- if $sk.smtpPassword }}
+            - name: SMTP_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.existingSecret }}
+                  key: {{ $sk.smtpPassword }}
+            {{- end }}
+            {{- if $sk.postmarkToken }}
+            - name: POSTMARK_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.existingSecret }}
+                  key: {{ $sk.postmarkToken }}
+            {{- end }}
+            # Provider-specific credentials. redis: the connection URL from the
+            # Secret; sqs: AWS keys from the Secret unless using pod-identity (IRSA).
+            {{- if and (eq .Values.queue.provider "redis") $sk.redisUrl }}
+            - name: NOOK_REDIS_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.existingSecret }}
+                  key: {{ $sk.redisUrl }}
+            {{- end }}
+            {{- if and (eq .Values.queue.provider "sqs") (eq .Values.queue.sqs.credentialsMode "secret") }}
+            {{- if $sk.awsAccessKeyId }}
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.existingSecret }}
+                  key: {{ $sk.awsAccessKeyId }}
+            {{- end }}
+            {{- if $sk.awsSecretAccessKey }}
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.existingSecret }}
+                  key: {{ $sk.awsSecretAccessKey }}
+            {{- end }}
+            {{- end }}
+            {{- with .Values.worker.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          resources:
+            {{- toYaml .Values.worker.resources | nindent 12 }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

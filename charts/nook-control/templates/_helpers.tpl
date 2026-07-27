@@ -85,6 +85,15 @@ The web image reference. Tag defaults to the chart's appVersion.
 {{- end -}}
 
 {{/*
+The worker image reference (MAIN-153). Tag defaults to the chart's appVersion,
+so the worker rolls forward with the control plane in lockstep.
+*/}}
+{{- define "nook-control.workerImage" -}}
+{{- $img := .Values.worker.image -}}
+{{- printf "%s/%s:%s" $img.registry $img.repository (default .Chart.AppVersion $img.tag) -}}
+{{- end -}}
+
+{{/*
 Guardrail: existingSecret is required — the chart references secrets, never
 creates or embeds them.
 */}}

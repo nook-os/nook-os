@@ -164,6 +164,60 @@ else
   echo "  ok:   default render omits every new key (additive)"
 fi
 
+# ── Worker + queue provider + KEDA matrix (MAIN-153) ─────────────────────────
+# AC-4: render all three providers × KEDA on/off and assert the worker
+# Deployment, the provider-matched env, and the matching KEDA trigger.
+echo "==> helm template (worker matrix: database|redis|sqs × KEDA on/off)"
+
+# Default (worker off) renders no worker Deployment / ScaledObject — additive.
+if grep -qE 'component: worker' <<<"$baseout"; then
+  echo "  FAIL: the worker Deployment leaked into the default render (not additive)"
+  fail=1
+else
+  echo "  ok:   worker off by default (additive)"
+fi
+
+wmatrix() {
+  local label="$1" out="$2" pattern="$3" want="$4" got
+  got="$(grep -cE "$pattern" <<<"$out" || true)"
+  if [ "$got" -ne "$want" ]; then
+    echo "  FAIL: $label — expected $want, got $got"
+    fail=1
+  else
+    echo "  ok:   $label ($got)"
+  fi
+}
+
+for provider in database redis sqs; do
+  extra=()
+  case "$provider" in
+    redis) extra=(--set secretKeys.redisUrl=REDIS_URL) ;;
+    sqs) extra=(--set queue.sqs.queueUrl=https://sqs.us-east-1.amazonaws.com/1/q
+                --set queue.sqs.region=us-east-1) ;;
+  esac
+
+  # KEDA off: worker Deployment renders, no ScaledObject.
+  off="$(render "${min[@]}" --set worker.enabled=true --set queue.provider="$provider" "${extra[@]}")"
+  wmatrix "$provider: 3 Deployments (worker on)" "$off" '^kind: Deployment$' 3
+  wmatrix "$provider: NOOK_QUEUE_PROVIDER"    "$off" "NOOK_QUEUE_PROVIDER: \"$provider\"" 1
+  wmatrix "$provider: no ScaledObject (KEDA off)" "$off" '^kind: ScaledObject$' 0
+
+  # KEDA on: the ScaledObject + the provider-matched trigger render.
+  on="$(render "${min[@]}" --set worker.enabled=true --set queue.provider="$provider" \
+        --set autoscaling.keda.enabled=true "${extra[@]}")"
+  wmatrix "$provider: ScaledObject (KEDA on)" "$on" '^kind: ScaledObject$' 1
+  case "$provider" in
+    database) wmatrix "$provider: postgresql trigger" "$on" 'type: postgresql' 1 ;;
+    redis)    wmatrix "$provider: redis trigger"      "$on" 'type: redis' 1 ;;
+    sqs)      wmatrix "$provider: aws-sqs trigger"    "$on" 'type: aws-sqs-queue' 1 ;;
+  esac
+  # Still no literal secret material anywhere in the KEDA-on render.
+  if grep -inE 'password: |nookdevsecret' <<<"$on" | grep -vE 'secretKeyRef|secretName|TriggerAuth|name:' >/dev/null; then
+    echo "  FAIL: $provider KEDA render leaked secret material"
+    fail=1
+  fi
+done
+
 if [ "$fail" -ne 0 ]; then
   echo "chart validation FAILED"
   exit 1
