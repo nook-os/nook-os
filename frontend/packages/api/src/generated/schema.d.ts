@@ -3863,6 +3863,11 @@ export interface components {
             /** @description `spec` (fill in a ticket) or `decompose` (break down an epic). */
             kind: string;
             predecessor_job_id?: null | components["schemas"]["JobId"];
+            /**
+             * @description Why the job could not yet be placed on an executor (MAIN-160): the
+             *     specific gate that failed while it waits `queued`. `None` once claimed.
+             */
+            queued_reason?: string | null;
             requested_by: components["schemas"]["UserId"];
             /** @description One of `queued|claimed|running|waiting_on_human|completed|failed|canceled`. */
             state: string;

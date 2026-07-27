@@ -9127,6 +9127,13 @@
               }
             ]
           },
+          "queued_reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why the job could not yet be placed on an executor (MAIN-160): the\nspecific gate that failed while it waits `queued`. `None` once claimed."
+          },
           "requested_by": {
             "$ref": "#/components/schemas/UserId"
           },

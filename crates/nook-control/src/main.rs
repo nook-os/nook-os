@@ -90,6 +90,10 @@ async fn serve(db: sqlx::PgPool, cfg: Config) -> Result<()> {
     let instance = state.registry.instance_id();
     tracing::info!(%instance, "control plane instance");
 
+    // Drain queued loop jobs onto eligible executors (MAIN-160). Every replica
+    // runs it; the queue's atomic receive keeps them from double-claiming.
+    nook_control::services::job_dispatch::start(state.clone());
+
     // One signal, every listener. A single task watches for SIGTERM/SIGINT and
     // flips a watch channel; the browser door, the agent door, and the grace
     // timer each hold a receiver, so a rolling update drains all of them at once
