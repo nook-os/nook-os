@@ -839,4 +839,61 @@ impl NookBackend for McpBackend {
             crate::routes::task_detail::link(&self.state, tenant, viewer, f, t, &kind).await?;
         Ok(serde_json::to_value(row)?)
     }
+
+    // ── Notebook (person-scoped; MAIN-102) ──────────────────────────────────
+    // These take the caller's own resolved `person` (never the first-user
+    // fallback) and route through the notebook module's service paths, so
+    // validation, encryption and the sealed-note exclusion all apply here too.
+
+    async fn notebook_list_notes(
+        &self,
+        person: uuid::Uuid,
+        q: Option<String>,
+    ) -> anyhow::Result<Vec<UserNoteSummary>> {
+        Ok(
+            crate::routes::notebook::list_notes_for(
+                &self.state,
+                person,
+                q.as_deref().unwrap_or(""),
+            )
+            .await?,
+        )
+    }
+
+    async fn notebook_get_note(
+        &self,
+        person: uuid::Uuid,
+        id: UserNoteId,
+    ) -> anyhow::Result<UserNote> {
+        Ok(crate::routes::notebook::get_note_for(&self.state, person, id).await?)
+    }
+
+    async fn notebook_create_note(
+        &self,
+        person: uuid::Uuid,
+        req: CreateUserNote,
+    ) -> anyhow::Result<UserNote> {
+        Ok(crate::routes::notebook::create_note_for(&self.state, person, req).await?)
+    }
+
+    async fn notebook_update_note(
+        &self,
+        person: uuid::Uuid,
+        id: UserNoteId,
+        req: UpdateUserNote,
+    ) -> anyhow::Result<UserNote> {
+        Ok(crate::routes::notebook::update_note_for(&self.state, person, id, req).await?)
+    }
+
+    async fn notebook_delete_note(&self, person: uuid::Uuid, id: UserNoteId) -> anyhow::Result<()> {
+        crate::routes::notebook::delete_note_for(&self.state, person, id).await?;
+        Ok(())
+    }
+
+    async fn notebook_list_folders(
+        &self,
+        person: uuid::Uuid,
+    ) -> anyhow::Result<Vec<UserNoteFolder>> {
+        Ok(crate::routes::notebook::list_folders_for(&self.state, person).await?)
+    }
 }

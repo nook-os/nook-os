@@ -429,7 +429,7 @@ pub fn build_router(state: AppState) -> Router {
 /// (ChatGPT connectors, Claude custom connectors) can find the issuer.
 async fn mcp_auth(
     axum::extract::State(state): axum::extract::State<AppState>,
-    req: axum::extract::Request,
+    mut req: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
     let bearer = req
@@ -439,9 +439,16 @@ async fn mcp_auth(
         .and_then(|v| v.strip_prefix("Bearer "))
         .map(str::to_string);
     if let Some(token) = bearer {
-        if state.cfg.mcp_token.as_deref() == Some(token.as_str())
-            || oidc_token_valid(&state, &token).await
-        {
+        // The static MCP_TOKEN is valid but carries no person — notebook tools
+        // refuse it with a pointed error (MAIN-102 AC-3).
+        if state.cfg.mcp_token.as_deref() == Some(token.as_str()) {
+            return next.run(req).await;
+        }
+        // An OIDC access token is validated against userinfo and resolved to the
+        // caller's NookOS identity, which rides in the request extensions into
+        // the MCP tool context (MAIN-102 AC-1).
+        if let Some(caller) = resolve_mcp_caller(&state, &token).await {
+            req.extensions_mut().insert(caller);
             return next.run(req).await;
         }
     }
@@ -459,42 +466,82 @@ async fn mcp_auth(
     resp
 }
 
-/// Validate an OIDC access token by presenting it to the issuer's userinfo
-/// endpoint. Successful validations are cached (by hash) for a minute.
-async fn oidc_token_valid(state: &AppState, token: &str) -> bool {
+/// Validate an OIDC access token against the issuer's userinfo endpoint AND
+/// resolve it to the caller's NookOS identity (MAIN-102). Returns `None` when
+/// there is no OIDC context, the token is rejected, or the userinfo body has no
+/// `sub`. Successful resolutions are cached (by token hash) for a minute so a
+/// busy MCP client does not re-hit userinfo on every tool call.
+///
+/// The userinfo claims are mapped with the same `login_identity` path the login
+/// callback uses, keyed on the configured issuer + the `sub`, so an MCP caller
+/// lands on the very same `users` row as their browser session.
+async fn resolve_mcp_caller(state: &AppState, token: &str) -> Option<nook_mcp::McpCaller> {
     use std::hash::{Hash, Hasher};
-    let Some(oidc) = state.oidc.as_ref() else {
-        return false;
-    };
-    let Some(endpoint) = oidc.metadata.userinfo_endpoint() else {
-        return false;
-    };
+    let oidc = state.oidc.as_ref()?;
+    let endpoint = oidc.metadata.userinfo_endpoint()?;
+
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     token.hash(&mut hasher);
     let key = hasher.finish();
-    if let Some(at) = state.mcp_auth_cache.get(&key) {
-        if at.elapsed() < std::time::Duration::from_secs(60) {
-            return true;
+    if let Some(entry) = state.mcp_auth_cache.get(&key) {
+        if entry.0.elapsed() < std::time::Duration::from_secs(60) {
+            return Some(entry.1.clone());
         }
     }
-    let ok = oidc
+
+    let resp = oidc
         .http
         .get(endpoint.as_str())
         .bearer_auth(token)
         .send()
         .await
-        .map(|r| r.status().is_success())
-        .unwrap_or(false);
-    if ok {
-        // Opportunistic pruning keeps the cache bounded.
-        if state.mcp_auth_cache.len() > 1024 {
-            state
-                .mcp_auth_cache
-                .retain(|_, at| at.elapsed() < std::time::Duration::from_secs(300));
-        }
-        state.mcp_auth_cache.insert(key, std::time::Instant::now());
+        .ok()?;
+    if !resp.status().is_success() {
+        return None;
     }
-    ok
+    let body: serde_json::Value = resp.json().await.ok()?;
+    let subject = body.get("sub").and_then(|v| v.as_str())?.to_string();
+    let claims = crate::services::identity::IdentityClaims {
+        issuer: oidc.metadata.issuer().to_string(),
+        subject,
+        email: body
+            .get("email")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+        email_verified: body
+            .get("email_verified")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        display_name: body
+            .get("name")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+        avatar_url: body
+            .get("picture")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+        raw_claims: body,
+    };
+    let (user, tenant) = crate::services::identity::login_identity(state, claims)
+        .await
+        .ok()?;
+    let person_id = crate::auth::person_id_of(state, user.id).await.ok()?;
+    let caller = nook_mcp::McpCaller {
+        person_id,
+        user_id: user.id,
+        tenant_id: tenant.id,
+    };
+
+    // Opportunistic pruning keeps the cache bounded.
+    if state.mcp_auth_cache.len() > 1024 {
+        state
+            .mcp_auth_cache
+            .retain(|_, e| e.0.elapsed() < std::time::Duration::from_secs(300));
+    }
+    state
+        .mcp_auth_cache
+        .insert(key, (std::time::Instant::now(), caller.clone()));
+    Some(caller)
 }
 
 /// The base URL clients used to reach us (honors reverse-proxy headers).

@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 nook-types = { workspace = true }
+uuid = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 async-trait = { workspace = true }

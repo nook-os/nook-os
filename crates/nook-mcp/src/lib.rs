@@ -7,6 +7,8 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use axum::http::request::Parts;
+use rmcp::handler::server::tool::Extension;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{CallToolResult, ContentBlock, ServerCapabilities, ServerInfo};
 use rmcp::schemars::{self, JsonSchema};
@@ -14,8 +16,27 @@ use rmcp::transport::streamable_http_server::session::local::LocalSessionManager
 use rmcp::transport::StreamableHttpService;
 use rmcp::{tool, tool_handler, tool_router, ErrorData as McpError, ServerHandler};
 use serde::Deserialize;
+use uuid::Uuid;
 
-use nook_types::{Event, Node, Note, Session, TaskItem, WorkspaceDetail};
+use nook_types::{
+    CreateUserNote, Event, Node, Note, Session, TaskItem, TenantId, UpdateUserNote, UserId,
+    UserNote, UserNoteFolder, UserNoteFolderId, UserNoteId, UserNoteSummary, WorkspaceDetail,
+};
+
+/// The per-request MCP caller identity resolved from an OIDC bearer (MAIN-102).
+///
+/// The control plane's `mcp_auth` middleware resolves the token's userinfo to a
+/// NookOS user and inserts this into the HTTP request's extensions; rmcp
+/// forwards `http::request::Parts` into each tool's request context, so a
+/// notebook tool reads it back with `parts.extensions.get::<McpCaller>()`. The
+/// static `MCP_TOKEN` path inserts nothing — those calls have no person, and
+/// every notebook tool refuses them.
+#[derive(Debug, Clone)]
+pub struct McpCaller {
+    pub person_id: Uuid,
+    pub user_id: UserId,
+    pub tenant_id: TenantId,
+}
 
 /// Everything the MCP surface is allowed to do, pre-scoped to a tenant.
 #[async_trait]
@@ -133,6 +154,31 @@ pub trait NookBackend: Send + Sync + 'static {
         to: String,
         kind: String,
     ) -> anyhow::Result<serde_json::Value>;
+
+    // ── Notebook (person-scoped; MAIN-102) ──────────────────────────────────
+    // Unlike every method above (pre-scoped to the instance's first tenant),
+    // these take a resolved `person` (a `users.person_id`) — the notebook is
+    // private to a person, so there is no instance fallback. They route through
+    // the notebook module's own service paths (validation, encryption, decrypt).
+    async fn notebook_list_notes(
+        &self,
+        person: Uuid,
+        q: Option<String>,
+    ) -> anyhow::Result<Vec<UserNoteSummary>>;
+    async fn notebook_get_note(&self, person: Uuid, id: UserNoteId) -> anyhow::Result<UserNote>;
+    async fn notebook_create_note(
+        &self,
+        person: Uuid,
+        req: CreateUserNote,
+    ) -> anyhow::Result<UserNote>;
+    async fn notebook_update_note(
+        &self,
+        person: Uuid,
+        id: UserNoteId,
+        req: UpdateUserNote,
+    ) -> anyhow::Result<UserNote>;
+    async fn notebook_delete_note(&self, person: Uuid, id: UserNoteId) -> anyhow::Result<()>;
+    async fn notebook_list_folders(&self, person: Uuid) -> anyhow::Result<Vec<UserNoteFolder>>;
 }
 
 /// The pick filter, mirroring `GET /api/v1/tasks`.
@@ -359,6 +405,64 @@ fn to_result<T: serde::Serialize>(value: &T) -> Result<CallToolResult, McpError>
 
 fn backend_err(e: anyhow::Error) -> McpError {
     McpError::internal_error(e.to_string(), None)
+}
+
+/// The notebook caller's person, or the explicit not-authenticated error every
+/// notebook tool returns for the static `MCP_TOKEN` path (which carries no
+/// person). The identity rides in the request's extensions (see [`McpCaller`]).
+fn require_person(parts: &Parts) -> Result<Uuid, McpError> {
+    parts
+        .extensions
+        .get::<McpCaller>()
+        .map(|c| c.person_id)
+        .ok_or_else(|| {
+            McpError::invalid_request(
+                "MCP is not authenticated as a user — connect with your own token".to_string(),
+                None,
+            )
+        })
+}
+
+fn parse_note_id(s: &str) -> Result<UserNoteId, McpError> {
+    s.parse()
+        .map_err(|_| McpError::invalid_params(format!("invalid note id {s:?}"), None))
+}
+
+fn parse_folder_id(s: &str) -> Result<UserNoteFolderId, McpError> {
+    s.parse()
+        .map_err(|_| McpError::invalid_params(format!("invalid folder id {s:?}"), None))
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct NotebookListParams {
+    /// Case-insensitive substring over note title + folder path. Omit to list all.
+    pub q: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct NotebookNoteIdParams {
+    /// The note's id.
+    pub id: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct NotebookCreateParams {
+    pub title: String,
+    /// Markdown body. Defaults to empty.
+    pub content_md: Option<String>,
+    /// Optional folder id to file the note under.
+    pub folder_id: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct NotebookUpdateParams {
+    pub id: String,
+    /// New title. Omit to leave unchanged.
+    pub title: Option<String>,
+    /// New markdown body. Omit to leave unchanged.
+    pub content_md: Option<String>,
+    /// Move the note into this folder id. Omit to leave it where it is.
+    pub folder_id: Option<String>,
 }
 
 #[tool_router]
@@ -799,6 +903,136 @@ impl NookMcp {
                 .map_err(backend_err)?,
         )
     }
+
+    // ── Notebook tools (person-scoped; MAIN-102) ────────────────────────────
+    // Each requires an OIDC-resolved person; the static MCP_TOKEN path gets the
+    // clear not-a-user error from `require_person`. The person rides in the
+    // request extensions, which rmcp exposes via `Extension<Parts>`.
+
+    #[tool(
+        description = "List your personal notebook notes (title + folder path only; bodies are \
+                       never returned). Optional `q` filters by case-insensitive substring."
+    )]
+    async fn notebook_list_notes(
+        &self,
+        Extension(parts): Extension<Parts>,
+        Parameters(p): Parameters<NotebookListParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let person = require_person(&parts)?;
+        to_result(
+            &self
+                .backend
+                .notebook_list_notes(person, p.q)
+                .await
+                .map_err(backend_err)?,
+        )
+    }
+
+    #[tool(
+        description = "Read one of your notebook notes by id, decrypted. A sealed note returns \
+                       no body (the server cannot decrypt it)."
+    )]
+    async fn notebook_get_note(
+        &self,
+        Extension(parts): Extension<Parts>,
+        Parameters(p): Parameters<NotebookNoteIdParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let person = require_person(&parts)?;
+        let id = parse_note_id(&p.id)?;
+        to_result(
+            &self
+                .backend
+                .notebook_get_note(person, id)
+                .await
+                .map_err(backend_err)?,
+        )
+    }
+
+    #[tool(description = "Create a note in your personal notebook.")]
+    async fn notebook_create_note(
+        &self,
+        Extension(parts): Extension<Parts>,
+        Parameters(p): Parameters<NotebookCreateParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let person = require_person(&parts)?;
+        let folder_id = match p.folder_id.as_deref() {
+            Some(s) => Some(parse_folder_id(s)?),
+            None => None,
+        };
+        let req = CreateUserNote {
+            title: p.title,
+            content_md: p.content_md.unwrap_or_default(),
+            folder_id,
+        };
+        to_result(
+            &self
+                .backend
+                .notebook_create_note(person, req)
+                .await
+                .map_err(backend_err)?,
+        )
+    }
+
+    #[tool(
+        description = "Update one of your notebook notes: change its title, body, or move it to \
+                       a folder. A sealed note's body cannot be updated this way."
+    )]
+    async fn notebook_update_note(
+        &self,
+        Extension(parts): Extension<Parts>,
+        Parameters(p): Parameters<NotebookUpdateParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let person = require_person(&parts)?;
+        let id = parse_note_id(&p.id)?;
+        // `folder_id` present → move into that folder; absent → leave in place.
+        // (Moving a note back to the root is not exposed over MCP in v1.)
+        let folder_id = match p.folder_id.as_deref() {
+            Some(s) => Some(Some(parse_folder_id(s)?)),
+            None => None,
+        };
+        let req = UpdateUserNote {
+            title: p.title,
+            content_md: p.content_md,
+            folder_id,
+        };
+        to_result(
+            &self
+                .backend
+                .notebook_update_note(person, id, req)
+                .await
+                .map_err(backend_err)?,
+        )
+    }
+
+    #[tool(description = "Delete one of your notebook notes by id.")]
+    async fn notebook_delete_note(
+        &self,
+        Extension(parts): Extension<Parts>,
+        Parameters(p): Parameters<NotebookNoteIdParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let person = require_person(&parts)?;
+        let id = parse_note_id(&p.id)?;
+        self.backend
+            .notebook_delete_note(person, id)
+            .await
+            .map_err(backend_err)?;
+        Ok(CallToolResult::success(vec![ContentBlock::text("deleted")]))
+    }
+
+    #[tool(description = "List your notebook folders.")]
+    async fn notebook_list_folders(
+        &self,
+        Extension(parts): Extension<Parts>,
+    ) -> Result<CallToolResult, McpError> {
+        let person = require_person(&parts)?;
+        to_result(
+            &self
+                .backend
+                .notebook_list_folders(person)
+                .await
+                .map_err(backend_err)?,
+        )
+    }
 }
 
 #[tool_handler]
@@ -824,4 +1058,44 @@ pub fn router(backend: Arc<dyn NookBackend>) -> axum::Router {
         Default::default(),
     );
     axum::Router::new().fallback_service(service)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parts_with(caller: Option<McpCaller>) -> Parts {
+        let mut parts = axum::http::Request::builder()
+            .body(())
+            .unwrap()
+            .into_parts()
+            .0;
+        if let Some(c) = caller {
+            parts.extensions.insert(c);
+        }
+        parts
+    }
+
+    #[test]
+    fn require_person_yields_the_caller_when_resolved() {
+        let person = Uuid::now_v7();
+        let caller = McpCaller {
+            person_id: person,
+            user_id: UserId::new(),
+            tenant_id: TenantId::new(),
+        };
+        assert_eq!(require_person(&parts_with(Some(caller))).unwrap(), person);
+    }
+
+    #[test]
+    fn require_person_refuses_with_a_pointed_error_when_unauthenticated() {
+        // No McpCaller in extensions — the MCP_TOKEN path. Every notebook tool
+        // takes this branch and must refuse (AC-3).
+        let err = require_person(&parts_with(None)).unwrap_err();
+        assert!(
+            err.message.contains("not authenticated as a user"),
+            "pointed not-a-user error: {}",
+            err.message
+        );
+    }
 }
