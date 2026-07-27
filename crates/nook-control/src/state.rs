@@ -4,7 +4,7 @@ use axum::extract::FromRef;
 use axum_extra::extract::cookie::Key;
 use sqlx::PgPool;
 
-use crate::auth::OidcContext;
+use crate::auth::{OidcContext, OidcState};
 use crate::config::Config;
 use crate::crypto::Vault;
 use crate::services::kanban::KanbanRegistry;
@@ -15,7 +15,10 @@ use nook_dispatcher::{DispatcherBackend, RuleBasedDispatcher};
 pub struct AppState {
     pub db: PgPool,
     pub cfg: Arc<Config>,
-    pub oidc: Option<Arc<OidcContext>>,
+    /// OIDC discovery state — configured/usable/degraded, hot-swappable after
+    /// boot so an IdP that was down at startup recovers without a restart
+    /// (MAIN-169). Readers call `state.oidc.current()`.
+    pub oidc: Arc<OidcState>,
     pub kanban: Arc<KanbanRegistry>,
     pub registry: Arc<Registry>,
     pub dispatcher: Arc<dyn DispatcherBackend>,
@@ -51,6 +54,9 @@ pub struct AppState {
 
 impl AppState {
     pub async fn new(db: PgPool, cfg: Config, oidc: Option<OidcContext>) -> Self {
+        // Discovery state is built from config; `oidc` seeds the already-
+        // discovered context from the boot-time attempt (MAIN-169).
+        let oidc = Arc::new(OidcState::new(&cfg, oidc));
         let cookie_key = crate::auth::cookie_key(&cfg.session_secret);
         let vault = Vault::from_env(&cfg.session_secret).expect("vault init failed");
         let artifacts: Arc<dyn crate::storage::ArtifactStore> =
@@ -79,7 +85,7 @@ impl AppState {
             vault,
             db,
             cfg: Arc::new(cfg),
-            oidc: oidc.map(Arc::new),
+            oidc,
             mcp_auth_cache: Arc::new(dashmap::DashMap::new()),
             notify_limit: Arc::new(Default::default()),
             preview_limit: Arc::new(Default::default()),

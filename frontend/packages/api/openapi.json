@@ -6970,7 +6970,11 @@
           },
           "oidc": {
             "type": "boolean",
-            "description": "An OIDC identity provider is configured."
+            "description": "An OIDC identity provider is configured AND usable (discovery has\nsucceeded). False both when no IdP is configured and when one is\nconfigured but currently unreachable — `oidc_degraded` tells those apart."
+          },
+          "oidc_degraded": {
+            "type": "boolean",
+            "description": "An OIDC identity provider is configured but its discovery document is\ncurrently unreachable (MAIN-169). The login page shows a retry notice\nwhere the IdP button sits, and never presents a local password form as\nthough it were the instance's only sign-in method."
           },
           "oidc_issuer": {
             "type": [
@@ -9049,6 +9053,10 @@
           "available": {
             "type": "boolean",
             "description": "Local sign-in is possible: the tenant is undecided, or already local."
+          },
+          "has_local_credentials": {
+            "type": "boolean",
+            "description": "At least one user on this instance has a local password set. This is the\nbreak-glass signal (MAIN-169 AC-5): during an OIDC outage the login page\noffers the password form ONLY when an existing local credential can use\nit — never registration, and never on an instance that has none."
           },
           "mode": {
             "type": [

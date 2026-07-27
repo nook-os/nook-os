@@ -278,6 +278,12 @@ pub struct LocalAuthStatus {
     /// "oidc" | "local" | null when nobody has signed in yet.
     #[serde(default)]
     pub mode: Option<String>,
+    /// At least one user on this instance has a local password set. This is the
+    /// break-glass signal (MAIN-169 AC-5): during an OIDC outage the login page
+    /// offers the password form ONLY when an existing local credential can use
+    /// it — never registration, and never on an instance that has none.
+    #[serde(default)]
+    pub has_local_credentials: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, ToSchema)]
@@ -334,8 +340,16 @@ pub struct ConfirmVerificationResult {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
 pub struct AuthProviders {
-    /// An OIDC identity provider is configured.
+    /// An OIDC identity provider is configured AND usable (discovery has
+    /// succeeded). False both when no IdP is configured and when one is
+    /// configured but currently unreachable — `oidc_degraded` tells those apart.
     pub oidc: bool,
+    /// An OIDC identity provider is configured but its discovery document is
+    /// currently unreachable (MAIN-169). The login page shows a retry notice
+    /// where the IdP button sits, and never presents a local password form as
+    /// though it were the instance's only sign-in method.
+    #[serde(default)]
+    pub oidc_degraded: bool,
     /// The dev/CI escape hatch is enabled (never in production).
     pub dev_login: bool,
     /// Username and password held in this database.

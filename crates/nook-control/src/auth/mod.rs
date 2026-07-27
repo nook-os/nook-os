@@ -6,6 +6,8 @@ pub mod password;
 pub mod perm;
 pub mod session_guard;
 
+use std::sync::Arc;
+
 use axum::extract::FromRequestParts;
 use axum::http::request::Parts;
 use axum_extra::extract::cookie::{Cookie, CookieJar, Key, SameSite};
@@ -39,6 +41,157 @@ impl OidcContext {
             CoreProviderMetadata::discover_async(IssuerUrl::new(issuer_url.to_string())?, &http)
                 .await?;
         Ok(Self { metadata, http })
+    }
+}
+
+/// The instance's OIDC discovery state, hot-swappable after boot (MAIN-169).
+///
+/// Discovery used to run once at startup: if the IdP was unreachable at that
+/// moment, OIDC login stayed disabled for the whole life of the process and the
+/// login page silently fell back to a local password form. This holds the
+/// *configured* issuer separately from the *discovered* context, so the three
+/// observable states are distinguishable and discovery can succeed later without
+/// a restart:
+///
+/// - **not configured** — no issuer set: `configured() == false`.
+/// - **configured and usable** — discovery has succeeded: `current()` is `Some`.
+/// - **configured but degraded** — the IdP was unreachable and discovery has
+///   not yet succeeded: `degraded() == true`, `current()` is `None`.
+///
+/// A background task retries while degraded, and [`login`] triggers an immediate
+/// on-demand attempt, so recovery needs no operator action.
+pub struct OidcState {
+    /// The configured issuer, present only when OIDC is fully configured
+    /// (`Config::oidc_configured()`). `None` means "no identity provider".
+    issuer: Option<String>,
+    /// The discovered context, `None` until discovery first succeeds. A cheap
+    /// `std::sync::RwLock` — reads (every login/callback/providers) clone the
+    /// `Arc` and release at once; the single write happens on discovery.
+    ctx: std::sync::RwLock<Option<Arc<OidcContext>>>,
+    /// Single-flight for on-demand + background discovery: held across the
+    /// network round-trip so a burst of concurrent logins makes ONE attempt at
+    /// the IdP, not one per request.
+    discovering: tokio::sync::Mutex<()>,
+}
+
+impl OidcState {
+    /// Build from config, optionally seeding an already-discovered context (the
+    /// one-shot attempt the server still makes at boot). When OIDC is not fully
+    /// configured the issuer is `None` and every state query reports "not
+    /// configured", regardless of any seed.
+    pub fn new(cfg: &crate::config::Config, discovered: Option<OidcContext>) -> Self {
+        let issuer = if cfg.oidc_configured() {
+            cfg.oidc_issuer_url.clone()
+        } else {
+            None
+        };
+        let ctx = std::sync::RwLock::new(match (&issuer, discovered) {
+            (Some(_), Some(c)) => Some(Arc::new(c)),
+            _ => None,
+        });
+        Self {
+            issuer,
+            ctx,
+            discovering: tokio::sync::Mutex::new(()),
+        }
+    }
+
+    /// Is an identity provider configured on this instance at all?
+    pub fn configured(&self) -> bool {
+        self.issuer.is_some()
+    }
+
+    /// The usable context, or `None` when not configured or still degraded.
+    pub fn current(&self) -> Option<Arc<OidcContext>> {
+        self.ctx.read().expect("oidc ctx lock").clone()
+    }
+
+    /// Configured, but discovery has not yet succeeded — the IdP is unreachable.
+    pub fn degraded(&self) -> bool {
+        self.configured() && self.current().is_none()
+    }
+
+    /// Attempt discovery now, storing and returning the context on success.
+    /// `Ok(None)` means "not configured" (nothing to discover); `Err` means the
+    /// IdP was unreachable. Single-flight and idempotent: an already-discovered
+    /// context short-circuits without a network call, and concurrent callers
+    /// coalesce onto one attempt.
+    pub async fn discover_now(&self) -> anyhow::Result<Option<Arc<OidcContext>>> {
+        let Some(issuer) = self.issuer.clone() else {
+            return Ok(None);
+        };
+        if let Some(c) = self.current() {
+            return Ok(Some(c));
+        }
+        let _guard = self.discovering.lock().await;
+        // Another caller may have discovered while we waited for the lock.
+        if let Some(c) = self.current() {
+            return Ok(Some(c));
+        }
+        let ctx = Arc::new(OidcContext::discover(&issuer).await?);
+        *self.ctx.write().expect("oidc ctx lock") = Some(ctx.clone());
+        tracing::info!(issuer = %issuer, "OIDC discovery complete");
+        Ok(Some(ctx))
+    }
+}
+
+#[cfg(test)]
+mod oidc_state_tests {
+    use super::*;
+    use nook_infra::Config;
+
+    fn cfg_with_issuer(issuer: Option<&str>) -> Config {
+        let mut c = Config::for_test();
+        c.oidc_issuer_url = issuer.map(str::to_string);
+        // `oidc_configured()` also requires a client id and a redirect url.
+        c.oidc_client_id = issuer.map(|_| "test-client".to_string());
+        c.oidc_redirect_url = issuer.map(|_| "https://nook.example.test/callback".to_string());
+        c
+    }
+
+    #[test]
+    fn not_configured_is_never_degraded() {
+        let s = OidcState::new(&cfg_with_issuer(None), None);
+        assert!(!s.configured());
+        assert!(!s.degraded());
+        assert!(s.current().is_none());
+    }
+
+    #[test]
+    fn configured_without_discovery_is_degraded() {
+        let s = OidcState::new(&cfg_with_issuer(Some("https://idp.example.test")), None);
+        assert!(s.configured());
+        assert!(
+            s.degraded(),
+            "configured but not yet discovered => degraded"
+        );
+        assert!(s.current().is_none());
+    }
+
+    #[tokio::test]
+    async fn on_demand_discovery_against_an_unreachable_idp_stays_degraded() {
+        // A host that will not resolve/connect stands in for the outage.
+        let s = OidcState::new(
+            &cfg_with_issuer(Some("https://idp.invalid.nonexistent.test")),
+            None,
+        );
+        let err = s.discover_now().await;
+        assert!(
+            err.is_err(),
+            "discovery must fail against an unreachable IdP"
+        );
+        assert!(s.degraded(), "a failed attempt leaves the state degraded");
+        assert!(s.current().is_none());
+    }
+
+    #[tokio::test]
+    async fn discover_now_is_a_noop_when_not_configured() {
+        let s = OidcState::new(&cfg_with_issuer(None), None);
+        let out = s
+            .discover_now()
+            .await
+            .expect("not-configured is not an error");
+        assert!(out.is_none());
     }
 }
 

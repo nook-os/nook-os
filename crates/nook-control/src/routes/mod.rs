@@ -483,7 +483,7 @@ async fn mcp_auth(
 /// lands on the very same `users` row as their browser session.
 async fn resolve_mcp_caller(state: &AppState, token: &str) -> Option<nook_mcp::McpCaller> {
     use std::hash::{Hash, Hasher};
-    let oidc = state.oidc.as_ref()?;
+    let oidc = state.oidc.current()?;
     let endpoint = oidc.metadata.userinfo_endpoint()?;
 
     let mut hasher = std::collections::hash_map::DefaultHasher::new();

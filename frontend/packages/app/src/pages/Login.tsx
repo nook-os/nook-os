@@ -43,8 +43,18 @@ export function Login() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const claiming = local?.needs_bootstrap === true;
-  const showLocal = local?.available === true;
+  // The identity provider is configured but currently unreachable (MAIN-169).
+  // The IdP button is replaced by a retry notice, and local sign-in is offered
+  // ONLY as break-glass: an existing password credential, never registration.
+  const degraded = providers?.oidc_degraded === true;
+  const hasLocalCred = local?.has_local_credentials === true;
+
+  // During an outage the ONLY local form we offer is a sign-in for an existing
+  // credential — never the create-owner/bootstrap form, which would mint a local
+  // admin on an instance that has chosen OIDC (NG-1). Outside an outage this is
+  // the ordinary "undecided or already local" availability.
+  const showLocal = degraded ? hasLocalCred : local?.available === true;
+  const claiming = !degraded && local?.needs_bootstrap === true;
 
   // Dev sign-in as ANY account, the way Hearth does it: the "credential" is
   // the email you type. Testing an authorization model requires being
@@ -120,8 +130,15 @@ export function Login() {
     window.location.href = next;
   };
 
+  // A degraded IdP is NOT "nothing available": OIDC is configured and coming
+  // back, so we show the retry notice rather than the "no method configured"
+  // error that would tell the operator to go set OIDC_* (which is already set).
   const nothingAvailable =
-    providers && !providers.oidc && !providers.dev_login && !showLocal;
+    providers &&
+    !providers.oidc &&
+    !degraded &&
+    !providers.dev_login &&
+    !showLocal;
 
   return (
     <div className="login-screen">
@@ -180,15 +197,35 @@ export function Login() {
           </form>
         )}
 
-        {showLocal && providers?.oidc && <div className="login-or">or</div>}
+        {showLocal && (providers?.oidc || degraded) && (
+          <div className="login-or">or</div>
+        )}
 
-        {providers?.oidc && (
-          <a
-            className="btn"
-            href={`/api/v1/auth/login?next=${encodeURIComponent(next)}`}
-          >
-            Sign in with your identity provider
-          </a>
+        {degraded ? (
+          <div className="login-degraded" role="status">
+            <div className="small bright">
+              Identity provider unreachable — retrying
+            </div>
+            <div className="small muted">
+              Sign-in through your identity provider will return automatically
+              once it is reachable; no action needed.
+            </div>
+            {!hasLocalCred && (
+              <div className="small muted login-degraded-hint">
+                No local account exists on this instance, so there is no
+                password sign-in to fall back to.
+              </div>
+            )}
+          </div>
+        ) : (
+          providers?.oidc && (
+            <a
+              className="btn"
+              href={`/api/v1/auth/login?next=${encodeURIComponent(next)}`}
+            >
+              Sign in with your identity provider
+            </a>
+          )
         )}
         {providers?.dev_login && !devOpen && (
           <button className="btn" onClick={() => setDevOpen(true)}>
