@@ -5,81 +5,15 @@
 use axum::extract::{Path, Query, State};
 use axum::Json;
 use nook_control::auth::{AuthCtx, Principal};
-use nook_control::config::Config;
 use nook_control::crypto;
 use nook_control::error::ApiError;
 use nook_control::routes::notebook;
 use nook_control::routes::notebook::NoteListQuery;
 use nook_control::services::identity::{login_identity, IdentityClaims};
-use nook_control::state::AppState;
+use nook_testkit::TestBed;
 use nook_types::*;
 use sqlx::PgPool;
-use tokio::sync::Mutex;
 use uuid::Uuid;
-
-mod common;
-use common::test_pool;
-
-// Provisioning the first identity races on the seeded tenant; serialize like the
-// other identity-driven suites.
-static SERIAL: Mutex<()> = Mutex::const_new(());
-
-fn test_config() -> Config {
-    Config {
-        app_env: "test".into(),
-        bind: "127.0.0.1:0".into(),
-        shutdown_grace_secs: 25,
-        public_base_url: "http://localhost:8080".into(),
-        web_origin: "http://localhost:5173".into(),
-        database_url: std::env::var("DATABASE_URL").unwrap_or_default(),
-        oidc_issuer_url: None,
-        oidc_client_id: None,
-        oidc_device_client_id: None,
-        oidc_device_authorization_endpoint: None,
-        oidc_client_secret: None,
-        oidc_redirect_url: None,
-        oidc_scopes: "openid profile email".into(),
-        session_secret: "0".repeat(64),
-        session_ttl_hours: 168,
-        default_tenant_name: format!("test-{}", Uuid::now_v7().simple()),
-        auth_dev_mode: true,
-        mcp_token: None,
-        dev_join_token: None,
-        dist_dir: "/nonexistent".into(),
-        agent_bind: "127.0.0.1:0".into(),
-        agent_public_url: None,
-        agent_tls_cert: None,
-        agent_tls_key: None,
-        releases_repo: "nook-os/nook-os".into(),
-        artifact_store: "disk".into(),
-        artifact_prefix: "nook".into(),
-        artifact_redirect: false,
-        s3_bucket: None,
-        s3_endpoint: None,
-        s3_region: None,
-        s3_access_key_id: None,
-        s3_secret_access_key: None,
-        s3_path_style: true,
-        cache_provider: "memory".into(),
-        queue_provider: "database".into(),
-        redis_url: None,
-        mail_provider: "capture".into(),
-        smtp_host: None,
-        smtp_port: 587,
-        smtp_tls: "starttls".into(),
-        smtp_from: "NookOS <no-reply@localhost>".into(),
-        smtp_username: None,
-        smtp_password: None,
-        postmark_token: None,
-        postmark_api_url: "https://api.postmarkapp.com/email".into(),
-        mail_from: "NookOS <no-reply@localhost>".into(),
-        mail_send_enabled: false,
-        mail_notifications_enabled: false,
-        mail_max_per_month: Some(100),
-        mail_max_per_day: None,
-        trusted_proxies: Vec::new(),
-    }
-}
 
 fn claims(subject: &str, name: &str) -> IdentityClaims {
     IdentityClaims {
@@ -119,17 +53,16 @@ fn mk_note(title: &str, content: &str, folder: Option<UserNoteFolderId>) -> Crea
     }
 }
 
-/// The whole feature in one test — the notebook shares a deployment-wide table,
-/// so separate parallel tests would step on each other; the SERIAL lock and
-/// per-person scoping keep this hermetic.
+/// The whole feature in one test, on this bed's private database (MAIN-156) —
+/// the per-person scoping is exercised here, and there is no shared-DB
+/// contention to serialize against.
 #[tokio::test]
 async fn notebook_is_person_scoped_encrypted_and_reparents() {
-    let _serial = SERIAL.lock().await;
-    let Some(pool) = test_pool().await else {
+    let Some(mut bed) = TestBed::new().await else {
         eprintln!("skipping notebook test — no DATABASE_URL");
         return;
     };
-    let state = AppState::new(pool.clone(), test_config(), None).await;
+    let state = bed.app_state().await;
 
     let a_sub = format!("alice-{}", Uuid::now_v7().simple());
     let b_sub = format!("bob-{}", Uuid::now_v7().simple());
@@ -139,7 +72,7 @@ async fn notebook_is_person_scoped_encrypted_and_reparents() {
     let (b_user, b_tenant) = login_identity(&state, claims(&b_sub, "Bob"))
         .await
         .expect("bob signs in");
-    let person_a = person_of(&pool, a_user.id).await;
+    let person_a = person_of(&bed.pool, a_user.id).await;
     let a = auth(a_user.id, a_tenant.id);
     let b = auth(b_user.id, b_tenant.id);
 
@@ -174,7 +107,7 @@ async fn notebook_is_person_scoped_encrypted_and_reparents() {
     // ── At rest it is ciphertext (AC-2) ─────────────────────────────────────
     let stored: Vec<u8> = sqlx::query_scalar("SELECT content_enc FROM user_notes WHERE id = $1")
         .bind(note.id)
-        .fetch_one(&pool)
+        .fetch_one(&bed.pool)
         .await
         .expect("content_enc");
     assert_ne!(
@@ -200,13 +133,8 @@ async fn notebook_is_person_scoped_encrypted_and_reparents() {
     // ── Same person, a DIFFERENT tenant → the SAME notebook (AC-3) ───────────
     // A second user row for person A in a fresh tenant: the notebook follows the
     // person, not the tenant/user.
-    let t2 = TenantId::new();
-    sqlx::query("INSERT INTO tenants (id, name, slug) VALUES ($1, $2, $2)")
-        .bind(t2)
-        .bind(format!("t2-{}", t2.0.simple()))
-        .execute(&pool)
-        .await
-        .expect("tenant 2");
+    let t2 = bed.tenant("t2").await;
+    // A second user row for person A (custom person_id → kept as a raw insert).
     let a2_user = UserId::new();
     sqlx::query(
         "INSERT INTO users (id, tenant_id, person_id, display_name, email)
@@ -216,7 +144,7 @@ async fn notebook_is_person_scoped_encrypted_and_reparents() {
     .bind(t2)
     .bind(person_a)
     .bind(format!("{a_sub}+t2@example.test"))
-    .execute(&pool)
+    .execute(&bed.pool)
     .await
     .expect("alice in tenant 2");
     let a2 = auth(a2_user, t2);
@@ -344,13 +272,7 @@ async fn notebook_is_person_scoped_encrypted_and_reparents() {
         "deleted note is gone"
     );
 
-    // Cleanup created tenants (never the seeded 'dev' one).
-    for t in [a_tenant.id, b_tenant.id, t2] {
-        let _ = sqlx::query("DELETE FROM tenants WHERE id = $1 AND slug <> 'dev'")
-            .bind(t)
-            .execute(&pool)
-            .await;
-    }
+    bed.teardown().await;
 }
 
 /// MAIN-84 hardening: the folder-cycle guard, the blank-name rejection, and the
@@ -358,12 +280,11 @@ async fn notebook_is_person_scoped_encrypted_and_reparents() {
 /// through the real handlers.
 #[tokio::test]
 async fn notebook_hardening_cycles_blanks_and_length() {
-    let _serial = SERIAL.lock().await;
-    let Some(pool) = test_pool().await else {
+    let Some(mut bed) = TestBed::new().await else {
         eprintln!("skipping notebook hardening test — no DATABASE_URL");
         return;
     };
-    let state = AppState::new(pool.clone(), test_config(), None).await;
+    let state = bed.app_state().await;
     let sub = format!("carol-{}", Uuid::now_v7().simple());
     let (user, tenant) = login_identity(&state, claims(&sub, "Carol"))
         .await
@@ -467,7 +388,7 @@ async fn notebook_hardening_cycles_blanks_and_length() {
     let a_parent: Option<UserNoteFolderId> =
         sqlx::query_scalar("SELECT parent_id FROM user_note_folders WHERE id = $1")
             .bind(a.id)
-            .fetch_one(&pool)
+            .fetch_one(&bed.pool)
             .await
             .unwrap();
     assert_eq!(
@@ -533,7 +454,7 @@ async fn notebook_hardening_cycles_blanks_and_length() {
     );
     let a_name: String = sqlx::query_scalar("SELECT name FROM user_note_folders WHERE id = $1")
         .bind(a.id)
-        .fetch_one(&pool)
+        .fetch_one(&bed.pool)
         .await
         .unwrap();
     assert_eq!(
@@ -645,10 +566,7 @@ async fn notebook_hardening_cycles_blanks_and_length() {
         "an omitted title leaves it unchanged"
     );
 
-    let _ = sqlx::query("DELETE FROM tenants WHERE id = $1 AND slug <> 'dev'")
-        .bind(tenant.id)
-        .execute(&pool)
-        .await;
+    bed.teardown().await;
 }
 
 /// AC-5 belt-and-braces: no operator surface may read notebook rows. The
@@ -700,12 +618,11 @@ fn pass_req(passphrase: &str) -> SetVaultPassphraseRequest {
 /// normal note, and every new endpoint is person-scoped (MAIN-100 AC-1..AC-6).
 #[tokio::test]
 async fn notebook_person_vault_and_seal_contract() {
-    let _serial = SERIAL.lock().await;
-    let Some(pool) = test_pool().await else {
+    let Some(mut bed) = TestBed::new().await else {
         eprintln!("skipping notebook seal test — no DATABASE_URL");
         return;
     };
-    let state = AppState::new(pool.clone(), test_config(), None).await;
+    let state = bed.app_state().await;
 
     let a_sub = format!("seal-a-{}", Uuid::now_v7().simple());
     let b_sub = format!("seal-b-{}", Uuid::now_v7().simple());
@@ -817,7 +734,7 @@ async fn notebook_person_vault_and_seal_contract() {
     //    server cannot open; only the passphrase does ─────────────────────────
     let stored: Vec<u8> = sqlx::query_scalar("SELECT content_enc FROM user_notes WHERE id = $1")
         .bind(note.id)
-        .fetch_one(&pool)
+        .fetch_one(&bed.pool)
         .await
         .unwrap();
     let unwrapped = state.vault.decrypt(&stored).unwrap();
@@ -936,7 +853,7 @@ async fn notebook_person_vault_and_seal_contract() {
     assert_eq!(un.content_md.as_deref(), Some(recovered.as_str()));
     let after: Vec<u8> = sqlx::query_scalar("SELECT content_enc FROM user_notes WHERE id = $1")
         .bind(note.id)
-        .fetch_one(&pool)
+        .fetch_one(&bed.pool)
         .await
         .unwrap();
     assert_eq!(
@@ -945,8 +862,5 @@ async fn notebook_person_vault_and_seal_contract() {
         "the note is server-readable again after unsealing"
     );
 
-    let _ = sqlx::query("DELETE FROM tenants WHERE id = ANY($1) AND slug <> 'dev'")
-        .bind(vec![a_tenant.id, b_tenant.id])
-        .execute(&pool)
-        .await;
+    bed.teardown().await;
 }

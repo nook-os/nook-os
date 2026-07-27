@@ -3,92 +3,22 @@
 //!
 //! The security-critical shape: a local invitee registers → verifies → signs in
 //! WITHOUT tenant membership → accepts → gains membership. Identity is decoupled
-//! from membership. Scope every assertion to rows this test creates.
+//! from membership. Setup + teardown run through `nook_testkit::TestBed`
+//! (MAIN-156).
 
 use axum::extract::{ConnectInfo, State};
 use axum::http::HeaderMap;
 use axum::Json;
 use nook_control::auth::IdentityCtx;
-use nook_control::config::Config;
 use nook_control::error::ApiResult;
 use nook_control::routes::invites;
 use nook_control::services::{identity, local_auth};
 use nook_control::state::AppState;
+use nook_testkit::TestBed;
 use nook_types::*;
 use sqlx::PgPool;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use uuid::Uuid;
-
-mod common;
-use common::test_pool;
-
-fn test_config() -> Config {
-    Config {
-        app_env: "test".into(),
-        bind: "127.0.0.1:0".into(),
-        shutdown_grace_secs: 25,
-        public_base_url: "http://localhost:8080".into(),
-        web_origin: "http://localhost:5173".into(),
-        database_url: std::env::var("DATABASE_URL").unwrap_or_default(),
-        oidc_issuer_url: None,
-        oidc_client_id: None,
-        oidc_device_client_id: None,
-        oidc_device_authorization_endpoint: None,
-        oidc_client_secret: None,
-        oidc_redirect_url: None,
-        oidc_scopes: "openid profile email".into(),
-        session_secret: "0".repeat(64),
-        session_ttl_hours: 168,
-        default_tenant_name: format!("test-{}", Uuid::now_v7().simple()),
-        auth_dev_mode: true,
-        mcp_token: None,
-        dev_join_token: None,
-        dist_dir: "/nonexistent".into(),
-        agent_bind: "127.0.0.1:0".into(),
-        agent_public_url: None,
-        agent_tls_cert: None,
-        agent_tls_key: None,
-        releases_repo: "nook-os/nook-os".into(),
-        artifact_store: "disk".into(),
-        artifact_prefix: "nook".into(),
-        artifact_redirect: false,
-        s3_bucket: None,
-        s3_endpoint: None,
-        s3_region: None,
-        s3_access_key_id: None,
-        s3_secret_access_key: None,
-        s3_path_style: true,
-        cache_provider: "memory".into(),
-        queue_provider: "database".into(),
-        redis_url: None,
-        mail_provider: "capture".into(),
-        smtp_host: None,
-        smtp_port: 587,
-        smtp_tls: "starttls".into(),
-        smtp_from: "NookOS <no-reply@localhost>".into(),
-        smtp_username: None,
-        smtp_password: None,
-        postmark_token: None,
-        postmark_api_url: "https://api.postmarkapp.com/email".into(),
-        mail_from: "NookOS <no-reply@localhost>".into(),
-        mail_send_enabled: false,
-        mail_notifications_enabled: false,
-        mail_max_per_month: Some(100),
-        mail_max_per_day: None,
-        trusted_proxies: Vec::new(),
-    }
-}
-
-async fn new_tenant(db: &PgPool) -> TenantId {
-    let id = TenantId(Uuid::now_v7());
-    sqlx::query("INSERT INTO tenants (id, name, slug) VALUES ($1, $2, $2)")
-        .bind(id)
-        .bind(format!("t-{}", id.0.simple()))
-        .execute(db)
-        .await
-        .unwrap();
-    id
-}
 
 /// A pending invite for `email` with `role`, returning the plaintext token.
 async fn add_invite(db: &PgPool, tenant: TenantId, email: &str, role: &str) -> String {
@@ -147,23 +77,16 @@ async fn user_by_email(db: &PgPool, tenant: TenantId, email: &str) -> Option<(Uu
     .map(|(id, u, has_pw): (Uuid, Option<String>, bool)| (id, u.unwrap_or_default(), has_pw))
 }
 
-async fn cleanup(db: &PgPool, tenant: TenantId) {
-    let _ = sqlx::query("DELETE FROM tenants WHERE id = $1 AND slug <> 'dev'")
-        .bind(tenant)
-        .execute(db)
-        .await;
-}
-
 #[tokio::test]
 async fn register_makes_an_unverified_memberless_user_and_leaves_the_invite_pending() {
-    let Some(pool) = test_pool().await else {
+    let Some(mut bed) = TestBed::new().await else {
         eprintln!("skipping invite-registration test — no DATABASE_URL");
         return;
     };
-    let state = AppState::new(pool.clone(), test_config(), None).await;
-    let tenant = new_tenant(&pool).await;
+    let state = bed.app_state().await;
+    let tenant = bed.tenant("t").await;
     let email = format!("pm-{}@example.test", Uuid::now_v7().simple());
-    let token = add_invite(&pool, tenant, &email, "admin").await;
+    let token = add_invite(&bed.pool, tenant, &email, "admin").await;
 
     register(
         &state,
@@ -179,16 +102,20 @@ async fn register_makes_an_unverified_memberless_user_and_leaves_the_invite_pend
     .await
     .expect("registration succeeds");
 
-    let (user, username, has_pw) = user_by_email(&pool, tenant, &email)
+    let (user, username, has_pw) = user_by_email(&bed.pool, tenant, &email)
         .await
         .expect("the account was created with the invite email");
     assert!(has_pw, "a local account has a password");
     assert!(username.starts_with("pat"), "the chosen username stuck");
     // No membership yet (AC-5 / NG-3): acceptance is separate.
-    assert_eq!(member_count(&pool, tenant, user).await, 0, "no membership");
+    assert_eq!(
+        member_count(&bed.pool, tenant, user).await,
+        0,
+        "no membership"
+    );
     // Unverified — no verified identity row.
     assert!(
-        !identity::email_is_verified(&pool, UserId(user))
+        !identity::email_is_verified(&bed.pool, UserId(user))
             .await
             .unwrap(),
         "the account starts unverified"
@@ -196,7 +123,7 @@ async fn register_makes_an_unverified_memberless_user_and_leaves_the_invite_pend
     // The invite is untouched (AC-5).
     let status: String = sqlx::query_scalar("SELECT status FROM invites WHERE token_hash = $1")
         .bind(nook_auth::hash_token(&token))
-        .fetch_one(&pool)
+        .fetch_one(&bed.pool)
         .await
         .unwrap();
     assert_eq!(
@@ -204,19 +131,19 @@ async fn register_makes_an_unverified_memberless_user_and_leaves_the_invite_pend
         "registration must not consume the invite"
     );
 
-    cleanup(&pool, tenant).await;
+    bed.teardown().await;
 }
 
 #[tokio::test]
 async fn login_by_username_or_email_works_for_a_memberless_user() {
-    let Some(pool) = test_pool().await else {
+    let Some(mut bed) = TestBed::new().await else {
         return;
     };
-    let tenant = new_tenant(&pool).await;
+    let tenant = bed.tenant("t").await;
     let email = format!("m-{}@example.test", Uuid::now_v7().simple());
     let username = format!("mem{}", tenant.0.simple());
     let user = local_auth::register_invited(
-        &pool,
+        &bed.pool,
         tenant,
         &username,
         &email,
@@ -227,50 +154,55 @@ async fn login_by_username_or_email_works_for_a_memberless_user() {
     .await
     .expect("register_invited");
     assert_eq!(
-        member_count(&pool, tenant, user.id.0).await,
+        member_count(&bed.pool, tenant, user.id.0).await,
         0,
         "no membership"
     );
 
     // Zero memberships, yet login succeeds — by username AND by email.
     assert!(
-        local_auth::login(&pool, tenant, &username, "s3cret-passphrase")
+        local_auth::login(&bed.pool, tenant, &username, "s3cret-passphrase")
             .await
             .is_ok(),
         "login by username"
     );
     assert!(
-        local_auth::login(&pool, tenant, &email, "s3cret-passphrase")
+        local_auth::login(&bed.pool, tenant, &email, "s3cret-passphrase")
             .await
             .is_ok(),
         "login by email"
     );
     // Case-insensitive, and a wrong password still fails.
     assert!(
-        local_auth::login(&pool, tenant, &email.to_uppercase(), "s3cret-passphrase")
-            .await
-            .is_ok(),
+        local_auth::login(
+            &bed.pool,
+            tenant,
+            &email.to_uppercase(),
+            "s3cret-passphrase"
+        )
+        .await
+        .is_ok(),
         "identifier match is case-insensitive"
     );
     assert!(
-        local_auth::login(&pool, tenant, &username, "wrong")
+        local_auth::login(&bed.pool, tenant, &username, "wrong")
             .await
             .is_err(),
         "a wrong password is refused"
     );
 
-    cleanup(&pool, tenant).await;
+    bed.teardown().await;
 }
 
 #[tokio::test]
 async fn identity_context_resolves_the_session_but_tenant_scoped_rejects_it() {
-    let Some(pool) = test_pool().await else {
+    let Some(mut bed) = TestBed::new().await else {
         return;
     };
-    let tenant = new_tenant(&pool).await;
+    let tenant = bed.tenant("t").await;
     let email = format!("id-{}@example.test", Uuid::now_v7().simple());
     let user = local_auth::register_invited(
-        &pool,
+        &bed.pool,
         tenant,
         &format!("id{}", tenant.0.simple()),
         &email,
@@ -290,12 +222,12 @@ async fn identity_context_resolves_the_session_but_tenant_scoped_rejects_it() {
     .bind(sid)
     .bind(user.id.0)
     .bind(tenant)
-    .execute(&pool)
+    .execute(&bed.pool)
     .await
     .unwrap();
 
     // Identity-only resolution succeeds and reports non-membership...
-    let (resolved, is_member) = nook_auth::resolve_session_identity(&pool, sid)
+    let (resolved, is_member) = nook_auth::resolve_session_identity(&bed.pool, sid)
         .await
         .unwrap();
     assert_eq!(resolved.user_id, user.id.0);
@@ -303,25 +235,25 @@ async fn identity_context_resolves_the_session_but_tenant_scoped_rejects_it() {
     // ...while the membership-requiring resolution refuses it (a 403, not a 401).
     assert!(
         matches!(
-            nook_auth::resolve_session(&pool, sid).await,
+            nook_auth::resolve_session(&bed.pool, sid).await,
             Err(nook_auth::AuthError::Forbidden)
         ),
         "tenant-scoped resolution must reject a memberless session with Forbidden"
     );
 
-    cleanup(&pool, tenant).await;
+    bed.teardown().await;
 }
 
 #[tokio::test]
 async fn acceptance_needs_a_verified_email_then_creates_membership_with_the_invited_role() {
-    let Some(pool) = test_pool().await else {
+    let Some(mut bed) = TestBed::new().await else {
         return;
     };
-    let tenant = new_tenant(&pool).await;
+    let tenant = bed.tenant("t").await;
     let email = format!("acc-{}@example.test", Uuid::now_v7().simple());
-    let token = add_invite(&pool, tenant, &email, "admin").await;
+    let token = add_invite(&bed.pool, tenant, &email, "admin").await;
     let user = local_auth::register_invited(
-        &pool,
+        &bed.pool,
         tenant,
         &format!("acc{}", tenant.0.simple()),
         &email,
@@ -333,21 +265,21 @@ async fn acceptance_needs_a_verified_email_then_creates_membership_with_the_invi
     .unwrap();
 
     // Unverified: acceptance is declined and NO membership is created (AC-2).
-    let declined = invites::accept_core(&pool, user.id.0, tenant, &token)
+    let declined = invites::accept_core(&bed.pool, user.id.0, tenant, &token)
         .await
         .unwrap();
     assert!(!declined.accepted, "unverified acceptance is declined");
     assert_eq!(
-        member_count(&pool, tenant, user.id.0).await,
+        member_count(&bed.pool, tenant, user.id.0).await,
         0,
         "still no membership"
     );
 
     // Verify, then accept: membership is created carrying the INVITED role.
-    identity::mark_local_email_verified(&pool, user.id, &email)
+    identity::mark_local_email_verified(&bed.pool, user.id, &email)
         .await
         .unwrap();
-    let accepted = invites::accept_core(&pool, user.id.0, tenant, &token)
+    let accepted = invites::accept_core(&bed.pool, user.id.0, tenant, &token)
         .await
         .unwrap();
     assert!(accepted.accepted, "a verified account accepts");
@@ -358,7 +290,7 @@ async fn acceptance_needs_a_verified_email_then_creates_membership_with_the_invi
     )
     .bind(tenant)
     .bind(user.id.0)
-    .fetch_optional(&pool)
+    .fetch_optional(&bed.pool)
     .await
     .unwrap();
     assert_eq!(
@@ -367,20 +299,20 @@ async fn acceptance_needs_a_verified_email_then_creates_membership_with_the_invi
         "membership carries the invited role"
     );
 
-    cleanup(&pool, tenant).await;
+    bed.teardown().await;
 }
 
 #[tokio::test]
 async fn a_mismatched_or_invalid_invite_creates_no_membership() {
-    let Some(pool) = test_pool().await else {
+    let Some(mut bed) = TestBed::new().await else {
         return;
     };
-    let tenant = new_tenant(&pool).await;
+    let tenant = bed.tenant("t").await;
     // The invite was addressed to someone else.
-    let token = add_invite(&pool, tenant, "someone-else@example.test", "member").await;
+    let token = add_invite(&bed.pool, tenant, "someone-else@example.test", "member").await;
     let email = format!("me-{}@example.test", Uuid::now_v7().simple());
     let user = local_auth::register_invited(
-        &pool,
+        &bed.pool,
         tenant,
         &format!("me{}", tenant.0.simple()),
         &email,
@@ -390,38 +322,38 @@ async fn a_mismatched_or_invalid_invite_creates_no_membership() {
     )
     .await
     .unwrap();
-    identity::mark_local_email_verified(&pool, user.id, &email)
+    identity::mark_local_email_verified(&bed.pool, user.id, &email)
         .await
         .unwrap();
 
     // Verified, but the invite's email is not this account's — declined.
-    let declined = invites::accept_core(&pool, user.id.0, tenant, &token)
+    let declined = invites::accept_core(&bed.pool, user.id.0, tenant, &token)
         .await
         .unwrap();
     assert!(!declined.accepted, "an email mismatch is declined");
-    assert_eq!(member_count(&pool, tenant, user.id.0).await, 0);
+    assert_eq!(member_count(&bed.pool, tenant, user.id.0).await, 0);
 
     // An unknown token is declined too.
-    let bad = invites::accept_core(&pool, user.id.0, tenant, "nonsense-token")
+    let bad = invites::accept_core(&bed.pool, user.id.0, tenant, "nonsense-token")
         .await
         .unwrap();
     assert!(!bad.accepted);
-    assert_eq!(member_count(&pool, tenant, user.id.0).await, 0);
+    assert_eq!(member_count(&bed.pool, tenant, user.id.0).await, 0);
 
-    cleanup(&pool, tenant).await;
+    bed.teardown().await;
 }
 
 #[tokio::test]
 async fn accept_moves_the_memberless_session_onto_the_accepted_tenant() {
-    let Some(pool) = test_pool().await else {
+    let Some(mut bed) = TestBed::new().await else {
         return;
     };
-    let state = AppState::new(pool.clone(), test_config(), None).await;
-    let tenant = new_tenant(&pool).await;
+    let state = bed.app_state().await;
+    let tenant = bed.tenant("t").await;
     let email = format!("sw-{}@example.test", Uuid::now_v7().simple());
-    let token = add_invite(&pool, tenant, &email, "member").await;
+    let token = add_invite(&bed.pool, tenant, &email, "member").await;
     let user = local_auth::register_invited(
-        &pool,
+        &bed.pool,
         tenant,
         &format!("sw{}", tenant.0.simple()),
         &email,
@@ -431,7 +363,7 @@ async fn accept_moves_the_memberless_session_onto_the_accepted_tenant() {
     )
     .await
     .unwrap();
-    identity::mark_local_email_verified(&pool, user.id, &email)
+    identity::mark_local_email_verified(&bed.pool, user.id, &email)
         .await
         .unwrap();
 
@@ -443,7 +375,7 @@ async fn accept_moves_the_memberless_session_onto_the_accepted_tenant() {
     .bind(sid)
     .bind(user.id.0)
     .bind(tenant)
-    .execute(&pool)
+    .execute(&bed.pool)
     .await
     .unwrap();
 
@@ -469,7 +401,7 @@ async fn accept_moves_the_memberless_session_onto_the_accepted_tenant() {
     // — here the same single tenant, and the memberless→member transition holds.
     let active: Uuid = sqlx::query_scalar("SELECT tenant_id FROM sessions_auth WHERE id = $1")
         .bind(sid)
-        .fetch_one(&pool)
+        .fetch_one(&bed.pool)
         .await
         .unwrap();
     assert_eq!(
@@ -477,29 +409,29 @@ async fn accept_moves_the_memberless_session_onto_the_accepted_tenant() {
         "the accepted tenant is set active on the session"
     );
     assert_eq!(
-        member_count(&pool, tenant, user.id.0).await,
+        member_count(&bed.pool, tenant, user.id.0).await,
         1,
         "now a member"
     );
 
     // And that session now passes the membership-requiring resolution.
     assert!(
-        nook_auth::resolve_session(&pool, sid).await.is_ok(),
+        nook_auth::resolve_session(&bed.pool, sid).await.is_ok(),
         "after accept, the session is member-scoped"
     );
 
-    cleanup(&pool, tenant).await;
+    bed.teardown().await;
 }
 
 #[tokio::test]
 async fn duplicate_email_registration_is_indistinguishable_and_harmless() {
-    let Some(pool) = test_pool().await else {
+    let Some(mut bed) = TestBed::new().await else {
         return;
     };
-    let state = AppState::new(pool.clone(), test_config(), None).await;
-    let tenant = new_tenant(&pool).await;
+    let state = bed.app_state().await;
+    let tenant = bed.tenant("t").await;
     let email = format!("dup-{}@example.test", Uuid::now_v7().simple());
-    let token = add_invite(&pool, tenant, &email, "member").await;
+    let token = add_invite(&bed.pool, tenant, &email, "member").await;
 
     let first = RegisterInviteRequest {
         token: token.clone(),
@@ -510,7 +442,7 @@ async fn duplicate_email_registration_is_indistinguishable_and_harmless() {
     register(&state, first, 21)
         .await
         .expect("first registration");
-    let (existing_id, existing_username, _) = user_by_email(&pool, tenant, &email)
+    let (existing_id, existing_username, _) = user_by_email(&bed.pool, tenant, &email)
         .await
         .expect("account exists");
 
@@ -532,34 +464,34 @@ async fn duplicate_email_registration_is_indistinguishable_and_harmless() {
     )
     .bind(tenant)
     .bind(&email)
-    .fetch_one(&pool)
+    .fetch_one(&bed.pool)
     .await
     .unwrap();
     assert_eq!(count, 1, "no second account for the same email");
-    let (still_id, still_username, _) = user_by_email(&pool, tenant, &email).await.unwrap();
+    let (still_id, still_username, _) = user_by_email(&bed.pool, tenant, &email).await.unwrap();
     assert_eq!(still_id, existing_id, "the existing account is unchanged");
     assert_eq!(
         still_username, existing_username,
         "and its username is untouched"
     );
 
-    cleanup(&pool, tenant).await;
+    bed.teardown().await;
 }
 
 #[tokio::test]
 async fn registration_is_refused_on_an_oidc_tenant() {
-    let Some(pool) = test_pool().await else {
+    let Some(mut bed) = TestBed::new().await else {
         return;
     };
-    let state = AppState::new(pool.clone(), test_config(), None).await;
-    let tenant = new_tenant(&pool).await;
+    let state = bed.app_state().await;
+    let tenant = bed.tenant("t").await;
     sqlx::query("UPDATE tenants SET auth_mode = 'oidc' WHERE id = $1")
         .bind(tenant)
-        .execute(&pool)
+        .execute(&bed.pool)
         .await
         .unwrap();
     let email = format!("oidc-{}@example.test", Uuid::now_v7().simple());
-    let token = add_invite(&pool, tenant, &email, "member").await;
+    let token = add_invite(&bed.pool, tenant, &email, "member").await;
 
     let refused = register(
         &state,
@@ -577,9 +509,9 @@ async fn registration_is_refused_on_an_oidc_tenant() {
         "local registration is refused on an OIDC tenant"
     );
     assert!(
-        user_by_email(&pool, tenant, &email).await.is_none(),
+        user_by_email(&bed.pool, tenant, &email).await.is_none(),
         "nothing was created"
     );
 
-    cleanup(&pool, tenant).await;
+    bed.teardown().await;
 }

@@ -5,72 +5,11 @@
 
 use axum::extract::{Query, State};
 use nook_control::auth::{AuthCtx, Principal};
-use nook_control::config::Config;
 use nook_control::routes::sessions::SessionsQuery;
-use nook_control::state::AppState;
+use nook_testkit::TestBed;
 use nook_types::*;
 use sqlx::PgPool;
 use uuid::Uuid;
-
-mod common;
-use common::test_pool;
-
-fn test_config() -> Config {
-    Config {
-        app_env: "test".into(),
-        bind: "127.0.0.1:0".into(),
-        shutdown_grace_secs: 25,
-        public_base_url: "http://localhost:8080".into(),
-        web_origin: "http://localhost:5173".into(),
-        database_url: std::env::var("DATABASE_URL").unwrap_or_default(),
-        oidc_issuer_url: None,
-        oidc_client_id: None,
-        oidc_device_client_id: None,
-        oidc_device_authorization_endpoint: None,
-        oidc_client_secret: None,
-        oidc_redirect_url: None,
-        oidc_scopes: "openid profile email".into(),
-        session_secret: "0".repeat(64),
-        session_ttl_hours: 168,
-        default_tenant_name: format!("test-{}", Uuid::now_v7().simple()),
-        auth_dev_mode: true,
-        mcp_token: None,
-        dev_join_token: None,
-        dist_dir: "/nonexistent".into(),
-        agent_bind: "127.0.0.1:0".into(),
-        agent_public_url: None,
-        agent_tls_cert: None,
-        agent_tls_key: None,
-        releases_repo: "nook-os/nook-os".into(),
-        artifact_store: "disk".into(),
-        artifact_prefix: "nook".into(),
-        artifact_redirect: false,
-        s3_bucket: None,
-        s3_endpoint: None,
-        s3_region: None,
-        s3_access_key_id: None,
-        s3_secret_access_key: None,
-        s3_path_style: true,
-        cache_provider: "memory".into(),
-        queue_provider: "database".into(),
-        redis_url: None,
-        mail_provider: "capture".into(),
-        smtp_host: None,
-        smtp_port: 587,
-        smtp_tls: "starttls".into(),
-        smtp_from: "NookOS <no-reply@localhost>".into(),
-        smtp_username: None,
-        smtp_password: None,
-        postmark_token: None,
-        postmark_api_url: "https://api.postmarkapp.com/email".into(),
-        mail_from: "NookOS <no-reply@localhost>".into(),
-        mail_send_enabled: false,
-        mail_notifications_enabled: false,
-        mail_max_per_month: Some(100),
-        mail_max_per_day: None,
-        trusted_proxies: Vec::new(),
-    }
-}
 
 fn user_ctx(user: UserId, tenant: TenantId) -> AuthCtx {
     AuthCtx {
@@ -82,34 +21,8 @@ fn user_ctx(user: UserId, tenant: TenantId) -> AuthCtx {
     }
 }
 
-async fn new_tenant(db: &PgPool) -> TenantId {
-    let id = TenantId::new();
-    sqlx::query("INSERT INTO tenants (id, name, slug) VALUES ($1, $2, $2)")
-        .bind(id)
-        .bind(format!("sv-{}", id.0.simple()))
-        .execute(db)
-        .await
-        .expect("tenant");
-    id
-}
-
-async fn add_user(db: &PgPool, tenant: TenantId, role: &str) -> UserId {
-    let user = UserId::new();
-    sqlx::query(
-        "INSERT INTO users (id, tenant_id, person_id, display_name, email, role)
-         VALUES ($1, $2, $3, 'U', $4, $5)",
-    )
-    .bind(user)
-    .bind(tenant)
-    .bind(Uuid::now_v7())
-    .bind(format!("u-{}@example.test", user.0.simple()))
-    .bind(role)
-    .execute(db)
-    .await
-    .expect("user");
-    user
-}
-
+/// An ownerless node (no `owner_person_id`) — `TestBed::node` always sets an
+/// owner, so this session suite keeps its own helper.
 async fn add_node(db: &PgPool, tenant: TenantId) -> NodeId {
     let id = NodeId::new();
     sqlx::query(
@@ -148,13 +61,6 @@ async fn add_session(
     id
 }
 
-async fn cleanup(db: &PgPool, tenant: TenantId) {
-    let _ = sqlx::query("DELETE FROM tenants WHERE id = $1 AND slug <> 'dev'")
-        .bind(tenant)
-        .execute(db)
-        .await;
-}
-
 fn all(active: Option<bool>) -> Query<SessionsQuery> {
     Query(SessionsQuery {
         workspace_id: None,
@@ -164,19 +70,19 @@ fn all(active: Option<bool>) -> Query<SessionsQuery> {
 
 #[tokio::test]
 async fn members_see_only_their_own_admins_see_all_including_null_creators() {
-    let Some(pool) = test_pool().await else {
+    let Some(mut bed) = TestBed::new().await else {
         eprintln!("skipping session-visibility test — no DATABASE_URL");
         return;
     };
-    let state = AppState::new(pool.clone(), test_config(), None).await;
-    let tenant = new_tenant(&pool).await;
-    let owner = add_user(&pool, tenant, "owner").await;
-    let member = add_user(&pool, tenant, "member").await;
-    let node = add_node(&pool, tenant).await;
+    let state = bed.app_state().await;
+    let tenant = bed.tenant("sv").await;
+    let (owner, _) = bed.user(tenant, "owner").await;
+    let (member, _) = bed.user(tenant, "member").await;
+    let node = add_node(&bed.pool, tenant).await;
 
-    let my_session = add_session(&pool, tenant, node, Some(member)).await;
-    let owner_session = add_session(&pool, tenant, node, Some(owner)).await;
-    let legacy_session = add_session(&pool, tenant, node, None).await; // created_by NULL
+    let my_session = add_session(&bed.pool, tenant, node, Some(member)).await;
+    let owner_session = add_session(&bed.pool, tenant, node, Some(owner)).await;
+    let legacy_session = add_session(&bed.pool, tenant, node, None).await; // created_by NULL
 
     // The member sees ONLY their own — not the owner's, not the NULL-creator row.
     let mine = nook_control::routes::sessions::list(
@@ -218,20 +124,20 @@ async fn members_see_only_their_own_admins_see_all_including_null_creators() {
         "an owner/admin sees every session incl. NULL-creator rows"
     );
 
-    cleanup(&pool, tenant).await;
+    bed.teardown().await;
 }
 
 #[tokio::test]
 async fn a_node_credential_sees_all_sessions_unchanged() {
-    let Some(pool) = test_pool().await else {
+    let Some(mut bed) = TestBed::new().await else {
         return;
     };
-    let state = AppState::new(pool.clone(), test_config(), None).await;
-    let tenant = new_tenant(&pool).await;
-    let member = add_user(&pool, tenant, "member").await;
-    let node = add_node(&pool, tenant).await;
-    let s1 = add_session(&pool, tenant, node, Some(member)).await;
-    let s2 = add_session(&pool, tenant, node, None).await;
+    let state = bed.app_state().await;
+    let tenant = bed.tenant("sv").await;
+    let (member, _) = bed.user(tenant, "member").await;
+    let node = add_node(&bed.pool, tenant).await;
+    let s1 = add_session(&bed.pool, tenant, node, Some(member)).await;
+    let s2 = add_session(&bed.pool, tenant, node, None).await;
 
     // A node token's listing is unchanged (whole tenant).
     let node_ctx = AuthCtx {
@@ -251,5 +157,5 @@ async fn a_node_credential_sees_all_sessions_unchanged() {
         "a node token still sees every session in its tenant"
     );
 
-    cleanup(&pool, tenant).await;
+    bed.teardown().await;
 }

@@ -7,75 +7,12 @@
 use axum::extract::{Path, State};
 use axum::Json;
 use nook_control::auth::{AuthCtx, Principal};
-use nook_control::config::Config;
 use nook_control::services::identity::{login_identity, IdentityClaims};
 use nook_control::state::AppState;
+use nook_testkit::TestBed;
 use nook_types::*;
 use sqlx::PgPool;
-use tokio::sync::Mutex;
 use uuid::Uuid;
-
-mod common;
-use common::test_pool;
-
-static SERIAL: Mutex<()> = Mutex::const_new(());
-
-fn test_config() -> Config {
-    Config {
-        app_env: "test".into(),
-        bind: "127.0.0.1:0".into(),
-        shutdown_grace_secs: 25,
-        public_base_url: "http://localhost:8080".into(),
-        web_origin: "http://localhost:5173".into(),
-        database_url: std::env::var("DATABASE_URL").unwrap_or_default(),
-        oidc_issuer_url: None,
-        oidc_client_id: None,
-        oidc_device_client_id: None,
-        oidc_device_authorization_endpoint: None,
-        oidc_client_secret: None,
-        oidc_redirect_url: None,
-        oidc_scopes: "openid profile email".into(),
-        session_secret: "0".repeat(64),
-        session_ttl_hours: 168,
-        default_tenant_name: format!("test-{}", Uuid::now_v7().simple()),
-        auth_dev_mode: true,
-        mcp_token: None,
-        dev_join_token: None,
-        dist_dir: "/nonexistent".into(),
-        agent_bind: "127.0.0.1:0".into(),
-        agent_public_url: None,
-        agent_tls_cert: None,
-        agent_tls_key: None,
-        releases_repo: "nook-os/nook-os".into(),
-        artifact_store: "disk".into(),
-        artifact_prefix: "nook".into(),
-        artifact_redirect: false,
-        s3_bucket: None,
-        s3_endpoint: None,
-        s3_region: None,
-        s3_access_key_id: None,
-        s3_secret_access_key: None,
-        s3_path_style: true,
-        cache_provider: "memory".into(),
-        queue_provider: "database".into(),
-        redis_url: None,
-        mail_provider: "capture".into(),
-        smtp_host: None,
-        smtp_port: 587,
-        smtp_tls: "starttls".into(),
-        smtp_from: "NookOS <no-reply@localhost>".into(),
-        smtp_username: None,
-        smtp_password: None,
-        postmark_token: None,
-        postmark_api_url: "https://api.postmarkapp.com/email".into(),
-        mail_from: "NookOS <no-reply@localhost>".into(),
-        mail_send_enabled: false,
-        mail_notifications_enabled: false,
-        mail_max_per_month: Some(100),
-        mail_max_per_day: None,
-        trusted_proxies: Vec::new(),
-    }
-}
 
 fn claims(subject: &str, name: &str) -> IdentityClaims {
     IdentityClaims {
@@ -131,13 +68,19 @@ async fn make_task(
 }
 
 async fn seed_label(pool: &PgPool, tenant: TenantId, name: &str) {
-    sqlx::query("INSERT INTO labels (id, tenant_id, name) VALUES ($1, $2, $3)")
-        .bind(Uuid::now_v7())
-        .bind(tenant)
-        .bind(name)
-        .execute(pool)
-        .await
-        .expect("seed label");
+    // Ensure the label exists — idempotent, because a freshly-seeded tenant
+    // already carries the agent-loop labels (`agent-ready`, `blocked`) from
+    // `seed::run`, and this helper only needs the row present, not net-new.
+    sqlx::query(
+        "INSERT INTO labels (id, tenant_id, name) VALUES ($1, $2, $3)
+         ON CONFLICT (tenant_id, name) DO NOTHING",
+    )
+    .bind(Uuid::now_v7())
+    .bind(tenant)
+    .bind(name)
+    .execute(pool)
+    .await
+    .expect("seed label");
 }
 
 /// Notifications for a tenant of a given kind — the fan-out inserts the row
@@ -158,12 +101,11 @@ async fn notes(pool: &PgPool, tenant: TenantId, kind: &str) -> Vec<Notification>
 
 #[tokio::test]
 async fn comments_and_escalation_labels_notify() {
-    let _serial = SERIAL.lock().await;
-    let Some(pool) = test_pool().await else {
+    let Some(mut bed) = TestBed::new().await else {
         eprintln!("skipping notifications test — no DATABASE_URL");
         return;
     };
-    let state = AppState::new(pool.clone(), test_config(), None).await;
+    let state = bed.app_state().await;
 
     let sub = format!("owner-{}", Uuid::now_v7().simple());
     let (owner, tenant) = login_identity(&state, claims(&sub, "Ada"))
@@ -178,7 +120,7 @@ async fn comments_and_escalation_labels_notify() {
     .bind(BoardId::new())
     .bind(tenant.id)
     .bind(format!("N{}", &Uuid::now_v7().simple().to_string()[..6]).to_uppercase())
-    .fetch_one(&pool)
+    .fetch_one(&bed.pool)
     .await
     .expect("board");
     sqlx::query(
@@ -187,7 +129,7 @@ async fn comments_and_escalation_labels_notify() {
     )
     .bind(Uuid::now_v7())
     .bind(board)
-    .execute(&pool)
+    .execute(&bed.pool)
     .await
     .expect("column");
 
@@ -207,7 +149,7 @@ async fn comments_and_escalation_labels_notify() {
     .await
     .expect("comment on team card");
 
-    let comment_notes = notes(&pool, tenant.id, "task.comment.created").await;
+    let comment_notes = notes(&bed.pool, tenant.id, "task.comment.created").await;
     assert_eq!(comment_notes.len(), 1, "one comment notification");
     let n = &comment_notes[0];
     assert!(
@@ -237,14 +179,16 @@ async fn comments_and_escalation_labels_notify() {
     .await
     .expect("comment on private card");
     assert_eq!(
-        notes(&pool, tenant.id, "task.comment.created").await.len(),
+        notes(&bed.pool, tenant.id, "task.comment.created")
+            .await
+            .len(),
         1,
         "a private card's comment must not add a notification"
     );
 
     // ── AC-2: an escalation label notifies; an ordinary one is silent ───────
-    seed_label(&pool, tenant.id, "blocked").await;
-    seed_label(&pool, tenant.id, "frontend").await;
+    seed_label(&bed.pool, tenant.id, "blocked").await;
+    seed_label(&bed.pool, tenant.id, "frontend").await;
 
     let _ = nook_control::routes::labels::add(
         State(state.clone()),
@@ -253,7 +197,7 @@ async fn comments_and_escalation_labels_notify() {
     )
     .await
     .expect("add blocked");
-    let label_notes = notes(&pool, tenant.id, "task.label.added").await;
+    let label_notes = notes(&bed.pool, tenant.id, "task.label.added").await;
     assert_eq!(label_notes.len(), 1, "blocked raises one notification");
     assert!(
         label_notes[0].body.contains("blocked"),
@@ -269,15 +213,12 @@ async fn comments_and_escalation_labels_notify() {
     .await
     .expect("add frontend");
     assert_eq!(
-        notes(&pool, tenant.id, "task.label.added").await.len(),
+        notes(&bed.pool, tenant.id, "task.label.added").await.len(),
         1,
         "an ordinary label must stay silent"
     );
 
-    let _ = sqlx::query("DELETE FROM tenants WHERE id = $1 AND slug <> 'dev'")
-        .bind(tenant.id)
-        .execute(&pool)
-        .await;
+    bed.teardown().await;
 }
 
 /// AC-3: the catalog route lists every notable kind with label, description,

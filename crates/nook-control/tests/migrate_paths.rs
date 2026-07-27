@@ -11,22 +11,16 @@
 //! that do not belong to the node refused, and a follow-up discovery of the NEW
 //! paths producing zero inserts or deletes.
 //!
-//! Every assertion is scoped to rows this test created (MAIN-93): the shared dev
-//! database is aged, so nothing here counts globally.
-//!
-//! Needs a running Postgres: set `DATABASE_URL`.
+//! Setup + teardown run through `nook_testkit::TestBed` (MAIN-156).
 
 use nook_control::services::discovery::{self, migrate_paths};
-use nook_control::state::AppState;
 use nook_proto::DiscoveredWorkspace;
+use nook_testkit::TestBed;
 use nook_types::{
     BoardId, MigratePathPair, NodeId, NodeWorkspaceId, TaskId, TenantId, WorkspaceId,
 };
 use sqlx::PgPool;
 use uuid::Uuid;
-
-mod common;
-use common::test_pool;
 
 /// The one repo this test moves, and the two on-disk layouts it lives in.
 struct Fixture {
@@ -156,13 +150,6 @@ async fn seed(db: &PgPool, legacy: &str, slug: &str) -> Fixture {
     }
 }
 
-async fn cleanup(db: &PgPool, tenant: TenantId) {
-    let _ = sqlx::query("DELETE FROM tenants WHERE id = $1")
-        .bind(tenant)
-        .execute(db)
-        .await;
-}
-
 async fn nw_path(db: &PgPool, id: NodeWorkspaceId) -> Option<String> {
     sqlx::query_as::<_, (String,)>("SELECT path FROM node_workspaces WHERE id = $1")
         .bind(id)
@@ -183,10 +170,12 @@ async fn task_worktree(db: &PgPool, id: TaskId) -> Option<String> {
 
 #[tokio::test]
 async fn rewrites_both_tables_and_preserves_row_ids() {
-    let Some(db) = test_pool().await else { return };
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
     let legacy = "/home/u/.nook/workspace";
     let slug = "/home/u/.nook/workspace/cp.example.com";
-    let f = seed(&db, legacy, slug).await;
+    let f = seed(&bed.pool, legacy, slug).await;
 
     let pairs = vec![
         MigratePathPair {
@@ -199,35 +188,39 @@ async fn rewrites_both_tables_and_preserves_row_ids() {
         },
     ];
 
-    let resp = migrate_paths(&db, f.node, &pairs).await.expect("migrate");
+    let resp = migrate_paths(&bed.pool, f.node, &pairs)
+        .await
+        .expect("migrate");
     assert_eq!(resp.node_workspaces_updated, 2, "both checkouts rewritten");
     assert_eq!(resp.tasks_updated, 1, "the task's worktree_path rewritten");
 
     // Same row ids, new paths — identity preserved, not delete-and-reinsert.
     assert_eq!(
-        nw_path(&db, f.primary_ws).await.as_deref(),
+        nw_path(&bed.pool, f.primary_ws).await.as_deref(),
         Some(format!("{slug}/acme/repo").as_str())
     );
     assert_eq!(
-        nw_path(&db, f.worktree_ws).await.as_deref(),
+        nw_path(&bed.pool, f.worktree_ws).await.as_deref(),
         Some(format!("{slug}/acme/repo__feature").as_str())
     );
     assert_eq!(
-        task_worktree(&db, f.task).await.as_deref(),
+        task_worktree(&bed.pool, f.task).await.as_deref(),
         Some(format!("{slug}/acme/repo").as_str()),
         "the task follows its worktree to the new path"
     );
 
-    cleanup(&db, f.tenant).await;
+    bed.teardown().await;
 }
 
 #[tokio::test]
 async fn refuses_a_path_that_does_not_belong_to_the_node() {
     use nook_control::error::ApiError;
-    let Some(db) = test_pool().await else { return };
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
     let legacy = "/home/u/.nook/workspace";
     let slug = "/home/u/.nook/workspace/cp.example.com";
-    let f = seed(&db, legacy, slug).await;
+    let f = seed(&bed.pool, legacy, slug).await;
 
     // One real pair and one that names a path this node does not hold.
     let pairs = vec![
@@ -241,7 +234,7 @@ async fn refuses_a_path_that_does_not_belong_to_the_node() {
         },
     ];
 
-    let err = migrate_paths(&db, f.node, &pairs)
+    let err = migrate_paths(&bed.pool, f.node, &pairs)
         .await
         .expect_err("a stray path is refused");
     assert!(
@@ -252,20 +245,22 @@ async fn refuses_a_path_that_does_not_belong_to_the_node() {
     // And nothing moved — the refusal is before any write, so the real pair's
     // row is untouched too.
     assert_eq!(
-        nw_path(&db, f.primary_ws).await.as_deref(),
+        nw_path(&bed.pool, f.primary_ws).await.as_deref(),
         Some(format!("{legacy}/acme/repo").as_str()),
         "a refused request leaves every row where it was"
     );
 
-    cleanup(&db, f.tenant).await;
+    bed.teardown().await;
 }
 
 #[tokio::test]
 async fn a_followup_discovery_of_the_new_paths_churns_nothing() {
-    let Some(db) = test_pool().await else { return };
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
     let legacy = "/home/u/.nook/workspace";
     let slug = "/home/u/.nook/workspace/cp.example.com";
-    let f = seed(&db, legacy, slug).await;
+    let f = seed(&bed.pool, legacy, slug).await;
 
     let pairs = vec![
         MigratePathPair {
@@ -277,13 +272,15 @@ async fn a_followup_discovery_of_the_new_paths_churns_nothing() {
             new: format!("{slug}/acme/repo__feature"),
         },
     ];
-    migrate_paths(&db, f.node, &pairs).await.expect("migrate");
+    migrate_paths(&bed.pool, f.node, &pairs)
+        .await
+        .expect("migrate");
 
     // The state of this node's checkouts right after the rewrite.
     let before: Vec<(NodeWorkspaceId, String)> =
         sqlx::query_as("SELECT id, path FROM node_workspaces WHERE node_id = $1 ORDER BY path")
             .bind(f.node)
-            .fetch_all(&db)
+            .fetch_all(&bed.pool)
             .await
             .expect("before");
     assert_eq!(before.len(), 2);
@@ -291,7 +288,7 @@ async fn a_followup_discovery_of_the_new_paths_churns_nothing() {
     // Now the agent connects and discovery reports the NEW paths. Because the
     // rows already sit at those paths, the reconcile must upsert them in place
     // (same ids) and delete nothing — zero churn.
-    let state = AppState::new(db.clone(), test_config(), None).await;
+    let state = bed.app_state().await;
     let discovered = vec![
         DiscoveredWorkspace {
             path: format!("{slug}/acme/repo"),
@@ -317,7 +314,7 @@ async fn a_followup_discovery_of_the_new_paths_churns_nothing() {
     let after: Vec<(NodeWorkspaceId, String)> =
         sqlx::query_as("SELECT id, path FROM node_workspaces WHERE node_id = $1 ORDER BY path")
             .bind(f.node)
-            .fetch_all(&db)
+            .fetch_all(&bed.pool)
             .await
             .expect("after");
 
@@ -328,68 +325,10 @@ async fn a_followup_discovery_of_the_new_paths_churns_nothing() {
     // The workspace was already known; reconcile must not spawn a second one.
     let ws_count: (i64,) = sqlx::query_as("SELECT count(*) FROM workspaces WHERE id = $1")
         .bind(f.workspace)
-        .fetch_one(&db)
+        .fetch_one(&bed.pool)
         .await
         .expect("ws count");
     assert_eq!(ws_count.0, 1);
 
-    cleanup(&db, f.tenant).await;
-}
-
-/// A throwaway config for `AppState::new`, matching the other suites'.
-fn test_config() -> nook_control::config::Config {
-    nook_control::config::Config {
-        app_env: "test".into(),
-        bind: "127.0.0.1:0".into(),
-        shutdown_grace_secs: 25,
-        agent_bind: "127.0.0.1:0".into(),
-        agent_public_url: None,
-        agent_tls_cert: None,
-        agent_tls_key: None,
-        public_base_url: "http://localhost:8080".into(),
-        web_origin: "http://localhost:5173".into(),
-        database_url: std::env::var("DATABASE_URL").unwrap_or_default(),
-        oidc_issuer_url: None,
-        oidc_client_id: None,
-        oidc_device_client_id: None,
-        oidc_device_authorization_endpoint: None,
-        oidc_client_secret: None,
-        oidc_redirect_url: None,
-        oidc_scopes: "openid profile email".into(),
-        session_secret: "0".repeat(64),
-        session_ttl_hours: 168,
-        default_tenant_name: "dev".into(),
-        auth_dev_mode: true,
-        mcp_token: None,
-        dev_join_token: None,
-        dist_dir: "/nonexistent".into(),
-        releases_repo: "nook-os/nook-os".into(),
-        artifact_store: "disk".into(),
-        artifact_prefix: "nook".into(),
-        artifact_redirect: false,
-        s3_bucket: None,
-        s3_endpoint: None,
-        s3_region: None,
-        s3_access_key_id: None,
-        s3_secret_access_key: None,
-        s3_path_style: true,
-        cache_provider: "memory".into(),
-        queue_provider: "database".into(),
-        redis_url: None,
-        mail_provider: "capture".into(),
-        smtp_host: None,
-        smtp_port: 587,
-        smtp_tls: "starttls".into(),
-        smtp_from: "NookOS <no-reply@localhost>".into(),
-        smtp_username: None,
-        smtp_password: None,
-        postmark_token: None,
-        postmark_api_url: "https://api.postmarkapp.com/email".into(),
-        mail_from: "NookOS <no-reply@localhost>".into(),
-        mail_send_enabled: false,
-        mail_notifications_enabled: false,
-        mail_max_per_month: Some(100),
-        mail_max_per_day: None,
-        trusted_proxies: Vec::new(),
-    }
+    bed.teardown().await;
 }

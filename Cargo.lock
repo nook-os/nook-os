@@ -2585,6 +2585,7 @@ dependencies = [
  "nook-infra",
  "nook-mcp",
  "nook-proto",
+ "nook-testkit",
  "nook-types",
  "openidconnect",
  "password-hash",
@@ -2715,6 +2716,19 @@ dependencies = [
  "serde",
  "serde_json",
  "utoipa",
+ "uuid",
+]
+
+[[package]]
+name = "nook-testkit"
+version = "0.4.18"
+dependencies = [
+ "anyhow",
+ "nook-control",
+ "nook-infra",
+ "nook-types",
+ "sqlx",
+ "tokio",
  "uuid",
 ]
 
