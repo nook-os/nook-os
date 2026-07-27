@@ -96,9 +96,9 @@ pub async fn create(
     Json(req): Json<CreateSessionRequest>,
 ) -> ApiResult<Json<Session>> {
     // Starting a session is running a program on that machine — only on one you
-    // own (MAIN-130). Replaces the old require_node_self, which let any signed-in
-    // member spawn on a teammate's node.
-    auth.require_node_owner(&state, req.node_id).await?;
+    // own, OR one its owner has shared with the team (MAIN-136, relaxing the
+    // MAIN-130 owner-only rule). Management of the node stays owner-gated.
+    auth.require_node_may_use(&state, req.node_id).await?;
     let session = core::create_session(&state, auth.tenant_id, Some(auth.user_id), req).await?;
     Ok(Json(session))
 }
@@ -117,8 +117,9 @@ pub async fn open_terminal(
     body: Option<Json<CreateTerminalRequest>>,
 ) -> ApiResult<Json<Session>> {
     // Same rule as any session: running a shell on a machine is acting on it,
-    // so it is confined to the node's owner (MAIN-130).
-    auth.require_node_owner(&state, node_id).await?;
+    // so it is confined to the node's owner or a node shared with the team
+    // (MAIN-136) — a terminal is just a session, no separate line.
+    auth.require_node_may_use(&state, node_id).await?;
     let req = body.map(|Json(r)| r).unwrap_or(CreateTerminalRequest {
         runtime: None,
         name: None,
