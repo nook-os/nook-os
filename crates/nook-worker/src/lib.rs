@@ -9,8 +9,10 @@
 //! Failure is honest (AC-4): a handler that returns `Err` — or panics, which is
 //! caught per item so one bad job never crash-loops the worker — is retried with
 //! an attempt-scaled backoff (the item is held invisible via `extend_visibility`
-//! until the delay elapses, then redelivered). The queue's own `max_attempts`
-//! exhaustion eventually dead-letters a job that never succeeds.
+//! until the delay elapses, then redelivered). On the **final** attempt the
+//! worker dead-letters the item with the handler's actual error (e.g. the SMTP
+//! failure for an email send, MAIN-149), so the dead table records the real
+//! cause rather than a generic "exhausted".
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -53,6 +55,51 @@ impl Handler for NoopHandler {
             payload_len = work.payload.len(),
             "noop: work received and acknowledged"
         );
+        Ok(())
+    }
+}
+
+/// The `email.send` handler (MAIN-149): deserialize the rendered message and
+/// drive the configured mail provider. It holds a `GuardedMailer`, so the
+/// enable / category / quota gates that used to run inline in the control plane
+/// run here instead — a held message is a success (acked, not retried); only a
+/// transport failure is an error that retries then dead-letters.
+pub struct EmailHandler {
+    mailer: std::sync::Arc<dyn nook_infra::mailer::Mailer>,
+}
+
+impl EmailHandler {
+    pub fn new(mailer: std::sync::Arc<dyn nook_infra::mailer::Mailer>) -> Self {
+        Self { mailer }
+    }
+}
+
+#[async_trait::async_trait]
+impl Handler for EmailHandler {
+    async fn handle(&self, work: &WorkEnvelope) -> Result<()> {
+        use nook_infra::mailer::{Category, EmailJob, SendOutcome};
+        let job: EmailJob = serde_json::from_slice(&work.payload)
+            .map_err(|e| anyhow::anyhow!("bad email.send payload: {e}"))?;
+        // A transport failure returns Err → retry/dead-letter. A gate holding the
+        // message is a success (Held), logged, and acked — policy, not failure.
+        match self
+            .mailer
+            .send_reporting(
+                &job.to,
+                &job.subject,
+                &job.text_body,
+                job.html_body.as_deref(),
+                Category::parse(&job.category),
+            )
+            .await?
+        {
+            SendOutcome::Delivered => {
+                tracing::info!(to = %job.to, subject = %job.subject, "email delivered")
+            }
+            SendOutcome::Held(reason) => {
+                tracing::info!(to = %job.to, reason, "email held — not delivered")
+            }
+        }
         Ok(())
     }
 }
@@ -157,15 +204,33 @@ async fn process(queue: &dyn Queue, registry: &Registry, work: &WorkEnvelope) ->
             queue.ack(work.id).await?;
         }
         Ok(Err(e)) => {
-            let delay = backoff(work.attempts);
-            tracing::warn!(id = %work.id, error = %e, backoff_secs = delay.as_secs(), "handler failed — backing off");
-            queue.extend_visibility(work.id, delay).await?;
+            fail(queue, work, &e.to_string()).await?;
         }
         Err(join) => {
-            let delay = backoff(work.attempts);
-            tracing::error!(id = %work.id, panicked = join.is_panic(), backoff_secs = delay.as_secs(), "handler panicked — backing off");
-            queue.extend_visibility(work.id, delay).await?;
+            let reason = if join.is_panic() {
+                "handler panicked".to_string()
+            } else {
+                format!("handler task failed: {join}")
+            };
+            fail(queue, work, &reason).await?;
         }
+    }
+    Ok(())
+}
+
+/// A handler failed (returned `Err` or panicked). Retry with an attempt-scaled
+/// backoff, but on the **final** attempt dead-letter with the actual `reason` —
+/// so a persistent failure lands in the dead table with its real cause (e.g. the
+/// SMTP error for an email send, MAIN-149 AC-3) rather than a generic
+/// "exhausted".
+async fn fail(queue: &dyn Queue, work: &WorkEnvelope, reason: &str) -> Result<()> {
+    if work.attempts >= work.max_attempts {
+        tracing::error!(id = %work.id, reason, attempts = work.attempts, "handler failed — dead-lettering");
+        queue.nack(work.id, Nack::Dead(reason.to_string())).await?;
+    } else {
+        let delay = backoff(work.attempts);
+        tracing::warn!(id = %work.id, reason, backoff_secs = delay.as_secs(), "handler failed — backing off");
+        queue.extend_visibility(work.id, delay).await?;
     }
     Ok(())
 }
@@ -522,6 +587,91 @@ mod tests {
             seen.lock().unwrap().len(),
             3,
             "all pending work was drained before exit"
+        );
+    }
+
+    // ── MAIN-149: the email.send handler + dead-letter-with-reason ──────────────
+
+    #[tokio::test]
+    async fn email_handler_delivers_via_the_mailer_and_acks() {
+        let Some(q) = queue().await else {
+            eprintln!("skipping email_handler_delivers_via_the_mailer_and_acks — no DATABASE_URL");
+            return;
+        };
+        use nook_infra::mailer::{capture::CaptureMailer, Category, EmailJob};
+        let ty = unique_type("email");
+        let cap = Arc::new(CaptureMailer::new());
+        let mut reg = Registry::new();
+        reg.register(ty.clone(), Arc::new(EmailHandler::new(cap.clone())));
+
+        let job = EmailJob::new(
+            "to@x.test",
+            "Subject",
+            "the body",
+            None,
+            Category::Transactional,
+        );
+        let payload = serde_json::to_vec(&job).unwrap();
+        q.enqueue(NewWork::new(Uuid::now_v7(), ty.clone(), payload))
+            .await
+            .unwrap();
+
+        let n = drain_once(&*q, &reg, std::slice::from_ref(&ty))
+            .await
+            .unwrap();
+        assert_eq!(n, 1);
+        assert_eq!(
+            cap.sent().len(),
+            1,
+            "the mailer delivered the queued message"
+        );
+        // Acked → a second drain finds nothing.
+        assert_eq!(
+            drain_once(&*q, &reg, std::slice::from_ref(&ty))
+                .await
+                .unwrap(),
+            0,
+            "a delivered email is acked"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failing_handler_dead_letters_with_its_error_on_the_final_attempt() {
+        let Some(q) = queue().await else {
+            eprintln!("skipping a_failing_handler_dead_letters_with_its_error — no DATABASE_URL");
+            return;
+        };
+        let url = std::env::var("DATABASE_URL").unwrap();
+        let pool = pool_of(&url);
+        let ty = unique_type("deadfail");
+        let mut reg = Registry::new();
+        reg.register(ty.clone(), Arc::new(Failing(Arc::new(AtomicUsize::new(0)))));
+
+        // max_attempts = 1: the first delivery is also the last, so a failure
+        // dead-letters immediately — carrying the handler's actual error (AC-3).
+        q.enqueue(NewWork::new(Uuid::now_v7(), ty.clone(), b"{}".to_vec()).max_attempts(1))
+            .await
+            .unwrap();
+        drain_once(&*q, &reg, std::slice::from_ref(&ty))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            count_in(&pool, "work_queue", &ty).await,
+            0,
+            "left the live queue"
+        );
+        let reason: String = sqlx::query_as::<_, (String,)>(
+            "SELECT reason FROM work_queue_dead WHERE work_type = $1",
+        )
+        .bind(&ty)
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+        .0;
+        assert!(
+            reason.contains("handler always fails"),
+            "the dead-letter reason is the handler's error, not a generic one: {reason}"
         );
     }
 }

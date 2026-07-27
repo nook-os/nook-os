@@ -6,8 +6,8 @@ use sqlx::postgres::PgPoolOptions;
 use std::sync::Arc;
 use tracing_subscriber::EnvFilter;
 
-use nook_infra::{queue, Config};
-use nook_worker::{resolve_work_types, run, Registry};
+use nook_infra::{mailer, queue, Config};
+use nook_worker::{resolve_work_types, run, EmailHandler, Registry};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -28,8 +28,20 @@ async fn main() -> Result<()> {
 
     // The worker does NOT run migrations — the control plane owns them
     // (MAIN-146 NG-2). It just connects to the schema they produced.
-    let queue: Arc<dyn queue::Queue> = Arc::from(queue::from_config(&cfg, db));
-    let registry = Registry::with_builtins();
+    let queue: Arc<dyn queue::Queue> = Arc::from(queue::from_config(&cfg, db.clone()));
+
+    // The mail provider, wrapped in the same send guards the control plane uses
+    // (MAIN-52) — so moving sends onto the queue (MAIN-149) preserves the
+    // enable / category / quota gates exactly, just here instead of inline.
+    let transport: Arc<dyn mailer::Mailer> = Arc::from(mailer::from_config(&cfg));
+    let email_mailer: Arc<dyn mailer::Mailer> =
+        Arc::new(mailer::GuardedMailer::new(transport, db, &cfg));
+
+    let mut registry = Registry::with_builtins();
+    registry.register(
+        nook_infra::mailer::EMAIL_WORK_TYPE,
+        Arc::new(EmailHandler::new(email_mailer)),
+    );
     let types = resolve_work_types(&registry);
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);

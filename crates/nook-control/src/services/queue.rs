@@ -8,8 +8,18 @@
 use anyhow::Result;
 use uuid::Uuid;
 
+use crate::mailer::{EmailJob, EMAIL_WORK_TYPE};
 use crate::queue::{NewWork, QueueStats};
 use crate::state::AppState;
+
+/// Enqueue a rendered email as an `email.send` job for `tenant_id` (MAIN-149).
+/// The control plane renders the message; the worker drives the mail provider,
+/// so the request no longer blocks on SMTP and a failed send retries there.
+pub async fn enqueue_email(state: &AppState, tenant_id: Uuid, job: &EmailJob) -> Result<()> {
+    let payload = serde_json::to_vec(job)?;
+    enqueue(state, tenant_id, EMAIL_WORK_TYPE, payload).await?;
+    Ok(())
+}
 
 /// Enqueue a unit of durable work for `tenant_id`. `payload` is the caller's
 /// serialized job (JSON by convention); the queue treats it as opaque bytes.

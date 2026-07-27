@@ -112,24 +112,27 @@ pub async fn request_core(
         "Confirm your email for NookOS.\n\nOpen this link to verify {email}:\n\n{link}\n\nThe link expires in 24 hours. If you did not request this, ignore this email."
     );
 
-    // Best-effort — a failed send is a reported state, not a crash (AC-5).
-    match state
-        .mailer
-        .send(
-            &email,
-            "Verify your email — NookOS",
-            &body,
-            None,
-            crate::mailer::Category::Transactional,
-        )
-        .await
-    {
+    // Enqueue the send onto the durable queue (MAIN-149) instead of blocking
+    // this request on SMTP: the worker drives the mail provider, and a failed
+    // send retries there rather than failing (or slowing) this call.
+    let job = crate::mailer::EmailJob::new(
+        &email,
+        "Verify your email — NookOS",
+        &body,
+        None,
+        crate::mailer::Category::Transactional,
+    );
+    let tenant: uuid::Uuid = sqlx::query_scalar("SELECT tenant_id FROM users WHERE id = $1")
+        .bind(user_id)
+        .fetch_one(&state.db)
+        .await?;
+    match crate::services::queue::enqueue_email(state, tenant, &job).await {
         Ok(()) => Ok(RequestVerificationResult {
             sent: true,
             message: format!("A verification link was sent to {email}."),
         }),
         Err(e) => {
-            tracing::error!(error = %e, "verification email failed to send");
+            tracing::error!(error = %e, "verification email failed to enqueue");
             Ok(RequestVerificationResult {
                 sent: false,
                 message: "Could not send the verification email — check the mail configuration and try again.".into(),
@@ -306,7 +309,17 @@ mod tests {
         let uid = user(&db, t, "local@vr.test", true).await;
 
         let r = request_core(&state, uid).await.unwrap();
-        assert!(r.sent, "the capture mailer accepts the send");
+        assert!(r.sent, "the send is accepted (enqueued)");
+        // MAIN-149: the send is now enqueued, not sent inline — an `email.send`
+        // job for this tenant lands in the queue for the worker to deliver.
+        let queued: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM work_queue WHERE work_type = 'email.send' AND tenant_id = $1",
+        )
+        .bind(t)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(queued, 1, "one email.send job enqueued for this tenant");
         let tokens = live_tokens(&db, uid).await;
         assert_eq!(tokens.len(), 1, "one live token");
         // Stored hashed: a 64-char hex digest, never the `evr_` plaintext.
