@@ -408,11 +408,17 @@ function BoardSearch({
 function Filters({
   labels,
   workspaces,
+  members,
+  epics,
   value,
   onChange,
 }: {
   labels: { id: string; name: string; color: string }[];
   workspaces: { id: string; name: string }[];
+  /** Tenant members for the specific-person assignee filter (MAIN-111). */
+  members: { id: string; name: string }[];
+  /** Board epics, in pick order, for the epic filter (MAIN-111). */
+  epics: { id: string; key: string }[];
   value: BoardFilter;
   onChange: (f: BoardFilter) => void;
 }) {
@@ -465,7 +471,7 @@ function Filters({
         : [...value.visibility, v],
     });
 
-  const chips = activeChips(value, workspaces);
+  const chips = activeChips(value, workspaces, members, epics);
   const anyActive = isFilterActive(value);
   // Clear-all resets to empty but keeps the current TAB (AC-4); the open task
   // rides in a separate URL key that writeFilter never touches.
@@ -605,13 +611,35 @@ function Filters({
               <select
                 className="task-select"
                 value={value.assignee}
-                onChange={(e) =>
-                  onChange({ ...value, assignee: e.target.value as BoardFilter["assignee"] })
-                }
+                onChange={(e) => onChange({ ...value, assignee: e.target.value })}
               >
                 <option value="any">any</option>
                 <option value="none">unclaimed</option>
                 <option value="me">mine</option>
+                {/* Every tenant member, by display name (MAIN-111 AC-1). */}
+                {members.map((m) => (
+                  <option key={m.id} value={m.id}>
+                    {m.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            <label className="filters-field">
+              <span className="faint small">epic</span>
+              <select
+                className="task-select"
+                value={value.epic ?? ""}
+                onChange={(e) =>
+                  onChange({ ...value, epic: e.target.value === "" ? null : e.target.value })
+                }
+              >
+                <option value="">all</option>
+                {epics.map((ep) => (
+                  <option key={ep.id} value={ep.id}>
+                    {ep.key}
+                  </option>
+                ))}
               </select>
             </label>
 
@@ -697,9 +725,13 @@ export interface BoardFilter {
   type: string[];
   /** Visibilities to include (OR'd); empty = any visibility (MAIN-103). */
   visibility: string[];
-  assignee: "any" | "none" | "me";
+  /** `any` · `none` (unclaimed) · `me` · a specific user's uuid (MAIN-111). */
+  assignee: string;
   priority: number | null;
   blocked: boolean | null;
+  /** An epic's task uuid to confine the board to its children, or null for all
+   *  (MAIN-111). Rides the server `parent` query param. */
+  epic: string | null;
   /** Workspace uuid, or null for all. Confines the board to one repo. */
   workspace: string | null;
   /** Reveal archived tasks (dimmed) in their columns. Default hidden. */
@@ -805,6 +837,7 @@ const EMPTY_FILTER: BoardFilter = {
   assignee: "any",
   priority: null,
   blocked: null,
+  epic: null,
   workspace: null,
   showArchived: false,
   q: "",
@@ -824,11 +857,16 @@ const FILTER_KEYS = [
   "assignee",
   "priority",
   "blocked",
+  "epic",
   "ws",
   "archived",
   "q",
   "view",
 ] as const;
+
+/** A uuid, so a person/epic filter value from the URL is recognised as one
+ *  (rather than coerced away) without accepting arbitrary junk (MAIN-111). */
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export function parseFilter(params: URLSearchParams): BoardFilter {
   const list = (k: string) =>
@@ -844,9 +882,22 @@ export function parseFilter(params: URLSearchParams): BoardFilter {
     not_label: list("xlabel"),
     type: list("type"),
     visibility: list("vis"),
-    assignee: assignee === "none" || assignee === "me" ? assignee : "any",
+    // `none`/`me` keep their meaning; a uuid is a specific person (MAIN-111);
+    // anything else (garbage) falls back to `any`. A uuid naming a user who no
+    // longer exists is kept — the board renders empty with a removable chip
+    // rather than crashing (AC-6).
+    assignee:
+      assignee === "none" || assignee === "me"
+        ? assignee
+        : assignee && UUID_RE.test(assignee)
+          ? assignee
+          : "any",
     priority: priority !== null && priority !== "" ? Number(priority) : null,
     blocked: blocked === null ? null : blocked === "true",
+    epic: (() => {
+      const e = params.get("epic");
+      return e && UUID_RE.test(e) ? e : null;
+    })(),
     workspace: params.get("ws") || null,
     showArchived: params.get("archived") === "1",
     q: params.get("q") ?? "",
@@ -865,6 +916,7 @@ export function writeFilter(next: URLSearchParams, f: BoardFilter): URLSearchPar
   if (f.assignee !== "any") next.set("assignee", f.assignee);
   if (f.priority !== null) next.set("priority", String(f.priority));
   if (f.blocked !== null) next.set("blocked", String(f.blocked));
+  if (f.epic) next.set("epic", f.epic);
   if (f.workspace) next.set("ws", f.workspace);
   if (f.showArchived) next.set("archived", "1");
   if (f.q) next.set("q", f.q);
@@ -896,6 +948,8 @@ export interface FilterChip {
 export function activeChips(
   f: BoardFilter,
   workspaces: { id: string; name: string }[],
+  members: { id: string; name: string }[] = [],
+  epics: { id: string; key: string }[] = [],
 ): FilterChip[] {
   const chips: FilterChip[] = [];
   for (const l of f.label)
@@ -914,8 +968,21 @@ export function activeChips(
   if (f.assignee !== "any")
     chips.push({
       key: "assignee",
-      label: f.assignee === "me" ? "mine" : "unclaimed",
+      label:
+        f.assignee === "me"
+          ? "mine"
+          : f.assignee === "none"
+            ? "unclaimed"
+            : // A specific person: their display name, or a fallback if the
+              // user no longer exists — the chip still removes cleanly (AC-6).
+              (members.find((m) => m.id === f.assignee)?.name ?? "unknown user"),
       next: { ...f, assignee: "any" },
+    });
+  if (f.epic)
+    chips.push({
+      key: "epic",
+      label: epics.find((e) => e.id === f.epic)?.key ?? "unknown epic",
+      next: { ...f, epic: null },
     });
   if (f.priority !== null)
     chips.push({
@@ -1030,6 +1097,24 @@ export function BoardPage() {
     queryKey: ["me"],
     queryFn: async () => (await api.GET("/api/v1/auth/me")).data ?? null,
   });
+  // Tenant members for the specific-person assignee filter (MAIN-111). The
+  // first page is plenty for a board's tenant; `principal_id` IS the user id the
+  // `assignee` param filters on.
+  const tenantId = me?.tenant?.id;
+  const { data: members } = useQuery({
+    queryKey: ["tenant-members", "board-filter", tenantId],
+    enabled: !!tenantId,
+    queryFn: async () =>
+      (
+        await api.GET("/api/v1/tenants/{id}/members", {
+          params: { path: { id: tenantId as string }, query: { limit: 200 } },
+        })
+      ).data?.rows ?? [],
+  });
+  const filterMembers = React.useMemo(
+    () => (members ?? []).map((m) => ({ id: m.principal_id, name: m.display_name })),
+    [members],
+  );
   const { data: labels } = useQuery({
     queryKey: ["labels"],
     queryFn: async () => (await api.GET("/api/v1/labels")).data ?? [],
@@ -1071,6 +1156,7 @@ export function BoardPage() {
     filter.assignee !== "any" ||
     filter.priority !== null ||
     filter.blocked !== null ||
+    filter.epic !== null ||
     filter.workspace !== null ||
     filter.q.length > 0;
 
@@ -1091,9 +1177,19 @@ export function BoardPage() {
               ...(filter.visibility.length ? { visibility: filter.visibility } : {}),
               ...(filter.assignee === "none"
                 ? { assignee: "none" }
-                : filter.assignee === "me" && me?.user?.id
-                  ? { assignee: me.user.id }
-                  : {}),
+                : filter.assignee === "me"
+                  ? me?.user?.id
+                    ? { assignee: me.user.id }
+                    : {}
+                  : filter.assignee !== "any"
+                    ? { assignee: filter.assignee } // a specific person's user uuid
+                    : {}),
+              // Epic filter → the server `parent` query, but only on the kanban
+              // tab; the Backlog tab narrows to the epic's SECTION client-side
+              // (it needs the epic row too, which `parent` would exclude).
+              ...(filter.epic && filter.view !== "backlog"
+                ? { parent: filter.epic }
+                : {}),
               ...(filter.priority !== null ? { priority: filter.priority } : {}),
               ...(filter.blocked !== null ? { is_blocked: filter.blocked } : {}),
               ...(filter.workspace ? { workspace: filter.workspace } : {}),
@@ -1249,7 +1345,15 @@ export function BoardPage() {
       t.parent_task_id &&
       epicIds.has(t.parent_task_id),
   );
-  const backlogGroups = groupByEpic([...visible, ...archivedEpicChildren], colTypeById);
+  const allBacklogGroups = groupByEpic([...visible, ...archivedEpicChildren], colTypeById);
+  // Epic filter on the Backlog tab: show ONLY that epic's section (AC-3). The
+  // kanban tab narrows server-side via the `parent` query param instead.
+  const backlogGroups = filter.epic
+    ? {
+        epics: allBacklogGroups.epics.filter((s) => s.epic.id === filter.epic),
+        noEpic: [],
+      }
+    : allBacklogGroups;
   const epics = detail.tasks.filter((t) => t.type === "epic");
 
   const addTask = async (columnId: string, title: string) => {
@@ -1410,6 +1514,11 @@ export function BoardPage() {
           <Filters
             labels={labels ?? []}
             workspaces={workspaces ?? []}
+            members={filterMembers}
+            epics={epicOptions(detail.tasks, "").map((e) => ({
+              id: e.id,
+              key: e.key ?? "",
+            }))}
             value={filter}
             onChange={setFilter}
           />

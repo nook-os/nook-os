@@ -39,6 +39,7 @@ describe("board filter URL round-trip (MAIN-15 AC-1)", () => {
       assignee: "any",
       priority: null,
       blocked: null,
+      epic: null,
       workspace: null,
       showArchived: false,
       q: "",
@@ -52,6 +53,7 @@ describe("board filter URL round-trip (MAIN-15 AC-1)", () => {
       assignee: "me",
       priority: 2,
       blocked: false,
+      epic: "019fa216-3c52-7a13-b7b6-b60f91802850",
       workspace: "019f840f-2d80-7163-b4b1-8b1e12d7e0d3",
       showArchived: true,
       q: "postmark",
@@ -65,6 +67,7 @@ describe("board filter URL round-trip (MAIN-15 AC-1)", () => {
       assignee: "none",
       priority: 0,
       blocked: true,
+      epic: null,
       workspace: null,
       showArchived: false,
       q: "MAIN-42",
@@ -181,6 +184,80 @@ describe("which tab a task belongs to (MAIN-82 AC-1/AC-5)", () => {
   });
 });
 
+describe("specific-person assignee + epic filter (MAIN-111)", () => {
+  const uuid = "019fa216-3c52-7a13-b7b6-b60f91802850";
+
+  it("parses a uuid assignee, keeps me/none, and coerces garbage to any (AC-2)", () => {
+    expect(parseFilter(new URLSearchParams(`assignee=${uuid}`)).assignee).toBe(uuid);
+    expect(parseFilter(new URLSearchParams("assignee=me")).assignee).toBe("me");
+    expect(parseFilter(new URLSearchParams("assignee=none")).assignee).toBe("none");
+    // Not a uuid, not me/none → any, rather than passing junk to the server.
+    expect(parseFilter(new URLSearchParams("assignee=nonsense")).assignee).toBe("any");
+    expect(parseFilter(new URLSearchParams("")).assignee).toBe("any");
+  });
+
+  it("round-trips a uuid assignee and an epic through the URL (AC-2/AC-4)", () => {
+    const f = parseFilter(new URLSearchParams(`assignee=${uuid}&epic=${uuid}`));
+    expect(f.assignee).toBe(uuid);
+    expect(f.epic).toBe(uuid);
+    const round = parseFilter(serializeFilter(f));
+    expect(round.assignee).toBe(uuid);
+    expect(round.epic).toBe(uuid);
+    // Absent keys stay absent, so a default board URL is unchanged.
+    expect(serializeFilter({ ...f, assignee: "any", epic: null }).has("assignee")).toBe(false);
+    expect(serializeFilter({ ...f, epic: null }).has("epic")).toBe(false);
+    // A non-uuid epic is dropped (AC-6: no crash, treated as no filter).
+    expect(parseFilter(new URLSearchParams("epic=nope")).epic).toBeNull();
+  });
+
+  it("renders a person chip by display name and an epic chip by key (AC-5)", () => {
+    const base: BoardFilter = {
+      label: [],
+      not_label: [],
+      type: [],
+      visibility: [],
+      assignee: uuid,
+      priority: null,
+      blocked: null,
+      epic: uuid,
+      workspace: null,
+      showArchived: false,
+      q: "",
+      view: "board",
+    };
+    const members = [{ id: uuid, name: "Alex Rivera" }];
+    const epics = [{ id: uuid, key: "MAIN-7" }];
+    const chips = activeChips(base, [], members, epics);
+    expect(chips.find((c) => c.key === "assignee")?.label).toBe("Alex Rivera");
+    expect(chips.find((c) => c.key === "epic")?.label).toBe("MAIN-7");
+    // Removing each clears just that filter.
+    expect(chips.find((c) => c.key === "assignee")?.next.assignee).toBe("any");
+    expect(chips.find((c) => c.key === "epic")?.next.epic).toBeNull();
+  });
+
+  it("falls back to a label (not a crash) for an unknown user or epic (AC-6)", () => {
+    const base: BoardFilter = {
+      label: [],
+      not_label: [],
+      type: [],
+      visibility: [],
+      assignee: uuid,
+      priority: null,
+      blocked: null,
+      epic: uuid,
+      workspace: null,
+      showArchived: false,
+      q: "",
+      view: "board",
+    };
+    // No members/epics resolve the ids — the chips still render and are active.
+    const chips = activeChips(base, [], [], []);
+    expect(chips.find((c) => c.key === "assignee")?.label).toBe("unknown user");
+    expect(chips.find((c) => c.key === "epic")?.label).toBe("unknown epic");
+    expect(isFilterActive(base)).toBe(true);
+  });
+});
+
 describe("active-filter chips (MAIN-110 AC-2/AC-3/AC-4)", () => {
   const empty: BoardFilter = {
     label: [],
@@ -190,6 +267,7 @@ describe("active-filter chips (MAIN-110 AC-2/AC-3/AC-4)", () => {
     assignee: "any",
     priority: null,
     blocked: null,
+    epic: null,
     workspace: null,
     showArchived: false,
     q: "",
