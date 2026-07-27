@@ -260,11 +260,13 @@ async fn cancel_works_from_live_states_and_is_refused_once_terminal() {
     jobs::transition(&state, tenant, waiting, "waiting_on_human")
         .await
         .unwrap();
-    let canceled = jobs::cancel(&state, tenant, waiting).await.expect("cancel");
+    let canceled = jobs::cancel(&state, tenant, user, waiting)
+        .await
+        .expect("cancel");
     assert_eq!(canceled.state, "canceled");
 
     // Cancelling an already-canceled job is a no-op success, not a 409.
-    let again = jobs::cancel(&state, tenant, waiting)
+    let again = jobs::cancel(&state, tenant, user, waiting)
         .await
         .expect("idempotent cancel");
     assert_eq!(again.state, "canceled");
@@ -292,7 +294,7 @@ async fn cancel_works_from_live_states_and_is_refused_once_terminal() {
     jobs::transition(&state, tenant, done, "completed")
         .await
         .unwrap();
-    let err = jobs::cancel(&state, tenant, done)
+    let err = jobs::cancel(&state, tenant, user, done)
         .await
         .expect_err("completed cannot cancel");
     assert!(matches!(err, nook_control::error::ApiError::Conflict(_)));
@@ -328,7 +330,7 @@ async fn transcript_appends_and_reads_back_in_order() {
         .await
         .unwrap();
 
-    let detail = jobs::get(&state, tenant, id).await.expect("get");
+    let detail = jobs::get(&state, tenant, user, id).await.expect("get");
     assert_eq!(detail.transcript.len(), 2);
     assert_eq!(detail.transcript[0].content, "job started");
     assert_eq!(detail.transcript[0].source, "system");
@@ -336,7 +338,7 @@ async fn transcript_appends_and_reads_back_in_order() {
 
     // A job from another tenant is invisible even by id.
     let other = bed.tenant("other").await;
-    let err = jobs::get(&state, other, id)
+    let err = jobs::get(&state, other, user, id)
         .await
         .expect_err("cross-tenant read");
     assert!(matches!(err, nook_control::error::ApiError::NotFound));
@@ -389,6 +391,81 @@ async fn rerun_forks_a_fresh_queued_job_linked_to_its_predecessor() {
         "links to predecessor"
     );
     assert_eq!(fresh.job.kind, "decompose");
+
+    bed.teardown().await;
+}
+
+/// A job whose target is a PRIVATE card is reachable only by someone who can see
+/// the card — mirroring the create-side gate onto get/cancel/rerun so a private
+/// card's transcript never leaks to another tenant member (review should-fix).
+#[tokio::test]
+async fn private_target_job_is_hidden_from_a_non_owner() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let (state, tenant, owner, b, c) = fixture(&bed).await;
+    // A second member of the SAME tenant who does not own the card.
+    let (other, _) = bed.user(tenant, "member").await;
+
+    // A private card created by `owner`.
+    let secret = TaskId::new();
+    sqlx::query(
+        "INSERT INTO tasks (id, tenant_id, board_id, column_id, title, type, created_by, visibility)
+         VALUES ($1,$2,$3,$4,'secret','task',$5,'private')",
+    )
+    .bind(secret)
+    .bind(tenant)
+    .bind(b)
+    .bind(c)
+    .bind(owner)
+    .execute(&bed.pool)
+    .await
+    .expect("private task");
+
+    // The owner may open a job on it and read it back.
+    let id = jobs::create(
+        &state,
+        tenant,
+        owner,
+        CreateLoopJobRequest {
+            kind: "spec".into(),
+            target_task_id: secret,
+        },
+    )
+    .await
+    .expect("owner opens a job on their private card")
+    .job
+    .id;
+    jobs::get(&state, tenant, owner, id)
+        .await
+        .expect("owner reads it");
+
+    // The other member — same tenant, cannot see the card — is refused on every
+    // path, as NotFound (never a distinguishable 403).
+    for probe in ["get", "cancel", "rerun"] {
+        let err = match probe {
+            "get" => jobs::get(&state, tenant, other, id).await.err(),
+            "cancel" => jobs::cancel(&state, tenant, other, id).await.err(),
+            _ => jobs::rerun(&state, tenant, other, id).await.err(),
+        };
+        assert!(
+            matches!(err, Some(nook_control::error::ApiError::NotFound)),
+            "{probe} must be NotFound for a non-owner of a private target"
+        );
+    }
+    // And that member cannot open their own job on the invisible card either.
+    let denied = jobs::create(
+        &state,
+        tenant,
+        other,
+        CreateLoopJobRequest {
+            kind: "spec".into(),
+            target_task_id: secret,
+        },
+    )
+    .await
+    .expect_err("non-owner cannot open a job on a private card");
+    assert!(matches!(denied, nook_control::error::ApiError::NotFound));
 
     bed.teardown().await;
 }

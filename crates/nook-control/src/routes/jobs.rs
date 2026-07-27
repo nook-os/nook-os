@@ -36,7 +36,9 @@ pub async fn get(
     auth: AuthCtx,
     Path(id): Path<JobId>,
 ) -> ApiResult<Json<LoopJobDetail>> {
-    Ok(Json(jobs::get(&state, auth.tenant_id, id).await?))
+    Ok(Json(
+        jobs::get(&state, auth.tenant_id, auth.user_id, id).await?,
+    ))
 }
 
 #[utoipa::path(post, path = "/api/v1/jobs/{id}/cancel",
@@ -49,7 +51,9 @@ pub async fn cancel(
     Path(id): Path<JobId>,
 ) -> ApiResult<Json<LoopJob>> {
     auth.require_user()?;
-    Ok(Json(jobs::cancel(&state, auth.tenant_id, id).await?))
+    Ok(Json(
+        jobs::cancel(&state, auth.tenant_id, auth.user_id, id).await?,
+    ))
 }
 
 #[utoipa::path(post, path = "/api/v1/jobs/{id}/rerun",

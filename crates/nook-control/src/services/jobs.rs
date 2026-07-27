@@ -59,6 +59,35 @@ async fn load(state: &AppState, tenant: TenantId, id: JobId) -> ApiResult<LoopJo
         .ok_or(ApiError::NotFound)
 }
 
+/// The job's target card. `NotFound` if it is gone or not this tenant's.
+async fn load_target(state: &AppState, tenant: TenantId, task_id: TaskId) -> ApiResult<TaskItem> {
+    sqlx::query_as("SELECT * FROM tasks WHERE id = $1 AND tenant_id = $2")
+        .bind(task_id)
+        .bind(tenant)
+        .fetch_optional(&state.db)
+        .await?
+        .ok_or(ApiError::NotFound)
+}
+
+/// Load a job AND enforce that `viewer` may see its target card — mirroring the
+/// create-side check so get/cancel/rerun never expose a private card's job (and
+/// its transcript) to a tenant member who cannot see the card (MAIN-76). Returns
+/// `NotFound` for both a missing job and an invisible target, so the two are
+/// indistinguishable to the caller.
+async fn load_visible(
+    state: &AppState,
+    tenant: TenantId,
+    viewer: UserId,
+    id: JobId,
+) -> ApiResult<(LoopJob, TaskItem)> {
+    let job = load(state, tenant, id).await?;
+    let target = load_target(state, tenant, job.target_task_id).await?;
+    if !crate::services::tasks::visible_to(&target, viewer) {
+        return Err(ApiError::NotFound);
+    }
+    Ok((job, target))
+}
+
 async fn transcript(state: &AppState, id: JobId) -> ApiResult<Vec<LoopJobTranscriptEntry>> {
     Ok(
         sqlx::query_as("SELECT * FROM loop_job_transcript WHERE job_id = $1 ORDER BY id")
@@ -91,12 +120,7 @@ pub async fn create(
 
     // The target must exist in this tenant and be visible to the requester —
     // a job is not a way to reach a private card you could not otherwise see.
-    let target: TaskItem = sqlx::query_as("SELECT * FROM tasks WHERE id = $1 AND tenant_id = $2")
-        .bind(req.target_task_id)
-        .bind(tenant)
-        .fetch_optional(&state.db)
-        .await?
-        .ok_or(ApiError::NotFound)?;
+    let target = load_target(state, tenant, req.target_task_id).await?;
     if !crate::services::tasks::visible_to(&target, requested_by) {
         return Err(ApiError::NotFound);
     }
@@ -135,13 +159,20 @@ pub async fn create(
         ))
         .await?;
 
-    record_created(state, tenant, &job).await;
+    record_job_event(state, tenant, "job.created", &job, is_private(&target)).await;
     detail(state, job).await
 }
 
-/// Read a job with its transcript (AC-3). 404 if it is not this tenant's.
-pub async fn get(state: &AppState, tenant: TenantId, id: JobId) -> ApiResult<LoopJobDetail> {
-    let job = load(state, tenant, id).await?;
+/// Read a job with its transcript (AC-3). 404 if it is not this tenant's, or if
+/// `viewer` cannot see the job's target card — a private card's transcript stays
+/// private (mirrors the create-side gate).
+pub async fn get(
+    state: &AppState,
+    tenant: TenantId,
+    viewer: UserId,
+    id: JobId,
+) -> ApiResult<LoopJobDetail> {
+    let (job, _) = load_visible(state, tenant, viewer, id).await?;
     detail(state, job).await
 }
 
@@ -174,25 +205,27 @@ pub async fn transition(
     .fetch_one(&state.db)
     .await?;
 
-    events::record(
-        state,
-        tenant,
-        EventDraft::new("job.state_changed")
-            .actor("user", updated.requested_by.0)
-            .payload(json!({
-                "job_id": updated.id,
-                "task_id": updated.target_task_id,
-                "kind": updated.kind,
-                "state": updated.state,
-            })),
-    )
-    .await;
+    // Privacy of the target card gates the notification (not the activity
+    // event) — a private card's state changes must not ring the tenant-wide
+    // bell. A vanished target is treated as private (fail closed).
+    let private = load_target(state, tenant, updated.target_task_id)
+        .await
+        .map(|t| is_private(&t))
+        .unwrap_or(true);
+    record_job_event(state, tenant, "job.state_changed", &updated, private).await;
     Ok(updated)
 }
 
 /// Cancel a job from any non-terminal state (AC-5). A no-op-style 200 if it is
-/// already canceled; a 409 if it already finished.
-pub async fn cancel(state: &AppState, tenant: TenantId, id: JobId) -> ApiResult<LoopJob> {
+/// already canceled; a 409 if it already finished. Refuses (as NotFound) a
+/// caller who cannot see the target card.
+pub async fn cancel(
+    state: &AppState,
+    tenant: TenantId,
+    viewer: UserId,
+    id: JobId,
+) -> ApiResult<LoopJob> {
+    load_visible(state, tenant, viewer, id).await?;
     transition(state, tenant, id, "canceled").await
 }
 
@@ -205,7 +238,7 @@ pub async fn rerun(
     requested_by: UserId,
     id: JobId,
 ) -> ApiResult<LoopJobDetail> {
-    let prev = load(state, tenant, id).await?;
+    let (prev, target) = load_visible(state, tenant, requested_by, id).await?;
     if !matches!(prev.state.as_str(), "failed" | "canceled") {
         return Err(ApiError::Conflict(
             "only a failed or canceled job can be re-run".into(),
@@ -239,7 +272,7 @@ pub async fn rerun(
         ))
         .await?;
 
-    record_created(state, tenant, &job).await;
+    record_job_event(state, tenant, "job.created", &job, is_private(&target)).await;
     detail(state, job).await
 }
 
@@ -264,17 +297,34 @@ pub async fn append_transcript(
     .await?)
 }
 
-async fn record_created(state: &AppState, tenant: TenantId, job: &LoopJob) {
+/// Is the target card private (creator + assignee only)?
+fn is_private(target: &TaskItem) -> bool {
+    target.visibility == "private"
+}
+
+/// Record a job lifecycle event on the UI bus (AC-4). `target_private` is carried
+/// in the payload so `events::notable()` can suppress the tenant-wide bell for a
+/// private target — the activity event still records, but the notification (which
+/// could surface transcript/card content) does not fan out. Every job event goes
+/// through here so the privacy flag can never be forgotten at a call site.
+async fn record_job_event(
+    state: &AppState,
+    tenant: TenantId,
+    kind: &'static str,
+    job: &LoopJob,
+    target_private: bool,
+) {
     events::record(
         state,
         tenant,
-        EventDraft::new("job.created")
+        EventDraft::new(kind)
             .actor("user", job.requested_by.0)
             .payload(json!({
                 "job_id": job.id,
                 "task_id": job.target_task_id,
                 "kind": job.kind,
                 "state": job.state,
+                "target_private": target_private,
             })),
     )
     .await;

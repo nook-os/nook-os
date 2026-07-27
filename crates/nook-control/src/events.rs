@@ -171,6 +171,17 @@ pub fn catalog() -> Vec<nook_types::NotificationKind> {
     ]
 }
 
+/// Does this event carry a `target_private: true` flag? Job events (MAIN-127)
+/// set it when their target card is private, so the notification can be gated
+/// without a DB read here (the pure-function contract of `notable`).
+fn is_private_target(event: &Event) -> bool {
+    event
+        .payload
+        .get("target_private")
+        .and_then(|v| v.as_bool())
+        == Some(true)
+}
+
 /// Which events become notifications, and how to phrase them.
 ///
 /// Curated rather than "everything": an inbox that receives every event is one
@@ -272,6 +283,11 @@ pub fn notable(base_url: &str, event: &Event) -> Option<crate::services::notify:
         "hooks.install_failed" => Draft::new("A node could not apply the managed hooks")
             .level("error")
             .body(text("error").unwrap_or_default().to_string()),
+        // A loop job whose target is a PRIVATE card is not notable: the
+        // tenant-wide bell must not surface a private card's existence or its
+        // transcript content (MAIN-76). The activity event still records; only
+        // the notification is gated — mirroring the private-comment rule above.
+        "job.created" | "job.state_changed" if is_private_target(event) => return None,
         // A loop job was queued (MAIN-127 AC-4). Info level — the deep link at
         // the tail points at the target card via the payload's `task_id`.
         "job.created" => Draft::new("Loop job created").level("info").body(format!(
@@ -471,5 +487,36 @@ mod tests {
             ),
         );
         assert!(d.is_none(), "a private card's comment must not notify");
+    }
+
+    /// A loop job on a PRIVATE target (MAIN-127) records its activity event but
+    /// must not ring the tenant-wide bell — the `target_private` flag gates it,
+    /// exactly as the missing excerpt gates a private comment above.
+    #[test]
+    fn job_events_do_not_notify_for_private_targets() {
+        for kind in ["job.created", "job.state_changed"] {
+            // Public target → notable.
+            let public = notable(
+                "http://x",
+                &ev(
+                    kind,
+                    serde_json::json!({ "kind": "spec", "state": "queued", "task_id": "MAIN-9", "target_private": false }),
+                ),
+            );
+            assert!(public.is_some(), "{kind} on a public target is notable");
+
+            // Private target → silent.
+            let private = notable(
+                "http://x",
+                &ev(
+                    kind,
+                    serde_json::json!({ "kind": "spec", "state": "queued", "task_id": "MAIN-9", "target_private": true }),
+                ),
+            );
+            assert!(
+                private.is_none(),
+                "{kind} on a private target must not notify"
+            );
+        }
     }
 }
