@@ -158,7 +158,7 @@ async fn pending_answered_lifecycle() {
     assert_eq!(answered.answered_by, Some(user));
 
     // Pullable: a later read (what `ask --wait` polls) sees the answer.
-    let pulled = interactions::get(&state, tenant, user, created.id)
+    let pulled = interactions::get(&state, tenant, &user_ctx(tenant, user), created.id)
         .await
         .expect("get");
     assert_eq!(pulled.state, "answered");
@@ -216,7 +216,7 @@ async fn first_answer_wins_under_concurrency() {
     );
 
     // The stored answer is the winner's, set once.
-    let final_i = interactions::get(&state, tenant, u1, created.id)
+    let final_i = interactions::get(&state, tenant, &user_ctx(tenant, u1), created.id)
         .await
         .expect("get");
     assert_eq!(final_i.state, "answered");
@@ -252,7 +252,7 @@ async fn a_private_subject_refuses_without_leaking_the_prompt() {
 
     // A teammate who cannot see the card is refused as NotFound — never the
     // prompt — on both read and answer.
-    let read = interactions::get(&state, tenant, other, created.id).await;
+    let read = interactions::get(&state, tenant, &user_ctx(tenant, other), created.id).await;
     assert!(
         matches!(read, Err(ApiError::NotFound)),
         "read refused as NotFound"
@@ -264,7 +264,7 @@ async fn a_private_subject_refuses_without_leaking_the_prompt() {
     );
 
     // And it stayed pending — the refused answer did not take.
-    let still = interactions::get(&state, tenant, owner, created.id)
+    let still = interactions::get(&state, tenant, &user_ctx(tenant, owner), created.id)
         .await
         .expect("owner get");
     assert_eq!(still.state, "pending");
@@ -404,6 +404,60 @@ async fn a_node_cannot_pause_a_job_it_does_not_run() {
         .await
         .expect("answer succeeds even though the node is offline");
     assert_eq!(answered.response.as_deref(), Some("go"));
+
+    bed.teardown().await;
+}
+
+#[tokio::test]
+async fn a_node_pulls_its_own_answer_even_on_a_private_card() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let tenant = bed.tenant("ix").await;
+    // The node's user identity (a node authenticates as the tenant owner) is
+    // deliberately NOT the private card's creator, so only the requester-bypass
+    // — not the node's user visibility — can resolve the pull.
+    let (node_user, _pu) = bed.user(tenant, "owner").await;
+    let (author, _pa) = bed.user(tenant, "member").await;
+    let private = task(&bed.pool, tenant, author, "private").await;
+    let runner = node(&bed.pool, tenant).await;
+    let job = claimed_job(&bed.pool, tenant, author, private, runner).await;
+    let state = bed.app_state().await;
+
+    // The executor raises a job-scoped pause on the private card.
+    let created = interactions::create(
+        &state,
+        tenant,
+        &node_ctx(tenant, node_user, runner),
+        CreateInteractionRequest {
+            job_id: Some(job),
+            ..ask("continue?")
+        },
+    )
+    .await
+    .expect("the executor raises the pause");
+    assert_eq!(created.requested_by_node_id, Some(runner));
+
+    // The card's author (who can see it) answers.
+    interactions::answer(&state, tenant, author, created.id, "go".into())
+        .await
+        .expect("author answers");
+
+    // The requesting node pulls its own answer — despite having no user identity
+    // that could see the private card. This is what `ask --wait` relies on.
+    let pulled = interactions::get(&state, tenant, &node_ctx(tenant, node_user, runner), created.id)
+        .await
+        .expect("the requesting node pulls its answer");
+    assert_eq!(pulled.state, "answered");
+    assert_eq!(pulled.response.as_deref(), Some("go"));
+
+    // And the node's plain user identity cannot: prove the bypass is scoped to
+    // the requesting NODE, not to its user (who cannot see the private card).
+    let as_user = interactions::get(&state, tenant, &user_ctx(tenant, node_user), created.id).await;
+    assert!(
+        matches!(as_user, Err(ApiError::NotFound)),
+        "the same user, not acting as the requesting node, is still refused"
+    );
 
     bed.teardown().await;
 }

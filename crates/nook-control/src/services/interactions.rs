@@ -180,11 +180,20 @@ pub async fn create(
 pub async fn get(
     state: &AppState,
     tenant: TenantId,
-    viewer: UserId,
+    caller: &AuthCtx,
     id: InteractionId,
 ) -> ApiResult<Interaction> {
     let interaction = load(state, tenant, id).await?;
-    if !subject_visible(state, tenant, viewer, interaction.task_id).await? {
+    // The requesting node may always pull its OWN interaction — this is how
+    // `ask --wait` resolves. Its executor authenticates as the node, which has no
+    // user identity that could clear a private card's visibility gate, so without
+    // this bypass a pause raised on a private-card job could never be answered
+    // back to the waiting run (MAIN-159 AC-4).
+    let is_requester = matches!(
+        caller.principal,
+        Principal::Node(nid) if interaction.requested_by_node_id == Some(nid)
+    );
+    if !is_requester && !subject_visible(state, tenant, caller.user_id, interaction.task_id).await? {
         return Err(ApiError::NotFound);
     }
     Ok(interaction)

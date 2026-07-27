@@ -53,9 +53,11 @@ pub async fn get(
     Path(id): Path<InteractionId>,
 ) -> ApiResult<Json<Interaction>> {
     // Left open to a node token too: `nook interactions ask --wait` polls this to
-    // pull the answer, and inside a job session it may authenticate as the node.
+    // pull the answer, and inside a job session it authenticates as the node —
+    // which the service lets read its own interaction regardless of subject
+    // visibility.
     Ok(Json(
-        interactions::get(&state, auth.tenant_id, auth.user_id, id).await?,
+        interactions::get(&state, auth.tenant_id, &auth, id).await?,
     ))
 }
 
