@@ -3,9 +3,10 @@
 //! Every suite used to rebuild the world by hand — seventeen copies of
 //! `test_config()`, dozens of tenant-bootstrap blocks, an `AppState`
 //! construction each — against a single shared, aged dev database that only ever
-//! grew. [`TestBed`] instead gives each test its **own** database: it creates a
-//! fresh, uniquely-named database, migrates and seeds it, hands back the pool +
-//! ids/contexts, and **drops the whole database** at the end.
+//! grew. [`TestBed`] instead gives each test its **own** database: it clones a
+//! migrated + seeded template (built once per process) into a fresh, uniquely-
+//! named database, hands back the pool + ids/contexts, and **drops the whole
+//! database** at the end.
 //!
 //! ```ignore
 //! let Some(mut bed) = TestBed::new().await else { return }; // skip without a DB server
@@ -31,7 +32,50 @@ use nook_control::state::AppState;
 use nook_infra::Config;
 use nook_types::{NodeId, TenantId, UserId, WorkspaceId};
 use sqlx::{Connection, PgConnection, PgPool};
+use tokio::sync::OnceCell;
 use uuid::Uuid;
+
+/// A migrated + seeded **template** database, built once per test process. Each
+/// test then makes its private database with `CREATE DATABASE … TEMPLATE`, a
+/// fast file-level copy, instead of re-running the whole migration set and seed
+/// per test — which, once every test had its own database (MAIN-166), pushed the
+/// CI Rust job past its time budget. `OnceCell` guarantees exactly one build even
+/// as tests run in parallel; the rest wait for it and then only clone.
+static TEMPLATE_DB: OnceCell<String> = OnceCell::const_new();
+
+/// Build (once) and name the template database. It is migrated and seeded, then
+/// its pool is closed — `CREATE DATABASE … TEMPLATE` refuses a template that has
+/// any live session. Leaks one `nook_tmpl_<uuid>` per process; the dev reset
+/// (`docker compose down -v`) and CI's ephemeral Postgres reclaim it.
+async fn template_db(base_url: &str) -> &'static str {
+    TEMPLATE_DB
+        .get_or_init(|| async {
+            let name = format!("nook_tmpl_{}", Uuid::now_v7().simple());
+            let mut admin = PgConnection::connect(base_url)
+                .await
+                .expect("connect to the base database to create the template");
+            sqlx::query(&format!("CREATE DATABASE \"{name}\""))
+                .execute(&mut admin)
+                .await
+                .expect("create the template database");
+            admin.close().await.ok();
+
+            let pool = PgPool::connect(&swap_db(base_url, &name))
+                .await
+                .expect("connect to the template database");
+            nook_control::MIGRATOR
+                .run(&pool)
+                .await
+                .expect("migrate the template database");
+            nook_control::seed::run(&pool, &Config::for_test())
+                .await
+                .expect("seed the template database");
+            // Release every connection so the template can be cloned.
+            pool.close().await;
+            name
+        })
+        .await
+}
 
 /// A prepared, **private** test world: a freshly created, migrated, and seeded
 /// database plus opt-in setup surfaces, dropped whole at teardown.
@@ -65,31 +109,25 @@ impl TestBed {
         let keep = std::env::var("NOOK_KEEP_TEST_DATA").is_ok();
         let db_name = format!("nook_test_{}", Uuid::now_v7().simple());
 
-        // Create the database from an admin connection to the base database
-        // (CREATE DATABASE cannot run against the target itself).
+        // Clone the migrated + seeded template rather than rebuilding it per test
+        // (the CI-budget fix). `CREATE DATABASE … TEMPLATE` is a file copy, so the
+        // fresh database arrives already migrated and seeded — no MIGRATOR, no
+        // seed here.
+        let template = template_db(&base_url).await;
         let mut admin = PgConnection::connect(&base_url)
             .await
             .expect("connect to the base database to create a test database");
-        sqlx::query(&format!("CREATE DATABASE \"{db_name}\""))
-            .execute(&mut admin)
-            .await
-            .expect("create the test database");
+        sqlx::query(&format!(
+            "CREATE DATABASE \"{db_name}\" TEMPLATE \"{template}\""
+        ))
+        .execute(&mut admin)
+        .await
+        .expect("create the test database from the template");
         admin.close().await.ok();
 
-        // Connect to the fresh database, migrate, and seed it.
-        let url = swap_db(&base_url, &db_name);
-        let pool = PgPool::connect(&url)
+        let pool = PgPool::connect(&swap_db(&base_url, &db_name))
             .await
             .expect("connect to the fresh test database");
-        nook_control::MIGRATOR
-            .run(&pool)
-            .await
-            .expect("migrate the test database");
-        // Seed exactly as a real boot does (themes always; demo tenants + dev
-        // join token because `for_test`'s app_env is not production).
-        nook_control::seed::run(&pool, &Config::for_test())
-            .await
-            .expect("seed the test database");
 
         Some(TestBed {
             pool,
