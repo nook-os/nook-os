@@ -129,6 +129,23 @@ pub struct Config {
     /// the future redis cache). Required when `queue_provider = redis`.
     pub redis_url: Option<String>,
 
+    // ── SQS queue provider ──────────────────────────────────────────────
+    /// `NOOK_SQS_QUEUE_URL` — the main SQS queue's URL. Required when
+    /// `queue_provider = sqs`. Credentials come from the standard AWS chain
+    /// (`AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`, instance role, …).
+    pub sqs_queue_url: Option<String>,
+    /// `NOOK_SQS_DLQ_URL` — an optional dead-letter queue. When set, an explicit
+    /// `Nack::Dead` (and an app-level attempt-cap exhaustion) sends the message
+    /// here with its reason; when unset those messages are simply deleted. SQS's
+    /// own redrive policy (operator-configured on the main queue, NG-1) is the
+    /// backstop and is documented, not created by us.
+    pub sqs_dlq_url: Option<String>,
+    /// `NOOK_SQS_ENDPOINT_URL` — override the SQS endpoint, for an emulator
+    /// (ElasticMQ/LocalStack) or a VPC endpoint. Unset uses the real AWS URL.
+    pub sqs_endpoint_url: Option<String>,
+    /// `NOOK_SQS_REGION` — the AWS region for SQS. Defaults to `us-east-1`.
+    pub sqs_region: Option<String>,
+
     // ── Email (mail provider) ───────────────────────────────────────────
     /// Which mail transport to use, chosen by name — `smtp` or `capture`.
     /// Explicit, like `NOOK_ARTIFACT_STORE`, rather than inferred from whether
@@ -268,6 +285,10 @@ impl Config {
 
             queue_provider: env_opt("NOOK_QUEUE_PROVIDER").unwrap_or_else(|| "database".into()),
             redis_url: env_opt("NOOK_REDIS_URL"),
+            sqs_queue_url: env_opt("NOOK_SQS_QUEUE_URL"),
+            sqs_dlq_url: env_opt("NOOK_SQS_DLQ_URL"),
+            sqs_endpoint_url: env_opt("NOOK_SQS_ENDPOINT_URL"),
+            sqs_region: env_opt("NOOK_SQS_REGION"),
 
             mail_provider: env_opt("MAIL_PROVIDER").unwrap_or_else(|| "capture".into()),
             smtp_host: env_opt("SMTP_HOST"),
@@ -328,6 +349,20 @@ impl Config {
             "NOOK_CACHE_PROVIDER",
             cfg.redis_url.as_deref(),
         )?;
+        // The sqs queue needs a queue URL; a missing one refuses boot here (the
+        // sync half of AC-3). The async reachability probe is in
+        // `queue::sqs::SqsQueue::from_config`, run at boot.
+        if cfg.queue_provider == "sqs"
+            && cfg
+                .sqs_queue_url
+                .as_deref()
+                .filter(|u| !u.is_empty())
+                .is_none()
+        {
+            anyhow::bail!(
+                "NOOK_QUEUE_PROVIDER=sqs requires NOOK_SQS_QUEUE_URL to be set (the SQS queue URL)"
+            );
+        }
         // An unknown mail provider is a misconfiguration worth stopping for,
         // rather than silently falling through to some default and dropping mail.
         if !crate::mailer::is_known_provider(&cfg.mail_provider) {
@@ -400,6 +435,10 @@ impl Config {
             cache_provider: "memory".into(),
             queue_provider: "database".into(),
             redis_url: None,
+            sqs_queue_url: None,
+            sqs_dlq_url: None,
+            sqs_endpoint_url: None,
+            sqs_region: None,
             mail_provider: "capture".into(),
             smtp_host: None,
             smtp_port: 587,

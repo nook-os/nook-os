@@ -35,10 +35,18 @@ jobs:
         options: >-
           --health-cmd "redis-cli ping"
           --health-interval 5s --health-timeout 5s --health-retries 10
+      # ElasticMQ — an in-memory SQS for the sqs queue provider's contract tests
+      # (MAIN-152). No health-cmd: the native image has no shell tools, so the
+      # "Wait for ElasticMQ" step below gates readiness from the runner instead.
+      # Without NOOK_TEST_SQS_ENDPOINT those tests skip; here they run for real.
+      elasticmq:
+        image: softwaremill/elasticmq-native:1.6.11
+        ports: ["9324:9324"]
     env:
       DATABASE_URL: postgres://nook:nook@localhost:5432/nook
       NOOK_REQUIRE_DB: "1"
       NOOK_TEST_REDIS_URL: redis://localhost:6379
+      NOOK_TEST_SQS_ENDPOINT: http://localhost:9324
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -49,6 +57,15 @@ jobs:
         run: cargo fmt --all --check
       - name: Clippy
         run: cargo clippy --workspace --all-targets
+      - name: Wait for ElasticMQ
+        run: |
+          for _ in $(seq 1 30); do
+            if curl -sf "http://localhost:9324/?Action=ListQueues&Version=2012-11-05" >/dev/null; then
+              echo "ElasticMQ ready"; exit 0
+            fi
+            sleep 1
+          done
+          echo "ElasticMQ did not become ready" >&2; exit 1
       - name: Test
         run: cargo test --workspace
 

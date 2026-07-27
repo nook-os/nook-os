@@ -59,6 +59,7 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 # S3-compatible endpoint, so one client covers every backend we ship.
 aws-config = { version = "1", default-features = false, features = ["rustls", "behavior-version-latest"] }
 aws-sdk-s3 = { version = "1", default-features = false, features = ["rustls", "rt-tokio"] }
+aws-sdk-sqs = { version = "1", default-features = false, features = ["rustls", "rt-tokio"] }
 aws-credential-types = "1"
 aws-smithy-types = "1"
 tokio-tungstenite = { version = "0.26", features = ["rustls-tls-native-roots"] }

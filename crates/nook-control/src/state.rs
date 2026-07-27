@@ -63,7 +63,7 @@ impl AppState {
         let cache: Arc<dyn crate::cache::Cache> = Arc::from(crate::cache::from_config(&cfg));
         // The durable work queue; database-backed today (MAIN-147).
         let queue: Arc<dyn crate::queue::Queue> =
-            Arc::from(crate::queue::from_config(&cfg, db.clone()));
+            Arc::from(crate::queue::from_config(&cfg, db.clone()).await);
         Self {
             artifacts,
             mailer,

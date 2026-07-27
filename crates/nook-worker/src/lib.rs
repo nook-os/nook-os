@@ -292,7 +292,7 @@ mod tests {
             .ok()?;
         nook_control::MIGRATOR.run(&db).await.ok()?;
         let cfg = nook_infra::Config::for_test();
-        Some(Arc::from(nook_infra::queue::from_config(&cfg, db)))
+        Some(Arc::from(nook_infra::queue::from_config(&cfg, db).await))
     }
 
     fn unique_type(tag: &str) -> String {
