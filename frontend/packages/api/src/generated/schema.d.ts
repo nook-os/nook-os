@@ -910,6 +910,35 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/nodes/{id}/shared": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * POST /api/v1/nodes/{id}/shared — the owner designates their machine as
+         *     team-usable, or takes it back (MAIN-135).
+         * @description Ownership, not role: only the person who owns the node may toggle it — an
+         *     admin who is not the owner is refused (403), because nobody volunteers
+         *     someone else's hardware. A node the caller cannot even see is a 404 (no
+         *     existence oracle, matching `get_one`); a visible node they do not own is a
+         *     403; a node with no owner cannot be shared at all (nothing to consent).
+         *
+         *     This parallels the `require_person_owns_node` chokepoint (person == owner),
+         *     but adds the visibility 404-vs-403 distinction the session guard does not
+         *     need, and carries share-specific messages.
+         */
+        post: operations["set_node_shared"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/nodes/{id}/terminal": {
         parameters: {
             query?: never;
@@ -3574,12 +3603,18 @@ export interface components {
             /**
              * Format: uuid
              * @description The person who owns this node — its join-token minter, else the tenant
-             *     owner (MAIN-119). Recorded and returned, not yet enforced anywhere.
+             *     owner (MAIN-119). Session-start is confined to this person (MAIN-130).
              */
             owner_person_id?: string | null;
             platform: string;
             /** @description Latest heartbeat resource sample (see `NodeResources`); `{}` until first. */
             resources: unknown;
+            /**
+             * @description Whether the owner has designated this node team-usable (MAIN-135). A
+             *     shared node is VISIBLE to the whole team; it is not yet usable by them —
+             *     session-start stays owner-only until a later unit of the epic.
+             */
+            shared: boolean;
             status: string;
             tenant_id: components["schemas"]["TenantId"];
             /** Format: date-time */
@@ -4067,6 +4102,10 @@ export interface components {
         SetPolicyRequest: {
             enabled: boolean;
             field: string;
+        };
+        /** @description Toggle a node's `shared` designation (MAIN-135). Owner-only at the route. */
+        SetSharedRequest: {
+            shared: boolean;
         };
         /** @description Setting or checking the app password. */
         SetVaultPassphraseRequest: {
@@ -6263,6 +6302,43 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    set_node_shared: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SetSharedRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Node"];
+                };
             };
             403: {
                 headers: {

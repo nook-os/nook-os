@@ -405,10 +405,20 @@ pub struct Node {
     pub status: String,
     pub last_seen_at: Option<DateTime<Utc>>,
     /// The person who owns this node — its join-token minter, else the tenant
-    /// owner (MAIN-119). Recorded and returned, not yet enforced anywhere.
+    /// owner (MAIN-119). Session-start is confined to this person (MAIN-130).
     pub owner_person_id: Option<Uuid>,
+    /// Whether the owner has designated this node team-usable (MAIN-135). A
+    /// shared node is VISIBLE to the whole team; it is not yet usable by them —
+    /// session-start stays owner-only until a later unit of the epic.
+    pub shared: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+/// Toggle a node's `shared` designation (MAIN-135). Owner-only at the route.
+#[derive(Debug, Clone, Deserialize, ToSchema)]
+pub struct SetSharedRequest {
+    pub shared: bool,
 }
 
 // ── Skills ───────────────────────────────────────────────────────────────────

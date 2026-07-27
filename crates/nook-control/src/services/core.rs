@@ -93,9 +93,10 @@ pub async fn get_workspace(
 }
 
 /// List a tenant's nodes, optionally scoped to a single owner person (MAIN-132).
-/// `owner = Some(person)` returns only that person's nodes (a member's own
-/// view); `owner = None` returns the whole fleet (owner/admin, and node tokens
-/// whose view is unchanged).
+/// `owner = Some(person)` returns that person's own nodes PLUS any node the
+/// team has been given — those flagged `shared` (MAIN-135); `owner = None`
+/// returns the whole fleet (owner/admin, and node tokens whose view is
+/// unchanged). Shared grants visibility only — session-start stays owner-only.
 pub async fn list_nodes(
     db: &PgPool,
     tenant: TenantId,
@@ -103,9 +104,9 @@ pub async fn list_nodes(
 ) -> ApiResult<Vec<Node>> {
     Ok(sqlx::query_as(
         "SELECT id, tenant_id, name, hostname, platform, capabilities, resources, status,
-                last_seen_at, owner_person_id, created_at, updated_at
+                last_seen_at, owner_person_id, shared, created_at, updated_at
          FROM nodes
-         WHERE tenant_id = $1 AND ($2::uuid IS NULL OR owner_person_id = $2)
+         WHERE tenant_id = $1 AND ($2::uuid IS NULL OR owner_person_id = $2 OR shared)
          ORDER BY name",
     )
     .bind(tenant)
