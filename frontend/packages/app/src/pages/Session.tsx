@@ -17,6 +17,7 @@ import { ScopeChip } from "../layout";
 import { SessionTabs } from "../SessionTabs";
 import { SessionWindows, SplitButtons } from "../SessionWindows";
 import { useSessionTabs } from "../sessionTabsStore";
+import { SessionOwner } from "../sessionOwner";
 import { askConfirm, notify } from "../dialogs";
 
 const DIFF_PANEL_KEY = "nookos-diff-panel-open";
@@ -487,6 +488,12 @@ export function SessionsPage() {
   const [picked, setPicked] = useState<Set<string>>(new Set());
   const [busy, setBusy] = useState(false);
 
+  // Who the caller is, so an owner/admin (who sees the whole tenant's sessions)
+  // can tell theirs apart from the team's. Deduped on the ["me"] key.
+  const { data: me } = useQuery({
+    queryKey: ["me"],
+    queryFn: async () => (await api.GET("/api/v1/auth/me")).data ?? null,
+  });
   const { data: sessions } = useQuery({
     queryKey: ["sessions", "all", selectedWorkspaceId],
     queryFn: async () =>
@@ -637,6 +644,7 @@ export function SessionsPage() {
                 <th>Session</th>
                 <th>Runtime</th>
                 <th>Status</th>
+                <th>Owner</th>
                 <th>Created</th>
                 <th style={{ width: 40 }} />
               </tr>
@@ -663,6 +671,9 @@ export function SessionsPage() {
                     </td>
                     <td>
                       <Pill tone={statusTone(status)}>{status}</Pill>
+                    </td>
+                    <td>
+                      <SessionOwner createdBy={s.created_by} meId={me?.user?.id} />
                     </td>
                     <td className="muted small">
                       {new Date(s.created_at).toLocaleString()}

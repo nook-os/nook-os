@@ -11,6 +11,7 @@ import { WorkspaceLocations } from "../WorkspaceLocations";
 import { askChoice, askConfirm, askForm, askText, notify } from "../dialogs";
 import { requireAppPassword, useAppPassword } from "../apppassword";
 import { adoptEnvFromDisk, saveEnv } from "../envvault";
+import { SessionOwner } from "../sessionOwner";
 
 export function WorkspacesPage() {
   const showNewWork = useNewWork((s) => s.show);
@@ -261,6 +262,10 @@ const PLACEHOLDER = [
 export function WorkspaceDetail() {
   const { id } = useParams<{ id: string }>();
   const showNewWork = useNewWork((s) => s.show);
+  const { data: me } = useQuery({
+    queryKey: ["me"],
+    queryFn: async () => (await api.GET("/api/v1/auth/me")).data ?? null,
+  });
   const { data: ws } = useQuery({
     queryKey: ["workspaces", id],
     queryFn: async () =>
@@ -365,6 +370,9 @@ export function WorkspaceDetail() {
                   </td>
                   <td>
                     <Pill tone={statusTone(s.status)}>{s.status}</Pill>
+                  </td>
+                  <td>
+                    <SessionOwner createdBy={s.created_by} meId={me?.user?.id} />
                   </td>
                   <td className="muted small">
                     {new Date(s.created_at).toLocaleString()}

@@ -6,6 +6,7 @@ import { Empty, Panel, Pill, StatusDot, statusTone } from "@nookos/ui";
 import { useLive } from "../live";
 import { ActivityFeed } from "./Activity";
 import { WorkspaceLocations } from "../WorkspaceLocations";
+import { SessionOwner } from "../sessionOwner";
 
 export function Dashboard() {
   const { data: nodes } = useQuery({
@@ -21,6 +22,10 @@ export function Dashboard() {
   const { data: workspaces } = useQuery({
     queryKey: ["workspaces"],
     queryFn: async () => (await api.GET("/api/v1/workspaces")).data ?? [],
+  });
+  const { data: me } = useQuery({
+    queryKey: ["me"],
+    queryFn: async () => (await api.GET("/api/v1/auth/me")).data ?? null,
   });
   const { data: suggestion } = useQuery({
     queryKey: ["dispatcher"],
@@ -88,6 +93,9 @@ export function Dashboard() {
                   </td>
                   <td>
                     <Pill tone={statusTone(s.status)}>{s.status}</Pill>
+                  </td>
+                  <td>
+                    <SessionOwner createdBy={s.created_by} meId={me?.user?.id} />
                   </td>
                 </tr>
               ))}

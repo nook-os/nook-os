@@ -54,12 +54,20 @@ pub async fn list(
     auth: AuthCtx,
     Query(q): Query<SessionsQuery>,
 ) -> ApiResult<Json<Vec<Session>>> {
+    // A tenant owner/admin sees every session's metadata (capacity/audit), as
+    // does a node credential, whose tenant-wide view is unchanged; a plain member
+    // is scoped to the sessions they created. Reuses the shared role check
+    // (`is_tenant_admin`, MAIN-132) rather than a duplicate query here.
+    let sees_all = !matches!(auth.principal, crate::auth::Principal::User)
+        || auth.is_tenant_admin(&state).await?;
+    let creator = if sees_all { None } else { Some(auth.user_id) };
     Ok(Json(
         core::list_sessions(
             &state.db,
             auth.tenant_id,
             q.workspace_id,
             q.active.unwrap_or(false),
+            creator,
         )
         .await?,
     ))

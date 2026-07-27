@@ -38,9 +38,9 @@ pub async fn suggest(
             }
         }
     }
-    let sessions = core::list_sessions(&state.db, auth.tenant_id, None, true).await?;
-    // The dispatcher's node count is a tenant-wide signal, unchanged by the
-    // per-member listing scope (MAIN-132 NG-1: no dispatch changes).
+    // The dispatcher's counts are tenant-wide capacity signals, unchanged by the
+    // per-member listing scopes (MAIN-132/133: no dispatch changes).
+    let sessions = core::list_sessions(&state.db, auth.tenant_id, None, true, None).await?;
     let nodes = core::list_nodes(&state.db, auth.tenant_id, None).await?;
 
     let suggestion = state

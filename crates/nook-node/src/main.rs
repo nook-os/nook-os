@@ -297,6 +297,10 @@ enum Command {
     /// `nook get nodes` lists the machines you can see: your own, or — if you
     /// are a tenant owner/admin — the whole fleet (MAIN-132). The control plane
     /// scopes it by your role; there is no client flag to widen it.
+    ///
+    /// `nook get sessions` is scoped by role too: you see the sessions you
+    /// started, or — as a tenant owner/admin — every session's metadata for
+    /// capacity and audit (MAIN-133). Session content stays private regardless.
     Get {
         /// nodes | sessions | workspaces | secrets | tasks | events | themes
         resource: String,
