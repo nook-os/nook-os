@@ -84,11 +84,19 @@ export function NodesPage() {
               {(nodes ?? []).map((n) => {
                 const caps = n.capabilities as Record<string, unknown>;
                 const status = nodeStatus[n.id] ?? n.status;
-                // Only the owner may open a session on a node (MAIN-130); an
-                // admin viewing a teammate's node still gets manage (update /
-                // remove), just no terminal. Gate on ownership, not role, so it
-                // reads correctly for members and admins alike.
+                // Only the owner may open a session on a node (MAIN-130) — so
+                // `terminal`/`share` are owner-only. Fleet MANAGEMENT
+                // (update/remove) stays with the owner or a tenant admin, as it
+                // was before shared nodes existed: now that a member can see a
+                // teammate's `shared` node (MAIN-135), it must render read-only
+                // for them — no manage buttons — while an admin keeps them
+                // (MAIN-132's admin-fleet-management). The server enforces all
+                // of this; this only hides what would 403.
                 const owned = n.owner_person_id === me?.person_id;
+                const canManage =
+                  owned ||
+                  me?.user?.role === "owner" ||
+                  me?.user?.role === "admin";
                 return (
                   <tr key={n.id}>
                     <td>
@@ -97,6 +105,17 @@ export function NodesPage() {
                         {n.name}
                       </Link>{" "}
                       <span className="faint">{n.hostname}</span>
+                      {n.shared && (
+                        <>
+                          {" "}
+                          <Pill
+                            tone="accent"
+                            title="visible to the whole team; not yet a spawn target for them"
+                          >
+                            shared
+                          </Pill>
+                        </>
+                      )}
                     </td>
                     <td>
                       <Pill tone={statusTone(status)}>{status}</Pill>
@@ -150,7 +169,38 @@ export function NodesPage() {
                           <SquareTerminal size={12} /> terminal
                         </button>
                       )}
-                      {status === "online" && (
+                      {/* Sharing is the owner's call and the server enforces it
+                          (MAIN-135); we only offer the toggle on rows you own. */}
+                      {owned && (
+                        <button
+                          className="btn small"
+                          title={
+                            n.shared
+                              ? `stop sharing ${n.name} with the team`
+                              : `let the team see ${n.name}`
+                          }
+                          onClick={async () => {
+                            const { error } = await api.POST(
+                              "/api/v1/nodes/{id}/shared",
+                              {
+                                params: { path: { id: n.id } },
+                                body: { shared: !n.shared },
+                              },
+                            );
+                            if (error) {
+                              await notify(
+                                "Couldn't change sharing",
+                                JSON.stringify(error),
+                              );
+                              return;
+                            }
+                            refetch();
+                          }}
+                        >
+                          {n.shared ? "unshare" : "share"}
+                        </button>
+                      )}
+                      {status === "online" && canManage && (
                         <button
                           className="btn small"
                           title={
@@ -178,26 +228,28 @@ export function NodesPage() {
                           <ArrowUpCircle size={12} /> update
                         </button>
                       )}
-                      <button
-                        className="btn danger small"
-                        onClick={async () => {
-                          const ok = await askConfirm({
-                            title: `Remove node ${n.name}`,
-                            description:
-                              "It stops appearing in NookOS. Re-running `nook setup` on that machine rejoins it.",
-                            confirmLabel: "remove",
-                            danger: true,
-                          });
-                          if (ok) {
-                            await api.DELETE("/api/v1/nodes/{id}", {
-                              params: { path: { id: n.id } },
+                      {canManage && (
+                        <button
+                          className="btn danger small"
+                          onClick={async () => {
+                            const ok = await askConfirm({
+                              title: `Remove node ${n.name}`,
+                              description:
+                                "It stops appearing in NookOS. Re-running `nook setup` on that machine rejoins it.",
+                              confirmLabel: "remove",
+                              danger: true,
                             });
-                            refetch();
-                          }
-                        }}
-                      >
-                        remove
-                      </button>
+                            if (ok) {
+                              await api.DELETE("/api/v1/nodes/{id}", {
+                                params: { path: { id: n.id } },
+                              });
+                              refetch();
+                            }
+                          }}
+                        >
+                          remove
+                        </button>
+                      )}
                       </span>
                     </td>
                   </tr>
