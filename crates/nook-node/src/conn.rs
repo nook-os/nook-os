@@ -649,6 +649,32 @@ pub async fn connect_once(cfg: &NodeConfig) -> Result<()> {
                 };
                 out_tx.send(report).await.ok();
             }
+            ControlToNode::InstallHooks { content, sha256 } => {
+                // Reported, never fatal (AC-2). A machine whose settings.json is
+                // hand-broken should keep running sessions — the operator is
+                // told the merge failed, the node does not disappear.
+                let report = match crate::wizard::hooks::apply_pushed(&content) {
+                    Ok(a) => {
+                        tracing::info!(
+                            sha = %&sha256[..sha256.len().min(8)],
+                            wrote = a.wrote, path = %a.path.display(),
+                            "applied managed hooks"
+                        );
+                        NodeToControl::HooksInstalled {
+                            path: a.path.display().to_string(),
+                            error: None,
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "cannot apply managed hooks");
+                        NodeToControl::HooksInstalled {
+                            path: String::new(),
+                            error: Some(e.to_string()),
+                        }
+                    }
+                };
+                out_tx.send(report).await.ok();
+            }
             ControlToNode::ForgetSkill { name } => {
                 match crate::wizard::skills::forget_taught(&name) {
                     Ok(paths) => {
