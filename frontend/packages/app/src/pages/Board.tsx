@@ -42,6 +42,7 @@ import { useNewWork } from "../newwork";
 import { askChoice, askConfirm, askForm, askText, notify } from "../dialogs";
 import { TaskDetail } from "../TaskDetail";
 import { TaskMenu } from "../TaskMenu";
+import { nativeContextMenu } from "../contextMenu";
 import { priorityMeta, priorityRank, previewText, PRIORITIES } from "../taskmeta";
 
 function Card({
@@ -76,6 +77,9 @@ function Card({
         opacity: isDragging ? 0.6 : 1,
         zIndex: isDragging ? 10 : undefined,
       }}
+      // Legacy island (TaskMenu): opens its own right-click menu, so the shared
+      // app-wide menu suppresses itself here (MAIN-167 NG-1).
+      {...nativeContextMenu}
       onContextMenu={(e) => {
         e.preventDefault();
         onMenu({ x: e.clientX, y: e.clientY });

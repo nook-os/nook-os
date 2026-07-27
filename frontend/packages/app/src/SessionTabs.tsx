@@ -12,6 +12,7 @@ import { useNewWork } from "./newwork";
 import { useSessionTabs } from "./sessionTabsStore";
 import { useTabHotkeys } from "./tabHotkeys";
 import { askText, notify } from "./dialogs";
+import { nativeContextMenu } from "./contextMenu";
 
 interface MenuState {
   id: string;
@@ -120,6 +121,7 @@ export function SessionTabs({ activeId }: { activeId?: string }) {
                 `${dropHere && dropHere.after ? " drop-after" : ""}`
               }
               draggable
+              {...nativeContextMenu}
               onClick={() => navigate(`/sessions/${t.id}`)}
               onContextMenu={(e) => {
                 e.preventDefault();
@@ -311,6 +313,7 @@ export function TabMenu({
     <div
       ref={ref}
       className="context-menu"
+      {...nativeContextMenu}
       style={{ left: pos.x, top: pos.y }}
       onContextMenu={(e) => e.preventDefault()}
     >

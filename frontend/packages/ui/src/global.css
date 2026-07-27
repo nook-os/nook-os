@@ -2851,6 +2851,53 @@ textarea.env-area.blurred {
   box-shadow: 0 10px 30px rgba(0, 0, 0, 0.55);
 }
 
+/* App-wide shared context menu (MAIN-167). Mirrors the .ctx-menu look so the
+   whole app reads as one system; kept as its own classes so a follow-up can
+   migrate the legacy menus onto it without a style tangle. */
+.ctxmenu {
+  position: fixed;
+  z-index: 400;
+  min-width: 178px;
+  padding: 3px;
+  background: var(--nook-bg-panel);
+  border: 1px solid var(--nook-border-bright);
+  border-radius: var(--nook-radius);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.55);
+  outline: none;
+}
+.ctxmenu-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  width: 100%;
+  padding: 4px 8px;
+  background: transparent;
+  border: 0;
+  border-radius: 3px;
+  color: var(--nook-fg);
+  font-family: inherit;
+  font-size: 11.5px;
+  text-align: left;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.ctxmenu-item:hover:not(:disabled),
+.ctxmenu-item:focus-visible {
+  background: var(--nook-bg-raised);
+  color: var(--nook-fg-bright);
+  outline: none;
+}
+.ctxmenu-item:disabled {
+  color: var(--nook-fg-faint);
+  cursor: default;
+}
+.ctxmenu-hint {
+  color: var(--nook-fg-faint);
+  font-size: 10.5px;
+}
+.ctxmenu-sep { height: 1px; margin: 3px 4px; background: var(--nook-border); }
+
 /* ── Inline composer ────────────────────────────────────────────────────── */
 
 .composer-open {

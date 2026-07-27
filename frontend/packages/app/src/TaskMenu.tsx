@@ -10,6 +10,7 @@ import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { api, type TaskItem } from "@nookos/api";
 import { VISIBILITY_META } from "@nookos/ui";
 import { askConfirm, notify } from "./dialogs";
+import { nativeContextMenu } from "./contextMenu";
 
 export interface MenuColumn {
   id: string;
@@ -184,6 +185,7 @@ export function TaskMenu({
     <div
       ref={ref}
       className="ctx-menu"
+      {...nativeContextMenu}
       style={{ left: pos.x, top: pos.y }}
       onMouseDown={(e) => e.stopPropagation()}
       onContextMenu={(e) => e.preventDefault()}

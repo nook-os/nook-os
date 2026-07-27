@@ -9,6 +9,7 @@ import {
 import { BrowserRouter, Route, Routes, useNavigate } from "react-router-dom";
 import { api } from "@nookos/api";
 import { Empty, ThemeProvider } from "@nookos/ui";
+import { ContextMenuProvider } from "./contextMenu";
 import { Shell } from "./layout";
 import { startLive } from "./live";
 import { AcceptInvitePage } from "./pages/AcceptInvite";
@@ -178,10 +179,14 @@ export function NookApp() {
     <QueryClientProvider client={queryClient}>
       <ThemeProvider>
         <BrowserRouter>
-          <AuthGate />
-          {/* Outside the router so a toast survives navigation — the thing it
-              is telling you about often IS a navigation. */}
-          <Toasts />
+          {/* One capture-phase contextmenu listener for the whole app: the
+              native menu never renders, a Nook menu always does (MAIN-167). */}
+          <ContextMenuProvider>
+            <AuthGate />
+            {/* Outside the router so a toast survives navigation — the thing it
+                is telling you about often IS a navigation. */}
+            <Toasts />
+          </ContextMenuProvider>
         </BrowserRouter>
       </ThemeProvider>
     </QueryClientProvider>
