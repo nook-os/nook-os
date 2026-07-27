@@ -1241,13 +1241,6 @@ table.nook-table tr.clickable { cursor: pointer; }
   border-bottom: 1px solid var(--nook-border);
 }
 
-.filter-sep {
-  width: 1px;
-  height: 14px;
-  background: var(--nook-border-bright);
-  margin: 0 3px;
-}
-
 .task-chip {
   border: 1px solid var(--nook-border-bright);
   background: transparent;
@@ -1263,6 +1256,82 @@ table.nook-table tr.clickable { cursor: pointer; }
 /* Excluded reads as struck through, so "not this" is legible at a glance
    rather than depending on a colour someone may not distinguish. */
 .task-chip.off { text-decoration: line-through; opacity: 0.6; }
+
+/* ── Board filters: hybrid strip + popover (MAIN-110) ───────────────────────*/
+
+/* An active-filter chip in the inline strip: the label plus a remove ×. */
+.filter-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.filter-chip-x {
+  color: var(--nook-fg-faint);
+  font-size: 12px;
+  line-height: 1;
+}
+.filter-chip:hover .filter-chip-x { color: var(--nook-accent); }
+
+/* The count badge on the Filters button. */
+.filter-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 15px;
+  height: 15px;
+  margin-left: 5px;
+  padding: 0 4px;
+  border-radius: 8px;
+  background: var(--nook-accent);
+  color: var(--nook-bg);
+  font-size: 10px;
+  font-weight: 600;
+}
+
+/* The anchored popover holding every control. Positioned by useAnchoredMenu. */
+.filters-popover {
+  z-index: 60;
+  width: 340px;
+  max-height: 70vh;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 10px;
+  background: var(--nook-bg-panel);
+  border: 1px solid var(--nook-border-bright);
+  border-radius: 4px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+}
+.filters-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.filters-group-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+.filters-legend { font-size: 10px; }
+.filters-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+.filters-row {
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+.filters-field {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.filters-label-search { width: 100%; }
 
 .task-select {
   background: var(--nook-bg);
