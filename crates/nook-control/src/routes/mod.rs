@@ -275,6 +275,18 @@ pub fn build_router(state: AppState) -> Router {
                 .patch(notebook::update_note)
                 .delete(notebook::delete_note),
         )
+        // Zero-knowledge note sealing + the person-level app-password vault (MAIN-100).
+        .route("/notebook/notes/{id}/seal", post(notebook::seal_note))
+        .route("/notebook/notes/{id}/unseal", post(notebook::unseal_note))
+        .route("/notebook/vault/status", get(notebook::vault_status))
+        .route(
+            "/notebook/vault/passphrase",
+            post(notebook::set_vault_passphrase),
+        )
+        .route(
+            "/notebook/vault/verify",
+            post(notebook::verify_vault_passphrase),
+        )
         .route(
             "/notebook/folders",
             get(notebook::list_folders).post(notebook::create_folder),

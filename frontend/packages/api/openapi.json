@@ -2252,6 +2252,191 @@
         }
       }
     },
+    "/api/v1/notebook/notes/{id}/seal": {
+      "post": {
+        "tags": [
+          "crate::routes::notebook"
+        ],
+        "summary": "Seal a note: store the client-produced sealed blob, authorized by the app\npassword against the person vault. The server never receives the plaintext —\nonly the already-sealed ciphertext, which it additionally vault-wraps.",
+        "operationId": "notebook_seal_note",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SealNoteRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserNote"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": ""
+          },
+          "404": {
+            "description": ""
+          },
+          "428": {
+            "description": ""
+          }
+        }
+      }
+    },
+    "/api/v1/notebook/notes/{id}/unseal": {
+      "post": {
+        "tags": [
+          "crate::routes::notebook"
+        ],
+        "summary": "Unseal a note: the client decrypted the sealed body locally and sends back\nthe recovered plaintext, which converts the row to a normal server-encrypted\nnote. Only a currently-sealed note converts.",
+        "operationId": "notebook_unseal_note",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UnsealNoteRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserNote"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": ""
+          },
+          "404": {
+            "description": ""
+          },
+          "428": {
+            "description": ""
+          }
+        }
+      }
+    },
+    "/api/v1/notebook/vault/passphrase": {
+      "post": {
+        "tags": [
+          "crate::routes::notebook"
+        ],
+        "summary": "Set the notebook app password. Once only — a second attempt is a conflict,\nnot an overwrite, so a stray call can never orphan sealed notes.",
+        "operationId": "notebook_set_vault_passphrase",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetVaultPassphraseRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NotebookVaultStatus"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": ""
+          }
+        }
+      }
+    },
+    "/api/v1/notebook/vault/status": {
+      "get": {
+        "tags": [
+          "crate::routes::notebook"
+        ],
+        "summary": "Has this person set their notebook app password yet?",
+        "operationId": "notebook_vault_status",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NotebookVaultStatus"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/notebook/vault/verify": {
+      "post": {
+        "tags": [
+          "crate::routes::notebook"
+        ],
+        "summary": "Check the app password without decrypting anything — lets the client unlock\n(and hold the password for sealing/unsealing) with a clear yes/no.",
+        "operationId": "notebook_verify_vault_passphrase",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetVaultPassphraseRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": ""
+          },
+          "403": {
+            "description": ""
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      }
+    },
     "/api/v1/notes/{id}": {
       "patch": {
         "tags": [
@@ -9051,6 +9236,25 @@
         "type": "string",
         "format": "uuid"
       },
+      "NotebookVaultStatus": {
+        "type": "object",
+        "description": "Whether a person has set their notebook app password (MAIN-100).",
+        "required": [
+          "configured"
+        ],
+        "properties": {
+          "configured": {
+            "type": "boolean"
+          },
+          "created_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          }
+        }
+      },
       "Notification": {
         "type": "object",
         "description": "Something a person should see. Distinct from an `Event`, which is the\ncomplete record of what happened and is never marked read.",
@@ -9840,6 +10044,59 @@
           },
           "node_name": {
             "type": "string"
+          }
+        }
+      },
+      "SealNoteRequest": {
+        "type": "object",
+        "description": "Seal a note (MAIN-100). The client produces the blob locally from its app\npassword; `passphrase` proves that password against the person vault (the\n`require_app_password` pattern). The server never sees the note plaintext.\nAll byte fields base64.",
+        "required": [
+          "salt",
+          "verifier",
+          "ciphertext",
+          "passphrase"
+        ],
+        "properties": {
+          "ciphertext": {
+            "type": "string",
+            "description": "`nonce(12) || AES-256-GCM(body)`, base64 — the sealed body."
+          },
+          "passphrase": {
+            "type": "string",
+            "description": "The app password, to authorize the seal against the person vault."
+          },
+          "salt": {
+            "type": "string",
+            "description": "KDF salt the client sealed under, base64."
+          },
+          "verifier": {
+            "type": "string",
+            "description": "One-way verifier of the client's derived key, base64."
+          }
+        }
+      },
+      "SealedBlob": {
+        "type": "object",
+        "description": "The client-decrypt contract for a sealed note (MAIN-100). A browser derives\nthe key with WebCrypto `PBKDF2-HMAC-SHA256(passphrase, salt, iterations)` →\n32-byte AES-256 key, then `AES-256-GCM` opens `ciphertext`, whose first 12\nbytes are the nonce and the rest the GCM body+tag. All byte fields base64.",
+        "required": [
+          "salt",
+          "iterations",
+          "ciphertext"
+        ],
+        "properties": {
+          "ciphertext": {
+            "type": "string",
+            "description": "`nonce(12) || AES-256-GCM(body)`, base64. The client-produced sealed\nciphertext; the server stores it vault-wrapped and cannot open it."
+          },
+          "iterations": {
+            "type": "integer",
+            "format": "int32",
+            "description": "PBKDF2 iteration count (matches the server's `crypto::KDF_ITERATIONS`).",
+            "minimum": 0
+          },
+          "salt": {
+            "type": "string",
+            "description": "KDF salt, base64. 16 bytes."
           }
         }
       },
@@ -11188,6 +11445,22 @@
         ],
         "description": "Live events pushed to browsers over `/api/v1/ws/ui`."
       },
+      "UnsealNoteRequest": {
+        "type": "object",
+        "description": "Unseal a note (MAIN-100): the client decrypted the sealed body locally and\nsends back the recovered plaintext, converting the row to a normal\nserver-encrypted note. `passphrase` is verified against the person vault.",
+        "required": [
+          "content_md",
+          "passphrase"
+        ],
+        "properties": {
+          "content_md": {
+            "type": "string"
+          },
+          "passphrase": {
+            "type": "string"
+          }
+        }
+      },
       "UpdateBoardRequest": {
         "type": "object",
         "required": [
@@ -11549,17 +11822,31 @@
       },
       "UserNote": {
         "type": "object",
-        "description": "A single note WITH its decrypted body (the `get` response).",
+        "description": "A single note. Unsealed notes carry the decrypted `content_md`; a sealed\nnote carries `sealed: true` and the `blob` instead — the server returns the\nciphertext it cannot open, for the browser to decrypt (MAIN-100).",
         "required": [
           "id",
           "title",
-          "content_md",
           "created_at",
           "updated_at"
         ],
         "properties": {
+          "blob": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/SealedBlob",
+                "description": "Present iff `sealed`. The client-decrypt contract for the body."
+              }
+            ]
+          },
           "content_md": {
-            "type": "string"
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Present iff the note is not sealed."
           },
           "created_at": {
             "type": "string",
@@ -11577,6 +11864,10 @@
           },
           "id": {
             "$ref": "#/components/schemas/UserNoteId"
+          },
+          "sealed": {
+            "type": "boolean",
+            "description": "True when the body is zero-knowledge sealed and `blob` is present."
           },
           "title": {
             "type": "string"
@@ -11667,6 +11958,10 @@
           "path": {
             "type": "string",
             "description": "Plaintext folder path, e.g. \"Work/Ideas\". Empty for a root note."
+          },
+          "sealed": {
+            "type": "boolean",
+            "description": "Whether this note is zero-knowledge sealed (MAIN-100). Titles and paths\nstay plaintext either way, so search still finds sealed notes."
           },
           "title": {
             "type": "string"

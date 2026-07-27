@@ -93,30 +93,101 @@ async fn would_cycle(
 }
 
 /// A note row straight from the table — body still ciphertext. Kept private so
-/// the encrypted bytes never leave this module without going through `decrypt`.
+/// the encrypted bytes never leave this module without going through `into_note`.
+/// `sealed_salt`/`sealed_verifier` are set only on sealed notes (MAIN-100).
 #[derive(sqlx::FromRow)]
 struct NoteRow {
     id: UserNoteId,
     folder_id: Option<UserNoteFolderId>,
     title: String,
     content_enc: Vec<u8>,
+    sealed_salt: Option<Vec<u8>>,
     created_at: chrono::DateTime<chrono::Utc>,
     updated_at: chrono::DateTime<chrono::Utc>,
 }
 
 impl NoteRow {
-    fn decrypt(self, vault: &Vault) -> ApiResult<UserNote> {
+    /// Turn a row into the API note. A sealed row (its `sealed_salt` set) yields
+    /// the client-decrypt blob — the server peels only its own vault wrap, never
+    /// the seal itself — while an unsealed row yields the decrypted `content_md`.
+    fn into_note(self, vault: &Vault) -> ApiResult<UserNote> {
+        let NoteRow {
+            id,
+            folder_id,
+            title,
+            content_enc,
+            sealed_salt,
+            created_at,
+            updated_at,
+        } = self;
+        let (content_md, sealed, blob) = match sealed_salt {
+            Some(salt) => {
+                // `content_enc` is the client's sealed ciphertext under the vault
+                // wrap; peel the wrap to hand the still-sealed bytes back.
+                let ciphertext = vault.decrypt(&content_enc).map_err(ApiError::Internal)?;
+                let blob = SealedBlob {
+                    salt: b64(&salt),
+                    iterations: crate::crypto::KDF_ITERATIONS,
+                    ciphertext: b64(&ciphertext),
+                };
+                (None, true, Some(blob))
+            }
+            None => {
+                let md = vault
+                    .decrypt_string(&content_enc)
+                    .map_err(ApiError::Internal)?;
+                (Some(md), false, None)
+            }
+        };
         Ok(UserNote {
-            id: self.id,
-            folder_id: self.folder_id,
-            title: self.title,
-            content_md: vault
-                .decrypt_string(&self.content_enc)
-                .map_err(ApiError::Internal)?,
-            created_at: self.created_at,
-            updated_at: self.updated_at,
+            id,
+            folder_id,
+            title,
+            content_md,
+            sealed,
+            blob,
+            created_at,
+            updated_at,
         })
     }
+}
+
+/// base64 (standard) encode — the wire form for the seal blob's byte fields.
+fn b64(bytes: &[u8]) -> String {
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD.encode(bytes)
+}
+
+/// Decode a base64 seal field, naming it in the error so a bad blob is obvious.
+fn unb64(s: &str, what: &str) -> ApiResult<Vec<u8>> {
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD
+        .decode(s.as_bytes())
+        .map_err(|_| ApiError::BadRequest(format!("{what} is not valid base64")))
+}
+
+/// Confirm a passphrase against the person's notebook vault before it seals or
+/// unseals anything — the person-scoped twin of gitops' app-password check.
+/// 428 when no vault is set yet, 403 on a wrong passphrase.
+async fn require_person_app_password(
+    state: &AppState,
+    person: Uuid,
+    passphrase: &str,
+) -> ApiResult<()> {
+    let row: Option<(Vec<u8>, Vec<u8>)> =
+        sqlx::query_as("SELECT kdf_salt, verifier FROM person_vaults WHERE person_id = $1")
+            .bind(person)
+            .fetch_optional(&state.db)
+            .await?;
+    let Some((salt, verifier)) = row else {
+        return Err(ApiError::SetupRequired(
+            "set a notebook app password before sealing notes".into(),
+        ));
+    };
+    if !crate::crypto::verify_passphrase(passphrase, &salt, &verifier) {
+        return Err(ApiError::Forbidden);
+    }
+    Ok(())
 }
 
 /// Confirm a folder belongs to this person, so a note/folder can never be moved
@@ -171,6 +242,7 @@ pub async fn list_notes(
         )
         SELECT n.id, n.folder_id, n.title,
                COALESCE(fp.path, '') AS path,
+               (n.sealed_salt IS NOT NULL) AS sealed,
                n.created_at, n.updated_at
         FROM user_notes n
         LEFT JOIN folder_path fp ON fp.id = n.folder_id
@@ -205,7 +277,7 @@ pub async fn get_note(
             .fetch_optional(&state.db)
             .await?;
     row.ok_or(ApiError::NotFound)?
-        .decrypt(&state.vault)
+        .into_note(&state.vault)
         .map(Json)
 }
 
@@ -238,7 +310,7 @@ pub async fn create_note(
     .bind(&enc)
     .fetch_one(&state.db)
     .await?;
-    row.decrypt(&state.vault).map(Json)
+    row.into_note(&state.vault).map(Json)
 }
 
 #[utoipa::path(patch, path = "/api/v1/notebook/notes/{id}",
@@ -261,6 +333,24 @@ pub async fn update_note(
     // A move must target one of the person's own folders (or root).
     if let Some(Some(folder)) = req.folder_id {
         owned_folder(&state, person, folder).await?;
+    }
+    // A sealed note's body may only change through the seal contract — a plain
+    // body PATCH would overwrite the client's sealed blob with server-encrypted
+    // plaintext, silently breaking the seal. Title/move-only edits still pass.
+    if req.content_md.is_some() {
+        let sealed: Option<(bool,)> = sqlx::query_as(
+            "SELECT sealed_salt IS NOT NULL FROM user_notes WHERE id = $1 AND person_id = $2",
+        )
+        .bind(id)
+        .bind(person)
+        .fetch_optional(&state.db)
+        .await?;
+        if matches!(sealed, Some((true,))) {
+            return Err(ApiError::Conflict(
+                "this note is sealed — change its body through seal/unseal, not a plain update"
+                    .into(),
+            ));
+        }
     }
     // Encrypt a new body only when one was supplied; a title-only or move-only
     // update must not touch the ciphertext.
@@ -295,7 +385,7 @@ pub async fn update_note(
     .fetch_optional(&state.db)
     .await?;
     row.ok_or(ApiError::NotFound)?
-        .decrypt(&state.vault)
+        .into_note(&state.vault)
         .map(Json)
 }
 
@@ -458,6 +548,188 @@ pub async fn delete_folder(
         .await?;
     tx.commit().await?;
     Ok(axum::http::StatusCode::NO_CONTENT)
+}
+
+// ── Person vault + note sealing (MAIN-100) ─────────────────────────────────────
+//
+// An OPTIONAL per-note zero-knowledge seal: the client encrypts the body under a
+// key derived from the person's app password and sends only ciphertext, so the
+// server stores a blob it cannot open (a database dump plus SECRETS_KEY reveals
+// nothing without the password, which is never stored). The person vault is the
+// person-scoped twin of `user_vaults` (routes/vault.rs), set once. Titles stay
+// plaintext, so search over sealed notes keeps working (AC-5).
+
+/// Has this person set their notebook app password yet?
+#[utoipa::path(get, path = "/api/v1/notebook/vault/status",
+    operation_id = "notebook_vault_status",
+    responses((status = 200, body = NotebookVaultStatus)))]
+pub async fn vault_status(
+    State(state): State<AppState>,
+    auth: AuthCtx,
+) -> ApiResult<Json<NotebookVaultStatus>> {
+    auth.require_user()?;
+    let person = person_id_for(&state, &auth).await?;
+    let row: Option<(chrono::DateTime<chrono::Utc>,)> =
+        sqlx::query_as("SELECT created_at FROM person_vaults WHERE person_id = $1")
+            .bind(person)
+            .fetch_optional(&state.db)
+            .await?;
+    Ok(Json(NotebookVaultStatus {
+        configured: row.is_some(),
+        created_at: row.map(|(t,)| t),
+    }))
+}
+
+/// Set the notebook app password. Once only — a second attempt is a conflict,
+/// not an overwrite, so a stray call can never orphan sealed notes.
+#[utoipa::path(post, path = "/api/v1/notebook/vault/passphrase",
+    operation_id = "notebook_set_vault_passphrase",
+    request_body = SetVaultPassphraseRequest,
+    responses((status = 200, body = NotebookVaultStatus), (status = 409)))]
+pub async fn set_vault_passphrase(
+    State(state): State<AppState>,
+    auth: AuthCtx,
+    Json(req): Json<SetVaultPassphraseRequest>,
+) -> ApiResult<Json<NotebookVaultStatus>> {
+    auth.require_user()?;
+    let person = person_id_for(&state, &auth).await?;
+    if req.passphrase.chars().count() < 8 {
+        return Err(ApiError::BadRequest(
+            "app password must be at least 8 characters".into(),
+        ));
+    }
+    let existing: Option<(Uuid,)> =
+        sqlx::query_as("SELECT person_id FROM person_vaults WHERE person_id = $1")
+            .bind(person)
+            .fetch_optional(&state.db)
+            .await?;
+    if existing.is_some() {
+        return Err(ApiError::Conflict(
+            "an app password is already set and cannot be changed".into(),
+        ));
+    }
+    let (salt, verifier) = crate::crypto::passphrase_verifier(&req.passphrase);
+    sqlx::query("INSERT INTO person_vaults (person_id, kdf_salt, verifier) VALUES ($1, $2, $3)")
+        .bind(person)
+        .bind(&salt)
+        .bind(&verifier)
+        .execute(&state.db)
+        .await?;
+    Ok(Json(NotebookVaultStatus {
+        configured: true,
+        created_at: Some(chrono::Utc::now()),
+    }))
+}
+
+/// Check the app password without decrypting anything — lets the client unlock
+/// (and hold the password for sealing/unsealing) with a clear yes/no.
+#[utoipa::path(post, path = "/api/v1/notebook/vault/verify",
+    operation_id = "notebook_verify_vault_passphrase",
+    request_body = SetVaultPassphraseRequest,
+    responses((status = 204), (status = 403), (status = 404)))]
+pub async fn verify_vault_passphrase(
+    State(state): State<AppState>,
+    auth: AuthCtx,
+    Json(req): Json<SetVaultPassphraseRequest>,
+) -> ApiResult<axum::http::StatusCode> {
+    auth.require_user()?;
+    let person = person_id_for(&state, &auth).await?;
+    let row: Option<(Vec<u8>, Vec<u8>)> =
+        sqlx::query_as("SELECT kdf_salt, verifier FROM person_vaults WHERE person_id = $1")
+            .bind(person)
+            .fetch_optional(&state.db)
+            .await?;
+    let (salt, verifier) = row.ok_or(ApiError::NotFound)?;
+    if crate::crypto::verify_passphrase(&req.passphrase, &salt, &verifier) {
+        Ok(axum::http::StatusCode::NO_CONTENT)
+    } else {
+        Err(ApiError::Forbidden)
+    }
+}
+
+/// Seal a note: store the client-produced sealed blob, authorized by the app
+/// password against the person vault. The server never receives the plaintext —
+/// only the already-sealed ciphertext, which it additionally vault-wraps.
+#[utoipa::path(post, path = "/api/v1/notebook/notes/{id}/seal",
+    operation_id = "notebook_seal_note",
+    params(("id" = String, Path,)),
+    request_body = SealNoteRequest,
+    responses((status = 200, body = UserNote), (status = 403), (status = 404), (status = 428)))]
+pub async fn seal_note(
+    State(state): State<AppState>,
+    auth: AuthCtx,
+    Path(id): Path<UserNoteId>,
+    Json(req): Json<SealNoteRequest>,
+) -> ApiResult<Json<UserNote>> {
+    let person = person_id_for(&state, &auth).await?;
+    // 428 when no vault, 403 on a wrong app password — before touching the note.
+    require_person_app_password(&state, person, &req.passphrase).await?;
+    let salt = unb64(&req.salt, "salt")?;
+    let verifier = unb64(&req.verifier, "verifier")?;
+    let ciphertext = unb64(&req.ciphertext, "ciphertext")?;
+    // The blob must actually open with this app password, or the note would be
+    // sealed under a key its owner can never reproduce.
+    if !crate::crypto::verify_passphrase(&req.passphrase, &salt, &verifier) {
+        return Err(ApiError::BadRequest(
+            "the sealed blob does not match your app password".into(),
+        ));
+    }
+    // Wrap the client ciphertext under the server vault at rest — a DB dump plus
+    // SECRETS_KEY still cannot open it without the app password.
+    let enc = state
+        .vault
+        .encrypt(&ciphertext)
+        .map_err(ApiError::Internal)?;
+    let row: Option<NoteRow> = sqlx::query_as(
+        "UPDATE user_notes
+         SET content_enc = $3, sealed_salt = $4, sealed_verifier = $5, updated_at = now()
+         WHERE id = $1 AND person_id = $2 RETURNING *",
+    )
+    .bind(id)
+    .bind(person)
+    .bind(&enc)
+    .bind(&salt)
+    .bind(&verifier)
+    .fetch_optional(&state.db)
+    .await?;
+    row.ok_or(ApiError::NotFound)?
+        .into_note(&state.vault)
+        .map(Json)
+}
+
+/// Unseal a note: the client decrypted the sealed body locally and sends back
+/// the recovered plaintext, which converts the row to a normal server-encrypted
+/// note. Only a currently-sealed note converts.
+#[utoipa::path(post, path = "/api/v1/notebook/notes/{id}/unseal",
+    operation_id = "notebook_unseal_note",
+    params(("id" = String, Path,)),
+    request_body = UnsealNoteRequest,
+    responses((status = 200, body = UserNote), (status = 403), (status = 404), (status = 428)))]
+pub async fn unseal_note(
+    State(state): State<AppState>,
+    auth: AuthCtx,
+    Path(id): Path<UserNoteId>,
+    Json(req): Json<UnsealNoteRequest>,
+) -> ApiResult<Json<UserNote>> {
+    let person = person_id_for(&state, &auth).await?;
+    require_person_app_password(&state, person, &req.passphrase).await?;
+    let enc = state
+        .vault
+        .encrypt(req.content_md.as_bytes())
+        .map_err(ApiError::Internal)?;
+    let row: Option<NoteRow> = sqlx::query_as(
+        "UPDATE user_notes
+         SET content_enc = $3, sealed_salt = NULL, sealed_verifier = NULL, updated_at = now()
+         WHERE id = $1 AND person_id = $2 AND sealed_salt IS NOT NULL RETURNING *",
+    )
+    .bind(id)
+    .bind(person)
+    .bind(&enc)
+    .fetch_optional(&state.db)
+    .await?;
+    row.ok_or(ApiError::NotFound)?
+        .into_note(&state.vault)
+        .map(Json)
 }
 
 #[cfg(test)]

@@ -120,7 +120,10 @@ pub struct Sealed {
     pub ciphertext: Vec<u8>,
 }
 
-const KDF_ITERATIONS: u32 = 210_000;
+/// PBKDF2-HMAC-SHA256 iteration count. Public because the notebook seal blob
+/// (MAIN-100) hands it to the browser as part of the client-decrypt contract:
+/// a WebCrypto `deriveKey` needs the exact iteration count to reproduce the key.
+pub const KDF_ITERATIONS: u32 = 210_000;
 
 fn derive(passphrase: &str, salt: &[u8]) -> [u8; 32] {
     use hmac::Mac as _;

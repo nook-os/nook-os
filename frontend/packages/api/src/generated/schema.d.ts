@@ -1104,6 +1104,105 @@ export interface paths {
         patch: operations["notebook_update_note"];
         trace?: never;
     };
+    "/api/v1/notebook/notes/{id}/seal": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Seal a note: store the client-produced sealed blob, authorized by the app
+         *     password against the person vault. The server never receives the plaintext —
+         *     only the already-sealed ciphertext, which it additionally vault-wraps.
+         */
+        post: operations["notebook_seal_note"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/notebook/notes/{id}/unseal": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Unseal a note: the client decrypted the sealed body locally and sends back
+         *     the recovered plaintext, which converts the row to a normal server-encrypted
+         *     note. Only a currently-sealed note converts.
+         */
+        post: operations["notebook_unseal_note"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/notebook/vault/passphrase": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Set the notebook app password. Once only — a second attempt is a conflict,
+         *     not an overwrite, so a stray call can never orphan sealed notes.
+         */
+        post: operations["notebook_set_vault_passphrase"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/notebook/vault/status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Has this person set their notebook app password yet? */
+        get: operations["notebook_vault_status"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/notebook/vault/verify": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Check the app password without decrypting anything — lets the client unlock
+         *     (and hold the password for sealing/unsealing) with a clear yes/no.
+         */
+        post: operations["notebook_verify_vault_passphrase"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/notes/{id}": {
         parameters: {
             query?: never;
@@ -3818,6 +3917,12 @@ export interface components {
         };
         /** Format: uuid */
         NoteId: string;
+        /** @description Whether a person has set their notebook app password (MAIN-100). */
+        NotebookVaultStatus: {
+            configured: boolean;
+            /** Format: date-time */
+            created_at?: string | null;
+        };
         /**
          * @description Something a person should see. Distinct from an `Event`, which is the
          *     complete record of what happened and is never marked read.
@@ -4131,6 +4236,42 @@ export interface components {
         ScheduledNode: {
             node_id: components["schemas"]["NodeId"];
             node_name: string;
+        };
+        /**
+         * @description Seal a note (MAIN-100). The client produces the blob locally from its app
+         *     password; `passphrase` proves that password against the person vault (the
+         *     `require_app_password` pattern). The server never sees the note plaintext.
+         *     All byte fields base64.
+         */
+        SealNoteRequest: {
+            /** @description `nonce(12) || AES-256-GCM(body)`, base64 — the sealed body. */
+            ciphertext: string;
+            /** @description The app password, to authorize the seal against the person vault. */
+            passphrase: string;
+            /** @description KDF salt the client sealed under, base64. */
+            salt: string;
+            /** @description One-way verifier of the client's derived key, base64. */
+            verifier: string;
+        };
+        /**
+         * @description The client-decrypt contract for a sealed note (MAIN-100). A browser derives
+         *     the key with WebCrypto `PBKDF2-HMAC-SHA256(passphrase, salt, iterations)` →
+         *     32-byte AES-256 key, then `AES-256-GCM` opens `ciphertext`, whose first 12
+         *     bytes are the nonce and the rest the GCM body+tag. All byte fields base64.
+         */
+        SealedBlob: {
+            /**
+             * @description `nonce(12) || AES-256-GCM(body)`, base64. The client-produced sealed
+             *     ciphertext; the server stores it vault-wrapped and cannot open it.
+             */
+            ciphertext: string;
+            /**
+             * Format: int32
+             * @description PBKDF2 iteration count (matches the server's `crypto::KDF_ITERATIONS`).
+             */
+            iterations: number;
+            /** @description KDF salt, base64. 16 bytes. */
+            salt: string;
         };
         /** @description Whether an import left a `.env` on disk that the vault hasn't adopted yet. */
         SecretOnDisk: {
@@ -4658,6 +4799,15 @@ export interface components {
             /** @enum {string} */
             type: "task_changed";
         };
+        /**
+         * @description Unseal a note (MAIN-100): the client decrypted the sealed body locally and
+         *     sends back the recovered plaintext, converting the row to a normal
+         *     server-encrypted note. `passphrase` is verified against the person vault.
+         */
+        UnsealNoteRequest: {
+            content_md: string;
+            passphrase: string;
+        };
         UpdateBoardRequest: {
             /**
              * @description Replace the board's automation rules (MAIN-73). Omitted leaves them
@@ -4795,13 +4945,21 @@ export interface components {
         };
         /** Format: uuid */
         UserId: string;
-        /** @description A single note WITH its decrypted body (the `get` response). */
+        /**
+         * @description A single note. Unsealed notes carry the decrypted `content_md`; a sealed
+         *     note carries `sealed: true` and the `blob` instead — the server returns the
+         *     ciphertext it cannot open, for the browser to decrypt (MAIN-100).
+         */
         UserNote: {
-            content_md: string;
+            blob?: null | components["schemas"]["SealedBlob"];
+            /** @description Present iff the note is not sealed. */
+            content_md?: string | null;
             /** Format: date-time */
             created_at: string;
             folder_id?: null | components["schemas"]["UserNoteFolderId"];
             id: components["schemas"]["UserNoteId"];
+            /** @description True when the body is zero-knowledge sealed and `blob` is present. */
+            sealed?: boolean;
             title: string;
             /** Format: date-time */
             updated_at: string;
@@ -4834,6 +4992,11 @@ export interface components {
             id: components["schemas"]["UserNoteId"];
             /** @description Plaintext folder path, e.g. "Work/Ideas". Empty for a root note. */
             path: string;
+            /**
+             * @description Whether this note is zero-knowledge sealed (MAIN-100). Titles and paths
+             *     stay plaintext either way, so search still finds sealed notes.
+             */
+            sealed?: boolean;
             title: string;
             /** Format: date-time */
             updated_at: string;
@@ -6828,6 +6991,173 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["UserNote"];
                 };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    notebook_seal_note: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SealNoteRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UserNote"];
+                };
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            428: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    notebook_unseal_note: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UnsealNoteRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UserNote"];
+                };
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            428: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    notebook_set_vault_passphrase: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SetVaultPassphraseRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NotebookVaultStatus"];
+                };
+            };
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    notebook_vault_status: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NotebookVaultStatus"];
+                };
+            };
+        };
+    };
+    notebook_verify_vault_passphrase: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SetVaultPassphraseRequest"];
+            };
+        };
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             404: {
                 headers: {

@@ -1312,19 +1312,80 @@ pub struct UserNoteSummary {
     pub title: String,
     /// Plaintext folder path, e.g. "Work/Ideas". Empty for a root note.
     pub path: String,
+    /// Whether this note is zero-knowledge sealed (MAIN-100). Titles and paths
+    /// stay plaintext either way, so search still finds sealed notes.
+    #[serde(default)]
+    pub sealed: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
 
-/// A single note WITH its decrypted body (the `get` response).
+/// The client-decrypt contract for a sealed note (MAIN-100). A browser derives
+/// the key with WebCrypto `PBKDF2-HMAC-SHA256(passphrase, salt, iterations)` →
+/// 32-byte AES-256 key, then `AES-256-GCM` opens `ciphertext`, whose first 12
+/// bytes are the nonce and the rest the GCM body+tag. All byte fields base64.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct SealedBlob {
+    /// KDF salt, base64. 16 bytes.
+    pub salt: String,
+    /// PBKDF2 iteration count (matches the server's `crypto::KDF_ITERATIONS`).
+    pub iterations: u32,
+    /// `nonce(12) || AES-256-GCM(body)`, base64. The client-produced sealed
+    /// ciphertext; the server stores it vault-wrapped and cannot open it.
+    pub ciphertext: String,
+}
+
+/// A single note. Unsealed notes carry the decrypted `content_md`; a sealed
+/// note carries `sealed: true` and the `blob` instead — the server returns the
+/// ciphertext it cannot open, for the browser to decrypt (MAIN-100).
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct UserNote {
     pub id: UserNoteId,
     pub folder_id: Option<UserNoteFolderId>,
     pub title: String,
-    pub content_md: String,
+    /// Present iff the note is not sealed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_md: Option<String>,
+    /// True when the body is zero-knowledge sealed and `blob` is present.
+    #[serde(default)]
+    pub sealed: bool,
+    /// Present iff `sealed`. The client-decrypt contract for the body.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blob: Option<SealedBlob>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+/// Whether a person has set their notebook app password (MAIN-100).
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct NotebookVaultStatus {
+    pub configured: bool,
+    pub created_at: Option<DateTime<Utc>>,
+}
+
+/// Seal a note (MAIN-100). The client produces the blob locally from its app
+/// password; `passphrase` proves that password against the person vault (the
+/// `require_app_password` pattern). The server never sees the note plaintext.
+/// All byte fields base64.
+#[derive(Debug, Clone, Deserialize, ToSchema)]
+pub struct SealNoteRequest {
+    /// KDF salt the client sealed under, base64.
+    pub salt: String,
+    /// One-way verifier of the client's derived key, base64.
+    pub verifier: String,
+    /// `nonce(12) || AES-256-GCM(body)`, base64 — the sealed body.
+    pub ciphertext: String,
+    /// The app password, to authorize the seal against the person vault.
+    pub passphrase: String,
+}
+
+/// Unseal a note (MAIN-100): the client decrypted the sealed body locally and
+/// sends back the recovered plaintext, converting the row to a normal
+/// server-encrypted note. `passphrase` is verified against the person vault.
+#[derive(Debug, Clone, Deserialize, ToSchema)]
+pub struct UnsealNoteRequest {
+    pub content_md: String,
+    pub passphrase: String,
 }
 
 /// Create a note. Body defaults to empty; `folder_id` None places it at root.
