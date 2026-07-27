@@ -24,6 +24,7 @@ import {
   EditableMarkdown,
   Select,
   TYPE_META,
+  VISIBILITY_META,
   useAnchoredMenu,
 } from "@nookos/ui";
 import { PRIORITIES } from "./taskmeta";
@@ -204,6 +205,30 @@ export function TaskDetail({
       body: { type },
     });
     bust();
+  };
+
+  /** Change who may see this card (MAIN-103). The MAIN-85 gate answers 403 "this
+   *  needs tenant owner or admin" when the caller may not — surfaced INLINE on
+   *  the selector, not as a toast or console noise. A 404 means the card became
+   *  invisible under us, so close the modal the way a vanished card is handled.
+   *  Returns the outcome so the selector can render the inline error. */
+  const setVisibility = async (
+    visibility: string,
+  ): Promise<{ ok: boolean; status: number }> => {
+    const { error, response } = await api.PATCH("/api/v1/tasks/{id}", {
+      params: { path: { id: taskId } },
+      body: { visibility },
+    });
+    if (!error && response.ok) {
+      bust();
+      return { ok: true, status: response.status };
+    }
+    if (response.status === 404) {
+      onClose();
+      return { ok: false, status: 404 };
+    }
+    // 403 (and anything else): leave the card as it was and let the selector say so.
+    return { ok: false, status: response.status };
   };
 
   /** Which repo this ticket is work on. `""` means none, sent as null. */
@@ -497,6 +522,11 @@ export function TaskDetail({
                 }))}
               />
 
+              {/* Who may see this card (MAIN-103). Changing it needs tenant
+                  owner/admin (MAIN-85); a refusal shows inline on the control. */}
+              <span className="faint small">Visibility</span>
+              <VisibilitySelect value={task.visibility} onChange={setVisibility} />
+
               <span className="faint small">Created</span>
               <span className="small">{new Date(task.created_at).toLocaleString()}</span>
 
@@ -629,6 +659,79 @@ function TypeSelect({
         <ChevronDown size={11} className="type-select-caret" />
       </button>
       {menu}
+    </div>
+  );
+}
+
+/**
+ * The visibility control in the detail sidebar (MAIN-103): shows the current
+ * visibility as a badge-button and opens a menu of the three values, PATCHing on
+ * pick — mirroring `TypeSelect`. The trigger and each option are buttons, so it
+ * is keyboard-reachable; the menu is portalled for the same reason. The MAIN-85
+ * gate's 403 surfaces INLINE, below the control (a 404 is handled by the caller,
+ * which closes the modal).
+ */
+function VisibilitySelect({
+  value,
+  onChange,
+}: {
+  value: string | null | undefined;
+  onChange: (visibility: string) => Promise<{ ok: boolean; status: number }>;
+}) {
+  const [open, setOpen] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const close = useCallback(() => setOpen(false), []);
+  const { hostRef, portal } = useAnchoredMenu(open, close, {
+    height: VISIBILITY_META.length * 34 + 42,
+  });
+  const current = value ?? "team";
+  const cur = VISIBILITY_META.find((v) => v.value === current) ?? VISIBILITY_META[1];
+  const pick = async (v: string) => {
+    setOpen(false);
+    if (v === current) return;
+    setError(null);
+    const res = await onChange(v);
+    // The MAIN-85 gate: say why, right here, rather than swallowing it.
+    if (!res.ok && res.status === 403) {
+      setError("this needs tenant owner or admin");
+    }
+  };
+  const menu = portal(
+    <div className="type-menu">
+      <div className="type-menu-head">Change visibility</div>
+      {VISIBILITY_META.map((v) => (
+        <button
+          key={v.value}
+          className={`type-menu-item ${v.tone}${v.value === current ? " current" : ""}`}
+          title={v.tooltip}
+          onClick={() => void pick(v.value)}
+        >
+          <v.Icon size={14} className="type-menu-icon" />
+          <span className="type-menu-label">{v.label}</span>
+        </button>
+      ))}
+    </div>,
+    "type-menu-portal",
+  );
+  return (
+    <div ref={hostRef} className="task-vis-field">
+      <button
+        className={`type-select-trigger ${cur.tone}`}
+        aria-label={`visibility: ${cur.label}`}
+        title={cur.tooltip}
+        aria-haspopup="menu"
+        onClick={() => setOpen((v) => !v)}
+      >
+        <cur.Icon size={14} />
+        <span className="type-menu-label">{cur.label}</span>
+        <ChevronDown size={11} className="type-select-caret" />
+      </button>
+      {menu}
+      {error && (
+        <span className="small" style={{ color: "var(--nook-err)", display: "block", marginTop: 3 }}>
+          {error}
+        </span>
+      )}
     </div>
   );
 }
