@@ -2781,6 +2781,7 @@ dependencies = [
  "dotenvy",
  "nook-control",
  "nook-infra",
+ "nook-testkit",
  "serde_json",
  "sqlx",
  "tokio",

@@ -9,16 +9,10 @@ use nook_control::auth::{AuthCtx, Principal};
 use nook_control::routes::bulk::bulk_tasks;
 use nook_control::services::identity::{login_identity, IdentityClaims};
 use nook_control::state::AppState;
-use nook_infra::Config;
+use nook_testkit::TestBed;
 use nook_types::*;
 use sqlx::PgPool;
-use tokio::sync::Mutex;
 use uuid::Uuid;
-
-mod common;
-use common::test_pool;
-
-static SERIAL: Mutex<()> = Mutex::const_new(());
 
 fn claims(subject: &str, name: &str) -> IdentityClaims {
     IdentityClaims {
@@ -144,20 +138,19 @@ fn result_for(resp: &BulkTaskResponse, id: TaskId) -> &BulkTaskItemResult {
 
 #[tokio::test]
 async fn bulk_actions_apply_skip_epics_and_respect_visibility() {
-    let _serial = SERIAL.lock().await;
-    let Some(pool) = test_pool().await else {
+    let Some(mut bed) = TestBed::new().await else {
         eprintln!("skipping bulk_tasks test — no DATABASE_URL");
         return;
     };
-    let state = AppState::new(pool.clone(), Config::for_test(), None).await;
+    let state = bed.app_state().await;
 
     let sub = format!("bulk-owner-{}", Uuid::now_v7().simple());
     let (owner, tenant) = login_identity(&state, claims(&sub, "Owner"))
         .await
         .expect("owner in");
     let a = auth(owner.id, tenant.id);
-    let member = add_member(&pool, tenant.id, "mia").await;
-    let board = make_board(&pool, tenant.id).await;
+    let member = add_member(&bed.pool, tenant.id, "mia").await;
+    let board = make_board(&bed.pool, tenant.id).await;
 
     let t1 = make_task(&state, tenant.id, board, owner.id, "one", None).await;
     let t2 = make_task(&state, tenant.id, board, owner.id, "two", None).await;
@@ -168,7 +161,7 @@ async fn bulk_actions_apply_skip_epics_and_respect_visibility() {
     let (other_owner, other_tenant) = login_identity(&state, claims(&osub, "Other"))
         .await
         .expect("other in");
-    let other_board = make_board(&pool, other_tenant.id).await;
+    let other_board = make_board(&bed.pool, other_tenant.id).await;
     let foreign = make_task(
         &state,
         other_tenant.id,
@@ -199,10 +192,10 @@ async fn bulk_actions_apply_skip_epics_and_respect_visibility() {
         Some("not found in your tenant")
     );
     // t1 really changed; the epic and foreign task did not.
-    assert_eq!(task_type(&pool, t1.id).await, "chore");
-    assert_eq!(task_type(&pool, epic.id).await, "epic");
+    assert_eq!(task_type(&bed.pool, t1.id).await, "chore");
+    assert_eq!(task_type(&bed.pool, epic.id).await, "epic");
     assert_eq!(
-        task_type(&pool, foreign.id).await,
+        task_type(&bed.pool, foreign.id).await,
         "task",
         "foreign untouched"
     );
@@ -210,8 +203,8 @@ async fn bulk_actions_apply_skip_epics_and_respect_visibility() {
     // ── priority (happy path) ───────────────────────────────────────────────
     let resp = call(&state, a, req(&[t1.id, t2.id], "priority", Some("2"))).await;
     assert_eq!(resp.updated, 2);
-    assert_eq!(task_priority(&pool, t1.id).await, 2);
-    assert_eq!(task_priority(&pool, t2.id).await, 2);
+    assert_eq!(task_priority(&bed.pool, t1.id).await, 2);
+    assert_eq!(task_priority(&bed.pool, t2.id).await, 2);
 
     // ── agent_ready on/off, epic skipped with its own reason ────────────────
     let resp = call(&state, a, req(&[t1.id, epic.id], "agent_ready", Some("on"))).await;
@@ -221,12 +214,12 @@ async fn bulk_actions_apply_skip_epics_and_respect_visibility() {
         Some("epics are never agent-ready")
     );
     assert!(
-        has_label(&pool, t1.id, "agent-ready").await,
+        has_label(&bed.pool, t1.id, "agent-ready").await,
         "label attached"
     );
     let _ = call(&state, a, req(&[t1.id], "agent_ready", Some("off"))).await;
     assert!(
-        !has_label(&pool, t1.id, "agent-ready").await,
+        !has_label(&bed.pool, t1.id, "agent-ready").await,
         "label removed"
     );
 
@@ -238,25 +231,21 @@ async fn bulk_actions_apply_skip_epics_and_respect_visibility() {
     )
     .await;
     assert_eq!(resp.updated, 1);
-    assert_eq!(task_assignee(&pool, t1.id).await, Some(member.0));
+    assert_eq!(task_assignee(&bed.pool, t1.id).await, Some(member.0));
     let _ = call(&state, a, req(&[t1.id], "assignee", None)).await;
-    assert_eq!(task_assignee(&pool, t1.id).await, None, "unassigned");
+    assert_eq!(task_assignee(&bed.pool, t1.id).await, None, "unassigned");
 
     // ── move to a column by type ────────────────────────────────────────────
     let resp = call(&state, a, req(&[t1.id], "move_column", Some("completed"))).await;
     assert_eq!(resp.updated, 1);
-    assert_eq!(column_type(&pool, t1.id).await, "completed");
+    assert_eq!(column_type(&bed.pool, t1.id).await, "completed");
 
     // ── archive ─────────────────────────────────────────────────────────────
     let resp = call(&state, a, req(&[t2.id], "archive", None)).await;
     assert_eq!(resp.updated, 1);
-    assert!(is_archived(&pool, t2.id).await, "archived_at set");
+    assert!(is_archived(&bed.pool, t2.id).await, "archived_at set");
 
-    // cleanup: drop both tenants' data
-    let _ = sqlx::query("DELETE FROM tenants WHERE id = ANY($1) AND slug <> 'dev'")
-        .bind(vec![tenant.id, other_tenant.id])
-        .execute(&pool)
-        .await;
+    bed.teardown().await;
 }
 
 async fn task_type(db: &PgPool, id: TaskId) -> String {

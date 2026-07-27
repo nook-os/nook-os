@@ -33,4 +33,5 @@ dotenvy = { workspace = true }
 # worker), and the test-support feature exposes `Config::for_test()`.
 nook-control = { workspace = true }
 nook-infra = { workspace = true, features = ["test-support"] }
+nook-testkit = { workspace = true }
 uuid = { workspace = true }

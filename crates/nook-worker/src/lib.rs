@@ -277,22 +277,18 @@ pub async fn run(
 mod tests {
     use super::*;
     use nook_infra::queue::NewWork;
+    use nook_testkit::TestBed;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use uuid::Uuid;
 
-    async fn queue() -> Option<Arc<dyn Queue>> {
-        if std::env::var("NOOK_REQUIRE_DB").ok().as_deref() != Some("1") {
-            return None;
-        }
-        let url = std::env::var("DATABASE_URL").ok()?;
-        let db = sqlx::postgres::PgPoolOptions::new()
-            .max_connections(5)
-            .connect(&url)
-            .await
-            .ok()?;
-        nook_control::MIGRATOR.run(&db).await.ok()?;
+    // A private, migrated database (MAIN-166) plus a queue built on it. Holding
+    // the `TestBed` keeps the DB alive for the test; its Drop drops the DB.
+    async fn setup() -> Option<(TestBed, Arc<dyn Queue>)> {
+        let bed = TestBed::new().await?;
         let cfg = nook_infra::Config::for_test();
-        Some(Arc::from(nook_infra::queue::from_config(&cfg, db).await))
+        let q: Arc<dyn Queue> =
+            Arc::from(nook_infra::queue::from_config(&cfg, bed.pool.clone()).await);
+        Some((bed, q))
     }
 
     fn unique_type(tag: &str) -> String {
@@ -341,10 +337,6 @@ mod tests {
         .0
     }
 
-    fn pool_of(url: &str) -> sqlx::PgPool {
-        sqlx::postgres::PgPool::connect_lazy(url).unwrap()
-    }
-
     #[test]
     fn backoff_scales_with_attempts_and_caps() {
         assert_eq!(backoff(1), Duration::from_secs(2));
@@ -367,8 +359,7 @@ mod tests {
 
     #[tokio::test]
     async fn dispatches_to_the_registered_handler_and_acks() {
-        let Some(q) = queue().await else {
-            eprintln!("skipping dispatches_to_the_registered_handler_and_acks — no DATABASE_URL");
+        let Some((_bed, q)) = setup().await else {
             return;
         };
         let ty = unique_type("dispatch");
@@ -396,8 +387,7 @@ mod tests {
 
     #[tokio::test]
     async fn allow_list_filters_which_types_are_received() {
-        let Some(q) = queue().await else {
-            eprintln!("skipping allow_list_filters_which_types_are_received — no DATABASE_URL");
+        let Some((_bed, q)) = setup().await else {
             return;
         };
         let a = unique_type("allowA");
@@ -430,14 +420,9 @@ mod tests {
 
     #[tokio::test]
     async fn unregistered_type_is_requeued_once_then_dead_lettered() {
-        let Some(q) = queue().await else {
-            eprintln!(
-                "skipping unregistered_type_is_requeued_once_then_dead_lettered — no DATABASE_URL"
-            );
+        let Some((bed, q)) = setup().await else {
             return;
         };
-        let url = std::env::var("DATABASE_URL").unwrap();
-        let pool = pool_of(&url);
         let ty = unique_type("nohandler");
         // An allow-list that names a type with no registered handler.
         let reg = Registry::new();
@@ -448,12 +433,12 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(
-            count_in(&pool, "work_queue_dead", &ty).await,
+            count_in(&bed.pool, "work_queue_dead", &ty).await,
             0,
             "not dead on the first pass"
         );
         assert_eq!(
-            count_in(&pool, "work_queue", &ty).await,
+            count_in(&bed.pool, "work_queue", &ty).await,
             1,
             "back in the queue"
         );
@@ -463,12 +448,12 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(
-            count_in(&pool, "work_queue", &ty).await,
+            count_in(&bed.pool, "work_queue", &ty).await,
             0,
             "left the live queue"
         );
         assert_eq!(
-            count_in(&pool, "work_queue_dead", &ty).await,
+            count_in(&bed.pool, "work_queue_dead", &ty).await,
             1,
             "dead-lettered"
         );
@@ -476,7 +461,7 @@ mod tests {
             "SELECT reason FROM work_queue_dead WHERE work_type = $1",
         )
         .bind(&ty)
-        .fetch_one(&pool)
+        .fetch_one(&bed.pool)
         .await
         .unwrap()
         .0;
@@ -488,12 +473,9 @@ mod tests {
 
     #[tokio::test]
     async fn handler_failure_backs_off_without_acking() {
-        let Some(q) = queue().await else {
-            eprintln!("skipping handler_failure_backs_off_without_acking — no DATABASE_URL");
+        let Some((bed, q)) = setup().await else {
             return;
         };
-        let url = std::env::var("DATABASE_URL").unwrap();
-        let pool = pool_of(&url);
         let ty = unique_type("fail");
         let calls = Arc::new(AtomicUsize::new(0));
         let mut reg = Registry::new();
@@ -506,9 +488,13 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 1, "handler ran once");
 
         // Not acked, not dead — still present, and invisible into the future.
-        assert_eq!(count_in(&pool, "work_queue", &ty).await, 1, "still queued");
         assert_eq!(
-            count_in(&pool, "work_queue_dead", &ty).await,
+            count_in(&bed.pool, "work_queue", &ty).await,
+            1,
+            "still queued"
+        );
+        assert_eq!(
+            count_in(&bed.pool, "work_queue_dead", &ty).await,
             0,
             "not dead after one failure"
         );
@@ -516,7 +502,7 @@ mod tests {
             "SELECT locked_until > now() FROM work_queue WHERE id = $1",
         )
         .bind(id)
-        .fetch_one(&pool)
+        .fetch_one(&bed.pool)
         .await
         .unwrap()
         .0;
@@ -525,12 +511,9 @@ mod tests {
 
     #[tokio::test]
     async fn a_panicking_handler_is_isolated_not_fatal() {
-        let Some(q) = queue().await else {
-            eprintln!("skipping a_panicking_handler_is_isolated_not_fatal — no DATABASE_URL");
+        let Some((bed, q)) = setup().await else {
             return;
         };
-        let url = std::env::var("DATABASE_URL").unwrap();
-        let pool = pool_of(&url);
         let ty = unique_type("panic");
         let mut reg = Registry::new();
         reg.register(ty.clone(), Arc::new(Panicking));
@@ -543,7 +526,7 @@ mod tests {
         assert_eq!(n, 1);
         // Treated as a failure: backed off, still present, not dead.
         assert_eq!(
-            count_in(&pool, "work_queue", &ty).await,
+            count_in(&bed.pool, "work_queue", &ty).await,
             1,
             "a panic is a failure, not a loss"
         );
@@ -551,12 +534,9 @@ mod tests {
 
     #[tokio::test]
     async fn run_drains_pending_work_then_stops_on_shutdown() {
-        let Some(q) = queue().await else {
-            eprintln!("skipping run_drains_pending_work_then_stops_on_shutdown — no DATABASE_URL");
+        let Some((bed, q)) = setup().await else {
             return;
         };
-        let url = std::env::var("DATABASE_URL").unwrap();
-        let pool = pool_of(&url);
         let ty = unique_type("shutdown");
         let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
         let mut reg = Registry::new();
@@ -571,7 +551,7 @@ mod tests {
 
         // Wait until the three items are drained, then signal shutdown.
         for _ in 0..50 {
-            if count_in(&pool, "work_queue", &ty).await == 0 {
+            if count_in(&bed.pool, "work_queue", &ty).await == 0 {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
@@ -594,8 +574,7 @@ mod tests {
 
     #[tokio::test]
     async fn email_handler_delivers_via_the_mailer_and_acks() {
-        let Some(q) = queue().await else {
-            eprintln!("skipping email_handler_delivers_via_the_mailer_and_acks — no DATABASE_URL");
+        let Some((_bed, q)) = setup().await else {
             return;
         };
         use nook_infra::mailer::{capture::CaptureMailer, Category, EmailJob};
@@ -637,12 +616,9 @@ mod tests {
 
     #[tokio::test]
     async fn a_failing_handler_dead_letters_with_its_error_on_the_final_attempt() {
-        let Some(q) = queue().await else {
-            eprintln!("skipping a_failing_handler_dead_letters_with_its_error — no DATABASE_URL");
+        let Some((bed, q)) = setup().await else {
             return;
         };
-        let url = std::env::var("DATABASE_URL").unwrap();
-        let pool = pool_of(&url);
         let ty = unique_type("deadfail");
         let mut reg = Registry::new();
         reg.register(ty.clone(), Arc::new(Failing(Arc::new(AtomicUsize::new(0)))));
@@ -657,7 +633,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            count_in(&pool, "work_queue", &ty).await,
+            count_in(&bed.pool, "work_queue", &ty).await,
             0,
             "left the live queue"
         );
@@ -665,7 +641,7 @@ mod tests {
             "SELECT reason FROM work_queue_dead WHERE work_type = $1",
         )
         .bind(&ty)
-        .fetch_one(&pool)
+        .fetch_one(&bed.pool)
         .await
         .unwrap()
         .0;

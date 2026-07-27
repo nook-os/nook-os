@@ -11,12 +11,10 @@ use std::time::Duration;
 
 use nook_control::ws::registry::{NodeHandle, OpPayload, Registry};
 use nook_proto::ControlToNode;
+use nook_testkit::TestBed;
 use nook_types::{NodeId, TenantId};
 use sqlx::PgPool;
 use uuid::Uuid;
-
-mod common;
-use common::test_pool;
 
 /// Insert a throwaway tenant + node row; returns the node id.
 async fn seed_node(pool: &PgPool) -> (TenantId, NodeId) {
@@ -54,67 +52,60 @@ async fn claim_lease(pool: &PgPool, node: NodeId, instance: Uuid) {
     .expect("claim lease");
 }
 
-async fn cleanup(pool: &PgPool, tenant: TenantId) {
-    let _ = sqlx::query("DELETE FROM tenants WHERE id = $1")
-        .bind(tenant)
-        .execute(pool)
-        .await;
-}
-
 /// Both instances see the current owner via the lease table, and a takeover
 /// (node reconnects to the other instance) flips routing.
 #[tokio::test]
 async fn lease_takeover_flips_ownership() {
-    let Some(pool) = test_pool().await else {
+    let Some(mut bed) = TestBed::new().await else {
         eprintln!("skipping: DATABASE_URL not set / postgres unreachable");
         return;
     };
-    let (tenant, node) = seed_node(&pool).await;
+    let (_tenant, node) = seed_node(&bed.pool).await;
 
     let a = Arc::new(Registry::new());
     let b = Arc::new(Registry::new());
 
     // Instance A owns the node.
-    claim_lease(&pool, node, a.instance_id()).await;
-    a.refresh_lease_cache(&pool).await;
-    b.refresh_lease_cache(&pool).await;
+    claim_lease(&bed.pool, node, a.instance_id()).await;
+    a.refresh_lease_cache(&bed.pool).await;
+    b.refresh_lease_cache(&bed.pool).await;
     assert!(a.node_online(node), "owner sees node online");
     assert!(b.node_online(node), "peer sees node online via lease");
 
     // Takeover: the node reconnects to B (last writer wins).
-    claim_lease(&pool, node, b.instance_id()).await;
-    a.refresh_lease_cache(&pool).await;
-    b.refresh_lease_cache(&pool).await;
+    claim_lease(&bed.pool, node, b.instance_id()).await;
+    a.refresh_lease_cache(&bed.pool).await;
+    b.refresh_lease_cache(&bed.pool).await;
     assert!(a.node_online(node), "peer A sees node online via B's lease");
 
     // Expired lease means offline everywhere.
     sqlx::query("UPDATE nodes SET lease_expires_at = now() - interval '1 second' WHERE id = $1")
         .bind(node)
-        .execute(&pool)
+        .execute(&bed.pool)
         .await
         .unwrap();
-    a.refresh_lease_cache(&pool).await;
-    b.refresh_lease_cache(&pool).await;
+    a.refresh_lease_cache(&bed.pool).await;
+    b.refresh_lease_cache(&bed.pool).await;
     assert!(!a.node_online(node), "expired lease reads offline");
     assert!(!b.node_online(node), "expired lease reads offline");
 
-    cleanup(&pool, tenant).await;
+    bed.teardown().await;
 }
 
 /// A message sent on instance A for a node whose socket lives on instance B
 /// crosses the bus and lands in B's local node channel.
 #[tokio::test]
 async fn send_to_node_routes_across_instances() {
-    let Some(pool) = test_pool().await else {
+    let Some(mut bed) = TestBed::new().await else {
         eprintln!("skipping: DATABASE_URL not set / postgres unreachable");
         return;
     };
-    let (tenant, node) = seed_node(&pool).await;
+    let (tenant, node) = seed_node(&bed.pool).await;
 
     let a = Arc::new(Registry::new());
     let b = Arc::new(Registry::new());
-    a.start_bus(pool.clone());
-    b.start_bus(pool.clone());
+    a.start_bus(bed.pool.clone());
+    b.start_bus(bed.pool.clone());
     // Wait until both listeners are actually LISTENing. A NOTIFY sent before
     // that is silently dropped by Postgres — the flake this test used to hit.
     assert!(a.bus_ready().await, "instance A never started listening");
@@ -129,8 +120,8 @@ async fn send_to_node_routes_across_instances() {
             tx,
         },
     );
-    claim_lease(&pool, node, b.instance_id()).await;
-    a.refresh_lease_cache(&pool).await;
+    claim_lease(&bed.pool, node, b.instance_id()).await;
+    a.refresh_lease_cache(&bed.pool).await;
 
     // A sends; the frame must arrive on B's channel via NOTIFY.
     assert!(a.send_to_node(node, ControlToNode::RescanWorkspaces));
@@ -140,23 +131,23 @@ async fn send_to_node_routes_across_instances() {
         .expect("channel open");
     assert!(matches!(got, ControlToNode::RescanWorkspaces));
 
-    cleanup(&pool, tenant).await;
+    bed.teardown().await;
 }
 
 /// Request/response round-trip across instances: A issues request_op for a
 /// node held by B; B's node answers; A's pending oneshot resolves.
 #[tokio::test]
 async fn op_reply_routes_back_to_requester() {
-    let Some(pool) = test_pool().await else {
+    let Some(mut bed) = TestBed::new().await else {
         eprintln!("skipping: DATABASE_URL not set / postgres unreachable");
         return;
     };
-    let (tenant, node) = seed_node(&pool).await;
+    let (tenant, node) = seed_node(&bed.pool).await;
 
     let a = Arc::new(Registry::new());
     let b = Arc::new(Registry::new());
-    a.start_bus(pool.clone());
-    b.start_bus(pool.clone());
+    a.start_bus(bed.pool.clone());
+    b.start_bus(bed.pool.clone());
     // Wait until both listeners are actually LISTENing. A NOTIFY sent before
     // that is silently dropped by Postgres — the flake this test used to hit.
     assert!(a.bus_ready().await, "instance A never started listening");
@@ -170,8 +161,8 @@ async fn op_reply_routes_back_to_requester() {
             tx,
         },
     );
-    claim_lease(&pool, node, b.instance_id()).await;
-    a.refresh_lease_cache(&pool).await;
+    claim_lease(&bed.pool, node, b.instance_id()).await;
+    a.refresh_lease_cache(&bed.pool).await;
 
     // A asks for a clone on B's node.
     let rx = a
@@ -211,5 +202,5 @@ async fn op_reply_routes_back_to_requester() {
     assert_eq!(op.message, "cloned");
     assert_eq!(op.path.as_deref(), Some("/workspace/repo"));
 
-    cleanup(&pool, tenant).await;
+    bed.teardown().await;
 }

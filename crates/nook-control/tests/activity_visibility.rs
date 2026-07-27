@@ -6,12 +6,10 @@
 
 use nook_control::auth::{AuthCtx, Principal};
 use nook_control::services::core::{self, ActivityScope};
+use nook_testkit::TestBed;
 use nook_types::*;
 use sqlx::PgPool;
 use uuid::Uuid;
-
-mod common;
-use common::test_pool;
 
 // ── The pure predicate (the same one the live bus applies per connection) ────
 
@@ -172,44 +170,37 @@ fn user_ctx(user: UserId, tenant: TenantId) -> AuthCtx {
     }
 }
 
-async fn cleanup(db: &PgPool, tenant: TenantId) {
-    let _ = sqlx::query("DELETE FROM tenants WHERE id = $1 AND slug <> 'dev'")
-        .bind(tenant)
-        .execute(db)
-        .await;
-}
-
 #[tokio::test]
 async fn events_list_scopes_members_to_their_own_activity() {
-    let Some(pool) = test_pool().await else {
+    let Some(mut bed) = TestBed::new().await else {
         eprintln!("skipping activity-visibility test — no DATABASE_URL");
         return;
     };
-    let tenant = new_tenant(&pool).await;
-    let (owner, owner_person) = add_user(&pool, tenant, "owner").await;
-    let (member, member_person) = add_user(&pool, tenant, "member").await;
+    let tenant = new_tenant(&bed.pool).await;
+    let (owner, owner_person) = add_user(&bed.pool, tenant, "owner").await;
+    let (member, member_person) = add_user(&bed.pool, tenant, "member").await;
 
-    let my_node = add_node(&pool, tenant, member_person).await;
-    let my_session = add_session(&pool, tenant, my_node, member).await;
-    let owner_node = add_node(&pool, tenant, owner_person).await;
+    let my_node = add_node(&bed.pool, tenant, member_person).await;
+    let my_session = add_session(&bed.pool, tenant, my_node, member).await;
+    let owner_node = add_node(&bed.pool, tenant, owner_person).await;
 
     // Five events: mine by action / on my node / on my session, plus a
     // teammate's action and an event on the teammate's node.
-    let e_my_action = add_event(&pool, tenant, Some(member), None, None).await;
-    let e_my_node = add_event(&pool, tenant, None, Some(my_node), None).await;
-    let e_my_session = add_event(&pool, tenant, None, None, Some(my_session)).await;
-    let e_owner_action = add_event(&pool, tenant, Some(owner), None, None).await;
-    let e_owner_node = add_event(&pool, tenant, None, Some(owner_node), None).await;
+    let e_my_action = add_event(&bed.pool, tenant, Some(member), None, None).await;
+    let e_my_node = add_event(&bed.pool, tenant, None, Some(my_node), None).await;
+    let e_my_session = add_event(&bed.pool, tenant, None, None, Some(my_session)).await;
+    let e_owner_action = add_event(&bed.pool, tenant, Some(owner), None, None).await;
+    let e_owner_node = add_event(&bed.pool, tenant, None, Some(owner_node), None).await;
 
     // Member: sees the three that are theirs, none of the teammate's.
-    let scope = ActivityScope::load(&pool, tenant, &user_ctx(member, tenant))
+    let scope = ActivityScope::load(&bed.pool, tenant, &user_ctx(member, tenant))
         .await
         .expect("scope");
     assert!(
         matches!(scope, ActivityScope::Member { .. }),
         "a member resolves to a scoped view"
     );
-    let seen = core::events_page(&pool, tenant, None, None, None, 200, &scope)
+    let seen = core::events_page(&bed.pool, tenant, None, None, None, 200, &scope)
         .await
         .expect("list")
         .events;
@@ -227,14 +218,14 @@ async fn events_list_scopes_members_to_their_own_activity() {
     );
 
     // Owner: the full audit feed sees all five.
-    let admin_scope = ActivityScope::load(&pool, tenant, &user_ctx(owner, tenant))
+    let admin_scope = ActivityScope::load(&bed.pool, tenant, &user_ctx(owner, tenant))
         .await
         .expect("scope");
     assert!(
         matches!(admin_scope, ActivityScope::All),
         "an owner resolves to the unfiltered feed"
     );
-    let all_seen = core::events_page(&pool, tenant, None, None, None, 200, &admin_scope)
+    let all_seen = core::events_page(&bed.pool, tenant, None, None, None, 200, &admin_scope)
         .await
         .expect("list")
         .events;
@@ -249,15 +240,15 @@ async fn events_list_scopes_members_to_their_own_activity() {
         assert!(all_ids.contains(&id), "owner sees every event");
     }
 
-    cleanup(&pool, tenant).await;
+    bed.teardown().await;
 }
 
 #[tokio::test]
 async fn a_node_credential_resolves_to_the_unfiltered_feed() {
-    let Some(pool) = test_pool().await else {
+    let Some(mut bed) = TestBed::new().await else {
         return;
     };
-    let tenant = new_tenant(&pool).await;
+    let tenant = new_tenant(&bed.pool).await;
 
     let node_ctx = AuthCtx {
         session_id: AuthSessionId(Uuid::nil()),
@@ -266,7 +257,7 @@ async fn a_node_credential_resolves_to_the_unfiltered_feed() {
         principal: Principal::Node(NodeId::new()),
         cookie_session: false,
     };
-    let scope = ActivityScope::load(&pool, tenant, &node_ctx)
+    let scope = ActivityScope::load(&bed.pool, tenant, &node_ctx)
         .await
         .expect("scope");
     assert!(
@@ -274,5 +265,5 @@ async fn a_node_credential_resolves_to_the_unfiltered_feed() {
         "a node token keeps the unfiltered tenant feed"
     );
 
-    cleanup(&pool, tenant).await;
+    bed.teardown().await;
 }

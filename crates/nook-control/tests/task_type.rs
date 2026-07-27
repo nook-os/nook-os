@@ -4,12 +4,10 @@
 
 use nook_control::routes::task_query::{query_rows, TaskFilter};
 use nook_control::services::kanban::{KanbanProvider, LocalBoardProvider};
+use nook_testkit::TestBed;
 use nook_types::{BoardId, CreateTaskRequest, TenantId, UpdateTaskRequest};
 use sqlx::PgPool;
 use uuid::Uuid;
-
-mod common;
-use common::test_pool;
 
 /// A tenant + board + one column to hang tasks on.
 async fn fixture(db: &PgPool) -> (TenantId, BoardId) {
@@ -80,9 +78,13 @@ fn patch_type(type_: &str) -> UpdateTaskRequest {
 
 #[tokio::test]
 async fn create_persists_type_and_defaults_to_task() {
-    let Some(db) = test_pool().await else { return };
-    let (tenant, board) = fixture(&db).await;
-    let provider = LocalBoardProvider { db: db.clone() };
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let (tenant, board) = fixture(&bed.pool).await;
+    let provider = LocalBoardProvider {
+        db: bed.pool.clone(),
+    };
 
     // Explicit type is stored.
     let bug = provider
@@ -97,13 +99,19 @@ async fn create_persists_type_and_defaults_to_task() {
         .await
         .expect("create task");
     assert_eq!(plain.type_, "task");
+
+    bed.teardown().await;
 }
 
 #[tokio::test]
 async fn an_invalid_type_is_rejected_not_coerced() {
-    let Some(db) = test_pool().await else { return };
-    let (tenant, board) = fixture(&db).await;
-    let provider = LocalBoardProvider { db: db.clone() };
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let (tenant, board) = fixture(&bed.pool).await;
+    let provider = LocalBoardProvider {
+        db: bed.pool.clone(),
+    };
 
     let err = provider
         .create_task(tenant, board, None, create("nope", Some("frobnicate")))
@@ -116,13 +124,19 @@ async fn an_invalid_type_is_rejected_not_coerced() {
             .contains("invalid task type"),
         "got {err:?}"
     );
+
+    bed.teardown().await;
 }
 
 #[tokio::test]
 async fn patch_changes_the_type() {
-    let Some(db) = test_pool().await else { return };
-    let (tenant, board) = fixture(&db).await;
-    let provider = LocalBoardProvider { db: db.clone() };
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let (tenant, board) = fixture(&bed.pool).await;
+    let provider = LocalBoardProvider {
+        db: bed.pool.clone(),
+    };
 
     let task = provider
         .create_task(tenant, board, None, create("t", None))
@@ -135,13 +149,19 @@ async fn patch_changes_the_type() {
         .await
         .expect("patch");
     assert_eq!(updated.type_, "epic");
+
+    bed.teardown().await;
 }
 
 #[tokio::test]
 async fn the_list_filter_ors_within_types_and_is_off_by_default() {
-    let Some(db) = test_pool().await else { return };
-    let (tenant, board) = fixture(&db).await;
-    let provider = LocalBoardProvider { db: db.clone() };
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let (tenant, board) = fixture(&bed.pool).await;
+    let provider = LocalBoardProvider {
+        db: bed.pool.clone(),
+    };
 
     for (title, ty) in [("e", "epic"), ("b", "bug"), ("c", "chore"), ("t", "task")] {
         provider
@@ -155,7 +175,7 @@ async fn the_list_filter_ors_within_types_and_is_off_by_default() {
             type_: types.into_iter().map(str::to_string).collect(),
             ..Default::default()
         };
-        let db = db.clone();
+        let db = bed.pool.clone();
         async move {
             query_rows(&db, tenant, nook_types::UserId::new(), &f)
                 .await
@@ -187,4 +207,6 @@ async fn the_list_filter_ors_within_types_and_is_off_by_default() {
         !all.iter().any(|t| t.type_ == "epic"),
         "the epic is only returned when explicitly filtered for"
     );
+
+    bed.teardown().await;
 }
