@@ -32,13 +32,27 @@ export interface TerminalTransport {
   close(): void;
 }
 
+/** Imperative handle so a parent (the session's context menu) can copy the
+ *  terminal's selection or paste text down the same send path a keypress uses. */
+export interface TerminalControls {
+  hasSelection(): boolean;
+  getSelection(): string;
+  /** Copy the current selection to the clipboard; false if there was none. */
+  copySelection(): boolean;
+  /** Deliver text to the session (honors bracketed-paste, like a real paste). */
+  paste(text: string): void;
+}
+
 export function TerminalView({
   attach,
   onStatus,
+  onControls,
 }: {
   /** Open the transport; called once on mount. */
   attach(handlers: TerminalHandlers): TerminalTransport;
   onStatus?(status: string): void;
+  /** Receives the imperative handle on mount, `null` on unmount. */
+  onControls?(controls: TerminalControls | null): void;
 }) {
   const hostRef = useRef<HTMLDivElement>(null);
   const { tokens } = useTheme();
@@ -274,21 +288,18 @@ export function TerminalView({
     };
     host.addEventListener("paste", onPaste, true);
 
-    // Right-click: paste (or copy an active selection); Shift+right-click keeps
-    // the browser menu. Middle-click pastes (Linux primary-selection habit).
-    const onContextMenu = (e: MouseEvent) => {
-      if (e.shiftKey) return;
-      e.preventDefault();
-      if (term.hasSelection()) copySelection();
-      else pasteFromClipboard();
-    };
+    // Right-click is now the app-wide Nook context menu (MAIN-167): the session
+    // page registers a region on this element offering Copy selection / Paste to
+    // session, which reaches back in through the `onControls` handle below. The
+    // global capture-phase listener prevents the native menu. Middle-click still
+    // pastes here (Linux primary-selection habit) — that's an auxclick, not a
+    // contextmenu, so it stays local.
     const onAuxClick = (e: MouseEvent) => {
       if (e.button === 1) {
         e.preventDefault();
         pasteFromClipboard();
       }
     };
-    host.addEventListener("contextmenu", onContextMenu);
     host.addEventListener("auxclick", onAuxClick);
 
     const transport = attach({
@@ -342,6 +353,14 @@ export function TerminalView({
       transport.sendInput(new TextEncoder().encode(data));
     });
 
+    // Hand the parent an imperative handle for the context-menu region (AC-4).
+    onControls?.({
+      hasSelection: () => term.hasSelection(),
+      getSelection: () => term.getSelection(),
+      copySelection: () => copySelection(),
+      paste: (text) => pasteText(text),
+    });
+
     // First fit once the renderer has its dimensions; then follow the panel.
     // (Deferred out of the observation callback so resizing the terminal —
     // which changes the observed element — can't re-enter the observer.)
@@ -352,10 +371,10 @@ export function TerminalView({
 
     return () => {
       disposed = true;
+      onControls?.(null);
       clearTimeout(voteTimer);
       observer.disconnect();
       host.removeEventListener("paste", onPaste, true);
-      host.removeEventListener("contextmenu", onContextMenu);
       host.removeEventListener("auxclick", onAuxClick);
       dataSub.dispose();
       transport.close();

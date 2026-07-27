@@ -6,6 +6,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { Plus } from "lucide-react";
+import { nativeContextMenu } from "./contextMenu";
 import { isDesktop, type ControlPlane } from "./desktop";
 import {
   forgetControlPlaneAndReconcile,
@@ -86,6 +87,7 @@ function Tabs() {
             // The host rides in the tooltip so a renamed tab still says which
             // machine it points at, without a second line in this dense strip.
             title={hostOf(cp.base_url)}
+            {...nativeContextMenu}
             onClick={() => switchToControlPlane(cp.base_url, activeUrl)}
             onContextMenu={(e) => {
               e.preventDefault();
@@ -112,6 +114,7 @@ function Tabs() {
         <div
           ref={ctxRef}
           className="cp-context"
+          {...nativeContextMenu}
           style={{ position: "fixed", left: ctx.x, top: ctx.y }}
         >
           <button

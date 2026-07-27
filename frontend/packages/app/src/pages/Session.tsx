@@ -10,7 +10,19 @@ import {
   RotateCw,
 } from "lucide-react";
 import { api, attachSession, type Session } from "@nookos/api";
-import { Empty, Panel, Pill, statusTone, TerminalView } from "@nookos/ui";
+import {
+  Empty,
+  Panel,
+  Pill,
+  statusTone,
+  TerminalView,
+  type TerminalControls,
+} from "@nookos/ui";
+import {
+  canReadClipboardNow,
+  ContextMenuRegion,
+  type ContextMenuItem,
+} from "../contextMenu";
 import { useLive } from "../live";
 import { useWorkspaceContext } from "../context";
 import { ScopeChip } from "../layout";
@@ -251,12 +263,44 @@ function isLive(status: string): boolean {
   return status === "starting" || status === "running" || status === "detached";
 }
 
+// The session terminal's right-click menu (AC-4): copy the terminal's own
+// selection, or paste clipboard text down the session's existing send path
+// (term.paste → onData → transport.sendInput). Registered as a context-menu
+// region so it beats the generic fallback on the app's highest-traffic surface.
+function terminalMenuItems(controls: TerminalControls | null): ContextMenuItem[] {
+  const hasSelection = !!controls && controls.hasSelection();
+  const paste: ContextMenuItem = canReadClipboardNow()
+    ? {
+        label: "Paste to session",
+        onSelect: () => {
+          navigator.clipboard
+            .readText()
+            .then((text) => controls?.paste(text))
+            .catch(() => {});
+        },
+      }
+    : {
+        label: "Paste to session",
+        disabled: true,
+        hint: "Clipboard access blocked",
+      };
+  return [
+    {
+      label: "Copy selection",
+      disabled: !hasSelection,
+      onSelect: () => controls?.copySelection(),
+    },
+    paste,
+  ];
+}
+
 export function SessionPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const [liveStatus, setLiveStatus] = useState<string | null>(null);
   const [attachKey, setAttachKey] = useState(0);
+  const [termControls, setTermControls] = useState<TerminalControls | null>(null);
   const [gitOpen, setGitOpen] = useState(
     () => localStorage.getItem(DIFF_PANEL_KEY) !== "closed",
   );
@@ -465,11 +509,20 @@ export function SessionPage() {
               </button>
             </div>
           ) : (
-            <TerminalView
-              key={`${session.id}:${attachKey}`}
-              attach={(handlers) => attachSession(session.id, handlers)}
-              onStatus={setLiveStatus}
-            />
+            <ContextMenuRegion
+              // `display: contents` keeps this wrapper out of the layout so the
+              // terminal still fills the panel; it stays in the DOM tree so the
+              // context-menu resolver finds the region on right-click.
+              style={{ display: "contents" }}
+              items={() => terminalMenuItems(termControls)}
+            >
+              <TerminalView
+                key={`${session.id}:${attachKey}`}
+                attach={(handlers) => attachSession(session.id, handlers)}
+                onStatus={setLiveStatus}
+                onControls={setTermControls}
+              />
+            </ContextMenuRegion>
           )}
         </Panel>
         {gitOpen && hasGitPanel && session.workspace_id && (

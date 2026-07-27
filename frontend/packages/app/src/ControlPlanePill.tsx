@@ -10,6 +10,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { Check, Plus, Server, ChevronDown } from "lucide-react";
+import { nativeContextMenu } from "./contextMenu";
 import { useAnchoredMenu } from "@nookos/ui";
 import { isDesktop, type ControlPlane } from "./desktop";
 import {
@@ -123,6 +124,7 @@ function Pill() {
               <button
                 key={cp.base_url}
                 className={`cp-row${isActive ? " current" : ""}`}
+                {...nativeContextMenu}
                 onClick={() => switchTo(cp.base_url)}
                 onContextMenu={(e) => {
                   e.preventDefault();
@@ -165,6 +167,7 @@ function Pill() {
         <div
           ref={ctxRef}
           className="cp-context"
+          {...nativeContextMenu}
           style={{ position: "fixed", left: ctx.x, top: ctx.y }}
         >
           <button onClick={() => rename(ctx.cp)}>Rename…</button>

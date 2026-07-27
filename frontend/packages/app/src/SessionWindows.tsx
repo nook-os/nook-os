@@ -7,6 +7,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { CircleDot, Columns2, Loader2, Plus, Rows2, X } from "lucide-react";
 import { api } from "@nookos/api";
 import { TabMenu } from "./SessionTabs";
+import { nativeContextMenu } from "./contextMenu";
 import { useLive, liveAgentMark } from "./live";
 import { askText } from "./dialogs";
 
@@ -56,6 +57,7 @@ export function SessionWindows({ sessionId }: { sessionId: string }) {
             role="button"
             tabIndex={0}
             className={`term-chip${w.active ? " active" : ""}`}
+            {...nativeContextMenu}
             onClick={() => act({ action: "select", index: w.index })}
             onContextMenu={(e) => {
               e.preventDefault();
