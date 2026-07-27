@@ -12,76 +12,12 @@ use axum::Json;
 use nook_control::auth::{AuthCtx, Principal};
 use nook_control::error::ApiError;
 use nook_control::state::AppState;
+use nook_testkit::TestBed;
 use nook_types::{AuthSessionId, SwitchTenantRequest, TenantId, UserId};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-mod common;
-use common::test_pool;
-
-fn test_config() -> nook_control::config::Config {
-    nook_control::config::Config {
-        app_env: "test".into(),
-        bind: "127.0.0.1:0".into(),
-        shutdown_grace_secs: 25,
-        agent_bind: "127.0.0.1:0".into(),
-        agent_public_url: None,
-        agent_tls_cert: None,
-        agent_tls_key: None,
-        public_base_url: "http://localhost:8080".into(),
-        web_origin: "http://localhost:5173".into(),
-        database_url: std::env::var("DATABASE_URL").unwrap_or_default(),
-        oidc_issuer_url: None,
-        oidc_client_id: None,
-        oidc_device_client_id: None,
-        oidc_device_authorization_endpoint: None,
-        oidc_client_secret: None,
-        oidc_redirect_url: None,
-        oidc_scopes: "openid profile email".into(),
-        session_secret: "0".repeat(64),
-        session_ttl_hours: 168,
-        default_tenant_name: "dev".into(),
-        auth_dev_mode: true,
-        mcp_token: None,
-        dev_join_token: None,
-        dist_dir: "/nonexistent".into(),
-        releases_repo: "nook-os/nook-os".into(),
-        artifact_store: "disk".into(),
-        artifact_prefix: "nook".into(),
-        artifact_redirect: false,
-        s3_bucket: None,
-        s3_endpoint: None,
-        s3_region: None,
-        s3_access_key_id: None,
-        s3_secret_access_key: None,
-        s3_path_style: true,
-        cache_provider: "memory".into(),
-        queue_provider: "database".into(),
-        redis_url: None,
-        mail_provider: "capture".into(),
-        smtp_host: None,
-        smtp_port: 587,
-        smtp_tls: "starttls".into(),
-        smtp_from: "NookOS <no-reply@localhost>".into(),
-        smtp_username: None,
-        smtp_password: None,
-        postmark_token: None,
-        postmark_api_url: "https://api.postmarkapp.com/email".into(),
-        mail_from: "NookOS <no-reply@localhost>".into(),
-        mail_send_enabled: false,
-        mail_notifications_enabled: false,
-        mail_max_per_month: Some(100),
-        mail_max_per_day: None,
-        trusted_proxies: Vec::new(),
-    }
-}
-
 async fn seed_tenant(pool: &PgPool) -> TenantId {
-    let _ = sqlx::query(
-        "DELETE FROM tenants WHERE slug LIKE 'authp-%' AND created_at < now() - interval '1 hour'",
-    )
-    .execute(pool)
-    .await;
     let id = TenantId::new();
     sqlx::query("INSERT INTO tenants (id, slug, name) VALUES ($1, $2, $2)")
         .bind(id)
@@ -147,21 +83,6 @@ async fn seed_session(pool: &PgPool, user: UserId, tenant: TenantId) -> Uuid {
     sid
 }
 
-async fn cleanup(pool: &PgPool, tenants: &[TenantId]) {
-    for t in tenants {
-        for tbl in ["events", "sessions_auth", "tenant_members", "users"] {
-            let _ = sqlx::query(&format!("DELETE FROM {tbl} WHERE tenant_id = $1"))
-                .bind(t)
-                .execute(pool)
-                .await;
-        }
-        let _ = sqlx::query("DELETE FROM tenants WHERE id = $1")
-            .bind(t)
-            .execute(pool)
-            .await;
-    }
-}
-
 /// Extract `AuthCtx` from a request bearing `nook_session=<sid>` — exercises the
 /// real cookie path, including the folded session+membership query.
 async fn extract(state: &AppState, sid: Uuid) -> Result<AuthCtx, ApiError> {
@@ -176,13 +97,13 @@ async fn extract(state: &AppState, sid: Uuid) -> Result<AuthCtx, ApiError> {
 /// AC-1: one query, but 401 (no session) and 403 (grant revoked) stay distinct.
 #[tokio::test]
 async fn one_query_keeps_401_no_session_distinct_from_403_revoked_grant() {
-    let Some(pool) = test_pool().await else {
+    let Some(mut bed) = TestBed::new().await else {
         return;
     };
-    let state = AppState::new(pool.clone(), test_config(), None).await;
-    let t = seed_tenant(&pool).await;
-    let me = seed_member(&pool, t, Uuid::new_v4()).await;
-    let sid = seed_session(&pool, me, t).await;
+    let state = bed.app_state().await;
+    let t = seed_tenant(&bed.pool).await;
+    let me = seed_member(&bed.pool, t, Uuid::new_v4()).await;
+    let sid = seed_session(&bed.pool, me, t).await;
 
     // A live session + grant resolves.
     let ok = extract(&state, sid).await.expect("member resolves");
@@ -192,7 +113,7 @@ async fn one_query_keeps_401_no_session_distinct_from_403_revoked_grant() {
 
     // Grant revoked, session still valid → 403 (NOT 401): the fold must not
     // collapse a live-session-without-grant into "no session".
-    revoke(&pool, t, me).await;
+    revoke(&bed.pool, t, me).await;
     let forbidden = extract(&state, sid).await.expect_err("revoked → error");
     assert!(
         matches!(forbidden, ApiError::Forbidden),
@@ -200,7 +121,7 @@ async fn one_query_keeps_401_no_session_distinct_from_403_revoked_grant() {
     );
 
     // No session row at all → 401.
-    grant(&pool, t, me).await; // re-grant, so only the session is missing
+    grant(&bed.pool, t, me).await; // re-grant, so only the session is missing
     let gone = extract(&state, Uuid::new_v4())
         .await
         .expect_err("unknown session → error");
@@ -212,7 +133,7 @@ async fn one_query_keeps_401_no_session_distinct_from_403_revoked_grant() {
     // An expired session → 401 (the `expires_at > now()` guard survived the fold).
     sqlx::query("UPDATE sessions_auth SET expires_at = now() - interval '1 minute' WHERE id = $1")
         .bind(sid)
-        .execute(&pool)
+        .execute(&bed.pool)
         .await
         .unwrap();
     let expired = extract(&state, sid).await.expect_err("expired → error");
@@ -221,19 +142,19 @@ async fn one_query_keeps_401_no_session_distinct_from_403_revoked_grant() {
         "an expired session is 401, got {expired:?}"
     );
 
-    cleanup(&pool, &[t]).await;
+    bed.teardown().await;
 }
 
 /// AC-3: a user token cannot switch (browser-only 400), decided by the explicit
 /// marker — not inferred from a zero-row UPDATE.
 #[tokio::test]
 async fn a_user_token_switch_is_refused_browser_only() {
-    let Some(pool) = test_pool().await else {
+    let Some(mut bed) = TestBed::new().await else {
         return;
     };
-    let state = AppState::new(pool.clone(), test_config(), None).await;
-    let t = seed_tenant(&pool).await;
-    let me = seed_member(&pool, t, Uuid::new_v4()).await;
+    let state = bed.app_state().await;
+    let t = seed_tenant(&bed.pool).await;
+    let me = seed_member(&bed.pool, t, Uuid::new_v4()).await;
 
     // A user token: Principal::User, but NOT a cookie session.
     let token_ctx = AuthCtx {
@@ -255,19 +176,19 @@ async fn a_user_token_switch_is_refused_browser_only() {
         "a user token switch is a browser-only 400, got {err:?}"
     );
 
-    cleanup(&pool, &[t]).await;
+    bed.teardown().await;
 }
 
 /// AC-3: a cookie session that authenticated but whose row vanished mid-request
 /// is 401 (session gone), not the token 400.
 #[tokio::test]
 async fn a_vanished_cookie_session_switch_is_401() {
-    let Some(pool) = test_pool().await else {
+    let Some(mut bed) = TestBed::new().await else {
         return;
     };
-    let state = AppState::new(pool.clone(), test_config(), None).await;
-    let t = seed_tenant(&pool).await;
-    let me = seed_member(&pool, t, Uuid::new_v4()).await;
+    let state = bed.app_state().await;
+    let t = seed_tenant(&bed.pool).await;
+    let me = seed_member(&bed.pool, t, Uuid::new_v4()).await;
 
     // A cookie session (marker true), member of `t`, but its sessions_auth row
     // does not exist — so the membership check passes and the UPDATE hits 0 rows.
@@ -290,22 +211,22 @@ async fn a_vanished_cookie_session_switch_is_401() {
         "a vanished cookie session is 401, got {err:?}"
     );
 
-    cleanup(&pool, &[t]).await;
+    bed.teardown().await;
 }
 
 /// AC-2: a real crossing is auditable from BOTH tenants' event logs.
 #[tokio::test]
 async fn a_switch_is_audited_from_both_tenants() {
-    let Some(pool) = test_pool().await else {
+    let Some(mut bed) = TestBed::new().await else {
         return;
     };
-    let state = AppState::new(pool.clone(), test_config(), None).await;
+    let state = bed.app_state().await;
     let person = Uuid::new_v4();
-    let a = seed_tenant(&pool).await; // source
-    let b = seed_tenant(&pool).await; // destination
-    let me_a = seed_member(&pool, a, person).await;
-    let _me_b = seed_member(&pool, b, person).await; // same person, member of b too
-    let sid = seed_session(&pool, me_a, a).await;
+    let a = seed_tenant(&bed.pool).await; // source
+    let b = seed_tenant(&bed.pool).await; // destination
+    let me_a = seed_member(&bed.pool, a, person).await;
+    let _me_b = seed_member(&bed.pool, b, person).await; // same person, member of b too
+    let sid = seed_session(&bed.pool, me_a, a).await;
 
     let ctx = AuthCtx {
         session_id: AuthSessionId(sid),
@@ -324,6 +245,9 @@ async fn a_switch_is_audited_from_both_tenants() {
 
     // The whole `user.tenant_switched` payload in a tenant's log (exactly one
     // is written per side in this scenario).
+    // An owned pool clone the per-tenant closure can capture without borrowing
+    // `bed` (teardown needs `&mut bed` after these run).
+    let pool = bed.pool.clone();
     let payload = |t: TenantId| {
         let pool = pool.clone();
         async move {
@@ -347,7 +271,7 @@ async fn a_switch_is_audited_from_both_tenants() {
     let (dest_count, dest) = payload(b).await;
     let (source_count, source) = payload(a).await;
 
-    cleanup(&pool, &[a, b]).await;
+    bed.teardown().await;
 
     assert_eq!(dest_count, 1, "the destination records the arrival");
     assert_eq!(source_count, 1, "the source records the departure (AC-2)");
@@ -393,14 +317,14 @@ async fn a_switch_is_audited_from_both_tenants() {
 /// NO departure — there is no crossing to record.
 #[tokio::test]
 async fn reselecting_the_current_tenant_records_no_departure() {
-    let Some(pool) = test_pool().await else {
+    let Some(mut bed) = TestBed::new().await else {
         return;
     };
-    let state = AppState::new(pool.clone(), test_config(), None).await;
+    let state = bed.app_state().await;
     let person = Uuid::new_v4();
-    let a = seed_tenant(&pool).await;
-    let me_a = seed_member(&pool, a, person).await;
-    let sid = seed_session(&pool, me_a, a).await;
+    let a = seed_tenant(&bed.pool).await;
+    let me_a = seed_member(&bed.pool, a, person).await;
+    let sid = seed_session(&bed.pool, me_a, a).await;
 
     let ctx = AuthCtx {
         session_id: AuthSessionId(sid),
@@ -423,11 +347,11 @@ async fn reselecting_the_current_tenant_records_no_departure() {
          WHERE tenant_id = $1 AND kind = 'user.tenant_switched'",
     )
     .bind(a)
-    .fetch_all(&pool)
+    .fetch_all(&bed.pool)
     .await
     .unwrap();
 
-    cleanup(&pool, &[a]).await;
+    bed.teardown().await;
 
     // Exactly the arrival, and nothing with direction "out".
     assert_eq!(directions.len(), 1, "only the arrival is recorded");
@@ -442,15 +366,15 @@ async fn reselecting_the_current_tenant_records_no_departure() {
 /// the same code chat uses, tested here where the schema is provisioned.
 #[tokio::test]
 async fn nook_auth_resolves_session_and_bearer() {
-    let Some(pool) = test_pool().await else {
+    let Some(mut bed) = TestBed::new().await else {
         return;
     };
-    let t = seed_tenant(&pool).await;
-    let me = seed_member(&pool, t, Uuid::new_v4()).await;
-    let sid = seed_session(&pool, me, t).await;
+    let t = seed_tenant(&bed.pool).await;
+    let me = seed_member(&bed.pool, t, Uuid::new_v4()).await;
+    let sid = seed_session(&bed.pool, me, t).await;
 
     // Session cookie → the right user + tenant, marked cookie_session.
-    let s = nook_auth::resolve_session(&pool, sid)
+    let s = nook_auth::resolve_session(&bed.pool, sid)
         .await
         .expect("valid session resolves");
     assert_eq!(s.user_id, me.0);
@@ -467,10 +391,10 @@ async fn nook_auth_resolves_session_and_bearer() {
     .bind(t)
     .bind(me)
     .bind(nook_auth::hash_token(token))
-    .execute(&pool)
+    .execute(&bed.pool)
     .await
     .unwrap();
-    let b = nook_auth::resolve_bearer(&pool, token)
+    let b = nook_auth::resolve_bearer(&bed.pool, token)
         .await
         .expect("valid token resolves");
     assert_eq!(b.user_id, me.0);
@@ -479,13 +403,13 @@ async fn nook_auth_resolves_session_and_bearer() {
 
     // Unknown credentials are refused.
     assert!(matches!(
-        nook_auth::resolve_session(&pool, Uuid::new_v4()).await,
+        nook_auth::resolve_session(&bed.pool, Uuid::new_v4()).await,
         Err(nook_auth::AuthError::Unauthorized)
     ));
     assert!(matches!(
-        nook_auth::resolve_bearer(&pool, "nook_user_nope").await,
+        nook_auth::resolve_bearer(&bed.pool, "nook_user_nope").await,
         Err(nook_auth::AuthError::Unauthorized)
     ));
 
-    cleanup(&pool, &[t]).await;
+    bed.teardown().await;
 }

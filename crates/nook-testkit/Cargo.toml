@@ -1,0 +1,21 @@
+[package]
+name = "nook-testkit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "nook_testkit"
+path = "src/lib.rs"
+
+# A test-only harness (MAIN-156). It depends on nook-control for AppState /
+# MIGRATOR / the canonical Config, and nook-control's own tests dev-depend on it
+# — Cargo permits that cycle because it runs only through dev-dependencies.
+[dependencies]
+nook-control = { workspace = true }
+nook-infra = { workspace = true, features = ["test-support"] }
+nook-types = { workspace = true }
+sqlx = { workspace = true }
+tokio = { workspace = true }
+uuid = { workspace = true }
+anyhow = { workspace = true }

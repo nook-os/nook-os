@@ -73,6 +73,8 @@ ipnet = "2"
 # Tests here build a defaulted Config via nook-infra's test-support helper,
 # which moved out with the config module in MAIN-146.
 nook-infra = { workspace = true, features = ["test-support"] }
+# The shared test harness (MAIN-156). Cycle back to nook-control is dev-only.
+nook-testkit = { workspace = true }
 # The notebook seal test (MAIN-100) fabricates a client blob with
 # `crypto::seal_with_passphrase` and base64-encodes it for the seal request.
 base64 = { workspace = true }

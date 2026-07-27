@@ -7,93 +7,13 @@
 //! than by reading the code.
 //!
 //! Needs a running Postgres (the dev stack's works): set `DATABASE_URL`. The
-//! tests skip cleanly when it's absent so `cargo test` stays green anywhere.
+//! tests skip cleanly when it's absent. Setup + teardown run through
+//! `nook_testkit::TestBed` (MAIN-156).
 
-use nook_control::config::Config;
 use nook_control::services::identity::{email_is_verified, login_identity, IdentityClaims};
-use nook_control::state::AppState;
+use nook_testkit::TestBed;
 use nook_types::TenantId;
-use sqlx::PgPool;
-
-mod common;
-use common::test_pool;
-use tokio::sync::Mutex;
 use uuid::Uuid;
-
-/// These tests share one database and one piece of global state — "the oldest
-/// tenant on the instance" — so they run one at a time. Cargo runs tests in a
-/// thread pool by default, and two of these racing produces a failure that
-/// looks like a bug in provisioning rather than in the test.
-static SERIAL: Mutex<()> = Mutex::const_new(());
-
-/// A config that does not touch the environment beyond what Config requires.
-///
-/// The default tenant name is unique per call. Hard-coding "dev" made these
-/// tests inherit whatever the shared development database happened to hold —
-/// including, once local accounts landed, a default tenant already committed
-/// to password sign-in, which refuses OIDC identities by design. The tests
-/// were reporting that as a bug in provisioning. Provisioning their own tenant
-/// makes them independent of ambient state, which is what they were always
-/// assuming.
-fn test_config() -> Config {
-    Config {
-        app_env: "test".into(),
-        bind: "127.0.0.1:0".into(),
-        shutdown_grace_secs: 25,
-        public_base_url: "http://localhost:8080".into(),
-        web_origin: "http://localhost:5173".into(),
-        database_url: std::env::var("DATABASE_URL").unwrap_or_default(),
-        oidc_issuer_url: None,
-        oidc_client_id: None,
-        oidc_device_client_id: None,
-        oidc_device_authorization_endpoint: None,
-        oidc_client_secret: None,
-        oidc_redirect_url: None,
-        oidc_scopes: "openid profile email".into(),
-        session_secret: "0".repeat(64),
-        session_ttl_hours: 168,
-        default_tenant_name: format!("test-{}", uuid::Uuid::now_v7().simple()),
-        auth_dev_mode: true,
-        mcp_token: None,
-        dev_join_token: None,
-        dist_dir: "/nonexistent".into(),
-        // Port 0 = let the OS pick; these tests never bind it.
-        agent_bind: "127.0.0.1:0".into(),
-        agent_public_url: None,
-        agent_tls_cert: None,
-        agent_tls_key: None,
-        releases_repo: "nook-os/nook-os".into(),
-        // Artifact storage is irrelevant to tenant isolation; disk with a
-        // nonexistent directory keeps these tests off the network.
-        artifact_store: "disk".into(),
-        artifact_prefix: "nook".into(),
-        artifact_redirect: false,
-        s3_bucket: None,
-        s3_endpoint: None,
-        s3_region: None,
-        s3_access_key_id: None,
-        s3_secret_access_key: None,
-        s3_path_style: true,
-        cache_provider: "memory".into(),
-        queue_provider: "database".into(),
-        redis_url: None,
-        mail_provider: "capture".into(),
-        smtp_host: None,
-        smtp_port: 587,
-        smtp_tls: "starttls".into(),
-        smtp_from: "NookOS <no-reply@localhost>".into(),
-        smtp_username: None,
-        smtp_password: None,
-        postmark_token: None,
-        postmark_api_url: "https://api.postmarkapp.com/email".into(),
-        mail_from: "NookOS <no-reply@localhost>".into(),
-        mail_send_enabled: false,
-        mail_notifications_enabled: false,
-        mail_max_per_month: Some(100),
-        mail_max_per_day: None,
-        trusted_proxies: Vec::new(),
-    }
-}
 
 fn claims(subject: &str, name: &str) -> IdentityClaims {
     claims_verified(subject, name, false)
@@ -111,30 +31,14 @@ fn claims_verified(subject: &str, name: &str, email_verified: bool) -> IdentityC
     }
 }
 
-/// Remove tenants a test created — never the seeded one.
-///
-/// The first identity on a fresh instance *adopts* the seeded tenant rather
-/// than making its own, so a test can end up holding a tenant it did not
-/// create. Deleting that takes the dev instance's board, join token and node
-/// with it.
-async fn cleanup(pool: &PgPool, tenants: &[TenantId]) {
-    for t in tenants {
-        let _ = sqlx::query("DELETE FROM tenants WHERE id = $1 AND slug <> 'dev'")
-            .bind(t)
-            .execute(pool)
-            .await;
-    }
-}
-
 /// The whole point: two people signing in do not end up in one tenant.
 #[tokio::test]
 async fn each_new_user_gets_their_own_tenant() {
-    let _serial = SERIAL.lock().await;
-    let Some(pool) = test_pool().await else {
+    let Some(mut bed) = TestBed::new().await else {
         eprintln!("skipping: DATABASE_URL not set / postgres unreachable");
         return;
     };
-    let state = AppState::new(pool.clone(), test_config(), None).await;
+    let state = bed.app_state().await;
 
     // Unique subjects so the test is re-runnable against a live dev database.
     let a_sub = format!("alice-{}", Uuid::now_v7().simple());
@@ -165,7 +69,7 @@ async fn each_new_user_gets_their_own_tenant() {
     .bind(b_user.id.0)
     .bind(a_tenant.id)
     .bind(b_tenant.id)
-    .fetch_one(&pool)
+    .fetch_one(&bed.pool)
     .await
     .unwrap();
     assert_eq!(
@@ -173,18 +77,17 @@ async fn each_new_user_gets_their_own_tenant() {
         "each user belongs to exactly one of the two tenants"
     );
 
-    cleanup(&pool, &[a_tenant.id, b_tenant.id]).await;
+    bed.teardown().await;
 }
 
 /// Signing in again is not a new tenant — the identity is already known.
 #[tokio::test]
 async fn returning_user_keeps_their_tenant() {
-    let _serial = SERIAL.lock().await;
-    let Some(pool) = test_pool().await else {
+    let Some(mut bed) = TestBed::new().await else {
         eprintln!("skipping: DATABASE_URL not set / postgres unreachable");
         return;
     };
-    let state = AppState::new(pool.clone(), test_config(), None).await;
+    let state = bed.app_state().await;
     let sub = format!("carol-{}", Uuid::now_v7().simple());
 
     let (first_user, first_tenant) = login_identity(&state, claims(&sub, "Carol"))
@@ -199,12 +102,12 @@ async fn returning_user_keeps_their_tenant() {
 
     let (tenant_count,): (i64,) = sqlx::query_as("SELECT count(*) FROM tenants WHERE id = $1")
         .bind(first_tenant.id)
-        .fetch_one(&pool)
+        .fetch_one(&bed.pool)
         .await
         .unwrap();
     assert_eq!(tenant_count, 1);
 
-    cleanup(&pool, &[first_tenant.id]).await;
+    bed.teardown().await;
 }
 
 /// Membership is written alongside the user, because that table is what teams
@@ -212,12 +115,11 @@ async fn returning_user_keeps_their_tenant() {
 /// rule and not by the other.
 #[tokio::test]
 async fn membership_row_mirrors_the_personal_tenant() {
-    let _serial = SERIAL.lock().await;
-    let Some(pool) = test_pool().await else {
+    let Some(mut bed) = TestBed::new().await else {
         eprintln!("skipping: DATABASE_URL not set / postgres unreachable");
         return;
     };
-    let state = AppState::new(pool.clone(), test_config(), None).await;
+    let state = bed.app_state().await;
     let sub = format!("dave-{}", Uuid::now_v7().simple());
 
     let (user, tenant) = login_identity(&state, claims(&sub, "Dave"))
@@ -230,7 +132,7 @@ async fn membership_row_mirrors_the_personal_tenant() {
     )
     .bind(tenant.id)
     .bind(user.id.0)
-    .fetch_optional(&pool)
+    .fetch_optional(&bed.pool)
     .await
     .unwrap();
 
@@ -238,7 +140,7 @@ async fn membership_row_mirrors_the_personal_tenant() {
     assert_eq!(principal_type, "user");
     assert_eq!(role, "owner");
 
-    cleanup(&pool, &[tenant.id]).await;
+    bed.teardown().await;
 }
 
 /// There is no way to make two people share a tenant by signing in. The flag
@@ -246,12 +148,11 @@ async fn membership_row_mirrors_the_personal_tenant() {
 /// identities, two tenants, no configuration involved.
 #[tokio::test]
 async fn every_new_identity_gets_its_own_tenant() {
-    let _serial = SERIAL.lock().await;
-    let Some(pool) = test_pool().await else {
+    let Some(mut bed) = TestBed::new().await else {
         eprintln!("skipping: DATABASE_URL not set / postgres unreachable");
         return;
     };
-    let state = AppState::new(pool.clone(), test_config(), None).await;
+    let state = bed.app_state().await;
 
     let a = format!("erin-{}", Uuid::now_v7().simple());
     let b = format!("frank-{}", Uuid::now_v7().simple());
@@ -268,7 +169,7 @@ async fn every_new_identity_gets_its_own_tenant() {
     );
     assert_eq!(b_user.role, "owner");
 
-    cleanup(&pool, &[a_tenant.id, b_tenant.id]).await;
+    bed.teardown().await;
 }
 
 /// A node token is a service credential, not the owner's password.
@@ -348,45 +249,15 @@ async fn node_tokens_are_confined_to_their_own_machine() {
     // refuses a human on a node they do not own. Asserted here against a real
     // node, with the comprehensive owner/member/admin/ownerless/MCP matrix in
     // tests/node_owner.rs.
-    let Some(pool) = test_pool().await else {
+    let Some(mut bed) = TestBed::new().await else {
         return;
     };
-    let _guard = SERIAL.lock().await;
-    let state = AppState::new(pool.clone(), test_config(), None).await;
+    let state = bed.app_state().await;
 
-    let tenant = TenantId(Uuid::now_v7());
-    sqlx::query("INSERT INTO tenants (id, name, slug) VALUES ($1, $2, $2)")
-        .bind(tenant)
-        .bind(format!("iso-{}", tenant.0.simple()))
-        .execute(&pool)
-        .await
-        .expect("tenant");
+    let tenant = bed.tenant("iso").await;
     // A member whose person owns NO node, and a node owned by someone else.
-    let member = UserId(Uuid::now_v7());
-    sqlx::query(
-        "INSERT INTO users (id, tenant_id, person_id, display_name, email, role)
-         VALUES ($1, $2, $3, 'M', $4, 'member')",
-    )
-    .bind(member)
-    .bind(tenant)
-    .bind(Uuid::now_v7())
-    .bind(format!("m-{}@example.test", member.0.simple()))
-    .execute(&pool)
-    .await
-    .expect("member");
-    let their_node = NodeId(Uuid::now_v7());
-    sqlx::query(
-        "INSERT INTO nodes (id, tenant_id, name, node_token_hash, status, owner_person_id)
-         VALUES ($1, $2, $3, $4, 'offline', $5)",
-    )
-    .bind(their_node)
-    .bind(tenant)
-    .bind(format!("nd-{}", their_node.0.simple()))
-    .bind(format!("h-{}", their_node.0.simple()))
-    .bind(Uuid::now_v7()) // owned by a different person
-    .execute(&pool)
-    .await
-    .expect("node");
+    let (member, _member_person) = bed.user(tenant, "member").await;
+    let their_node = bed.node(tenant, Uuid::now_v7()).await; // owned by a different person
 
     let member_ctx = AuthCtx {
         session_id: AuthSessionId(Uuid::nil()),
@@ -403,29 +274,25 @@ async fn node_tokens_are_confined_to_their_own_machine() {
         "MAIN-130: a human must be refused starting a session on a node they do not own",
     );
 
-    let _ = sqlx::query("DELETE FROM tenants WHERE id = $1")
-        .bind(tenant)
-        .execute(&pool)
-        .await;
+    bed.teardown().await;
 }
 
 /// MAIN-29: an OIDC login whose IdP asserts `email_verified=true` stamps the
 /// identity, and the predicate reports it. An unverified claim leaves it null.
 #[tokio::test]
 async fn oidc_email_verified_claim_sets_the_timestamp_and_predicate() {
-    let _serial = SERIAL.lock().await;
-    let Some(pool) = test_pool().await else {
+    let Some(mut bed) = TestBed::new().await else {
         eprintln!("skipping: DATABASE_URL not set / postgres unreachable");
         return;
     };
-    let state = AppState::new(pool.clone(), test_config(), None).await;
+    let state = bed.app_state().await;
 
     let v_sub = format!("verified-{}", Uuid::now_v7().simple());
-    let (v_user, v_tenant) = login_identity(&state, claims_verified(&v_sub, "Vera", true))
+    let (v_user, _v_tenant) = login_identity(&state, claims_verified(&v_sub, "Vera", true))
         .await
         .expect("verified user signs in");
     let u_sub = format!("unverified-{}", Uuid::now_v7().simple());
-    let (u_user, u_tenant) = login_identity(&state, claims_verified(&u_sub, "Uri", false))
+    let (u_user, _u_tenant) = login_identity(&state, claims_verified(&u_sub, "Uri", false))
         .await
         .expect("unverified user signs in");
 
@@ -433,21 +300,21 @@ async fn oidc_email_verified_claim_sets_the_timestamp_and_predicate() {
     let (v_at,): (Option<chrono::DateTime<chrono::Utc>>,) =
         sqlx::query_as("SELECT email_verified_at FROM identities WHERE subject = $1")
             .bind(&v_sub)
-            .fetch_one(&pool)
+            .fetch_one(&bed.pool)
             .await
             .unwrap();
     let (u_at,): (Option<chrono::DateTime<chrono::Utc>>,) =
         sqlx::query_as("SELECT email_verified_at FROM identities WHERE subject = $1")
             .bind(&u_sub)
-            .fetch_one(&pool)
+            .fetch_one(&bed.pool)
             .await
             .unwrap();
 
     // …and so does the predicate.
-    let v_pred = email_is_verified(&pool, v_user.id).await.unwrap();
-    let u_pred = email_is_verified(&pool, u_user.id).await.unwrap();
+    let v_pred = email_is_verified(&bed.pool, v_user.id).await.unwrap();
+    let u_pred = email_is_verified(&bed.pool, u_user.id).await.unwrap();
 
-    cleanup(&pool, &[v_tenant.id, u_tenant.id]).await;
+    bed.teardown().await;
 
     assert!(
         v_at.is_some(),
@@ -465,19 +332,18 @@ async fn oidc_email_verified_claim_sets_the_timestamp_and_predicate() {
 /// time the IdP asserts it — verification only moves one way.
 #[tokio::test]
 async fn returning_login_records_a_newly_verified_email() {
-    let _serial = SERIAL.lock().await;
-    let Some(pool) = test_pool().await else {
+    let Some(mut bed) = TestBed::new().await else {
         eprintln!("skipping: DATABASE_URL not set / postgres unreachable");
         return;
     };
-    let state = AppState::new(pool.clone(), test_config(), None).await;
+    let state = bed.app_state().await;
     let sub = format!("laterverify-{}", Uuid::now_v7().simple());
 
-    let (user, tenant) = login_identity(&state, claims_verified(&sub, "Lee", false))
+    let (user, _tenant) = login_identity(&state, claims_verified(&sub, "Lee", false))
         .await
         .expect("first sign-in, unverified");
     assert!(
-        !email_is_verified(&pool, user.id).await.unwrap(),
+        !email_is_verified(&bed.pool, user.id).await.unwrap(),
         "starts unverified"
     );
 
@@ -485,8 +351,8 @@ async fn returning_login_records_a_newly_verified_email() {
     login_identity(&state, claims_verified(&sub, "Lee", true))
         .await
         .expect("second sign-in, now verified");
-    let verified = email_is_verified(&pool, user.id).await.unwrap();
+    let verified = email_is_verified(&bed.pool, user.id).await.unwrap();
 
-    cleanup(&pool, &[tenant.id]).await;
+    bed.teardown().await;
     assert!(verified, "a later verified login records the verification");
 }

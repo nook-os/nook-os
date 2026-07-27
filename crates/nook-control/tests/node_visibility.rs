@@ -2,74 +2,16 @@
 //! only nodes whose `owner_person_id` is theirs (a non-owned id 404s); a tenant
 //! owner/admin sees the whole fleet; a node token's view is unchanged; and
 //! `/auth/me` carries the caller's role + person_id. Set `DATABASE_URL`.
+//!
+//! Setup + teardown run through `nook_testkit::TestBed` (MAIN-156).
 
 use axum::extract::{Path, State};
 use nook_control::auth::{AuthCtx, Principal};
-use nook_control::config::Config;
 use nook_control::state::AppState;
+use nook_testkit::TestBed;
 use nook_types::*;
 use sqlx::PgPool;
 use uuid::Uuid;
-
-mod common;
-use common::test_pool;
-
-fn test_config() -> Config {
-    Config {
-        app_env: "test".into(),
-        bind: "127.0.0.1:0".into(),
-        shutdown_grace_secs: 25,
-        public_base_url: "http://localhost:8080".into(),
-        web_origin: "http://localhost:5173".into(),
-        database_url: std::env::var("DATABASE_URL").unwrap_or_default(),
-        oidc_issuer_url: None,
-        oidc_client_id: None,
-        oidc_device_client_id: None,
-        oidc_device_authorization_endpoint: None,
-        oidc_client_secret: None,
-        oidc_redirect_url: None,
-        oidc_scopes: "openid profile email".into(),
-        session_secret: "0".repeat(64),
-        session_ttl_hours: 168,
-        default_tenant_name: format!("test-{}", Uuid::now_v7().simple()),
-        auth_dev_mode: true,
-        mcp_token: None,
-        dev_join_token: None,
-        dist_dir: "/nonexistent".into(),
-        agent_bind: "127.0.0.1:0".into(),
-        agent_public_url: None,
-        agent_tls_cert: None,
-        agent_tls_key: None,
-        releases_repo: "nook-os/nook-os".into(),
-        artifact_store: "disk".into(),
-        artifact_prefix: "nook".into(),
-        artifact_redirect: false,
-        s3_bucket: None,
-        s3_endpoint: None,
-        s3_region: None,
-        s3_access_key_id: None,
-        s3_secret_access_key: None,
-        s3_path_style: true,
-        cache_provider: "memory".into(),
-        queue_provider: "database".into(),
-        redis_url: None,
-        mail_provider: "capture".into(),
-        smtp_host: None,
-        smtp_port: 587,
-        smtp_tls: "starttls".into(),
-        smtp_from: "NookOS <no-reply@localhost>".into(),
-        smtp_username: None,
-        smtp_password: None,
-        postmark_token: None,
-        postmark_api_url: "https://api.postmarkapp.com/email".into(),
-        mail_from: "NookOS <no-reply@localhost>".into(),
-        mail_send_enabled: false,
-        mail_notifications_enabled: false,
-        mail_max_per_month: Some(100),
-        mail_max_per_day: None,
-        trusted_proxies: Vec::new(),
-    }
-}
 
 fn user_ctx(user: UserId, tenant: TenantId) -> AuthCtx {
     AuthCtx {
@@ -81,72 +23,19 @@ fn user_ctx(user: UserId, tenant: TenantId) -> AuthCtx {
     }
 }
 
-async fn new_tenant(db: &PgPool) -> TenantId {
-    let id = TenantId::new();
-    sqlx::query("INSERT INTO tenants (id, name, slug) VALUES ($1, $2, $2)")
-        .bind(id)
-        .bind(format!("nv-{}", id.0.simple()))
-        .execute(db)
-        .await
-        .expect("tenant");
-    id
-}
-
-async fn add_user(db: &PgPool, tenant: TenantId, role: &str) -> (UserId, Uuid) {
-    let user = UserId::new();
-    let person = Uuid::now_v7();
-    sqlx::query(
-        "INSERT INTO users (id, tenant_id, person_id, display_name, email, role)
-         VALUES ($1, $2, $3, 'U', $4, $5)",
-    )
-    .bind(user)
-    .bind(tenant)
-    .bind(person)
-    .bind(format!("u-{}@example.test", user.0.simple()))
-    .bind(role)
-    .execute(db)
-    .await
-    .expect("user");
-    (user, person)
-}
-
-async fn add_node(db: &PgPool, tenant: TenantId, owner: Uuid) -> NodeId {
-    let id = NodeId::new();
-    sqlx::query(
-        "INSERT INTO nodes (id, tenant_id, name, node_token_hash, status, owner_person_id)
-         VALUES ($1, $2, $3, $4, 'offline', $5)",
-    )
-    .bind(id)
-    .bind(tenant)
-    .bind(format!("n-{}", id.0.simple()))
-    .bind(format!("h-{}", id.0.simple()))
-    .bind(owner)
-    .execute(db)
-    .await
-    .expect("node");
-    id
-}
-
-async fn cleanup(db: &PgPool, tenant: TenantId) {
-    let _ = sqlx::query("DELETE FROM tenants WHERE id = $1 AND slug <> 'dev'")
-        .bind(tenant)
-        .execute(db)
-        .await;
-}
-
 #[tokio::test]
 async fn members_see_only_their_own_admins_see_all() {
-    let Some(pool) = test_pool().await else {
+    let Some(mut bed) = TestBed::new().await else {
         eprintln!("skipping node-visibility test — no DATABASE_URL");
         return;
     };
-    let state = AppState::new(pool.clone(), test_config(), None).await;
-    let tenant = new_tenant(&pool).await;
-    let (owner, owner_person) = add_user(&pool, tenant, "owner").await;
-    let (member, member_person) = add_user(&pool, tenant, "member").await;
+    let state = bed.app_state().await;
+    let tenant = bed.tenant("nv").await;
+    let (owner, owner_person) = bed.user(tenant, "owner").await;
+    let (member, member_person) = bed.user(tenant, "member").await;
 
-    let my_node = add_node(&pool, tenant, member_person).await;
-    let owner_node = add_node(&pool, tenant, owner_person).await;
+    let my_node = bed.node(tenant, member_person).await;
+    let owner_node = bed.node(tenant, owner_person).await;
 
     // The member sees ONLY their own node.
     let mine = nook_control::routes::nodes::list(State(state.clone()), user_ctx(member, tenant))
@@ -171,21 +60,21 @@ async fn members_see_only_their_own_admins_see_all() {
         "an owner/admin sees the whole fleet"
     );
 
-    cleanup(&pool, tenant).await;
+    bed.teardown().await;
 }
 
 #[tokio::test]
 async fn get_one_404s_for_a_member_on_a_non_owned_node() {
-    let Some(pool) = test_pool().await else {
+    let Some(mut bed) = TestBed::new().await else {
         return;
     };
-    let state = AppState::new(pool.clone(), test_config(), None).await;
-    let tenant = new_tenant(&pool).await;
-    let (owner, owner_person) = add_user(&pool, tenant, "owner").await;
-    let (member, member_person) = add_user(&pool, tenant, "member").await;
+    let state = bed.app_state().await;
+    let tenant = bed.tenant("nv").await;
+    let (owner, owner_person) = bed.user(tenant, "owner").await;
+    let (member, member_person) = bed.user(tenant, "member").await;
 
-    let my_node = add_node(&pool, tenant, member_person).await;
-    let owner_node = add_node(&pool, tenant, owner_person).await;
+    let my_node = bed.node(tenant, member_person).await;
+    let owner_node = bed.node(tenant, owner_person).await;
 
     // A member reading their own node: ok. Reading a teammate's: 404.
     assert!(
@@ -220,21 +109,21 @@ async fn get_one_404s_for_a_member_on_a_non_owned_node() {
         "an owner/admin may read any node in the tenant"
     );
 
-    cleanup(&pool, tenant).await;
+    bed.teardown().await;
 }
 
 #[tokio::test]
 async fn a_node_token_sees_the_whole_fleet_unchanged() {
-    let Some(pool) = test_pool().await else {
+    let Some(mut bed) = TestBed::new().await else {
         return;
     };
-    let state = AppState::new(pool.clone(), test_config(), None).await;
-    let tenant = new_tenant(&pool).await;
-    let (_owner, owner_person) = add_user(&pool, tenant, "owner").await;
-    let (_member, member_person) = add_user(&pool, tenant, "member").await;
+    let state = bed.app_state().await;
+    let tenant = bed.tenant("nv").await;
+    let (_owner, owner_person) = bed.user(tenant, "owner").await;
+    let (_member, member_person) = bed.user(tenant, "member").await;
 
-    let a = add_node(&pool, tenant, owner_person).await;
-    let b = add_node(&pool, tenant, member_person).await;
+    let a = bed.node(tenant, owner_person).await;
+    let b = bed.node(tenant, member_person).await;
 
     // A node credential's listing is unchanged (whole tenant), per AC-1.
     let node_ctx = AuthCtx {
@@ -254,17 +143,17 @@ async fn a_node_token_sees_the_whole_fleet_unchanged() {
         "a node token still sees every node in its tenant"
     );
 
-    cleanup(&pool, tenant).await;
+    bed.teardown().await;
 }
 
 #[tokio::test]
 async fn me_carries_role_and_person_id() {
-    let Some(pool) = test_pool().await else {
+    let Some(mut bed) = TestBed::new().await else {
         return;
     };
-    let state = AppState::new(pool.clone(), test_config(), None).await;
-    let tenant = new_tenant(&pool).await;
-    let (member, member_person) = add_user(&pool, tenant, "member").await;
+    let state = bed.app_state().await;
+    let tenant = bed.tenant("nv").await;
+    let (member, member_person) = bed.user(tenant, "member").await;
 
     let me = nook_control::routes::auth::me(State(state.clone()), user_ctx(member, tenant))
         .await
@@ -279,7 +168,7 @@ async fn me_carries_role_and_person_id() {
         "me carries the caller's tenant role"
     );
 
-    cleanup(&pool, tenant).await;
+    bed.teardown().await;
 }
 
 // ── MAIN-135: shared nodes (owner-set flag + team visibility) ─────────────────
@@ -328,15 +217,15 @@ async fn member_sees(state: &AppState, member: UserId, tenant: TenantId, node: N
 
 #[tokio::test]
 async fn sharing_a_node_makes_it_visible_to_the_team_and_unsharing_reverts() {
-    let Some(pool) = test_pool().await else {
+    let Some(mut bed) = TestBed::new().await else {
         eprintln!("skipping shared-node test — no DATABASE_URL");
         return;
     };
-    let state = AppState::new(pool.clone(), test_config(), None).await;
-    let tenant = new_tenant(&pool).await;
-    let (owner, owner_person) = add_user(&pool, tenant, "owner").await;
-    let (member, _member_person) = add_user(&pool, tenant, "member").await;
-    let node = add_node(&pool, tenant, owner_person).await;
+    let state = bed.app_state().await;
+    let tenant = bed.tenant("nv").await;
+    let (owner, owner_person) = bed.user(tenant, "owner").await;
+    let (member, _member_person) = bed.user(tenant, "member").await;
+    let node = bed.node(tenant, owner_person).await;
 
     // Before sharing: the member cannot see the owner's node (MAIN-132).
     assert!(
@@ -385,22 +274,22 @@ async fn sharing_a_node_makes_it_visible_to_the_team_and_unsharing_reverts() {
         "unsharing removes the node from the member's view again"
     );
 
-    cleanup(&pool, tenant).await;
+    bed.teardown().await;
 }
 
 #[tokio::test]
 async fn only_the_owner_may_toggle_shared() {
-    let Some(pool) = test_pool().await else {
+    let Some(mut bed) = TestBed::new().await else {
         return;
     };
-    let state = AppState::new(pool.clone(), test_config(), None).await;
-    let tenant = new_tenant(&pool).await;
-    let (owner, owner_person) = add_user(&pool, tenant, "owner").await;
-    let (member, _) = add_user(&pool, tenant, "member").await;
-    let (admin, _) = add_user(&pool, tenant, "admin").await;
+    let state = bed.app_state().await;
+    let tenant = bed.tenant("nv").await;
+    let (owner, owner_person) = bed.user(tenant, "owner").await;
+    let (member, _) = bed.user(tenant, "member").await;
+    let (admin, _) = bed.user(tenant, "admin").await;
 
     // A shared node the member can SEE but does not own → 403 on toggle.
-    let shared_node = add_node(&pool, tenant, owner_person).await;
+    let shared_node = bed.node(tenant, owner_person).await;
     set_shared(&state, user_ctx(owner, tenant), shared_node, true)
         .await
         .expect("owner shares");
@@ -412,7 +301,7 @@ async fn only_the_owner_may_toggle_shared() {
     );
 
     // A node the member CANNOT see (not owned, not shared) → 404, no oracle.
-    let hidden_node = add_node(&pool, tenant, owner_person).await;
+    let hidden_node = bed.node(tenant, owner_person).await;
     assert!(
         set_shared(&state, user_ctx(member, tenant), hidden_node, true)
             .await
@@ -430,7 +319,7 @@ async fn only_the_owner_may_toggle_shared() {
 
     // An ownerless node cannot be shared — nobody to consent (AC-3). Toggle as
     // the admin, who (unscoped) passes visibility and is caught by the owner gate.
-    let orphan = add_ownerless_node(&pool, tenant).await;
+    let orphan = add_ownerless_node(&bed.pool, tenant).await;
     assert!(
         set_shared(&state, user_ctx(admin, tenant), orphan, true)
             .await
@@ -438,5 +327,5 @@ async fn only_the_owner_may_toggle_shared() {
         "an ownerless node cannot be shared"
     );
 
-    cleanup(&pool, tenant).await;
+    bed.teardown().await;
 }

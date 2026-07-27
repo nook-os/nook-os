@@ -1,0 +1,307 @@
+//! One test harness for the NookOS integration suites (MAIN-156).
+//!
+//! Every suite used to rebuild the world by hand — seventeen copies of
+//! `test_config()`, dozens of tenant-bootstrap blocks, an `AppState`
+//! construction each — against a single shared, aged dev database that only ever
+//! grew. [`TestBed`] instead gives each test its **own** database: it creates a
+//! fresh, uniquely-named database, migrates and seeds it, hands back the pool +
+//! ids/contexts, and **drops the whole database** at the end.
+//!
+//! ```ignore
+//! let Some(mut bed) = TestBed::new().await else { return }; // skip without a DB server
+//! let state = bed.app_state().await;
+//! let tenant = bed.tenant("iso").await;
+//! let (user, _person) = bed.user(tenant, "admin").await;
+//! // … assertions against a private, freshly-seeded database …
+//! bed.teardown().await; // (or let it drop — Drop drops the database on panic too)
+//! ```
+//!
+//! ## Isolation model
+//!
+//! Each `TestBed` owns a private database, so tests need **no** scope-to-own-rows
+//! discipline and run in **parallel** without contending — the unique database
+//! name per test is the isolation. `NOOK_KEEP_TEST_DATA=1` keeps the database
+//! (and its rows) around for debugging instead of dropping it.
+//!
+//! The bare [`test_pool`] below is the legacy path for the suites not yet
+//! migrated (NG-1): it connects to the shared `DATABASE_URL` database, where the
+//! **MAIN-93 doctrine still applies** — scope every assertion to rows you
+//! created, never global counts, never a shared-table sweep. Those suites move
+//! onto `TestBed` (and shed that discipline) card by card.
+
+use anyhow::{Context, Result};
+use nook_control::state::AppState;
+use nook_infra::Config;
+use nook_types::{NodeId, TenantId, UserId, WorkspaceId};
+use sqlx::{Connection, PgConnection, PgPool};
+use uuid::Uuid;
+
+/// Connect to `DATABASE_URL` and bring the schema up to date — the exact
+/// semantics `tests/common/mod.rs` had, preserved for the ~27 suites that still
+/// share the one database (NG-1).
+///
+/// `None` means "no database configured, skip this test" — legitimate on a
+/// developer's machine, and a hard failure when `NOOK_REQUIRE_DB` is set,
+/// because a silent skip in CI is indistinguishable from a passing test.
+pub async fn test_pool() -> Option<PgPool> {
+    let Ok(url) = std::env::var("DATABASE_URL") else {
+        assert!(
+            std::env::var("NOOK_REQUIRE_DB").is_err(),
+            "NOOK_REQUIRE_DB is set but DATABASE_URL is not - these tests would \
+             have skipped silently and reported success"
+        );
+        return None;
+    };
+    let pool = PgPool::connect(&url).await.ok()?;
+    nook_control::MIGRATOR
+        .run(&pool)
+        .await
+        .expect("migrations must apply to the test database");
+    Some(pool)
+}
+
+/// A prepared, **private** test world: a freshly created, migrated, and seeded
+/// database plus opt-in setup surfaces, dropped whole at teardown.
+pub struct TestBed {
+    /// The pool for this test's private database.
+    pub pool: PgPool,
+    /// `DATABASE_URL` — the server + base database, used for the admin
+    /// `CREATE`/`DROP DATABASE` statements (which cannot run against the target).
+    base_url: String,
+    /// The unique database this bed created (e.g. `nook_test_<uuid>`).
+    db_name: String,
+    /// `NOOK_KEEP_TEST_DATA=1` keeps the database for debugging.
+    keep: bool,
+    /// Set once the database has been dropped, so teardown + Drop don't double.
+    dropped: bool,
+}
+
+impl TestBed {
+    /// Create a fresh private database, migrate and seed it. `None` to skip when
+    /// there is no `DATABASE_URL` (hard-fails under `NOOK_REQUIRE_DB`, same rule
+    /// as [`test_pool`]).
+    pub async fn new() -> Option<TestBed> {
+        let Ok(base_url) = std::env::var("DATABASE_URL") else {
+            assert!(
+                std::env::var("NOOK_REQUIRE_DB").is_err(),
+                "NOOK_REQUIRE_DB is set but DATABASE_URL is not - these tests \
+                 would have skipped silently and reported success"
+            );
+            return None;
+        };
+        let keep = std::env::var("NOOK_KEEP_TEST_DATA").is_ok();
+        let db_name = format!("nook_test_{}", Uuid::now_v7().simple());
+
+        // Create the database from an admin connection to the base database
+        // (CREATE DATABASE cannot run against the target itself).
+        let mut admin = PgConnection::connect(&base_url)
+            .await
+            .expect("connect to the base database to create a test database");
+        sqlx::query(&format!("CREATE DATABASE \"{db_name}\""))
+            .execute(&mut admin)
+            .await
+            .expect("create the test database");
+        admin.close().await.ok();
+
+        // Connect to the fresh database, migrate, and seed it.
+        let url = swap_db(&base_url, &db_name);
+        let pool = PgPool::connect(&url)
+            .await
+            .expect("connect to the fresh test database");
+        nook_control::MIGRATOR
+            .run(&pool)
+            .await
+            .expect("migrate the test database");
+        // Seed exactly as a real boot does (themes always; demo tenants + dev
+        // join token because `for_test`'s app_env is not production).
+        nook_control::seed::run(&pool, &Config::for_test())
+            .await
+            .expect("seed the test database");
+
+        Some(TestBed {
+            pool,
+            base_url,
+            db_name,
+            keep,
+            dropped: false,
+        })
+    }
+
+    /// The canonical test [`Config`] — one construction, overridable per field
+    /// (mutate the returned value). Wraps `Config::for_test()`.
+    pub fn config(&self) -> Config {
+        Config::for_test()
+    }
+
+    /// A fresh `AppState` on this bed's database with the canonical config.
+    pub async fn app_state(&self) -> AppState {
+        AppState::new(self.pool.clone(), self.config(), None).await
+    }
+
+    /// Create a tenant (name = slug = `test-<hint>-<uuid>`). No tracking needed —
+    /// the whole database is dropped at teardown.
+    pub async fn tenant(&self, hint: &str) -> TenantId {
+        let id = TenantId::new();
+        let name = format!("test-{hint}-{}", id.0.simple());
+        sqlx::query("INSERT INTO tenants (id, name, slug) VALUES ($1, $2, $2)")
+            .bind(id)
+            .bind(name)
+            .execute(&self.pool)
+            .await
+            .expect("create tenant");
+        id
+    }
+
+    /// Create a user in `tenant` with `role`. Returns `(user_id, person_id)` —
+    /// the person id is what node ownership keys on.
+    pub async fn user(&self, tenant: TenantId, role: &str) -> (UserId, Uuid) {
+        let user = UserId::new();
+        let person = Uuid::now_v7();
+        sqlx::query(
+            "INSERT INTO users (id, tenant_id, person_id, display_name, email, role)
+             VALUES ($1, $2, $3, 'U', $4, $5)",
+        )
+        .bind(user)
+        .bind(tenant)
+        .bind(person)
+        .bind(format!("u-{}@example.test", user.0.simple()))
+        .bind(role)
+        .execute(&self.pool)
+        .await
+        .expect("create user");
+        (user, person)
+    }
+
+    /// Create an offline node in `tenant` owned by `owner` (a person id).
+    pub async fn node(&self, tenant: TenantId, owner: Uuid) -> NodeId {
+        let id = NodeId::new();
+        sqlx::query(
+            "INSERT INTO nodes (id, tenant_id, name, node_token_hash, status, owner_person_id)
+             VALUES ($1, $2, $3, $4, 'offline', $5)",
+        )
+        .bind(id)
+        .bind(tenant)
+        .bind(format!("n-{}", id.0.simple()))
+        .bind(format!("h-{}", id.0.simple()))
+        .bind(owner)
+        .execute(&self.pool)
+        .await
+        .expect("create node");
+        id
+    }
+
+    /// Create a workspace in `tenant`.
+    pub async fn workspace(&self, tenant: TenantId) -> WorkspaceId {
+        let id = WorkspaceId::new();
+        let name = format!("test-ws-{}", id.0.simple());
+        sqlx::query("INSERT INTO workspaces (id, tenant_id, name, slug) VALUES ($1, $2, $3, $3)")
+            .bind(id)
+            .bind(tenant)
+            .bind(name)
+            .execute(&self.pool)
+            .await
+            .expect("create workspace");
+        id
+    }
+
+    /// Force the keep-on-teardown flag (test-support for the teardown tests; in
+    /// normal use it comes from `NOOK_KEEP_TEST_DATA`).
+    pub fn set_keep(&mut self, keep: bool) {
+        self.keep = keep;
+    }
+
+    /// The name of this bed's private database — for teardown-behaviour tests.
+    pub fn db_name(&self) -> &str {
+        &self.db_name
+    }
+
+    /// Drop the whole private database (unless `NOOK_KEEP_TEST_DATA`). Idempotent.
+    pub async fn teardown(&mut self) {
+        if self.dropped || self.keep {
+            self.dropped = true;
+            return;
+        }
+        self.dropped = true;
+        self.pool.close().await;
+        let _ = drop_database(&self.base_url, &self.db_name).await;
+    }
+}
+
+/// Rewrite the database segment of a Postgres URL, preserving any query params.
+fn swap_db(base: &str, db: &str) -> String {
+    let (scheme, rest) = base.split_once("://").unwrap_or(("postgres", base));
+    let (authority_and_db, params) = match rest.split_once('?') {
+        Some((a, p)) => (a, Some(p)),
+        None => (rest, None),
+    };
+    let authority = authority_and_db
+        .rsplit_once('/')
+        .map(|(a, _)| a)
+        .unwrap_or(authority_and_db);
+    let mut out = format!("{scheme}://{authority}/{db}");
+    if let Some(p) = params {
+        out.push('?');
+        out.push_str(p);
+    }
+    out
+}
+
+/// Drop `db` from an admin connection to the base database. `WITH (FORCE)`
+/// terminates any stragglers (Postgres 13+); the dev/CI Postgres is 16.
+async fn drop_database(base_url: &str, db: &str) -> Result<()> {
+    let mut admin = PgConnection::connect(base_url)
+        .await
+        .context("connect to drop the test database")?;
+    sqlx::query(&format!("DROP DATABASE IF EXISTS \"{db}\" WITH (FORCE)"))
+        .execute(&mut admin)
+        .await
+        .context("drop the test database")?;
+    admin.close().await.ok();
+    Ok(())
+}
+
+impl Drop for TestBed {
+    fn drop(&mut self) {
+        // Safety net: if the test panicked before `teardown().await`, drop the
+        // database anyway. Drop is sync and the test's runtime may be unwinding,
+        // so do the async work on a throwaway current-thread runtime on a fresh
+        // OS thread — never blocking the test's runtime.
+        if self.dropped || self.keep {
+            return;
+        }
+        self.dropped = true;
+        let base = self.base_url.clone();
+        let name = self.db_name.clone();
+        let pool = self.pool.clone();
+        let _ = std::thread::spawn(move || {
+            let Ok(rt) = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            else {
+                return;
+            };
+            rt.block_on(async {
+                pool.close().await;
+                let _ = drop_database(&base, &name).await;
+            });
+        })
+        .join();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn swap_db_rewrites_only_the_database_segment() {
+        assert_eq!(
+            swap_db("postgres://nook:nook@postgres:5432/nook", "nook_test_1"),
+            "postgres://nook:nook@postgres:5432/nook_test_1"
+        );
+        assert_eq!(
+            swap_db("postgres://u:p@h:5432/base?sslmode=disable", "t"),
+            "postgres://u:p@h:5432/t?sslmode=disable"
+        );
+    }
+}

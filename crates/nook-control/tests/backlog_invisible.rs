@@ -2,74 +2,15 @@
 //! backlog-column and epic tasks by default, and `claim_inner` refuses them with
 //! distinct 400s — all through the real code paths against a live Postgres. Set
 //! `DATABASE_URL`.
+//!
+//! Setup + teardown run through `nook_testkit::TestBed` (MAIN-156).
 
-use nook_control::config::Config;
 use nook_control::error::ApiError;
 use nook_control::routes::task_query::{claim_inner, query_rows, TaskFilter};
-use nook_control::state::AppState;
+use nook_testkit::TestBed;
 use nook_types::*;
 use sqlx::PgPool;
 use uuid::Uuid;
-
-mod common;
-use common::test_pool;
-
-fn test_config() -> Config {
-    Config {
-        app_env: "test".into(),
-        bind: "127.0.0.1:0".into(),
-        shutdown_grace_secs: 25,
-        public_base_url: "http://localhost:8080".into(),
-        web_origin: "http://localhost:5173".into(),
-        database_url: std::env::var("DATABASE_URL").unwrap_or_default(),
-        oidc_issuer_url: None,
-        oidc_client_id: None,
-        oidc_device_client_id: None,
-        oidc_device_authorization_endpoint: None,
-        oidc_client_secret: None,
-        oidc_redirect_url: None,
-        oidc_scopes: "openid profile email".into(),
-        session_secret: "0".repeat(64),
-        session_ttl_hours: 168,
-        default_tenant_name: format!("test-{}", Uuid::now_v7().simple()),
-        auth_dev_mode: true,
-        mcp_token: None,
-        dev_join_token: None,
-        dist_dir: "/nonexistent".into(),
-        agent_bind: "127.0.0.1:0".into(),
-        agent_public_url: None,
-        agent_tls_cert: None,
-        agent_tls_key: None,
-        releases_repo: "nook-os/nook-os".into(),
-        artifact_store: "disk".into(),
-        artifact_prefix: "nook".into(),
-        artifact_redirect: false,
-        s3_bucket: None,
-        s3_endpoint: None,
-        s3_region: None,
-        s3_access_key_id: None,
-        s3_secret_access_key: None,
-        s3_path_style: true,
-        cache_provider: "memory".into(),
-        queue_provider: "database".into(),
-        redis_url: None,
-        mail_provider: "capture".into(),
-        smtp_host: None,
-        smtp_port: 587,
-        smtp_tls: "starttls".into(),
-        smtp_from: "NookOS <no-reply@localhost>".into(),
-        smtp_username: None,
-        smtp_password: None,
-        postmark_token: None,
-        postmark_api_url: "https://api.postmarkapp.com/email".into(),
-        mail_from: "NookOS <no-reply@localhost>".into(),
-        mail_send_enabled: false,
-        mail_notifications_enabled: false,
-        mail_max_per_month: Some(100),
-        mail_max_per_day: None,
-        trusted_proxies: Vec::new(),
-    }
-}
 
 /// A tenant + board with a `backlog` column and an `unstarted` column.
 async fn fixture(db: &PgPool) -> (TenantId, BoardId, ColumnId, ColumnId) {
@@ -146,17 +87,17 @@ async fn pick_ids(db: &PgPool, tenant: TenantId, f: &TaskFilter) -> Vec<TaskId> 
 
 #[tokio::test]
 async fn pick_excludes_backlog_and_epics_by_default() {
-    let Some(pool) = test_pool().await else {
+    let Some(mut bed) = TestBed::new().await else {
         eprintln!("skipping backlog test — no DATABASE_URL");
         return;
     };
-    let (tenant, board, backlog, todo) = fixture(&pool).await;
+    let (tenant, board, backlog, todo) = fixture(&bed.pool).await;
 
     // A normal task on the board, a normal task in the backlog, and an epic on
     // the board.
-    let normal = task(&pool, tenant, board, todo, 1, "task").await;
-    let in_backlog = task(&pool, tenant, board, backlog, 2, "task").await;
-    let epic = task(&pool, tenant, board, todo, 3, "epic").await;
+    let normal = task(&bed.pool, tenant, board, todo, 1, "task").await;
+    let in_backlog = task(&bed.pool, tenant, board, backlog, 2, "task").await;
+    let epic = task(&bed.pool, tenant, board, todo, 3, "epic").await;
 
     let base = TaskFilter {
         board: Some(board.to_string()),
@@ -165,7 +106,7 @@ async fn pick_excludes_backlog_and_epics_by_default() {
     };
 
     // ── Default: backlog + epic excluded (AC-1/AC-2) ────────────────────────
-    let def = pick_ids(&pool, tenant, &base).await;
+    let def = pick_ids(&bed.pool, tenant, &base).await;
     assert!(def.contains(&normal), "a board task is picked");
     assert!(
         !def.contains(&in_backlog),
@@ -178,7 +119,7 @@ async fn pick_excludes_backlog_and_epics_by_default() {
 
     // ── backlog=true includes backlog tasks (AC-1) ──────────────────────────
     let with_backlog = pick_ids(
-        &pool,
+        &bed.pool,
         tenant,
         &TaskFilter {
             backlog: Some(true),
@@ -197,7 +138,7 @@ async fn pick_excludes_backlog_and_epics_by_default() {
 
     // ── type=epic surfaces epics on purpose (AC-2) ──────────────────────────
     let with_epic = pick_ids(
-        &pool,
+        &bed.pool,
         tenant,
         &TaskFilter {
             type_: vec!["epic".into()],
@@ -214,10 +155,7 @@ async fn pick_excludes_backlog_and_epics_by_default() {
         "and only epics — the type filter still restricts"
     );
 
-    let _ = sqlx::query("DELETE FROM tenants WHERE id = $1 AND slug <> 'dev'")
-        .bind(tenant)
-        .execute(&pool)
-        .await;
+    bed.teardown().await;
 }
 
 #[tokio::test]
@@ -226,20 +164,20 @@ async fn parent_filter_lifts_the_backlog_exclusion() {
     // has merged: an epic's tickets span triage and the board, so a `parent=`
     // query must return the children still in the backlog rather than silently
     // dropping them. Without the parent filter, those same tickets stay hidden.
-    let Some(pool) = test_pool().await else {
+    let Some(mut bed) = TestBed::new().await else {
         eprintln!("skipping parent-lift test — no DATABASE_URL");
         return;
     };
-    let (tenant, board, backlog, todo) = fixture(&pool).await;
+    let (tenant, board, backlog, todo) = fixture(&bed.pool).await;
 
-    let epic = task(&pool, tenant, board, todo, 1, "epic").await;
-    let child_backlog = task(&pool, tenant, board, backlog, 2, "task").await;
-    let child_board = task(&pool, tenant, board, todo, 3, "task").await;
+    let epic = task(&bed.pool, tenant, board, todo, 1, "epic").await;
+    let child_backlog = task(&bed.pool, tenant, board, backlog, 2, "task").await;
+    let child_board = task(&bed.pool, tenant, board, todo, 3, "task").await;
     for child in [child_backlog, child_board] {
         sqlx::query("UPDATE tasks SET parent_task_id = $1 WHERE id = $2")
             .bind(epic)
             .bind(child)
-            .execute(&pool)
+            .execute(&bed.pool)
             .await
             .expect("set parent");
     }
@@ -252,7 +190,7 @@ async fn parent_filter_lifts_the_backlog_exclusion() {
 
     // ?parent=<epic> returns BOTH children — the backlog exclusion is lifted.
     let children = pick_ids(
-        &pool,
+        &bed.pool,
         tenant,
         &TaskFilter {
             parent: Some(epic.to_string()),
@@ -270,26 +208,23 @@ async fn parent_filter_lifts_the_backlog_exclusion() {
     );
 
     // Without a parent filter the backlog child stays excluded by default.
-    let default = pick_ids(&pool, tenant, &base).await;
+    let default = pick_ids(&bed.pool, tenant, &base).await;
     assert!(
         !default.contains(&child_backlog),
         "the backlog child is still hidden without parent="
     );
 
-    let _ = sqlx::query("DELETE FROM tenants WHERE id = $1 AND slug <> 'dev'")
-        .bind(tenant)
-        .execute(&pool)
-        .await;
+    bed.teardown().await;
 }
 
 #[tokio::test]
 async fn claim_refuses_backlog_and_epic_with_distinct_messages() {
-    let Some(pool) = test_pool().await else {
+    let Some(mut bed) = TestBed::new().await else {
         eprintln!("skipping claim-refusal test — no DATABASE_URL");
         return;
     };
-    let state = AppState::new(pool.clone(), test_config(), None).await;
-    let (tenant, board, backlog, todo) = fixture(&pool).await;
+    let state = bed.app_state().await;
+    let (tenant, board, backlog, todo) = fixture(&bed.pool).await;
     // A real user row — claiming sets assignee_user_id, which has an FK.
     let claimant = UserId::new();
     sqlx::query(
@@ -299,13 +234,13 @@ async fn claim_refuses_backlog_and_epic_with_distinct_messages() {
     .bind(claimant)
     .bind(tenant)
     .bind(format!("claimant-{}@example.test", claimant.0.simple()))
-    .execute(&pool)
+    .execute(&bed.pool)
     .await
     .expect("claimant user");
 
-    let in_backlog = task(&pool, tenant, board, backlog, 1, "task").await;
-    let epic = task(&pool, tenant, board, todo, 2, "epic").await;
-    let normal = task(&pool, tenant, board, todo, 3, "task").await;
+    let in_backlog = task(&bed.pool, tenant, board, backlog, 1, "task").await;
+    let epic = task(&bed.pool, tenant, board, todo, 2, "epic").await;
+    let normal = task(&bed.pool, tenant, board, todo, 3, "task").await;
 
     // Backlog: a 400 naming the backlog, NOT the 409 lost-claim message (AC-4).
     let backlog_err = claim_inner(&state, tenant, claimant, &in_backlog.to_string(), None)
@@ -343,10 +278,10 @@ async fn claim_refuses_backlog_and_epic_with_distinct_messages() {
          JOIN boards b ON b.id = t.board_id WHERE t.id = $1",
     )
     .bind(in_backlog)
-    .fetch_one(&pool)
+    .fetch_one(&bed.pool)
     .await
     .expect("key");
-    let resolved = nook_control::services::tasks::resolve_id(&pool, tenant, &key)
+    let resolved = nook_control::services::tasks::resolve_id(&bed.pool, tenant, &key)
         .await
         .expect("backlog task resolves by key");
     assert_eq!(
@@ -354,8 +289,5 @@ async fn claim_refuses_backlog_and_epic_with_distinct_messages() {
         "the backlog task is still addressable"
     );
 
-    let _ = sqlx::query("DELETE FROM tenants WHERE id = $1 AND slug <> 'dev'")
-        .bind(tenant)
-        .execute(&pool)
-        .await;
+    bed.teardown().await;
 }

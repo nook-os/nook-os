@@ -12,6 +12,7 @@ members = [
     "crates/nook-node",
     "crates/nook-openapi-gen",
     "crates/nook-worker",
+    "crates/nook-testkit",
 ]
 
 [workspace.package]
@@ -28,6 +29,7 @@ nook-infra = { path = "crates/nook-infra" }
 nook-dispatcher = { path = "crates/nook-dispatcher" }
 nook-mcp = { path = "crates/nook-mcp" }
 nook-control = { path = "crates/nook-control" }
+nook-testkit = { path = "crates/nook-testkit" }
 
 tokio = { version = "1", features = ["full"] }
 axum = { version = "0.8", features = ["ws", "macros"] }

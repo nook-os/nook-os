@@ -3,84 +3,12 @@
 //! the detail `children` array, and tenant isolation — through the real code
 //! paths against a live Postgres. Set `DATABASE_URL`.
 
-use nook_control::config::Config;
 use nook_control::routes::task_detail::detail;
 use nook_control::routes::task_query::{query_rows, TaskFilter};
-use nook_control::state::AppState;
+use nook_testkit::TestBed;
 use nook_types::*;
 use sqlx::PgPool;
 use uuid::Uuid;
-
-mod common;
-use common::test_pool;
-
-fn test_config() -> Config {
-    Config {
-        app_env: "test".into(),
-        bind: "127.0.0.1:0".into(),
-        shutdown_grace_secs: 25,
-        public_base_url: "http://localhost:8080".into(),
-        web_origin: "http://localhost:5173".into(),
-        database_url: std::env::var("DATABASE_URL").unwrap_or_default(),
-        oidc_issuer_url: None,
-        oidc_client_id: None,
-        oidc_device_client_id: None,
-        oidc_device_authorization_endpoint: None,
-        oidc_client_secret: None,
-        oidc_redirect_url: None,
-        oidc_scopes: "openid profile email".into(),
-        session_secret: "0".repeat(64),
-        session_ttl_hours: 168,
-        default_tenant_name: format!("test-{}", Uuid::now_v7().simple()),
-        auth_dev_mode: true,
-        mcp_token: None,
-        dev_join_token: None,
-        dist_dir: "/nonexistent".into(),
-        agent_bind: "127.0.0.1:0".into(),
-        agent_public_url: None,
-        agent_tls_cert: None,
-        agent_tls_key: None,
-        releases_repo: "nook-os/nook-os".into(),
-        artifact_store: "disk".into(),
-        artifact_prefix: "nook".into(),
-        artifact_redirect: false,
-        s3_bucket: None,
-        s3_endpoint: None,
-        s3_region: None,
-        s3_access_key_id: None,
-        s3_secret_access_key: None,
-        s3_path_style: true,
-        cache_provider: "memory".into(),
-        queue_provider: "database".into(),
-        redis_url: None,
-        mail_provider: "capture".into(),
-        smtp_host: None,
-        smtp_port: 587,
-        smtp_tls: "starttls".into(),
-        smtp_from: "NookOS <no-reply@localhost>".into(),
-        smtp_username: None,
-        smtp_password: None,
-        postmark_token: None,
-        postmark_api_url: "https://api.postmarkapp.com/email".into(),
-        mail_from: "NookOS <no-reply@localhost>".into(),
-        mail_send_enabled: false,
-        mail_notifications_enabled: false,
-        mail_max_per_month: Some(100),
-        mail_max_per_day: None,
-        trusted_proxies: Vec::new(),
-    }
-}
-
-async fn make_tenant(db: &PgPool) -> TenantId {
-    let t = TenantId(Uuid::now_v7());
-    sqlx::query("INSERT INTO tenants (id, name, slug) VALUES ($1, $2, $2)")
-        .bind(t)
-        .bind(format!("t-{}", t.0.simple()))
-        .execute(db)
-        .await
-        .expect("tenant");
-    t
-}
 
 /// A board with one column to hang cards on.
 async fn make_board(db: &PgPool, tenant: TenantId) -> BoardId {
@@ -143,13 +71,13 @@ fn patch_parent(parent: Option<Option<&str>>) -> UpdateTaskRequest {
 
 #[tokio::test]
 async fn epic_parent_create_patch_validate_filter_and_orphan() {
-    let Some(pool) = test_pool().await else {
+    let Some(mut bed) = TestBed::new().await else {
         eprintln!("skipping epic-parent test — no DATABASE_URL");
         return;
     };
-    let state = AppState::new(pool.clone(), test_config(), None).await;
-    let tenant = make_tenant(&pool).await;
-    let board = make_board(&pool, tenant).await;
+    let state = bed.app_state().await;
+    let tenant = bed.tenant("tp").await;
+    let board = make_board(&bed.pool, tenant).await;
     let provider = state.kanban.get("local").expect("local provider");
 
     // An epic, and a plain task to be the "not an epic" parent later.
@@ -158,9 +86,10 @@ async fn epic_parent_create_patch_validate_filter_and_orphan() {
         .await
         .expect("epic");
     // create_task returns the raw row; the human key is computed by enrich.
-    let epic = nook_control::services::tasks::enrich_one(&pool, "http://x", UserId::new(), epic)
-        .await
-        .expect("enrich epic");
+    let epic =
+        nook_control::services::tasks::enrich_one(&bed.pool, "http://x", UserId::new(), epic)
+            .await
+            .expect("enrich epic");
     let epic_key = epic.key.clone().expect("epic key"); // e.g. B123-1
     let plain = provider
         .create_task(tenant, board, None, req("a plain task", None, None))
@@ -195,7 +124,7 @@ async fn epic_parent_create_patch_validate_filter_and_orphan() {
         limit: Some(200),
         ..Default::default()
     };
-    let mut ids: Vec<TaskId> = query_rows(&pool, tenant, nook_types::UserId::new(), &f)
+    let mut ids: Vec<TaskId> = query_rows(&bed.pool, tenant, nook_types::UserId::new(), &f)
         .await
         .expect("children")
         .into_iter()
@@ -233,7 +162,7 @@ async fn epic_parent_create_patch_validate_filter_and_orphan() {
         .await
         .is_err());
     // parent on another board
-    let board2 = make_board(&pool, tenant).await;
+    let board2 = make_board(&bed.pool, tenant).await;
     let epic2 = provider
         .create_task(tenant, board2, None, req("Epic B", Some("epic"), None))
         .await
@@ -278,13 +207,13 @@ async fn epic_parent_create_patch_validate_filter_and_orphan() {
     // ── Delete the epic → children ORPHAN, not deleted (AC-1) ───────────────
     sqlx::query("DELETE FROM tasks WHERE id = $1")
         .bind(epic.id)
-        .execute(&pool)
+        .execute(&bed.pool)
         .await
         .expect("delete epic");
     let (survivor_parent,): (Option<Uuid>,) =
         sqlx::query_as("SELECT parent_task_id FROM tasks WHERE id = $1")
             .bind(child2.id)
-            .fetch_one(&pool)
+            .fetch_one(&bed.pool)
             .await
             .expect("child survives");
     assert_eq!(
@@ -293,8 +222,8 @@ async fn epic_parent_create_patch_validate_filter_and_orphan() {
     );
 
     // ── Tenant isolation on parent resolution (AC-2) ────────────────────────
-    let other = make_tenant(&pool).await;
-    let other_board = make_board(&pool, other).await;
+    let other = bed.tenant("tp").await;
+    let other_board = make_board(&bed.pool, other).await;
     let other_epic = provider
         .create_task(
             other,
@@ -319,12 +248,7 @@ async fn epic_parent_create_patch_validate_filter_and_orphan() {
         "parent resolution is tenant-scoped"
     );
 
-    for t in [tenant, other] {
-        let _ = sqlx::query("DELETE FROM tenants WHERE id = $1 AND slug <> 'dev'")
-            .bind(t)
-            .execute(&pool)
-            .await;
-    }
+    bed.teardown().await;
 }
 
 /// MAIN-76 × MAIN-81: a private child must not leak its title/key through the
@@ -332,13 +256,13 @@ async fn epic_parent_create_patch_validate_filter_and_orphan() {
 /// created it nor is assigned — the leak the visibility rebase closed.
 #[tokio::test]
 async fn private_child_does_not_leak_through_epic() {
-    let Some(pool) = test_pool().await else {
+    let Some(mut bed) = TestBed::new().await else {
         eprintln!("skipping private-child leak test — no DATABASE_URL");
         return;
     };
-    let state = AppState::new(pool.clone(), test_config(), None).await;
-    let tenant = make_tenant(&pool).await;
-    let board = make_board(&pool, tenant).await;
+    let state = bed.app_state().await;
+    let tenant = bed.tenant("tp").await;
+    let board = make_board(&bed.pool, tenant).await;
     let provider = state.kanban.get("local").expect("local provider");
 
     // Owner A and an unrelated member B.
@@ -350,9 +274,10 @@ async fn private_child_does_not_leak_through_epic() {
         .create_task(tenant, board, Some(a), req("Epic", Some("epic"), None))
         .await
         .expect("epic");
-    let epic = nook_control::services::tasks::enrich_one(&pool, "http://x", UserId::new(), epic)
-        .await
-        .expect("enrich");
+    let epic =
+        nook_control::services::tasks::enrich_one(&bed.pool, "http://x", UserId::new(), epic)
+            .await
+            .expect("enrich");
     let epic_key = epic.key.clone().expect("key");
 
     let team_child = provider
@@ -399,7 +324,7 @@ async fn private_child_does_not_leak_through_epic() {
         limit: Some(200),
         ..Default::default()
     };
-    let b_ids: Vec<TaskId> = query_rows(&pool, tenant, b, &f)
+    let b_ids: Vec<TaskId> = query_rows(&bed.pool, tenant, b, &f)
         .await
         .expect("B parent list")
         .into_iter()
@@ -410,7 +335,7 @@ async fn private_child_does_not_leak_through_epic() {
         !b_ids.contains(&secret_child.id),
         "the parent filter never leaks the private child to a non-owner"
     );
-    let a_ids: Vec<TaskId> = query_rows(&pool, tenant, a, &f)
+    let a_ids: Vec<TaskId> = query_rows(&bed.pool, tenant, a, &f)
         .await
         .expect("A parent list")
         .into_iter()
@@ -421,10 +346,7 @@ async fn private_child_does_not_leak_through_epic() {
         "the owner still sees their private child under the epic"
     );
 
-    let _ = sqlx::query("DELETE FROM tenants WHERE id = $1 AND slug <> 'dev'")
-        .bind(tenant)
-        .execute(&pool)
-        .await;
+    bed.teardown().await;
 }
 
 /// MAIN-86 AC-1/AC-2: the MCP task mutations (`set_task_parent`,
@@ -435,13 +357,13 @@ async fn private_child_does_not_leak_through_epic() {
 /// key can never silently send MCP writes through the wrong (or no) provider.
 #[tokio::test]
 async fn mcp_task_mutations_resolve_the_boards_provider() {
-    let Some(pool) = test_pool().await else {
+    let Some(mut bed) = TestBed::new().await else {
         eprintln!("skipping provider-resolution test — no DATABASE_URL");
         return;
     };
-    let state = AppState::new(pool.clone(), test_config(), None).await;
-    let tenant = make_tenant(&pool).await;
-    let board = make_board(&pool, tenant).await;
+    let state = bed.app_state().await;
+    let tenant = bed.tenant("tp").await;
+    let board = make_board(&bed.pool, tenant).await;
     let provider = state.kanban.get("local").expect("local provider");
     let task = provider
         .create_task(tenant, board, None, req("a task", None, None))
@@ -457,7 +379,7 @@ async fn mcp_task_mutations_resolve_the_boards_provider() {
     )
     .bind(task.id)
     .bind(tenant)
-    .fetch_one(&pool)
+    .fetch_one(&bed.pool)
     .await
     .expect("resolve provider");
     assert_eq!(
@@ -469,8 +391,5 @@ async fn mcp_task_mutations_resolve_the_boards_provider() {
         "the resolved provider string yields a live provider from the registry"
     );
 
-    let _ = sqlx::query("DELETE FROM tenants WHERE id = $1 AND slug <> 'dev'")
-        .bind(tenant)
-        .execute(&pool)
-        .await;
+    bed.teardown().await;
 }

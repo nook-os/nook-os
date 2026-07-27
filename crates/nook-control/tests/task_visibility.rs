@@ -5,77 +5,14 @@
 
 use axum::extract::{Path, State};
 use nook_control::auth::{AuthCtx, Principal};
-use nook_control::config::Config;
 use nook_control::error::ApiError;
 use nook_control::routes::task_query::{claim_inner, query_rows, TaskFilter};
 use nook_control::services::identity::{login_identity, IdentityClaims};
 use nook_control::state::AppState;
+use nook_testkit::TestBed;
 use nook_types::*;
 use sqlx::PgPool;
-use tokio::sync::Mutex;
 use uuid::Uuid;
-
-mod common;
-use common::test_pool;
-
-static SERIAL: Mutex<()> = Mutex::const_new(());
-
-fn test_config() -> Config {
-    Config {
-        app_env: "test".into(),
-        bind: "127.0.0.1:0".into(),
-        shutdown_grace_secs: 25,
-        public_base_url: "http://localhost:8080".into(),
-        web_origin: "http://localhost:5173".into(),
-        database_url: std::env::var("DATABASE_URL").unwrap_or_default(),
-        oidc_issuer_url: None,
-        oidc_client_id: None,
-        oidc_device_client_id: None,
-        oidc_device_authorization_endpoint: None,
-        oidc_client_secret: None,
-        oidc_redirect_url: None,
-        oidc_scopes: "openid profile email".into(),
-        session_secret: "0".repeat(64),
-        session_ttl_hours: 168,
-        default_tenant_name: format!("test-{}", Uuid::now_v7().simple()),
-        auth_dev_mode: true,
-        mcp_token: None,
-        dev_join_token: None,
-        dist_dir: "/nonexistent".into(),
-        agent_bind: "127.0.0.1:0".into(),
-        agent_public_url: None,
-        agent_tls_cert: None,
-        agent_tls_key: None,
-        releases_repo: "nook-os/nook-os".into(),
-        artifact_store: "disk".into(),
-        artifact_prefix: "nook".into(),
-        artifact_redirect: false,
-        s3_bucket: None,
-        s3_endpoint: None,
-        s3_region: None,
-        s3_access_key_id: None,
-        s3_secret_access_key: None,
-        s3_path_style: true,
-        cache_provider: "memory".into(),
-        queue_provider: "database".into(),
-        redis_url: None,
-        mail_provider: "capture".into(),
-        smtp_host: None,
-        smtp_port: 587,
-        smtp_tls: "starttls".into(),
-        smtp_from: "NookOS <no-reply@localhost>".into(),
-        smtp_username: None,
-        smtp_password: None,
-        postmark_token: None,
-        postmark_api_url: "https://api.postmarkapp.com/email".into(),
-        mail_from: "NookOS <no-reply@localhost>".into(),
-        mail_send_enabled: false,
-        mail_notifications_enabled: false,
-        mail_max_per_month: Some(100),
-        mail_max_per_day: None,
-        trusted_proxies: Vec::new(),
-    }
-}
 
 fn claims(subject: &str, name: &str) -> IdentityClaims {
     IdentityClaims {
@@ -171,12 +108,11 @@ async fn list_ids(
 
 #[tokio::test]
 async fn visibility_governs_read_claim_board_and_update() {
-    let _serial = SERIAL.lock().await;
-    let Some(pool) = test_pool().await else {
+    let Some(mut bed) = TestBed::new().await else {
         eprintln!("skipping task-visibility test — no DATABASE_URL");
         return;
     };
-    let state = AppState::new(pool.clone(), test_config(), None).await;
+    let state = bed.app_state().await;
 
     // One tenant, three people: A owns it (also the creator under test), B and C
     // are ordinary members.
@@ -185,8 +121,8 @@ async fn visibility_governs_read_claim_board_and_update() {
         .await
         .expect("owner signs in");
     let a = owner.id;
-    let b = add_member(&pool, tenant.id, "bob", "member").await;
-    let c = add_member(&pool, tenant.id, "carol", "member").await;
+    let b = add_member(&bed.pool, tenant.id, "bob", "member").await;
+    let c = add_member(&bed.pool, tenant.id, "carol", "member").await;
 
     // A board to hang cards on.
     let board: BoardId = sqlx::query_scalar(
@@ -196,7 +132,7 @@ async fn visibility_governs_read_claim_board_and_update() {
     .bind(BoardId::new())
     .bind(tenant.id)
     .bind(format!("V{}", &Uuid::now_v7().simple().to_string()[..6]).to_uppercase())
-    .fetch_one(&pool)
+    .fetch_one(&bed.pool)
     .await
     .expect("board");
     sqlx::query(
@@ -205,7 +141,7 @@ async fn visibility_governs_read_claim_board_and_update() {
     )
     .bind(Uuid::now_v7())
     .bind(board)
-    .execute(&pool)
+    .execute(&bed.pool)
     .await
     .expect("column");
 
@@ -235,7 +171,7 @@ async fn visibility_governs_read_claim_board_and_update() {
     sqlx::query("UPDATE tasks SET assignee_user_id = $2 WHERE id = $1")
         .bind(private.id)
         .bind(c)
-        .execute(&pool)
+        .execute(&bed.pool)
         .await
         .expect("assign");
     assert!(
@@ -355,7 +291,7 @@ async fn visibility_governs_read_claim_board_and_update() {
         "SELECT title FROM tasks WHERE tenant_id = $1 AND visibility <> 'private' ORDER BY title",
     )
     .bind(tenant.id)
-    .fetch_all(&pool)
+    .fetch_all(&bed.pool)
     .await
     .expect("titles");
     assert!(
@@ -367,10 +303,7 @@ async fn visibility_governs_read_claim_board_and_update() {
         "private titles never reach an operator"
     );
 
-    let _ = sqlx::query("DELETE FROM tenants WHERE id = $1 AND slug <> 'dev'")
-        .bind(tenant.id)
-        .execute(&pool)
-        .await;
+    bed.teardown().await;
 }
 
 /// MAIN-85: changing a card's `visibility` is gated to the card's owner
@@ -380,12 +313,11 @@ async fn visibility_governs_read_claim_board_and_update() {
 /// route so the gate is tested where it lives, against live Postgres.
 #[tokio::test]
 async fn visibility_change_is_gated_to_owner_or_admin() {
-    let _serial = SERIAL.lock().await;
-    let Some(pool) = test_pool().await else {
+    let Some(mut bed) = TestBed::new().await else {
         eprintln!("skipping visibility-gate test — no DATABASE_URL");
         return;
     };
-    let state = AppState::new(pool.clone(), test_config(), None).await;
+    let state = bed.app_state().await;
 
     // A owns the tenant and creates the cards. B is an ordinary member (neither
     // creator nor assignee nor admin). ADM is a tenant admin who is likewise
@@ -395,9 +327,9 @@ async fn visibility_change_is_gated_to_owner_or_admin() {
         .await
         .expect("owner signs in");
     let a = owner.id;
-    let b = add_member(&pool, tenant.id, "bob", "member").await;
-    let adm = add_member(&pool, tenant.id, "admin", "admin").await;
-    let asg = add_member(&pool, tenant.id, "asa", "member").await;
+    let b = add_member(&bed.pool, tenant.id, "bob", "member").await;
+    let adm = add_member(&bed.pool, tenant.id, "admin", "admin").await;
+    let asg = add_member(&bed.pool, tenant.id, "asa", "member").await;
 
     let board: BoardId = sqlx::query_scalar(
         "INSERT INTO boards (id, tenant_id, name, key, provider)
@@ -406,7 +338,7 @@ async fn visibility_change_is_gated_to_owner_or_admin() {
     .bind(BoardId::new())
     .bind(tenant.id)
     .bind(format!("G{}", &Uuid::now_v7().simple().to_string()[..6]).to_uppercase())
-    .fetch_one(&pool)
+    .fetch_one(&bed.pool)
     .await
     .expect("board");
     sqlx::query(
@@ -415,7 +347,7 @@ async fn visibility_change_is_gated_to_owner_or_admin() {
     )
     .bind(Uuid::now_v7())
     .bind(board)
-    .execute(&pool)
+    .execute(&bed.pool)
     .await
     .expect("column");
 
@@ -455,7 +387,7 @@ async fn visibility_change_is_gated_to_owner_or_admin() {
         "a non-owner, non-admin member is refused 403, got {denied:?}"
     );
     assert_eq!(
-        vis(&pool, team.id).await,
+        vis(&bed.pool, team.id).await,
         "team",
         "a refused visibility change leaves the card untouched"
     );
@@ -470,7 +402,7 @@ async fn visibility_change_is_gated_to_owner_or_admin() {
     sqlx::query("UPDATE tasks SET assignee_user_id = $2 WHERE id = $1")
         .bind(team.id)
         .bind(asg)
-        .execute(&pool)
+        .execute(&bed.pool)
         .await
         .expect("assign");
     let by_assignee = patch(&state, asg, team.id, UpdateUserVis::visibility("team"))
@@ -513,7 +445,7 @@ async fn visibility_change_is_gated_to_owner_or_admin() {
     assert_eq!(same_vis.0.visibility, "team", "unchanged, and allowed");
 
     // ── AC-3: a refused change drops the WHOLE request, other fields included ─
-    let before = title_of(&pool, move_card.id).await;
+    let before = title_of(&bed.pool, move_card.id).await;
     let combo = patch(
         &state,
         b,
@@ -526,12 +458,12 @@ async fn visibility_change_is_gated_to_owner_or_admin() {
         "changing visibility + title as a non-owner is refused 403, got {combo:?}"
     );
     assert_eq!(
-        title_of(&pool, move_card.id).await,
+        title_of(&bed.pool, move_card.id).await,
         before,
         "the title in the refused request was NOT applied"
     );
     assert_eq!(
-        vis(&pool, move_card.id).await,
+        vis(&bed.pool, move_card.id).await,
         "team",
         "and neither was the visibility change"
     );
@@ -544,10 +476,7 @@ async fn visibility_change_is_gated_to_owner_or_admin() {
         "a private card is NotFound (404) to a non-owner, not a 403, got {unseen:?}"
     );
 
-    let _ = sqlx::query("DELETE FROM tenants WHERE id = $1 AND slug <> 'dev'")
-        .bind(tenant.id)
-        .execute(&pool)
-        .await;
+    bed.teardown().await;
 }
 
 /// Small builders for `UpdateTaskRequest` in the two update assertions above.
@@ -600,12 +529,11 @@ fn blank_update() -> UpdateTaskRequest {
 /// detail read goes through.
 #[tokio::test]
 async fn private_parent_key_is_redacted_from_children_for_non_owners() {
-    let _serial = SERIAL.lock().await;
-    let Some(pool) = test_pool().await else {
+    let Some(mut bed) = TestBed::new().await else {
         eprintln!("skipping parent-key redaction test — no DATABASE_URL");
         return;
     };
-    let state = AppState::new(pool.clone(), test_config(), None).await;
+    let state = bed.app_state().await;
 
     // O owns the tenant and the epic; V is an ordinary member who is neither the
     // epic's creator nor its assignee.
@@ -614,7 +542,7 @@ async fn private_parent_key_is_redacted_from_children_for_non_owners() {
         .await
         .expect("owner signs in");
     let o = owner.id;
-    let v = add_member(&pool, tenant.id, "vic", "member").await;
+    let v = add_member(&bed.pool, tenant.id, "vic", "member").await;
 
     let board_key = format!("E{}", &Uuid::now_v7().simple().to_string()[..6]).to_uppercase();
     let board: BoardId = sqlx::query_scalar(
@@ -624,7 +552,7 @@ async fn private_parent_key_is_redacted_from_children_for_non_owners() {
     .bind(BoardId::new())
     .bind(tenant.id)
     .bind(&board_key)
-    .fetch_one(&pool)
+    .fetch_one(&bed.pool)
     .await
     .expect("board");
     sqlx::query(
@@ -633,7 +561,7 @@ async fn private_parent_key_is_redacted_from_children_for_non_owners() {
     )
     .bind(Uuid::now_v7())
     .bind(board)
-    .execute(&pool)
+    .execute(&bed.pool)
     .await
     .expect("column");
 
@@ -643,7 +571,7 @@ async fn private_parent_key_is_redacted_from_children_for_non_owners() {
     sqlx::query("UPDATE tasks SET parent_task_id = $2 WHERE id = $1")
         .bind(child.id)
         .bind(epic.id)
-        .execute(&pool)
+        .execute(&bed.pool)
         .await
         .expect("file the child under the epic");
     let expected = format!("{board_key}-{}", epic.number.expect("epic has a number"));
@@ -668,7 +596,7 @@ async fn private_parent_key_is_redacted_from_children_for_non_owners() {
     };
 
     // O (the epic's owner) sees the parent key.
-    let as_o = enrich_as(o, row(&pool, child.id).await).await;
+    let as_o = enrich_as(o, row(&bed.pool, child.id).await).await;
     assert_eq!(
         as_o.parent_key.as_deref(),
         Some(expected.as_str()),
@@ -676,7 +604,7 @@ async fn private_parent_key_is_redacted_from_children_for_non_owners() {
     );
 
     // V (non-owner) sees the child as parentless — the key is redacted.
-    let as_v = enrich_as(v, row(&pool, child.id).await).await;
+    let as_v = enrich_as(v, row(&bed.pool, child.id).await).await;
     assert_eq!(
         as_v.parent_key, None,
         "a private epic's key is not exposed on a child a non-owner can see"
@@ -691,18 +619,15 @@ async fn private_parent_key_is_redacted_from_children_for_non_owners() {
     // Flip the epic to team-visible → the key returns for V (non-regression).
     sqlx::query("UPDATE tasks SET visibility = 'team' WHERE id = $1")
         .bind(epic.id)
-        .execute(&pool)
+        .execute(&bed.pool)
         .await
         .expect("flip epic to team");
-    let as_v2 = enrich_as(v, row(&pool, child.id).await).await;
+    let as_v2 = enrich_as(v, row(&bed.pool, child.id).await).await;
     assert_eq!(
         as_v2.parent_key.as_deref(),
         Some(expected.as_str()),
         "a team epic's key appears on its children for any tenant viewer"
     );
 
-    let _ = sqlx::query("DELETE FROM tenants WHERE id = $1 AND slug <> 'dev'")
-        .bind(tenant.id)
-        .execute(&pool)
-        .await;
+    bed.teardown().await;
 }
