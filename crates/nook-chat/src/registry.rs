@@ -70,6 +70,7 @@ mod tests {
             id: Uuid::now_v7(),
             channel_id: channel,
             author_id: Uuid::now_v7(),
+            author_name: None,
             body: "hi".into(),
             created_at: Utc::now(),
         }

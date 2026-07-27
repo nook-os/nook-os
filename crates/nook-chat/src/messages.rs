@@ -21,6 +21,7 @@ struct MessageRow {
     id: Uuid,
     channel_id: Uuid,
     author_id: Uuid,
+    author_name: Option<String>,
     body: String,
     created_at: DateTime<Utc>,
 }
@@ -31,14 +32,21 @@ impl From<MessageRow> for ChatMessage {
             id: r.id,
             channel_id: r.channel_id,
             author_id: r.author_id,
+            author_name: r.author_name,
             body: r.body,
             created_at: r.created_at,
         }
     }
 }
 
-const SELECT_MESSAGE: &str =
-    "SELECT id, channel_id, author_id, body, created_at FROM chat_messages";
+/// Reads carry the author's display name resolved from `public.users` by
+/// `author_id` — so an org channel shows names for authors in other tenants
+/// (MAIN-112 AC-4). `public.` is qualified so the join works on both the running
+/// `chat,public` search_path and the `chat`-only test pool. A LEFT join keeps a
+/// message with a since-deleted author readable (name `None`).
+const SELECT_MESSAGE: &str = "SELECT m.id, m.channel_id, m.author_id, \
+     u.display_name AS author_name, m.body, m.created_at \
+     FROM chat_messages m LEFT JOIN public.users u ON u.id = m.author_id";
 
 pub async fn post(
     State(state): State<AppState>,
@@ -46,7 +54,7 @@ pub async fn post(
     Path(channel_id): Path<Uuid>,
     Json(req): Json<PostChatMessage>,
 ) -> Result<(StatusCode, Json<ChatMessage>), ChatError> {
-    let scope = crate::channels::access(&state.db, channel_id, caller.tenant_id).await?;
+    let scope = crate::channels::access(&state.db, channel_id, &caller).await?;
     if scope.archived {
         return Err(ChatError::Conflict("this channel is archived".into()));
     }
@@ -58,7 +66,9 @@ pub async fn post(
     let row = sqlx::query_as::<_, MessageRow>(
         "INSERT INTO chat_messages (id, channel_id, author_id, tenant_id, body)
          VALUES ($1, $2, $3, $4, $5)
-         RETURNING id, channel_id, author_id, body, created_at",
+         RETURNING id, channel_id, author_id,
+             (SELECT display_name FROM public.users WHERE id = author_id) AS author_name,
+             body, created_at",
     )
     .bind(Uuid::now_v7())
     .bind(channel_id)
@@ -93,14 +103,14 @@ pub async fn history(
 ) -> Result<Json<ChatMessagePage>, ChatError> {
     // Read is allowed on archived channels (history stays readable, AC-1); the
     // scope check still refuses another tenant's channel (AC-5).
-    crate::channels::access(&state.db, channel_id, caller.tenant_id).await?;
+    crate::channels::access(&state.db, channel_id, &caller).await?;
 
     let limit = q.limit.unwrap_or(50).clamp(1, 200);
     // v7 ids are time-ordered, so `id < before` is "older" and `ORDER BY id DESC`
     // is newest-first — the same keyset shape the rest of NookOS uses.
     let rows = sqlx::query_as::<_, MessageRow>(&format!(
-        "{SELECT_MESSAGE} WHERE channel_id = $1 AND ($2::uuid IS NULL OR id < $2)
-         ORDER BY id DESC LIMIT $3"
+        "{SELECT_MESSAGE} WHERE m.channel_id = $1 AND ($2::uuid IS NULL OR m.id < $2)
+         ORDER BY m.id DESC LIMIT $3"
     ))
     .bind(channel_id)
     .bind(q.before)
@@ -122,7 +132,7 @@ pub async fn history(
 /// Read one message back by id — used by the bus listener to deliver a peer
 /// instance's post to local subscribers.
 pub async fn fetch(pool: &PgPool, id: Uuid) -> Option<ChatMessage> {
-    sqlx::query_as::<_, MessageRow>(&format!("{SELECT_MESSAGE} WHERE id = $1"))
+    sqlx::query_as::<_, MessageRow>(&format!("{SELECT_MESSAGE} WHERE m.id = $1"))
         .bind(id)
         .fetch_optional(pool)
         .await

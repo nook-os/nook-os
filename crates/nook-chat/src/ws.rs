@@ -24,7 +24,7 @@ pub async fn subscribe(
 ) -> Result<Response, ChatError> {
     // Authorize BEFORE the upgrade: another tenant's channel is refused here, so
     // the socket the leak would flow through is never created (AC-5).
-    crate::channels::access(&state.db, channel_id, caller.tenant_id).await?;
+    crate::channels::access(&state.db, channel_id, &caller).await?;
     let rx = state.registry.subscribe(channel_id);
     Ok(ws.on_upgrade(move |socket| pump(socket, rx)))
 }

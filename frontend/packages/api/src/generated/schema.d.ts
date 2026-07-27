@@ -3162,7 +3162,7 @@ export interface components {
             id: string;
             label: string;
         };
-        /** @description A chat channel visible to a tenant member. */
+        /** @description A chat channel visible to a member. */
         ChatChannel: {
             /** @description Archived channels are hidden from the default list and refuse new posts. */
             archived: boolean;
@@ -3171,6 +3171,11 @@ export interface components {
             /** Format: uuid */
             id: string;
             name: string;
+            /**
+             * @description `"tenant"` (shared by a tenant, the default) or `"org"` (shared across
+             *     every tenant under an org — MAIN-112). Drives the org badge in the UI.
+             */
+            owner_type: string;
             slug: string;
         };
         /**
@@ -3180,6 +3185,12 @@ export interface components {
         ChatMessage: {
             /** Format: uuid */
             author_id: string;
+            /**
+             * @description The author's display name, resolved from `public.users` by `author_id` —
+             *     so an org channel shows names for authors in other tenants (MAIN-112
+             *     AC-4). `None` only if the author row is gone.
+             */
+            author_name?: string | null;
             body: string;
             /** Format: uuid */
             channel_id: string;
@@ -3253,6 +3264,11 @@ export interface components {
         /** @description Create a channel: a human name. The slug is derived server-side. */
         CreateChatChannel: {
             name: string;
+            /**
+             * @description `"tenant"` (default) or `"org"`. An org channel is owned by the caller's
+             *     tenant's org and needs tenant owner/admin to create (MAIN-112 AC-3).
+             */
+            owner?: string | null;
         };
         CreateColumnRequest: {
             name: string;

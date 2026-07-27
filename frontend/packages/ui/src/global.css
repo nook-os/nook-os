@@ -3744,6 +3744,26 @@ a.toast-main:hover .toast-title { text-decoration: underline; }
   box-shadow: inset 2px 0 0 var(--nook-accent);
 }
 .chat-channel-hash { color: var(--nook-fg-faint); }
+/* Org-channel indicator (MAIN-112): a small pill next to the channel name. */
+.chat-channel-org {
+  margin-left: auto;
+  padding: 0 5px;
+  border: 1px solid var(--nook-border);
+  border-radius: 3px;
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--nook-accent);
+}
+.chat-main-head .chat-channel-org { margin-left: 8px; }
+.chan-owner-select {
+  background: var(--nook-bg-raised);
+  color: var(--nook-fg);
+  border: 1px solid var(--nook-border);
+  border-radius: 3px;
+  font-size: 11px;
+  padding: 2px 4px;
+}
 
 .chat-main {
   display: flex;

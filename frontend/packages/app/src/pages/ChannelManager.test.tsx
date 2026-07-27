@@ -68,12 +68,22 @@ describe("ChannelManager (MAIN-94)", () => {
     expect(listChannels).toHaveBeenCalledWith(true);
   });
 
-  it("creates a channel from a non-empty name (AC-2)", async () => {
+  it("creates a channel from a non-empty name (AC-2), defaulting to team owner", async () => {
     renderModal();
     await screen.findByText("general");
     await userEvent.type(screen.getByLabelText("new channel name"), "release-notes");
     await userEvent.click(screen.getByRole("button", { name: /create/i }));
-    expect(createChannel).toHaveBeenCalledWith("release-notes");
+    // The owner selector defaults to "tenant" (My team) — MAIN-112.
+    expect(createChannel).toHaveBeenCalledWith("release-notes", "tenant");
+  });
+
+  it("creates an org channel when the owner selector is set to My org (MAIN-112 AC-4)", async () => {
+    renderModal();
+    await screen.findByText("general");
+    await userEvent.type(screen.getByLabelText("new channel name"), "org-wide");
+    await userEvent.selectOptions(screen.getByLabelText("channel owner"), "org");
+    await userEvent.click(screen.getByRole("button", { name: /create/i }));
+    expect(createChannel).toHaveBeenCalledWith("org-wide", "org");
   });
 
   it("rejects an empty name inline and creates nothing (AC-2)", async () => {
