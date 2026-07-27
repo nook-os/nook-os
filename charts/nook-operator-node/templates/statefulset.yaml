@@ -1,0 +1,114 @@
+{{- include "nook-operator-node.requireJoin" . -}}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "nook-operator-node.fullname" . }}
+  labels:
+    {{- include "nook-operator-node.labels" . | nindent 4 }}
+spec:
+  # Shared substrate, not a scaled workload; parallel pods would each be a
+  # distinct node. Default one.
+  replicas: {{ .Values.replicas }}
+  serviceName: {{ include "nook-operator-node.fullname" . }}
+  selector:
+    matchLabels:
+      {{- include "nook-operator-node.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "nook-operator-node.selectorLabels" . | nindent 8 }}
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      # Give sessions a moment to wind down; the node itself joins once and runs.
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: operator-node
+          image: {{ include "nook-operator-node.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          env:
+            - name: NOOK_SERVER
+              value: {{ .Values.server | quote }}
+            - name: NOOK_JOIN_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.existingSecret }}
+                  key: {{ .Values.secretKeys.joinToken }}
+            - name: NOOK_NODE_NAME
+              value: {{ .Values.nodeName | quote }}
+            - name: NOOK_WORKSPACE_ROOT
+              value: /workspace
+            # This IS the shared operator node — reported as capabilities.shared_operator (AC-4).
+            - name: NOOK_SHARED_OPERATOR
+              value: "1"
+            # tmux runtime dir on its own volume (AC-2). tmux honours TMUX_TMPDIR.
+            - name: TMUX_TMPDIR
+              value: /var/lib/nook/tmux
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: config
+              mountPath: /root/.config/nook
+            - name: workspace
+              mountPath: /workspace
+            - name: tmux
+              mountPath: /var/lib/nook/tmux
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+  # Persistent identity, checkouts, and tmux runtime (AC-2/AC-5). volumeClaim-
+  # Templates give the pod stable PVCs it re-attaches on restart; deleting them
+  # (a fresh volume) makes the node re-join cleanly with a new identity.
+  volumeClaimTemplates:
+    - metadata:
+        name: config
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- with .Values.persistence.config.storageClass }}
+        storageClassName: {{ . | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.persistence.config.size }}
+    - metadata:
+        name: workspace
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- with .Values.persistence.workspace.storageClass }}
+        storageClassName: {{ . | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.persistence.workspace.size }}
+    - metadata:
+        name: tmux
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- with .Values.persistence.tmux.storageClass }}
+        storageClassName: {{ . | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.persistence.tmux.size }}

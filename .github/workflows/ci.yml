@@ -157,6 +157,8 @@ jobs:
           version: v3.17.0
       - name: Lint and render the chart
         run: ./charts/nook-control/ci/validate.sh
+      - name: Lint and render the operator-node chart
+        run: ./charts/nook-operator-node/ci/validate.sh
 
   # A real (kind) bring-up of the chart on top of the lint/template job above:
   # install against an in-cluster Postgres, assert both Deployments converge and
@@ -217,3 +219,20 @@ jobs:
       - name: Chart end-to-end on kind
         if: steps.changes.outputs.charts == 'true' || github.event_name == 'workflow_dispatch'
         run: ./scripts/k8s-e2e.sh --pull
+
+  # Shared operator node bring-up over docker-compose (MAIN-125): build the
+  # operator image, join the control plane, assert it comes online with the
+  # shared-operator designation, and survives a restart with its identity intact.
+  #
+  # workflow_dispatch ONLY — never on a PR push. The build pulls the agent
+  # runtimes (claude/codex/copilot from npm, hermes from its install script) over
+  # the network, so its availability must not gate merges. Run it on demand from
+  # the Actions tab when the image or its wiring changes.
+  operator-node-e2e:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - name: Operator node bring-up on docker-compose
+        run: ./scripts/operator-node-e2e.sh

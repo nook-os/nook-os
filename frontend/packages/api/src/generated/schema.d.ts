@@ -2865,6 +2865,14 @@ export interface components {
             /** @description Detected runtime executables: "claude", "hermes", "codex", "bash", ... */
             runtimes?: string[];
             /**
+             * @description Whether this node is the deployment's shared operator node — a machine
+             *     the stack ships (MAIN-125) rather than a person's own. Reported so later
+             *     executor selection can tell it apart from personal nodes; surfaced in
+             *     `nook get nodes` and the Nodes UI. Set by `NOOK_SHARED_OPERATOR` on that
+             *     container; false everywhere else.
+             */
+            shared_operator?: boolean;
+            /**
              * @description This node's SSH public key (generated locally; the private half never
              *     leaves the machine). Add it as a deploy key to clone private repos.
              */

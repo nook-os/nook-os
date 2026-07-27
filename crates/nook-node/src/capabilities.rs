@@ -83,5 +83,37 @@ pub fn detect() -> Capabilities {
                 .and_then(|c| c.ssh_key_path)
                 .as_deref(),
         ),
+        shared_operator: shared_operator(),
+    }
+}
+
+/// Is this the deployment's shared operator node (MAIN-125)? Read from
+/// `NOOK_SHARED_OPERATOR`; the shipped operator-node container sets it, and no
+/// personal node ever does.
+fn shared_operator() -> bool {
+    env_truthy(&std::env::var("NOOK_SHARED_OPERATOR").unwrap_or_default())
+}
+
+/// A truthy env value: `1`/`true`/`yes`/`on` (case/space-insensitive). Unset,
+/// empty, `0`, and `false` are all false. Pure, so it is testable without env.
+fn env_truthy(v: &str) -> bool {
+    matches!(
+        v.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::env_truthy;
+
+    #[test]
+    fn shared_operator_flag_reads_truthy_env_only() {
+        for on in ["1", "true", "TRUE", " yes ", "on"] {
+            assert!(env_truthy(on), "{on:?} should be truthy");
+        }
+        for off in ["", "0", "false", "no", "off", "  "] {
+            assert!(!env_truthy(off), "{off:?} should be false");
+        }
     }
 }

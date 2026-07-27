@@ -1,0 +1,70 @@
+# nook-operator-node — the shared operator node as an in-cluster StatefulSet.
+#
+# A StatefulSet (not a Deployment) so the pod keeps a stable identity and its
+# own PersistentVolumeClaims across restarts — that is what makes AC-5 hold:
+# node identity and checkouts survive a restart, a fresh volume re-joins clean.
+
+nameOverride: ""
+fullnameOverride: ""
+
+image:
+  registry: ghcr.io
+  # nook-<image> from the release matrix (image: operator-node).
+  repository: nook-os/nook-operator-node
+  # Defaults to the chart's appVersion when empty.
+  tag: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+# One operator node per deployment by default. It is shared substrate, not a
+# scaled workload; raise only if you deliberately want several.
+replicas: 1
+
+# The control plane the node joins. Non-secret — the join TOKEN is the secret,
+# referenced below. Must be the agent listener's externally reachable address.
+server: ""
+
+# Node identity as reported to the control plane.
+nodeName: "operator"
+
+# Join is operator-driven: provision a single-use (or short-lived) join token in
+# the UI / via POST /api/v1/nodes/join-tokens, put it in a Secret, and reference
+# it here. The chart never stores the token itself.
+#   kubectl create secret generic nook-operator-join \
+#     --from-literal=joinToken=nook_join_...
+existingSecret: ""
+secretKeys:
+  # Key inside existingSecret holding the join token.
+  joinToken: joinToken
+
+# Persistent volumes (AC-2/AC-5). Each becomes a volumeClaimTemplate so the pod
+# re-attaches the SAME volumes on restart.
+persistence:
+  # Node identity + generated SSH key (node.toml). A restart re-attaches as the
+  # same node; a fresh volume re-joins as a new one.
+  config:
+    size: 1Gi
+    storageClass: ""
+  # Cloned repos / worktrees.
+  workspace:
+    size: 20Gi
+    storageClass: ""
+  # tmux runtime dir (TMUX_TMPDIR). The socket dir persists; note a pod restart
+  # still terminates the tmux server process, so in-flight sessions do not resume.
+  tmux:
+    size: 1Gi
+    storageClass: ""
+
+# Extra environment for the node process (e.g. RUST_LOG overrides).
+extraEnv: []
+
+resources: {}
+
+podAnnotations: {}
+podSecurityContext: {}
+securityContext: {}
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

@@ -1,0 +1,10 @@
+# Compose override for the operator-node integration test (MAIN-125), layered
+# on docker-compose.yml only when scripts/operator-node-e2e.sh runs. It gives
+# the control plane the same well-known join token the operator-node service
+# consumes, so the control plane SEEDS it and the node can join non-interactively
+# at first boot. Kept out of the base compose so the ordinary dev stack is
+# unchanged (NG-4): the base only seeds a token when an operator exports one.
+services:
+  control-plane:
+    environment:
+      NOOK_DEV_JOIN_TOKEN: ${NOOK_DEV_JOIN_TOKEN:-}

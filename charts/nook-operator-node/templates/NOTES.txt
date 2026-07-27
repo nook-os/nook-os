@@ -1,0 +1,18 @@
+The shared operator node is deploying.
+
+  StatefulSet:  {{ include "nook-operator-node.fullname" . }}
+  Image:        {{ include "nook-operator-node.image" . }}
+  Control plane: {{ .Values.server }}
+
+It joins the control plane once at first boot using the join token in Secret
+"{{ .Values.existingSecret }}" (key "{{ .Values.secretKeys.joinToken }}"), then runs.
+
+1. Watch it come up and join:
+     kubectl -n {{ .Release.Namespace }} rollout status statefulset/{{ include "nook-operator-node.fullname" . }}
+     kubectl -n {{ .Release.Namespace }} logs statefulset/{{ include "nook-operator-node.fullname" . }} -f
+
+2. In the NookOS Nodes page it appears online, marked "shared operator", with an
+   SSH key. Add that key to your git host to clone workspaces onto it.
+
+3. Identity, checkouts, and the tmux runtime live on PersistentVolumeClaims, so a
+   pod restart keeps them. Deleting the PVCs makes it re-join as a fresh node.
