@@ -16,14 +16,29 @@ import {
   channelHistory,
   connectChatSocket,
   listChannels,
+  listDms,
   me as chatMe,
+  openDm,
   postMessage,
   type ChatChannel,
   type ChatMessage,
+  type DmSummary,
 } from "@nookos/api";
+import { Plus } from "lucide-react";
 import { ChatView } from "@nookos/ui";
 import { buildChatMessages, type PendingMessage } from "./chatMessages";
 import { ChannelManager } from "./ChannelManager";
+import { DmPicker } from "./DmPicker";
+
+/** A DM has no name of its own — label it by its OTHER participants (MAIN-113
+ *  AC-5). Falls back to "Direct message" if names haven't resolved yet. */
+function dmName(dm: DmSummary, myPersonId: string | null | undefined): string {
+  const others = dm.participants
+    .filter((p) => p.person_id !== myPersonId)
+    .map((p) => p.display_name)
+    .filter(Boolean);
+  return others.length ? others.join(", ") : "Direct message";
+}
 
 /** Owner and admin manage channels; everyone else reads and posts. Mirrors the
  *  chat service's gate, so the UI never shows a control the server would 403. */
@@ -56,16 +71,35 @@ export function ChatPage() {
   });
   const channels = channelsQuery.data ?? [];
 
+  // The caller's direct messages (MAIN-113), listed beside the channels.
+  const dmsQuery = useQuery({ queryKey: ["chat", "dms"], queryFn: listDms });
+  const dms = dmsQuery.data ?? [];
+
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [managing, setManaging] = useState(false);
+  const [pickingDm, setPickingDm] = useState(false);
 
   // Auto-select the first channel once the list loads, but never fight a user's
-  // choice or point at a channel that has since vanished.
+  // choice or point at a conversation (channel OR dm) that has since vanished.
   useEffect(() => {
-    if (channels.length === 0) return;
-    if (selectedId && channels.some((c) => c.id === selectedId)) return;
-    setSelectedId(channels[0].id);
-  }, [channels, selectedId]);
+    if (
+      selectedId &&
+      (channels.some((c) => c.id === selectedId) || dms.some((d) => d.id === selectedId))
+    )
+      return;
+    if (channels.length > 0) setSelectedId(channels[0].id);
+    else if (dms.length > 0) setSelectedId(dms[0].id);
+  }, [channels, dms, selectedId]);
+
+  // When the picker opens a DM, jump straight into it.
+  const onDmOpened = useCallback(
+    (dm: DmSummary) => {
+      void qc.invalidateQueries({ queryKey: ["chat", "dms"] });
+      setSelectedId(dm.id);
+      setPickingDm(false);
+    },
+    [qc],
+  );
 
   const historyQuery = useInfiniteQuery({
     queryKey: ["chat", "messages", selectedId],
@@ -161,6 +195,12 @@ export function ChatPage() {
   );
 
   const activeChannel = channels.find((c) => c.id === selectedId);
+  const activeDm = dms.find((d) => d.id === selectedId);
+  const activeTitle = activeChannel
+    ? activeChannel.name
+    : activeDm
+      ? dmName(activeDm, chatIdentity?.person_id)
+      : null;
 
   return (
     <div className="chat-page">
@@ -201,21 +241,49 @@ export function ChatPage() {
             </button>
           ))
         )}
+
+        <div className="chat-channels-head">
+          <span>Direct Messages</span>
+          <button
+            type="button"
+            className="chat-channels-manage"
+            onClick={() => setPickingDm(true)}
+            title="new direct message"
+            aria-label="new direct message"
+          >
+            <Plus size={13} />
+          </button>
+        </div>
+        {dms.length === 0 ? (
+          <div className="chat-channels-empty">No direct messages yet.</div>
+        ) : (
+          dms.map((d) => (
+            <button
+              key={d.id}
+              type="button"
+              className={`chat-channel${d.id === selectedId ? " active" : ""}`}
+              onClick={() => setSelectedId(d.id)}
+            >
+              <span className="chat-channel-hash">@</span>
+              {dmName(d, chatIdentity?.person_id)}
+            </button>
+          ))
+        )}
       </aside>
       <section className="chat-main">
         <header className="chat-main-head">
-          {activeChannel ? (
+          {activeTitle ? (
             <>
-              <span className="chat-channel-hash">#</span>
-              {activeChannel.name}
-              {activeChannel.owner_type === "org" && (
+              <span className="chat-channel-hash">{activeDm ? "@" : "#"}</span>
+              {activeTitle}
+              {activeChannel?.owner_type === "org" && (
                 <span className="chat-channel-org" title="Shared across your org">
                   org
                 </span>
               )}
             </>
           ) : (
-            "Select a channel"
+            "Select a conversation"
           )}
         </header>
         <ChatView
@@ -226,11 +294,12 @@ export function ChatPage() {
           loadingOlder={historyQuery.isFetchingNextPage}
           currentUserId={meId}
           disabled={!selectedId}
-          placeholder={activeChannel ? `Message #${activeChannel.name}` : "Select a channel"}
+          placeholder={activeTitle ? `Message ${activeTitle}` : "Select a conversation"}
           onRetry={onRetry}
         />
       </section>
       {managing && canManage && <ChannelManager onClose={() => setManaging(false)} />}
+      {pickingDm && <DmPicker onClose={() => setPickingDm(false)} onOpened={onDmOpened} />}
     </div>
   );
 }

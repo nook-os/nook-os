@@ -20,6 +20,7 @@ vi.mock("@nookos/api", () => ({
   me: vi.fn(async () => ({
     user_id: "me",
     tenant_id: "t",
+    person_id: "p-me",
     cookie_session: false,
     role: identity.role,
   })),
@@ -28,6 +29,9 @@ vi.mock("@nookos/api", () => ({
   listChannels: vi.fn(async () => [
     { id: "c1", name: "general", slug: "general", archived: false, created_at: "2026-07-25T09:00:00Z" },
   ]),
+  listDms: vi.fn(async () => []),
+  openDm: vi.fn(),
+  listPeople: vi.fn(async () => []),
   channelHistory: vi.fn(async () => ({
     messages: [
       { id: "h1", author_id: "u-bob", channel_id: "c1", body: "old message", created_at: "2026-07-25T09:30:00Z" },

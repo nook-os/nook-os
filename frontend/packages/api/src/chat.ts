@@ -14,12 +14,17 @@ type ChatMessage = Schemas["ChatMessage"];
 type ChatMessagePage = Schemas["ChatMessagePage"];
 type CreateChatChannel = Schemas["CreateChatChannel"];
 type UpdateChatChannel = Schemas["UpdateChatChannel"];
+export type DmSummary = Schemas["DmSummary"];
+export type PersonRef = Schemas["PersonRef"];
 
 /** `GET /api/me` — the caller as chat resolves them, including their tenant
  *  `role` so the UI can gate channel management to admins (MAIN-94 AC-5). */
 export interface ChatMe {
   user_id: string;
   tenant_id: string;
+  /** The caller's cross-tenant person id — used to name a DM by its other
+   *  participants (MAIN-113). `null` for a user row with no person. */
+  person_id: string | null;
   cookie_session: boolean;
   role: string | null;
 }
@@ -111,6 +116,24 @@ export function createChannel(
 ): Promise<ChatChannel> {
   const body: CreateChatChannel = { name, owner };
   return chatWrite<ChatChannel>("POST", "/channels", body);
+}
+
+/** The caller's direct-message conversations, newest first (MAIN-113). */
+export function listDms(): Promise<DmSummary[]> {
+  return chatGet<DmSummary[]>("/dms");
+}
+
+/**
+ * Open — or reuse — a DM with `personIds` (the caller is added automatically).
+ * Opening the same set twice returns the same conversation, never a duplicate.
+ */
+export function openDm(personIds: string[]): Promise<DmSummary> {
+  return chatWrite<DmSummary>("POST", "/dms", { person_ids: personIds });
+}
+
+/** People the caller may start a DM with — everyone in their org(s) (MAIN-113). */
+export function listPeople(): Promise<PersonRef[]> {
+  return chatGet<PersonRef[]>("/people");
 }
 
 /** Rename or (un)archive a channel (admin only server-side). */

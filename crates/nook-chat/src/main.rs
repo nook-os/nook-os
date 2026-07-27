@@ -11,6 +11,7 @@
 mod bus;
 mod channels;
 mod config;
+mod dms;
 mod messages;
 mod registry;
 mod ws;
@@ -32,6 +33,7 @@ use uuid::Uuid;
 
 /// Chat's own migration set, embedded at compile time — applied into the `chat`
 /// schema, so it never touches the control plane's `public._sqlx_migrations`.
+/// Embedded: 0001_chat_init, 0002_chat_channel_archive, 0003_chat_dm.
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
 #[derive(Clone)]
@@ -100,6 +102,10 @@ async fn main() -> anyhow::Result<()> {
             get(messages::history).post(messages::post),
         )
         .route("/api/channels/{id}/ws", get(ws::subscribe))
+        // Direct messages (MAIN-113): open-or-create + list the caller's DMs,
+        // and the org-scoped people picker that feeds the new-DM affordance.
+        .route("/api/dms", get(dms::list).post(dms::open))
+        .route("/api/people", get(dms::people))
         .layer(tower_http::trace::TraceLayer::new_for_http())
         .with_state(state);
 
@@ -149,9 +155,19 @@ async fn me(State(state): State<AppState>, caller: Caller) -> Result<Json<Value>
     // The caller's tenant role, so the frontend can gate channel management to
     // admins (MAIN-94 AC-5) — `null` for a caller with no `users` row.
     let role = tenant_role(&state.db, caller.user_id, caller.tenant_id).await?;
+    // The caller's PERSON (cross-tenant identity), so the DM UI can name a
+    // conversation by its *other* participants (MAIN-113 AC-5). `null` if the
+    // user row has no person (pre-MAIN-130 rows).
+    let person_id: Option<Uuid> = sqlx::query_scalar("SELECT person_id FROM users WHERE id = $1")
+        .bind(caller.user_id)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(|_| ChatError::Internal)?
+        .flatten();
     Ok(Json(json!({
         "user_id": caller.user_id,
         "tenant_id": caller.tenant_id,
+        "person_id": person_id,
         "cookie_session": caller.cookie_session,
         "role": role,
     })))

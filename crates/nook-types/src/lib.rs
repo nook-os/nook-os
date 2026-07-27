@@ -2441,6 +2441,31 @@ pub struct PostChatMessage {
     pub body: String,
 }
 
+/// A person the caller may address in a DM (MAIN-113 AC-4): the stable
+/// cross-tenant `person_id` and a display name resolved from `public.users`.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct PersonRef {
+    pub person_id: Uuid,
+    pub display_name: String,
+}
+
+/// A direct-message conversation the caller belongs to (MAIN-113). The UI names
+/// it by its *other* participants' display names — DM channels carry no
+/// human-facing channel name of their own.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct DmSummary {
+    pub id: Uuid,
+    pub created_at: DateTime<Utc>,
+    pub participants: Vec<PersonRef>,
+}
+
+/// Open (or reuse) a DM with these persons — the creator is always included, so
+/// the effective set is `{caller} ∪ person_ids`, 2–8 people (MAIN-113 AC-2).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct OpenDmRequest {
+    pub person_ids: Vec<Uuid>,
+}
+
 /// What the chat websocket pushes to a subscribed client (AC-3). Adjacently
 /// tagged for clean generated TypeScript, like the node protocol.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]

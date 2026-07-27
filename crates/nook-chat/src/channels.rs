@@ -75,6 +75,10 @@ pub async fn access(
     let authorized = match owner_type.as_str() {
         "tenant" => owner_id == caller.tenant_id,
         "org" => person_in_org(db, caller.user_id, owner_id).await?,
+        // A DM is reachable only by its participants, resolved by person so a
+        // participant reaches it from any tenant and a tenant admin who is not a
+        // participant is refused (MAIN-113 AC-3).
+        "dm" => person_is_participant(db, caller.user_id, channel_id).await?,
         _ => false,
     };
     if !authorized {
@@ -101,6 +105,29 @@ async fn person_in_org(db: &sqlx::PgPool, user_id: Uuid, org: Uuid) -> Result<bo
     )
     .bind(user_id)
     .bind(org)
+    .fetch_one(db)
+    .await
+    .map_err(|_| ChatError::Internal)?;
+    Ok(ok)
+}
+
+/// Is the caller's person a participant of this DM (MAIN-113)? Resolves the
+/// caller's `person_id` and checks `chat_channel_participants` — the same
+/// person-keyed membership `dms::open` writes.
+async fn person_is_participant(
+    db: &sqlx::PgPool,
+    user_id: Uuid,
+    channel_id: Uuid,
+) -> Result<bool, ChatError> {
+    let (ok,): (bool,) = sqlx::query_as(
+        "SELECT EXISTS(
+             SELECT 1 FROM chat_channel_participants
+             WHERE channel_id = $1
+               AND person_id = (SELECT person_id FROM public.users WHERE id = $2)
+         )",
+    )
+    .bind(channel_id)
+    .bind(user_id)
     .fetch_one(db)
     .await
     .map_err(|_| ChatError::Internal)?;

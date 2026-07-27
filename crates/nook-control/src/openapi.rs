@@ -378,6 +378,9 @@ use utoipa::OpenApi;
         nook_types::UpdateChatChannel,
         nook_types::PostChatMessage,
         nook_types::ChatServerMessage,
+        nook_types::PersonRef,
+        nook_types::DmSummary,
+        nook_types::OpenDmRequest,
     ))
 )]
 pub struct ApiDoc;

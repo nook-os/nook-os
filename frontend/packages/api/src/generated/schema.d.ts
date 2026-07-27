@@ -3573,6 +3573,18 @@ export interface components {
             items: components["schemas"]["DispatchItem"][];
         };
         /**
+         * @description A direct-message conversation the caller belongs to (MAIN-113). The UI names
+         *     it by its *other* participants' display names — DM channels carry no
+         *     human-facing channel name of their own.
+         */
+        DmSummary: {
+            /** Format: date-time */
+            created_at: string;
+            /** Format: uuid */
+            id: string;
+            participants: components["schemas"]["PersonRef"][];
+        };
+        /**
          * @description Whether the signed-in user's email is verified, and whether a local
          *     verification round-trip applies to them (MAIN-30).
          */
@@ -4209,6 +4221,13 @@ export interface components {
             ok: boolean;
             path?: string | null;
         };
+        /**
+         * @description Open (or reuse) a DM with these persons — the creator is always included, so
+         *     the effective set is `{caller} ∪ person_ids`, 2–8 people (MAIN-113 AC-2).
+         */
+        OpenDmRequest: {
+            person_ids: string[];
+        };
         /** @description Unlocking a protected secret. */
         OpenSecretRequest: {
             passphrase: string;
@@ -4316,6 +4335,15 @@ export interface components {
             id: string;
             name: string;
             slug: string;
+        };
+        /**
+         * @description A person the caller may address in a DM (MAIN-113 AC-4): the stable
+         *     cross-tenant `person_id` and a display name resolved from `public.users`.
+         */
+        PersonRef: {
+            display_name: string;
+            /** Format: uuid */
+            person_id: string;
         };
         /** @description One policy-gated field with its current state and plain-language meaning. */
         PolicyField: {
