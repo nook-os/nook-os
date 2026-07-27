@@ -8,6 +8,7 @@
 // the card's job is to be readable.
 import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { api, type TaskItem } from "@nookos/api";
+import { VISIBILITY_META } from "@nookos/ui";
 import { askConfirm, notify } from "./dialogs";
 
 export interface MenuColumn {
@@ -44,7 +45,7 @@ export function TaskMenu({
 }) {
   const ref = useRef<HTMLDivElement>(null);
   const [pos, setPos] = useState(anchor);
-  const [submenu, setSubmenu] = useState<"move" | "epic" | null>(null);
+  const [submenu, setSubmenu] = useState<"move" | "epic" | "visibility" | null>(null);
 
   // Keep the menu on screen. Opened from a card near the right edge or the
   // bottom of a tall column, a naively-placed menu renders half off-screen and
@@ -98,6 +99,18 @@ export function TaskMenu({
   // Only for a non-epic task, and only when epics are known. Exclude self.
   const epicChoices = (epics ?? []).filter((e) => e.id !== task.id);
   const canMoveToEpic = task.type !== "epic" && !!epics;
+
+  // Change who may see this card (MAIN-103). A 403 from the MAIN-85 gate ("this
+  // needs tenant owner or admin") surfaces via the shared write-failure toast,
+  // untouched — the same way every other menu PATCH reports a refusal.
+  const currentVisibility = task.visibility ?? "team";
+  const setVisibility = (visibility: string) =>
+    run(() =>
+      api.PATCH("/api/v1/tasks/{id}", {
+        params: { path: { id: task.id } },
+        body: { visibility },
+      }),
+    );
 
   const copy = async (text: string, what: string) => {
     try {
@@ -244,6 +257,35 @@ export function TaskMenu({
           )}
         </div>
       )}
+
+      <div
+        className="ctx-sub-host"
+        onMouseEnter={() => setSubmenu("visibility")}
+        onMouseLeave={() => setSubmenu(null)}
+      >
+        {item(
+          "Visibility",
+          () => setSubmenu(submenu === "visibility" ? null : "visibility"),
+          { sub: true },
+        )}
+        {submenu === "visibility" && (
+          <div className="ctx-submenu">
+            {VISIBILITY_META.map((v) => (
+              <button
+                key={v.value}
+                className="ctx-item"
+                onMouseDown={(e) => e.stopPropagation()}
+                onClick={() => setVisibility(v.value)}
+                title={v.tooltip}
+              >
+                <v.Icon size={12} style={{ marginRight: 6, verticalAlign: "-1px" }} />
+                {v.label}
+                {currentVisibility === v.value && <span className="ok"> ✓</span>}
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
 
       <div className="ctx-sep" />
 

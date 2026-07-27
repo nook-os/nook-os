@@ -3929,6 +3929,18 @@
             }
           },
           {
+            "name": "visibility",
+            "in": "query",
+            "description": "Repeatable per-task visibility filter (MAIN-103): `private`|`team`|`org`.\nORs within values and ANDs with the other filters. It only NARROWS within\nwhat the viewer may already see — the viewer predicate still applies, so\n`visibility=private` never reveals another person's private card.",
+            "required": false,
+            "schema": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          {
             "name": "is_blocked",
             "in": "query",
             "description": "Filter on the derived blocker state.",

@@ -28,7 +28,15 @@ import { api, type TaskItem } from "@nookos/api";
 import { AutomationDialog } from "./BoardAutomation";
 import { BoardBacklog } from "./BoardBacklog";
 import { useBacklogSelection } from "./backlogSelection";
-import { Empty, Panel, Pill, TypeBadge, TYPE_META } from "@nookos/ui";
+import {
+  Empty,
+  Panel,
+  Pill,
+  TypeBadge,
+  TYPE_META,
+  VisibilityBadge,
+  VISIBILITY_META,
+} from "@nookos/ui";
 import { useNewWork } from "../newwork";
 import { askChoice, askConfirm, askForm, askText, notify } from "../dialogs";
 import { TaskDetail } from "../TaskDetail";
@@ -90,6 +98,13 @@ function Card({
             reads as before (AC-5). */}
         {task.type && task.type !== "task" && (
           <TypeBadge type={task.type} compact />
+        )}
+        {/* Visibility is flagged inline only when it is NOT the default `team`
+            (MAIN-103) — a private/org card is scannable across columns, while a
+            plain team card shows nothing, so a default board reads as before,
+            exactly like the type badge above. */}
+        {task.visibility && task.visibility !== "team" && (
+          <VisibilityBadge visibility={task.visibility} compact />
         )}
         <span className="card-key mono">{task.key ?? ""}</span>
         {task.title}
@@ -422,10 +437,19 @@ function Filters({
         ? value.type.filter((x) => x !== t)
         : [...value.type, t],
     });
+  // Same shape for visibility: each chip toggles membership, several are OR'd.
+  const toggleVisibility = (v: string) =>
+    onChange({
+      ...value,
+      visibility: value.visibility.includes(v)
+        ? value.visibility.filter((x) => x !== v)
+        : [...value.visibility, v],
+    });
   const active =
     value.label.length > 0 ||
     value.not_label.length > 0 ||
     value.type.length > 0 ||
+    value.visibility.length > 0 ||
     value.assignee !== "any" ||
     value.priority !== null ||
     value.blocked !== null ||
@@ -466,6 +490,24 @@ function Filters({
           >
             <TypeBadge type={t.value} compact />
             {t.label}
+          </button>
+        );
+      })}
+
+      <span className="filter-sep" />
+      <span className="faint small">visibility</span>
+      {VISIBILITY_META.map((v) => {
+        const on = value.visibility.includes(v.value);
+        return (
+          <button
+            key={v.value}
+            className={`task-chip type-chip ${on ? "on" : ""}`}
+            aria-pressed={on}
+            onClick={() => toggleVisibility(v.value)}
+            title={on ? `click to clear ${v.label}` : `filter to ${v.label}`}
+          >
+            <VisibilityBadge visibility={v.value} compact />
+            {v.label}
           </button>
         );
       })}
@@ -555,6 +597,8 @@ export interface BoardFilter {
   not_label: string[];
   /** Issue types to include (OR'd); empty = any type. */
   type: string[];
+  /** Visibilities to include (OR'd); empty = any visibility (MAIN-103). */
+  visibility: string[];
   assignee: "any" | "none" | "me";
   priority: number | null;
   blocked: boolean | null;
@@ -659,6 +703,7 @@ const EMPTY_FILTER: BoardFilter = {
   label: [],
   not_label: [],
   type: [],
+  visibility: [],
   assignee: "any",
   priority: null,
   blocked: null,
@@ -677,6 +722,7 @@ const FILTER_KEYS = [
   "label",
   "xlabel",
   "type",
+  "vis",
   "assignee",
   "priority",
   "blocked",
@@ -699,6 +745,7 @@ export function parseFilter(params: URLSearchParams): BoardFilter {
     label: list("label"),
     not_label: list("xlabel"),
     type: list("type"),
+    visibility: list("vis"),
     assignee: assignee === "none" || assignee === "me" ? assignee : "any",
     priority: priority !== null && priority !== "" ? Number(priority) : null,
     blocked: blocked === null ? null : blocked === "true",
@@ -716,6 +763,7 @@ export function writeFilter(next: URLSearchParams, f: BoardFilter): URLSearchPar
   if (f.label.length) next.set("label", f.label.join(","));
   if (f.not_label.length) next.set("xlabel", f.not_label.join(","));
   if (f.type.length) next.set("type", f.type.join(","));
+  if (f.visibility.length) next.set("vis", f.visibility.join(","));
   if (f.assignee !== "any") next.set("assignee", f.assignee);
   if (f.priority !== null) next.set("priority", String(f.priority));
   if (f.blocked !== null) next.set("blocked", String(f.blocked));
@@ -852,6 +900,7 @@ export function BoardPage() {
     filter.label.length > 0 ||
     filter.not_label.length > 0 ||
     filter.type.length > 0 ||
+    filter.visibility.length > 0 ||
     filter.assignee !== "any" ||
     filter.priority !== null ||
     filter.blocked !== null ||
@@ -870,6 +919,9 @@ export function BoardPage() {
               ...(filter.label.length ? { label: filter.label } : {}),
               ...(filter.not_label.length ? { not_label: filter.not_label } : {}),
               ...(filter.type.length ? { type: filter.type } : {}),
+              // Server-driven, no client re-filter: the visibility param NARROWS
+              // within what the viewer may already see (MAIN-103).
+              ...(filter.visibility.length ? { visibility: filter.visibility } : {}),
               ...(filter.assignee === "none"
                 ? { assignee: "none" }
                 : filter.assignee === "me" && me?.user?.id

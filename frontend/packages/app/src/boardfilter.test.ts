@@ -33,6 +33,7 @@ describe("board filter URL round-trip (MAIN-15 AC-1)", () => {
       label: [],
       not_label: [],
       type: [],
+      visibility: [],
       assignee: "any",
       priority: null,
       blocked: null,
@@ -45,6 +46,7 @@ describe("board filter URL round-trip (MAIN-15 AC-1)", () => {
       label: ["agent-ready", "urgent"],
       not_label: ["blocked"],
       type: ["bug", "epic"],
+      visibility: ["private", "org"],
       assignee: "me",
       priority: 2,
       blocked: false,
@@ -57,6 +59,7 @@ describe("board filter URL round-trip (MAIN-15 AC-1)", () => {
       label: [],
       not_label: [],
       type: ["chore"],
+      visibility: ["team"],
       assignee: "none",
       priority: 0,
       blocked: true,
@@ -90,6 +93,16 @@ describe("board filter URL round-trip (MAIN-15 AC-1)", () => {
     ]);
     // No type filter → the key is absent, so a default board URL is unchanged.
     expect(serializeFilter(cases[0]).has("type")).toBe(false);
+  });
+
+  it("writes the multi-select visibility filter as a comma list, and parses it back (MAIN-103)", () => {
+    expect(serializeFilter(cases[1]).get("vis")).toBe("private,org");
+    expect(parseFilter(new URLSearchParams("vis=private,org")).visibility).toEqual([
+      "private",
+      "org",
+    ]);
+    // No visibility filter → the key is absent, so a default board URL is unchanged.
+    expect(serializeFilter(cases[0]).has("vis")).toBe(false);
   });
 
   it("round-trips the Board/Backlog tab via ?view (MAIN-82 AC-4)", () => {

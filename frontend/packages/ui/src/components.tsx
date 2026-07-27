@@ -1,5 +1,15 @@
 import React from "react";
-import { BookOpen, Bug, Layers, SquareCheck, Wrench, type LucideIcon } from "lucide-react";
+import {
+  BookOpen,
+  Bug,
+  Building2,
+  Layers,
+  Lock,
+  SquareCheck,
+  Users,
+  Wrench,
+  type LucideIcon,
+} from "lucide-react";
 
 export function Panel({
   title,
@@ -97,6 +107,79 @@ export function TypeBadge({
   const m = typeMeta(type);
   return (
     <span className={`type-badge ${m.tone}`} title={m.label}>
+      <m.Icon size={12} className="type-badge-icon" />
+      {!compact && <span className="type-badge-label">{m.label}</span>}
+    </span>
+  );
+}
+
+/** The three per-task visibilities (MAIN-103). String, not an enum, because the
+ *  server owns the set; this is only its presentation. Default is `team`. */
+export type TaskVisibility = "private" | "team" | "org";
+
+export interface VisibilityMeta {
+  value: TaskVisibility;
+  label: string;
+  tone: Tone;
+  /** The sentence the badge/tooltip carries — who this card is visible to. */
+  tooltip: string;
+  Icon: LucideIcon;
+}
+
+/**
+ * The ONE visibility → (tone, icon, label, tooltip) mapping (MAIN-103), mirroring
+ * `TYPE_META`. The detail selector, the board card, the context menu and the
+ * board filter all read it, so a visibility looks identical everywhere and a new
+ * value is added in exactly one place. Tones come from the shared vocabulary:
+ * `private` is restricted (warn), `team` is the quiet default (dim), `org` is
+ * reference-wide (info).
+ */
+export const VISIBILITY_META: VisibilityMeta[] = [
+  {
+    value: "private",
+    label: "Private",
+    tone: "warn",
+    tooltip: "Private — only the creator and assignee can see this card.",
+    Icon: Lock,
+  },
+  {
+    value: "team",
+    label: "Team",
+    tone: "dim",
+    tooltip: "Team — visible to the whole tenant (the default).",
+    Icon: Users,
+  },
+  {
+    value: "org",
+    label: "Org",
+    tone: "info",
+    tooltip: "Org — visible across the organization.",
+    Icon: Building2,
+  },
+];
+
+/** Look up a visibility's presentation, defaulting to `team` for an absent or
+ *  unknown value — the server's own default — so nothing ever renders blank. */
+export function visibilityMeta(visibility: string | null | undefined): VisibilityMeta {
+  return VISIBILITY_META.find((v) => v.value === visibility) ?? VISIBILITY_META[1];
+}
+
+/**
+ * A compact, theme-native indicator for a task's visibility: the icon, plus its
+ * label unless `compact`. Same props/shape/styling as `TypeBadge` — it reuses
+ * the `type-badge` classes so a visibility badge sits identically beside a type
+ * badge. Reused on board cards (compact) and in the board filter (MAIN-103).
+ */
+export function VisibilityBadge({
+  visibility,
+  compact = false,
+}: {
+  visibility: string | null | undefined;
+  compact?: boolean;
+}) {
+  const m = visibilityMeta(visibility);
+  return (
+    <span className={`type-badge ${m.tone}`} title={m.tooltip}>
       <m.Icon size={12} className="type-badge-icon" />
       {!compact && <span className="type-badge-label">{m.label}</span>}
     </span>
