@@ -7873,6 +7873,13 @@ export interface operations {
                  *     key is `type`.
                  */
                 type?: string[];
+                /**
+                 * @description Repeatable per-task visibility filter (MAIN-103): `private`|`team`|`org`.
+                 *     ORs within values and ANDs with the other filters. It only NARROWS within
+                 *     what the viewer may already see — the viewer predicate still applies, so
+                 *     `visibility=private` never reveals another person's private card.
+                 */
+                visibility?: string[];
                 /** @description Filter on the derived blocker state. */
                 is_blocked?: boolean;
                 /**

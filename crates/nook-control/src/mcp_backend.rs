@@ -604,6 +604,8 @@ impl NookBackend for McpBackend {
                 priority: f.priority,
                 // Type filtering isn't exposed over MCP's pick (parity with q).
                 type_: Vec::new(),
+                // Visibility filtering isn't exposed over MCP's pick either.
+                visibility: Vec::new(),
                 is_blocked: f.is_blocked,
                 parent: f.parent,
                 workspace: None,

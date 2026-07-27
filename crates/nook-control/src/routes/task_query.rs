@@ -44,6 +44,12 @@ pub struct TaskFilter {
     /// key is `type`.
     #[serde(rename = "type", default)]
     pub type_: Vec<String>,
+    /// Repeatable per-task visibility filter (MAIN-103): `private`|`team`|`org`.
+    /// ORs within values and ANDs with the other filters. It only NARROWS within
+    /// what the viewer may already see — the viewer predicate still applies, so
+    /// `visibility=private` never reveals another person's private card.
+    #[serde(default)]
+    pub visibility: Vec<String>,
     /// Filter on the derived blocker state.
     pub is_blocked: Option<bool>,
     /// An epic's children (MAIN-81): a uuid or key (`NOOK-7`). Returns the tasks
@@ -103,6 +109,22 @@ impl TaskFilter {
                 "column_type" => f.column_type = Some(v),
                 "priority" => f.priority = Some(num(&k, &v)?),
                 "type" => many(&mut f.type_),
+                // Validated against the three values — junk is a 400, not a
+                // silently ignored filter, so a typo can't quietly widen a list.
+                "visibility" => {
+                    for val in v
+                        .split(',')
+                        .map(|s| s.trim().to_lowercase())
+                        .filter(|s| !s.is_empty())
+                    {
+                        if !matches!(val.as_str(), "private" | "team" | "org") {
+                            return Err(ApiError::BadRequest(format!(
+                                "visibility must be one of private, team, org — got {val:?}"
+                            )));
+                        }
+                        f.visibility.push(val);
+                    }
+                }
                 "limit" => f.limit = Some(num(&k, &v)?),
                 "parent" => f.parent = Some(v),
                 "is_blocked" => f.is_blocked = Some(flag(&k, &v)?),
@@ -291,6 +313,10 @@ pub async fn query_rows(
           -- an agent's claim path enforces, so the list never shows work it
           -- could not then start.
           AND (t.visibility <> 'private' OR t.created_by = $16 OR t.assignee_user_id = $16)
+          -- explicit visibility filter (MAIN-103 AC-3): ANDs with the viewer
+          -- predicate above, so it can only NARROW — `visibility=private` still
+          -- shows only the caller's own private cards, never a teammate's.
+          AND (cardinality($19::text[]) = 0 OR t.visibility = ANY($19))
           -- epic children (MAIN-81): when a parent is given, restrict to its
           -- tickets. This spans every column (children live in backlog and on
           -- the board), so it deliberately does NOT constrain the column type.
@@ -330,6 +356,8 @@ pub async fn query_rows(
     .bind(parent_id)
     // $18: include backlog-column tasks (default false, MAIN-80).
     .bind(f.backlog.unwrap_or(false))
+    // $19: explicit visibility filter (empty = no filter, MAIN-103).
+    .bind(&f.visibility)
     .fetch_all(db)
     .await?;
 
@@ -909,5 +937,137 @@ mod db_tests {
             "archived=true returns both"
         );
         assert_eq!(by_id, 1, "an archived task is still resolvable by id");
+    }
+
+    /// MAIN-103 AC-3: the `visibility=` param parses the three values and rejects
+    /// anything else with a 400 — a typo can't become a silently-ignored filter.
+    #[test]
+    fn visibility_filter_parses_and_rejects_junk() {
+        let f = TaskFilter::parse(Some("visibility=private,team")).unwrap();
+        assert_eq!(
+            f.visibility,
+            vec!["private".to_string(), "team".to_string()]
+        );
+        assert!(
+            TaskFilter::parse(Some("visibility=bogus")).is_err(),
+            "an unknown visibility value is a 400"
+        );
+    }
+
+    /// A task with a chosen visibility and creator.
+    async fn vis_task(
+        db: &PgPool,
+        tenant: Uuid,
+        board: Uuid,
+        col: Uuid,
+        number: i32,
+        visibility: &str,
+        created_by: Uuid,
+    ) -> TaskId {
+        let id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO tasks (id, tenant_id, board_id, column_id, title, number, visibility, created_by)
+             VALUES ($1, $2, $3, $4, 't', $5, $6, $7)",
+        )
+        .bind(id)
+        .bind(tenant)
+        .bind(board)
+        .bind(col)
+        .bind(number)
+        .bind(visibility)
+        .bind(created_by)
+        .execute(db)
+        .await
+        .unwrap();
+        TaskId(id)
+    }
+
+    /// MAIN-103 AC-3: the visibility filter NARROWS within what the viewer may
+    /// see and never widens — `visibility=private` shows only the caller's own
+    /// private cards, never a teammate's.
+    #[tokio::test]
+    async fn visibility_filter_narrows_and_never_widens() {
+        let Some(db) = pool().await else {
+            eprintln!("skipping visibility_filter_narrows_and_never_widens — no DATABASE_URL");
+            return;
+        };
+        let tenant = Uuid::new_v4();
+        let board = Uuid::new_v4();
+        let col = Uuid::new_v4();
+        let me = Uuid::new_v4();
+        let other = Uuid::new_v4();
+        sqlx::query("INSERT INTO tenants (id, name, slug) VALUES ($1, 'V103', $2)")
+            .bind(tenant)
+            .bind(format!("v103-{tenant}"))
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO boards (id, tenant_id, name, key) VALUES ($1, $2, 'B', $3)")
+            .bind(board)
+            .bind(tenant)
+            .bind(format!("V{}", &board.simple().to_string()[..6]).to_uppercase())
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO board_columns (id, board_id, name, type, position)
+             VALUES ($1, $2, 'Todo', 'unstarted', 0)",
+        )
+        .bind(col)
+        .bind(board)
+        .execute(&db)
+        .await
+        .unwrap();
+
+        let my_private = vis_task(&db, tenant, board, col, 1, "private", me).await;
+        let team_card = vis_task(&db, tenant, board, col, 2, "team", other).await;
+        let their_private = vis_task(&db, tenant, board, col, 3, "private", other).await;
+
+        let list = |visibility: Vec<String>| {
+            let db = db.clone();
+            let f = TaskFilter {
+                board: Some(board.to_string()),
+                visibility,
+                ..Default::default()
+            };
+            async move {
+                query_rows(&db, TenantId(tenant), nook_types::UserId(me), &f)
+                    .await
+                    .unwrap()
+                    .into_iter()
+                    .map(|t| t.id)
+                    .collect::<Vec<_>>()
+            }
+        };
+
+        // No filter: I see my private card and the team card, never the other
+        // person's private card (the viewer predicate, MAIN-76).
+        let all = list(vec![]).await;
+        assert!(all.contains(&my_private) && all.contains(&team_card));
+        assert!(
+            !all.contains(&their_private),
+            "a teammate's private card is never visible"
+        );
+
+        // visibility=private narrows to ONLY my own private card — it does not
+        // widen to the teammate's private card.
+        let privates = list(vec!["private".into()]).await;
+        assert!(
+            privates.contains(&my_private),
+            "my private card passes the filter"
+        );
+        assert!(
+            !privates.contains(&team_card),
+            "the team card is filtered out"
+        );
+        assert!(
+            !privates.contains(&their_private),
+            "visibility=private must NOT reveal a teammate's private card"
+        );
+
+        // visibility=team narrows to the team card only.
+        let teams = list(vec!["team".into()]).await;
+        assert!(teams.contains(&team_card));
+        assert!(!teams.contains(&my_private) && !teams.contains(&their_private));
     }
 }
