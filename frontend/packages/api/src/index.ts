@@ -32,6 +32,17 @@ export type TaskComment = Schemas["TaskComment"];
 export type RelatedTask = Schemas["RelatedTask"];
 export type EventItem = Schemas["Event"];
 export type Note = Schemas["Note"];
+// Personal notebook (MAIN-66/84/101). The workspace rolling `Note` above is a
+// distinct type — these are the person-global user notebook.
+export type UserNote = Schemas["UserNote"];
+export type UserNoteSummary = Schemas["UserNoteSummary"];
+export type UserNoteFolder = Schemas["UserNoteFolder"];
+export type UserNoteId = Schemas["UserNoteId"];
+export type UserNoteFolderId = Schemas["UserNoteFolderId"];
+export type CreateUserNote = Schemas["CreateUserNote"];
+export type UpdateUserNote = Schemas["UpdateUserNote"];
+export type CreateUserNoteFolder = Schemas["CreateUserNoteFolder"];
+export type UpdateUserNoteFolder = Schemas["UpdateUserNoteFolder"];
 export type Theme = Schemas["Theme"];
 export type DispatchSuggestion = Schemas["DispatchSuggestion"];
 export type OperatorAuditEntry = Schemas["OperatorAuditEntry"];

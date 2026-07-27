@@ -23,6 +23,7 @@ import { Connect } from "./pages/Connect";
 import { checkForUpdate, initDesktop, installUpdate, isDesktop, setControlPlaneAccount, type AvailableUpdate } from "./desktop";
 import { installLinkHandler, registerNavigator } from "./links";
 import { NodeDetail, NodesPage } from "./pages/Nodes";
+import { Notebook } from "./pages/Notebook";
 import { SessionPage, SessionsPage } from "./pages/Session";
 import { SettingsPage } from "./pages/Settings";
 import { TeamPage } from "./pages/Team";
@@ -159,6 +160,7 @@ function AuthGate() {
         <Route path="activity" element={<ActivityPage />} />
         <Route path="nodes" element={<NodesPage />} />
         <Route path="nodes/:id" element={<NodeDetail />} />
+        <Route path="notebook" element={<Notebook />} />
         <Route path="settings" element={<SettingsPage />} />
         <Route path="team" element={<TeamPage />} />
         <Route path="verify-email" element={<VerifyEmailPage />} />

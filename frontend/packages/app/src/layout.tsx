@@ -13,6 +13,7 @@ import {
   LayoutDashboard,
   LogOut,
   Mic,
+  NotebookText,
   Server,
   ShieldCheck,
   Settings,
@@ -45,6 +46,9 @@ const SECTIONS = [
   { to: "/chat", label: "Chat", icon: MessageSquare },
   { to: "/activity", label: "Activity", icon: Activity },
   { to: "/nodes", label: "Nodes", icon: Server },
+  // Person-global, not workspace-scoped: your private notebook follows you
+  // across every org you belong to (MAIN-101).
+  { to: "/notebook", label: "Notes", icon: NotebookText },
 ];
 
 /// Shown only to somebody holding an operator binding.
