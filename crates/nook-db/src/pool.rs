@@ -102,6 +102,8 @@ into_db_value! {
     i64 => |v| DbValue::I64(Some(v)),
     Option<i64> => |v| DbValue::I64(v),
     f64 => |v| DbValue::F64(Some(v)),
+    Option<f64> => |v| DbValue::F64(v),
+    &[u8] => |v| DbValue::Bytes(Some(v.to_vec())),
     chrono::DateTime<chrono::Utc> => |v| DbValue::Timestamptz(Some(v)),
     Option<chrono::DateTime<chrono::Utc>> => |v| DbValue::Timestamptz(v),
     serde_json::Value => |v| DbValue::Json(Some(v)),

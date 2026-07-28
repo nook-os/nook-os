@@ -23,7 +23,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use async_trait::async_trait;
-use nook_db::{DbPool, Postgres, TypeMapping};
+use nook_db::{params, Db, DbPool, Postgres, TypeMapping};
 
 use super::{Category, Mailer, SendOutcome};
 
@@ -68,29 +68,33 @@ impl GuardedMailer {
     /// ("month" or "day"). A query failure counts as 0 — the guard must never
     /// fail a request path over its own bookkeeping.
     async fn count_since(&self, unit: &str) -> i64 {
-        sqlx::query_as::<_, (i64,)>(&format!(
-            "SELECT count(*) FROM mail_sends WHERE sent_at >= date_trunc($1, {})",
-            Postgres.now()
-        ))
-        .bind(unit)
-        .fetch_one(&self.db)
-        .await
-        .map(|(n,)| n)
-        .unwrap_or(0)
+        self.db
+            .query_scalar::<i64>(
+                &format!(
+                    "SELECT count(*) FROM mail_sends WHERE sent_at >= date_trunc($1, {})",
+                    Postgres.now()
+                ),
+                params![unit],
+            )
+            .await
+            .unwrap_or(0)
     }
 
     /// Record a real send so it counts toward the quota and can be audited
     /// (AC-5). Best-effort: a failed insert is logged, not surfaced — the mail
     /// already went, and losing a count row is safer than erroring the caller.
     async fn record_sent(&self, to: &str, category: Category) {
-        let res = sqlx::query(
-            "INSERT INTO mail_sends (id, category, recipient_domain) VALUES ($1, $2, $3)",
-        )
-        .bind(uuid::Uuid::now_v7())
-        .bind(category.as_str())
-        .bind(recipient_domain(to))
-        .execute(&self.db)
-        .await;
+        let res = self
+            .db
+            .exec(
+                "INSERT INTO mail_sends (id, category, recipient_domain) VALUES ($1, $2, $3)",
+                params![
+                    uuid::Uuid::now_v7(),
+                    category.as_str(),
+                    recipient_domain(to)
+                ],
+            )
+            .await;
         if let Err(e) = res {
             tracing::warn!(error = %e, "failed to record a mail.sent row — quota count may drift");
         }
@@ -254,11 +258,9 @@ mod tests {
     }
 
     async fn count(db: &DbPool) -> i64 {
-        sqlx::query_as::<_, (i64,)>("SELECT count(*) FROM mail_sends")
-            .fetch_one(db)
+        db.query_scalar::<i64>("SELECT count(*) FROM mail_sends", params![])
             .await
             .unwrap()
-            .0
     }
 
     /// The whole gate matrix in one test, because the quota count is a single
@@ -271,10 +273,7 @@ mod tests {
             eprintln!("skipping the_guards_gate_enable_category_and_quota — no DATABASE_URL");
             return;
         };
-        sqlx::query("DELETE FROM mail_sends")
-            .execute(&db)
-            .await
-            .unwrap();
+        db.exec("DELETE FROM mail_sends", params![]).await.unwrap();
 
         // Using a CaptureMailer as the inner "transport": cap.sent() is exactly
         // the set of REAL sends that passed the guard (captured/gated/blocked
@@ -329,10 +328,7 @@ mod tests {
 
         // ── Quota: cap at 2, the third is blocked; and it PERSISTS across a
         //    fresh guard (a restart) since the count is table-derived (AC-4) ──
-        sqlx::query("DELETE FROM mail_sends")
-            .execute(&db)
-            .await
-            .unwrap();
+        db.exec("DELETE FROM mail_sends", params![]).await.unwrap();
         cfg.mail_max_per_month = Some(2);
         let cap = Arc::new(CaptureMailer::new());
         let g = guard(cap.clone(), &db, &cfg);
@@ -354,18 +350,16 @@ mod tests {
         assert_eq!(cap2.sent().len(), 0, "the cap survives a restart");
 
         // The recorded rows carry domain + category for audit (AC-5).
-        let row: (String, String) = sqlx::query_as(
-            "SELECT category, recipient_domain FROM mail_sends ORDER BY sent_at LIMIT 1",
-        )
-        .fetch_one(&db)
-        .await
-        .unwrap();
+        let row: (String, String) = db
+            .query_one(
+                "SELECT category, recipient_domain FROM mail_sends ORDER BY sent_at LIMIT 1",
+                params![],
+            )
+            .await
+            .unwrap();
         assert_eq!(row.0, "transactional");
         assert_eq!(row.1, "x.test");
 
-        sqlx::query("DELETE FROM mail_sends")
-            .execute(&db)
-            .await
-            .unwrap();
+        db.exec("DELETE FROM mail_sends", params![]).await.unwrap();
     }
 }

@@ -18,7 +18,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use nook_db::{AtomicClaim, DbPool, Postgres, TypeMapping};
+use nook_db::{params, AtomicClaim, Db, DbPool, Postgres, TypeMapping};
 use uuid::Uuid;
 
 use super::{Nack, NewWork, Queue, QueueStats, WorkEnvelope};
@@ -78,19 +78,23 @@ impl Queue for DbQueue {
         // `now()` routes through the type-mapping seam (MAIN-211); `make_interval`
         // is an interval construct outside this (b) card and stays inline.
         let now = Postgres.now();
-        sqlx::query(&format!(
-            "INSERT INTO work_queue \
+        self.db
+            .exec(
+                &format!(
+                    "INSERT INTO work_queue \
                (id, tenant_id, work_type, payload, attempts, max_attempts, not_before, enqueued_at) \
              VALUES ($1, $2, $3, $4, 0, $5, coalesce({now} + make_interval(secs => $6), {now}), {now})",
-        ))
-        .bind(id)
-        .bind(work.tenant_id)
-        .bind(&work.work_type)
-        .bind(&work.payload)
-        .bind(work.max_attempts)
-        .bind(work.delay.map(secs))
-        .execute(&self.db)
-        .await?;
+                ),
+                params![
+                    id,
+                    work.tenant_id,
+                    &work.work_type,
+                    work.payload,
+                    work.max_attempts,
+                    work.delay.map(secs)
+                ],
+            )
+            .await?;
         Ok(id)
     }
 
@@ -165,9 +169,8 @@ impl Queue for DbQueue {
     }
 
     async fn ack(&self, id: Uuid) -> Result<()> {
-        sqlx::query("DELETE FROM work_queue WHERE id = $1")
-            .bind(id)
-            .execute(&self.db)
+        self.db
+            .exec("DELETE FROM work_queue WHERE id = $1", params![id])
             .await?;
         Ok(())
     }
@@ -177,9 +180,11 @@ impl Queue for DbQueue {
             // Make it visible again immediately. Its incremented `attempts`
             // stays, so the next receive enforces exhaustion.
             Nack::Requeue => {
-                sqlx::query("UPDATE work_queue SET locked_until = NULL WHERE id = $1")
-                    .bind(id)
-                    .execute(&self.db)
+                self.db
+                    .exec(
+                        "UPDATE work_queue SET locked_until = NULL WHERE id = $1",
+                        params![id],
+                    )
                     .await?;
             }
             Nack::Dead(reason) => {
@@ -193,29 +198,35 @@ impl Queue for DbQueue {
 
     async fn extend_visibility(&self, id: Uuid, visibility: Duration) -> Result<()> {
         let now = Postgres.now();
-        sqlx::query(&format!(
-            "UPDATE work_queue SET locked_until = {now} + make_interval(secs => $2) WHERE id = $1",
-        ))
-        .bind(id)
-        .bind(secs(visibility))
-        .execute(&self.db)
-        .await?;
+        self.db
+            .exec(
+                &format!(
+                    "UPDATE work_queue SET locked_until = {now} + make_interval(secs => $2) WHERE id = $1",
+                ),
+                params![id, secs(visibility)],
+            )
+            .await?;
         Ok(())
     }
 
     async fn describe(&self) -> Result<QueueStats> {
         let now = Postgres.now();
-        let (ready, in_flight): (i64, i64) = sqlx::query_as(&format!(
-            "SELECT \
+        let (ready, in_flight): (i64, i64) = self
+            .db
+            .query_one(
+                &format!(
+                    "SELECT \
                count(*) FILTER (WHERE (locked_until IS NULL OR locked_until <= {now}) \
                                   AND not_before <= {now}), \
                count(*) FILTER (WHERE locked_until > {now}) \
              FROM work_queue",
-        ))
-        .fetch_one(&self.db)
-        .await?;
-        let (dead,): (i64,) = sqlx::query_as("SELECT count(*) FROM work_queue_dead")
-            .fetch_one(&self.db)
+                ),
+                params![],
+            )
+            .await?;
+        let dead: i64 = self
+            .db
+            .query_scalar("SELECT count(*) FROM work_queue_dead", params![])
             .await?;
         Ok(QueueStats {
             backend: self.backend().into(),
@@ -278,17 +289,20 @@ mod tests {
     #[async_trait::async_trait]
     impl DeadInspect for DbDead {
         async fn dead_count(&self, work_type: &str) -> i64 {
-            sqlx::query_as::<_, (i64,)>("SELECT count(*) FROM work_queue_dead WHERE work_type = $1")
-                .bind(work_type)
-                .fetch_one(&self.0)
+            self.0
+                .query_scalar::<i64>(
+                    "SELECT count(*) FROM work_queue_dead WHERE work_type = $1",
+                    params![work_type],
+                )
                 .await
                 .unwrap()
-                .0
         }
         async fn dead_reason(&self, id: Uuid) -> Option<String> {
-            sqlx::query_as::<_, (String,)>("SELECT reason FROM work_queue_dead WHERE id = $1")
-                .bind(id)
-                .fetch_optional(&self.0)
+            self.0
+                .query_opt::<(String,)>(
+                    "SELECT reason FROM work_queue_dead WHERE id = $1",
+                    params![id],
+                )
                 .await
                 .unwrap()
                 .map(|r| r.0)
