@@ -6,6 +6,7 @@ pub mod discovery;
 pub mod identity;
 pub mod interactions;
 pub mod job_dispatch;
+pub mod job_reaper;
 pub mod jobs;
 pub mod kanban;
 pub mod local_auth;

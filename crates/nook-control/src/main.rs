@@ -119,6 +119,11 @@ async fn serve(db: sqlx::PgPool, cfg: Config) -> Result<()> {
     // runs it; the queue's atomic receive keeps them from double-claiming.
     nook_control::services::job_dispatch::start(state.clone());
 
+    // Reap jobs whose executor node went dark, so a crashed/upgraded operator
+    // never strands work (MAIN-164). Every replica runs it; the reap's atomic
+    // conditional UPDATE keeps them from double-failing a job.
+    nook_control::services::job_reaper::start(state.clone());
+
     // One signal, every listener. A single task watches for SIGTERM/SIGINT and
     // flips a watch channel; the browser door, the agent door, and the grace
     // timer each hold a receiver, so a rolling update drains all of them at once

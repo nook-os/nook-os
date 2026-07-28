@@ -647,6 +647,66 @@ async fn fail_with(state: &AppState, tenant: TenantId, id: JobId, reason: &str) 
     Ok(())
 }
 
+/// Fail every job whose executor node has gone dark (MAIN-164) — the reaper's
+/// one query. Scans jobs in `claimed`/`running` whose `executor_node_id` points
+/// at a node last seen more than `grace_secs` ago, moves each to `failed` with a
+/// transcript line naming the cause, and emits the standard `job.state_changed`
+/// event. Runs across every tenant (a CP replica serves them all); each reaped
+/// row carries its own tenant.
+///
+/// `waiting_on_human` is deliberately NOT in the scan set (AC-2): a paused job
+/// waits indefinitely regardless of executor liveness. `claimed → failed` and
+/// `running → failed` are the transitions this uses, both already legal in the
+/// single transition table (AC-3).
+///
+/// Multi-instance safe (AC-5): the reap is one conditional
+/// `UPDATE ... WHERE state IN ('claimed','running')` guarded on the staleness
+/// window — the same atomic pattern as the executor claim. Only the replica whose
+/// UPDATE actually flips a row gets it back via `RETURNING`, so two reapers cannot
+/// double-fail a job, and a job that resumed or completed between scan and update
+/// falls out of the guard untouched. Returns how many jobs were reaped.
+pub async fn reap_stale_executors(state: &AppState, grace_secs: u64) -> ApiResult<u64> {
+    let reaped: Vec<(JobId, TenantId, TaskId, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
+        "UPDATE loop_jobs j
+            SET state = 'failed', updated_at = now()
+           FROM nodes n
+          WHERE j.executor_node_id = n.id
+            AND j.state IN ('claimed', 'running')
+            AND n.last_seen_at IS NOT NULL
+            AND n.last_seen_at < now() - ($1::bigint * interval '1 second')
+        RETURNING j.id, j.tenant_id, j.target_task_id, n.last_seen_at",
+    )
+    .bind(grace_secs as i64)
+    .fetch_all(&state.db)
+    .await?;
+
+    for (id, tenant, target, last_seen) in &reaped {
+        append_transcript(
+            state,
+            *id,
+            "system",
+            &format!(
+                "executor node offline since {}, reaped after {grace_secs}s",
+                last_seen.to_rfc3339()
+            ),
+        )
+        .await
+        .ok();
+        // Emit the same `job.state_changed` event any transition would — loaded
+        // back so the payload shape matches, with the target's privacy gating the
+        // tenant-wide bell. (The atomic UPDATE above already made the state
+        // change; this is only its announcement.)
+        if let Ok(job) = load(state, *tenant, *id).await {
+            let private = load_target(state, *tenant, *target)
+                .await
+                .map(|t| is_private(&t))
+                .unwrap_or(true);
+            record_job_event(state, *tenant, "job.state_changed", &job, private).await;
+        }
+    }
+    Ok(reaped.len() as u64)
+}
+
 /// Is `node` the executor the job was placed on? The gate for accepting a node's
 /// streamed transcript / finish (MAIN-161 security): a node token is scoped to
 /// its OWN runs, so it must not be able to inject into or terminate another
