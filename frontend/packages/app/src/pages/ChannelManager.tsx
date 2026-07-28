@@ -14,6 +14,7 @@ import {
   type ChatChannel,
 } from "@nookos/api";
 import { askText, notify } from "../dialogs";
+import { ContextMenuRegion, type ContextMenuItem } from "../contextMenu";
 
 export function ChannelManager({ onClose }: { onClose: () => void }) {
   const qc = useQueryClient();
@@ -79,6 +80,18 @@ export function ChannelManager({ onClose }: { onClose: () => void }) {
     }
   };
 
+  // The same Rename + Archive/Unarchive right-click menu the sidebar offers
+  // (MAIN-177). The sidebar never lists archived channels, so this modal is the
+  // one place a channel's Unarchive item is reachable by right-click. No delete
+  // (AC-4/NG-2); this modal is admin-only, so the items are admin-gated (AC-2).
+  const menuItems = (c: ChatChannel): ContextMenuItem[] => [
+    { label: "Rename…", onSelect: () => void rename(c) },
+    {
+      label: c.archived ? "Unarchive" : "Archive",
+      onSelect: () => void setArchived(c, !c.archived),
+    },
+  ];
+
   return (
     <div className="modal-backdrop" onMouseDown={onClose}>
       <div
@@ -130,16 +143,26 @@ export function ChannelManager({ onClose }: { onClose: () => void }) {
               <div className="faint small">No channels yet.</div>
             ) : (
               active.map((c) => (
-                <div className="chan-manage-row" key={c.id}>
-                  <span className="chat-channel-hash">#</span>
-                  <span className="chan-manage-name">{c.name}</span>
-                  <button className="btn small" onClick={() => rename(c)} title="rename">
-                    <Pencil size={11} />
-                  </button>
-                  <button className="btn small" onClick={() => setArchived(c, true)} title="archive">
-                    <Archive size={11} />
-                  </button>
-                </div>
+                <ContextMenuRegion
+                  key={c.id}
+                  items={() => menuItems(c)}
+                  style={{ display: "contents" }}
+                >
+                  <div className="chan-manage-row">
+                    <span className="chat-channel-hash">#</span>
+                    <span className="chan-manage-name">{c.name}</span>
+                    <button className="btn small" onClick={() => rename(c)} title="rename">
+                      <Pencil size={11} />
+                    </button>
+                    <button
+                      className="btn small"
+                      onClick={() => setArchived(c, true)}
+                      title="archive"
+                    >
+                      <Archive size={11} />
+                    </button>
+                  </div>
+                </ContextMenuRegion>
               ))
             )}
           </div>
@@ -148,17 +171,23 @@ export function ChannelManager({ onClose }: { onClose: () => void }) {
             <div className="chan-manage-archived">
               <div className="chan-manage-subhdr faint small">Archived</div>
               {archived.map((c) => (
-                <div className="chan-manage-row archived" key={c.id}>
-                  <span className="chat-channel-hash">#</span>
-                  <span className="chan-manage-name">{c.name}</span>
-                  <button
-                    className="btn small"
-                    onClick={() => setArchived(c, false)}
-                    title="unarchive"
-                  >
-                    <ArchiveRestore size={11} /> restore
-                  </button>
-                </div>
+                <ContextMenuRegion
+                  key={c.id}
+                  items={() => menuItems(c)}
+                  style={{ display: "contents" }}
+                >
+                  <div className="chan-manage-row archived">
+                    <span className="chat-channel-hash">#</span>
+                    <span className="chan-manage-name">{c.name}</span>
+                    <button
+                      className="btn small"
+                      onClick={() => setArchived(c, false)}
+                      title="unarchive"
+                    >
+                      <ArchiveRestore size={11} /> restore
+                    </button>
+                  </div>
+                </ContextMenuRegion>
               ))}
             </div>
           )}
