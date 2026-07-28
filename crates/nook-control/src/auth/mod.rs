@@ -8,6 +8,8 @@ pub mod session_guard;
 
 use std::sync::Arc;
 
+use nook_db::{Postgres, TypeMapping};
+
 use axum::extract::FromRequestParts;
 use axum::http::request::Parts;
 use axum_extra::extract::cookie::{Cookie, CookieJar, Key, SameSite};
@@ -773,10 +775,11 @@ pub async fn create_auth_session(
     tenant_id: TenantId,
 ) -> Result<AuthSessionId, ApiError> {
     let id = AuthSessionId::new();
-    sqlx::query(
+    sqlx::query(&format!(
         "INSERT INTO sessions_auth (id, user_id, tenant_id, expires_at)
-         VALUES ($1, $2, $3, now() + make_interval(hours => $4))",
-    )
+         VALUES ($1, $2, $3, {now} + make_interval(hours => $4))",
+        now = Postgres.now()
+    ))
     .bind(id)
     .bind(user_id)
     .bind(tenant_id)

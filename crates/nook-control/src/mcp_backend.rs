@@ -2,6 +2,7 @@
 //! the same service layer the REST handlers use.
 
 use async_trait::async_trait;
+use nook_db::{Postgres, TypeMapping};
 use nook_mcp::NookBackend;
 use nook_proto::ControlToNode;
 use nook_types::*;
@@ -328,10 +329,11 @@ impl NookBackend for McpBackend {
 
         let note = match existing {
             Some(note) => {
-                sqlx::query_as(
-                    "UPDATE notes SET content_md = content_md || $2, updated_at = now()
+                sqlx::query_as(&format!(
+                    "UPDATE notes SET content_md = content_md || $2, updated_at = {now}
                      WHERE id = $1 RETURNING *",
-                )
+                    now = Postgres.now()
+                ))
                 .bind(note.id)
                 .bind(format!("\n{content}"))
                 .fetch_one(&self.state.db)
@@ -647,10 +649,11 @@ impl NookBackend for McpBackend {
         let tenant = self.tenant().await?;
         let viewer = self.user().await?;
         let id = crate::services::tasks::resolve_id(&self.state.db, tenant, &task).await?;
-        let t: TaskItem = sqlx::query_as(
-            "UPDATE tasks SET assignee_user_id = NULL, updated_at = now()
+        let t: TaskItem = sqlx::query_as(&format!(
+            "UPDATE tasks SET assignee_user_id = NULL, updated_at = {now}
              WHERE id = $1 AND tenant_id = $2 RETURNING *",
-        )
+            now = Postgres.now()
+        ))
         .bind(id)
         .bind(tenant)
         .fetch_one(&self.state.db)
@@ -758,10 +761,11 @@ impl NookBackend for McpBackend {
         let tenant = self.tenant().await?;
         let viewer = self.user().await?;
         let id = crate::services::tasks::resolve_id(&self.state.db, tenant, &task).await?;
-        let t: TaskItem = sqlx::query_as(
-            "UPDATE tasks SET priority = $3, updated_at = now()
+        let t: TaskItem = sqlx::query_as(&format!(
+            "UPDATE tasks SET priority = $3, updated_at = {now}
              WHERE id = $1 AND tenant_id = $2 RETURNING *",
-        )
+            now = Postgres.now()
+        ))
         .bind(id)
         .bind(tenant)
         .bind(priority.clamp(0, 4))
