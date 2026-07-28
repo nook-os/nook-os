@@ -6,6 +6,7 @@
 //! directory-name slug. Never auto-merge two workspaces with different
 //! remotes. Git worktrees are out of scope for M1.
 
+use nook_db::{Postgres, TypeMapping};
 use nook_proto::{DiscoveredWorkspace, UiEvent};
 use nook_types::*;
 use rand::distr::Alphanumeric;
@@ -101,10 +102,11 @@ pub async fn reconcile(
                     .await?;
                 }
                 if let Some((_, repo)) = d.name.split_once('/') {
-                    sqlx::query(
-                        "UPDATE workspaces SET name = $2, slug = $3, updated_at = now()
+                    sqlx::query(&format!(
+                        "UPDATE workspaces SET name = $2, slug = $3, updated_at = {}
                          WHERE id = $1 AND name = $4",
-                    )
+                        Postgres.now()
+                    ))
                     .bind(id)
                     .bind(&d.name)
                     .bind(slugify(&d.name))
@@ -144,7 +146,7 @@ pub async fn reconcile(
                 .await?;
         let is_new_checkout = known.is_none();
 
-        sqlx::query(
+        sqlx::query(&format!(
             "INSERT INTO node_workspaces
                (id, tenant_id, node_id, workspace_id, path, git_remote_url,
                 git_remote_normalized, git_branch, git_status)
@@ -155,8 +157,9 @@ pub async fn reconcile(
                git_remote_normalized = EXCLUDED.git_remote_normalized,
                git_branch = EXCLUDED.git_branch,
                git_status = EXCLUDED.git_status,
-               last_scanned_at = now()",
-        )
+               last_scanned_at = {}",
+            Postgres.now()
+        ))
         .bind(NodeWorkspaceId::new())
         .bind(tenant)
         .bind(node_id)
@@ -253,10 +256,11 @@ pub async fn migrate_paths(
     let mut node_workspaces_updated: u32 = 0;
     let mut tasks_updated: u32 = 0;
     for pair in pairs {
-        let nw = sqlx::query(
-            "UPDATE node_workspaces SET path = $3, last_scanned_at = now()
+        let nw = sqlx::query(&format!(
+            "UPDATE node_workspaces SET path = $3, last_scanned_at = {}
              WHERE node_id = $1 AND path = $2",
-        )
+            Postgres.now()
+        ))
         .bind(node_id)
         .bind(&pair.old)
         .bind(&pair.new)
@@ -266,10 +270,11 @@ pub async fn migrate_paths(
 
         // A task's worktree lives on a specific node; scope the rewrite to this
         // one so an identical relative path on another machine is never touched.
-        let t = sqlx::query(
-            "UPDATE tasks SET worktree_path = $3, updated_at = now()
+        let t = sqlx::query(&format!(
+            "UPDATE tasks SET worktree_path = $3, updated_at = {}
              WHERE worktree_node_id = $1 AND worktree_path = $2",
-        )
+            Postgres.now()
+        ))
         .bind(node_id)
         .bind(&pair.old)
         .bind(&pair.new)

@@ -6,7 +6,7 @@
 //!
 //! Shared by the REST handlers (and, later, MCP) so the surfaces never drift.
 
-use nook_db::{Json, Postgres, TimeMath};
+use nook_db::{Json, Postgres, TimeMath, TypeMapping};
 use nook_types::*;
 use serde_json::json;
 use uuid::Uuid;
@@ -246,10 +246,11 @@ pub async fn transition(
             job.state
         )));
     }
-    let updated: LoopJob = sqlx::query_as(
-        "UPDATE loop_jobs SET state = $2, updated_at = now()
+    let updated: LoopJob = sqlx::query_as(&format!(
+        "UPDATE loop_jobs SET state = $2, updated_at = {}
          WHERE id = $1 RETURNING *",
-    )
+        Postgres.now()
+    ))
     .bind(id)
     .bind(to)
     .fetch_one(&state.db)
@@ -512,12 +513,13 @@ pub async fn select_executor(
     };
 
     // Atomic claim: only the caller that flips `queued` -> `claimed` wins.
-    let claimed: Option<LoopJob> = sqlx::query_as(
+    let claimed: Option<LoopJob> = sqlx::query_as(&format!(
         "UPDATE loop_jobs
-            SET executor_node_id = $2, state = 'claimed', queued_reason = NULL, updated_at = now()
+            SET executor_node_id = $2, state = 'claimed', queued_reason = NULL, updated_at = {}
           WHERE id = $1 AND state = 'queued'
           RETURNING *",
-    )
+        Postgres.now()
+    ))
     .bind(job_id)
     .bind(node)
     .fetch_optional(&state.db)
@@ -578,7 +580,7 @@ async fn no_executor_reason(state: &AppState, tenant: TenantId, person: Uuid) ->
 /// `state = 'queued'` so a concurrent claim is never clobbered by a stale
 /// reason write.
 async fn set_queued_reason(state: &AppState, job_id: JobId, reason: &str) -> ApiResult<LoopJob> {
-    sqlx::query("UPDATE loop_jobs SET queued_reason = $2, updated_at = now() WHERE id = $1 AND state = 'queued'")
+    sqlx::query(&format!("UPDATE loop_jobs SET queued_reason = $2, updated_at = {} WHERE id = $1 AND state = 'queued'", Postgres.now()))
         .bind(job_id)
         .bind(reason)
         .execute(&state.db)
@@ -780,13 +782,14 @@ pub async fn reap_stale_executors(state: &AppState, grace_secs: u64) -> ApiResul
     let reaped: Vec<(JobId, TenantId, TaskId, chrono::DateTime<chrono::Utc>)> =
         sqlx::query_as(&format!(
             "UPDATE loop_jobs j
-            SET state = 'failed', updated_at = now()
+            SET state = 'failed', updated_at = {now}
            FROM nodes n
           WHERE j.executor_node_id = n.id
             AND j.state IN ('claimed', 'running')
             AND n.last_seen_at IS NOT NULL
             AND n.last_seen_at < {cutoff}
         RETURNING j.id, j.tenant_id, j.target_task_id, n.last_seen_at",
+            now = Postgres.now(),
             cutoff = Postgres.now_minus_scaled("$1::bigint", "1 second")
         ))
         .bind(grace_secs as i64)

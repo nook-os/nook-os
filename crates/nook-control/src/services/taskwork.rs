@@ -2,6 +2,7 @@
 //! submit-PR, prune. Shared by REST handlers and MCP tools so an AI can drive
 //! the same lifecycle a human can.
 
+use nook_db::{Postgres, TypeMapping};
 use nook_proto::ControlToNode;
 use nook_types::*;
 
@@ -95,10 +96,11 @@ pub async fn dispatch(
     let node = crate::services::schedule::pick(state, tenant, user, task.workspace_id).await?;
     let todo = column_id(state, task.board_id, "Todo", 1).await?;
 
-    let updated: TaskItem = sqlx::query_as(
-        "UPDATE tasks SET assigned_node_id = $2, column_id = $3, updated_at = now()
+    let updated: TaskItem = sqlx::query_as(&format!(
+        "UPDATE tasks SET assigned_node_id = $2, column_id = $3, updated_at = {}
          WHERE id = $1 RETURNING *",
-    )
+        Postgres.now()
+    ))
     .bind(task_id)
     .bind(node)
     .bind(todo)
@@ -237,12 +239,13 @@ pub async fn start_work(
     .await?;
 
     let in_progress = column_id(state, task.board_id, "In Progress", 2).await?;
-    let updated: TaskItem = sqlx::query_as(
+    let updated: TaskItem = sqlx::query_as(&format!(
         "UPDATE tasks SET workspace_id = $2, assigned_node_id = $3, branch = $4,
                 worktree_path = $5, worktree_node_id = $3, session_id = $6,
-                column_id = $7, updated_at = now()
+                column_id = $7, updated_at = {}
          WHERE id = $1 RETURNING *",
-    )
+        Postgres.now()
+    ))
     .bind(task_id)
     .bind(workspace_id)
     .bind(node_id)
@@ -300,10 +303,11 @@ pub async fn submit_pr(
             crate::services::tasks::column_of_type(&state.db, task.board_id, "completed").await?
         }
     };
-    let updated: TaskItem = sqlx::query_as(
-        "UPDATE tasks SET pr_url = $2, column_id = $3, updated_at = now()
+    let updated: TaskItem = sqlx::query_as(&format!(
+        "UPDATE tasks SET pr_url = $2, column_id = $3, updated_at = {}
          WHERE id = $1 RETURNING *",
-    )
+        Postgres.now()
+    ))
     .bind(task_id)
     .bind(&url)
     .bind(target)
@@ -350,10 +354,11 @@ pub async fn prune_worktree(
         )));
     }
 
-    let updated: TaskItem = sqlx::query_as(
-        "UPDATE tasks SET worktree_path = NULL, worktree_node_id = NULL, updated_at = now()
+    let updated: TaskItem = sqlx::query_as(&format!(
+        "UPDATE tasks SET worktree_path = NULL, worktree_node_id = NULL, updated_at = {}
          WHERE id = $1 RETURNING *",
-    )
+        Postgres.now()
+    ))
     .bind(task_id)
     .fetch_one(&state.db)
     .await?;
@@ -377,9 +382,10 @@ pub async fn move_task(
 ) -> ApiResult<TaskItem> {
     let task = load_task(state, tenant, task_id).await?;
     let col = column_id(state, task.board_id, column, 0).await?;
-    let updated: TaskItem = sqlx::query_as(
-        "UPDATE tasks SET column_id = $2, updated_at = now() WHERE id = $1 RETURNING *",
-    )
+    let updated: TaskItem = sqlx::query_as(&format!(
+        "UPDATE tasks SET column_id = $2, updated_at = {} WHERE id = $1 RETURNING *",
+        Postgres.now()
+    ))
     .bind(task_id)
     .bind(col)
     .fetch_one(&state.db)

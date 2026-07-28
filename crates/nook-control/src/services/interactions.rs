@@ -14,6 +14,7 @@
 //! (`waiting_on_human → running`). A job that fails or is canceled cancels its
 //! pending ask (see [`cancel_for_job`]).
 
+use nook_db::{Postgres, TypeMapping};
 use nook_types::*;
 use serde_json::json;
 use uuid::Uuid;
@@ -267,13 +268,14 @@ pub async fn answer(
         return Err(ApiError::NotFound);
     }
 
-    let updated: Option<Interaction> = sqlx::query_as(
+    let updated: Option<Interaction> = sqlx::query_as(&format!(
         "UPDATE interactions
             SET state = 'answered', answered_by = $2, response = $3,
-                answered_at = now(), updated_at = now()
+                answered_at = {now}, updated_at = {now}
           WHERE id = $1 AND state = 'pending'
           RETURNING *",
-    )
+        now = Postgres.now()
+    ))
     .bind(id)
     .bind(viewer)
     .bind(&response)
@@ -371,12 +373,13 @@ pub async fn cancel(
     if !subject_visible(state, tenant, viewer, existing.task_id).await? {
         return Err(ApiError::NotFound);
     }
-    let updated: Option<Interaction> = sqlx::query_as(
+    let updated: Option<Interaction> = sqlx::query_as(&format!(
         "UPDATE interactions
-            SET state = 'canceled', updated_at = now()
+            SET state = 'canceled', updated_at = {}
           WHERE id = $1 AND state = 'pending'
           RETURNING *",
-    )
+        Postgres.now()
+    ))
     .bind(id)
     .fetch_optional(&state.db)
     .await?;
@@ -406,12 +409,13 @@ pub async fn cancel(
 /// not fail the job transition that triggered it. Each cancel records its
 /// activity event and fans the live `InteractionChanged` signal, like `cancel`.
 pub async fn cancel_for_job(state: &AppState, tenant: TenantId, job_id: JobId) {
-    let canceled: Vec<Interaction> = match sqlx::query_as(
+    let canceled: Vec<Interaction> = match sqlx::query_as(&format!(
         "UPDATE interactions
-            SET state = 'canceled', updated_at = now()
+            SET state = 'canceled', updated_at = {}
           WHERE job_id = $1 AND tenant_id = $2 AND state = 'pending'
           RETURNING *",
-    )
+        Postgres.now()
+    ))
     .bind(job_id)
     .bind(tenant)
     .fetch_all(&state.db)

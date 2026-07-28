@@ -263,10 +263,11 @@ pub async fn events_page(
         "SELECT * FROM events
          WHERE tenant_id = $1
            AND ({ws} IS NULL OR workspace_id = $2)
-           AND ($3::text IS NULL OR kind LIKE $3 || '%')
+           AND ({kind} IS NULL OR kind LIKE $3 || '%')
            AND ({before} IS NULL OR occurred_at < $4)",
         ws = Postgres.cast("$2", "uuid"),
         before = Postgres.cast("$4", "timestamptz"),
+        kind = Postgres.cast("$3", "text"),
     );
     if matches!(scope, ActivityScope::Member { .. }) {
         sql.push_str(" AND (actor_id = ANY($6) OR node_id = ANY($7) OR session_id = ANY($8))");
@@ -325,13 +326,14 @@ pub async fn operator_audit_page(
     // An empty or whitespace-only search is "no filter", not "match the empty
     // string" — the search box clears to that and must show the whole log.
     let q = q.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+    let term = Postgres.cast("$2", "text");
     let rows: Vec<OperatorAuditEntry> = sqlx::query_as(&format!(
         "SELECT e.id, e.kind, e.actor_type, e.actor_id, e.tenant_id,
                 t.slug AS tenant_slug, e.occurred_at
          FROM events e JOIN tenants t ON t.id = e.tenant_id
          WHERE (e.kind LIKE 'operator.%' OR e.kind LIKE 'rbac.%'
                 OR e.kind LIKE 'node.%'  OR e.kind LIKE 'user.%')
-           AND ($2::text IS NULL OR (
+           AND ({term} IS NULL OR (
                     e.kind ILIKE '%' || $2 || '%'
                  OR t.slug ILIKE '%' || $2 || '%'
                  OR e.actor_type ILIKE '%' || $2 || '%'
@@ -371,6 +373,7 @@ pub async fn operator_tenants_page(
 ) -> ApiResult<OperatorTenantPage> {
     let limit = limit.clamp(1, 200);
     let q = search_filter(q);
+    let term = Postgres.cast("$2", "text");
     let rows: Vec<OperatorTenant> = sqlx::query_as(&format!(
         "SELECT t.id, t.slug, t.org_id, t.created_at,
                 (SELECT count(*) FROM users u WHERE u.tenant_id = t.id)    AS members,
@@ -380,7 +383,7 @@ pub async fn operator_tenants_page(
                     AND s.status IN ('starting','running','detached'))     AS active_sessions,
                 (SELECT count(*) FROM workspaces w WHERE w.tenant_id = t.id) AS workspaces
          FROM tenants t
-         WHERE ($2::text IS NULL OR t.slug ILIKE '%' || $2 || '%' OR t.name ILIKE '%' || $2 || '%')
+         WHERE ({term} IS NULL OR t.slug ILIKE '%' || $2 || '%' OR t.name ILIKE '%' || $2 || '%')
            AND ({cursor} IS NULL OR t.id < $3)
          ORDER BY t.id DESC
          LIMIT $1",
@@ -408,6 +411,7 @@ pub async fn operator_nodes_page(
 ) -> ApiResult<OperatorNodePage> {
     let limit = limit.clamp(1, 200);
     let q = search_filter(q);
+    let term = Postgres.cast("$2", "text");
     let rows: Vec<OperatorNode> = sqlx::query_as(&format!(
         "SELECT n.id, n.name, n.platform, n.status, n.last_seen_at, n.resources,
                 n.tenant_id, t.slug AS tenant_slug,
@@ -415,7 +419,7 @@ pub async fn operator_nodes_page(
                   WHERE s.node_id = n.id
                     AND s.status IN ('starting','running','detached')) AS active_sessions
          FROM nodes n JOIN tenants t ON t.id = n.tenant_id
-         WHERE ($2::text IS NULL OR (
+         WHERE ({term} IS NULL OR (
                     n.name ILIKE '%' || $2 || '%'
                  OR t.slug ILIKE '%' || $2 || '%'
                  OR n.platform ILIKE '%' || $2 || '%'
@@ -447,6 +451,7 @@ pub async fn operator_bindings_page(
 ) -> ApiResult<OperatorBindingPage> {
     let limit = limit.clamp(1, 200);
     let q = search_filter(q);
+    let term = Postgres.cast("$2", "text");
     let rows: Vec<BindingRow> = sqlx::query_as(&format!(
         "SELECT b.id, u.email, u.display_name, b.role_key, b.scope_type, b.scope_id,
                 COALESCE(o.slug, t.slug) AS scope_label, b.created_at
@@ -454,7 +459,7 @@ pub async fn operator_bindings_page(
          JOIN users u ON u.id = b.subject_id
          LEFT JOIN orgs o    ON b.scope_type = 'org'    AND o.id = b.scope_id
          LEFT JOIN tenants t ON b.scope_type = 'tenant' AND t.id = b.scope_id
-         WHERE ($2::text IS NULL OR (
+         WHERE ({term} IS NULL OR (
                     u.email ILIKE '%' || $2 || '%'
                  OR b.role_key ILIKE '%' || $2 || '%'
                  OR b.scope_type ILIKE '%' || $2 || '%'
@@ -489,12 +494,13 @@ pub async fn tenant_members_page(
 ) -> ApiResult<TenantMemberPage> {
     let limit = limit.clamp(1, 200);
     let q = search_filter(q);
+    let term = Postgres.cast("$3", "text");
     let rows: Vec<TenantMemberItem> = sqlx::query_as(&format!(
         "SELECT m.principal_id, u.email, u.display_name, m.role, m.created_at AS joined_at
          FROM tenant_members m
          JOIN users u ON u.id = m.principal_id
          WHERE m.tenant_id = $1 AND m.principal_type = 'user'
-           AND ($3::text IS NULL OR (
+           AND ({term} IS NULL OR (
                     u.email ILIKE '%' || $3 || '%'
                  OR u.display_name ILIKE '%' || $3 || '%'
                  OR m.role ILIKE '%' || $3 || '%'))
@@ -619,10 +625,13 @@ pub async fn create_session_at(
         },
     );
     if !sent {
-        sqlx::query("UPDATE sessions SET status = 'error', updated_at = now() WHERE id = $1")
-            .bind(session.id)
-            .execute(&state.db)
-            .await?;
+        sqlx::query(&format!(
+            "UPDATE sessions SET status = 'error', updated_at = {} WHERE id = $1",
+            Postgres.now()
+        ))
+        .bind(session.id)
+        .execute(&state.db)
+        .await?;
         return Err(ApiError::BadRequest("node went offline".into()));
     }
 
@@ -682,10 +691,13 @@ pub async fn create_ad_hoc_session(
         },
     );
     if !sent {
-        sqlx::query("UPDATE sessions SET status = 'error', updated_at = now() WHERE id = $1")
-            .bind(session.id)
-            .execute(&state.db)
-            .await?;
+        sqlx::query(&format!(
+            "UPDATE sessions SET status = 'error', updated_at = {} WHERE id = $1",
+            Postgres.now()
+        ))
+        .bind(session.id)
+        .execute(&state.db)
+        .await?;
         return Err(ApiError::BadRequest("node went offline".into()));
     }
 
@@ -745,10 +757,13 @@ pub async fn create_auth_session(
         },
     );
     if !sent {
-        sqlx::query("UPDATE sessions SET status = 'error', updated_at = now() WHERE id = $1")
-            .bind(session.id)
-            .execute(&state.db)
-            .await?;
+        sqlx::query(&format!(
+            "UPDATE sessions SET status = 'error', updated_at = {} WHERE id = $1",
+            Postgres.now()
+        ))
+        .bind(session.id)
+        .execute(&state.db)
+        .await?;
         return Err(ApiError::BadRequest("node went offline".into()));
     }
 

@@ -5,7 +5,7 @@
 //! given tenant uses one or the other, never both. See `auth_mode` below.
 
 use anyhow::Result;
-use nook_db::DbPool;
+use nook_db::{DbPool, Postgres, TypeMapping};
 use nook_types::{Tenant, TenantId, User, UserId};
 
 use crate::auth::password;
@@ -260,11 +260,14 @@ pub async fn change_password(
         return Err(ApiError::Unauthorized);
     }
     let next_hash = password::hash(next).map_err(|e| ApiError::BadRequest(e.to_string()))?;
-    sqlx::query("UPDATE users SET password_hash = $2, updated_at = now() WHERE id = $1")
-        .bind(user_id)
-        .bind(next_hash)
-        .execute(db)
-        .await?;
+    sqlx::query(&format!(
+        "UPDATE users SET password_hash = $2, updated_at = {} WHERE id = $1",
+        Postgres.now()
+    ))
+    .bind(user_id)
+    .bind(next_hash)
+    .execute(db)
+    .await?;
     Ok(())
 }
 
