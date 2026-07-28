@@ -150,6 +150,24 @@ describe("ChatView reactions/edit/delete", () => {
     expect(screen.getByLabelText("Add reaction")).toBeTruthy();
   });
 
+  it("lets a tenant admin delete (but not edit) another user's message (AC-4)", () => {
+    render(
+      <ChatView
+        messages={[{ ...reacted, authorId: "u-bob" }]}
+        onSend={vi.fn()}
+        currentUserId="u-me"
+        onEditMessage={vi.fn()}
+        onDeleteMessage={vi.fn()}
+        onToggleReaction={vi.fn()}
+        canDeleteAny
+      />,
+    );
+    // Admin gets Delete on someone else's message — the AC-4 admin path.
+    expect(screen.getByLabelText("Delete message")).toBeTruthy();
+    // Edit stays author-only even for an admin.
+    expect(screen.queryByLabelText("Edit message")).toBeNull();
+  });
+
   it("renders a deleted message as a placeholder with no actions or reactions", () => {
     const deleted: ChatViewMessage = {
       ...reacted,

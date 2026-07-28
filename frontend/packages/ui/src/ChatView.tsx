@@ -87,9 +87,13 @@ export interface ChatViewProps {
   /** Save an inline edit (MAIN-116 AC-3). Only offered on the viewer's own,
    *  non-deleted messages; omit to suppress the Edit action entirely. */
   onEditMessage?: (messageId: string, newBody: string) => void;
-  /** Delete a message (MAIN-116 AC-4). Only offered on the viewer's own,
-   *  non-deleted messages; the caller owns any confirmation. Omit to suppress. */
+  /** Delete a message (MAIN-116 AC-4). Offered on the viewer's own messages, and
+   *  on any message when `canDeleteAny` is set (a tenant admin). The caller owns
+   *  any confirmation. Omit to suppress. */
   onDeleteMessage?: (messageId: string) => void;
+  /** The viewer is a tenant owner/admin, so Delete is offered on ANY message,
+   *  not only their own (MAIN-116 AC-4). Edit stays author-only regardless. */
+  canDeleteAny?: boolean;
 }
 
 const GROUP_GAP_MS = 5 * 60 * 1000;
@@ -128,6 +132,7 @@ export function ChatView({
   onToggleReaction,
   onEditMessage,
   onDeleteMessage,
+  canDeleteAny = false,
 }: ChatViewProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const [draft, setDraft] = useState("");
@@ -226,8 +231,11 @@ export function ChatView({
             // non-deleted message. A deleted one shows only its placeholder.
             const settled = !m.pending && !m.failed && !m.deleted;
             const canReact = settled && !!onToggleReaction;
+            // Edit is always author-only. Delete is author OR tenant admin
+            // (MAIN-116 AC-4) — `canDeleteAny` plumbs the admin role, so an admin
+            // can remove someone else's message, which the backend already allows.
             const canEdit = settled && mine && !!onEditMessage;
-            const canDelete = settled && mine && !!onDeleteMessage;
+            const canDelete = settled && (mine || canDeleteAny) && !!onDeleteMessage;
             const isEditing = editing?.id === m.id;
             const reactions = m.reactions ?? [];
             return (

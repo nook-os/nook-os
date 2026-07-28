@@ -116,6 +116,7 @@ export function buildChatMessages(
   pending: PendingMessage[],
   meId: string | undefined,
   names: Record<string, string> = {},
+  newReplyIds?: ReadonlySet<string>,
 ): ChatViewMessage[] {
   // Dedupe confirmed messages by id: a message can appear in both a refetched
   // history page and the live buffer.
@@ -123,12 +124,17 @@ export function buildChatMessages(
   for (const m of history) byId.set(m.id, m);
   for (const m of live) byId.set(m.id, m);
 
-  // Count replies we know about live, per parent, to bump the parent's count.
-  // History carries no replies (the server excludes them), so this counts only
-  // this session's live arrivals — added on top of the server `reply_count`.
+  // Bump each parent's "N replies" by the replies that arrived NEW this session,
+  // on top of the server `reply_count` (history carries no replies — the server
+  // excludes them). `newReplyIds` is the set of ids that arrived as NEW posts;
+  // an `message_updated` (edit/delete/reaction) to a PRE-EXISTING reply lands in
+  // `live` too, but it is already in the server count, so counting it would
+  // double-count and inflate the parent for every viewer (MAIN-116 review fix).
+  // When `newReplyIds` is omitted (the thread panel / older tests) all live
+  // replies count, as before.
   const liveReplies: Record<string, number> = {};
   for (const m of byId.values()) {
-    if (m.parent_message_id) {
+    if (m.parent_message_id && (!newReplyIds || newReplyIds.has(m.id))) {
       liveReplies[m.parent_message_id] = (liveReplies[m.parent_message_id] ?? 0) + 1;
     }
   }

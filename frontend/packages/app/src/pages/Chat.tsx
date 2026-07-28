@@ -127,6 +127,10 @@ export function ChatPage() {
   // Live + optimistic state is per-open-channel; both reset on a channel switch.
   const [live, setLive] = useState<ChatMessage[]>([]);
   const [pending, setPending] = useState<PendingMessage[]>([]);
+  // Ids of replies that arrived as NEW posts this session (never updates), so a
+  // parent's "N replies" bumps only for genuine new arrivals and an edit/delete/
+  // reaction on a pre-existing reply can't inflate it (MAIN-116 review fix).
+  const [newReplyIds, setNewReplyIds] = useState<ReadonlySet<string>>(new Set());
   const tempCounter = useRef(0);
 
   // The current history, reachable from stable callbacks (the socket handler and
@@ -214,6 +218,7 @@ export function ChatPage() {
   useEffect(() => {
     setLive([]);
     setPending([]);
+    setNewReplyIds(new Set());
     setThreadParentId(null);
   }, [selectedId]);
 
@@ -223,9 +228,21 @@ export function ChatPage() {
     if (!selectedId) return;
     const dispose = connectChatSocket(
       selectedId,
-      (msg) => setLive((prev) => (prev.some((m) => m.id === msg.id) ? prev : [...prev, msg])),
+      (msg) => {
+        setLive((prev) => (prev.some((m) => m.id === msg.id) ? prev : [...prev, msg]));
+        // A NEW reply bumps its parent's count; record its id so an later update
+        // to it is not re-counted (MAIN-116 review fix).
+        if (msg.parent_message_id) {
+          setNewReplyIds((prev) =>
+            prev.has(msg.id) ? prev : new Set(prev).add(msg.id),
+          );
+        }
+      },
       {
         onReconnect: () => {
+          // The refetched history carries authoritative reply counts, so drop the
+          // optimistic new-reply bumps to avoid double-counting after the gap.
+          setNewReplyIds(new Set());
           void qc.invalidateQueries({ queryKey: ["chat", "messages", selectedId] });
         },
         // An edit, soft-delete, or reaction toggle on any message in this
@@ -287,8 +304,8 @@ export function ChatPage() {
 
   const names = useMemo(() => (meId ? { [meId]: "You" } : {}), [meId]);
   const messages = useMemo(
-    () => buildChatMessages(history, live, pending, meId, names),
-    [history, live, pending, meId, names],
+    () => buildChatMessages(history, live, pending, meId, names, newReplyIds),
+    [history, live, pending, meId, names, newReplyIds],
   );
 
   // Resolve the open thread's parent message from what we already hold; a reply
@@ -408,6 +425,7 @@ export function ChatPage() {
             onToggleReaction={onToggleReaction}
             onEditMessage={onEditMessage}
             onDeleteMessage={onDeleteMessage}
+            canDeleteAny={canManage}
           />
           {threadParent && selectedId && (
             <ThreadPanel
@@ -420,6 +438,7 @@ export function ChatPage() {
               onToggleReaction={onToggleReaction}
               onEditMessage={onEditMessage}
               onDeleteMessage={onDeleteMessage}
+              canDeleteAny={canManage}
             />
           )}
         </div>

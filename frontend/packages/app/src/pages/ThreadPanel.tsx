@@ -26,6 +26,9 @@ export interface ThreadPanelProps {
   onToggleReaction?: (messageId: string, emoji: string, on: boolean) => void;
   onEditMessage?: (messageId: string, newBody: string) => void;
   onDeleteMessage?: (messageId: string) => void;
+  /** The viewer is a tenant admin — Delete is offered on any reply, not only
+   *  their own (MAIN-116 AC-4). */
+  canDeleteAny?: boolean;
 }
 
 const PAGE_SIZE = 50;
@@ -40,6 +43,7 @@ export function ThreadPanel({
   onToggleReaction,
   onEditMessage,
   onDeleteMessage,
+  canDeleteAny,
 }: ThreadPanelProps) {
   const threadQuery = useInfiniteQuery({
     queryKey: ["chat", "thread", parent.id],
@@ -154,6 +158,7 @@ export function ThreadPanel({
         onToggleReaction={onToggleReaction}
         onEditMessage={onEditMessage}
         onDeleteMessage={onDeleteMessage}
+        canDeleteAny={canDeleteAny}
       />
     </aside>
   );

@@ -123,6 +123,23 @@ describe("buildChatMessages", () => {
     const out = buildChatMessages([msg("p", "u1", "lonely", "2026-07-25T10:00:00Z")], [], [], "me");
     expect(out[0].replyCount).toBeUndefined();
   });
+
+  it("bumps only for NEW replies, not updates to pre-existing ones (review fix)", () => {
+    const parent: ChatMessage = {
+      ...msg("p", "u1", "parent", "2026-07-25T10:00:00Z"),
+      reply_count: 2, // two replies already counted by the server at load
+    };
+    // `r-old` is one of those two, re-entering `live` via a reaction/edit
+    // (message_updated); `r-new` is a genuinely new reply that arrived live.
+    const live = [
+      reply("r-old", "p", "2026-07-25T09:00:00Z"),
+      reply("r-new", "p", "2026-07-25T10:05:00Z"),
+    ];
+    // Only the NEW reply's id is in the set.
+    const out = buildChatMessages([parent], live, [], "me", {}, new Set(["r-new"]));
+    // Server 2 + one new arrival = 3, NOT 4 — the update to r-old is not counted.
+    expect(out.find((m) => m.id === "p")?.replyCount).toBe(3);
+  });
 });
 
 describe("buildThreadMessages", () => {
