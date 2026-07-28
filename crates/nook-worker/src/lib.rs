@@ -359,295 +359,319 @@ mod tests {
 
     #[tokio::test]
     async fn dispatches_to_the_registered_handler_and_acks() {
-        let Some((_bed, q)) = setup().await else {
-            return;
-        };
-        let ty = unique_type("dispatch");
-        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let mut reg = Registry::new();
-        reg.register(ty.clone(), Arc::new(Recorder(seen.clone())));
+        nook_testkit::deadline(60, async {
+            let Some((_bed, q)) = setup().await else {
+                return;
+            };
+            let ty = unique_type("dispatch");
+            let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let mut reg = Registry::new();
+            reg.register(ty.clone(), Arc::new(Recorder(seen.clone())));
 
-        let id = q.enqueue(work(&ty)).await.unwrap();
-        let n = drain_once(&*q, &reg, std::slice::from_ref(&ty))
-            .await
-            .unwrap();
-        assert_eq!(n, 1);
-        assert_eq!(
-            seen.lock().unwrap().as_slice(),
-            &[id],
-            "handler saw the item"
-        );
+            let id = q.enqueue(work(&ty)).await.unwrap();
+            let n = drain_once(&*q, &reg, std::slice::from_ref(&ty))
+                .await
+                .unwrap();
+            assert_eq!(n, 1);
+            assert_eq!(
+                seen.lock().unwrap().as_slice(),
+                &[id],
+                "handler saw the item"
+            );
 
-        // Acked → gone: a second drain finds nothing.
-        let again = drain_once(&*q, &reg, std::slice::from_ref(&ty))
-            .await
-            .unwrap();
-        assert_eq!(again, 0, "the item was acked");
+            // Acked → gone: a second drain finds nothing.
+            let again = drain_once(&*q, &reg, std::slice::from_ref(&ty))
+                .await
+                .unwrap();
+            assert_eq!(again, 0, "the item was acked");
+        })
+        .await;
     }
 
     #[tokio::test]
     async fn allow_list_filters_which_types_are_received() {
-        let Some((_bed, q)) = setup().await else {
-            return;
-        };
-        let a = unique_type("allowA");
-        let b = unique_type("allowB");
-        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let mut reg = Registry::new();
-        reg.register(a.clone(), Arc::new(Recorder(seen.clone())));
-        reg.register(b.clone(), Arc::new(Recorder(seen.clone())));
+        nook_testkit::deadline(60, async {
+            let Some((_bed, q)) = setup().await else {
+                return;
+            };
+            let a = unique_type("allowA");
+            let b = unique_type("allowB");
+            let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let mut reg = Registry::new();
+            reg.register(a.clone(), Arc::new(Recorder(seen.clone())));
+            reg.register(b.clone(), Arc::new(Recorder(seen.clone())));
 
-        let ida = q.enqueue(work(&a)).await.unwrap();
-        let _idb = q.enqueue(work(&b)).await.unwrap();
+            let ida = q.enqueue(work(&a)).await.unwrap();
+            let _idb = q.enqueue(work(&b)).await.unwrap();
 
-        // Drain only type A.
-        let n = drain_once(&*q, &reg, std::slice::from_ref(&a))
-            .await
-            .unwrap();
-        assert_eq!(n, 1);
-        assert_eq!(
-            seen.lock().unwrap().as_slice(),
-            &[ida],
-            "only A was received"
-        );
+            // Drain only type A.
+            let n = drain_once(&*q, &reg, std::slice::from_ref(&a))
+                .await
+                .unwrap();
+            assert_eq!(n, 1);
+            assert_eq!(
+                seen.lock().unwrap().as_slice(),
+                &[ida],
+                "only A was received"
+            );
 
-        // B is still queued.
-        let n_b = drain_once(&*q, &reg, std::slice::from_ref(&b))
-            .await
-            .unwrap();
-        assert_eq!(n_b, 1, "B was left untouched by the A-only drain");
+            // B is still queued.
+            let n_b = drain_once(&*q, &reg, std::slice::from_ref(&b))
+                .await
+                .unwrap();
+            assert_eq!(n_b, 1, "B was left untouched by the A-only drain");
+        })
+        .await;
     }
 
     #[tokio::test]
     async fn unregistered_type_is_requeued_once_then_dead_lettered() {
-        let Some((bed, q)) = setup().await else {
-            return;
-        };
-        let ty = unique_type("nohandler");
-        // An allow-list that names a type with no registered handler.
-        let reg = Registry::new();
-        q.enqueue(work(&ty)).await.unwrap();
+        nook_testkit::deadline(60, async {
+            let Some((bed, q)) = setup().await else {
+                return;
+            };
+            let ty = unique_type("nohandler");
+            // An allow-list that names a type with no registered handler.
+            let reg = Registry::new();
+            q.enqueue(work(&ty)).await.unwrap();
 
-        // First delivery (attempts=1): requeued, not dead yet.
-        drain_once(&*q, &reg, std::slice::from_ref(&ty))
-            .await
-            .unwrap();
-        assert_eq!(
-            count_in(&bed.pool, "work_queue_dead", &ty).await,
-            0,
-            "not dead on the first pass"
-        );
-        assert_eq!(
-            count_in(&bed.pool, "work_queue", &ty).await,
-            1,
-            "back in the queue"
-        );
+            // First delivery (attempts=1): requeued, not dead yet.
+            drain_once(&*q, &reg, std::slice::from_ref(&ty))
+                .await
+                .unwrap();
+            assert_eq!(
+                count_in(&bed.pool, "work_queue_dead", &ty).await,
+                0,
+                "not dead on the first pass"
+            );
+            assert_eq!(
+                count_in(&bed.pool, "work_queue", &ty).await,
+                1,
+                "back in the queue"
+            );
 
-        // Second delivery (attempts=2): dead-lettered with "no handler".
-        drain_once(&*q, &reg, std::slice::from_ref(&ty))
+            // Second delivery (attempts=2): dead-lettered with "no handler".
+            drain_once(&*q, &reg, std::slice::from_ref(&ty))
+                .await
+                .unwrap();
+            assert_eq!(
+                count_in(&bed.pool, "work_queue", &ty).await,
+                0,
+                "left the live queue"
+            );
+            assert_eq!(
+                count_in(&bed.pool, "work_queue_dead", &ty).await,
+                1,
+                "dead-lettered"
+            );
+            let reason: String = sqlx::query_as::<_, (String,)>(
+                "SELECT reason FROM work_queue_dead WHERE work_type = $1",
+            )
+            .bind(&ty)
+            .fetch_one(&bed.pool)
             .await
-            .unwrap();
-        assert_eq!(
-            count_in(&bed.pool, "work_queue", &ty).await,
-            0,
-            "left the live queue"
-        );
-        assert_eq!(
-            count_in(&bed.pool, "work_queue_dead", &ty).await,
-            1,
-            "dead-lettered"
-        );
-        let reason: String = sqlx::query_as::<_, (String,)>(
-            "SELECT reason FROM work_queue_dead WHERE work_type = $1",
-        )
-        .bind(&ty)
-        .fetch_one(&bed.pool)
-        .await
-        .unwrap()
-        .0;
-        assert!(
-            reason.contains("no handler"),
-            "reason names the cause: {reason}"
-        );
+            .unwrap()
+            .0;
+            assert!(
+                reason.contains("no handler"),
+                "reason names the cause: {reason}"
+            );
+        })
+        .await;
     }
 
     #[tokio::test]
     async fn handler_failure_backs_off_without_acking() {
-        let Some((bed, q)) = setup().await else {
-            return;
-        };
-        let ty = unique_type("fail");
-        let calls = Arc::new(AtomicUsize::new(0));
-        let mut reg = Registry::new();
-        reg.register(ty.clone(), Arc::new(Failing(calls.clone())));
+        nook_testkit::deadline(60, async {
+            let Some((bed, q)) = setup().await else {
+                return;
+            };
+            let ty = unique_type("fail");
+            let calls = Arc::new(AtomicUsize::new(0));
+            let mut reg = Registry::new();
+            reg.register(ty.clone(), Arc::new(Failing(calls.clone())));
 
-        let id = q.enqueue(work(&ty)).await.unwrap();
-        drain_once(&*q, &reg, std::slice::from_ref(&ty))
+            let id = q.enqueue(work(&ty)).await.unwrap();
+            drain_once(&*q, &reg, std::slice::from_ref(&ty))
+                .await
+                .unwrap();
+            assert_eq!(calls.load(Ordering::SeqCst), 1, "handler ran once");
+
+            // Not acked, not dead — still present, and invisible into the future.
+            assert_eq!(
+                count_in(&bed.pool, "work_queue", &ty).await,
+                1,
+                "still queued"
+            );
+            assert_eq!(
+                count_in(&bed.pool, "work_queue_dead", &ty).await,
+                0,
+                "not dead after one failure"
+            );
+            let locked_future: bool = sqlx::query_as::<_, (bool,)>(
+                "SELECT locked_until > now() FROM work_queue WHERE id = $1",
+            )
+            .bind(id)
+            .fetch_one(&bed.pool)
             .await
-            .unwrap();
-        assert_eq!(calls.load(Ordering::SeqCst), 1, "handler ran once");
-
-        // Not acked, not dead — still present, and invisible into the future.
-        assert_eq!(
-            count_in(&bed.pool, "work_queue", &ty).await,
-            1,
-            "still queued"
-        );
-        assert_eq!(
-            count_in(&bed.pool, "work_queue_dead", &ty).await,
-            0,
-            "not dead after one failure"
-        );
-        let locked_future: bool = sqlx::query_as::<_, (bool,)>(
-            "SELECT locked_until > now() FROM work_queue WHERE id = $1",
-        )
-        .bind(id)
-        .fetch_one(&bed.pool)
-        .await
-        .unwrap()
-        .0;
-        assert!(locked_future, "the item is held invisible by the backoff");
+            .unwrap()
+            .0;
+            assert!(locked_future, "the item is held invisible by the backoff");
+        })
+        .await;
     }
 
     #[tokio::test]
     async fn a_panicking_handler_is_isolated_not_fatal() {
-        let Some((bed, q)) = setup().await else {
-            return;
-        };
-        let ty = unique_type("panic");
-        let mut reg = Registry::new();
-        reg.register(ty.clone(), Arc::new(Panicking));
+        nook_testkit::deadline(60, async {
+            let Some((bed, q)) = setup().await else {
+                return;
+            };
+            let ty = unique_type("panic");
+            let mut reg = Registry::new();
+            reg.register(ty.clone(), Arc::new(Panicking));
 
-        q.enqueue(work(&ty)).await.unwrap();
-        // The panic must be caught: drain_once returns Ok, not a propagated unwind.
-        let n = drain_once(&*q, &reg, std::slice::from_ref(&ty))
-            .await
-            .unwrap();
-        assert_eq!(n, 1);
-        // Treated as a failure: backed off, still present, not dead.
-        assert_eq!(
-            count_in(&bed.pool, "work_queue", &ty).await,
-            1,
-            "a panic is a failure, not a loss"
-        );
+            q.enqueue(work(&ty)).await.unwrap();
+            // The panic must be caught: drain_once returns Ok, not a propagated unwind.
+            let n = drain_once(&*q, &reg, std::slice::from_ref(&ty))
+                .await
+                .unwrap();
+            assert_eq!(n, 1);
+            // Treated as a failure: backed off, still present, not dead.
+            assert_eq!(
+                count_in(&bed.pool, "work_queue", &ty).await,
+                1,
+                "a panic is a failure, not a loss"
+            );
+        })
+        .await;
     }
 
     #[tokio::test]
     async fn run_drains_pending_work_then_stops_on_shutdown() {
-        let Some((bed, q)) = setup().await else {
-            return;
-        };
-        let ty = unique_type("shutdown");
-        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let mut reg = Registry::new();
-        reg.register(ty.clone(), Arc::new(Recorder(seen.clone())));
+        nook_testkit::deadline(60, async {
+            let Some((bed, q)) = setup().await else {
+                return;
+            };
+            let ty = unique_type("shutdown");
+            let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let mut reg = Registry::new();
+            reg.register(ty.clone(), Arc::new(Recorder(seen.clone())));
 
-        for _ in 0..3 {
-            q.enqueue(work(&ty)).await.unwrap();
-        }
-
-        let (tx, rx) = tokio::sync::watch::channel(false);
-        let handle = tokio::spawn(run(q.clone(), reg, vec![ty.clone()], rx));
-
-        // Wait until the three items are drained, then signal shutdown.
-        for _ in 0..50 {
-            if count_in(&bed.pool, "work_queue", &ty).await == 0 {
-                break;
+            for _ in 0..3 {
+                q.enqueue(work(&ty)).await.unwrap();
             }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-        tx.send(true).unwrap();
 
-        tokio::time::timeout(Duration::from_secs(5), handle)
-            .await
-            .expect("run returns promptly after shutdown")
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            seen.lock().unwrap().len(),
-            3,
-            "all pending work was drained before exit"
-        );
+            let (tx, rx) = tokio::sync::watch::channel(false);
+            let handle = tokio::spawn(run(q.clone(), reg, vec![ty.clone()], rx));
+
+            // Wait until the three items are drained, then signal shutdown.
+            for _ in 0..50 {
+                if count_in(&bed.pool, "work_queue", &ty).await == 0 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            tx.send(true).unwrap();
+
+            tokio::time::timeout(Duration::from_secs(5), handle)
+                .await
+                .expect("run returns promptly after shutdown")
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                seen.lock().unwrap().len(),
+                3,
+                "all pending work was drained before exit"
+            );
+        })
+        .await;
     }
 
     // ── MAIN-149: the email.send handler + dead-letter-with-reason ──────────────
 
     #[tokio::test]
     async fn email_handler_delivers_via_the_mailer_and_acks() {
-        let Some((_bed, q)) = setup().await else {
-            return;
-        };
-        use nook_infra::mailer::{capture::CaptureMailer, Category, EmailJob};
-        let ty = unique_type("email");
-        let cap = Arc::new(CaptureMailer::new());
-        let mut reg = Registry::new();
-        reg.register(ty.clone(), Arc::new(EmailHandler::new(cap.clone())));
+        nook_testkit::deadline(60, async {
+            let Some((_bed, q)) = setup().await else {
+                return;
+            };
+            use nook_infra::mailer::{capture::CaptureMailer, Category, EmailJob};
+            let ty = unique_type("email");
+            let cap = Arc::new(CaptureMailer::new());
+            let mut reg = Registry::new();
+            reg.register(ty.clone(), Arc::new(EmailHandler::new(cap.clone())));
 
-        let job = EmailJob::new(
-            "to@x.test",
-            "Subject",
-            "the body",
-            None,
-            Category::Transactional,
-        );
-        let payload = serde_json::to_vec(&job).unwrap();
-        q.enqueue(NewWork::new(Uuid::now_v7(), ty.clone(), payload))
-            .await
-            .unwrap();
-
-        let n = drain_once(&*q, &reg, std::slice::from_ref(&ty))
-            .await
-            .unwrap();
-        assert_eq!(n, 1);
-        assert_eq!(
-            cap.sent().len(),
-            1,
-            "the mailer delivered the queued message"
-        );
-        // Acked → a second drain finds nothing.
-        assert_eq!(
-            drain_once(&*q, &reg, std::slice::from_ref(&ty))
+            let job = EmailJob::new(
+                "to@x.test",
+                "Subject",
+                "the body",
+                None,
+                Category::Transactional,
+            );
+            let payload = serde_json::to_vec(&job).unwrap();
+            q.enqueue(NewWork::new(Uuid::now_v7(), ty.clone(), payload))
                 .await
-                .unwrap(),
-            0,
-            "a delivered email is acked"
-        );
+                .unwrap();
+
+            let n = drain_once(&*q, &reg, std::slice::from_ref(&ty))
+                .await
+                .unwrap();
+            assert_eq!(n, 1);
+            assert_eq!(
+                cap.sent().len(),
+                1,
+                "the mailer delivered the queued message"
+            );
+            // Acked → a second drain finds nothing.
+            assert_eq!(
+                drain_once(&*q, &reg, std::slice::from_ref(&ty))
+                    .await
+                    .unwrap(),
+                0,
+                "a delivered email is acked"
+            );
+        })
+        .await;
     }
 
     #[tokio::test]
     async fn a_failing_handler_dead_letters_with_its_error_on_the_final_attempt() {
-        let Some((bed, q)) = setup().await else {
-            return;
-        };
-        let ty = unique_type("deadfail");
-        let mut reg = Registry::new();
-        reg.register(ty.clone(), Arc::new(Failing(Arc::new(AtomicUsize::new(0)))));
+        nook_testkit::deadline(60, async {
+            let Some((bed, q)) = setup().await else {
+                return;
+            };
+            let ty = unique_type("deadfail");
+            let mut reg = Registry::new();
+            reg.register(ty.clone(), Arc::new(Failing(Arc::new(AtomicUsize::new(0)))));
 
-        // max_attempts = 1: the first delivery is also the last, so a failure
-        // dead-letters immediately — carrying the handler's actual error (AC-3).
-        q.enqueue(NewWork::new(Uuid::now_v7(), ty.clone(), b"{}".to_vec()).max_attempts(1))
-            .await
-            .unwrap();
-        drain_once(&*q, &reg, std::slice::from_ref(&ty))
-            .await
-            .unwrap();
+            // max_attempts = 1: the first delivery is also the last, so a failure
+            // dead-letters immediately — carrying the handler's actual error (AC-3).
+            q.enqueue(NewWork::new(Uuid::now_v7(), ty.clone(), b"{}".to_vec()).max_attempts(1))
+                .await
+                .unwrap();
+            drain_once(&*q, &reg, std::slice::from_ref(&ty))
+                .await
+                .unwrap();
 
-        assert_eq!(
-            count_in(&bed.pool, "work_queue", &ty).await,
-            0,
-            "left the live queue"
-        );
-        let reason: String = sqlx::query_as::<_, (String,)>(
-            "SELECT reason FROM work_queue_dead WHERE work_type = $1",
-        )
-        .bind(&ty)
-        .fetch_one(&bed.pool)
-        .await
-        .unwrap()
-        .0;
-        assert!(
-            reason.contains("handler always fails"),
-            "the dead-letter reason is the handler's error, not a generic one: {reason}"
-        );
+            assert_eq!(
+                count_in(&bed.pool, "work_queue", &ty).await,
+                0,
+                "left the live queue"
+            );
+            let reason: String = sqlx::query_as::<_, (String,)>(
+                "SELECT reason FROM work_queue_dead WHERE work_type = $1",
+            )
+            .bind(&ty)
+            .fetch_one(&bed.pool)
+            .await
+            .unwrap()
+            .0;
+            assert!(
+                reason.contains("handler always fails"),
+                "the dead-letter reason is the handler's error, not a generic one: {reason}"
+            );
+        })
+        .await;
     }
 }

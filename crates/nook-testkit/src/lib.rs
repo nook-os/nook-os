@@ -238,6 +238,21 @@ impl TestBed {
     }
 }
 
+/// Hard per-test deadline (MAIN-185 AC-2). Wrap a DB-backed test body so a
+/// hang fails THAT test in `secs` seconds with a pointed message, instead of
+/// stalling the whole binary until the CI job's `timeout-minutes` cancels the
+/// run — a failure mode indistinguishable from infrastructure flake, which is
+/// exactly how the TestBed::Drop deadlock burned six PRs before being found.
+pub async fn deadline<T>(secs: u64, fut: impl std::future::Future<Output = T>) -> T {
+    match tokio::time::timeout(std::time::Duration::from_secs(secs), fut).await {
+        Ok(v) => v,
+        Err(_) => panic!(
+            "test exceeded its {secs}s deadline — that is a hang, not slowness \
+             (see MAIN-185); failing fast here instead of eating the CI job"
+        ),
+    }
+}
+
 /// Rewrite the database segment of a Postgres URL, preserving any query params.
 fn swap_db(base: &str, db: &str) -> String {
     let (scheme, rest) = base.split_once("://").unwrap_or(("postgres", base));
@@ -307,6 +322,20 @@ impl Drop for TestBed {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The wrapper itself must be proven to fire (MAIN-185 AC-2 test
+    /// expectation): a deliberately-hung future fails with the deadline
+    /// message. `start_paused` auto-advances time, so the 60s fires instantly.
+    #[tokio::test(start_paused = true)]
+    #[should_panic(expected = "exceeded its 60s deadline")]
+    async fn deadline_flags_a_hung_future() {
+        deadline(60, std::future::pending::<()>()).await;
+    }
+
+    #[tokio::test]
+    async fn deadline_passes_a_prompt_future_through() {
+        assert_eq!(deadline(60, async { 7 }).await, 7);
+    }
 
     #[test]
     fn swap_db_rewrites_only_the_database_segment() {
