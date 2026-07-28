@@ -170,34 +170,6 @@ async fn person_is_participant(
     Ok(ok)
 }
 
-/// Every channel/DM the caller can currently reach: their tenant's channels,
-/// their org's channels, and the DMs their person participates in (MAIN-117). The
-/// per-user live stream subscribes to exactly this set. Archived channels are
-/// included — they simply receive no new posts. Delivery is still re-authorized
-/// per message by [`access`] (AC-6), so this set only needs to be a superset that
-/// never leaks another scope's channel.
-pub async fn member_channel_ids(
-    db: &sqlx::PgPool,
-    caller: &Caller,
-) -> Result<Vec<Uuid>, ChatError> {
-    let ids: Vec<Uuid> = sqlx::query_scalar(
-        "SELECT c.id FROM chat_channels c
-          WHERE (c.owner_type = 'tenant' AND c.owner_id = $1)
-             OR (c.owner_type = 'org' AND c.owner_id = (SELECT org_id FROM public.tenants WHERE id = $1))
-         UNION
-         SELECT c.id FROM chat_channels c
-           JOIN chat_channel_participants p ON p.channel_id = c.id
-          WHERE c.owner_type = 'dm'
-            AND p.person_id = (SELECT person_id FROM public.users WHERE id = $2)",
-    )
-    .bind(caller.tenant_id)
-    .bind(caller.user_id)
-    .fetch_all(db)
-    .await
-    .map_err(|_| ChatError::Internal)?;
-    Ok(ids)
-}
-
 /// The org a tenant belongs to (`tenants.org_id`).
 async fn org_of(db: &sqlx::PgPool, tenant: Uuid) -> Result<Uuid, ChatError> {
     let (org,): (Uuid,) = sqlx::query_as("SELECT org_id FROM public.tenants WHERE id = $1")
@@ -447,9 +419,7 @@ pub fn slugify(name: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        access, create, list, mark_read, member_channel_ids, place, slugify, update, ListQuery,
-    };
+    use super::{access, create, list, mark_read, place, slugify, update, ListQuery};
     use crate::{AppState, Caller, ChatError};
     use axum::extract::{Path, Query, State};
     use axum::Json;
@@ -1308,12 +1278,13 @@ mod tests {
         cleanup(&state.db, tenant).await;
     }
 
-    /// The per-user stream boundary (MAIN-117 AC-6): the subscribe set is exactly
-    /// the caller's own channels + DMs, a cross-tenant intruder is refused, and a
-    /// participant removed mid-connection stops being authorized — so the running
-    /// socket delivers nothing more from that channel.
+    /// The per-user stream's authorization gate (MAIN-117 AC-6). Each firehose
+    /// event is forwarded only if `access` authorizes the caller for its channel
+    /// AT THAT MOMENT, so the boundary is fully dynamic: a cross-tenant intruder
+    /// never passes, a member ADDED mid-session begins passing (no reconnect), and
+    /// a member REMOVED stops passing immediately.
     #[tokio::test]
-    async fn stream_membership_is_scoped_and_reauthorizes_after_removal() {
+    async fn stream_gate_isolates_and_tracks_membership_changes() {
         let Some(state) = setup().await else { return };
         let org = new_org(&state.db).await;
         let t_a = new_tenant_in_org(&state.db, org).await;
@@ -1337,20 +1308,8 @@ mod tests {
         .expect("channel a")
         .1
          .0;
-        let ch_b = create(
-            State(state.clone()),
-            caller(b, t_b),
-            Json(CreateChatChannel {
-                name: "team-b".into(),
-                owner: None,
-            }),
-        )
-        .await
-        .expect("channel b")
-        .1
-         .0;
 
-        // A DM between person_a and person_c (owner_id = the creating person).
+        // A DM created by person_a; person_c is NOT a participant yet.
         let dm = Uuid::now_v7();
         sqlx::query(
             "INSERT INTO chat_channels (id, owner_type, owner_id, name, slug)
@@ -1362,46 +1321,45 @@ mod tests {
         .execute(&state.db)
         .await
         .unwrap();
-        for p in [person_a, person_c] {
-            sqlx::query(
-                "INSERT INTO chat_channel_participants (channel_id, person_id) VALUES ($1, $2)",
-            )
-            .bind(dm)
-            .bind(p)
-            .execute(&state.db)
-            .await
-            .unwrap();
-        }
+        sqlx::query(
+            "INSERT INTO chat_channel_participants (channel_id, person_id) VALUES ($1, $2)",
+        )
+        .bind(dm)
+        .bind(person_a)
+        .execute(&state.db)
+        .await
+        .unwrap();
 
-        // A subscribes to their tenant channel + the DM, never the other tenant's.
-        let a_ids = member_channel_ids(&state.db, &caller(a, t_a))
-            .await
-            .expect("a ids");
-        assert!(a_ids.contains(&ch_a.id), "A sees their tenant channel");
-        assert!(a_ids.contains(&dm), "A sees their DM");
-        assert!(
-            !a_ids.contains(&ch_b.id),
-            "A never subscribes to another tenant's channel"
-        );
-
-        // The intruder subscribes to none of A's channels, and delivery is refused
-        // even if a foreign event somehow reached the pump.
-        let b_ids = member_channel_ids(&state.db, &caller(b, t_b))
-            .await
-            .expect("b ids");
-        assert!(!b_ids.contains(&ch_a.id));
-        assert!(!b_ids.contains(&dm));
+        // Isolation: the tenant-B intruder is refused A's tenant channel and DM,
+        // so an event on either is never forwarded to them.
         assert!(is_forbidden(
             &access(&state.db, ch_a.id, &caller(b, t_b)).await
         ));
         assert!(is_forbidden(&access(&state.db, dm, &caller(b, t_b)).await));
+        // A, a member, is authorized for both.
+        assert!(access(&state.db, ch_a.id, &caller(a, t_a)).await.is_ok());
+        assert!(access(&state.db, dm, &caller(a, t_a)).await.is_ok());
 
-        // C is a DM participant → authorized. After removal, re-auth refuses it and
-        // C no longer subscribes — the boundary holds without a reconnect.
+        // ADD: C is not yet in the DM → refused. Add the participant → now passes,
+        // so C's already-open stream starts delivering it without a reconnect.
+        assert!(
+            is_forbidden(&access(&state.db, dm, &caller(c, t_a)).await),
+            "C is refused before being added"
+        );
+        sqlx::query(
+            "INSERT INTO chat_channel_participants (channel_id, person_id) VALUES ($1, $2)",
+        )
+        .bind(dm)
+        .bind(person_c)
+        .execute(&state.db)
+        .await
+        .unwrap();
         assert!(
             access(&state.db, dm, &caller(c, t_a)).await.is_ok(),
-            "C is a participant"
+            "a participant added mid-session begins receiving"
         );
+
+        // REMOVE: drop C again → refused immediately.
         sqlx::query(
             "DELETE FROM chat_channel_participants WHERE channel_id = $1 AND person_id = $2",
         )
@@ -1412,14 +1370,7 @@ mod tests {
         .unwrap();
         assert!(
             is_forbidden(&access(&state.db, dm, &caller(c, t_a)).await),
-            "a removed participant is refused delivery"
-        );
-        let c_ids = member_channel_ids(&state.db, &caller(c, t_a))
-            .await
-            .expect("c ids");
-        assert!(
-            !c_ids.contains(&dm),
-            "removed participant no longer subscribes"
+            "a removed participant stops receiving"
         );
 
         let _ = sqlx::query("DELETE FROM chat_channels WHERE id = $1")

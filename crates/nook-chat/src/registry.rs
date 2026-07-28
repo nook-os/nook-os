@@ -1,11 +1,14 @@
-//! Per-channel live fan-out (MAIN-49 AC-3).
+//! Per-instance live fan-out (MAIN-49 AC-3; per-user stream MAIN-117 AC-4/AC-6).
 //!
-//! Each subscribed websocket holds a `broadcast::Receiver`; a posted message is
-//! published to its channel's sender and every current subscriber on THIS
-//! instance receives it. Cross-instance delivery rides the bus (`bus.rs`); this
-//! is the local half, mirroring the control plane's registry/bus split.
+//! Every event this instance publishes goes onto ONE broadcast firehose. Each
+//! per-user websocket taps it with [`Registry::subscribe_all`] and forwards an
+//! event only if the caller is authorized for that event's channel *at that
+//! moment* (`channels::access`), so the delivery boundary is re-evaluated per
+//! event — a membership change (a DM opened, a person added to an org) takes
+//! effect live, with no reconnect. Cross-instance delivery rides the bus
+//! (`bus.rs`), which republishes each remote event through [`publish_local`];
+//! this is the local half, mirroring the control plane's registry/bus split.
 
-use dashmap::DashMap;
 use nook_types::ChatServerMessage;
 use tokio::sync::broadcast;
 use uuid::Uuid;
@@ -16,8 +19,8 @@ const CHANNEL_CAP: usize = 256;
 
 /// The channel a server-message event belongs to. Both variants carry a
 /// [`ChatMessage`], so a new post and an update (edit/delete/reaction — MAIN-116)
-/// route to the same per-channel subscribers. `pub(crate)` so the per-user stream
-/// (MAIN-117) can re-authorize each delivered event by its channel.
+/// route the same way. `pub(crate)` so the per-user stream (MAIN-117) can
+/// re-authorize each delivered event by its channel.
 pub(crate) fn event_channel(event: &ChatServerMessage) -> Uuid {
     match event {
         ChatServerMessage::Message(m) | ChatServerMessage::MessageUpdated(m) => m.channel_id,
@@ -28,14 +31,19 @@ pub struct Registry {
     /// This instance's id, so the bus can skip its own NOTIFYs and never deliver
     /// a message twice on the instance that posted it.
     instance: Uuid,
-    channels: DashMap<Uuid, broadcast::Sender<ChatServerMessage>>,
+    /// Every event this instance publishes, in one stream. The per-user socket
+    /// (MAIN-117) taps this and filters by membership per event, so a channel or
+    /// DM gained mid-session delivers live without a reconnect — a fixed
+    /// subscribe set resolved at connect could not (AC-6 "a user added begins
+    /// receiving it").
+    firehose: broadcast::Sender<ChatServerMessage>,
 }
 
 impl Registry {
     pub fn new() -> Self {
         Self {
             instance: Uuid::now_v7(),
-            channels: DashMap::new(),
+            firehose: broadcast::channel(CHANNEL_CAP).0,
         }
     }
 
@@ -43,25 +51,17 @@ impl Registry {
         self.instance
     }
 
-    /// Subscribe a websocket to a channel's live events (new messages AND
-    /// updates — MAIN-116 AC-5).
-    pub fn subscribe(&self, channel_id: Uuid) -> broadcast::Receiver<ChatServerMessage> {
-        self.sender(channel_id).subscribe()
+    /// Subscribe to EVERY event on this instance (MAIN-117): the per-user stream
+    /// re-authorizes each by channel before forwarding, so this carries no
+    /// authorization on its own — it is a superset the socket filters.
+    pub fn subscribe_all(&self) -> broadcast::Receiver<ChatServerMessage> {
+        self.firehose.subscribe()
     }
 
-    /// Deliver an event to this instance's subscribers of its channel. Sending
-    /// with no receivers is a no-op (nobody is watching that channel here).
+    /// Deliver an event to this instance's per-user streams via the firehose.
+    /// Sending with no receivers is a no-op.
     pub fn publish_local(&self, event: ChatServerMessage) {
-        if let Some(tx) = self.channels.get(&event_channel(&event)) {
-            let _ = tx.send(event);
-        }
-    }
-
-    fn sender(&self, channel_id: Uuid) -> broadcast::Sender<ChatServerMessage> {
-        self.channels
-            .entry(channel_id)
-            .or_insert_with(|| broadcast::channel(CHANNEL_CAP).0)
-            .clone()
+        let _ = self.firehose.send(event);
     }
 }
 
@@ -94,27 +94,28 @@ mod tests {
         }
     }
 
-    /// A subscriber only receives its own channel's events — the fan-out never
-    /// crosses channels, and since a channel belongs to exactly one tenant this
-    /// is the local half of tenant isolation (AC-3/AC-5).
+    /// The firehose carries EVERY published event, tagged by its channel, to
+    /// every tap. Isolation is not done here — the per-user socket re-authorizes
+    /// each event by `event_channel` before forwarding (AC-6). This proves the
+    /// superset-plus-tag contract that filtering depends on.
     #[tokio::test]
-    async fn a_subscriber_only_receives_its_own_channels_messages() {
+    async fn the_firehose_carries_every_event_tagged_by_channel() {
         let reg = Registry::new();
         let channel_a = Uuid::now_v7();
         let channel_b = Uuid::now_v7();
-        let mut rx = reg.subscribe(channel_a);
+        let mut rx = reg.subscribe_all();
 
-        // A message on another channel must not reach this subscriber.
-        reg.publish_local(ChatServerMessage::Message(msg(channel_b)));
-        // A message on the subscribed channel must.
-        let sent = msg(channel_a);
-        reg.publish_local(ChatServerMessage::Message(sent.clone()));
+        let on_a = msg(channel_a);
+        let on_b = msg(channel_b);
+        reg.publish_local(ChatServerMessage::Message(on_a.clone()));
+        reg.publish_local(ChatServerMessage::Message(on_b.clone()));
 
-        let got = rx.try_recv().expect("the channel_a message is delivered");
-        let ChatServerMessage::Message(got) = got else {
-            panic!("expected a Message event");
-        };
-        assert_eq!(got.id, sent.id);
+        // Both events arrive on the single tap, each identifiable by channel so
+        // the socket can authorize (and keep or drop) it.
+        let first = rx.try_recv().expect("first event delivered");
+        assert_eq!(event_channel(&first), channel_a);
+        let second = rx.try_recv().expect("second event delivered");
+        assert_eq!(event_channel(&second), channel_b);
         assert!(rx.try_recv().is_err(), "nothing else was delivered");
     }
 

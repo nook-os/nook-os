@@ -10,12 +10,14 @@
 //! The socket is receive-only: posting is the REST endpoint, so there is exactly
 //! one write path and one place scope is enforced.
 //!
-//! **Authorization boundary (AC-6).** At connect the stream subscribes only to
-//! the caller's own channels ([`channels::member_channel_ids`]). Each delivered
-//! event is then RE-authorized by [`channels::access`] before it is forwarded, so
-//! a member removed mid-connection (a DM participant dropped, a person who left an
-//! org) stops receiving immediately, and a cross-tenant intruder never receives a
-//! foreign channel's messages even if a sender is shared on this instance.
+//! **Authorization boundary (AC-6), enforced per event.** The socket taps the
+//! instance firehose (every published event) and forwards an event ONLY if
+//! [`channels::access`] authorizes the caller for that event's channel at that
+//! moment. This makes the boundary fully dynamic: a member added mid-session (a
+//! DM opened with the user, a person joining an org) starts receiving live with
+//! no reconnect; a member removed stops immediately; and a cross-tenant intruder
+//! never receives a foreign channel's messages. There is no connect-time
+//! subscribe snapshot to go stale.
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
@@ -23,69 +25,33 @@ use axum::response::Response;
 use futures_util::{SinkExt, StreamExt};
 use nook_types::ChatServerMessage;
 use tokio::sync::broadcast::error::RecvError;
-use tokio::sync::mpsc;
 
 use crate::{channels, AppState, Caller, ChatError};
-
-/// Bound on the merged per-socket queue: a slow client that fills it is dropped
-/// from the newest events and resyncs on reconnect, never blocking a sender.
-const SOCKET_CAP: usize = 256;
 
 pub async fn stream(
     State(state): State<AppState>,
     caller: Caller,
     ws: WebSocketUpgrade,
 ) -> Result<Response, ChatError> {
-    // Resolve the caller's channel set BEFORE the upgrade, so a caller with no
-    // access establishes an (empty) stream rather than leaking anything.
-    let channel_ids = channels::member_channel_ids(&state.db, &caller).await?;
-    let receivers = channel_ids
-        .iter()
-        .map(|id| state.registry.subscribe(*id))
-        .collect::<Vec<_>>();
-    Ok(ws.on_upgrade(move |socket| pump(state, caller, socket, receivers)))
+    let events = state.registry.subscribe_all();
+    Ok(ws.on_upgrade(move |socket| pump(state, caller, socket, events)))
 }
 
-/// Merge every subscribed channel's broadcast receiver into one socket. A slim
-/// forwarder task per channel drains its broadcast into a shared mpsc; the pump
-/// re-authorizes and writes. Forwarders are aborted when the socket closes.
 async fn pump(
     state: AppState,
     caller: Caller,
     socket: WebSocket,
-    receivers: Vec<tokio::sync::broadcast::Receiver<ChatServerMessage>>,
+    mut events: tokio::sync::broadcast::Receiver<ChatServerMessage>,
 ) {
     let (mut sink, mut stream) = socket.split();
-    let (tx, mut rx) = mpsc::channel::<ChatServerMessage>(SOCKET_CAP);
-
-    let mut forwarders = Vec::with_capacity(receivers.len());
-    for mut brx in receivers {
-        let tx = tx.clone();
-        forwarders.push(tokio::spawn(async move {
-            loop {
-                match brx.recv().await {
-                    Ok(event) => {
-                        if tx.send(event).await.is_err() {
-                            break; // the socket went away
-                        }
-                    }
-                    // A slow socket fell behind on this channel; keep going.
-                    Err(RecvError::Lagged(_)) => continue,
-                    Err(RecvError::Closed) => break,
-                }
-            }
-        }));
-    }
-    // Keep our own `tx` alive so the socket stays open even with zero channels
-    // (the client waits and resyncs); it drops when this task returns.
-    let _keepalive = tx;
-
     loop {
         tokio::select! {
-            delivered = rx.recv() => match delivered {
-                Some(event) => {
-                    // AC-6: re-authorize by the event's channel; a removed member
-                    // or an intruder is skipped, delivering nothing.
+            delivered = events.recv() => match delivered {
+                Ok(event) => {
+                    // AC-6: authorize the caller for THIS event's channel right
+                    // now. A non-member (intruder or removed) is skipped; a member
+                    // just added is admitted — evaluated per event, so membership
+                    // changes take effect live.
                     let channel_id = crate::registry::event_channel(&event);
                     if channels::access(&state.db, channel_id, &caller).await.is_err() {
                         continue;
@@ -95,7 +61,10 @@ async fn pump(
                         break; // the client went away
                     }
                 }
-                None => break,
+                // A slow client fell behind; it stays connected and resyncs on
+                // reconnect (it can backfill over history).
+                Err(RecvError::Lagged(_)) => continue,
+                Err(RecvError::Closed) => break,
             },
             incoming = stream.next() => match incoming {
                 Some(Ok(Message::Close(_))) | None => break,
@@ -103,9 +72,5 @@ async fn pump(
                 Some(Err(_)) => break,
             },
         }
-    }
-
-    for f in forwarders {
-        f.abort();
     }
 }
