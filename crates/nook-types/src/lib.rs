@@ -2164,7 +2164,10 @@ pub struct LoopJobDetail {
 #[derive(Debug, Clone, Deserialize, ToSchema)]
 pub struct CreateLoopJobRequest {
     pub kind: String,
-    pub target_task_id: TaskId,
+    /// The target ticket, as a UUID **or** a board key (`MAIN-42`) — resolved
+    /// server-side like every other task-addressed route (MAIN-209), so the Loop
+    /// panel (which opens by key) and CLI/MCP callers can both target by key.
+    pub target_task_id: String,
 }
 
 // ── Interactions (MAIN-159) ──────────────────────────────────────────────────

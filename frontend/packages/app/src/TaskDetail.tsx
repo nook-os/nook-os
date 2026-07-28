@@ -346,8 +346,11 @@ export function TaskDetail({
           <TaskInteractions taskId={taskId} />
 
           {/* The ticket's own loop run (MAIN-128): the spec/decompose job and
-              its live transcript, with the start / re-run action in its header. */}
-          <LoopPanel taskId={taskId} taskType={task.type} />
+              its live transcript. Pass the resolved UUID (`task.id`), not the
+              prop `taskId` — the board opens the modal by KEY, and the jobs API
+              is UUID-keyed, so forwarding the key 400s the list and 422s create
+              (MAIN-209). */}
+          <LoopPanel taskId={task.id} taskType={task.type} />
 
           <div className="task-section">
             <div className="task-section-h">

@@ -126,9 +126,14 @@ pub async fn create(
         )));
     }
 
+    // Accept a UUID or a board key (MAIN-209) — the Loop panel opens by key.
+    // `resolve_id` is tenant-scoped and 404s an unknown key.
+    let target_id =
+        crate::services::tasks::resolve_id(&state.db, tenant, &req.target_task_id).await?;
+
     // The target must exist in this tenant and be visible to the requester —
     // a job is not a way to reach a private card you could not otherwise see.
-    let target = load_target(state, tenant, req.target_task_id).await?;
+    let target = load_target(state, tenant, target_id).await?;
     if !crate::services::tasks::visible_to(&target, requested_by) {
         return Err(ApiError::NotFound);
     }
@@ -148,7 +153,7 @@ pub async fn create(
     .bind(id)
     .bind(tenant)
     .bind(&req.kind)
-    .bind(req.target_task_id)
+    .bind(target_id)
     .bind(target.workspace_id)
     .bind(requested_by)
     .fetch_one(&state.db)

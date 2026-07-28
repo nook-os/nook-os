@@ -8297,7 +8297,8 @@
             "type": "string"
           },
           "target_task_id": {
-            "$ref": "#/components/schemas/TaskId"
+            "type": "string",
+            "description": "The target ticket, as a UUID **or** a board key (`MAIN-42`) — resolved\nserver-side like every other task-addressed route (MAIN-209), so the Loop\npanel (which opens by key) and CLI/MCP callers can both target by key."
           }
         }
       },

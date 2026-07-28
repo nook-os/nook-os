@@ -94,7 +94,7 @@ async fn create_enqueues_a_work_item_and_records_an_event() {
         user,
         CreateLoopJobRequest {
             kind: "spec".into(),
-            target_task_id: target,
+            target_task_id: target.to_string(),
         },
     )
     .await
@@ -150,7 +150,7 @@ async fn decompose_requires_an_epic_target() {
         user,
         CreateLoopJobRequest {
             kind: "decompose".into(),
-            target_task_id: plain,
+            target_task_id: plain.to_string(),
         },
     )
     .await
@@ -163,7 +163,7 @@ async fn decompose_requires_an_epic_target() {
         user,
         CreateLoopJobRequest {
             kind: "decompose".into(),
-            target_task_id: epic,
+            target_task_id: epic.to_string(),
         },
     )
     .await
@@ -176,7 +176,7 @@ async fn decompose_requires_an_epic_target() {
         user,
         CreateLoopJobRequest {
             kind: "translate".into(),
-            target_task_id: epic,
+            target_task_id: epic.to_string(),
         },
     )
     .await
@@ -196,7 +196,7 @@ async fn lifecycle_allows_legal_transitions_and_refuses_illegal_ones() {
 
     let spec = CreateLoopJobRequest {
         kind: "spec".into(),
-        target_task_id: target,
+        target_task_id: target.to_string(),
     };
 
     // The happy path: queued → claimed → running → completed.
@@ -243,7 +243,7 @@ async fn cancel_works_from_live_states_and_is_refused_once_terminal() {
         user,
         CreateLoopJobRequest {
             kind: "spec".into(),
-            target_task_id: target,
+            target_task_id: target.to_string(),
         },
     )
     .await
@@ -278,7 +278,7 @@ async fn cancel_works_from_live_states_and_is_refused_once_terminal() {
         user,
         CreateLoopJobRequest {
             kind: "spec".into(),
-            target_task_id: target,
+            target_task_id: target.to_string(),
         },
     )
     .await
@@ -315,7 +315,7 @@ async fn transcript_appends_and_reads_back_in_order() {
         user,
         CreateLoopJobRequest {
             kind: "spec".into(),
-            target_task_id: target,
+            target_task_id: target.to_string(),
         },
     )
     .await
@@ -359,7 +359,7 @@ async fn rerun_forks_a_fresh_queued_job_linked_to_its_predecessor() {
         user,
         CreateLoopJobRequest {
             kind: "decompose".into(),
-            target_task_id: epic,
+            target_task_id: epic.to_string(),
         },
     )
     .await
@@ -429,7 +429,7 @@ async fn private_target_job_is_hidden_from_a_non_owner() {
         owner,
         CreateLoopJobRequest {
             kind: "spec".into(),
-            target_task_id: secret,
+            target_task_id: secret.to_string(),
         },
     )
     .await
@@ -460,7 +460,7 @@ async fn private_target_job_is_hidden_from_a_non_owner() {
         other,
         CreateLoopJobRequest {
             kind: "spec".into(),
-            target_task_id: secret,
+            target_task_id: secret.to_string(),
         },
     )
     .await
@@ -486,7 +486,7 @@ async fn list_for_task_returns_the_tickets_jobs_newest_first_and_is_visibility_g
         owner,
         CreateLoopJobRequest {
             kind: "spec".into(),
-            target_task_id: target,
+            target_task_id: target.to_string(),
         },
     )
     .await
@@ -499,7 +499,7 @@ async fn list_for_task_returns_the_tickets_jobs_newest_first_and_is_visibility_g
         owner,
         CreateLoopJobRequest {
             kind: "spec".into(),
-            target_task_id: target,
+            target_task_id: target.to_string(),
         },
     )
     .await
@@ -532,7 +532,7 @@ async fn list_for_task_returns_the_tickets_jobs_newest_first_and_is_visibility_g
         owner,
         CreateLoopJobRequest {
             kind: "spec".into(),
-            target_task_id: secret,
+            target_task_id: secret.to_string(),
         },
     )
     .await
@@ -542,6 +542,101 @@ async fn list_for_task_returns_the_tickets_jobs_newest_first_and_is_visibility_g
         denied,
         Err(nook_control::error::ApiError::NotFound)
     ));
+
+    bed.teardown().await;
+}
+
+/// The Loop panel opens tickets by board KEY (MAIN-209), so the jobs surface must
+/// resolve key-or-uuid like every other task-addressed route — create no longer
+/// 422s a key, list no longer 400s one, and an unknown key 404s.
+#[tokio::test]
+async fn jobs_accept_a_board_key_and_reject_unknown() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let state = bed.app_state().await;
+    let tenant = bed.tenant("jobs-key").await;
+    let (user, _p) = bed.user(tenant, "member").await;
+    let (board, col) = board(&bed.pool, tenant).await;
+
+    // A task WITH a number, so it has a resolvable key (the `task` helper leaves
+    // `number` null — a keyless fixture that could not be addressed by key).
+    let task_id = TaskId::new();
+    sqlx::query(
+        "INSERT INTO tasks (id, tenant_id, board_id, column_id, title, type, created_by, number)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,42)",
+    )
+    .bind(task_id)
+    .bind(tenant)
+    .bind(board)
+    .bind(col)
+    .bind("keyed")
+    .bind("task")
+    .bind(user)
+    .execute(&bed.pool)
+    .await
+    .expect("numbered task");
+    let board_key: String = sqlx::query_scalar("SELECT key FROM boards WHERE id = $1")
+        .bind(board)
+        .fetch_one(&bed.pool)
+        .await
+        .unwrap();
+    let key = format!("{board_key}-42");
+
+    // create by KEY resolves to the same task (a 422 before this fix).
+    let by_key = jobs::create(
+        &state,
+        tenant,
+        user,
+        CreateLoopJobRequest {
+            kind: "spec".into(),
+            target_task_id: key.clone(),
+        },
+    )
+    .await
+    .expect("create by key");
+    assert_eq!(by_key.job.target_task_id, task_id);
+
+    // create by UUID string still works (AC-4 parity).
+    let by_uuid = jobs::create(
+        &state,
+        tenant,
+        user,
+        CreateLoopJobRequest {
+            kind: "spec".into(),
+            target_task_id: task_id.to_string(),
+        },
+    )
+    .await
+    .expect("create by uuid");
+    assert_eq!(by_uuid.job.target_task_id, task_id);
+
+    // an unknown key 404s — not a 422 or a 500.
+    let unknown = jobs::create(
+        &state,
+        tenant,
+        user,
+        CreateLoopJobRequest {
+            kind: "spec".into(),
+            target_task_id: format!("{board_key}-9999"),
+        },
+    )
+    .await;
+    assert!(matches!(
+        unknown,
+        Err(nook_control::error::ApiError::NotFound)
+    ));
+
+    // the list route resolves the key the same way (resolve_id → list service):
+    // the key names the same task, and its jobs list back.
+    let resolved = nook_control::services::tasks::resolve_id(&bed.pool, tenant, &key)
+        .await
+        .expect("resolve key");
+    assert_eq!(resolved, task_id);
+    let listed = jobs::list_for_task(&state, tenant, user, resolved)
+        .await
+        .expect("list by resolved key");
+    assert_eq!(listed.len(), 2, "both jobs on the keyed task are listed");
 
     bed.teardown().await;
 }

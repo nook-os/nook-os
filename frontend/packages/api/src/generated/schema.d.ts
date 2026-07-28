@@ -3622,7 +3622,12 @@ export interface components {
          */
         CreateLoopJobRequest: {
             kind: string;
-            target_task_id: components["schemas"]["TaskId"];
+            /**
+             * @description The target ticket, as a UUID **or** a board key (`MAIN-42`) — resolved
+             *     server-side like every other task-addressed route (MAIN-209), so the Loop
+             *     panel (which opens by key) and CLI/MCP callers can both target by key.
+             */
+            target_task_id: string;
         };
         CreateNoteRequest: {
             content_md: string;
