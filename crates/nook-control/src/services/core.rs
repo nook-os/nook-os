@@ -1,7 +1,7 @@
 //! Shared queries used by both REST handlers and MCP tools.
 
 use chrono::{DateTime, Utc};
-use nook_db::DbPool;
+use nook_db::{DbPool, Postgres, TypeMapping};
 use nook_types::*;
 use uuid::Uuid;
 
@@ -102,13 +102,14 @@ pub async fn list_nodes(
     tenant: TenantId,
     owner: Option<uuid::Uuid>,
 ) -> ApiResult<Vec<Node>> {
-    Ok(sqlx::query_as(
+    Ok(sqlx::query_as(&format!(
         "SELECT id, tenant_id, name, hostname, platform, capabilities, resources, status,
                 last_seen_at, owner_person_id, shared, created_at, updated_at
          FROM nodes
-         WHERE tenant_id = $1 AND ($2::uuid IS NULL OR owner_person_id = $2 OR shared)
+         WHERE tenant_id = $1 AND ({owner} IS NULL OR owner_person_id = $2 OR shared)
          ORDER BY name",
-    )
+        owner = Postgres.cast("$2", "uuid")
+    ))
     .bind(tenant)
     .bind(owner)
     .fetch_all(db)
@@ -258,12 +259,14 @@ pub async fn events_page(
     let limit = limit.clamp(1, 200);
     // The list filter is the SQL twin of `ActivityScope::allows`, bound from the
     // same resolved sets — so page and bus enforce one rule (MAIN-134).
-    let mut sql = String::from(
+    let mut sql = format!(
         "SELECT * FROM events
          WHERE tenant_id = $1
-           AND ($2::uuid IS NULL OR workspace_id = $2)
+           AND ({ws} IS NULL OR workspace_id = $2)
            AND ($3::text IS NULL OR kind LIKE $3 || '%')
-           AND ($4::timestamptz IS NULL OR occurred_at < $4)",
+           AND ({before} IS NULL OR occurred_at < $4)",
+        ws = Postgres.cast("$2", "uuid"),
+        before = Postgres.cast("$4", "timestamptz"),
     );
     if matches!(scope, ActivityScope::Member { .. }) {
         sql.push_str(" AND (actor_id = ANY($6) OR node_id = ANY($7) OR session_id = ANY($8))");
@@ -322,7 +325,7 @@ pub async fn operator_audit_page(
     // An empty or whitespace-only search is "no filter", not "match the empty
     // string" — the search box clears to that and must show the whole log.
     let q = q.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
-    let rows: Vec<OperatorAuditEntry> = sqlx::query_as(
+    let rows: Vec<OperatorAuditEntry> = sqlx::query_as(&format!(
         "SELECT e.id, e.kind, e.actor_type, e.actor_id, e.tenant_id,
                 t.slug AS tenant_slug, e.occurred_at
          FROM events e JOIN tenants t ON t.id = e.tenant_id
@@ -333,10 +336,11 @@ pub async fn operator_audit_page(
                  OR t.slug ILIKE '%' || $2 || '%'
                  OR e.actor_type ILIKE '%' || $2 || '%'
                  OR e.actor_id::text ILIKE '%' || $2 || '%'))
-           AND ($3::uuid IS NULL OR e.id < $3)
+           AND ({cursor} IS NULL OR e.id < $3)
          ORDER BY e.id DESC
          LIMIT $1",
-    )
+        cursor = Postgres.cast("$3", "uuid")
+    ))
     .bind(limit)
     .bind(q)
     .bind(after)
@@ -367,7 +371,7 @@ pub async fn operator_tenants_page(
 ) -> ApiResult<OperatorTenantPage> {
     let limit = limit.clamp(1, 200);
     let q = search_filter(q);
-    let rows: Vec<OperatorTenant> = sqlx::query_as(
+    let rows: Vec<OperatorTenant> = sqlx::query_as(&format!(
         "SELECT t.id, t.slug, t.org_id, t.created_at,
                 (SELECT count(*) FROM users u WHERE u.tenant_id = t.id)    AS members,
                 (SELECT count(*) FROM nodes n WHERE n.tenant_id = t.id)    AS nodes,
@@ -377,10 +381,11 @@ pub async fn operator_tenants_page(
                 (SELECT count(*) FROM workspaces w WHERE w.tenant_id = t.id) AS workspaces
          FROM tenants t
          WHERE ($2::text IS NULL OR t.slug ILIKE '%' || $2 || '%' OR t.name ILIKE '%' || $2 || '%')
-           AND ($3::uuid IS NULL OR t.id < $3)
+           AND ({cursor} IS NULL OR t.id < $3)
          ORDER BY t.id DESC
          LIMIT $1",
-    )
+        cursor = Postgres.cast("$3", "uuid")
+    ))
     .bind(limit)
     .bind(q)
     .bind(after)
@@ -403,7 +408,7 @@ pub async fn operator_nodes_page(
 ) -> ApiResult<OperatorNodePage> {
     let limit = limit.clamp(1, 200);
     let q = search_filter(q);
-    let rows: Vec<OperatorNode> = sqlx::query_as(
+    let rows: Vec<OperatorNode> = sqlx::query_as(&format!(
         "SELECT n.id, n.name, n.platform, n.status, n.last_seen_at, n.resources,
                 n.tenant_id, t.slug AS tenant_slug,
                 (SELECT count(*) FROM sessions s
@@ -415,10 +420,11 @@ pub async fn operator_nodes_page(
                  OR t.slug ILIKE '%' || $2 || '%'
                  OR n.platform ILIKE '%' || $2 || '%'
                  OR n.status ILIKE '%' || $2 || '%'))
-           AND ($3::uuid IS NULL OR n.id < $3)
+           AND ({cursor} IS NULL OR n.id < $3)
          ORDER BY n.id DESC
          LIMIT $1",
-    )
+        cursor = Postgres.cast("$3", "uuid")
+    ))
     .bind(limit)
     .bind(q)
     .bind(after)
@@ -441,7 +447,7 @@ pub async fn operator_bindings_page(
 ) -> ApiResult<OperatorBindingPage> {
     let limit = limit.clamp(1, 200);
     let q = search_filter(q);
-    let rows: Vec<BindingRow> = sqlx::query_as(
+    let rows: Vec<BindingRow> = sqlx::query_as(&format!(
         "SELECT b.id, u.email, u.display_name, b.role_key, b.scope_type, b.scope_id,
                 COALESCE(o.slug, t.slug) AS scope_label, b.created_at
          FROM role_bindings b
@@ -453,10 +459,11 @@ pub async fn operator_bindings_page(
                  OR b.role_key ILIKE '%' || $2 || '%'
                  OR b.scope_type ILIKE '%' || $2 || '%'
                  OR COALESCE(o.slug, t.slug) ILIKE '%' || $2 || '%'))
-           AND ($3::uuid IS NULL OR b.id < $3)
+           AND ({cursor} IS NULL OR b.id < $3)
          ORDER BY b.id DESC
          LIMIT $1",
-    )
+        cursor = Postgres.cast("$3", "uuid")
+    ))
     .bind(limit)
     .bind(q)
     .bind(after)
@@ -482,7 +489,7 @@ pub async fn tenant_members_page(
 ) -> ApiResult<TenantMemberPage> {
     let limit = limit.clamp(1, 200);
     let q = search_filter(q);
-    let rows: Vec<TenantMemberItem> = sqlx::query_as(
+    let rows: Vec<TenantMemberItem> = sqlx::query_as(&format!(
         "SELECT m.principal_id, u.email, u.display_name, m.role, m.created_at AS joined_at
          FROM tenant_members m
          JOIN users u ON u.id = m.principal_id
@@ -491,10 +498,11 @@ pub async fn tenant_members_page(
                     u.email ILIKE '%' || $3 || '%'
                  OR u.display_name ILIKE '%' || $3 || '%'
                  OR m.role ILIKE '%' || $3 || '%'))
-           AND ($4::uuid IS NULL OR m.principal_id < $4)
+           AND ({cursor} IS NULL OR m.principal_id < $4)
          ORDER BY m.principal_id DESC
          LIMIT $2",
-    )
+        cursor = Postgres.cast("$4", "uuid")
+    ))
     .bind(tenant)
     .bind(limit)
     .bind(q)
