@@ -4318,3 +4318,59 @@ a.toast-main:hover .toast-title { text-decoration: underline; }
   display: inline-flex;
   padding: 0;
 }
+
+/* MCP helper banner (MAIN-180): same bar shape as .notebook-error, info-toned
+   (amber accent, not error red) and taller because it holds a URL + two lines. */
+.notebook-mcp-banner {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 6px 8px 0;
+  padding: 8px 10px;
+  flex: none;
+  border: 1px solid var(--nook-border-bright);
+  border-radius: var(--nook-radius);
+  background: color-mix(in srgb, var(--nook-accent) 10%, transparent);
+  color: var(--nook-fg);
+  font-size: 12px;
+}
+.notebook-mcp-banner > svg {
+  flex: none;
+  margin-top: 1px;
+  color: var(--nook-accent);
+}
+.notebook-mcp-banner-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.notebook-mcp-banner-body p {
+  margin: 0;
+  color: var(--nook-fg-dim);
+}
+.notebook-mcp-banner a {
+  color: var(--nook-info);
+}
+.notebook-mcp-url {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.notebook-mcp-url code {
+  flex: 1;
+  min-width: 0;
+  word-break: break-all;
+  color: var(--nook-accent);
+}
+.notebook-mcp-dismiss {
+  background: none;
+  border: none;
+  color: var(--nook-fg-dim);
+  cursor: pointer;
+  display: inline-flex;
+  flex: none;
+  padding: 0;
+}
