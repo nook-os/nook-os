@@ -206,6 +206,12 @@ pub struct Config {
     /// (comma-separated CIDRs) to the edge proxy's address range when one fronts
     /// this service. Resolved by nook-control's client-IP helper.
     pub trusted_proxies: Vec<ipnet::IpNet>,
+
+    // ── Loop jobs ───────────────────────────────────────────────────────
+    /// How many seconds an executor node may be unseen (`nodes.last_seen_at`)
+    /// before the reaper fails a job it was running (MAIN-164), so a dead
+    /// operator container cannot strand work forever. Default 180.
+    pub job_reap_grace_secs: u64,
 }
 
 /// Parse one entry of `NOOK_TRUSTED_PROXIES`: a CIDR (`10.0.0.0/8`) or a bare
@@ -324,6 +330,10 @@ impl Config {
             trusted_proxies: env_opt("NOOK_TRUSTED_PROXIES")
                 .map(|v| v.split(',').filter_map(parse_trusted_proxy).collect())
                 .unwrap_or_default(),
+
+            job_reap_grace_secs: env_opt("NOOK_JOB_REAP_GRACE_SECS")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(180),
         };
 
         if cfg.is_production() && cfg.auth_dev_mode {
@@ -456,6 +466,7 @@ impl Config {
             mail_max_per_month: Some(100),
             mail_max_per_day: None,
             trusted_proxies: Vec::new(),
+            job_reap_grace_secs: 180,
         }
     }
 }
