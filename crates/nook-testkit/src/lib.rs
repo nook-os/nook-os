@@ -273,17 +273,22 @@ async fn drop_database(base_url: &str, db: &str) -> Result<()> {
 
 impl Drop for TestBed {
     fn drop(&mut self) {
-        // Safety net: if the test panicked before `teardown().await`, drop the
-        // database anyway. Drop is sync and the test's runtime may be unwinding,
-        // so do the async work on a throwaway current-thread runtime on a fresh
-        // OS thread — never blocking the test's runtime.
+        // Safety net: if the test skipped `teardown().await` (or panicked before
+        // it), drop the database anyway. Drop is sync, so the async work runs on
+        // a throwaway current-thread runtime on a fresh OS thread.
+        //
+        // This thread must NEVER touch `self.pool` (MAIN-185): the pool's
+        // connections are I/O objects registered with the TEST's runtime, and
+        // the `join()` below has that runtime frozen — closing them from here
+        // deadlocks both threads (gdb-verified; the hang that ate whole CI jobs).
+        // `drop_database`'s `WITH (FORCE)` severs those connections server-side
+        // instead, and the pool itself drops inertly on the test thread after.
         if self.dropped || self.keep {
             return;
         }
         self.dropped = true;
         let base = self.base_url.clone();
         let name = self.db_name.clone();
-        let pool = self.pool.clone();
         let _ = std::thread::spawn(move || {
             let Ok(rt) = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -292,7 +297,6 @@ impl Drop for TestBed {
                 return;
             };
             rt.block_on(async {
-                pool.close().await;
                 let _ = drop_database(&base, &name).await;
             });
         })
