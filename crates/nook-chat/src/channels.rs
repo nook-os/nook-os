@@ -14,7 +14,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::Json;
 use chrono::{DateTime, Utc};
-use nook_types::{ChatChannel, CreateChatChannel, UpdateChatChannel};
+use nook_types::{ChatChannel, ChatChannelPlacement, CreateChatChannel, UpdateChatChannel};
 use uuid::Uuid;
 
 use crate::{AppState, Caller, ChatError};
@@ -26,6 +26,8 @@ struct ChannelRow {
     slug: String,
     owner_type: String,
     archived_at: Option<DateTime<Utc>>,
+    category_id: Option<Uuid>,
+    position: i32,
     created_at: DateTime<Utc>,
 }
 
@@ -37,10 +39,17 @@ impl From<ChannelRow> for ChatChannel {
             slug: r.slug,
             owner_type: r.owner_type,
             archived: r.archived_at.is_some(),
+            category_id: r.category_id,
+            position: r.position,
             created_at: r.created_at,
         }
     }
 }
+
+/// The `chat_channels` columns every read of a channel selects — kept in one
+/// place so `category_id`/`position` (MAIN-178) can't be forgotten on a path.
+const CHANNEL_COLS: &str =
+    "id, name, slug, owner_type, archived_at, category_id, position, created_at";
 
 /// A channel's scope facts, resolved once and reused by every handler that
 /// touches a channel by id.
@@ -169,11 +178,11 @@ pub async fn create(
             )))
         }
     };
-    let row = sqlx::query_as::<_, ChannelRow>(
+    let row = sqlx::query_as::<_, ChannelRow>(&format!(
         "INSERT INTO chat_channels (id, owner_type, owner_id, name, slug)
          VALUES ($1, $2, $3, $4, $5)
-         RETURNING id, name, slug, owner_type, archived_at, created_at",
-    )
+         RETURNING {CHANNEL_COLS}"
+    ))
     .bind(Uuid::now_v7())
     .bind(owner_type)
     .bind(owner_id)
@@ -210,15 +219,15 @@ pub async fn list(
     // The caller's own tenant channels, plus the channels of the org their
     // tenant belongs to — one org per session, so an org channel appears once
     // (AC-1, AC-2). Cross-org isolation holds: only this tenant's org matches.
-    let rows = sqlx::query_as::<_, ChannelRow>(
-        "SELECT id, name, slug, owner_type, archived_at, created_at FROM chat_channels
+    let rows = sqlx::query_as::<_, ChannelRow>(&format!(
+        "SELECT {CHANNEL_COLS} FROM chat_channels
          WHERE (
                  (owner_type = 'tenant' AND owner_id = $1)
               OR (owner_type = 'org' AND owner_id = (SELECT org_id FROM public.tenants WHERE id = $1))
                )
            AND ($2 OR archived_at IS NULL)
-         ORDER BY created_at",
-    )
+         ORDER BY created_at"
+    ))
     .bind(caller.tenant_id)
     .bind(q.include_archived)
     .fetch_all(&state.db)
@@ -252,7 +261,7 @@ pub async fn update(
     // `$3` says "archived was supplied"; when it was, `$4` sets archived_at to
     // now (archive) or NULL (restore). name is COALESCEd so an absent name is
     // left untouched. `access` already scoped the row, so the id alone is safe.
-    let row = sqlx::query_as::<_, ChannelRow>(
+    let row = sqlx::query_as::<_, ChannelRow>(&format!(
         "UPDATE chat_channels
          SET name = COALESCE($2, name),
              archived_at = CASE
@@ -260,12 +269,58 @@ pub async fn update(
                  ELSE archived_at
              END
          WHERE id = $1
-         RETURNING id, name, slug, owner_type, archived_at, created_at",
-    )
+         RETURNING {CHANNEL_COLS}"
+    ))
     .bind(id)
     .bind(req.name.as_deref().map(str::trim))
     .bind(req.archived.is_some())
     .bind(req.archived.unwrap_or(false))
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|_| ChatError::Internal)?
+    .ok_or(ChatError::NotFound)?;
+    Ok(Json(row.into()))
+}
+
+/// Set a channel's category and ordering position (MAIN-178 AC-2). Admin-only,
+/// and the channel is scope-checked via `access`. A named category must belong to
+/// the SAME owner scope as the channel — the FK proves it exists, not that it is
+/// this tenant/org's — so a channel can never be filed under a foreign group;
+/// `None` un-categorizes it.
+pub async fn place(
+    State(state): State<AppState>,
+    caller: Caller,
+    Path(id): Path<Uuid>,
+    Json(req): Json<ChatChannelPlacement>,
+) -> Result<Json<ChatChannel>, ChatError> {
+    crate::require_admin(&state.db, &caller).await?;
+    access(&state.db, id, &caller).await?;
+
+    if let Some(cat) = req.category_id {
+        let same_owner: Option<(bool,)> = sqlx::query_as(
+            "SELECT (c.owner_type = ch.owner_type AND c.owner_id = ch.owner_id)
+               FROM chat_channel_categories c, chat_channels ch
+              WHERE c.id = $1 AND ch.id = $2",
+        )
+        .bind(cat)
+        .bind(id)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(|_| ChatError::Internal)?;
+        if !matches!(same_owner, Some((true,))) {
+            return Err(ChatError::BadRequest(
+                "that category is not in this channel's scope".into(),
+            ));
+        }
+    }
+
+    let row = sqlx::query_as::<_, ChannelRow>(&format!(
+        "UPDATE chat_channels SET category_id = $2, position = $3
+         WHERE id = $1 RETURNING {CHANNEL_COLS}"
+    ))
+    .bind(id)
+    .bind(req.category_id)
+    .bind(req.position)
     .fetch_optional(&state.db)
     .await
     .map_err(|_| ChatError::Internal)?
@@ -309,11 +364,14 @@ pub fn slugify(name: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{access, create, list, slugify, update, ListQuery};
+    use super::{access, create, list, place, slugify, update, ListQuery};
     use crate::{AppState, Caller, ChatError};
     use axum::extract::{Path, Query, State};
     use axum::Json;
-    use nook_types::{CreateChatChannel, UpdateChatChannel};
+    use nook_types::{
+        ChatChannelPlacement, CreateChatCategory, CreateChatChannel, ReorderChatCategories,
+        UpdateChatChannel,
+    };
     use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
     use sqlx::PgPool;
     use std::str::FromStr;
@@ -407,6 +465,10 @@ mod tests {
 
     async fn cleanup(db: &PgPool, tenant: Uuid) {
         let _ = sqlx::query("DELETE FROM chat_channels WHERE owner_id = $1")
+            .bind(tenant)
+            .execute(db)
+            .await;
+        let _ = sqlx::query("DELETE FROM chat_channel_categories WHERE owner_id = $1")
             .bind(tenant)
             .execute(db)
             .await;
@@ -766,6 +828,218 @@ mod tests {
             ids(restored).contains(&gone.id),
             "unarchived channel is back in the default list"
         );
+
+        cleanup(&state.db, tenant).await;
+    }
+
+    // ── Channel categories (MAIN-178) ───────────────────────────────────────
+
+    /// Every category mutation is admin-only; reads are visible to any member
+    /// (AC-2/AC-3). A member is refused on create and reorder but can list.
+    #[tokio::test]
+    async fn categories_are_admin_gated_but_member_visible() {
+        let Some(state) = setup().await else { return };
+        let tenant = new_tenant(&state.db).await;
+        let admin = add_user(&state.db, tenant, "admin").await;
+        let member = add_user(&state.db, tenant, "member").await;
+
+        // A member cannot create a category.
+        let denied = crate::categories::create(
+            State(state.clone()),
+            caller(member, tenant),
+            Json(CreateChatCategory {
+                name: "Team".into(),
+                owner: None,
+            }),
+        )
+        .await;
+        assert!(is_forbidden(&denied), "member create refused: {denied:?}");
+
+        // An admin can.
+        let cat = crate::categories::create(
+            State(state.clone()),
+            caller(admin, tenant),
+            Json(CreateChatCategory {
+                name: "Team".into(),
+                owner: None,
+            }),
+        )
+        .await
+        .expect("admin creates category")
+        .1
+         .0;
+
+        // A member CAN read the list — the sidebar renders groups for everyone.
+        let listed = crate::categories::list(State(state.clone()), caller(member, tenant))
+            .await
+            .expect("member lists categories")
+            .0;
+        assert!(
+            listed.iter().any(|c| c.id == cat.id),
+            "member sees the created category"
+        );
+
+        // A member cannot reorder.
+        let denied = crate::categories::reorder(
+            State(state.clone()),
+            caller(member, tenant),
+            Json(ReorderChatCategories {
+                ordered_ids: vec![cat.id],
+            }),
+        )
+        .await;
+        assert!(is_forbidden(&denied), "member reorder refused: {denied:?}");
+
+        cleanup(&state.db, tenant).await;
+    }
+
+    /// Deleting a category un-categorizes its channels — it never deletes them,
+    /// and a channel's placement (`category_id`, `position`) round-trips through
+    /// list (AC-3).
+    #[tokio::test]
+    async fn deleting_a_category_uncategorizes_channels_and_placement_round_trips() {
+        let Some(state) = setup().await else { return };
+        let tenant = new_tenant(&state.db).await;
+        let admin = add_user(&state.db, tenant, "owner").await;
+
+        let cat = crate::categories::create(
+            State(state.clone()),
+            caller(admin, tenant),
+            Json(CreateChatCategory {
+                name: "Ops".into(),
+                owner: None,
+            }),
+        )
+        .await
+        .expect("category")
+        .1
+         .0;
+        let ch = create(
+            State(state.clone()),
+            caller(admin, tenant),
+            Json(CreateChatChannel {
+                name: "deploys".into(),
+                owner: None,
+            }),
+        )
+        .await
+        .expect("channel")
+        .1
+         .0;
+
+        // Placing the channel records its category and position, and a fresh
+        // list carries them back (proves listChannels surfaces the new columns).
+        let placed = place(
+            State(state.clone()),
+            caller(admin, tenant),
+            Path(ch.id),
+            Json(ChatChannelPlacement {
+                category_id: Some(cat.id),
+                position: 3,
+            }),
+        )
+        .await
+        .expect("place")
+        .0;
+        assert_eq!(placed.category_id, Some(cat.id));
+        assert_eq!(placed.position, 3);
+        let before = list(
+            State(state.clone()),
+            caller(admin, tenant),
+            Query(ListQuery {
+                include_archived: false,
+            }),
+        )
+        .await
+        .expect("list before delete")
+        .0;
+        let row = before
+            .iter()
+            .find(|c| c.id == ch.id)
+            .expect("channel present");
+        assert_eq!(row.category_id, Some(cat.id), "list carries category_id");
+        assert_eq!(row.position, 3, "list carries position");
+
+        // Deleting the category leaves the channel — just uncategorized.
+        let status =
+            crate::categories::delete(State(state.clone()), caller(admin, tenant), Path(cat.id))
+                .await
+                .expect("delete category");
+        assert_eq!(status, axum::http::StatusCode::NO_CONTENT);
+        let after = list(
+            State(state.clone()),
+            caller(admin, tenant),
+            Query(ListQuery {
+                include_archived: false,
+            }),
+        )
+        .await
+        .expect("list after delete")
+        .0;
+        let row = after
+            .iter()
+            .find(|c| c.id == ch.id)
+            .expect("channel survives category delete");
+        assert_eq!(
+            row.category_id, None,
+            "channel is uncategorized after its category is deleted"
+        );
+
+        cleanup(&state.db, tenant).await;
+    }
+
+    /// Reorder persists: the new order is reflected by a subsequent list (AC-2).
+    #[tokio::test]
+    async fn reorder_persists_across_a_fresh_list() {
+        let Some(state) = setup().await else { return };
+        let tenant = new_tenant(&state.db).await;
+        let admin = add_user(&state.db, tenant, "admin").await;
+
+        let mk = |name: &'static str| {
+            let state = state.clone();
+            async move {
+                crate::categories::create(
+                    State(state.clone()),
+                    caller(admin, tenant),
+                    Json(CreateChatCategory {
+                        name: name.into(),
+                        owner: None,
+                    }),
+                )
+                .await
+                .expect("category")
+                .1
+                 .0
+            }
+        };
+        let a = mk("A").await; // position 0
+        let b = mk("B").await; // position 1
+
+        // Flip the order.
+        let reordered = crate::categories::reorder(
+            State(state.clone()),
+            caller(admin, tenant),
+            Json(ReorderChatCategories {
+                ordered_ids: vec![b.id, a.id],
+            }),
+        )
+        .await
+        .expect("reorder")
+        .0;
+        let order: Vec<_> = reordered.iter().map(|c| c.id).collect();
+        assert_eq!(order, vec![b.id, a.id], "reorder response is B, A");
+
+        // A fresh list reflects the persisted order.
+        let listed = crate::categories::list(State(state.clone()), caller(admin, tenant))
+            .await
+            .expect("list")
+            .0;
+        let persisted: Vec<_> = listed
+            .iter()
+            .filter(|c| c.id == a.id || c.id == b.id)
+            .map(|c| c.id)
+            .collect();
+        assert_eq!(persisted, vec![b.id, a.id], "list reflects B before A");
 
         cleanup(&state.db, tenant).await;
     }

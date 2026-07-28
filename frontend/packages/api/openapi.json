@@ -7631,6 +7631,38 @@
           }
         }
       },
+      "ChatCategory": {
+        "type": "object",
+        "description": "A channel category (MAIN-178): a Discord-style group shared across a\ntenant/org, ordered by `position`. Admin-defined; DMs are never categorized.",
+        "required": [
+          "id",
+          "name",
+          "owner_type",
+          "position",
+          "created_at"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string"
+          },
+          "owner_type": {
+            "type": "string",
+            "description": "`\"tenant\"` or `\"org\"`, scoped exactly like a channel."
+          },
+          "position": {
+            "type": "integer",
+            "format": "int32"
+          }
+        }
+      },
       "ChatChannel": {
         "type": "object",
         "description": "A chat channel visible to a member.",
@@ -7647,6 +7679,14 @@
             "type": "boolean",
             "description": "Archived channels are hidden from the default list and refuse new posts."
           },
+          "category_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The category this channel is grouped under (MAIN-178), or `None` when\nuncategorized. Deleting a category resets this to `None` for its channels."
+          },
           "created_at": {
             "type": "string",
             "format": "date-time"
@@ -7662,8 +7702,33 @@
             "type": "string",
             "description": "`\"tenant\"` (shared by a tenant, the default) or `\"org\"` (shared across\nevery tenant under an org — MAIN-112). Drives the org badge in the UI."
           },
+          "position": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Ordering position within its category (or the uncategorized bucket) —\nthe sidebar orders by it (MAIN-178). `0` until an admin arranges it."
+          },
           "slug": {
             "type": "string"
+          }
+        }
+      },
+      "ChatChannelPlacement": {
+        "type": "object",
+        "description": "Place a channel (MAIN-178): set its category (`None` = uncategorized) and its\nordering position within that group.",
+        "required": [
+          "position"
+        ],
+        "properties": {
+          "category_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "position": {
+            "type": "integer",
+            "format": "int32"
           }
         }
       },
@@ -8005,6 +8070,24 @@
           },
           "name": {
             "type": "string"
+          }
+        }
+      },
+      "CreateChatCategory": {
+        "type": "object",
+        "description": "Create a category. `owner` is `\"tenant\"` (default) or `\"org\"`, like a channel.",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "owner": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         }
       },
@@ -10946,6 +11029,22 @@
           }
         }
       },
+      "ReorderChatCategories": {
+        "type": "object",
+        "description": "Reorder categories (MAIN-178): the new order, as category ids. Each id's\n`position` becomes its index; ids outside the caller's scope are ignored.",
+        "required": [
+          "ordered_ids"
+        ],
+        "properties": {
+          "ordered_ids": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        }
+      },
       "ReportAgentStateRequest": {
         "type": "object",
         "description": "A hook reporting what the agent in a session is doing.",
@@ -12530,6 +12629,18 @@
               "string",
               "null"
             ]
+          }
+        }
+      },
+      "UpdateChatCategory": {
+        "type": "object",
+        "description": "Rename a category (MAIN-178).",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
           }
         }
       },

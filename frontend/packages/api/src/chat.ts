@@ -14,6 +14,7 @@ type ChatMessage = Schemas["ChatMessage"];
 type ChatMessagePage = Schemas["ChatMessagePage"];
 export type ChatThread = Schemas["ChatThread"];
 export type ChatReactionAggregate = Schemas["ChatReactionAggregate"];
+export type ChatCategory = Schemas["ChatCategory"];
 type CreateChatChannel = Schemas["CreateChatChannel"];
 type UpdateChatChannel = Schemas["UpdateChatChannel"];
 type UpdateChatMessage = Schemas["UpdateChatMessage"];
@@ -115,6 +116,8 @@ async function chatWrite<T>(
     reportWriteFailure({ method, path: full, status: res.status, message });
     throw new Error(message);
   }
+  // A 204 (e.g. category delete) has no body to parse.
+  if (res.status === 204) return undefined as T;
   return (await res.json()) as T;
 }
 
@@ -170,6 +173,50 @@ export function updateChannel(
   patch: UpdateChatChannel,
 ): Promise<ChatChannel> {
   return chatWrite<ChatChannel>("PATCH", `/channels/${id}`, patch);
+}
+
+// ── Channel categories (MAIN-178) ────────────────────────────────────────────
+// Reads are visible to any member; the mutations are admin-only server-side.
+
+/** The tenant/org's categories, in display (`position`) order. */
+export function listCategories(): Promise<ChatCategory[]> {
+  return chatGet<ChatCategory[]>("/categories");
+}
+
+/** Create a category (admin only). `owner` is "tenant" (default) or "org". */
+export function createCategory(
+  name: string,
+  owner: "tenant" | "org" = "tenant",
+): Promise<ChatCategory> {
+  return chatWrite<ChatCategory>("POST", "/categories", { name, owner });
+}
+
+/** Rename a category (admin only). */
+export function renameCategory(id: string, name: string): Promise<ChatCategory> {
+  return chatWrite<ChatCategory>("PATCH", `/categories/${id}`, { name });
+}
+
+/** Delete a category (admin only). Its channels become uncategorized; none are
+ *  deleted. Resolves once the 204 lands. */
+export function deleteCategory(id: string): Promise<void> {
+  return chatWrite<void>("DELETE", `/categories/${id}`);
+}
+
+/** Reorder categories (admin only): the new order as ids. Returns the reordered
+ *  list. */
+export function reorderCategories(orderedIds: string[]): Promise<ChatCategory[]> {
+  return chatWrite<ChatCategory[]>("POST", "/categories/reorder", {
+    ordered_ids: orderedIds,
+  });
+}
+
+/** Place a channel (admin only): set its category (`null` = uncategorized) and
+ *  its ordering position within that group. */
+export function placeChannel(
+  id: string,
+  placement: { category_id: string | null; position: number },
+): Promise<ChatChannel> {
+  return chatWrite<ChatChannel>("PATCH", `/channels/${id}/placement`, placement);
 }
 
 /**

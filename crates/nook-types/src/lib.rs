@@ -2467,7 +2467,57 @@ pub struct ChatChannel {
     pub owner_type: String,
     /// Archived channels are hidden from the default list and refuse new posts.
     pub archived: bool,
+    /// The category this channel is grouped under (MAIN-178), or `None` when
+    /// uncategorized. Deleting a category resets this to `None` for its channels.
+    #[serde(default)]
+    pub category_id: Option<Uuid>,
+    /// Ordering position within its category (or the uncategorized bucket) —
+    /// the sidebar orders by it (MAIN-178). `0` until an admin arranges it.
+    #[serde(default)]
+    pub position: i32,
     pub created_at: DateTime<Utc>,
+}
+
+/// A channel category (MAIN-178): a Discord-style group shared across a
+/// tenant/org, ordered by `position`. Admin-defined; DMs are never categorized.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ChatCategory {
+    pub id: Uuid,
+    pub name: String,
+    /// `"tenant"` or `"org"`, scoped exactly like a channel.
+    pub owner_type: String,
+    pub position: i32,
+    pub created_at: DateTime<Utc>,
+}
+
+/// Create a category. `owner` is `"tenant"` (default) or `"org"`, like a channel.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct CreateChatCategory {
+    pub name: String,
+    #[serde(default)]
+    pub owner: Option<String>,
+}
+
+/// Rename a category (MAIN-178).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct UpdateChatCategory {
+    pub name: String,
+}
+
+/// Reorder categories (MAIN-178): the new order, as category ids. Each id's
+/// `position` becomes its index; ids outside the caller's scope are ignored.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ReorderChatCategories {
+    pub ordered_ids: Vec<Uuid>,
+}
+
+/// Place a channel (MAIN-178): set its category (`None` = uncategorized) and its
+/// ordering position within that group.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ChatChannelPlacement {
+    #[serde(default)]
+    pub category_id: Option<Uuid>,
+    pub position: i32,
 }
 
 /// A posted message. `id` is a UUID v7, so history paginates by keyset on it
