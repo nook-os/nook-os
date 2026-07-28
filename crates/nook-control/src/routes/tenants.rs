@@ -7,6 +7,7 @@
 
 use axum::extract::{Path, Query, State};
 use axum::Json;
+use nook_db::{Postgres, TypeMapping};
 use nook_types::*;
 use serde::Deserialize;
 
@@ -211,12 +212,15 @@ pub async fn change_member_role(
     .bind(new_role)
     .execute(&state.db)
     .await?;
-    sqlx::query("UPDATE users SET role = $3, updated_at = now() WHERE id = $2 AND tenant_id = $1")
-        .bind(tenant)
-        .bind(pid)
-        .bind(new_role)
-        .execute(&state.db)
-        .await?;
+    sqlx::query(&format!(
+        "UPDATE users SET role = $3, updated_at = {} WHERE id = $2 AND tenant_id = $1",
+        Postgres.now()
+    ))
+    .bind(tenant)
+    .bind(pid)
+    .bind(new_role)
+    .execute(&state.db)
+    .await?;
 
     // The role is part of the cached tenants list, so a change makes that
     // person's cached entry stale — drop it across their sessions (MAIN-27 AC-4).

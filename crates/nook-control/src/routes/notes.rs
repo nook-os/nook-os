@@ -1,5 +1,6 @@
 use axum::extract::{Path, State};
 use axum::Json;
+use nook_db::{Postgres, TypeMapping};
 use nook_types::*;
 
 use crate::auth::AuthCtx;
@@ -55,13 +56,14 @@ pub async fn update(
     Path(id): Path<NoteId>,
     Json(req): Json<UpdateNoteRequest>,
 ) -> ApiResult<Json<Note>> {
-    let note: Option<Note> = sqlx::query_as(
+    let note: Option<Note> = sqlx::query_as(&format!(
         "UPDATE notes SET
             title = COALESCE($3, title),
             content_md = COALESCE($4, content_md),
-            updated_at = now()
+            updated_at = {}
          WHERE id = $1 AND tenant_id = $2 RETURNING *",
-    )
+        Postgres.now()
+    ))
     .bind(id)
     .bind(auth.tenant_id)
     .bind(&req.title)

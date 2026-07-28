@@ -1,5 +1,6 @@
 use axum::extract::{Path, State};
 use axum::Json;
+use nook_db::{Postgres, TypeMapping};
 use nook_types::*;
 
 use crate::auth::AuthCtx;
@@ -143,11 +144,12 @@ pub async fn set_shared(
         Some(_) => {}
     }
 
-    let node: Node = sqlx::query_as(
-        "UPDATE nodes SET shared = $3, updated_at = now() WHERE id = $1 AND tenant_id = $2
+    let node: Node = sqlx::query_as(&format!(
+        "UPDATE nodes SET shared = $3, updated_at = {} WHERE id = $1 AND tenant_id = $2
          RETURNING id, tenant_id, name, hostname, platform, capabilities, resources, status,
                    last_seen_at, owner_person_id, shared, created_at, updated_at",
-    )
+        Postgres.now()
+    ))
     .bind(id)
     .bind(auth.tenant_id)
     .bind(req.shared)

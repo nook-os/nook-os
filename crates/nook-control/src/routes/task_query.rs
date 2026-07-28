@@ -269,25 +269,25 @@ pub async fn query_rows(
         JOIN boards b ON b.id = t.board_id
         JOIN board_columns c ON c.id = t.column_id
         WHERE t.tenant_id = $1
-          AND ($2::text IS NULL OR b.id::text = $2 OR upper(b.key) = upper($2))
+          AND ({b_text} IS NULL OR {bid_text} = $2 OR upper(b.key) = upper($2))
           AND ({ws} IS NULL OR t.workspace_id = $3)
-          AND ($4::text IS NULL OR c.type = $4)
-          AND ($5::int  IS NULL OR t.priority = $5)
-          AND (NOT $6::bool OR t.assignee_user_id IS NULL)
+          AND ({col_text} IS NULL OR c.type = $4)
+          AND ({prio_int}  IS NULL OR t.priority = $5)
+          AND (NOT {unassigned_bool} OR t.assignee_user_id IS NULL)
           AND ({assignee} IS NULL OR t.assignee_user_id = $7)
           -- every required label must be present
-          AND (cardinality($8::text[]) = 0 OR (
+          AND (cardinality({labels_arr}) = 0 OR (
                 SELECT count(DISTINCT l.name) FROM task_labels tl
                 JOIN labels l ON l.id = tl.label_id
                 WHERE tl.task_id = t.id AND l.name = ANY($8)
-              ) = cardinality($8::text[]))
+              ) = cardinality({labels_arr}))
           -- and none of the excluded ones
           AND NOT EXISTS (
                 SELECT 1 FROM task_labels tl
                 JOIN labels l ON l.id = tl.label_id
-                WHERE tl.task_id = t.id AND l.name = ANY($9::text[]))
+                WHERE tl.task_id = t.id AND l.name = ANY({not_labels_arr}))
           -- blocked is DERIVED: an unfinished task pointing here with `blocks`
-          AND ($10::bool IS NULL OR $10 = EXISTS (
+          AND ({blocked_bool} IS NULL OR $10 = EXISTS (
                 SELECT 1 FROM task_relations r
                 JOIN tasks bt ON bt.id = r.from_task
                 JOIN board_columns bc ON bc.id = bt.column_id
@@ -295,20 +295,20 @@ pub async fn query_rows(
                   AND bc.type NOT IN ('completed', 'canceled')))
           AND ({created} IS NULL OR t.created_at > $11)
           -- archived work is off the board and NEVER pickable unless explicitly asked for
-          AND ($13::bool OR t.archived_at IS NULL)
+          AND ({archived_bool} OR t.archived_at IS NULL)
           -- free-text search across title, description, and display key (MAIN-54).
           -- Substring, case-insensitive; ANDs with every filter above.
-          AND ($14::text IS NULL OR (
+          AND ({q_text} IS NULL OR (
                     t.title ILIKE $14
                  OR t.description ILIKE $14
-                 OR (b.key || '-' || t.number::text) ILIKE $14))
+                 OR (b.key || '-' || {number_text}) ILIKE $14))
           -- issue-type filter (MAIN-59) + epic exclusion (MAIN-80): with an
           -- explicit type filter the requested types pass (so `type=epic`
           -- surfaces epics on purpose); with no type filter, everything EXCEPT
           -- `epic` passes — an epic is a container, never a unit of work the
           -- loop should pick. Labels (incl. agent-ready) have no bearing.
           AND (t.type = ANY($15)
-               OR (cardinality($15::text[]) = 0 AND t.type <> 'epic'))
+               OR (cardinality({types_arr}) = 0 AND t.type <> 'epic'))
           -- per-task visibility (MAIN-76): a `private` card is seen only by its
           -- creator or assignee; `team`/`org` are tenant-visible. Same predicate
           -- an agent's claim path enforces, so the list never shows work it
@@ -317,7 +317,7 @@ pub async fn query_rows(
           -- explicit visibility filter (MAIN-103 AC-3): ANDs with the viewer
           -- predicate above, so it can only NARROW — `visibility=private` still
           -- shows only the caller's own private cards, never a teammate's.
-          AND (cardinality($19::text[]) = 0 OR t.visibility = ANY($19))
+          AND (cardinality({vis_arr}) = 0 OR t.visibility = ANY($19))
           -- epic children (MAIN-81): when a parent is given, restrict to its
           -- tickets. This spans every column (children live in backlog and on
           -- the board), so it deliberately does NOT constrain the column type.
@@ -329,7 +329,7 @@ pub async fn query_rows(
           -- ($18). AC-3: a `parent=` query (an epic's children, which span
           -- backlog and board — $17 present) LIFTS this exclusion, so listing an
           -- epic's tickets never silently drops the ones still in triage.
-          AND ($18::bool OR {parent} IS NOT NULL OR c.type <> 'backlog')
+          AND ({backlog_bool} OR {parent} IS NOT NULL OR c.type <> 'backlog')
         -- priority 0 means "unset", which sorts last rather than first
         ORDER BY CASE WHEN t.priority = 0 THEN 5 ELSE t.priority END, t.created_at
         LIMIT $12
@@ -338,6 +338,20 @@ pub async fn query_rows(
         assignee = Postgres.cast("$7", "uuid"),
         created = Postgres.cast("$11", "timestamptz"),
         parent = Postgres.cast("$17", "uuid"),
+        b_text = Postgres.cast("$2", "text"),
+        bid_text = Postgres.cast("b.id", "text"),
+        col_text = Postgres.cast("$4", "text"),
+        prio_int = Postgres.cast("$5", "int"),
+        unassigned_bool = Postgres.cast("$6", "bool"),
+        blocked_bool = Postgres.cast("$10", "bool"),
+        archived_bool = Postgres.cast("$13", "bool"),
+        q_text = Postgres.cast("$14", "text"),
+        number_text = Postgres.cast("t.number", "text"),
+        backlog_bool = Postgres.cast("$18", "bool"),
+        labels_arr = Postgres.cast("$8", "text[]"),
+        not_labels_arr = Postgres.cast("$9", "text[]"),
+        types_arr = Postgres.cast("$15", "text[]"),
+        vis_arr = Postgres.cast("$19", "text[]"),
     ))
     .bind(tenant)
     .bind(f.board.as_deref())
@@ -452,14 +466,15 @@ pub async fn claim_inner(
         None => None,
     };
 
-    let updated: Option<TaskItem> = sqlx::query_as(
+    let updated: Option<TaskItem> = sqlx::query_as(&format!(
         "UPDATE tasks SET
              assignee_user_id = $1,
              column_id = coalesce($2, column_id),
-             updated_at = now()
+             updated_at = {}
          WHERE id = $3 AND tenant_id = $4 AND assignee_user_id IS NULL
          RETURNING *",
-    )
+        Postgres.now()
+    ))
     .bind(claimant)
     .bind(target)
     .bind(id)
@@ -528,10 +543,11 @@ pub async fn release(
     Path(ident): Path<String>,
 ) -> ApiResult<Json<TaskItem>> {
     let id = tasks::resolve_id(&state.db, auth.tenant_id, &ident).await?;
-    let task: TaskItem = sqlx::query_as(
-        "UPDATE tasks SET assignee_user_id = NULL, updated_at = now()
+    let task: TaskItem = sqlx::query_as(&format!(
+        "UPDATE tasks SET assignee_user_id = NULL, updated_at = {}
          WHERE id = $1 AND tenant_id = $2 RETURNING *",
-    )
+        Postgres.now()
+    ))
     .bind(id)
     .bind(auth.tenant_id)
     .fetch_optional(&state.db)
@@ -668,7 +684,7 @@ mod tests {
 #[cfg(test)]
 mod db_tests {
     use super::{query_rows, TaskFilter};
-    use nook_db::DbPool;
+    use nook_db::{DbPool, Postgres, TypeMapping};
     use nook_types::{TaskId, TenantId};
     use sqlx::postgres::PgPoolOptions;
     use uuid::Uuid;
@@ -690,10 +706,11 @@ mod db_tests {
     /// Insert a board + one column + a task (archived or not), returning the id.
     async fn task(db: &DbPool, tenant: Uuid, board: Uuid, col: Uuid, archived: bool) -> TaskId {
         let id = Uuid::new_v4();
-        sqlx::query(
+        sqlx::query(&format!(
             "INSERT INTO tasks (id, tenant_id, board_id, column_id, title, archived_at)
-             VALUES ($1, $2, $3, $4, 't', CASE WHEN $5 THEN now() ELSE NULL END)",
-        )
+             VALUES ($1, $2, $3, $4, 't', CASE WHEN $5 THEN {} ELSE NULL END)",
+            Postgres.now()
+        ))
         .bind(id)
         .bind(tenant)
         .bind(board)

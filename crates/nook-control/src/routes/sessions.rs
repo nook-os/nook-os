@@ -1,5 +1,6 @@
 use axum::extract::{Path, Query, State};
 use axum::Json;
+use nook_db::{Postgres, TypeMapping};
 use nook_proto::{ControlToNode, UiEvent, WindowAction};
 use nook_types::*;
 use serde::Deserialize;
@@ -306,10 +307,11 @@ pub async fn update(
     if name.is_empty() {
         return Err(ApiError::BadRequest("name cannot be empty".into()));
     }
-    let session: Option<Session> = sqlx::query_as(
-        "UPDATE sessions SET name = $3, updated_at = now()
+    let session: Option<Session> = sqlx::query_as(&format!(
+        "UPDATE sessions SET name = $3, updated_at = {}
          WHERE id = $1 AND tenant_id = $2 RETURNING *",
-    )
+        Postgres.now()
+    ))
     .bind(id)
     .bind(auth.tenant_id)
     .bind(name)
@@ -439,11 +441,12 @@ pub async fn restart(
         return Err(ApiError::BadRequest("node went offline".into()));
     }
 
-    let session: Session = sqlx::query_as(
+    let session: Session = sqlx::query_as(&format!(
         "UPDATE sessions SET status = 'starting', error = NULL, ended_at = NULL,
-                updated_at = now()
+                updated_at = {}
          WHERE id = $1 RETURNING *",
-    )
+        Postgres.now()
+    ))
     .bind(id)
     .fetch_one(&state.db)
     .await?;

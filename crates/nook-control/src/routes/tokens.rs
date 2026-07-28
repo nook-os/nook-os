@@ -12,6 +12,7 @@
 use axum::extract::{Path, State};
 use axum::Json;
 use chrono::{Duration, Utc};
+use nook_db::{Postgres, TypeMapping};
 use nook_types::*;
 use rand::distr::Alphanumeric;
 use rand::Rng;
@@ -94,10 +95,11 @@ pub async fn create(
     responses((status = 200, body = [UserToken])))]
 pub async fn list(State(state): State<AppState>, auth: AuthCtx) -> ApiResult<Json<Vec<UserToken>>> {
     auth.require_user()?;
-    let rows: Vec<UserToken> = sqlx::query_as(
-        "SELECT id::text, name, last_used_at, expires_at, created_at
+    let rows: Vec<UserToken> = sqlx::query_as(&format!(
+        "SELECT {}, name, last_used_at, expires_at, created_at
          FROM user_tokens WHERE user_id = $1 ORDER BY created_at DESC",
-    )
+        Postgres.cast("id", "text")
+    ))
     .bind(auth.user_id)
     .fetch_all(&state.db)
     .await?;

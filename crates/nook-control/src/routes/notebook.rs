@@ -18,7 +18,7 @@
 
 use axum::extract::{Path, Query, State};
 use axum::Json;
-use nook_db::{CiMatch, Postgres};
+use nook_db::{CiMatch, Postgres, TypeMapping};
 use nook_types::*;
 use serde::Deserialize;
 use uuid::Uuid;
@@ -254,7 +254,7 @@ pub(crate) async fn list_notes_for(
     let rows: Vec<UserNoteSummary> = sqlx::query_as(&format!(
         r#"
         WITH RECURSIVE folder_path AS (
-            SELECT id, name::text AS path, parent_id
+            SELECT id, {name_cast} AS path, parent_id
             FROM user_note_folders
             WHERE person_id = $1 AND parent_id IS NULL
           UNION ALL
@@ -274,6 +274,7 @@ pub(crate) async fn list_notes_for(
                OR {path_match})
         ORDER BY n.updated_at DESC
         "#,
+        name_cast = Postgres.cast("name", "text"),
         title_match = Postgres.ci_match("n.title", "'%' || $2 || '%'"),
         path_match = Postgres.ci_match("COALESCE(fp.path, '')", "'%' || $2 || '%'"),
     ))
@@ -421,14 +422,15 @@ pub(crate) async fn update_note_for(
         None => (false, None),
         Some(v) => (true, v),
     };
-    let row: Option<NoteRow> = sqlx::query_as(
+    let row: Option<NoteRow> = sqlx::query_as(&format!(
         "UPDATE user_notes SET
             title = COALESCE($3, title),
             content_enc = COALESCE($4, content_enc),
             folder_id = CASE WHEN $5 THEN $6 ELSE folder_id END,
-            updated_at = now()
+            updated_at = {}
          WHERE id = $1 AND person_id = $2 RETURNING *",
-    )
+        Postgres.now()
+    ))
     .bind(id)
     .bind(person)
     .bind(&req.title)
@@ -555,13 +557,14 @@ pub async fn update_folder(
         None => (false, None),
         Some(v) => (true, v),
     };
-    let folder: Option<UserNoteFolder> = sqlx::query_as(
+    let folder: Option<UserNoteFolder> = sqlx::query_as(&format!(
         "UPDATE user_note_folders SET
             name = COALESCE($3, name),
             parent_id = CASE WHEN $4 THEN $5 ELSE parent_id END,
-            updated_at = now()
+            updated_at = {}
          WHERE id = $1 AND person_id = $2 RETURNING *",
-    )
+        Postgres.now()
+    ))
     .bind(id)
     .bind(person)
     .bind(&req.name)
@@ -749,11 +752,12 @@ pub async fn seal_note(
         .vault
         .encrypt(&ciphertext)
         .map_err(ApiError::Internal)?;
-    let row: Option<NoteRow> = sqlx::query_as(
+    let row: Option<NoteRow> = sqlx::query_as(&format!(
         "UPDATE user_notes
-         SET content_enc = $3, sealed_salt = $4, sealed_verifier = $5, updated_at = now()
+         SET content_enc = $3, sealed_salt = $4, sealed_verifier = $5, updated_at = {}
          WHERE id = $1 AND person_id = $2 RETURNING *",
-    )
+        Postgres.now()
+    ))
     .bind(id)
     .bind(person)
     .bind(&enc)
@@ -786,11 +790,12 @@ pub async fn unseal_note(
         .vault
         .encrypt(req.content_md.as_bytes())
         .map_err(ApiError::Internal)?;
-    let row: Option<NoteRow> = sqlx::query_as(
+    let row: Option<NoteRow> = sqlx::query_as(&format!(
         "UPDATE user_notes
-         SET content_enc = $3, sealed_salt = NULL, sealed_verifier = NULL, updated_at = now()
+         SET content_enc = $3, sealed_salt = NULL, sealed_verifier = NULL, updated_at = {}
          WHERE id = $1 AND person_id = $2 AND sealed_salt IS NOT NULL RETURNING *",
-    )
+        Postgres.now()
+    ))
     .bind(id)
     .bind(person)
     .bind(&enc)
