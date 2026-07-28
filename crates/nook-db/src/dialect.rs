@@ -58,6 +58,15 @@ pub trait Json {
     /// [`TypeMapping::cast`] the placeholder instead; never build a literal from
     /// untrusted input.
     fn literal(&self, raw: &str) -> String;
+    /// Set a value at a JSON path, creating missing keys — for an in-place
+    /// `UPDATE … SET {col} = <this>`. The `value` is a **composed** SQL
+    /// expression so a bound payload stays parameterized:
+    /// `set("capabilities", "{runtime_auth}", "$2")` →
+    /// `jsonb_set(capabilities, '{runtime_auth}', $2, true)` (the audited
+    /// capabilities-merge site, node-supplied JSON bound to `$2`). The `path`
+    /// is a static, code-controlled key path, never user input — spliced like
+    /// [`Json::get_text`]'s key. Postgres: `jsonb_set({col}, '{path}', {value}, true)`.
+    fn set(&self, col: &str, path: &str, value: &str) -> String;
 }
 
 // ── type-mapping ────────────────────────────────────────────────────────────
@@ -123,6 +132,9 @@ impl Json for Postgres {
     }
     fn literal(&self, raw: &str) -> String {
         format!("'{raw}'::jsonb")
+    }
+    fn set(&self, col: &str, path: &str, value: &str) -> String {
+        format!("jsonb_set({col}, '{path}', {value}, true)")
     }
 }
 
@@ -214,6 +226,12 @@ mod tests {
             "jsonb_array_elements(caps -> 'runtime_auth')"
         );
         assert_eq!(pg.literal("[]"), "'[]'::jsonb");
+        // set() composes a BOUND value into jsonb_set — the ws/node.rs
+        // capabilities merge, node JSON bound to $2, create_missing = true.
+        assert_eq!(
+            pg.set("capabilities", "{runtime_auth}", "$2"),
+            "jsonb_set(capabilities, '{runtime_auth}', $2, true)"
+        );
     }
 
     #[test]
@@ -264,6 +282,14 @@ mod tests {
             .await
             .expect("@> $1::jsonb executes with a bound payload");
         assert!(hit);
+        // set() runs: jsonb_set merges a BOUND value at a path, create_missing.
+        let set = pg.set(&pg.literal("{\"a\":1}"), "{b}", &pg.cast("$1", "jsonb"));
+        let merged: String = sqlx::query_scalar(&format!("SELECT ({set})::text"))
+            .bind("2")
+            .fetch_one(&pool)
+            .await
+            .expect("jsonb_set executes with a bound value");
+        assert_eq!(merged, "{\"a\": 1, \"b\": 2}");
     }
 
     #[tokio::test]

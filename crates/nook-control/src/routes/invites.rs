@@ -747,7 +747,7 @@ mod tests {
 mod db_tests {
     use super::accept_core;
     use crate::seed::hash_token;
-    use nook_db::DbPool;
+    use nook_db::{DbPool, Json};
     use nook_types::TenantId;
     use sqlx::postgres::PgPoolOptions;
     use uuid::Uuid;
@@ -803,17 +803,19 @@ mod db_tests {
     /// Mark a user's email verified (a verified identity), so an accept can pass
     /// the AC-8 gate.
     async fn verify(db: &DbPool, user_id: Uuid, email: &str) {
-        sqlx::query(
+        let sql = format!(
             "INSERT INTO identities (id,user_id,issuer,subject,email,raw_claims,email_verified_at)
-             VALUES ($1,$2,'local',$3,$4,'{}'::jsonb, now())",
-        )
-        .bind(Uuid::now_v7())
-        .bind(user_id)
-        .bind(user_id.to_string())
-        .bind(email)
-        .execute(db)
-        .await
-        .unwrap();
+             VALUES ($1,$2,'local',$3,$4,{}, now())",
+            nook_db::Postgres.literal("{}")
+        );
+        sqlx::query(&sql)
+            .bind(Uuid::now_v7())
+            .bind(user_id)
+            .bind(user_id.to_string())
+            .bind(email)
+            .execute(db)
+            .await
+            .unwrap();
     }
     async fn is_member(db: &DbPool, tenant: Uuid, person: Uuid) -> bool {
         let (n,): (i64,) = sqlx::query_as(

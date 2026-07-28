@@ -17,7 +17,7 @@
 //! team tenant as well. Both are written here so the two never disagree.
 
 use chrono::{DateTime, Utc};
-use nook_db::DbPool;
+use nook_db::{DbPool, Json, Postgres};
 use nook_types::{IdentityId, Tenant, TenantId, TenantMembership, User, UserId};
 use serde_json::Value;
 
@@ -256,18 +256,21 @@ pub async fn email_is_verified(db: &DbPool, user_id: UserId) -> ApiResult<bool> 
 /// with no change to the predicate. Idempotent — a second confirm keeps the
 /// first verification time.
 pub async fn mark_local_email_verified(db: &DbPool, user_id: UserId, email: &str) -> ApiResult<()> {
-    sqlx::query(
+    // The static raw_claims literal routes through the json seam (MAIN-201).
+    let sql = format!(
         "INSERT INTO identities (id, user_id, issuer, subject, email, raw_claims, email_verified_at)
-         VALUES ($1, $2, 'local', $3, $4, '{\"verified_via\":\"local\"}'::jsonb, now())
+         VALUES ($1, $2, 'local', $3, $4, {}, now())
          ON CONFLICT (issuer, subject)
            DO UPDATE SET email_verified_at = COALESCE(identities.email_verified_at, now())",
-    )
-    .bind(uuid::Uuid::now_v7())
-    .bind(user_id)
-    .bind(user_id.0.to_string())
-    .bind(email)
-    .execute(db)
-    .await?;
+        Postgres.literal("{\"verified_via\":\"local\"}")
+    );
+    sqlx::query(&sql)
+        .bind(uuid::Uuid::now_v7())
+        .bind(user_id)
+        .bind(user_id.0.to_string())
+        .bind(email)
+        .execute(db)
+        .await?;
     Ok(())
 }
 

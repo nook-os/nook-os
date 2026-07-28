@@ -6,6 +6,7 @@
 //!
 //! Shared by the REST handlers (and, later, MCP) so the surfaces never drift.
 
+use nook_db::{Json, Postgres};
 use nook_types::*;
 use serde_json::json;
 use uuid::Uuid;
@@ -14,6 +15,17 @@ use crate::error::{ApiError, ApiResult};
 use crate::events::{self, EventDraft};
 use crate::queue::NewWork;
 use crate::state::AppState;
+
+/// The `capabilities @> '{"shared_operator":true}'::jsonb` containment test,
+/// routed through the json seam (MAIN-201) so the jsonb operator lives in the
+/// Postgres impl, not inline. The flag is a code constant, so `literal` is the
+/// injection-safe form here (never user input).
+fn shared_operator_clause() -> String {
+    Postgres.contains(
+        "capabilities",
+        &Postgres.literal("{\"shared_operator\":true}"),
+    )
+}
 
 /// The work-queue routing string every loop job enqueues under. A future
 /// consumer (MAIN-160) filters `receive` on exactly this.
@@ -463,24 +475,36 @@ pub async fn select_executor(
     // The best eligible node: owned-and-online-and-authorized first, else the
     // online authorized shared operator. `@>` containment tests the operator
     // flag; the EXISTS scans the reported auth profiles for our runtime.
-    let node: Option<NodeId> = sqlx::query_scalar(
+    // jsonb operators routed through the json seam (MAIN-201): the runtime_auth
+    // array is expanded and its elements' fields read via the trait, so the
+    // Postgres-specific SQL lives in the impl. Behavior is unchanged.
+    let runtime_auth = Postgres.array_elements(&format!(
+        "COALESCE({}, {})",
+        Postgres.get_json("capabilities", "runtime_auth"),
+        Postgres.literal("[]")
+    ));
+    let node_sql = format!(
         "SELECT id FROM nodes
          WHERE tenant_id = $1
            AND status = 'online'
-           AND (owner_person_id = $2 OR capabilities @> '{\"shared_operator\":true}')
+           AND (owner_person_id = $2 OR {operator})
            AND EXISTS (
                  SELECT 1
-                 FROM jsonb_array_elements(COALESCE(capabilities->'runtime_auth', '[]'::jsonb)) e
-                 WHERE e->>'runtime' = $3 AND e->>'state' = 'authorized'
+                 FROM {runtime_auth} e
+                 WHERE {runtime} = $3 AND {state} = 'authorized'
                )
          ORDER BY (owner_person_id = $2) DESC NULLS LAST, id
          LIMIT 1",
-    )
-    .bind(tenant)
-    .bind(person)
-    .bind(LOOP_RUNTIME)
-    .fetch_optional(&state.db)
-    .await?;
+        operator = shared_operator_clause(),
+        runtime = Postgres.get_text("e", "runtime"),
+        state = Postgres.get_text("e", "state"),
+    );
+    let node: Option<NodeId> = sqlx::query_scalar(&node_sql)
+        .bind(tenant)
+        .bind(person)
+        .bind(LOOP_RUNTIME)
+        .fetch_optional(&state.db)
+        .await?;
 
     let Some(node) = node else {
         let reason = no_executor_reason(state, tenant, person).await?;
@@ -525,14 +549,16 @@ async fn no_executor_reason(state: &AppState, tenant: TenantId, person: Uuid) ->
     .bind(person)
     .fetch_one(&state.db)
     .await?;
-    let operator_online: i64 = sqlx::query_scalar(
+    let operator_sql = format!(
         "SELECT count(*) FROM nodes
          WHERE tenant_id = $1 AND status = 'online'
-           AND capabilities @> '{\"shared_operator\":true}'",
-    )
-    .bind(tenant)
-    .fetch_one(&state.db)
-    .await?;
+           AND {}",
+        shared_operator_clause()
+    );
+    let operator_online: i64 = sqlx::query_scalar(&operator_sql)
+        .bind(tenant)
+        .fetch_one(&state.db)
+        .await?;
 
     Ok(match (owned_online, operator_online) {
         (0, 0) => "no eligible executor: you have no node online and no shared operator is available".into(),
