@@ -16,6 +16,7 @@
 
 use axum::extract::State;
 use axum::Json;
+use nook_db::{Postgres, TypeMapping};
 use nook_types::*;
 
 use crate::auth::AuthCtx;
@@ -243,10 +244,11 @@ async fn apply_update(
 /// `task_query::release`'s effect (there is no way to clear via
 /// `UpdateTaskRequest`, whose `assignee_user_id` COALESCEs).
 async fn clear_assignee(state: &AppState, auth: &AuthCtx, id: TaskId) -> ApiResult<()> {
-    sqlx::query(
-        "UPDATE tasks SET assignee_user_id = NULL, updated_at = now()
+    sqlx::query(&format!(
+        "UPDATE tasks SET assignee_user_id = NULL, updated_at = {}
          WHERE id = $1 AND tenant_id = $2",
-    )
+        Postgres.now()
+    ))
     .bind(id)
     .bind(auth.tenant_id)
     .execute(&state.db)

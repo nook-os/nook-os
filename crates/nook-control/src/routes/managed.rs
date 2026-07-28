@@ -15,6 +15,7 @@
 
 use axum::extract::State;
 use axum::Json;
+use nook_db::{Postgres, TypeMapping};
 use nook_types::*;
 use sha2::{Digest, Sha256};
 
@@ -100,12 +101,13 @@ pub async fn upsert_default(
         // The shipped default advanced: refresh the row to it and bump version.
         // This is the one case that overwrites — a newer default is meant to win.
         Some((version, stored_default)) if stored_default != default_sha => {
-            sqlx::query(
+            sqlx::query(&format!(
                 "UPDATE managed_content
                     SET content = $3, sha256 = $4, version = $5,
-                        default_sha256 = $4, updated_at = now()
+                        default_sha256 = $4, updated_at = {}
                   WHERE kind = $1 AND name = $2",
-            )
+                Postgres.now()
+            ))
             .bind(kind)
             .bind(name)
             .bind(content)

@@ -8,6 +8,7 @@
 use axum::extract::{Path, State};
 use axum::Json;
 use base64::Engine;
+use nook_db::{Postgres, TypeMapping};
 use nook_proto::ControlToNode;
 use nook_types::*;
 
@@ -374,9 +375,10 @@ pub async fn submit(
         tokio::time::sleep(std::time::Duration::from_millis(400)).await;
         type_into_session("\r");
     }
-    let item: FeedbackItem = sqlx::query_as(
-        "UPDATE feedback SET status = $2, updated_at = now() WHERE id = $1 RETURNING *",
-    )
+    let item: FeedbackItem = sqlx::query_as(&format!(
+        "UPDATE feedback SET status = $2, updated_at = {} WHERE id = $1 RETURNING *",
+        Postgres.now()
+    ))
     .bind(item.id)
     // 'queued' is not a holding pattern — nothing retries it. Record what
     // actually happened so the log doesn't imply work is under way.
@@ -439,13 +441,14 @@ pub async fn update(
     Path(id): Path<uuid::Uuid>,
     Json(req): Json<UpdateFeedbackRequest>,
 ) -> ApiResult<Json<FeedbackItem>> {
-    let item: Option<FeedbackItem> = sqlx::query_as(
+    let item: Option<FeedbackItem> = sqlx::query_as(&format!(
         "UPDATE feedback SET
             status = COALESCE($3, status),
             pr_url = COALESCE($4, pr_url),
-            updated_at = now()
+            updated_at = {}
          WHERE id = $1 AND tenant_id = $2 RETURNING *",
-    )
+        Postgres.now()
+    ))
     .bind(id)
     .bind(auth.tenant_id)
     .bind(&req.status)
