@@ -48,8 +48,11 @@ pub async fn get(
 pub async fn list_for_task(
     State(state): State<AppState>,
     auth: AuthCtx,
-    Path(task_id): Path<TaskId>,
+    Path(task_id): Path<String>,
 ) -> ApiResult<Json<Vec<LoopJob>>> {
+    // Accept a UUID or a board key (MAIN-209) — the Loop panel opens by key, so
+    // the list GET must resolve it like every other task-addressed route.
+    let task_id = crate::services::tasks::resolve_id(&state.db, auth.tenant_id, &task_id).await?;
     Ok(Json(
         jobs::list_for_task(&state, auth.tenant_id, auth.user_id, task_id).await?,
     ))
