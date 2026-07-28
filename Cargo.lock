@@ -2646,6 +2646,8 @@ dependencies = [
 name = "nook-db"
 version = "0.4.22"
 dependencies = [
+ "async-trait",
+ "futures-util",
  "sqlx",
  "tokio",
 ]
