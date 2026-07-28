@@ -32,7 +32,7 @@ pub use dialect::{
 /// The engine-dispatching pool + parameter model (MAIN-205). Introduced
 /// alongside the `DbPool` alias; it becomes the pool type at the call-site flip.
 pub mod pool;
-pub use pool::{DbTx, DbValue, EnginePool};
+pub use pool::{Db, DbTx, DbValue, EnginePool};
 
 use std::fmt;
 

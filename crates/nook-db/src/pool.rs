@@ -7,16 +7,16 @@
 //! concrete associated type). Every query flows through one execution
 //! convention here, so "which engine" is a single-file concern forever.
 //!
-//! The shape: callers pass SQL text plus an owned, engine-neutral parameter list
-//! ([`DbValue`]); each arm encodes those parameters with its own driver, and row
-//! mapping rides `sqlx::FromRow` over both row types. The Postgres arm reproduces
-//! today's binds exactly (bit-identical — MAIN-205 AC-3), so the flip changes the
-//! transport shape, not behaviour. The SQLite arm is built to *compile* here; its
-//! runtime is proven when the engine and its migration track land in MAIN-196.
-//!
-//! This module is the foundation the ~656 call-site migration dispatches onto; it
-//! is introduced alongside the existing `DbPool` alias and only becomes the pool
-//! type at the flip, so each build step stays green.
+//! The surface is the [`Db`] trait: callers pass SQL text plus an owned,
+//! engine-neutral parameter list ([`DbValue`], usually via [`params!`]), and row
+//! mapping rides `sqlx::FromRow` over both row types. The methods are named to
+//! NOT collide with sqlx's `Executor` (`query_one`/`exec`/…, never `fetch_one`),
+//! which is what lets the call-site migration run while `DbPool` is still
+//! `PgPool`: `Db` is implemented for `PgPool` too, so a migrated `db.query_one(…)`
+//! compiles green before the type flip, and the flip to [`EnginePool`] needs no
+//! further site change. The Postgres arm reproduces today's binds exactly
+//! (bit-identical — MAIN-205 AC-3). The SQLite arm is built to *compile* here;
+//! its runtime is proven when the engine + migration track land in MAIN-196.
 
 use sqlx::postgres::{PgArguments, PgPool, PgRow};
 use sqlx::sqlite::{SqliteArguments, SqlitePool, SqliteRow};
@@ -137,7 +137,7 @@ impl From<Vec<uuid::Uuid>> for DbValue {
 /// Build a `Vec<DbValue>` from a heterogeneous parameter list, in bind order.
 ///
 /// ```ignore
-/// db.fetch_one::<Workspace>(
+/// db.query_one::<Workspace>(
 ///     "SELECT * FROM workspaces WHERE tenant_id = $1 AND id = $2",
 ///     params![tenant, id],
 /// ).await?
@@ -201,7 +201,6 @@ fn sqlite_args(
             DbValue::Uuid(x) => a.add(x).map_err(add_err)?,
             DbValue::Timestamptz(x) => a.add(x).map_err(add_err)?,
             DbValue::Json(x) => a.add(x).map_err(add_err)?,
-            // Lists were flattened away by expand_lists; a list here is a bug.
             DbValue::TextList(_) | DbValue::UuidList(_) | DbValue::I64List(_) => {
                 unreachable!("expand_lists flattens every list parameter")
             }
@@ -215,13 +214,10 @@ fn sqlite_args(
 /// and flatten the parameters to match. Pure and engine-agnostic; the SQLite arm
 /// is its only user today.
 fn expand_lists(sql: &str, params: Vec<DbValue>) -> (String, Vec<DbValue>) {
-    // Fast path: nothing to expand.
     if !params.iter().any(DbValue::is_list) {
         return (sql.to_owned(), params);
     }
 
-    // Map each original 1-based parameter index to the run of new indices it
-    // occupies after expansion, and build the flattened parameter vector.
     let mut flat: Vec<DbValue> = Vec::new();
     let mut groups: Vec<Vec<usize>> = Vec::with_capacity(params.len());
     let mut next = 1usize;
@@ -271,10 +267,6 @@ fn expand_lists(sql: &str, params: Vec<DbValue>) -> (String, Vec<DbValue>) {
         }
     }
 
-    // Replace each `$k` token in the SQL with its group's rendering. A list group
-    // renders as `$a, $b, …` (the caller's surrounding parentheses / `IN` stay);
-    // an empty list renders `NULL` so `IN (NULL)` matches nothing, mirroring the
-    // empty-`ANY` truth table.
     let rewritten = replace_placeholders(sql, |k| {
         let g = &groups[k - 1];
         if g.is_empty() {
@@ -289,9 +281,7 @@ fn expand_lists(sql: &str, params: Vec<DbValue>) -> (String, Vec<DbValue>) {
     (rewritten, flat)
 }
 
-/// Walk `sql` replacing each `$N` placeholder (1-based) using `render`. Only
-/// bare `$<digits>` tokens are touched; `$$` and dollar-quoted bodies are not a
-/// concern in this codebase's parameterised statements.
+/// Walk `sql` replacing each `$N` placeholder (1-based) using `render`.
 fn replace_placeholders(sql: &str, mut render: impl FnMut(usize) -> String) -> String {
     let bytes = sql.as_bytes();
     let mut out = String::with_capacity(sql.len() + 16);
@@ -314,10 +304,155 @@ fn replace_placeholders(sql: &str, mut render: impl FnMut(usize) -> String) -> S
     out
 }
 
-// ── the pool ─────────────────────────────────────────────────────────────────
+// ── the dispatch surface ─────────────────────────────────────────────────────
+
+/// The query surface every call site routes through. Named to avoid sqlx's
+/// `Executor` methods (`query_one`, never `fetch_one`) so it can be implemented
+/// for `PgPool` during the migration and for [`EnginePool`] after the flip, with
+/// call sites unchanged across it.
+#[allow(async_fn_in_trait)]
+pub trait Db {
+    /// Run a statement, returning affected rows. For `RETURNING`, use the
+    /// `query_*` fetchers instead.
+    async fn exec(&self, sql: &str, params: Vec<DbValue>) -> Result<u64, sqlx::Error>;
+
+    /// Fetch exactly one row, mapped via `FromRow`.
+    async fn query_one<T>(&self, sql: &str, params: Vec<DbValue>) -> Result<T, sqlx::Error>
+    where
+        T: Send + Unpin,
+        T: for<'r> FromRow<'r, PgRow>,
+        T: for<'r> FromRow<'r, SqliteRow>;
+
+    /// Fetch at most one row, mapped via `FromRow`.
+    async fn query_opt<T>(&self, sql: &str, params: Vec<DbValue>) -> Result<Option<T>, sqlx::Error>
+    where
+        T: Send + Unpin,
+        T: for<'r> FromRow<'r, PgRow>,
+        T: for<'r> FromRow<'r, SqliteRow>;
+
+    /// Fetch every row, mapped via `FromRow`.
+    async fn query_all<T>(&self, sql: &str, params: Vec<DbValue>) -> Result<Vec<T>, sqlx::Error>
+    where
+        T: Send + Unpin,
+        T: for<'r> FromRow<'r, PgRow>,
+        T: for<'r> FromRow<'r, SqliteRow>;
+
+    /// Fetch a single scalar (one column of one row), e.g. `SELECT count(*)`.
+    async fn query_scalar<T>(&self, sql: &str, params: Vec<DbValue>) -> Result<T, sqlx::Error>
+    where
+        T: Send + Unpin,
+        for<'r> T: sqlx::Decode<'r, sqlx::Postgres> + sqlx::Type<sqlx::Postgres>,
+        for<'r> T: sqlx::Decode<'r, sqlx::Sqlite> + sqlx::Type<sqlx::Sqlite>;
+}
+
+impl Db for PgPool {
+    async fn exec(&self, sql: &str, params: Vec<DbValue>) -> Result<u64, sqlx::Error> {
+        let args = pg_args(params)?;
+        Ok(sqlx::query_with(sql, args).execute(self).await?.rows_affected())
+    }
+    async fn query_one<T>(&self, sql: &str, params: Vec<DbValue>) -> Result<T, sqlx::Error>
+    where
+        T: Send + Unpin,
+        T: for<'r> FromRow<'r, PgRow>,
+        T: for<'r> FromRow<'r, SqliteRow>,
+    {
+        let args = pg_args(params)?;
+        sqlx::query_as_with::<sqlx::Postgres, T, _>(sql, args)
+            .fetch_one(self)
+            .await
+    }
+    async fn query_opt<T>(&self, sql: &str, params: Vec<DbValue>) -> Result<Option<T>, sqlx::Error>
+    where
+        T: Send + Unpin,
+        T: for<'r> FromRow<'r, PgRow>,
+        T: for<'r> FromRow<'r, SqliteRow>,
+    {
+        let args = pg_args(params)?;
+        sqlx::query_as_with::<sqlx::Postgres, T, _>(sql, args)
+            .fetch_optional(self)
+            .await
+    }
+    async fn query_all<T>(&self, sql: &str, params: Vec<DbValue>) -> Result<Vec<T>, sqlx::Error>
+    where
+        T: Send + Unpin,
+        T: for<'r> FromRow<'r, PgRow>,
+        T: for<'r> FromRow<'r, SqliteRow>,
+    {
+        let args = pg_args(params)?;
+        sqlx::query_as_with::<sqlx::Postgres, T, _>(sql, args)
+            .fetch_all(self)
+            .await
+    }
+    async fn query_scalar<T>(&self, sql: &str, params: Vec<DbValue>) -> Result<T, sqlx::Error>
+    where
+        T: Send + Unpin,
+        for<'r> T: sqlx::Decode<'r, sqlx::Postgres> + sqlx::Type<sqlx::Postgres>,
+        for<'r> T: sqlx::Decode<'r, sqlx::Sqlite> + sqlx::Type<sqlx::Sqlite>,
+    {
+        let args = pg_args(params)?;
+        sqlx::query_scalar_with::<sqlx::Postgres, T, _>(sql, args)
+            .fetch_one(self)
+            .await
+    }
+}
+
+impl Db for SqlitePool {
+    async fn exec(&self, sql: &str, params: Vec<DbValue>) -> Result<u64, sqlx::Error> {
+        let (sql, args) = sqlite_args(sql, params)?;
+        Ok(sqlx::query_with(&sql, args)
+            .execute(self)
+            .await?
+            .rows_affected())
+    }
+    async fn query_one<T>(&self, sql: &str, params: Vec<DbValue>) -> Result<T, sqlx::Error>
+    where
+        T: Send + Unpin,
+        T: for<'r> FromRow<'r, PgRow>,
+        T: for<'r> FromRow<'r, SqliteRow>,
+    {
+        let (sql, args) = sqlite_args(sql, params)?;
+        sqlx::query_as_with::<sqlx::Sqlite, T, _>(&sql, args)
+            .fetch_one(self)
+            .await
+    }
+    async fn query_opt<T>(&self, sql: &str, params: Vec<DbValue>) -> Result<Option<T>, sqlx::Error>
+    where
+        T: Send + Unpin,
+        T: for<'r> FromRow<'r, PgRow>,
+        T: for<'r> FromRow<'r, SqliteRow>,
+    {
+        let (sql, args) = sqlite_args(sql, params)?;
+        sqlx::query_as_with::<sqlx::Sqlite, T, _>(&sql, args)
+            .fetch_optional(self)
+            .await
+    }
+    async fn query_all<T>(&self, sql: &str, params: Vec<DbValue>) -> Result<Vec<T>, sqlx::Error>
+    where
+        T: Send + Unpin,
+        T: for<'r> FromRow<'r, PgRow>,
+        T: for<'r> FromRow<'r, SqliteRow>,
+    {
+        let (sql, args) = sqlite_args(sql, params)?;
+        sqlx::query_as_with::<sqlx::Sqlite, T, _>(&sql, args)
+            .fetch_all(self)
+            .await
+    }
+    async fn query_scalar<T>(&self, sql: &str, params: Vec<DbValue>) -> Result<T, sqlx::Error>
+    where
+        T: Send + Unpin,
+        for<'r> T: sqlx::Decode<'r, sqlx::Postgres> + sqlx::Type<sqlx::Postgres>,
+        for<'r> T: sqlx::Decode<'r, sqlx::Sqlite> + sqlx::Type<sqlx::Sqlite>,
+    {
+        let (sql, args) = sqlite_args(sql, params)?;
+        sqlx::query_scalar_with::<sqlx::Sqlite, T, _>(&sql, args)
+            .fetch_one(self)
+            .await
+    }
+}
 
 /// The engine-dispatching pool. Cheap to clone (each arm is an `sqlx` pool
-/// handle). At the MAIN-205 flip this becomes the workspace's `DbPool`.
+/// handle). At the MAIN-205 flip this becomes the workspace's `DbPool`; its [`Db`]
+/// impl simply forwards to whichever concrete pool it holds.
 #[derive(Clone)]
 pub struct EnginePool(Arm);
 
@@ -346,123 +481,8 @@ impl EnginePool {
         }
     }
 
-    /// Run a statement, returning the number of affected rows. For `RETURNING`
-    /// statements use [`fetch_one`](Self::fetch_one) / friends instead.
-    pub async fn execute(&self, sql: &str, params: Vec<DbValue>) -> Result<u64, sqlx::Error> {
-        match &self.0 {
-            Arm::Pg(p) => {
-                let args = pg_args(params)?;
-                let r = sqlx::query_with(sql, args).execute(p).await?;
-                Ok(r.rows_affected())
-            }
-            Arm::Sqlite(p) => {
-                let (sql, args) = sqlite_args(sql, params)?;
-                let r = sqlx::query_with(&sql, args).execute(p).await?;
-                Ok(r.rows_affected())
-            }
-        }
-    }
-
-    /// Fetch exactly one row, mapped via `FromRow`.
-    pub async fn fetch_one<T>(&self, sql: &str, params: Vec<DbValue>) -> Result<T, sqlx::Error>
-    where
-        T: Send + Unpin,
-        T: for<'r> FromRow<'r, PgRow>,
-        T: for<'r> FromRow<'r, SqliteRow>,
-    {
-        match &self.0 {
-            Arm::Pg(p) => {
-                let args = pg_args(params)?;
-                sqlx::query_as_with::<sqlx::Postgres, T, _>(sql, args)
-                    .fetch_one(p)
-                    .await
-            }
-            Arm::Sqlite(p) => {
-                let (sql, args) = sqlite_args(sql, params)?;
-                sqlx::query_as_with::<sqlx::Sqlite, T, _>(&sql, args)
-                    .fetch_one(p)
-                    .await
-            }
-        }
-    }
-
-    /// Fetch at most one row, mapped via `FromRow`.
-    pub async fn fetch_optional<T>(
-        &self,
-        sql: &str,
-        params: Vec<DbValue>,
-    ) -> Result<Option<T>, sqlx::Error>
-    where
-        T: Send + Unpin,
-        T: for<'r> FromRow<'r, PgRow>,
-        T: for<'r> FromRow<'r, SqliteRow>,
-    {
-        match &self.0 {
-            Arm::Pg(p) => {
-                let args = pg_args(params)?;
-                sqlx::query_as_with::<sqlx::Postgres, T, _>(sql, args)
-                    .fetch_optional(p)
-                    .await
-            }
-            Arm::Sqlite(p) => {
-                let (sql, args) = sqlite_args(sql, params)?;
-                sqlx::query_as_with::<sqlx::Sqlite, T, _>(&sql, args)
-                    .fetch_optional(p)
-                    .await
-            }
-        }
-    }
-
-    /// Fetch every row, mapped via `FromRow`.
-    pub async fn fetch_all<T>(&self, sql: &str, params: Vec<DbValue>) -> Result<Vec<T>, sqlx::Error>
-    where
-        T: Send + Unpin,
-        T: for<'r> FromRow<'r, PgRow>,
-        T: for<'r> FromRow<'r, SqliteRow>,
-    {
-        match &self.0 {
-            Arm::Pg(p) => {
-                let args = pg_args(params)?;
-                sqlx::query_as_with::<sqlx::Postgres, T, _>(sql, args)
-                    .fetch_all(p)
-                    .await
-            }
-            Arm::Sqlite(p) => {
-                let (sql, args) = sqlite_args(sql, params)?;
-                sqlx::query_as_with::<sqlx::Sqlite, T, _>(&sql, args)
-                    .fetch_all(p)
-                    .await
-            }
-        }
-    }
-
-    /// Fetch a single scalar (one column of one row), e.g. `SELECT count(*)`.
-    /// The counterpart to today's `sqlx::query_scalar`.
-    pub async fn fetch_scalar<T>(&self, sql: &str, params: Vec<DbValue>) -> Result<T, sqlx::Error>
-    where
-        T: Send + Unpin,
-        for<'r> T: sqlx::Decode<'r, sqlx::Postgres> + sqlx::Type<sqlx::Postgres>,
-        for<'r> T: sqlx::Decode<'r, sqlx::Sqlite> + sqlx::Type<sqlx::Sqlite>,
-    {
-        match &self.0 {
-            Arm::Pg(p) => {
-                let args = pg_args(params)?;
-                sqlx::query_scalar_with::<sqlx::Postgres, T, _>(sql, args)
-                    .fetch_one(p)
-                    .await
-            }
-            Arm::Sqlite(p) => {
-                let (sql, args) = sqlite_args(sql, params)?;
-                sqlx::query_scalar_with::<sqlx::Sqlite, T, _>(&sql, args)
-                    .fetch_one(p)
-                    .await
-            }
-        }
-    }
-
-    /// Begin a transaction. The returned [`DbTx`] carries the same dispatch
-    /// surface; finish with [`DbTx::commit`] or [`DbTx::rollback`] (dropping it
-    /// rolls back, exactly as an sqlx transaction does).
+    /// Begin a transaction. The returned [`DbTx`] carries the same query surface;
+    /// finish with [`DbTx::commit`] / [`DbTx::rollback`] (drop rolls back).
     pub async fn begin(&self) -> Result<DbTx<'_>, sqlx::Error> {
         match &self.0 {
             Arm::Pg(p) => Ok(DbTx::Pg(p.begin().await?)),
@@ -471,9 +491,62 @@ impl EnginePool {
     }
 }
 
+impl Db for EnginePool {
+    async fn exec(&self, sql: &str, params: Vec<DbValue>) -> Result<u64, sqlx::Error> {
+        match &self.0 {
+            Arm::Pg(p) => p.exec(sql, params).await,
+            Arm::Sqlite(p) => p.exec(sql, params).await,
+        }
+    }
+    async fn query_one<T>(&self, sql: &str, params: Vec<DbValue>) -> Result<T, sqlx::Error>
+    where
+        T: Send + Unpin,
+        T: for<'r> FromRow<'r, PgRow>,
+        T: for<'r> FromRow<'r, SqliteRow>,
+    {
+        match &self.0 {
+            Arm::Pg(p) => p.query_one(sql, params).await,
+            Arm::Sqlite(p) => p.query_one(sql, params).await,
+        }
+    }
+    async fn query_opt<T>(&self, sql: &str, params: Vec<DbValue>) -> Result<Option<T>, sqlx::Error>
+    where
+        T: Send + Unpin,
+        T: for<'r> FromRow<'r, PgRow>,
+        T: for<'r> FromRow<'r, SqliteRow>,
+    {
+        match &self.0 {
+            Arm::Pg(p) => p.query_opt(sql, params).await,
+            Arm::Sqlite(p) => p.query_opt(sql, params).await,
+        }
+    }
+    async fn query_all<T>(&self, sql: &str, params: Vec<DbValue>) -> Result<Vec<T>, sqlx::Error>
+    where
+        T: Send + Unpin,
+        T: for<'r> FromRow<'r, PgRow>,
+        T: for<'r> FromRow<'r, SqliteRow>,
+    {
+        match &self.0 {
+            Arm::Pg(p) => p.query_all(sql, params).await,
+            Arm::Sqlite(p) => p.query_all(sql, params).await,
+        }
+    }
+    async fn query_scalar<T>(&self, sql: &str, params: Vec<DbValue>) -> Result<T, sqlx::Error>
+    where
+        T: Send + Unpin,
+        for<'r> T: sqlx::Decode<'r, sqlx::Postgres> + sqlx::Type<sqlx::Postgres>,
+        for<'r> T: sqlx::Decode<'r, sqlx::Sqlite> + sqlx::Type<sqlx::Sqlite>,
+    {
+        match &self.0 {
+            Arm::Pg(p) => p.query_scalar(sql, params).await,
+            Arm::Sqlite(p) => p.query_scalar(sql, params).await,
+        }
+    }
+}
+
 /// An in-flight transaction, dispatching to whichever engine opened it. Mirrors
-/// [`EnginePool`]'s execute / fetch surface so a `db.begin()` block reads the
-/// same on either arm. Not `Clone`: a transaction is a single borrowed session.
+/// the [`Db`] query surface so a `db.begin()` block reads the same on either arm.
+/// Not `Clone`: a transaction is a single borrowed session.
 pub enum DbTx<'c> {
     Pg(sqlx::Transaction<'c, sqlx::Postgres>),
     Sqlite(sqlx::Transaction<'c, sqlx::Sqlite>),
@@ -481,23 +554,27 @@ pub enum DbTx<'c> {
 
 impl DbTx<'_> {
     /// Run a statement inside the transaction, returning affected rows.
-    pub async fn execute(&mut self, sql: &str, params: Vec<DbValue>) -> Result<u64, sqlx::Error> {
+    pub async fn exec(&mut self, sql: &str, params: Vec<DbValue>) -> Result<u64, sqlx::Error> {
         match self {
             DbTx::Pg(tx) => {
                 let args = pg_args(params)?;
-                let r = sqlx::query_with(sql, args).execute(&mut **tx).await?;
-                Ok(r.rows_affected())
+                Ok(sqlx::query_with(sql, args)
+                    .execute(&mut **tx)
+                    .await?
+                    .rows_affected())
             }
             DbTx::Sqlite(tx) => {
                 let (sql, args) = sqlite_args(sql, params)?;
-                let r = sqlx::query_with(&sql, args).execute(&mut **tx).await?;
-                Ok(r.rows_affected())
+                Ok(sqlx::query_with(&sql, args)
+                    .execute(&mut **tx)
+                    .await?
+                    .rows_affected())
             }
         }
     }
 
     /// Fetch exactly one row inside the transaction, mapped via `FromRow`.
-    pub async fn fetch_one<T>(&mut self, sql: &str, params: Vec<DbValue>) -> Result<T, sqlx::Error>
+    pub async fn query_one<T>(&mut self, sql: &str, params: Vec<DbValue>) -> Result<T, sqlx::Error>
     where
         T: Send + Unpin,
         T: for<'r> FromRow<'r, PgRow>,
@@ -520,7 +597,7 @@ impl DbTx<'_> {
     }
 
     /// Fetch at most one row inside the transaction, mapped via `FromRow`.
-    pub async fn fetch_optional<T>(
+    pub async fn query_opt<T>(
         &mut self,
         sql: &str,
         params: Vec<DbValue>,
@@ -547,7 +624,7 @@ impl DbTx<'_> {
     }
 
     /// Fetch a single scalar inside the transaction.
-    pub async fn fetch_scalar<T>(
+    pub async fn query_scalar<T>(
         &mut self,
         sql: &str,
         params: Vec<DbValue>,
@@ -606,7 +683,6 @@ mod tests {
 
     #[test]
     fn a_list_expands_and_renumbers_the_tail() {
-        // $2 is a 3-element list; the trailing $3 must slide to $5.
         let (sql, params) = expand_lists(
             "SELECT * FROM t WHERE tenant = $1 AND name = ANY($2) AND live = $3",
             vec![
@@ -619,7 +695,6 @@ mod tests {
             sql,
             "SELECT * FROM t WHERE tenant = $1 AND name = ANY($2, $3, $4) AND live = $5"
         );
-        // 1 uuid + 3 texts + 1 bool, in order.
         assert_eq!(params.len(), 5);
         assert!(matches!(params[0], DbValue::Uuid(_)));
         assert!(matches!(params[1], DbValue::Text(_)));
