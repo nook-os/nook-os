@@ -185,21 +185,15 @@ impl ActivityScope {
         auth: &crate::auth::AuthCtx,
     ) -> ApiResult<Self> {
         // A node credential is not a person watching a feed — unchanged tenant
-        // view. (The role query lives here, not in shared auth code, so this
-        // stays independent of MAIN-132's is_tenant_admin.)
+        // view. Kept ahead of the role check because `is_tenant_admin` reports a
+        // node as non-admin, whereas the feed grants a node the full view.
         if !matches!(auth.principal, crate::auth::Principal::User) {
             return Ok(Self::All);
         }
-        let role: Option<(String,)> =
-            sqlx::query_as("SELECT role FROM users WHERE id = $1 AND tenant_id = $2")
-                .bind(auth.user_id)
-                .bind(tenant)
-                .fetch_optional(db)
-                .await?;
-        if matches!(
-            role.as_ref().map(|(r,)| r.as_str()),
-            Some("owner") | Some("admin")
-        ) {
+        // An owner/admin sees the whole tenant's activity. Now that MAIN-118's
+        // children have merged, this reuses the one shared role check rather
+        // than its own copy of the query (MAIN-137).
+        if auth.is_tenant_admin(db).await? {
             return Ok(Self::All);
         }
         // A member: their person's user ids, the nodes that person owns, and the

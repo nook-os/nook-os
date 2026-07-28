@@ -360,18 +360,16 @@ impl AuthCtx {
     /// from the authenticated context, never from the request, so a tenant
     /// admin has no way to name someone else's tenant.
     pub async fn require_tenant_admin(&self, state: &AppState) -> Result<(), ApiError> {
+        // `require_user` first, so a node credential still gets its specific
+        // "sign in as a user" message rather than the generic role refusal; the
+        // role decision itself reuses the one `is_tenant_admin` query (MAIN-137).
         self.require_user()?;
-        let role: Option<(String,)> =
-            sqlx::query_as("SELECT role FROM users WHERE id = $1 AND tenant_id = $2")
-                .bind(self.user_id)
-                .bind(self.tenant_id)
-                .fetch_optional(&state.db)
-                .await?;
-        match role.as_ref().map(|(r,)| r.as_str()) {
-            Some("owner") | Some("admin") => Ok(()),
-            _ => Err(ApiError::ForbiddenMsg(
+        if self.is_tenant_admin(&state.db).await? {
+            Ok(())
+        } else {
+            Err(ApiError::ForbiddenMsg(
                 "this needs tenant owner or admin".into(),
-            )),
+            ))
         }
     }
 
@@ -379,7 +377,7 @@ impl AuthCtx {
     /// `require_tenant_admin`, for scoping a listing rather than gating an
     /// action (MAIN-132): a member sees only their own resources, an admin the
     /// whole tenant. A node credential is not a role-holder — `false`.
-    pub async fn is_tenant_admin(&self, state: &AppState) -> Result<bool, ApiError> {
+    pub async fn is_tenant_admin(&self, db: &sqlx::PgPool) -> Result<bool, ApiError> {
         if !matches!(self.principal, Principal::User) {
             return Ok(false);
         }
@@ -387,7 +385,7 @@ impl AuthCtx {
             sqlx::query_as("SELECT role FROM users WHERE id = $1 AND tenant_id = $2")
                 .bind(self.user_id)
                 .bind(self.tenant_id)
-                .fetch_optional(&state.db)
+                .fetch_optional(db)
                 .await?;
         Ok(matches!(
             role.as_ref().map(|(r,)| r.as_str()),
