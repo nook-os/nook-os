@@ -110,6 +110,27 @@ pub trait TimeMath {
     fn now_minus_scaled(&self, count: &str, unit: &str) -> String;
 }
 
+// ── ci-match (case-insensitive matching) ─────────────────────────────────────
+
+/// Case-insensitive matching (audit (b): `ILIKE`, MAIN-203). Postgres has the
+/// `ILIKE` operator; SQLite has no such operator and instead relies on `LIKE`
+/// with a case-insensitive collation (`COLLATE NOCASE`) — so the *whole* match
+/// expression differs per engine, not just an operator keyword, which is why
+/// this is a seam rather than a mechanical `ILIKE`→`LIKE` string swap.
+///
+/// **Adoption pattern** (how a per-crate sweep card replaces an inline `ILIKE`):
+/// an inline `col ILIKE <pattern>` becomes `{}` in a `format!`, filled by
+/// `engine.ci_match("col", "<pattern>")`. The `pattern` is a **composed** SQL
+/// expression the caller supplies, so a bound search term stays parameterized —
+/// e.g. `ci_match("n.title", "'%' || $2 || '%'")` reproduces
+/// `n.title ILIKE '%' || $2 || '%'` on Postgres. Never splice an untrusted term
+/// into `pattern` as a literal; bind it and wrap the placeholder.
+pub trait CiMatch {
+    /// A case-insensitive match of `col` against a composed `pattern` expression.
+    /// Postgres: `{col} ILIKE {pattern}`; SQLite: `{col} LIKE {pattern} COLLATE NOCASE`.
+    fn ci_match(&self, col: &str, pattern: &str) -> String;
+}
+
 // ── event-bus ───────────────────────────────────────────────────────────────
 
 /// Cross-instance event fan-out (audit (c): `LISTEN`/`NOTIFY`). Postgres
@@ -187,6 +208,25 @@ impl TimeMath for Postgres {
     }
     fn now_minus_scaled(&self, count: &str, unit: &str) -> String {
         format!("now() - ({count} * interval '{unit}')")
+    }
+}
+
+impl CiMatch for Postgres {
+    fn ci_match(&self, col: &str, pattern: &str) -> String {
+        format!("{col} ILIKE {pattern}")
+    }
+}
+
+/// The SQLite fragment arm. A zero-sized handle like [`Postgres`]; only the
+/// seams SQLite needs *today* are implemented here (currently [`CiMatch`], from
+/// MAIN-203) — the rest arrive with the engine's own cards. SQLite has no
+/// `ILIKE`, so case-insensitivity rides `LIKE … COLLATE NOCASE`.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Sqlite;
+
+impl CiMatch for Sqlite {
+    fn ci_match(&self, col: &str, pattern: &str) -> String {
+        format!("{col} LIKE {pattern} COLLATE NOCASE")
     }
 }
 
@@ -291,6 +331,22 @@ mod tests {
         );
     }
 
+    #[test]
+    fn ci_match_differs_per_engine() {
+        // The composed-pattern form the sweep adopts (bound term stays in $2).
+        let pattern = "'%' || $2 || '%'";
+        // Postgres delegates to ILIKE — byte-identical to today's inline usage.
+        assert_eq!(
+            Postgres.ci_match("n.title", pattern),
+            "n.title ILIKE '%' || $2 || '%'"
+        );
+        // SQLite has no ILIKE: LIKE + a case-insensitive collation.
+        assert_eq!(
+            Sqlite.ci_match("n.title", pattern),
+            "n.title LIKE '%' || $2 || '%' COLLATE NOCASE"
+        );
+    }
+
     // ── Postgres SQL is real, not plausible (needs a DB) ───────────────────
     // These connect to DATABASE_URL directly (nook-db is below nook-testkit) and
     // skip when it is absent, matching the suite's DB-optional convention.
@@ -364,6 +420,20 @@ mod tests {
         .await
         .expect("now() - ($1 * interval) executes with a bound multiplier");
         assert!(scaled_ok);
+    }
+
+    #[tokio::test]
+    async fn pg_ci_match_is_case_insensitive() {
+        let Some(pool) = pool().await else { return };
+        // The exact form the exemplar adopts: 'Work' matched by a lowercase
+        // bound term through the ILIKE the Postgres arm emits.
+        let expr = Postgres.ci_match("'Work'", "'%' || $1 || '%'");
+        let hit: bool = sqlx::query_scalar(&format!("SELECT {expr}"))
+            .bind("work")
+            .fetch_one(&pool)
+            .await
+            .expect("ci_match executes");
+        assert!(hit, "ILIKE matches across case");
     }
 
     #[tokio::test]
