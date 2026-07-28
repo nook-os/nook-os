@@ -29,6 +29,11 @@ pub use dialect::{
     AtomicClaim, CiMatch, EventBus, Json, PgEventBus, Postgres, Sqlite, TimeMath, TypeMapping,
 };
 
+/// The engine-dispatching pool + parameter model (MAIN-205). Introduced
+/// alongside the `DbPool` alias; it becomes the pool type at the call-site flip.
+pub mod pool;
+pub use pool::{DbValue, EnginePool};
+
 use std::fmt;
 
 /// The database engine, selected from the `DATABASE_URL` scheme (MAIN-195). This
