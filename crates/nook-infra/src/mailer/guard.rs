@@ -23,7 +23,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use async_trait::async_trait;
-use nook_db::DbPool;
+use nook_db::{DbPool, Postgres, TypeMapping};
 
 use super::{Category, Mailer, SendOutcome};
 
@@ -68,9 +68,10 @@ impl GuardedMailer {
     /// ("month" or "day"). A query failure counts as 0 — the guard must never
     /// fail a request path over its own bookkeeping.
     async fn count_since(&self, unit: &str) -> i64 {
-        sqlx::query_as::<_, (i64,)>(
-            "SELECT count(*) FROM mail_sends WHERE sent_at >= date_trunc($1, now())",
-        )
+        sqlx::query_as::<_, (i64,)>(&format!(
+            "SELECT count(*) FROM mail_sends WHERE sent_at >= date_trunc($1, {})",
+            Postgres.now()
+        ))
         .bind(unit)
         .fetch_one(&self.db)
         .await

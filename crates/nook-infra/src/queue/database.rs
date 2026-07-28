@@ -18,7 +18,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use nook_db::{AtomicClaim, DbPool, Postgres};
+use nook_db::{AtomicClaim, DbPool, Postgres, TypeMapping};
 use uuid::Uuid;
 
 use super::{Nack, NewWork, Queue, QueueStats, WorkEnvelope};
@@ -75,11 +75,14 @@ fn secs(d: Duration) -> f64 {
 impl Queue for DbQueue {
     async fn enqueue(&self, work: NewWork) -> Result<Uuid> {
         let id = Uuid::now_v7();
-        sqlx::query(
+        // `now()` routes through the type-mapping seam (MAIN-211); `make_interval`
+        // is an interval construct outside this (b) card and stays inline.
+        let now = Postgres.now();
+        sqlx::query(&format!(
             "INSERT INTO work_queue \
                (id, tenant_id, work_type, payload, attempts, max_attempts, not_before, enqueued_at) \
-             VALUES ($1, $2, $3, $4, 0, $5, coalesce(now() + make_interval(secs => $6), now()), now())",
-        )
+             VALUES ($1, $2, $3, $4, 0, $5, coalesce({now} + make_interval(secs => $6), {now}), {now})",
+        ))
         .bind(id)
         .bind(work.tenant_id)
         .bind(&work.work_type)
@@ -112,17 +115,19 @@ impl Queue for DbQueue {
         // engine's lock-and-skip clause (Postgres: `FOR UPDATE SKIP LOCKED`),
         // so the Postgres-specific SQL lives in the trait, not inline here
         // (MAIN-199). Behavior is bit-identical.
+        let now = Postgres.now();
         let claim_sql = format!(
             "SELECT id, tenant_id, work_type, payload, attempts, max_attempts, \
                     not_before, enqueued_at \
              FROM work_queue \
-             WHERE (locked_until IS NULL OR locked_until <= now()) \
-               AND not_before <= now() \
-               AND ($1::text[] IS NULL OR work_type = ANY($1)) \
+             WHERE (locked_until IS NULL OR locked_until <= {now}) \
+               AND not_before <= {now} \
+               AND ({tf_cast} IS NULL OR work_type = ANY($1)) \
              ORDER BY enqueued_at \
-             {} \
+             {lock} \
              LIMIT $2",
-            Postgres.claim_lock_clause()
+            tf_cast = Postgres.cast("$1", "text[]"),
+            lock = Postgres.claim_lock_clause(),
         );
         let candidates = sqlx::query_as::<_, WorkRow>(&claim_sql)
             .bind(&type_filter)
@@ -139,11 +144,12 @@ impl Queue for DbQueue {
                 dead_letter(&mut tx, row.id, "max attempts exhausted").await?;
                 continue;
             }
-            sqlx::query(
+            let now = Postgres.now();
+            sqlx::query(&format!(
                 "UPDATE work_queue \
-                 SET attempts = attempts + 1, locked_until = now() + make_interval(secs => $2) \
+                 SET attempts = attempts + 1, locked_until = {now} + make_interval(secs => $2) \
                  WHERE id = $1",
-            )
+            ))
             .bind(row.id)
             .bind(secs(visibility))
             .execute(&mut *tx)
@@ -186,9 +192,10 @@ impl Queue for DbQueue {
     }
 
     async fn extend_visibility(&self, id: Uuid, visibility: Duration) -> Result<()> {
-        sqlx::query(
-            "UPDATE work_queue SET locked_until = now() + make_interval(secs => $2) WHERE id = $1",
-        )
+        let now = Postgres.now();
+        sqlx::query(&format!(
+            "UPDATE work_queue SET locked_until = {now} + make_interval(secs => $2) WHERE id = $1",
+        ))
         .bind(id)
         .bind(secs(visibility))
         .execute(&self.db)
@@ -197,13 +204,14 @@ impl Queue for DbQueue {
     }
 
     async fn describe(&self) -> Result<QueueStats> {
-        let (ready, in_flight): (i64, i64) = sqlx::query_as(
+        let now = Postgres.now();
+        let (ready, in_flight): (i64, i64) = sqlx::query_as(&format!(
             "SELECT \
-               count(*) FILTER (WHERE (locked_until IS NULL OR locked_until <= now()) \
-                                  AND not_before <= now()), \
-               count(*) FILTER (WHERE locked_until > now()) \
+               count(*) FILTER (WHERE (locked_until IS NULL OR locked_until <= {now}) \
+                                  AND not_before <= {now}), \
+               count(*) FILTER (WHERE locked_until > {now}) \
              FROM work_queue",
-        )
+        ))
         .fetch_one(&self.db)
         .await?;
         let (dead,): (i64,) = sqlx::query_as("SELECT count(*) FROM work_queue_dead")

@@ -276,6 +276,7 @@ pub async fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nook_db::{Postgres, TypeMapping};
     use nook_infra::queue::NewWork;
     use nook_testkit::TestBed;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -508,9 +509,10 @@ mod tests {
                 0,
                 "not dead after one failure"
             );
-            let locked_future: bool = sqlx::query_as::<_, (bool,)>(
-                "SELECT locked_until > now() FROM work_queue WHERE id = $1",
-            )
+            let locked_future: bool = sqlx::query_as::<_, (bool,)>(&format!(
+                "SELECT locked_until > {} FROM work_queue WHERE id = $1",
+                Postgres.now()
+            ))
             .bind(id)
             .fetch_one(&bed.pool)
             .await
