@@ -43,12 +43,20 @@ pub trait Json {
     fn get_text(&self, col: &str, key: &str) -> String;
     /// Extract a top-level field **as json**. Postgres: `{col} -> '{key}'`.
     fn get_json(&self, col: &str, key: &str) -> String;
-    /// Containment test. Postgres: `{col} @> '{json}'::jsonb`.
-    fn contains(&self, col: &str, json: &str) -> String;
+    /// Containment test with a **composed right-hand expression**. The caller
+    /// supplies the RHS as SQL so a bound payload stays parameterized:
+    /// `contains("capabilities", &cast("$1", "jsonb"))` → `capabilities @> $1::jsonb`
+    /// (the exact audited form, node-supplied JSON bound to `$1`). NEVER splice
+    /// untrusted JSON as a literal — bind it and `cast` the placeholder — or the
+    /// sweep would open an injection. Postgres: `{col} @> {rhs}`.
+    fn contains(&self, col: &str, rhs: &str) -> String;
     /// Expand a JSON array expression to a set of rows. Postgres:
     /// `jsonb_array_elements({expr})`.
     fn array_elements(&self, expr: &str) -> String;
-    /// A JSON literal of the engine's json type. Postgres: `'{raw}'::jsonb`.
+    /// A **static** JSON literal — e.g. `'[]'::jsonb` as a COALESCE default.
+    /// Postgres: `'{raw}'::jsonb`. For user-supplied JSON, bind a parameter and
+    /// [`TypeMapping::cast`] the placeholder instead; never build a literal from
+    /// untrusted input.
     fn literal(&self, raw: &str) -> String;
 }
 
@@ -107,8 +115,8 @@ impl Json for Postgres {
     fn get_json(&self, col: &str, key: &str) -> String {
         format!("{col} -> '{key}'")
     }
-    fn contains(&self, col: &str, json: &str) -> String {
-        format!("{col} @> '{json}'::jsonb")
+    fn contains(&self, col: &str, rhs: &str) -> String {
+        format!("{col} @> {rhs}")
     }
     fn array_elements(&self, expr: &str) -> String {
         format!("jsonb_array_elements({expr})")
@@ -189,8 +197,16 @@ mod tests {
             pg.get_json("caps", "runtime_auth"),
             "caps -> 'runtime_auth'"
         );
+        // Containment composes an RHS expression: the audited site BINDS its
+        // node-supplied payload, so `cast("$1","jsonb")` must compose to a
+        // parameter, not a spliced literal (AC-3 must-fix — no injection).
         assert_eq!(
-            pg.contains("capabilities", "{\"shared_operator\":true}"),
+            pg.contains("capabilities", &pg.cast("$1", "jsonb")),
+            "capabilities @> $1::jsonb"
+        );
+        // A static literal RHS still composes, for a constant (not user input).
+        assert_eq!(
+            pg.contains("capabilities", &pg.literal("{\"shared_operator\":true}")),
             "capabilities @> '{\"shared_operator\":true}'::jsonb"
         );
         assert_eq!(
@@ -238,6 +254,16 @@ mod tests {
             .await
             .expect("::uuid cast executes");
         assert_eq!(back, uuid);
+        // Containment with a BOUND payload — the injection-safe form the sweep
+        // must adopt: the JSON travels as $1, never spliced into the SQL.
+        let rhs = pg.cast("$1", "jsonb");
+        let sql = format!("SELECT '{{\"a\":1,\"b\":2}}'::jsonb @> {rhs}");
+        let hit: bool = sqlx::query_scalar(&sql)
+            .bind("{\"a\":1}")
+            .fetch_one(&pool)
+            .await
+            .expect("@> $1::jsonb executes with a bound payload");
+        assert!(hit);
     }
 
     #[tokio::test]
