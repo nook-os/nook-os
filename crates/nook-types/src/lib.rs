@@ -934,7 +934,11 @@ pub struct ClaimTaskRequest {
 /// Exists so a person can switch between users without inventing credentials —
 /// testing "what does an operator see that a member does not" is impossible if
 /// becoming the other person is hard.
-#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
+// FromRow is hand-written (see the impls near end of file): `deployment_roles`
+// is a Postgres text[] with no SQLite `Decode`, so the derive can't cover both
+// row types. The PgRow impl reproduces the derive; the SqliteRow impl defers to
+// MAIN-196 (MAIN-205 proves Postgres only).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct DevAccount {
     pub email: String,
     pub display_name: String,
@@ -1191,7 +1195,10 @@ pub struct NotifyRequest {
 /// a channel list is the sort of thing a UI fetches often and logs freely.
 /// What a person needs to see is that it exists, whether it works, and what it
 /// is filtered to.
-#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
+// FromRow hand-written (see impls near end of file): `levels`/`kinds` are
+// Postgres text[] arrays with no SQLite `Decode`. PgRow reproduces the derive;
+// SqliteRow defers to MAIN-196.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct NotificationChannel {
     pub id: Uuid,
     pub tenant_id: TenantId,
@@ -2179,7 +2186,10 @@ pub struct CreateLoopJobRequest {
 
 /// A pending/answered/canceled ask for a human. Its subject (a job and/or the
 /// ticket it is anchored to) governs who may see and answer it.
-#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
+// FromRow hand-written (see impls near end of file): `choices` is a Postgres
+// text[] array with no SQLite `Decode`. PgRow reproduces the derive; SqliteRow
+// defers to MAIN-196.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct Interaction {
     pub id: InteractionId,
     pub tenant_id: TenantId,
@@ -2674,4 +2684,113 @@ pub enum ChatServerMessage {
     /// reaction-aggregated); the client replaces it in place by `id`. Delivered
     /// on the message's own channel, so a reply update reaches the thread too.
     MessageUpdated(ChatMessage),
+}
+
+// ── Hand-written FromRow for the array-column types (MAIN-205) ────────────────
+//
+// Three DTOs decode a Postgres `text[]` column into a `Vec<String>` field
+// (`DevAccount.deployment_roles`, `NotificationChannel.levels`/`kinds`,
+// `Interaction.choices`). SQLite has no array type, so `Vec<String>` has no
+// `Decode<Sqlite>` and `#[derive(FromRow)]` — which is generic over the row's
+// database — cannot cover `SqliteRow`. The dispatch pool (`nook_db::EnginePool`)
+// bounds its fetch methods on `FromRow` over BOTH row types, so each of these
+// needs a concrete pair: a `PgRow` impl that reproduces exactly what the derive
+// did (by-name `try_get`, bit-identical), and a `SqliteRow` impl deferred to
+// MAIN-196, where SQLite's array-storage shape (JSON-in-TEXT) is decided. The
+// deferred arm returns a clear error rather than panicking; it never runs under
+// MAIN-205's Postgres-only proof.
+
+macro_rules! deferred_sqlite_fromrow {
+    ($t:ty) => {
+        impl<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> for $t {
+            fn from_row(_row: &'r sqlx::sqlite::SqliteRow) -> sqlx::Result<Self> {
+                Err(sqlx::Error::Decode(
+                    concat!(
+                        "SQLite row mapping for array-column type `",
+                        stringify!($t),
+                        "` lands in MAIN-196"
+                    )
+                    .into(),
+                ))
+            }
+        }
+    };
+}
+
+impl<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> for DevAccount {
+    fn from_row(row: &'r sqlx::postgres::PgRow) -> sqlx::Result<Self> {
+        use sqlx::Row;
+        Ok(Self {
+            email: row.try_get("email")?,
+            display_name: row.try_get("display_name")?,
+            tenant_slug: row.try_get("tenant_slug")?,
+            deployment_roles: row.try_get("deployment_roles")?,
+        })
+    }
+}
+deferred_sqlite_fromrow!(DevAccount);
+
+impl<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> for NotificationChannel {
+    fn from_row(row: &'r sqlx::postgres::PgRow) -> sqlx::Result<Self> {
+        use sqlx::Row;
+        Ok(Self {
+            id: row.try_get("id")?,
+            tenant_id: row.try_get("tenant_id")?,
+            kind: row.try_get("kind")?,
+            name: row.try_get("name")?,
+            enabled: row.try_get("enabled")?,
+            levels: row.try_get("levels")?,
+            kinds: row.try_get("kinds")?,
+            last_ok_at: row.try_get("last_ok_at")?,
+            last_error: row.try_get("last_error")?,
+            created_at: row.try_get("created_at")?,
+            updated_at: row.try_get("updated_at")?,
+        })
+    }
+}
+deferred_sqlite_fromrow!(NotificationChannel);
+
+impl<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> for Interaction {
+    fn from_row(row: &'r sqlx::postgres::PgRow) -> sqlx::Result<Self> {
+        use sqlx::Row;
+        Ok(Self {
+            id: row.try_get("id")?,
+            tenant_id: row.try_get("tenant_id")?,
+            job_id: row.try_get("job_id")?,
+            task_id: row.try_get("task_id")?,
+            prompt: row.try_get("prompt")?,
+            choices: row.try_get("choices")?,
+            state: row.try_get("state")?,
+            requested_by_node_id: row.try_get("requested_by_node_id")?,
+            requested_by_session_id: row.try_get("requested_by_session_id")?,
+            answered_by: row.try_get("answered_by")?,
+            response: row.try_get("response")?,
+            created_at: row.try_get("created_at")?,
+            updated_at: row.try_get("updated_at")?,
+            answered_at: row.try_get("answered_at")?,
+        })
+    }
+}
+deferred_sqlite_fromrow!(Interaction);
+
+#[cfg(test)]
+mod dual_row_fromrow {
+    //! MAIN-205: the dispatch pool bounds fetches on FromRow over both row types.
+    //! Guard that the array-column DTOs satisfy both arms (their SqliteRow impl
+    //! is the deferred one from this file), so a regression is a compile failure.
+    use super::*;
+    fn both<T>()
+    where
+        T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow>,
+        T: for<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow>,
+    {
+    }
+    #[test]
+    fn array_column_dtos_map_from_both_rows() {
+        both::<TaskItem>();
+        both::<OperatorTenant>();
+        both::<DevAccount>();
+        both::<NotificationChannel>();
+        both::<Interaction>();
+    }
 }
