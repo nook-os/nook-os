@@ -24,7 +24,7 @@ import {
   X,
   Zap,
 } from "lucide-react";
-import { api, type TaskItem } from "@nookos/api";
+import { api, type TaskItem, type LoopJob } from "@nookos/api";
 import { AutomationDialog } from "./BoardAutomation";
 import { BoardBacklog } from "./BoardBacklog";
 import { summarizeBulk, useBacklogSelection } from "./backlogSelection";
@@ -41,15 +41,20 @@ import {
 import { useNewWork } from "../newwork";
 import { askChoice, askConfirm, askForm, askText, notify } from "../dialogs";
 import { TaskDetail } from "../TaskDetail";
-import { TaskMenu } from "../TaskMenu";
-import { nativeContextMenu } from "../contextMenu";
+import { taskMenuItems } from "../TaskMenu";
+import {
+  ContextMenuRegion,
+  useContextMenuApi,
+  type ContextMenuItem,
+} from "../contextMenu";
+import { fetchTaskJobs, taskJobsKey } from "../loop";
 import { priorityMeta, priorityRank, previewText, PRIORITIES } from "../taskmeta";
 
 function Card({
   task,
   workspaceName,
   onOpen,
-  onMenu,
+  menuItems,
   selected,
   blocked,
   hit = false,
@@ -59,13 +64,17 @@ function Card({
    *  which repo each card belongs to — and which loop will build it. */
   workspaceName?: string;
   onOpen: () => void;
-  onMenu: (anchor: { x: number; y: number }) => void;
+  /** The task's action-menu items, for the shared context-menu primitive
+   *  (MAIN-168): right-click opens them via the card's region, the three-dots
+   *  button opens them via `openAt`. */
+  menuItems: () => ContextMenuItem[];
   selected: boolean;
   blocked: boolean;
   /** This card is the exact-key search hit — highlighted + scrolled into view
    *  (MAIN-181 AC-3). */
   hit?: boolean;
 }) {
+  const { openAt } = useContextMenuApi();
   const { attributes, listeners, setNodeRef, transform, isDragging } =
     useDraggable({ id: task.id });
   // Compose dnd-kit's draggable ref with our own so an exact-key hit can be
@@ -78,7 +87,11 @@ function Card({
   React.useEffect(() => {
     if (hit) node.current?.scrollIntoView({ block: "center", behavior: "smooth" });
   }, [hit]);
+  // Right-click anywhere on the card opens the task menu through the shared
+  // primitive's region (MAIN-168). `display: contents` keeps the wrapper out of
+  // the board-cards flex layout.
   return (
+    <ContextMenuRegion items={menuItems} style={{ display: "contents" }}>
     <div
       ref={setRefs}
       className={`board-card${selected ? " selected" : ""}${hit ? " hit" : ""}${blocked ? " blocked" : ""}${
@@ -90,13 +103,6 @@ function Card({
           : undefined,
         opacity: isDragging ? 0.6 : 1,
         zIndex: isDragging ? 10 : undefined,
-      }}
-      // Legacy island (TaskMenu): opens its own right-click menu, so the shared
-      // app-wide menu suppresses itself here (MAIN-167 NG-1).
-      {...nativeContextMenu}
-      onContextMenu={(e) => {
-        e.preventDefault();
-        onMenu({ x: e.clientX, y: e.clientY });
       }}
     >
       {/* Drag and open share this handle. The 4px activation distance is what
@@ -136,7 +142,7 @@ function Card({
         onClick={(e) => {
           e.stopPropagation();
           const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
-          onMenu({ x: r.right - 170, y: r.bottom + 4 });
+          openAt(r.right - 170, r.bottom + 4, menuItems());
         }}
       >
         <MoreHorizontal size={13} />
@@ -183,6 +189,7 @@ function Card({
         <div className="desc">{previewText(task.description)}</div>
       )}
     </div>
+    </ContextMenuRegion>
   );
 }
 
@@ -195,7 +202,7 @@ function Column({
   onRename,
   onDelete,
   onOpen,
-  onMenu,
+  menuItems,
   onArchiveCompleted,
   selectedId,
   hitId = null,
@@ -210,7 +217,8 @@ function Column({
   onRename: (name: string) => void;
   onDelete: () => void;
   onOpen: (id: string) => void;
-  onMenu: (task: TaskItem, anchor: { x: number; y: number }) => void;
+  /** Build a task's action-menu items for the shared primitive (MAIN-168). */
+  menuItems: (task: TaskItem) => ContextMenuItem[];
   /** Archive every live task in this column at once. Offered only for
    *  completed/canceled columns (AC-4). */
   onArchiveCompleted: () => void;
@@ -300,7 +308,7 @@ function Column({
             task={t}
             workspaceName={t.workspace_id ? wsName.get(t.workspace_id) : undefined}
             onOpen={() => onOpen(t.key ?? t.id)}
-            onMenu={(anchor) => onMenu(t, anchor)}
+            menuItems={() => menuItems(t)}
             selected={selectedId === t.key || selectedId === t.id}
             hit={hitId === t.id}
             blocked={blockedIds.has(t.id)}
@@ -1088,6 +1096,7 @@ export function showsUnderArchive(
 
 export function BoardPage() {
   const queryClient = useQueryClient();
+  const { openAt } = useContextMenuApi();
   const showNewWork = useNewWork((s) => s.show);
   // The open task lives in the URL, not in component state.
   //
@@ -1110,10 +1119,6 @@ export function BoardPage() {
       { replace: !key },
     );
   };
-  const [menu, setMenu] = useState<{
-    task: TaskItem;
-    anchor: { x: number; y: number };
-  } | null>(null);
   // The filter lives in the URL, like the open task. A filter change is a
   // history entry (push) so Back/forward walk through them; the `task` param is
   // preserved across filter edits by `writeFilter`.
@@ -1433,6 +1438,31 @@ export function BoardPage() {
     : allBacklogGroups;
   const epics = detail.tasks.filter((t) => t.type === "epic");
 
+  // Build a task's action-menu items for the shared context-menu primitive
+  // (MAIN-168). The loop item's disabled state reads the task's jobs from the
+  // query cache; a prefetch warms it so a repeat open is accurate (a cold first
+  // open shows the action enabled — the backend stays authoritative).
+  const buildItems = (task: TaskItem): ContextMenuItem[] => {
+    void queryClient.prefetchQuery({
+      queryKey: taskJobsKey(task.id),
+      queryFn: () => fetchTaskJobs(task.id),
+    });
+    return taskMenuItems({
+      task,
+      columns: detail.columns,
+      epics,
+      jobs: queryClient.getQueryData<LoopJob[]>(taskJobsKey(task.id)),
+      onOpen: () => setOpenTask(task.key ?? task.id),
+      onStartWork: (t) =>
+        showNewWork({
+          taskId: t.id,
+          workspaceId: t.workspace_id ?? undefined,
+          worktree: true,
+        }),
+      refresh: bust,
+    });
+  };
+
   // The exact-key search hit (MAIN-181 AC-3): a case-insensitive FULL-key match,
   // so typing `MAIN-34` / `main-34` highlights and scrolls to that ticket on
   // whichever tab renders it — regardless of type, column, or collapse. `null`
@@ -1650,7 +1680,7 @@ export function BoardPage() {
               onAddChild={addChild}
               onAddBacklog={(title) => backlogColumn && addTask(backlogColumn.id, title)}
               onOpen={setOpenTask}
-              onMenu={(t, anchor) => setMenu({ task: t, anchor })}
+              onMenu={(t, anchor) => openAt(anchor.x, anchor.y, buildItems(t))}
               onToggleSelect={toggleSelect}
               onSendToBoard={sendToBoard}
               onDispatch={dispatchTask}
@@ -1677,7 +1707,7 @@ export function BoardPage() {
                       onRename={(n) => renameColumn(c.id, n)}
                       onDelete={() => deleteColumn(c.id)}
                       onOpen={setOpenTask}
-                      onMenu={(t, anchor) => setMenu({ task: t, anchor })}
+                      menuItems={buildItems}
                       onArchiveCompleted={() => archiveCompleted(c.id)}
                       selectedId={openTask}
                       hitId={exactKeyHitId}
@@ -1712,27 +1742,8 @@ export function BoardPage() {
             const t = detail.tasks.find(
               (x) => x.key === openTask || x.id === openTask,
             );
-            if (t) setMenu({ task: t, anchor });
+            if (t) openAt(anchor.x, anchor.y, buildItems(t));
           }}
-        />
-      )}
-
-      {menu && (
-        <TaskMenu
-          task={menu.task}
-          columns={detail.columns}
-          epics={epics}
-          anchor={menu.anchor}
-          onClose={() => setMenu(null)}
-          onOpen={() => setOpenTask(menu.task.key ?? menu.task.id)}
-          onStartWork={(t) =>
-            showNewWork({
-              taskId: t.id,
-              workspaceId: t.workspace_id ?? undefined,
-              worktree: true,
-            })
-          }
-          refresh={bust}
         />
       )}
     </div>

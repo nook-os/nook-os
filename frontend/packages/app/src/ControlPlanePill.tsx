@@ -7,10 +7,10 @@
 // reachability dot (AC-3, AC-9); choosing one makes it active and reloads the
 // webview onto it (AC-4); "Add control plane…" and an expired token both drop
 // to the Connect screen (AC-5, AC-6); right-click renames or forgets (AC-7).
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { Check, Plus, Server, ChevronDown } from "lucide-react";
-import { nativeContextMenu } from "./contextMenu";
+import { ContextMenuRegion } from "./contextMenu";
 import { useAnchoredMenu } from "@nookos/ui";
 import { isDesktop, type ControlPlane } from "./desktop";
 import {
@@ -39,9 +39,7 @@ function Pill() {
   const qc = useQueryClient();
   const [open, setOpen] = useState(false);
   const [health, setHealth] = useState<Record<string, Health>>({});
-  const [ctx, setCtx] = useState<{ cp: ControlPlane; x: number; y: number } | null>(null);
   const [adding, setAdding] = useState<{ prefillUrl?: string; notice?: string } | null>(null);
-  const ctxRef = useRef<HTMLDivElement>(null);
 
   const { servers, activeUrl, active } = useControlPlanes();
 
@@ -72,16 +70,6 @@ function Pill() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, servers.map((s) => s.base_url).join(",")]);
 
-  // Close the right-click menu on any outside click.
-  useEffect(() => {
-    if (!ctx) return;
-    const away = (e: MouseEvent) => {
-      if (!ctxRef.current?.contains(e.target as Node)) setCtx(null);
-    };
-    window.addEventListener("mousedown", away);
-    return () => window.removeEventListener("mousedown", away);
-  }, [ctx]);
-
   if (!active) return null; // configured servers always exist past first-run
 
   // Both surfaces delegate the actual switch/rename/forget to the shared module
@@ -91,11 +79,11 @@ function Pill() {
     await switchToControlPlane(url, activeUrl);
   };
   const rename = async (cp: ControlPlane) => {
-    setCtx(null);
+    setOpen(false);
     await renameControlPlaneWithDialog(cp, qc);
   };
   const forget = async (cp: ControlPlane) => {
-    setCtx(null);
+    setOpen(false);
     await forgetControlPlaneAndReconcile(cp, activeUrl, qc);
   };
 
@@ -121,29 +109,33 @@ function Pill() {
           {servers.map((cp) => {
             const isActive = cp.base_url === activeUrl;
             return (
-              <button
+              // Right-click a server row → rename/forget, via the shared menu
+              // (MAIN-168). `display: contents` keeps the dropdown layout intact.
+              <ContextMenuRegion
                 key={cp.base_url}
-                className={`cp-row${isActive ? " current" : ""}`}
-                {...nativeContextMenu}
-                onClick={() => switchTo(cp.base_url)}
-                onContextMenu={(e) => {
-                  e.preventDefault();
-                  setOpen(false);
-                  setCtx({ cp, x: e.clientX, y: e.clientY });
-                }}
+                style={{ display: "contents" }}
+                items={() => [
+                  { label: "Rename…", onSelect: () => void rename(cp) },
+                  { label: "Forget", onSelect: () => void forget(cp) },
+                ]}
               >
-                <span className="cp-row-check">{isActive && <Check size={13} />}</span>
-                {dot(cp)}
-                <span className="cp-row-text">
-                  <span className="cp-row-name">
-                    {cp.label || hostOf(cp.base_url)}
+                <button
+                  className={`cp-row${isActive ? " current" : ""}`}
+                  onClick={() => switchTo(cp.base_url)}
+                >
+                  <span className="cp-row-check">{isActive && <Check size={13} />}</span>
+                  {dot(cp)}
+                  <span className="cp-row-text">
+                    <span className="cp-row-name">
+                      {cp.label || hostOf(cp.base_url)}
+                    </span>
+                    {/* When a custom label is set, the host shows underneath so a
+                        rename never hides the machine (AC-3). */}
+                    {cp.label && <span className="cp-row-host">{hostOf(cp.base_url)}</span>}
+                    {cp.account && <span className="cp-row-account">{cp.account}</span>}
                   </span>
-                  {/* When a custom label is set, the host shows underneath so a
-                      rename never hides the machine (AC-3). */}
-                  {cp.label && <span className="cp-row-host">{hostOf(cp.base_url)}</span>}
-                  {cp.account && <span className="cp-row-account">{cp.account}</span>}
-                </span>
-              </button>
+                </button>
+              </ContextMenuRegion>
             );
           })}
           <button
@@ -161,18 +153,6 @@ function Pill() {
           </button>
         </>,
         "cp-menu",
-      )}
-
-      {ctx && (
-        <div
-          ref={ctxRef}
-          className="cp-context"
-          {...nativeContextMenu}
-          style={{ position: "fixed", left: ctx.x, top: ctx.y }}
-        >
-          <button onClick={() => rename(ctx.cp)}>Rename…</button>
-          <button onClick={() => forget(ctx.cp)}>Forget</button>
-        </div>
       )}
 
       {adding && (

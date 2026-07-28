@@ -1,7 +1,7 @@
 // The tab strip above the terminal — VS-Code-style: click to switch, × to
 // close the tab (the session keeps running), right-click for the rest, + to
 // start new work.
-import React, { useEffect, useRef, useState } from "react";
+import React, { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
 import { CircleDot, Loader2, Pin, Plus, SquareTerminal, X } from "lucide-react";
@@ -12,13 +12,7 @@ import { useNewWork } from "./newwork";
 import { useSessionTabs } from "./sessionTabsStore";
 import { useTabHotkeys } from "./tabHotkeys";
 import { askText, notify } from "./dialogs";
-import { nativeContextMenu } from "./contextMenu";
-
-interface MenuState {
-  id: string;
-  x: number;
-  y: number;
-}
+import { ContextMenuRegion, type ContextMenuItem } from "./contextMenu";
 
 export function SessionTabs({ activeId }: { activeId?: string }) {
   const navigate = useNavigate();
@@ -29,7 +23,6 @@ export function SessionTabs({ activeId }: { activeId?: string }) {
   const agentState = useLive((s) => s.agentState);
   const showNewWork = useNewWork((s) => s.show);
   const selectedWorkspaceId = useWorkspaceContext((s) => s.selectedWorkspaceId);
-  const [menu, setMenu] = useState<MenuState | null>(null);
   // Drag-to-reorder state: which tab is being dragged, and where the insertion
   // line currently sits (a target tab and whether it drops after it). Both null
   // when nothing is dragging.
@@ -95,6 +88,46 @@ export function SessionTabs({ activeId }: { activeId?: string }) {
     queryClient.invalidateQueries();
   };
 
+  // The tab's right-click menu, as items for the shared primitive (MAIN-168).
+  const tabMenu = (t: (typeof tabs)[number]): ContextMenuItem[] => {
+    const idx = tabs.findIndex((x) => x.id === t.id);
+    return [
+      { label: "Close", onSelect: () => closeTab(t.id) },
+      {
+        label: "Close Others",
+        disabled: tabs.length < 2,
+        onSelect: () => {
+          store.closeOthers(t.id);
+          if (activeId !== t.id) navigate(`/sessions/${t.id}`);
+        },
+      },
+      {
+        label: "Close to the Right",
+        disabled: idx >= tabs.length - 1,
+        onSelect: () =>
+          store.closeToTheRight(
+            t.id,
+            tabs.map((x) => x.id),
+          ),
+      },
+      { separator: true },
+      {
+        label: "Close All",
+        onSelect: () => {
+          store.closeAll(tabs.map((x) => x.id));
+          navigate("/sessions");
+        },
+      },
+      { label: t.pinned ? "Unpin" : "Pin", onSelect: () => store.togglePin(t.id) },
+      { label: "Rename Session…", onSelect: () => renameSession(t.id, t.name) },
+      { separator: true },
+      {
+        label: "Copy Session ID",
+        onSelect: () => void navigator.clipboard?.writeText(t.id).catch(() => {}),
+      },
+    ];
+  };
+
   return (
     <>
       <div className="session-tabs">
@@ -111,8 +144,13 @@ export function SessionTabs({ activeId }: { activeId?: string }) {
           // dead regardless of the last thing its agent said.
           const agent = dead ? undefined : agentState[t.id]?.state;
           return (
-            <div
+            // Right-click → the tab menu, via the shared primitive (MAIN-168).
+            <ContextMenuRegion
               key={t.id}
+              style={{ display: "contents" }}
+              items={() => tabMenu(t)}
+            >
+            <div
               className={
                 `session-tab${t.id === activeId ? " active" : ""}` +
                 `${t.pinned ? " pinned" : ""}` +
@@ -121,12 +159,7 @@ export function SessionTabs({ activeId }: { activeId?: string }) {
                 `${dropHere && dropHere.after ? " drop-after" : ""}`
               }
               draggable
-              {...nativeContextMenu}
               onClick={() => navigate(`/sessions/${t.id}`)}
-              onContextMenu={(e) => {
-                e.preventDefault();
-                setMenu({ id: t.id, x: e.clientX, y: e.clientY });
-              }}
               onDoubleClick={() => renameSession(t.id, t.name)}
               // Middle-click closes the tab, like a browser/VS Code. mousedown
               // preventDefault stops the middle-click autoscroll circle; the
@@ -197,6 +230,7 @@ export function SessionTabs({ activeId }: { activeId?: string }) {
                 <X size={11} />
               </button>
             </div>
+            </ContextMenuRegion>
           );
         })}
         <button
@@ -208,130 +242,6 @@ export function SessionTabs({ activeId }: { activeId?: string }) {
         </button>
       </div>
 
-      {menu && (
-        <TabMenu
-          x={menu.x}
-          y={menu.y}
-          onClose={() => setMenu(null)}
-          items={[
-            { label: "Close", onSelect: () => closeTab(menu.id) },
-            {
-              label: "Close Others",
-              disabled: tabs.length < 2,
-              onSelect: () => {
-                store.closeOthers(menu.id);
-                if (activeId !== menu.id) navigate(`/sessions/${menu.id}`);
-              },
-            },
-            {
-              label: "Close to the Right",
-              disabled: tabs.findIndex((t) => t.id === menu.id) >= tabs.length - 1,
-              onSelect: () =>
-                store.closeToTheRight(
-                  menu.id,
-                  tabs.map((t) => t.id),
-                ),
-            },
-            {
-              label: "Close All",
-              onSelect: () => {
-                store.closeAll(tabs.map((t) => t.id));
-                navigate("/sessions");
-              },
-              divider: true,
-            },
-            {
-              label: tabs.find((t) => t.id === menu.id)?.pinned ? "Unpin" : "Pin",
-              onSelect: () => store.togglePin(menu.id),
-            },
-            {
-              label: "Rename Session…",
-              onSelect: () => {
-                const tab = tabs.find((t) => t.id === menu.id);
-                if (tab) renameSession(tab.id, tab.name);
-              },
-            },
-            {
-              label: "Copy Session ID",
-              divider: true,
-              onSelect: () => navigator.clipboard?.writeText(menu.id).catch(() => {}),
-            },
-          ]}
-        />
-      )}
     </>
-  );
-}
-
-export interface MenuItem {
-  label: string;
-  onSelect(): void;
-  disabled?: boolean;
-  danger?: boolean;
-  /** Draw a separator above this item. */
-  divider?: boolean;
-}
-
-/** A small context menu that closes on select, outside click, or Escape. */
-export function TabMenu({
-  x,
-  y,
-  items,
-  onClose,
-}: {
-  x: number;
-  y: number;
-  items: MenuItem[];
-  onClose(): void;
-}) {
-  const ref = useRef<HTMLDivElement>(null);
-  const [pos, setPos] = useState({ x, y });
-
-  useEffect(() => {
-    // Keep the menu on screen when opened near an edge.
-    const el = ref.current;
-    if (el) {
-      const r = el.getBoundingClientRect();
-      setPos({
-        x: Math.min(x, window.innerWidth - r.width - 8),
-        y: Math.min(y, window.innerHeight - r.height - 8),
-      });
-    }
-    const away = (e: MouseEvent) => {
-      if (!ref.current?.contains(e.target as Node)) onClose();
-    };
-    const key = (e: KeyboardEvent) => e.key === "Escape" && onClose();
-    document.addEventListener("mousedown", away);
-    document.addEventListener("keydown", key);
-    return () => {
-      document.removeEventListener("mousedown", away);
-      document.removeEventListener("keydown", key);
-    };
-  }, [x, y, onClose]);
-
-  return (
-    <div
-      ref={ref}
-      className="context-menu"
-      {...nativeContextMenu}
-      style={{ left: pos.x, top: pos.y }}
-      onContextMenu={(e) => e.preventDefault()}
-    >
-      {items.map((item, i) => (
-        <React.Fragment key={item.label}>
-          {item.divider && i > 0 && <div className="context-menu-sep" />}
-          <button
-            className={`context-menu-item${item.danger ? " danger" : ""}`}
-            disabled={item.disabled}
-            onClick={() => {
-              onClose();
-              item.onSelect();
-            }}
-          >
-            {item.label}
-          </button>
-        </React.Fragment>
-      ))}
-    </div>
   );
 }

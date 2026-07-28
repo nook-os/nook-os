@@ -43,6 +43,14 @@ export interface ContextMenuItem {
   /** Right-aligned hint, e.g. a shortcut or a reason an item is disabled. */
   hint?: string;
   separator?: boolean;
+  /** Destructive action — rendered in the error colour (Delete, Close Terminal). */
+  danger?: boolean;
+  /** Optional leading icon (e.g. a visibility glyph). Presentational only. */
+  icon?: React.ReactNode;
+  /** A submenu: hovering (or activating) this row opens a nested panel of these
+   *  items to the side. One level only — children are leaf rows. Migrated from
+   *  TaskMenu's hand-rolled hover submenus (MAIN-168). */
+  children?: ContextMenuItem[];
 }
 
 /** Items for a region, or a function returning them at open time (so a region
@@ -383,12 +391,19 @@ function ContextMenu({
   const ref = useRef<HTMLDivElement>(null);
   const [pos, setPos] = useState({ x: state.x, y: state.y });
   // Indices of activatable (non-separator, non-disabled) items, for arrow nav.
+  // Parents (with children) ARE navigable — activating one opens its submenu.
   const navigable = state.items
     .map((it, i) => ({ it, i }))
     .filter(({ it }) => !it.separator && !it.disabled)
     .map(({ i }) => i);
   const [active, setActive] = useState<number>(-1);
+  // The top-level index whose submenu is open (or -1), and the focused child
+  // within it. A submenu is mouse-hover / click driven (as TaskMenu's were),
+  // with keyboard entry via Enter/→ (MAIN-168).
+  const [openSub, setOpenSub] = useState<number>(-1);
+  const [subActive, setSubActive] = useState<number>(-1);
   const itemRefs = useRef<(HTMLButtonElement | null)[]>([]);
+  const subRefs = useRef<(HTMLButtonElement | null)[]>([]);
 
   // Clamp into the viewport at the pointer — same approach as TaskMenu, so a
   // menu opened near an edge never renders half off-screen.
@@ -418,15 +433,44 @@ function ContextMenu({
     return () => window.removeEventListener("mousedown", away, true);
   }, [onClose]);
 
-  const activate = (i: number) => {
-    const item = state.items[i];
-    if (!item || item.disabled || item.separator) return;
+  // Run a leaf item: close the menu, then fire its action.
+  const runLeaf = (item: ContextMenuItem | undefined) => {
+    if (!item || item.disabled || item.separator || item.children) return;
     onClose();
     item.onSelect?.();
   };
 
-  const move = (dir: 1 | -1) => {
+  // Open a top item's submenu and focus its first activatable child.
+  const openSubmenu = (i: number) => {
+    const kids = state.items[i]?.children ?? [];
+    const first = kids.findIndex((k) => !k.separator && !k.disabled);
+    setOpenSub(i);
+    setSubActive(first);
+    if (first >= 0) requestAnimationFrame(() => subRefs.current[first]?.focus());
+  };
+
+  const closeSubmenu = () => {
+    const parent = openSub;
+    setOpenSub(-1);
+    setSubActive(-1);
+    if (parent >= 0) itemRefs.current[parent]?.focus();
+  };
+
+  // Activate the focused TOP item: a parent toggles its submenu, a leaf runs.
+  const activateTop = (i: number) => {
+    const item = state.items[i];
+    if (!item || item.disabled || item.separator) return;
+    if (item.children?.length) {
+      openSub === i ? closeSubmenu() : openSubmenu(i);
+    } else {
+      runLeaf(item);
+    }
+  };
+
+  const moveTop = (dir: 1 | -1) => {
     if (navigable.length === 0) return;
+    setOpenSub(-1);
+    setSubActive(-1);
     setActive((cur) => {
       const at = navigable.indexOf(cur);
       const next =
@@ -440,44 +484,85 @@ function ContextMenu({
     });
   };
 
+  // Navigate within the open submenu's activatable children.
+  const moveSub = (dir: 1 | -1) => {
+    if (openSub < 0) return;
+    const kids = state.items[openSub]?.children ?? [];
+    const nav = kids
+      .map((k, j) => ({ k, j }))
+      .filter(({ k }) => !k.separator && !k.disabled)
+      .map(({ j }) => j);
+    if (nav.length === 0) return;
+    setSubActive((cur) => {
+      const at = nav.indexOf(cur);
+      const next =
+        at === -1
+          ? dir === 1
+            ? nav[0]
+            : nav[nav.length - 1]
+          : nav[(at + dir + nav.length) % nav.length];
+      subRefs.current[next]?.focus();
+      return next;
+    });
+  };
+
   const onKeyDown = (e: React.KeyboardEvent) => {
+    const inSub = openSub >= 0 && subActive >= 0;
     switch (e.key) {
       case "Escape":
         e.preventDefault();
-        onClose();
+        if (openSub >= 0) closeSubmenu();
+        else onClose();
         break;
       case "ArrowDown":
         e.preventDefault();
-        move(1);
+        inSub ? moveSub(1) : moveTop(1);
         break;
       case "ArrowUp":
         e.preventDefault();
-        move(-1);
+        inSub ? moveSub(-1) : moveTop(-1);
         break;
-      case "Home":
-        e.preventDefault();
-        if (navigable.length) {
-          setActive(navigable[0]);
-          itemRefs.current[navigable[0]]?.focus();
+      case "ArrowRight":
+        if (!inSub && active >= 0 && state.items[active]?.children?.length) {
+          e.preventDefault();
+          openSubmenu(active);
         }
         break;
+      case "ArrowLeft":
+        if (openSub >= 0) {
+          e.preventDefault();
+          closeSubmenu();
+        }
+        break;
+      case "Home":
       case "End":
-        e.preventDefault();
-        if (navigable.length) {
-          const last = navigable[navigable.length - 1];
-          setActive(last);
-          itemRefs.current[last]?.focus();
+        if (!inSub && navigable.length) {
+          e.preventDefault();
+          const idx = e.key === "Home" ? navigable[0] : navigable[navigable.length - 1];
+          setOpenSub(-1);
+          setActive(idx);
+          itemRefs.current[idx]?.focus();
         }
         break;
       case "Enter":
       case " ":
-        if (active >= 0) {
-          e.preventDefault();
-          activate(active);
-        }
+        e.preventDefault();
+        if (inSub) runLeaf(state.items[openSub]?.children?.[subActive]);
+        else if (active >= 0) activateTop(active);
         break;
     }
   };
+
+  const row = (item: ContextMenuItem, i: number, hasSub: boolean) => (
+    <>
+      <span className="ctxmenu-label">
+        {item.icon && <span className="ctxmenu-icon">{item.icon}</span>}
+        {item.label}
+      </span>
+      {item.hint && <span className="ctxmenu-hint">{item.hint}</span>}
+      {hasSub && <span className="ctxmenu-arrow" aria-hidden="true">›</span>}
+    </>
+  );
 
   return createPortal(
     <div
@@ -490,30 +575,68 @@ function ContextMenu({
       onContextMenu={(e) => e.preventDefault()}
       onMouseDown={(e) => e.stopPropagation()}
     >
-      {state.items.map((item, i) =>
-        item.separator ? (
-          <div key={`sep-${i}`} className="ctxmenu-sep" role="separator" />
-        ) : (
-          <button
+      {state.items.map((item, i) => {
+        if (item.separator) {
+          return <div key={`sep-${i}`} className="ctxmenu-sep" role="separator" />;
+        }
+        const hasSub = !!item.children?.length;
+        return (
+          <div
             key={`${item.label}-${i}`}
-            ref={(el) => {
-              itemRefs.current[i] = el;
+            className="ctxmenu-subhost"
+            onMouseEnter={() => {
+              setActive(i);
+              setOpenSub(hasSub ? i : -1);
+              setSubActive(-1);
             }}
-            className="ctxmenu-item"
-            role="menuitem"
-            type="button"
-            disabled={item.disabled}
-            aria-disabled={item.disabled || undefined}
-            tabIndex={-1}
-            onMouseEnter={() => setActive(i)}
-            onMouseDown={(e) => e.stopPropagation()}
-            onClick={() => activate(i)}
           >
-            <span className="ctxmenu-label">{item.label}</span>
-            {item.hint && <span className="ctxmenu-hint">{item.hint}</span>}
-          </button>
-        ),
-      )}
+            <button
+              ref={(el) => {
+                itemRefs.current[i] = el;
+              }}
+              className={`ctxmenu-item${item.danger ? " danger" : ""}`}
+              role="menuitem"
+              type="button"
+              disabled={item.disabled}
+              aria-disabled={item.disabled || undefined}
+              aria-haspopup={hasSub || undefined}
+              aria-expanded={hasSub ? openSub === i : undefined}
+              tabIndex={-1}
+              onMouseDown={(e) => e.stopPropagation()}
+              onClick={() => (hasSub ? activateTop(i) : runLeaf(item))}
+            >
+              {row(item, i, hasSub)}
+            </button>
+            {hasSub && openSub === i && (
+              <div className="ctxmenu-submenu" role="menu">
+                {item.children!.map((child, j) =>
+                  child.separator ? (
+                    <div key={`sub-sep-${j}`} className="ctxmenu-sep" role="separator" />
+                  ) : (
+                    <button
+                      key={`${child.label}-${j}`}
+                      ref={(el) => {
+                        subRefs.current[j] = el;
+                      }}
+                      className={`ctxmenu-item${child.danger ? " danger" : ""}`}
+                      role="menuitem"
+                      type="button"
+                      disabled={child.disabled}
+                      aria-disabled={child.disabled || undefined}
+                      tabIndex={-1}
+                      onMouseEnter={() => setSubActive(j)}
+                      onMouseDown={(e) => e.stopPropagation()}
+                      onClick={() => runLeaf(child)}
+                    >
+                      {row(child, j, false)}
+                    </button>
+                  ),
+                )}
+              </div>
+            )}
+          </div>
+        );
+      })}
     </div>,
     document.body,
   );

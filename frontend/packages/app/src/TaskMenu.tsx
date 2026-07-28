@@ -6,13 +6,19 @@
 // mis-click from the drag handle, and a column of twenty cards rendered eighty
 // buttons nobody was looking at. Actions belong behind a deliberate gesture;
 // the card's job is to be readable.
-import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
-import { api, type TaskItem } from "@nookos/api";
+//
+// MAIN-168: this no longer renders its own positioned/dismissed menu. It builds
+// a `ContextMenuItem[]` for the shared app-wide context-menu primitive
+// (`contextMenu.tsx`) — the board registers these as a card's region (right-
+// click) and opens them from the three-dots button via `openAt`. The three
+// hover submenus ("Move to", "Move to epic", "Visibility") map onto the
+// primitive's `children`.
+import React from "react";
+import { api, type TaskItem, type LoopJob } from "@nookos/api";
 import { VISIBILITY_META } from "@nookos/ui";
 import { askConfirm, notify } from "./dialogs";
-import { nativeContextMenu } from "./contextMenu";
-import { createLoopJob, fetchTaskJobs, loopAction, taskJobsKey } from "./loop";
+import type { ContextMenuItem } from "./contextMenu";
+import { createLoopJob, loopAction } from "./loop";
 
 export interface MenuColumn {
   id: string;
@@ -26,71 +32,35 @@ export interface MenuAnchor {
   y: number;
 }
 
-export function TaskMenu({
-  task,
-  columns,
-  epics,
-  anchor,
-  onClose,
-  onStartWork,
-  onOpen,
-  refresh,
-}: {
+export interface TaskMenuContext {
   task: TaskItem;
   columns: MenuColumn[];
   /** The board's epics, for "Move to epic" (MAIN-83 AC-5). Omitted → no entry. */
   epics?: { id: string; key?: string | null; title: string; type?: string }[];
-  anchor: MenuAnchor;
-  onClose: () => void;
-  onStartWork: (task: TaskItem) => void;
+  /** The task's loop jobs, if known (drives the loop item's disabled state).
+   *  Read from the query cache at open time; undefined when not yet fetched. */
+  jobs?: LoopJob[];
   onOpen: () => void;
+  onStartWork: (task: TaskItem) => void;
   refresh: () => void;
-}) {
-  const ref = useRef<HTMLDivElement>(null);
-  const [pos, setPos] = useState(anchor);
-  const [submenu, setSubmenu] = useState<"move" | "epic" | "visibility" | null>(null);
+}
 
-  // Keep the menu on screen. Opened from a card near the right edge or the
-  // bottom of a tall column, a naively-placed menu renders half off-screen and
-  // the items you wanted are the ones you cannot reach.
-  useLayoutEffect(() => {
-    const el = ref.current;
-    if (!el) return;
-    const r = el.getBoundingClientRect();
-    setPos({
-      x: Math.min(anchor.x, window.innerWidth - r.width - 8),
-      y: Math.min(anchor.y, window.innerHeight - r.height - 8),
-    });
-  }, [anchor]);
-
-  useEffect(() => {
-    const away = () => onClose();
-    const esc = (e: KeyboardEvent) => e.key === "Escape" && onClose();
-    // `mousedown`, not `click`: a click listener added during a click event
-    // fires on that very event and the menu closes as it opens.
-    window.addEventListener("mousedown", away);
-    window.addEventListener("keydown", esc);
-    return () => {
-      window.removeEventListener("mousedown", away);
-      window.removeEventListener("keydown", esc);
-    };
-  }, [onClose]);
-
+/** Build the task action menu as items for the shared context-menu primitive. */
+export function taskMenuItems({
+  task,
+  columns,
+  epics,
+  jobs,
+  onOpen,
+  onStartWork,
+  refresh,
+}: TaskMenuContext): ContextMenuItem[] {
+  // Every mutating action refreshes the board after it lands; the primitive has
+  // already closed the menu by the time onSelect runs.
   const run = async (fn: () => Promise<unknown>) => {
     await fn();
     refresh();
-    onClose();
   };
-
-  // The ticket's loop entry action (MAIN-128): an epic runs the decomposer, any
-  // other ticket drafts a spec. Disabled — with the reason as a tooltip — while
-  // a job is already active on it, exactly as the panel header decides.
-  const { data: jobs } = useQuery({
-    queryKey: taskJobsKey(task.id),
-    queryFn: () => fetchTaskJobs(task.id),
-  });
-  const loop = loopAction(task.type, jobs);
-  const startLoop = () => run(() => createLoopJob(loop.kind, task.id));
 
   const move = (column_id: string) =>
     run(() =>
@@ -109,13 +79,9 @@ export function TaskMenu({
         body: { parent },
       }),
     );
-  // Only for a non-epic task, and only when epics are known. Exclude self.
-  const epicChoices = (epics ?? []).filter((e) => e.id !== task.id);
-  const canMoveToEpic = task.type !== "epic" && !!epics;
 
-  // Change who may see this card (MAIN-103). A 403 from the MAIN-85 gate ("this
-  // needs tenant owner or admin") surfaces via the shared write-failure toast,
-  // untouched — the same way every other menu PATCH reports a refusal.
+  // Change who may see this card (MAIN-103). A 403 from the MAIN-85 gate
+  // surfaces via the shared write-failure toast, untouched.
   const currentVisibility = task.visibility ?? "team";
   const setVisibility = (visibility: string) =>
     run(() =>
@@ -125,7 +91,7 @@ export function TaskMenu({
       }),
     );
 
-  const copy = async (text: string, what: string) => {
+  const copy = async (text: string) => {
     try {
       await navigator.clipboard.writeText(text);
     } catch {
@@ -133,8 +99,6 @@ export function TaskMenu({
       // Say so rather than pretending it worked.
       await notify("Could not copy", `Copy this manually:\n\n${text}`);
     }
-    onClose();
-    void what;
   };
 
   const del = () =>
@@ -176,184 +140,107 @@ export function TaskMenu({
       }
     });
 
-  const item = (
-    label: string,
-    onClick: () => void,
-    opts: { danger?: boolean; sub?: boolean } = {},
-  ) => (
-    <button
-      key={label}
-      className={`ctx-item${opts.danger ? " danger" : ""}`}
-      onMouseDown={(e) => e.stopPropagation()}
-      onClick={onClick}
-      onMouseEnter={() => !opts.sub && setSubmenu(null)}
-    >
-      {label}
-      {opts.sub && <span className="ctx-arrow">›</span>}
-    </button>
-  );
+  // The ticket's loop entry action (MAIN-128): an epic runs the decomposer, any
+  // other ticket drafts a spec. Disabled — with the reason as a hint — while a
+  // job is already active on it, exactly as the panel header decides.
+  const loop = loopAction(task.type, jobs);
 
-  return (
-    <div
-      ref={ref}
-      className="ctx-menu"
-      {...nativeContextMenu}
-      style={{ left: pos.x, top: pos.y }}
-      onMouseDown={(e) => e.stopPropagation()}
-      onContextMenu={(e) => e.preventDefault()}
-    >
-      {item("Open", () => {
-        onOpen();
-        onClose();
-      })}
+  const items: ContextMenuItem[] = [];
 
-      <div
-        className="ctx-sub-host"
-        onMouseEnter={() => setSubmenu("move")}
-        onMouseLeave={() => setSubmenu(null)}
-      >
-        {item("Move to", () => setSubmenu(submenu === "move" ? null : "move"), { sub: true })}
-        {submenu === "move" && (
-          <div className="ctx-submenu">
-            {columns.map((c) =>
-              c.id === task.column_id ? null : (
-                <button
-                  key={c.id}
-                  className="ctx-item"
-                  onMouseDown={(e) => e.stopPropagation()}
-                  onClick={() => move(c.id)}
-                >
-                  {c.name}
-                </button>
-              ),
-            )}
-          </div>
-        )}
-      </div>
+  items.push({ label: "Open", onSelect: onOpen });
 
-      {canMoveToEpic && (
-        <div
-          className="ctx-sub-host"
-          onMouseEnter={() => setSubmenu("epic")}
-          onMouseLeave={() => setSubmenu(null)}
-        >
-          {item("Move to epic", () => setSubmenu(submenu === "epic" ? null : "epic"), {
-            sub: true,
-          })}
-          {submenu === "epic" && (
-            <div className="ctx-submenu">
-              {task.parent_task_id && (
-                <button
-                  className="ctx-item"
-                  onMouseDown={(e) => e.stopPropagation()}
-                  onClick={() => moveToEpic(null)}
-                >
-                  — No epic —
-                </button>
-              )}
-              {epicChoices.length === 0 && !task.parent_task_id && (
-                <span className="ctx-item faint">no epics on this board</span>
-              )}
-              {epicChoices.map((e) =>
-                e.id === task.parent_task_id ? null : (
-                  <button
-                    key={e.id}
-                    className="ctx-item"
-                    onMouseDown={(ev) => ev.stopPropagation()}
-                    onClick={() => moveToEpic(e.id)}
-                  >
-                    {e.key ? `${e.key} ` : ""}
-                    {e.title}
-                  </button>
-                ),
-              )}
-            </div>
-          )}
-        </div>
-      )}
+  // "Move to" — every column except the one it is already in.
+  items.push({
+    label: "Move to",
+    children: columns
+      .filter((c) => c.id !== task.column_id)
+      .map((c) => ({ label: c.name, onSelect: () => move(c.id) })),
+  });
 
-      <div
-        className="ctx-sub-host"
-        onMouseEnter={() => setSubmenu("visibility")}
-        onMouseLeave={() => setSubmenu(null)}
-      >
-        {item(
-          "Visibility",
-          () => setSubmenu(submenu === "visibility" ? null : "visibility"),
-          { sub: true },
-        )}
-        {submenu === "visibility" && (
-          <div className="ctx-submenu">
-            {VISIBILITY_META.map((v) => (
-              <button
-                key={v.value}
-                className="ctx-item"
-                onMouseDown={(e) => e.stopPropagation()}
-                onClick={() => setVisibility(v.value)}
-                title={v.tooltip}
-              >
-                <v.Icon size={12} style={{ marginRight: 6, verticalAlign: "-1px" }} />
-                {v.label}
-                {currentVisibility === v.value && <span className="ok"> ✓</span>}
-              </button>
-            ))}
-          </div>
-        )}
-      </div>
+  // "Move to epic" — only for a non-epic task, and only when epics are known.
+  if (task.type !== "epic" && !!epics) {
+    const epicChoices = (epics ?? []).filter(
+      (e) => e.id !== task.id && e.id !== task.parent_task_id,
+    );
+    const kids: ContextMenuItem[] = [];
+    if (task.parent_task_id) {
+      kids.push({ label: "— No epic —", onSelect: () => moveToEpic(null) });
+    }
+    if (epicChoices.length === 0 && !task.parent_task_id) {
+      kids.push({ label: "no epics on this board", disabled: true });
+    }
+    for (const e of epicChoices) {
+      kids.push({
+        label: `${e.key ? `${e.key} ` : ""}${e.title}`,
+        onSelect: () => moveToEpic(e.id),
+      });
+    }
+    items.push({ label: "Move to epic", children: kids });
+  }
 
-      <div className="ctx-sep" />
+  // "Visibility" — each option with its glyph; the current one is checked.
+  items.push({
+    label: "Visibility",
+    children: VISIBILITY_META.map((v) => ({
+      label: v.label,
+      icon: <v.Icon size={12} />,
+      hint: currentVisibility === v.value ? "✓" : undefined,
+      onSelect: () => setVisibility(v.value),
+    })),
+  });
 
-      {task.key && item("Copy key", () => copy(task.key!, "key"))}
-      {task.url && item("Copy link", () => copy(task.url!, "link"))}
+  items.push({ separator: true });
+  if (task.key) items.push({ label: "Copy key", onSelect: () => copy(task.key!) });
+  if (task.url) items.push({ label: "Copy link", onSelect: () => copy(task.url!) });
 
-      <div className="ctx-sep" />
+  items.push({ separator: true });
+  items.push({
+    label: loop.label,
+    disabled: loop.disabled,
+    hint: loop.disabled ? (loop.reason ?? undefined) : undefined,
+    onSelect: () => createLoopJob(loop.kind, task.id).then(refresh),
+  });
 
-      {/* The loop entry action (MAIN-128). Disabled with its reason as the
-          tooltip when a job is already active on this ticket. */}
-      <button
-        className="ctx-item"
-        onMouseDown={(e) => e.stopPropagation()}
-        onClick={() => !loop.disabled && startLoop()}
-        disabled={loop.disabled}
-        title={loop.reason ?? loop.label}
-      >
-        {loop.label}
-      </button>
-
-      <div className="ctx-sep" />
-
-      {/* Offered by capability, so nothing here can only fail. */}
-      {!task.branch && item("Start work…", () => {
-        onStartWork(task);
-        onClose();
-      })}
-      {task.branch && !task.pr_url && item("Submit PR", submitPr)}
-      {!task.assigned_node_id &&
-        item("Dispatch to a node", () =>
-          run(() =>
-            api.POST("/api/v1/tasks/{id}/dispatch", { params: { path: { id: task.id } } }),
-          ),
-        )}
-      {task.worktree_path &&
-        item("Prune worktree", () =>
-          run(async () => {
-            const ok = await askConfirm({
-              title: "Prune worktree",
-              description: `Remove this task's checkout from ${task.worktree_path}?`,
-              confirmLabel: "prune",
-              danger: true,
+  items.push({ separator: true });
+  // Offered by capability, so nothing here can only fail.
+  if (!task.branch) {
+    items.push({ label: "Start work…", onSelect: () => onStartWork(task) });
+  }
+  if (task.branch && !task.pr_url) {
+    items.push({ label: "Submit PR", onSelect: submitPr });
+  }
+  if (!task.assigned_node_id) {
+    items.push({
+      label: "Dispatch to a node",
+      onSelect: () =>
+        run(() =>
+          api.POST("/api/v1/tasks/{id}/dispatch", { params: { path: { id: task.id } } }),
+        ),
+    });
+  }
+  if (task.worktree_path) {
+    items.push({
+      label: "Prune worktree",
+      onSelect: () =>
+        run(async () => {
+          const ok = await askConfirm({
+            title: "Prune worktree",
+            description: `Remove this task's checkout from ${task.worktree_path}?`,
+            confirmLabel: "prune",
+            danger: true,
+          });
+          if (ok) {
+            await api.POST("/api/v1/tasks/{id}/prune-worktree", {
+              params: { path: { id: task.id } },
             });
-            if (ok) {
-              await api.POST("/api/v1/tasks/{id}/prune-worktree", {
-                params: { path: { id: task.id } },
-              });
-            }
-          }),
-        )}
+          }
+        }),
+    });
+  }
 
-      <div className="ctx-sep" />
-      {item(task.archived_at ? "Unarchive" : "Archive", archive)}
-      {item("Delete", del, { danger: true })}
-    </div>
-  );
+  items.push({ separator: true });
+  items.push({ label: task.archived_at ? "Unarchive" : "Archive", onSelect: archive });
+  items.push({ label: "Delete", danger: true, onSelect: del });
+
+  return items;
 }
