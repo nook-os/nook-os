@@ -159,6 +159,16 @@ export function startLive(queryClient: QueryClient) {
         });
         queryClient.invalidateQueries({ queryKey: ["task", event.data.task_id] });
       }
+    } else if (event.type === "job_changed") {
+      // A loop job's transcript grew or its state changed (MAIN-128). Same
+      // "what you have is stale" contract as `task_changed`: the event carries
+      // the TARGET TICKET id, so refetch that ticket's job list and — because a
+      // transcript line or a state change is a per-job delta — every job cached
+      // under it. The panel reads `["task", id, "jobs"]` for the list and
+      // `["job", jobId]` for a job's detail; invalidating the `["job"]` prefix
+      // covers whichever job the panel is currently showing without knowing its id.
+      queryClient.invalidateQueries({ queryKey: ["task", event.data.task_id, "jobs"] });
+      queryClient.invalidateQueries({ queryKey: ["job"] });
     } else if (event.type === "activity") {
       useLive.setState((s) => ({
         activity: [event.data.event, ...s.activity].slice(0, ACTIVITY_BUFFER),

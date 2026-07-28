@@ -29,6 +29,12 @@ export type Invite = Schemas["Invite"];
 // Durable human interactions (MAIN-159): an executor's ask, answered from the
 // web or the CLI, that survives the browser tab that raised it.
 export type Interaction = Schemas["Interaction"];
+// Ticket-anchored loop jobs (MAIN-128): a spec/decompose run and its transcript,
+// streamed onto the ticket that raised it.
+export type LoopJob = Schemas["LoopJob"];
+export type LoopJobDetail = Schemas["LoopJobDetail"];
+export type LoopJobTranscriptEntry = Schemas["LoopJobTranscriptEntry"];
+export type CreateLoopJobRequest = Schemas["CreateLoopJobRequest"];
 export type TaskDetail = Schemas["TaskDetail"];
 export type TaskLabel = Schemas["Label"];
 export type TaskComment = Schemas["TaskComment"];

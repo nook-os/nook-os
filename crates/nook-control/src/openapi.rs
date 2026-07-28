@@ -143,6 +143,7 @@ use utoipa::OpenApi;
         crate::routes::taskwork::move_task,
         crate::routes::jobs::create,
         crate::routes::jobs::get,
+        crate::routes::jobs::list_for_task,
         crate::routes::jobs::cancel,
         crate::routes::jobs::rerun,
         crate::routes::interactions::create,

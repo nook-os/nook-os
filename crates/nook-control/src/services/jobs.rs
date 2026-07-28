@@ -184,6 +184,31 @@ pub async fn get(
     detail(state, job).await
 }
 
+/// Every loop job on a ticket, newest first (MAIN-128) — what the ticket's Loop
+/// panel lists to find the active/latest run and offer re-run on a failed one.
+/// Visibility-gated on the target card (a private card's jobs stay private,
+/// mirroring `get`). Transcripts are omitted — this is the cheap list; the panel
+/// fetches the chosen job's `get` for its transcript. `NotFound` (not empty) when
+/// the caller cannot see the card, so its existence never leaks.
+pub async fn list_for_task(
+    state: &AppState,
+    tenant: TenantId,
+    viewer: UserId,
+    task_id: TaskId,
+) -> ApiResult<Vec<LoopJob>> {
+    let target = load_target(state, tenant, task_id).await?;
+    if !crate::services::tasks::visible_to(&target, viewer) {
+        return Err(ApiError::NotFound);
+    }
+    Ok(sqlx::query_as(
+        "SELECT * FROM loop_jobs WHERE tenant_id = $1 AND target_task_id = $2 ORDER BY id DESC",
+    )
+    .bind(tenant)
+    .bind(task_id)
+    .fetch_all(&state.db)
+    .await?)
+}
+
 /// Move a job to `to`, refusing illegal transitions (AC-6). Records a
 /// `job.state_changed` event on success. The single write path for lifecycle
 /// changes — cancel and (later) the executor's claim/run/finish all go through
@@ -221,6 +246,13 @@ pub async fn transition(
         .map(|t| is_private(&t))
         .unwrap_or(true);
     record_job_event(state, tenant, "job.state_changed", &updated, private).await;
+    // Nudge the ticket's live Loop panel that the job changed (MAIN-128 AC-2).
+    state.registry.publish(
+        tenant,
+        nook_proto::UiEvent::JobChanged {
+            task_id: updated.target_task_id,
+        },
+    );
 
     // MAIN-162: a job that fails or is canceled cancels any pending interaction
     // it raised — a paused human ask on dead work is moot. (A human who then
@@ -325,7 +357,7 @@ pub async fn append_transcript(
     source: &str,
     content: &str,
 ) -> ApiResult<LoopJobTranscriptEntry> {
-    Ok(sqlx::query_as(
+    let entry: LoopJobTranscriptEntry = sqlx::query_as(
         "INSERT INTO loop_job_transcript (id, job_id, source, content)
          VALUES ($1, $2, $3, $4) RETURNING *",
     )
@@ -334,7 +366,23 @@ pub async fn append_transcript(
     .bind(source)
     .bind(content)
     .fetch_one(&state.db)
-    .await?)
+    .await?;
+
+    // Nudge the ticket's live Loop panel that a new transcript line landed
+    // (MAIN-128 AC-2 — the run "streams" as narration arrives). Best-effort: a
+    // missing job row just means no live nudge, never a failed append.
+    if let Ok(Some((tenant, task_id))) = sqlx::query_as::<_, (TenantId, TaskId)>(
+        "SELECT tenant_id, target_task_id FROM loop_jobs WHERE id = $1",
+    )
+    .bind(id)
+    .fetch_optional(&state.db)
+    .await
+    {
+        state
+            .registry
+            .publish(tenant, nook_proto::UiEvent::JobChanged { task_id });
+    }
+    Ok(entry)
 }
 
 /// Is the target card private (creator + assignee only)?

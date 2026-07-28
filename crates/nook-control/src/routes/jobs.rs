@@ -41,6 +41,20 @@ pub async fn get(
     ))
 }
 
+#[utoipa::path(get, path = "/api/v1/tasks/{task_id}/jobs",
+    operation_id = "task_jobs",
+    params(("task_id" = String, Path,)),
+    responses((status = 200, body = [LoopJob])))]
+pub async fn list_for_task(
+    State(state): State<AppState>,
+    auth: AuthCtx,
+    Path(task_id): Path<TaskId>,
+) -> ApiResult<Json<Vec<LoopJob>>> {
+    Ok(Json(
+        jobs::list_for_task(&state, auth.tenant_id, auth.user_id, task_id).await?,
+    ))
+}
+
 #[utoipa::path(post, path = "/api/v1/jobs/{id}/cancel",
     operation_id = "job_cancel",
     params(("id" = String, Path,)),

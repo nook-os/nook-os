@@ -458,6 +458,14 @@ pub enum UiEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         task_id: Option<nook_types::TaskId>,
     },
+    /// A loop job's transcript grew or its state changed (MAIN-128) — the nudge
+    /// that drives the ticket's live Loop panel. Carries the TARGET TICKET id
+    /// (not the job id), the same "what you have is stale" contract as
+    /// `TaskChanged`: the panel refetches the job + transcript for that ticket.
+    /// Visibility is enforced on the refetch, so the nudge itself leaks nothing.
+    JobChanged {
+        task_id: nook_types::TaskId,
+    },
 }
 
 /// Terminal attach socket messages (browser → control plane).

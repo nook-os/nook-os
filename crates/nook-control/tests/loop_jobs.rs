@@ -469,3 +469,79 @@ async fn private_target_job_is_hidden_from_a_non_owner() {
 
     bed.teardown().await;
 }
+
+#[tokio::test]
+async fn list_for_task_returns_the_tickets_jobs_newest_first_and_is_visibility_gated() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let (state, tenant, owner, b, c) = fixture(&bed).await;
+    let ws = bed.workspace(tenant).await;
+    let target = task(&bed.pool, tenant, b, c, "task", owner, Some(ws)).await;
+
+    // Two jobs on the same ticket (the second re-runs the first, say).
+    let first = jobs::create(
+        &state,
+        tenant,
+        owner,
+        CreateLoopJobRequest {
+            kind: "spec".into(),
+            target_task_id: target,
+        },
+    )
+    .await
+    .expect("first")
+    .job
+    .id;
+    let second = jobs::create(
+        &state,
+        tenant,
+        owner,
+        CreateLoopJobRequest {
+            kind: "spec".into(),
+            target_task_id: target,
+        },
+    )
+    .await
+    .expect("second")
+    .job
+    .id;
+
+    // The ticket's Loop panel lists both, newest first (v7 ids are time-ordered).
+    let listed = jobs::list_for_task(&state, tenant, owner, target)
+        .await
+        .expect("list");
+    assert_eq!(
+        listed.iter().map(|j| j.id).collect::<Vec<_>>(),
+        vec![second, first],
+        "newest first"
+    );
+
+    // A private-card ticket's jobs stay private — a non-owner gets NotFound, not
+    // an empty list, so the ticket's existence never leaks (MAIN-128 AC-5).
+    let (intruder, _p) = bed.user(tenant, "member").await;
+    let secret = task(&bed.pool, tenant, b, c, "task", owner, Some(ws)).await;
+    sqlx::query("UPDATE tasks SET visibility = 'private' WHERE id = $1")
+        .bind(secret)
+        .execute(&bed.pool)
+        .await
+        .unwrap();
+    jobs::create(
+        &state,
+        tenant,
+        owner,
+        CreateLoopJobRequest {
+            kind: "spec".into(),
+            target_task_id: secret,
+        },
+    )
+    .await
+    .expect("owner opens a job on their private card");
+    let denied = jobs::list_for_task(&state, tenant, intruder, secret).await;
+    assert!(matches!(
+        denied,
+        Err(nook_control::error::ApiError::NotFound)
+    ));
+
+    bed.teardown().await;
+}
