@@ -17,7 +17,7 @@
 //! team tenant as well. Both are written here so the two never disagree.
 
 use chrono::{DateTime, Utc};
-use nook_db::{DbPool, Json, Postgres};
+use nook_db::{DbPool, Json, Postgres, TypeMapping};
 use nook_types::{IdentityId, Tenant, TenantId, TenantMembership, User, UserId};
 use serde_json::Value;
 
@@ -259,10 +259,11 @@ pub async fn mark_local_email_verified(db: &DbPool, user_id: UserId, email: &str
     // The static raw_claims literal routes through the json seam (MAIN-201).
     let sql = format!(
         "INSERT INTO identities (id, user_id, issuer, subject, email, raw_claims, email_verified_at)
-         VALUES ($1, $2, 'local', $3, $4, {}, now())
+         VALUES ($1, $2, 'local', $3, $4, {}, {now})
          ON CONFLICT (issuer, subject)
-           DO UPDATE SET email_verified_at = COALESCE(identities.email_verified_at, now())",
-        Postgres.literal("{\"verified_via\":\"local\"}")
+           DO UPDATE SET email_verified_at = COALESCE(identities.email_verified_at, {now})",
+        Postgres.literal("{\"verified_via\":\"local\"}"),
+        now = Postgres.now()
     );
     sqlx::query(&sql)
         .bind(uuid::Uuid::now_v7())
@@ -297,10 +298,11 @@ pub async fn login_identity(state: &AppState, claims: IdentityClaims) -> ApiResu
         // never clear it — verification only moves one way, and only from a true
         // claim.
         if claims.email_verified {
-            sqlx::query(
-                "UPDATE identities SET email_verified_at = now()
+            sqlx::query(&format!(
+                "UPDATE identities SET email_verified_at = {}
                  WHERE issuer = $1 AND subject = $2 AND email_verified_at IS NULL",
-            )
+                Postgres.now()
+            ))
             .bind(&claims.issuer)
             .bind(&claims.subject)
             .execute(&state.db)
@@ -428,10 +430,11 @@ pub async fn login_identity(state: &AppState, claims: IdentityClaims) -> ApiResu
     // `email_verified_at` is stamped now ONLY when the IdP asserted the address;
     // otherwise it stays null. A CASE on the bound flag keeps "verified means a
     // real timestamp" true — nothing here derives it from the email string.
-    sqlx::query(
+    sqlx::query(&format!(
         "INSERT INTO identities (id, user_id, issuer, subject, email, raw_claims, email_verified_at)
-         VALUES ($1, $2, $3, $4, $5, $6, CASE WHEN $7 THEN now() ELSE NULL END)",
-    )
+         VALUES ($1, $2, $3, $4, $5, $6, CASE WHEN $7 THEN {} ELSE NULL END)",
+        Postgres.now()
+    ))
     .bind(IdentityId::new())
     .bind(user.id)
     .bind(&claims.issuer)
@@ -582,7 +585,7 @@ mod db_tests {
         invalidate_person_tenants, member_user_in_tenant, memberships_for,
     };
     use crate::cache::memory::MemoryCache;
-    use nook_db::DbPool;
+    use nook_db::{DbPool, Postgres, TypeMapping};
     use nook_types::{TenantId, UserId};
     use sqlx::postgres::PgPoolOptions;
     use uuid::Uuid;
@@ -876,11 +879,14 @@ mod db_tests {
         let oidc_unverified = email_is_verified(&db, oidc).await.unwrap();
 
         // Now the IdP verifies the OIDC identity's address.
-        sqlx::query("UPDATE identities SET email_verified_at = now() WHERE user_id = $1")
-            .bind(oidc.0)
-            .execute(&db)
-            .await
-            .unwrap();
+        sqlx::query(&format!(
+            "UPDATE identities SET email_verified_at = {} WHERE user_id = $1",
+            Postgres.now()
+        ))
+        .bind(oidc.0)
+        .execute(&db)
+        .await
+        .unwrap();
         let oidc_verified = email_is_verified(&db, oidc).await.unwrap();
         // The local user shares the email but is still unverified — no string join.
         let local_after = email_is_verified(&db, local).await.unwrap();

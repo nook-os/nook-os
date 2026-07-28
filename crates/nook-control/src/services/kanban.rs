@@ -414,10 +414,11 @@ impl KanbanProvider for LocalBoardProvider {
                 type = COALESCE($12, type),
                 visibility = COALESCE($13, visibility),
                 parent_task_id = CASE WHEN $14 THEN $15 ELSE parent_task_id END,
-                updated_at = now()
+                updated_at = {now}
              WHERE id = $1 AND tenant_id = $2
                AND ({guard} IS NULL OR updated_at = $11)
              RETURNING *",
+            now = Postgres.now(),
             guard = Postgres.cast("$11", "timestamptz")
         ))
         .bind(task)

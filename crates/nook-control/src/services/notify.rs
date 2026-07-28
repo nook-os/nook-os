@@ -22,7 +22,7 @@
 
 use async_trait::async_trait;
 use hmac::{Hmac, Mac};
-use nook_db::DbPool;
+use nook_db::{DbPool, Postgres, TypeMapping};
 use nook_types::*;
 use serde_json::Value;
 use sha2::Sha256;
@@ -747,13 +747,14 @@ async fn record_outcome(db: &DbPool, channel: uuid::Uuid, result: anyhow::Result
             )
         }
     };
-    let _ = sqlx::query(
+    let _ = sqlx::query(&format!(
         "UPDATE notification_channels
-         SET last_ok_at = CASE WHEN $2 THEN now() ELSE last_ok_at END,
+         SET last_ok_at = CASE WHEN $2 THEN {now} ELSE last_ok_at END,
              last_error = $3,
-             updated_at = now()
+             updated_at = {now}
          WHERE id = $1",
-    )
+        now = Postgres.now()
+    ))
     .bind(channel)
     .bind(ok)
     .bind(err)
