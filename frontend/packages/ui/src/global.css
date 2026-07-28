@@ -3694,7 +3694,7 @@ a.toast-main:hover .toast-title { text-decoration: underline; }
   background: var(--nook-bg);
 }
 .search-input:focus-within { border-color: var(--nook-accent); }
-.search-input-icon { color: var(--nook-fg-faint); flex: none; }
+.search-input-icon { color: var(--nook-fg-faint); flex: none; display: inline-flex; align-items: center; }
 .search-input-field {
   font: inherit;
   font-size: 11.5px;
@@ -3869,6 +3869,11 @@ a.toast-main:hover .toast-title { text-decoration: underline; }
 }
 .chan-manage-create { display: flex; gap: 8px; }
 .chan-manage-create .chan-input { flex: 1; }
+/* The New-DM modal's action row (MAIN-176 AC-3): cap it to the same width as the
+   filter input above and let the Start-chat button fill it, so the two line up
+   edge-to-edge (the filter input is a standalone `.chan-input`, max-width 420). */
+.chan-manage-create.dm-create { max-width: 420px; }
+.chan-manage-create.dm-create .btn { flex: 1; }
 .chan-manage-error { color: var(--nook-err); font-size: 12px; }
 .chan-manage-list,
 .chan-manage-archived { display: flex; flex-direction: column; gap: 4px; }
@@ -4395,6 +4400,17 @@ a.toast-main:hover .toast-title { text-decoration: underline; }
   padding: 6px;
   border-bottom: 1px solid var(--nook-border);
   flex: none;
+}
+/* In Notes the search box fills its sidebar column edge-to-edge (MAIN-176 AC-1).
+   Scoped to `.notebook-search` so every other SearchInput (Settings → Access
+   tokens, operator tables) keeps its default inline width. */
+.notebook-search .search-input {
+  display: flex;
+}
+.notebook-search .search-input-field {
+  width: auto;
+  flex: 1;
+  min-width: 0;
 }
 
 .notebook-tree {

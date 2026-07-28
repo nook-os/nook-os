@@ -90,7 +90,7 @@ export function DmPicker({
               ))
             )}
           </div>
-          <div className="chan-manage-create">
+          <div className="chan-manage-create dm-create">
             <button
               className="btn small primary"
               onClick={start}

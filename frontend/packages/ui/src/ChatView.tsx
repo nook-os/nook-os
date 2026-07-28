@@ -407,6 +407,7 @@ export function ChatView({
         <button
           type="button"
           className="chat-send"
+          title="Send message"
           disabled={disabled || draft.trim().length === 0}
           onClick={submit}
         >
