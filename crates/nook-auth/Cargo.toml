@@ -9,6 +9,7 @@ name = "nook_auth"
 path = "src/lib.rs"
 
 [dependencies]
+nook-db = { workspace = true }
 sqlx = { workspace = true }
 uuid = { workspace = true }
 sha2 = { workspace = true }

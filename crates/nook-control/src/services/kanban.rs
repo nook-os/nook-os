@@ -3,11 +3,11 @@
 //! external providers are registered but unconfigured in milestone 1.
 
 use async_trait::async_trait;
+use nook_db::DbPool;
 use nook_types::{
     Board, BoardDetail, BoardId, ColumnId, CreateTaskRequest, TaskId, TaskItem, TenantId,
     UpdateTaskRequest, UserId,
 };
-use sqlx::PgPool;
 
 use crate::error::{ApiError, ApiResult};
 
@@ -63,7 +63,7 @@ fn validate_visibility(v: Option<&str>) -> ApiResult<()> {
 /// nesting, which also makes cycles impossible). Every failure is a 400 naming
 /// the rule.
 async fn validate_parent(
-    db: &sqlx::PgPool,
+    db: &nook_db::DbPool,
     tenant: TenantId,
     viewer: UserId,
     board: BoardId,
@@ -142,7 +142,7 @@ pub trait KanbanProvider: Send + Sync {
 // ── Local boards (Postgres) ─────────────────────────────────────────────────
 
 pub struct LocalBoardProvider {
-    pub db: PgPool,
+    pub db: DbPool,
 }
 
 #[async_trait]
@@ -518,7 +518,7 @@ pub struct KanbanRegistry {
 }
 
 impl KanbanRegistry {
-    pub fn new(db: PgPool) -> Self {
+    pub fn new(db: DbPool) -> Self {
         Self {
             providers: vec![
                 std::sync::Arc::new(LocalBoardProvider { db }),

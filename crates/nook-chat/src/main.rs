@@ -27,9 +27,9 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, patch, post, put};
 use axum::{Json, Router};
 use axum_extra::extract::CookieJar;
+use nook_db::DbPool;
 use serde_json::{json, Value};
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
-use sqlx::PgPool;
 use uuid::Uuid;
 
 /// Chat's own migration set, embedded at compile time — applied into the `chat`
@@ -41,7 +41,7 @@ static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
 #[derive(Clone)]
 pub(crate) struct AppState {
-    pub(crate) db: PgPool,
+    pub(crate) db: DbPool,
     /// Per-channel live fan-out for the delivery websocket (AC-3).
     pub(crate) registry: Arc<registry::Registry>,
 }
@@ -157,7 +157,7 @@ async fn main() -> anyhow::Result<()> {
 /// then race the `pg_namespace` insert, and the loser gets `23505`
 /// (unique_violation) even though `IF NOT EXISTS` was asked for. The schema
 /// exists either way, so a duplicate is success, not an error.
-pub(crate) async fn ensure_chat_schema(pool: &sqlx::PgPool) -> Result<(), sqlx::Error> {
+pub(crate) async fn ensure_chat_schema(pool: &nook_db::DbPool) -> Result<(), sqlx::Error> {
     match sqlx::query("CREATE SCHEMA IF NOT EXISTS chat")
         .execute(pool)
         .await
@@ -211,7 +211,7 @@ async fn me(State(state): State<AppState>, caller: Caller) -> Result<Json<Value>
 /// membership row. This is the ONLY role source chat uses (NG-5): the existing
 /// per-tenant `users.role`, not a new permission catalog.
 pub(crate) async fn tenant_role(
-    db: &PgPool,
+    db: &DbPool,
     user: Uuid,
     tenant: Uuid,
 ) -> Result<Option<String>, ChatError> {
@@ -234,7 +234,7 @@ pub(crate) fn role_is_admin(role: Option<&str>) -> bool {
 
 /// Refuse a caller who is not a tenant owner/admin with a 403 — the gate on
 /// every channel-management handler (MAIN-94 AC-5).
-pub(crate) async fn require_admin(db: &PgPool, caller: &Caller) -> Result<(), ChatError> {
+pub(crate) async fn require_admin(db: &DbPool, caller: &Caller) -> Result<(), ChatError> {
     let role = tenant_role(db, caller.user_id, caller.tenant_id).await?;
     if role_is_admin(role.as_deref()) {
         Ok(())

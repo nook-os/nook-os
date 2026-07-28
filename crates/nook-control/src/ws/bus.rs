@@ -8,11 +8,11 @@
 
 use std::sync::Arc;
 
+use nook_db::DbPool;
 use nook_proto::{AttachServerMessage, ControlToNode, UiEvent};
 use nook_types::{NodeId, SessionId, TenantId};
 use serde::{Deserialize, Serialize};
 use sqlx::postgres::PgListener;
-use sqlx::PgPool;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
@@ -114,7 +114,7 @@ enum Wire {
 /// Spawn the bus tasks: outbound pump, listener, and maintenance loop.
 pub(crate) fn start(
     registry: Arc<Registry>,
-    pool: PgPool,
+    pool: DbPool,
     mut outbound: mpsc::UnboundedReceiver<Outbound>,
 ) {
     let me = registry.instance_id();
@@ -230,7 +230,7 @@ pub(crate) fn start(
     });
 }
 
-async fn fetch_outbox(pool: &PgPool, id: i64) -> Option<BusMessage> {
+async fn fetch_outbox(pool: &DbPool, id: i64) -> Option<BusMessage> {
     let payload: Option<String> =
         sqlx::query_scalar("DELETE FROM bus_outbox WHERE id = $1 RETURNING payload")
             .bind(id)

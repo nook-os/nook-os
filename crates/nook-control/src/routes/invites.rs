@@ -364,7 +364,7 @@ pub async fn accept(
 /// database without an `AuthCtx`. `fallback_tenant` is where a declined/no-op
 /// caller stays (their own active tenant).
 pub async fn accept_core(
-    db: &sqlx::PgPool,
+    db: &nook_db::DbPool,
     user_id: uuid::Uuid,
     fallback_tenant: TenantId,
     token: &str,
@@ -747,12 +747,12 @@ mod tests {
 mod db_tests {
     use super::accept_core;
     use crate::seed::hash_token;
+    use nook_db::DbPool;
     use nook_types::TenantId;
     use sqlx::postgres::PgPoolOptions;
-    use sqlx::PgPool;
     use uuid::Uuid;
 
-    async fn pool() -> Option<PgPool> {
+    async fn pool() -> Option<DbPool> {
         if std::env::var("NOOK_REQUIRE_DB").ok().as_deref() != Some("1") {
             return None;
         }
@@ -764,7 +764,7 @@ mod db_tests {
         crate::MIGRATOR.run(&db).await.ok()?;
         Some(db)
     }
-    async fn tenant(db: &PgPool, name: &str) -> Uuid {
+    async fn tenant(db: &DbPool, name: &str) -> Uuid {
         let id = Uuid::new_v4();
         sqlx::query("INSERT INTO tenants (id, name, slug) VALUES ($1,$2,$3)")
             .bind(id)
@@ -776,13 +776,13 @@ mod db_tests {
         id
     }
     /// A users row (a person, by person_id) in a tenant.
-    async fn user(db: &PgPool, tenant: Uuid, email: &str, person: Uuid) -> Uuid {
+    async fn user(db: &DbPool, tenant: Uuid, email: &str, person: Uuid) -> Uuid {
         let id = Uuid::new_v4();
         sqlx::query("INSERT INTO users (id,tenant_id,display_name,email,role,person_id) VALUES ($1,$2,'P',$3,'owner',$4)")
             .bind(id).bind(tenant).bind(email).bind(person).execute(db).await.unwrap();
         id
     }
-    async fn invite(db: &PgPool, tenant: Uuid, email: &str, days: i64) -> String {
+    async fn invite(db: &DbPool, tenant: Uuid, email: &str, days: i64) -> String {
         let token = format!("inv_{}", Uuid::new_v4().simple());
         // Stored hashed at rest (AC-9); the helper hands back the plaintext.
         sqlx::query(
@@ -802,7 +802,7 @@ mod db_tests {
 
     /// Mark a user's email verified (a verified identity), so an accept can pass
     /// the AC-8 gate.
-    async fn verify(db: &PgPool, user_id: Uuid, email: &str) {
+    async fn verify(db: &DbPool, user_id: Uuid, email: &str) {
         sqlx::query(
             "INSERT INTO identities (id,user_id,issuer,subject,email,raw_claims,email_verified_at)
              VALUES ($1,$2,'local',$3,$4,'{}'::jsonb, now())",
@@ -815,7 +815,7 @@ mod db_tests {
         .await
         .unwrap();
     }
-    async fn is_member(db: &PgPool, tenant: Uuid, person: Uuid) -> bool {
+    async fn is_member(db: &DbPool, tenant: Uuid, person: Uuid) -> bool {
         let (n,): (i64,) = sqlx::query_as(
             "SELECT count(*) FROM users u JOIN tenant_members m
                ON m.tenant_id=u.tenant_id AND m.principal_type='user' AND m.principal_id=u.id
@@ -828,7 +828,7 @@ mod db_tests {
         .unwrap();
         n > 0
     }
-    async fn cleanup(db: &PgPool, tenants: &[Uuid]) {
+    async fn cleanup(db: &DbPool, tenants: &[Uuid]) {
         for t in tenants {
             for tbl in ["invites", "tenant_members", "users"] {
                 let _ = sqlx::query(&format!("DELETE FROM {tbl} WHERE tenant_id=$1"))

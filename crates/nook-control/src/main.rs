@@ -49,7 +49,7 @@ async fn main() -> Result<()> {
     }
 }
 
-async fn serve(db: sqlx::PgPool, cfg: Config) -> Result<()> {
+async fn serve(db: nook_db::DbPool, cfg: Config) -> Result<()> {
     // Pick the TLS backend explicitly. Several crates in the tree pull rustls
     // with different providers (the AWS SDK among them), which leaves the
     // process-wide default ambiguous — and rustls panics rather than guessing.

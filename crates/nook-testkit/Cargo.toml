@@ -12,6 +12,7 @@ path = "src/lib.rs"
 # MIGRATOR / the canonical Config, and nook-control's own tests dev-depend on it
 # — Cargo permits that cycle because it runs only through dev-dependencies.
 [dependencies]
+nook-db = { workspace = true }
 nook-control = { workspace = true }
 nook-infra = { workspace = true, features = ["test-support"] }
 nook-types = { workspace = true }

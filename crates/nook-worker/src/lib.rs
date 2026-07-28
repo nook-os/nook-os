@@ -326,7 +326,7 @@ mod tests {
         }
     }
 
-    async fn count_in(pool: &sqlx::PgPool, table: &str, ty: &str) -> i64 {
+    async fn count_in(pool: &nook_db::DbPool, table: &str, ty: &str) -> i64 {
         sqlx::query_as::<_, (i64,)>(&format!(
             "SELECT count(*) FROM {table} WHERE work_type = $1"
         ))

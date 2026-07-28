@@ -2553,6 +2553,7 @@ dependencies = [
 name = "nook-auth"
 version = "0.4.22"
 dependencies = [
+ "nook-db",
  "sha2 0.10.9",
  "sqlx",
  "uuid",
@@ -2571,6 +2572,7 @@ dependencies = [
  "futures-util",
  "nook-auth",
  "nook-control",
+ "nook-db",
  "nook-types",
  "serde",
  "serde_json",
@@ -2607,6 +2609,7 @@ dependencies = [
  "hyper-util",
  "ipnet",
  "nook-auth",
+ "nook-db",
  "nook-dispatcher",
  "nook-infra",
  "nook-mcp",
@@ -2640,6 +2643,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "nook-db"
+version = "0.4.22"
+dependencies = [
+ "sqlx",
+]
+
+[[package]]
 name = "nook-dispatcher"
 version = "0.4.22"
 dependencies = [
@@ -2665,6 +2675,7 @@ dependencies = [
  "ipnet",
  "lettre",
  "nook-control",
+ "nook-db",
  "redis",
  "reqwest",
  "serde",
@@ -2753,6 +2764,7 @@ version = "0.4.22"
 dependencies = [
  "anyhow",
  "nook-control",
+ "nook-db",
  "nook-infra",
  "nook-types",
  "sqlx",
@@ -2780,6 +2792,7 @@ dependencies = [
  "async-trait",
  "dotenvy",
  "nook-control",
+ "nook-db",
  "nook-infra",
  "nook-testkit",
  "serde_json",

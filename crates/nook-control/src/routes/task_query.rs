@@ -205,7 +205,7 @@ pub async fn pick(
 /// exclusion (and the rest of the filter) can be tested against a real database
 /// without constructing an `AppState`.
 pub async fn query_rows(
-    db: &sqlx::PgPool,
+    db: &nook_db::DbPool,
     tenant: TenantId,
     viewer: UserId,
     f: &TaskFilter,
@@ -663,12 +663,12 @@ mod tests {
 #[cfg(test)]
 mod db_tests {
     use super::{query_rows, TaskFilter};
+    use nook_db::DbPool;
     use nook_types::{TaskId, TenantId};
     use sqlx::postgres::PgPoolOptions;
-    use sqlx::PgPool;
     use uuid::Uuid;
 
-    async fn pool() -> Option<PgPool> {
+    async fn pool() -> Option<DbPool> {
         if std::env::var("NOOK_REQUIRE_DB").ok().as_deref() != Some("1") {
             return None;
         }
@@ -683,7 +683,7 @@ mod db_tests {
     }
 
     /// Insert a board + one column + a task (archived or not), returning the id.
-    async fn task(db: &PgPool, tenant: Uuid, board: Uuid, col: Uuid, archived: bool) -> TaskId {
+    async fn task(db: &DbPool, tenant: Uuid, board: Uuid, col: Uuid, archived: bool) -> TaskId {
         let id = Uuid::new_v4();
         sqlx::query(
             "INSERT INTO tasks (id, tenant_id, board_id, column_id, title, archived_at)
@@ -702,7 +702,7 @@ mod db_tests {
 
     /// Insert a task with a title, description, and number, returning its id.
     async fn titled_task(
-        db: &PgPool,
+        db: &DbPool,
         tenant: Uuid,
         board: Uuid,
         col: Uuid,
@@ -956,7 +956,7 @@ mod db_tests {
 
     /// A task with a chosen visibility and creator.
     async fn vis_task(
-        db: &PgPool,
+        db: &DbPool,
         tenant: Uuid,
         board: Uuid,
         col: Uuid,

@@ -1,14 +1,14 @@
 //! Shared queries used by both REST handlers and MCP tools.
 
 use chrono::{DateTime, Utc};
+use nook_db::DbPool;
 use nook_types::*;
-use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::error::ApiResult;
 
 pub async fn workspace_locations(
-    db: &PgPool,
+    db: &DbPool,
     tenant: TenantId,
     workspace: WorkspaceId,
 ) -> ApiResult<Vec<WorkspaceLocation>> {
@@ -52,7 +52,7 @@ pub async fn workspace_locations(
         .collect())
 }
 
-pub async fn list_workspaces(db: &PgPool, tenant: TenantId) -> ApiResult<Vec<WorkspaceDetail>> {
+pub async fn list_workspaces(db: &DbPool, tenant: TenantId) -> ApiResult<Vec<WorkspaceDetail>> {
     let workspaces: Vec<Workspace> =
         sqlx::query_as("SELECT * FROM workspaces WHERE tenant_id = $1 ORDER BY name")
             .bind(tenant)
@@ -70,7 +70,7 @@ pub async fn list_workspaces(db: &PgPool, tenant: TenantId) -> ApiResult<Vec<Wor
 }
 
 pub async fn get_workspace(
-    db: &PgPool,
+    db: &DbPool,
     tenant: TenantId,
     id: WorkspaceId,
 ) -> ApiResult<Option<WorkspaceDetail>> {
@@ -98,7 +98,7 @@ pub async fn get_workspace(
 /// returns the whole fleet (owner/admin, and node tokens whose view is
 /// unchanged). Shared grants visibility only — session-start stays owner-only.
 pub async fn list_nodes(
-    db: &PgPool,
+    db: &DbPool,
     tenant: TenantId,
     owner: Option<uuid::Uuid>,
 ) -> ApiResult<Vec<Node>> {
@@ -122,7 +122,7 @@ pub async fn list_nodes(
 /// owner/admin metadata view, and the unchanged view MCP/dispatcher get). This
 /// is the metadata/list layer only; content access stays with `session_guard`.
 pub async fn list_sessions(
-    db: &PgPool,
+    db: &DbPool,
     tenant: TenantId,
     workspace: Option<WorkspaceId>,
     active_only: bool,
@@ -180,7 +180,7 @@ pub enum ActivityScope {
 impl ActivityScope {
     /// Resolve the caller's activity scope from their role and owned resources.
     pub async fn load(
-        db: &PgPool,
+        db: &DbPool,
         tenant: TenantId,
         auth: &crate::auth::AuthCtx,
     ) -> ApiResult<Self> {
@@ -247,7 +247,7 @@ impl ActivityScope {
 }
 
 pub async fn events_page(
-    db: &PgPool,
+    db: &DbPool,
     tenant: TenantId,
     workspace: Option<WorkspaceId>,
     kind_prefix: Option<String>,
@@ -313,7 +313,7 @@ pub async fn events_page(
 /// or task title this surface must not hand over (the same rule `audit_log`
 /// enforced before it grew a cursor).
 pub async fn operator_audit_page(
-    db: &PgPool,
+    db: &DbPool,
     q: Option<String>,
     after: Option<EventId>,
     limit: i64,
@@ -360,7 +360,7 @@ fn search_filter(q: Option<String>) -> Option<String> {
 /// `operator_audit_page`. Rows come back WITHOUT the policy-gated fields
 /// (`repositories`/`task_titles`); the handler enriches them per opted-in org.
 pub async fn operator_tenants_page(
-    db: &PgPool,
+    db: &DbPool,
     q: Option<String>,
     after: Option<TenantId>,
     limit: i64,
@@ -396,7 +396,7 @@ pub async fn operator_tenants_page(
 
 /// Operator nodes, keyset-paginated + searched (name/tenant slug/platform/status).
 pub async fn operator_nodes_page(
-    db: &PgPool,
+    db: &DbPool,
     q: Option<String>,
     after: Option<NodeId>,
     limit: i64,
@@ -434,7 +434,7 @@ pub async fn operator_nodes_page(
 
 /// Operator role bindings, keyset-paginated + searched (email/role/scope).
 pub async fn operator_bindings_page(
-    db: &PgPool,
+    db: &DbPool,
     q: Option<String>,
     after: Option<uuid::Uuid>,
     limit: i64,
@@ -474,7 +474,7 @@ pub async fn operator_bindings_page(
 /// `operator_audit_page` (MAIN-45 AC-2). Keyed on the member's UUID v7
 /// `principal_id`; searches only members of `tenant`.
 pub async fn tenant_members_page(
-    db: &PgPool,
+    db: &DbPool,
     tenant: TenantId,
     q: Option<String>,
     after: Option<uuid::Uuid>,
@@ -758,7 +758,7 @@ pub async fn create_auth_session(
 }
 
 pub async fn list_notes(
-    db: &PgPool,
+    db: &DbPool,
     tenant: TenantId,
     workspace: WorkspaceId,
 ) -> ApiResult<Vec<Note>> {
@@ -772,7 +772,7 @@ pub async fn list_notes(
 }
 
 pub async fn create_note(
-    db: &PgPool,
+    db: &DbPool,
     tenant: TenantId,
     workspace: WorkspaceId,
     req: CreateNoteRequest,
@@ -799,12 +799,12 @@ mod db_tests {
         operator_audit_page, operator_bindings_page, operator_nodes_page, operator_tenants_page,
         tenant_members_page,
     };
+    use nook_db::DbPool;
     use nook_types::{EventId, NodeId, TenantId};
     use sqlx::postgres::PgPoolOptions;
-    use sqlx::PgPool;
     use uuid::Uuid;
 
-    async fn pool() -> Option<PgPool> {
+    async fn pool() -> Option<DbPool> {
         if std::env::var("NOOK_REQUIRE_DB").ok().as_deref() != Some("1") {
             return None;
         }
@@ -818,7 +818,7 @@ mod db_tests {
         Some(db)
     }
 
-    async fn tenant(db: &PgPool, slug: &str) -> TenantId {
+    async fn tenant(db: &DbPool, slug: &str) -> TenantId {
         // v7 (creation-ordered), matching production `TenantId::new()`, so the
         // keyset `ORDER BY id DESC` walks newest-first as the real endpoints do.
         let id = Uuid::now_v7();
@@ -832,7 +832,7 @@ mod db_tests {
         TenantId(id)
     }
 
-    async fn node(db: &PgPool, tenant: TenantId, name: &str, status: &str) -> Uuid {
+    async fn node(db: &DbPool, tenant: TenantId, name: &str, status: &str) -> Uuid {
         let id = Uuid::now_v7();
         sqlx::query(
             "INSERT INTO nodes (id, tenant_id, name, node_token_hash, platform, status)
@@ -850,7 +850,7 @@ mod db_tests {
         id
     }
 
-    async fn user(db: &PgPool, tenant: TenantId, email: &str) -> Uuid {
+    async fn user(db: &DbPool, tenant: TenantId, email: &str) -> Uuid {
         let id = Uuid::now_v7();
         sqlx::query(
             "INSERT INTO users (id, tenant_id, display_name, email, role)
@@ -865,7 +865,7 @@ mod db_tests {
         id
     }
 
-    async fn binding(db: &PgPool, subject: Uuid, role_key: &str) -> Uuid {
+    async fn binding(db: &DbPool, subject: Uuid, role_key: &str) -> Uuid {
         let id = Uuid::now_v7();
         sqlx::query(
             "INSERT INTO role_bindings (id, subject_id, role_key, scope_type)
@@ -881,7 +881,7 @@ mod db_tests {
     }
 
     /// Insert one audit-visible event and return its (v7, creation-ordered) id.
-    async fn event(db: &PgPool, tenant: TenantId, kind: &str, actor_type: &str) -> EventId {
+    async fn event(db: &DbPool, tenant: TenantId, kind: &str, actor_type: &str) -> EventId {
         let id = EventId::new();
         sqlx::query(
             "INSERT INTO events (id, tenant_id, kind, actor_type, actor_id)
@@ -898,7 +898,7 @@ mod db_tests {
         id
     }
 
-    async fn cleanup(db: &PgPool, t: TenantId) {
+    async fn cleanup(db: &DbPool, t: TenantId) {
         // role_bindings have no tenant_id column, so delete them via their
         // subjects first (both role_bindings and tenant_members reference users).
         let _ = sqlx::query(
@@ -920,7 +920,7 @@ mod db_tests {
     }
 
     /// A member: a v7 `users` row (the keyset id) + its `tenant_members` grant.
-    async fn member(db: &PgPool, tenant: TenantId, email: &str, name: &str, role: &str) -> Uuid {
+    async fn member(db: &DbPool, tenant: TenantId, email: &str, name: &str, role: &str) -> Uuid {
         let uid = Uuid::now_v7();
         sqlx::query(
             "INSERT INTO users (id, tenant_id, display_name, email, role)

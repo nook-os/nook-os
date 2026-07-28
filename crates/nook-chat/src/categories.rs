@@ -47,7 +47,7 @@ fn scope_with(bind: &str) -> String {
 }
 
 /// The org a tenant belongs to (`tenants.org_id`).
-async fn org_of(db: &sqlx::PgPool, tenant: Uuid) -> Result<Uuid, ChatError> {
+async fn org_of(db: &nook_db::DbPool, tenant: Uuid) -> Result<Uuid, ChatError> {
     let (org,): (Uuid,) = sqlx::query_as("SELECT org_id FROM public.tenants WHERE id = $1")
         .bind(tenant)
         .fetch_one(db)
@@ -58,7 +58,7 @@ async fn org_of(db: &sqlx::PgPool, tenant: Uuid) -> Result<Uuid, ChatError> {
 
 /// A scope's categories in display order — the shared read behind the list
 /// endpoint and the reorder response.
-async fn scoped(db: &sqlx::PgPool, tenant: Uuid) -> Result<Vec<ChatCategory>, ChatError> {
+async fn scoped(db: &nook_db::DbPool, tenant: Uuid) -> Result<Vec<ChatCategory>, ChatError> {
     let rows = sqlx::query_as::<_, CategoryRow>(&format!(
         "SELECT {CATEGORY_COLS} FROM chat_channel_categories
          WHERE {scope} ORDER BY position, created_at",

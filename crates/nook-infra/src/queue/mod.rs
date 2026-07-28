@@ -214,7 +214,7 @@ pub fn validate_provider(name: &str) -> Result<()> {
 /// by `validate_provider` (called from `Config::from_env`), so by the time we
 /// get here the provider is valid and anything but a recognised name resolves
 /// to the database backend rather than panicking a boot that already validated.
-pub async fn from_config(cfg: &crate::config::Config, db: sqlx::PgPool) -> Box<dyn Queue> {
+pub async fn from_config(cfg: &crate::config::Config, db: nook_db::DbPool) -> Box<dyn Queue> {
     // `sqs` builds an AWS client and probes the queue; an unreachable queue is a
     // fatal boot error (AC-3), consistent with how AppState::new `.expect()`s
     // other fatal init (the vault). It never silently falls back — a deployment

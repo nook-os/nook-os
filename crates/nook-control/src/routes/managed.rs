@@ -56,7 +56,7 @@ fn hooks_content() -> String {
 /// "Newer" is decided by the default's own sha, recorded per row as
 /// `default_sha256`, so it is the shipped content changing — not the row
 /// differing from the default — that triggers a refresh.
-pub async fn seed(db: &sqlx::PgPool) -> Result<(), sqlx::Error> {
+pub async fn seed(db: &nook_db::DbPool) -> Result<(), sqlx::Error> {
     upsert_default(db, "skill", MANAGED_SKILL_NAME, NOOKOS_SKILL).await?;
     upsert_default(db, "hooks", HOOKS_NAME, &hooks_content()).await?;
     Ok(())
@@ -66,7 +66,7 @@ pub async fn seed(db: &sqlx::PgPool) -> Result<(), sqlx::Error> {
 /// applies to each embedded default). Public so the seed rules can be exercised
 /// against a synthetic key without disturbing the real rows.
 pub async fn upsert_default(
-    db: &sqlx::PgPool,
+    db: &nook_db::DbPool,
     kind: &str,
     name: &str,
     content: &str,
@@ -172,7 +172,7 @@ pub async fn get_hooks(
 /// node applies (AC-4). Sub-ticket 2's push is `send_to_node(node, payload)` over
 /// these; here we only prove the stored row maps cleanly onto the wire type.
 pub async fn managed_skills_as_install(
-    db: &sqlx::PgPool,
+    db: &nook_db::DbPool,
 ) -> Result<Vec<nook_proto::ControlToNode>, sqlx::Error> {
     let rows: Vec<(String, String, String)> = sqlx::query_as(
         "SELECT name, content, sha256 FROM managed_content WHERE kind = 'skill' ORDER BY name",
@@ -195,7 +195,7 @@ pub async fn managed_skills_as_install(
 /// node applies (MAIN-105 AC-3). `None` when the store has no hooks row, so
 /// connect-replay simply sends nothing rather than an empty push.
 pub async fn managed_hooks_as_install(
-    db: &sqlx::PgPool,
+    db: &nook_db::DbPool,
 ) -> Result<Option<nook_proto::ControlToNode>, sqlx::Error> {
     let row: Option<(String, String)> = sqlx::query_as(
         "SELECT content, sha256 FROM managed_content WHERE kind = 'hooks' AND name = $1",

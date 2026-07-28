@@ -94,7 +94,7 @@ pub struct Access {
 ///   the owning org (`tenants.org_id`). The person behind a user is stable
 ///   across tenants, so one person in two org tenants sees the one channel.
 pub async fn access(
-    db: &sqlx::PgPool,
+    db: &nook_db::DbPool,
     channel_id: Uuid,
     caller: &Caller,
 ) -> Result<Access, ChatError> {
@@ -130,7 +130,7 @@ pub async fn access(
 /// user in any tenant whose `org_id` matches — the cross-tenant membership rule
 /// (AC-1). Reaches `public.users`/`public.tenants` via the `chat,public`
 /// search_path, like the existing `tenant_role` lookup.
-async fn person_in_org(db: &sqlx::PgPool, user_id: Uuid, org: Uuid) -> Result<bool, ChatError> {
+async fn person_in_org(db: &nook_db::DbPool, user_id: Uuid, org: Uuid) -> Result<bool, ChatError> {
     let (ok,): (bool,) = sqlx::query_as(
         "SELECT EXISTS(
              SELECT 1 FROM public.users u
@@ -151,7 +151,7 @@ async fn person_in_org(db: &sqlx::PgPool, user_id: Uuid, org: Uuid) -> Result<bo
 /// caller's `person_id` and checks `chat_channel_participants` — the same
 /// person-keyed membership `dms::open` writes.
 async fn person_is_participant(
-    db: &sqlx::PgPool,
+    db: &nook_db::DbPool,
     user_id: Uuid,
     channel_id: Uuid,
 ) -> Result<bool, ChatError> {
@@ -171,7 +171,7 @@ async fn person_is_participant(
 }
 
 /// The org a tenant belongs to (`tenants.org_id`).
-async fn org_of(db: &sqlx::PgPool, tenant: Uuid) -> Result<Uuid, ChatError> {
+async fn org_of(db: &nook_db::DbPool, tenant: Uuid) -> Result<Uuid, ChatError> {
     let (org,): (Uuid,) = sqlx::query_as("SELECT org_id FROM public.tenants WHERE id = $1")
         .bind(tenant)
         .fetch_one(db)
@@ -424,12 +424,12 @@ mod tests {
     use axum::extract::{Path, Query, State};
     use axum::Json;
     use chrono::{DateTime, Utc};
+    use nook_db::DbPool;
     use nook_types::{
         ChatChannelPlacement, CreateChatCategory, CreateChatChannel, ReorderChatCategories,
         UpdateChatChannel,
     };
     use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
-    use sqlx::PgPool;
     use std::str::FromStr;
     use std::sync::Arc;
     use uuid::Uuid;
@@ -449,7 +449,7 @@ mod tests {
     // exactly as the service configures its pool. DB-backed; no-ops without
     // NOOK_REQUIRE_DB=1, matching the suite convention.
 
-    async fn pool(url: &str, search_path: &str) -> PgPool {
+    async fn pool(url: &str, search_path: &str) -> DbPool {
         let opts = PgConnectOptions::from_str(url)
             .unwrap()
             .options([("search_path", search_path)]);
@@ -480,7 +480,7 @@ mod tests {
         })
     }
 
-    async fn new_tenant(db: &PgPool) -> Uuid {
+    async fn new_tenant(db: &DbPool) -> Uuid {
         let id = Uuid::now_v7();
         sqlx::query("INSERT INTO public.tenants (id, name, slug) VALUES ($1, $2, $2)")
             .bind(id)
@@ -491,7 +491,7 @@ mod tests {
         id
     }
 
-    async fn add_user(db: &PgPool, tenant: Uuid, role: &str) -> Uuid {
+    async fn add_user(db: &DbPool, tenant: Uuid, role: &str) -> Uuid {
         let id = Uuid::now_v7();
         sqlx::query(
             "INSERT INTO public.users (id, tenant_id, person_id, display_name, email, role)
@@ -519,7 +519,7 @@ mod tests {
         matches!(r, Err(ChatError::Forbidden))
     }
 
-    async fn cleanup(db: &PgPool, tenant: Uuid) {
+    async fn cleanup(db: &DbPool, tenant: Uuid) {
         let _ = sqlx::query("DELETE FROM chat_channels WHERE owner_id = $1")
             .bind(tenant)
             .execute(db)
@@ -536,7 +536,7 @@ mod tests {
 
     // ── Org channels (MAIN-112) ─────────────────────────────────────────────
 
-    async fn new_org(db: &PgPool) -> Uuid {
+    async fn new_org(db: &DbPool) -> Uuid {
         let id = Uuid::now_v7();
         sqlx::query("INSERT INTO public.orgs (id, name, slug) VALUES ($1, $2, $2)")
             .bind(id)
@@ -547,7 +547,7 @@ mod tests {
         id
     }
 
-    async fn new_tenant_in_org(db: &PgPool, org: Uuid) -> Uuid {
+    async fn new_tenant_in_org(db: &DbPool, org: Uuid) -> Uuid {
         let id = Uuid::now_v7();
         sqlx::query("INSERT INTO public.tenants (id, name, slug, org_id) VALUES ($1, $2, $2, $3)")
             .bind(id)
@@ -561,7 +561,7 @@ mod tests {
 
     /// A user for a specific `person` — so the same person can hold users in two
     /// org tenants (the AC-2 dedupe case).
-    async fn add_user_person(db: &PgPool, tenant: Uuid, person: Uuid, role: &str) -> Uuid {
+    async fn add_user_person(db: &DbPool, tenant: Uuid, person: Uuid, role: &str) -> Uuid {
         let id = Uuid::now_v7();
         sqlx::query(
             "INSERT INTO public.users (id, tenant_id, person_id, display_name, email, role)
@@ -1104,7 +1104,7 @@ mod tests {
 
     /// Insert a message into a channel, returning its `created_at` so a test can
     /// pin a cursor exactly at or around it.
-    async fn post_msg(db: &PgPool, channel: Uuid, author: Uuid, tenant: Uuid) -> DateTime<Utc> {
+    async fn post_msg(db: &DbPool, channel: Uuid, author: Uuid, tenant: Uuid) -> DateTime<Utc> {
         let (ts,): (DateTime<Utc>,) = sqlx::query_as(
             "INSERT INTO chat_messages (id, channel_id, author_id, tenant_id, body)
              VALUES ($1, $2, $3, $4, 'hi') RETURNING created_at",
@@ -1121,7 +1121,7 @@ mod tests {
 
     /// Force a read cursor to an exact instant — used to test the strict-`>`
     /// boundary and the monotonic (`GREATEST`) guard directly.
-    async fn set_cursor(db: &PgPool, channel: Uuid, user: Uuid, at: DateTime<Utc>) {
+    async fn set_cursor(db: &DbPool, channel: Uuid, user: Uuid, at: DateTime<Utc>) {
         sqlx::query(
             "INSERT INTO chat_read_cursors (channel_id, user_id, last_read_at)
              VALUES ($1, $2, $3)

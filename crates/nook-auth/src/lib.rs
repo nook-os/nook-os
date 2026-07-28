@@ -7,13 +7,13 @@
 //! than copying them means the two services cannot drift: a change to how a
 //! session is validated is a change in one place.
 //!
-//! The queries take a `&PgPool` and nothing else — no `AppState`, no framework —
+//! The queries take a `&DbPool` and nothing else — no `AppState`, no framework —
 //! so any service holding the shared Postgres can call them. The credential
 //! plumbing (reading the cookie, splitting the `Authorization` header, the
 //! node-cert path) stays in each service; this is only the database check that
 //! must be identical.
 
-use sqlx::PgPool;
+use nook_db::DbPool;
 use uuid::Uuid;
 
 /// The browser session cookie. Its value IS the raw session id (server-side
@@ -72,7 +72,7 @@ pub fn hash_token(token: &str) -> String {
 /// One query, folding the membership check into the row so 401 (no/expired
 /// session) stays distinct from 403 (grant revoked) — the exact shape the
 /// control plane's `AuthCtx` used before this was extracted.
-pub async fn resolve_session(pool: &PgPool, session_id: Uuid) -> Result<Resolved, AuthError> {
+pub async fn resolve_session(pool: &DbPool, session_id: Uuid) -> Result<Resolved, AuthError> {
     let (resolved, is_member) = resolve_session_identity(pool, session_id).await?;
     // The membership check is what separates 401 (no/expired session) from 403
     // (session fine, but no grant on its tenant) — see `AuthError`.
@@ -93,7 +93,7 @@ pub async fn resolve_session(pool: &PgPool, session_id: Uuid) -> Result<Resolved
 /// single exception, and it returns `is_member` so the caller can still tell the
 /// difference rather than being handed a bare identity.
 pub async fn resolve_session_identity(
-    pool: &PgPool,
+    pool: &DbPool,
     session_id: Uuid,
 ) -> Result<(Resolved, bool), AuthError> {
     let row: Option<(Uuid, Uuid, bool)> = sqlx::query_as(
@@ -122,7 +122,7 @@ pub async fn resolve_session_identity(
 }
 
 /// Resolve a `nook_user_` bearer token, refreshing its last-used timestamp.
-pub async fn resolve_bearer(pool: &PgPool, token: &str) -> Result<Resolved, AuthError> {
+pub async fn resolve_bearer(pool: &DbPool, token: &str) -> Result<Resolved, AuthError> {
     let hash = hash_token(token);
     let row: Option<(Uuid, Uuid, Uuid)> = sqlx::query_as(
         "SELECT id, user_id, tenant_id FROM user_tokens

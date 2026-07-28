@@ -14,9 +14,9 @@ use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
+use nook_db::DbPool;
 use nook_proto::{AttachServerMessage, ControlToNode, UiEvent};
 use nook_types::{GitFileStatus, NodeId, SessionId, TenantId};
-use sqlx::PgPool;
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use uuid::Uuid;
 
@@ -205,7 +205,7 @@ impl Registry {
 
     /// Join the cross-instance bus. Idempotent; without it the registry is a
     /// plain single-instance in-memory registry.
-    pub fn start_bus(self: &Arc<Self>, pool: PgPool) {
+    pub fn start_bus(self: &Arc<Self>, pool: DbPool) {
         let (tx, rx) = mpsc::unbounded_channel();
         if self.bus_tx.set(tx).is_ok() {
             bus::start(self.clone(), pool, rx);
@@ -724,7 +724,7 @@ impl Registry {
     // ── Bus plumbing (called from bus.rs) ──────────────────────────────────
 
     /// Refresh the lease mirror from Postgres.
-    pub async fn refresh_lease_cache(&self, pool: &PgPool) {
+    pub async fn refresh_lease_cache(&self, pool: &DbPool) {
         let rows: Vec<(Uuid, Uuid, f64)> = sqlx::query_as(
             "SELECT id, owning_instance_id,
                     EXTRACT(EPOCH FROM lease_expires_at - now())::float8

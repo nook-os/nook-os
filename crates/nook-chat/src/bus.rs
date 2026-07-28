@@ -10,9 +10,9 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use nook_db::DbPool;
 use serde::{Deserialize, Serialize};
 use sqlx::postgres::PgListener;
-use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::registry::Registry;
@@ -36,7 +36,7 @@ struct Notice {
 /// Announce a posted OR updated message so peer instances deliver it too. Best
 /// effort: a failed NOTIFY costs cross-instance liveness for one message, never
 /// correctness of what was stored.
-pub async fn publish(pool: &PgPool, message_id: Uuid, origin: Uuid, updated: bool) {
+pub async fn publish(pool: &DbPool, message_id: Uuid, origin: Uuid, updated: bool) {
     let payload = serde_json::to_string(&Notice {
         id: message_id,
         origin,
@@ -56,7 +56,7 @@ pub async fn publish(pool: &PgPool, message_id: Uuid, origin: Uuid, updated: boo
 /// Spawn the listener for the life of the process: receive peers' announcements,
 /// read the message back, and deliver it to local subscribers. Reconnects on
 /// error so a dropped listener connection is self-healing.
-pub fn start(registry: Arc<Registry>, pool: PgPool) {
+pub fn start(registry: Arc<Registry>, pool: DbPool) {
     tokio::spawn(async move {
         loop {
             if let Err(e) = run(&registry, &pool).await {
@@ -67,7 +67,7 @@ pub fn start(registry: Arc<Registry>, pool: PgPool) {
     });
 }
 
-async fn run(registry: &Registry, pool: &PgPool) -> anyhow::Result<()> {
+async fn run(registry: &Registry, pool: &DbPool) -> anyhow::Result<()> {
     let mut listener = PgListener::connect_with(pool).await?;
     listener.listen(NOTIFY_CHANNEL).await?;
     loop {

@@ -159,7 +159,10 @@ pub async fn confirm(
 /// The confirm state machine, split from the handler for testing. Consumes a
 /// live token and verifies; refuses a consumed/expired/unknown token; treats a
 /// used link on an already-verified address as an idempotent success.
-pub async fn confirm_core(db: &sqlx::PgPool, token: &str) -> ApiResult<ConfirmVerificationResult> {
+pub async fn confirm_core(
+    db: &nook_db::DbPool,
+    token: &str,
+) -> ApiResult<ConfirmVerificationResult> {
     let decline = |msg: &str| {
         Ok(ConfirmVerificationResult {
             verified: false,
@@ -222,12 +225,12 @@ mod tests {
     use crate::seed::hash_token;
     use crate::services::identity::email_is_verified;
     use crate::state::AppState;
+    use nook_db::DbPool;
     use nook_types::UserId;
     use sqlx::postgres::PgPoolOptions;
-    use sqlx::PgPool;
     use uuid::Uuid;
 
-    async fn pool() -> Option<PgPool> {
+    async fn pool() -> Option<DbPool> {
         if std::env::var("NOOK_REQUIRE_DB").ok().as_deref() != Some("1") {
             return None;
         }
@@ -240,7 +243,7 @@ mod tests {
         Some(db)
     }
 
-    async fn tenant(db: &PgPool, name: &str) -> Uuid {
+    async fn tenant(db: &DbPool, name: &str) -> Uuid {
         let id = Uuid::new_v4();
         sqlx::query("INSERT INTO tenants (id, name, slug) VALUES ($1,$2,$3)")
             .bind(id)
@@ -254,7 +257,7 @@ mod tests {
 
     /// A user row. `local` decides whether it has a password hash (local
     /// account) or none (OIDC-style).
-    async fn user(db: &PgPool, tenant: Uuid, email: &str, local: bool) -> UserId {
+    async fn user(db: &DbPool, tenant: Uuid, email: &str, local: bool) -> UserId {
         let id = Uuid::new_v4();
         sqlx::query(
             "INSERT INTO users (id, tenant_id, display_name, email, username, password_hash, role, person_id)
@@ -271,7 +274,7 @@ mod tests {
         UserId(id)
     }
 
-    async fn live_tokens(db: &PgPool, uid: UserId) -> Vec<(String,)> {
+    async fn live_tokens(db: &DbPool, uid: UserId) -> Vec<(String,)> {
         sqlx::query_as(
             "SELECT token_hash FROM email_verification_tokens WHERE user_id = $1 AND consumed_at IS NULL",
         )
@@ -281,7 +284,7 @@ mod tests {
         .unwrap()
     }
 
-    async fn cleanup(db: &PgPool, tenants: &[Uuid]) {
+    async fn cleanup(db: &DbPool, tenants: &[Uuid]) {
         for t in tenants {
             // Child rows key off the user, which keys off the tenant.
             let _ = sqlx::query("DELETE FROM email_verification_tokens WHERE user_id IN (SELECT id FROM users WHERE tenant_id = $1)").bind(t).execute(db).await;

@@ -9,6 +9,7 @@ name = "nook_infra"
 path = "src/lib.rs"
 
 [dependencies]
+nook-db = { workspace = true }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 tracing = { workspace = true }

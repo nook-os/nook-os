@@ -16,6 +16,7 @@ path = "src/main.rs"
 # from the control plane's HTTP/WS/UI surface, so a fleet of workers scales
 # cheaply (MAIN-148 AC-1).
 [dependencies]
+nook-db = { workspace = true }
 nook-infra = { workspace = true }
 tokio = { workspace = true }
 sqlx = { workspace = true }

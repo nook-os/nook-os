@@ -268,7 +268,7 @@ async fn fan_out(
 /// on register. The node skips writes whose sha it already has, so the steady
 /// state costs nothing.
 pub async fn all_for_tenant(
-    db: &sqlx::PgPool,
+    db: &nook_db::DbPool,
     tenant_id: TenantId,
 ) -> Result<Vec<nook_proto::ControlToNode>, sqlx::Error> {
     let rows: Vec<(String, String, String)> =

@@ -5,8 +5,8 @@
 //! given tenant uses one or the other, never both. See `auth_mode` below.
 
 use anyhow::Result;
+use nook_db::DbPool;
 use nook_types::{Tenant, TenantId, User, UserId};
-use sqlx::PgPool;
 
 use crate::auth::password;
 use crate::error::{ApiError, ApiResult};
@@ -36,7 +36,7 @@ impl AuthMode {
 }
 
 /// Read a tenant's mode. `None` means nobody has signed in yet.
-pub async fn mode_of(db: &PgPool, tenant: TenantId) -> Result<Option<AuthMode>, sqlx::Error> {
+pub async fn mode_of(db: &DbPool, tenant: TenantId) -> Result<Option<AuthMode>, sqlx::Error> {
     let row: Option<(Option<String>,)> =
         sqlx::query_as("SELECT auth_mode FROM tenants WHERE id = $1")
             .bind(tenant)
@@ -51,7 +51,7 @@ pub async fn mode_of(db: &PgPool, tenant: TenantId) -> Result<Option<AuthMode>, 
 /// people signing in at the same moment on a fresh instance would otherwise
 /// both see "undecided" and each set their own answer, and the loser would be
 /// silently locked out of an instance they thought they had just claimed.
-pub async fn claim_mode(db: &PgPool, tenant: TenantId, want: AuthMode) -> ApiResult<()> {
+pub async fn claim_mode(db: &DbPool, tenant: TenantId, want: AuthMode) -> ApiResult<()> {
     let settled: Option<(Option<String>,)> = sqlx::query_as(
         "UPDATE tenants SET auth_mode = $2 WHERE id = $1 AND auth_mode IS NULL
          RETURNING auth_mode",
@@ -90,7 +90,7 @@ pub async fn claim_mode(db: &PgPool, tenant: TenantId, want: AuthMode) -> ApiRes
 /// email". The identifier is matched case-insensitively against both columns;
 /// existing username sign-in is unchanged.
 pub async fn login(
-    db: &PgPool,
+    db: &DbPool,
     tenant: TenantId,
     identifier: &str,
     supplied: &str,
@@ -137,7 +137,7 @@ pub async fn login(
 /// `is_first` decides the role: the person who claims an empty instance owns
 /// it. Everyone after is created by an admin and starts as a member.
 pub async fn create(
-    db: &PgPool,
+    db: &DbPool,
     tenant: TenantId,
     username: &str,
     email: &str,
@@ -202,7 +202,7 @@ pub async fn create(
 /// The email is the caller's responsibility to take from the invite, never from
 /// the client. Username follows the ordinary rules; a duplicate is a clean 400.
 pub async fn register_invited(
-    db: &PgPool,
+    db: &DbPool,
     tenant: TenantId,
     username: &str,
     email: &str,
@@ -239,7 +239,7 @@ pub async fn register_invited(
 
 /// Change a password, proving the old one first.
 pub async fn change_password(
-    db: &PgPool,
+    db: &DbPool,
     user_id: UserId,
     current: &str,
     next: &str,
