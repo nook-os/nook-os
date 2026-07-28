@@ -2,8 +2,8 @@
 //! brings the same predictable environment back on every reboot.
 
 use anyhow::Result;
+use nook_db::DbPool;
 use nook_types::*;
-use sqlx::PgPool;
 
 use crate::config::Config;
 
@@ -266,7 +266,7 @@ fn daylight_tokens() -> serde_json::Value {
     .tokens()
 }
 
-pub async fn run(db: &PgPool, cfg: &Config) -> Result<()> {
+pub async fn run(db: &DbPool, cfg: &Config) -> Result<()> {
     // Built-in themes (always seeded, all environments).
     for (name, slug, tokens) in [
         ("Charcoal Gold", "charcoal-gold", charcoal_gold_tokens()),
@@ -488,7 +488,7 @@ pub async fn run(db: &PgPool, cfg: &Config) -> Result<()> {
 /// user would silently re-grant after a revocation, and would hand the role to
 /// whoever happened to be first if the users table were ever rebuilt. A second
 /// operator has to be a deliberate act.
-pub async fn bootstrap_operator(db: &PgPool) {
+pub async fn bootstrap_operator(db: &DbPool) {
     let existing: Result<Option<(uuid::Uuid,)>, _> =
         sqlx::query_as("SELECT id FROM role_bindings WHERE scope_type = 'deployment' LIMIT 1")
             .fetch_optional(db)

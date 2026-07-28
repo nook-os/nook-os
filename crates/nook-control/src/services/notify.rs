@@ -22,10 +22,10 @@
 
 use async_trait::async_trait;
 use hmac::{Hmac, Mac};
+use nook_db::DbPool;
 use nook_types::*;
 use serde_json::Value;
 use sha2::Sha256;
-use sqlx::PgPool;
 
 use crate::state::AppState;
 
@@ -736,7 +736,7 @@ pub fn matches_filters(n: &Notification, levels: &[String], kinds: &[String]) ->
     true
 }
 
-async fn record_outcome(db: &PgPool, channel: uuid::Uuid, result: anyhow::Result<()>) {
+async fn record_outcome(db: &DbPool, channel: uuid::Uuid, result: anyhow::Result<()>) {
     let (ok, err) = match result {
         Ok(()) => (true, None),
         Err(e) => {

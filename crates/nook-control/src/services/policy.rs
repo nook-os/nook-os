@@ -19,8 +19,8 @@
 //! visibility without anything having to insert defaults, and a bug in a
 //! seeding path cannot accidentally open a field.
 
+use nook_db::DbPool;
 use nook_types::{PolicyField, TenantId};
-use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::error::{ApiError, ApiResult};
@@ -80,7 +80,7 @@ impl Field {
 /// Is one field currently on for this org?
 ///
 /// The newest row wins; no row means off.
-pub async fn enabled(db: &PgPool, org: Uuid, field: Field) -> ApiResult<bool> {
+pub async fn enabled(db: &DbPool, org: Uuid, field: Field) -> ApiResult<bool> {
     let row: Option<(bool,)> = sqlx::query_as(
         "SELECT enabled FROM org_visibility_policy
          WHERE org_id = $1 AND field = $2
@@ -94,7 +94,7 @@ pub async fn enabled(db: &PgPool, org: Uuid, field: Field) -> ApiResult<bool> {
 }
 
 /// Every field with its current state, for a UI to render.
-pub async fn current(db: &PgPool, org: Uuid) -> ApiResult<Vec<PolicyField>> {
+pub async fn current(db: &DbPool, org: Uuid) -> ApiResult<Vec<PolicyField>> {
     let mut out = Vec::with_capacity(Field::ALL.len());
     for f in Field::ALL {
         out.push(PolicyField {

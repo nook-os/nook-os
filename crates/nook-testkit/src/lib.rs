@@ -29,9 +29,10 @@
 
 use anyhow::{Context, Result};
 use nook_control::state::AppState;
+use nook_db::DbPool;
 use nook_infra::Config;
 use nook_types::{NodeId, TenantId, UserId, WorkspaceId};
-use sqlx::{Connection, PgConnection, PgPool};
+use sqlx::{Connection, PgConnection};
 use tokio::sync::OnceCell;
 use uuid::Uuid;
 
@@ -60,7 +61,7 @@ async fn template_db(base_url: &str) -> &'static str {
                 .expect("create the template database");
             admin.close().await.ok();
 
-            let pool = PgPool::connect(&swap_db(base_url, &name))
+            let pool = DbPool::connect(&swap_db(base_url, &name))
                 .await
                 .expect("connect to the template database");
             nook_control::MIGRATOR
@@ -81,7 +82,7 @@ async fn template_db(base_url: &str) -> &'static str {
 /// database plus opt-in setup surfaces, dropped whole at teardown.
 pub struct TestBed {
     /// The pool for this test's private database.
-    pub pool: PgPool,
+    pub pool: DbPool,
     /// `DATABASE_URL` — the server + base database, used for the admin
     /// `CREATE`/`DROP DATABASE` statements (which cannot run against the target).
     base_url: String,
@@ -125,7 +126,7 @@ impl TestBed {
         .expect("create the test database from the template");
         admin.close().await.ok();
 
-        let pool = PgPool::connect(&swap_db(&base_url, &db_name))
+        let pool = DbPool::connect(&swap_db(&base_url, &db_name))
             .await
             .expect("connect to the fresh test database");
 

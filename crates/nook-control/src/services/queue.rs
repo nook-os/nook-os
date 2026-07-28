@@ -58,7 +58,7 @@ mod tests {
     use crate::config::Config;
     use std::time::Duration;
 
-    async fn pool() -> Option<sqlx::PgPool> {
+    async fn pool() -> Option<nook_db::DbPool> {
         if std::env::var("NOOK_REQUIRE_DB").ok().as_deref() != Some("1") {
             return None;
         }

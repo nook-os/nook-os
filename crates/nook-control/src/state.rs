@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use axum::extract::FromRef;
 use axum_extra::extract::cookie::Key;
-use sqlx::PgPool;
+use nook_db::DbPool;
 
 use crate::auth::{OidcContext, OidcState};
 use crate::config::Config;
@@ -13,7 +13,7 @@ use nook_dispatcher::{DispatcherBackend, RuleBasedDispatcher};
 
 #[derive(Clone)]
 pub struct AppState {
-    pub db: PgPool,
+    pub db: DbPool,
     pub cfg: Arc<Config>,
     /// OIDC discovery state — configured/usable/degraded, hot-swappable after
     /// boot so an IdP that was down at startup recovers without a restart
@@ -53,7 +53,7 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub async fn new(db: PgPool, cfg: Config, oidc: Option<OidcContext>) -> Self {
+    pub async fn new(db: DbPool, cfg: Config, oidc: Option<OidcContext>) -> Self {
         // Discovery state is built from config; `oidc` seeds the already-
         // discovered context from the boot-time attempt (MAIN-169).
         let oidc = Arc::new(OidcState::new(&cfg, oidc));

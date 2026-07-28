@@ -20,9 +20,9 @@
 
 use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Duration, Utc};
+use nook_db::DbPool;
 use nook_types::TenantId;
 use sha2::{Digest, Sha256};
-use sqlx::PgPool;
 use uuid::Uuid;
 
 /// CAs outlive the leaves they sign by a wide margin — rotating a CA is a
@@ -72,7 +72,7 @@ fn pem_to_der(pem: &str) -> Result<Vec<u8>> {
 /// immediately, whereas a rotation stages the new CA and promotes it later,
 /// once nodes have had a chance to pick it up.
 pub async fn generate(
-    db: &PgPool,
+    db: &DbPool,
     vault: &crate::crypto::Vault,
     tenant: TenantId,
     make_active: bool,
@@ -132,7 +132,7 @@ pub async fn generate(
 /// you are trying to retire, so enrolment and renewal both return this whole
 /// set. That is what makes rotation a background process rather than a
 /// fleet-wide outage.
-pub async fn trust_bundle(db: &PgPool, tenant: TenantId) -> Result<Vec<TenantCa>> {
+pub async fn trust_bundle(db: &DbPool, tenant: TenantId) -> Result<Vec<TenantCa>> {
     let rows: Vec<TenantCa> = sqlx::query_as(
         "SELECT id, tenant_id, state, cert_pem, fingerprint, not_after, created_at
            FROM tenant_cas WHERE tenant_id = $1 ORDER BY created_at",
@@ -165,7 +165,7 @@ type CaRow = (
 
 /// signing with something that isn't what the tenant enrolled against.
 pub async fn load_signer(
-    db: &PgPool,
+    db: &DbPool,
     vault: &crate::crypto::Vault,
     tenant: TenantId,
 ) -> Result<(TenantCa, String)> {
@@ -245,7 +245,7 @@ pub struct IssuedLeaf {
 /// reads identity off the certificate, which makes this the single point where
 /// "who is this machine" is established.
 pub async fn sign_node_csr(
-    db: &PgPool,
+    db: &DbPool,
     vault: &crate::crypto::Vault,
     tenant: TenantId,
     node_id: Uuid,
@@ -331,7 +331,7 @@ fn pem_wrap(label: &str, der: &[u8]) -> String {
 
 /// Promote a staged CA to be the tenant's signer, demoting the current one to
 /// `retiring` — it stays trusted, it just stops issuing.
-pub async fn promote(db: &PgPool, tenant: TenantId, ca_id: Uuid) -> Result<()> {
+pub async fn promote(db: &DbPool, tenant: TenantId, ca_id: Uuid) -> Result<()> {
     let mut tx = db.begin().await?;
     // Demote first: the partial unique index allows only one active row, so
     // the order matters.
@@ -361,7 +361,7 @@ pub async fn promote(db: &PgPool, tenant: TenantId, ca_id: Uuid) -> Result<()> {
 /// How many nodes still hold an unexpired leaf signed by this CA.
 ///
 /// The retirement guard, and the number an admin watches during a rotation.
-pub async fn live_leaves(db: &PgPool, tenant: TenantId, ca_id: Uuid) -> Result<i64> {
+pub async fn live_leaves(db: &DbPool, tenant: TenantId, ca_id: Uuid) -> Result<i64> {
     let (n,): (i64,) = sqlx::query_as(
         "SELECT count(*) FROM nodes
           WHERE tenant_id = $1 AND ca_id = $2
@@ -381,7 +381,7 @@ pub async fn live_leaves(db: &PgPool, tenant: TenantId, ca_id: Uuid) -> Result<i
 /// lock those machines out mid-rotation, which is exactly the outage the
 /// staged/active/retiring dance exists to avoid. A check here rather than a
 /// step in a runbook, because runbooks are not executed at 2am.
-pub async fn retire(db: &PgPool, tenant: TenantId, ca_id: Uuid) -> Result<()> {
+pub async fn retire(db: &DbPool, tenant: TenantId, ca_id: Uuid) -> Result<()> {
     let live = live_leaves(db, tenant, ca_id).await?;
     if live > 0 {
         bail!(
@@ -428,7 +428,7 @@ pub struct NodeIdentity {
 ///    in the certificate. A certificate that claims a node in someone else's
 ///    tenant is rejected even if it is otherwise perfectly valid — the
 ///    certificate proves *who*, the tenant check decides *what*.
-pub async fn verify_node_cert(db: &PgPool, cert_der: &[u8]) -> Result<NodeIdentity> {
+pub async fn verify_node_cert(db: &DbPool, cert_der: &[u8]) -> Result<NodeIdentity> {
     use x509_parser::prelude::*;
 
     let (_, cert) =

@@ -23,13 +23,13 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use async_trait::async_trait;
-use sqlx::PgPool;
+use nook_db::DbPool;
 
 use super::{Category, Mailer, SendOutcome};
 
 pub struct GuardedMailer {
     inner: Arc<dyn Mailer>,
-    db: PgPool,
+    db: DbPool,
     send_enabled: bool,
     notifications_enabled: bool,
     max_per_month: Option<i64>,
@@ -37,7 +37,7 @@ pub struct GuardedMailer {
 }
 
 impl GuardedMailer {
-    pub fn new(inner: Arc<dyn Mailer>, db: PgPool, cfg: &crate::config::Config) -> Self {
+    pub fn new(inner: Arc<dyn Mailer>, db: DbPool, cfg: &crate::config::Config) -> Self {
         Self {
             inner,
             db,
@@ -232,7 +232,7 @@ mod tests {
         assert_eq!(recipient_domain("trailing@"), "unknown");
     }
 
-    async fn pool() -> Option<PgPool> {
+    async fn pool() -> Option<DbPool> {
         if std::env::var("NOOK_REQUIRE_DB").ok().as_deref() != Some("1") {
             return None;
         }
@@ -248,11 +248,11 @@ mod tests {
         Some(db)
     }
 
-    fn guard(cap: Arc<CaptureMailer>, db: &PgPool, cfg: &Config) -> GuardedMailer {
+    fn guard(cap: Arc<CaptureMailer>, db: &DbPool, cfg: &Config) -> GuardedMailer {
         GuardedMailer::new(cap, db.clone(), cfg)
     }
 
-    async fn count(db: &PgPool) -> i64 {
+    async fn count(db: &DbPool) -> i64 {
         sqlx::query_as::<_, (i64,)>("SELECT count(*) FROM mail_sends")
             .fetch_one(db)
             .await

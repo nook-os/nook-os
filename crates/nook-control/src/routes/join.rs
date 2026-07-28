@@ -28,7 +28,7 @@ pub fn random_token(prefix: &str, len: usize) -> String {
 /// token) or the minter's user row is gone. `None` only when the tenant has no
 /// owner-role user to fall back to — the same guarantee the backfill makes.
 async fn owner_person(
-    db: &sqlx::PgPool,
+    db: &nook_db::DbPool,
     tenant: TenantId,
     minter: Option<uuid::Uuid>,
 ) -> Option<uuid::Uuid> {

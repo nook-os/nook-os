@@ -377,7 +377,7 @@ impl AuthCtx {
     /// `require_tenant_admin`, for scoping a listing rather than gating an
     /// action (MAIN-132): a member sees only their own resources, an admin the
     /// whole tenant. A node credential is not a role-holder — `false`.
-    pub async fn is_tenant_admin(&self, db: &sqlx::PgPool) -> Result<bool, ApiError> {
+    pub async fn is_tenant_admin(&self, db: &nook_db::DbPool) -> Result<bool, ApiError> {
         if !matches!(self.principal, Principal::User) {
             return Ok(false);
         }

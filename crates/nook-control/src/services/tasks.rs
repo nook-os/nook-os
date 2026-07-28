@@ -7,8 +7,8 @@
 //! the cost of that is two extra queries for a whole board rather than two per
 //! task.
 
+use nook_db::DbPool;
 use nook_types::*;
-use sqlx::PgPool;
 use std::collections::HashMap;
 
 use crate::error::{ApiError, ApiResult};
@@ -75,7 +75,7 @@ pub fn public_title(task: &TaskItem) -> Option<&str> {
 /// N+1 there is the difference between one render and two hundred round trips.
 /// Two queries regardless of how many tasks come in.
 pub async fn enrich(
-    db: &PgPool,
+    db: &DbPool,
     base_url: &str,
     viewer: UserId,
     mut tasks: Vec<TaskItem>,
@@ -211,7 +211,7 @@ pub async fn enrich(
 
 /// One task, enriched.
 pub async fn enrich_one(
-    db: &PgPool,
+    db: &DbPool,
     base_url: &str,
     viewer: UserId,
     task: TaskItem,
@@ -227,7 +227,7 @@ pub async fn enrich_one(
 /// Agents are told keys, not uuids — `Closes NOOK-42` is the join between a PR
 /// and its issue — so every task-addressed endpoint accepts both. Tenant-scoped
 /// either way: a uuid is not an authorisation.
-pub async fn resolve_id(db: &PgPool, tenant: TenantId, ident: &str) -> ApiResult<TaskId> {
+pub async fn resolve_id(db: &DbPool, tenant: TenantId, ident: &str) -> ApiResult<TaskId> {
     if let Ok(uuid) = ident.parse::<uuid::Uuid>() {
         let found: Option<(TaskId,)> =
             sqlx::query_as("SELECT id FROM tasks WHERE id = $1 AND tenant_id = $2")
@@ -275,7 +275,7 @@ fn split_key(ident: &str) -> Option<(String, i32)> {
 /// Lowest position wins when a board has two of a type — a deliberate choice
 /// rather than an error, because a board with "In Review" and "In Progress"
 /// both marked `started` is a reasonable thing for a human to build.
-pub async fn column_of_type(db: &PgPool, board: BoardId, column_type: &str) -> ApiResult<ColumnId> {
+pub async fn column_of_type(db: &DbPool, board: BoardId, column_type: &str) -> ApiResult<ColumnId> {
     const TYPES: [&str; 6] = [
         "backlog",
         "unstarted",

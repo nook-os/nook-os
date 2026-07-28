@@ -28,7 +28,7 @@ pub struct MemberListQuery {
 /// The caller's role in a tenant, read from `tenant_members` — the single source
 /// of truth (not `users.role`), so authorization is against the membership that
 /// actually grants access (AC-7).
-async fn role_in(db: &sqlx::PgPool, user_id: uuid::Uuid, tenant: TenantId) -> ApiResult<String> {
+async fn role_in(db: &nook_db::DbPool, user_id: uuid::Uuid, tenant: TenantId) -> ApiResult<String> {
     let row: Option<(String,)> = sqlx::query_as(
         "SELECT role FROM tenant_members
          WHERE tenant_id = $1 AND principal_type = 'user' AND principal_id = $2",
@@ -72,7 +72,7 @@ fn may_modify_target(caller: &str, target: &str) -> bool {
 
 /// How many owners a tenant has — the guard that keeps a tenant from being left
 /// ownerless (AC-5).
-async fn owner_count(db: &sqlx::PgPool, tenant: TenantId) -> ApiResult<i64> {
+async fn owner_count(db: &nook_db::DbPool, tenant: TenantId) -> ApiResult<i64> {
     let (n,): (i64,) = sqlx::query_as(
         "SELECT count(*) FROM tenant_members
          WHERE tenant_id = $1 AND principal_type = 'user' AND role = 'owner'",
@@ -410,12 +410,12 @@ mod tests {
 #[cfg(test)]
 mod db_tests {
     use super::{owner_count, role_in};
+    use nook_db::DbPool;
     use nook_types::TenantId;
     use sqlx::postgres::PgPoolOptions;
-    use sqlx::PgPool;
     use uuid::Uuid;
 
-    async fn pool() -> Option<PgPool> {
+    async fn pool() -> Option<DbPool> {
         if std::env::var("NOOK_REQUIRE_DB").ok().as_deref() != Some("1") {
             return None;
         }
@@ -429,7 +429,7 @@ mod db_tests {
         Some(db)
     }
 
-    async fn member(db: &PgPool, tenant: Uuid, role: &str) -> Uuid {
+    async fn member(db: &DbPool, tenant: Uuid, role: &str) -> Uuid {
         let uid = Uuid::new_v4();
         sqlx::query(
             "INSERT INTO users (id, tenant_id, display_name, email, role, person_id)

@@ -13,6 +13,7 @@ name = "nook-control"
 path = "src/main.rs"
 
 [dependencies]
+nook-db = { workspace = true }
 nook-types = { workspace = true }
 nook-proto = { workspace = true }
 nook-dispatcher = { workspace = true }

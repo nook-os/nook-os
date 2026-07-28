@@ -218,7 +218,7 @@ pub async fn reconcile(
 /// attempt to name another node's paths, aborts the whole request rather than
 /// silently updating nothing.
 pub async fn migrate_paths(
-    db: &sqlx::PgPool,
+    db: &nook_db::DbPool,
     node_id: NodeId,
     pairs: &[nook_types::MigratePathPair],
 ) -> ApiResult<nook_types::MigratePathsResponse> {

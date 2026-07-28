@@ -21,7 +21,7 @@ const MIN_PARTICIPANTS: usize = 2;
 const MAX_PARTICIPANTS: usize = 8;
 
 /// The caller's person — the identity a DM keys on (MAIN-130).
-async fn person_of(db: &sqlx::PgPool, user_id: Uuid) -> Result<Uuid, ChatError> {
+async fn person_of(db: &nook_db::DbPool, user_id: Uuid) -> Result<Uuid, ChatError> {
     let (p,): (Uuid,) = sqlx::query_as("SELECT person_id FROM public.users WHERE id = $1")
         .bind(user_id)
         .fetch_optional(db)
@@ -34,7 +34,7 @@ async fn person_of(db: &sqlx::PgPool, user_id: Uuid) -> Result<Uuid, ChatError> 
 /// May `me` DM `other`? Yes iff `other` has a user in a tenant under one of
 /// `me`'s orgs — the same org boundary org channels use (AC-4). This both scopes
 /// the picker and gates `open`, so a DM can never be opened cross-org.
-async fn dmable(db: &sqlx::PgPool, me: Uuid, other: Uuid) -> Result<bool, ChatError> {
+async fn dmable(db: &nook_db::DbPool, me: Uuid, other: Uuid) -> Result<bool, ChatError> {
     let (ok,): (bool,) = sqlx::query_as(
         "SELECT EXISTS(
              SELECT 1 FROM public.users u
@@ -189,7 +189,7 @@ pub async fn open(
 /// A `dm` channel whose participant set is *exactly* `persons`. Count-equality
 /// plus "every participant is in the set" gives exact equality, since the set is
 /// deduped: |members| = N and members ⊆ set with |set| = N ⇒ members = set.
-async fn find_exact(db: &sqlx::PgPool, persons: &[Uuid]) -> Result<Option<Uuid>, ChatError> {
+async fn find_exact(db: &nook_db::DbPool, persons: &[Uuid]) -> Result<Option<Uuid>, ChatError> {
     let n = persons.len() as i64;
     let id: Option<Uuid> = sqlx::query_scalar(
         "SELECT c.id FROM chat_channels c
@@ -209,7 +209,7 @@ async fn find_exact(db: &sqlx::PgPool, persons: &[Uuid]) -> Result<Option<Uuid>,
 }
 
 /// A DM's summary: its id, creation time, and participants with display names.
-async fn summary(db: &sqlx::PgPool, id: Uuid, reader: Uuid) -> Result<DmSummary, ChatError> {
+async fn summary(db: &nook_db::DbPool, id: Uuid, reader: Uuid) -> Result<DmSummary, ChatError> {
     let (created_at,): (chrono::DateTime<chrono::Utc>,) =
         sqlx::query_as("SELECT created_at FROM chat_channels WHERE id = $1")
             .bind(id)
@@ -264,14 +264,14 @@ mod tests {
     use super::{list, open, people};
     use crate::{channels, AppState, Caller, ChatError};
     use axum::extract::{Json, State};
+    use nook_db::DbPool;
     use nook_types::OpenDmRequest;
     use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
-    use sqlx::PgPool;
     use std::str::FromStr;
     use std::sync::Arc;
     use uuid::Uuid;
 
-    async fn pool(url: &str, search_path: &str) -> PgPool {
+    async fn pool(url: &str, search_path: &str) -> DbPool {
         let opts = PgConnectOptions::from_str(url)
             .unwrap()
             .options([("search_path", search_path)]);
@@ -308,7 +308,7 @@ mod tests {
         }
     }
 
-    async fn new_org(db: &PgPool) -> Uuid {
+    async fn new_org(db: &DbPool) -> Uuid {
         let id = Uuid::now_v7();
         sqlx::query("INSERT INTO public.orgs (id, name, slug) VALUES ($1, $2, $2)")
             .bind(id)
@@ -319,7 +319,7 @@ mod tests {
         id
     }
 
-    async fn tenant_in_org(db: &PgPool, org: Uuid) -> Uuid {
+    async fn tenant_in_org(db: &DbPool, org: Uuid) -> Uuid {
         let id = Uuid::now_v7();
         sqlx::query("INSERT INTO public.tenants (id, name, slug, org_id) VALUES ($1, $2, $2, $3)")
             .bind(id)
@@ -332,7 +332,7 @@ mod tests {
     }
 
     /// A user for `person` in `tenant`. Returns the user id.
-    async fn user(db: &PgPool, tenant: Uuid, person: Uuid, name: &str) -> Uuid {
+    async fn user(db: &DbPool, tenant: Uuid, person: Uuid, name: &str) -> Uuid {
         let id = Uuid::now_v7();
         sqlx::query(
             "INSERT INTO public.users (id, tenant_id, person_id, display_name, email, role)

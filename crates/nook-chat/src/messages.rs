@@ -11,12 +11,12 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::Json;
 use chrono::{DateTime, Utc};
+use nook_db::DbPool;
 use nook_types::{
     ChatMessage, ChatMessagePage, ChatReactionAggregate, ChatServerMessage, ChatThread,
     PostChatMessage, UpdateChatMessage,
 };
 use serde::Deserialize;
-use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::{AppState, Caller, ChatError};
@@ -81,7 +81,7 @@ struct ReactionRow {
 /// path, which has no single viewer) yields `reacted = false` everywhere — the
 /// counts are still accurate, and each client overlays its own reacted state.
 async fn load_reactions(
-    pool: &PgPool,
+    pool: &DbPool,
     viewer: Option<Uuid>,
     ids: &[Uuid],
 ) -> HashMap<Uuid, Vec<ChatReactionAggregate>> {
@@ -117,7 +117,7 @@ async fn load_reactions(
 
 /// Attach reactions to a batch of messages for `viewer`. A deleted message keeps
 /// an empty reaction set (its content — and its tally — is gone from view).
-async fn attach_reactions(pool: &PgPool, viewer: Option<Uuid>, messages: &mut [ChatMessage]) {
+async fn attach_reactions(pool: &DbPool, viewer: Option<Uuid>, messages: &mut [ChatMessage]) {
     let ids: Vec<Uuid> = messages
         .iter()
         .filter(|m| !m.deleted)
@@ -276,12 +276,12 @@ pub async fn history(
 /// bus listener and the update handlers to build the broadcast payload. Uses the
 /// reply-rollup select so an edited/reacted PARENT keeps its `reply_count` in the
 /// update event (MAIN-116). Redaction + reactions applied.
-pub async fn fetch(pool: &PgPool, id: Uuid) -> Option<ChatMessage> {
+pub async fn fetch(pool: &DbPool, id: Uuid) -> Option<ChatMessage> {
     read_message(pool, None, id).await
 }
 
 /// One message by id with redaction + reactions attached for `viewer`.
-async fn read_message(pool: &PgPool, viewer: Option<Uuid>, id: Uuid) -> Option<ChatMessage> {
+async fn read_message(pool: &DbPool, viewer: Option<Uuid>, id: Uuid) -> Option<ChatMessage> {
     let row =
         sqlx::query_as::<_, MessageRow>(&format!("{SELECT_MESSAGE_WITH_REPLIES} WHERE m.id = $1"))
             .bind(id)
@@ -376,7 +376,7 @@ fn valid_emoji(emoji: &str) -> bool {
 
 /// Load a message's `(channel_id, author_id, deleted_at)` for an authz decision.
 async fn message_meta(
-    pool: &PgPool,
+    pool: &DbPool,
     id: Uuid,
 ) -> Result<(Uuid, Uuid, Option<DateTime<Utc>>), ChatError> {
     sqlx::query_as("SELECT channel_id, author_id, deleted_at FROM chat_messages WHERE id = $1")

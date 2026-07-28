@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/nook-types",
+    "crates/nook-db",
     "crates/nook-proto",
     "crates/nook-auth",
     "crates/nook-chat",
@@ -23,6 +24,7 @@ repository = "https://github.com/nookos/nookos"
 
 [workspace.dependencies]
 nook-types = { path = "crates/nook-types" }
+nook-db = { path = "crates/nook-db" }
 nook-proto = { path = "crates/nook-proto" }
 nook-auth = { path = "crates/nook-auth" }
 nook-infra = { path = "crates/nook-infra" }

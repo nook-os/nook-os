@@ -17,9 +17,9 @@
 //! team tenant as well. Both are written here so the two never disagree.
 
 use chrono::{DateTime, Utc};
+use nook_db::DbPool;
 use nook_types::{IdentityId, Tenant, TenantId, TenantMembership, User, UserId};
 use serde_json::Value;
-use sqlx::PgPool;
 
 use crate::error::{ApiError, ApiResult};
 use crate::state::AppState;
@@ -38,7 +38,7 @@ use crate::state::AppState;
 ///
 /// `active` is the tenant the session is scoped to right now, marked `current`.
 pub async fn memberships_for(
-    db: &PgPool,
+    db: &DbPool,
     user_id: UserId,
     active: TenantId,
 ) -> ApiResult<Vec<TenantMembership>> {
@@ -92,7 +92,7 @@ fn tenants_cache_key(user_id: UserId) -> String {
 /// access (NG-2), so authorization always reads the table directly.
 pub async fn cached_memberships_for(
     cache: &dyn crate::cache::Cache,
-    db: &PgPool,
+    db: &DbPool,
     user_id: UserId,
     active: TenantId,
 ) -> ApiResult<Vec<TenantMembership>> {
@@ -123,7 +123,7 @@ pub async fn cached_memberships_for(
 /// falls back to the TTL, and must never fail the write path that called it.
 pub async fn invalidate_person_tenants(
     cache: &dyn crate::cache::Cache,
-    db: &PgPool,
+    db: &DbPool,
     user_id: UserId,
 ) {
     let ids: Vec<UserId> = sqlx::query_scalar(
@@ -168,7 +168,7 @@ fn to_memberships(
 /// Correlated by `person_id`, never email (MAIN-12), so a matching email string
 /// in another tenant cannot be leveraged into a switch.
 pub async fn member_user_in_tenant(
-    db: &PgPool,
+    db: &DbPool,
     user_id: UserId,
     target: TenantId,
 ) -> ApiResult<Option<UserId>> {
@@ -199,7 +199,7 @@ pub async fn member_user_in_tenant(
 /// indexed lookup; the personal-tenant grant every user has (written in
 /// `login_identity`) means a legitimate session always passes.
 pub async fn active_membership_exists(
-    db: &PgPool,
+    db: &DbPool,
     user_id: UserId,
     tenant: TenantId,
 ) -> ApiResult<bool> {
@@ -236,7 +236,7 @@ pub struct IdentityClaims {
 /// anything: a local account (no identity) is unverified, and so is an OIDC
 /// login whose IdP did not assert `email_verified`. This is the platform
 /// predicate invite acceptance and account-linking will gate on.
-pub async fn email_is_verified(db: &PgPool, user_id: UserId) -> ApiResult<bool> {
+pub async fn email_is_verified(db: &DbPool, user_id: UserId) -> ApiResult<bool> {
     let (verified,): (bool,) = sqlx::query_as(
         "SELECT EXISTS (
              SELECT 1 FROM identities
@@ -255,7 +255,7 @@ pub async fn email_is_verified(db: &PgPool, user_id: UserId) -> ApiResult<bool> 
 /// user, carrying `email_verified_at`. `email_is_verified` then reports true
 /// with no change to the predicate. Idempotent — a second confirm keeps the
 /// first verification time.
-pub async fn mark_local_email_verified(db: &PgPool, user_id: UserId, email: &str) -> ApiResult<()> {
+pub async fn mark_local_email_verified(db: &DbPool, user_id: UserId, email: &str) -> ApiResult<()> {
     sqlx::query(
         "INSERT INTO identities (id, user_id, issuer, subject, email, raw_claims, email_verified_at)
          VALUES ($1, $2, 'local', $3, $4, '{\"verified_via\":\"local\"}'::jsonb, now())
@@ -579,15 +579,15 @@ mod db_tests {
         invalidate_person_tenants, member_user_in_tenant, memberships_for,
     };
     use crate::cache::memory::MemoryCache;
+    use nook_db::DbPool;
     use nook_types::{TenantId, UserId};
     use sqlx::postgres::PgPoolOptions;
-    use sqlx::PgPool;
     use uuid::Uuid;
 
     /// A pool, or `None` when there is no database to talk to — in which case
     /// the test returns early rather than failing, matching the suite's
     /// convention that DB-backed tests are skipped without `NOOK_REQUIRE_DB`.
-    async fn pool() -> Option<PgPool> {
+    async fn pool() -> Option<DbPool> {
         if std::env::var("NOOK_REQUIRE_DB").ok().as_deref() != Some("1") {
             return None;
         }
@@ -607,7 +607,7 @@ mod db_tests {
         Some(db)
     }
 
-    async fn tenant(db: &PgPool, name: &str) -> TenantId {
+    async fn tenant(db: &DbPool, name: &str) -> TenantId {
         let id = Uuid::new_v4();
         // Slug is unique instance-wide; the uuid keeps parallel/repeat runs from
         // colliding.
@@ -623,7 +623,7 @@ mod db_tests {
 
     /// A `users` row with an EXPLICIT `person_id` and `email`, plus its
     /// `tenant_members` grant — the two knobs AC-3 turns.
-    async fn member(db: &PgPool, tenant: TenantId, email: &str, person: Uuid) -> UserId {
+    async fn member(db: &DbPool, tenant: TenantId, email: &str, person: Uuid) -> UserId {
         let uid = Uuid::new_v4();
         sqlx::query(
             "INSERT INTO users (id, tenant_id, display_name, email, role, person_id)
@@ -649,7 +649,7 @@ mod db_tests {
         UserId(uid)
     }
 
-    async fn cleanup(db: &PgPool, tenants: &[TenantId]) {
+    async fn cleanup(db: &DbPool, tenants: &[TenantId]) {
         for t in tenants {
             let _ = sqlx::query("DELETE FROM tenant_members WHERE tenant_id = $1")
                 .bind(t.0)

@@ -18,13 +18,13 @@ use std::time::Duration;
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use sqlx::PgPool;
+use nook_db::DbPool;
 use uuid::Uuid;
 
 use super::{Nack, NewWork, Queue, QueueStats, WorkEnvelope};
 
 pub struct DbQueue {
-    db: PgPool,
+    db: DbPool,
 }
 
 #[derive(sqlx::FromRow)]
@@ -55,7 +55,7 @@ impl WorkRow {
 }
 
 impl DbQueue {
-    pub fn new(db: PgPool) -> Self {
+    pub fn new(db: DbPool) -> Self {
         Self { db }
     }
 
@@ -262,7 +262,7 @@ mod tests {
     }
 
     /// Reads the dead-letter table for the parameterized contract runners.
-    struct DbDead(sqlx::PgPool);
+    struct DbDead(nook_db::DbPool);
     #[async_trait::async_trait]
     impl DeadInspect for DbDead {
         async fn dead_count(&self, work_type: &str) -> i64 {
