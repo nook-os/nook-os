@@ -396,9 +396,33 @@ pub fn build_router(state: AppState) -> Router {
 
     // MCP: streamable-HTTP service guarded by the static MCP token (dev) or an
     // OIDC access token from the configured issuer.
-    let mcp = nook_mcp::router(std::sync::Arc::new(crate::mcp_backend::McpBackend {
-        state: state.clone(),
-    }))
+    //
+    // rmcp's DNS-rebinding protection rejects any Host header not on its
+    // allowlist, and its default is loopback-only — which 403'd every real
+    // client (ChatGPT at the public hostname, in-cluster agents at the compose
+    // service name) AFTER their auth succeeded (MAIN-190). Thread the hosts we
+    // actually serve; entries carry no port, so any port on these names passes.
+    let mcp_allowed_hosts = {
+        let mut hosts = vec![
+            "localhost".to_string(),
+            "127.0.0.1".to_string(),
+            "::1".to_string(),
+            // The compose service name in-cluster callers dial.
+            "control-plane".to_string(),
+        ];
+        if let Some(host) = host_of(&state.cfg.public_base_url) {
+            if !hosts.contains(&host) {
+                hosts.push(host);
+            }
+        }
+        hosts
+    };
+    let mcp = nook_mcp::router(
+        std::sync::Arc::new(crate::mcp_backend::McpBackend {
+            state: state.clone(),
+        }),
+        mcp_allowed_hosts,
+    )
     .layer(axum::middleware::from_fn_with_state(
         state.clone(),
         mcp_auth,
@@ -599,6 +623,24 @@ async fn oauth_protected_resource(
 /// one origin for another, from a custom scheme, is a fight with each
 /// platform's webview that has no upside. Refusing credentials here keeps that
 /// decision honest instead of half-working on one platform.
+/// The bare hostname of a URL — no scheme, port, userinfo, or path — for the
+/// MCP transport's Host allowlist (MAIN-190). Hand-rolled because pulling in a
+/// URL crate for one field is heavier than the parse.
+fn host_of(url: &str) -> Option<String> {
+    let rest = url.split_once("://").map(|(_, r)| r).unwrap_or(url);
+    let authority = rest.split(['/', '?', '#']).next()?;
+    let authority = authority
+        .rsplit_once('@')
+        .map(|(_, h)| h)
+        .unwrap_or(authority);
+    // Bracketed IPv6: `[::1]:8080` → `::1`.
+    if let Some(inner) = authority.strip_prefix('[') {
+        return inner.split_once(']').map(|(h, _)| h.to_string());
+    }
+    let host = authority.split(':').next().unwrap_or(authority);
+    (!host.is_empty()).then(|| host.to_string())
+}
+
 fn desktop_cors() -> CorsLayer {
     CorsLayer::new()
         .allow_origin(AllowOrigin::predicate(|origin, _| {
@@ -614,4 +656,27 @@ fn desktop_cors() -> CorsLayer {
         }))
         .allow_methods(tower_http::cors::Any)
         .allow_headers(tower_http::cors::Any)
+}
+
+#[cfg(test)]
+mod host_of_tests {
+    use super::host_of;
+
+    #[test]
+    fn host_of_extracts_the_bare_hostname() {
+        assert_eq!(
+            host_of("https://nook.hein.network").as_deref(),
+            Some("nook.hein.network")
+        );
+        assert_eq!(
+            host_of("http://localhost:8080/base").as_deref(),
+            Some("localhost")
+        );
+        assert_eq!(host_of("http://[::1]:8080").as_deref(), Some("::1"));
+        assert_eq!(
+            host_of("https://u:p@h.example:443/x?y#z").as_deref(),
+            Some("h.example")
+        );
+        assert_eq!(host_of(""), None);
+    }
 }

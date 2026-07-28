@@ -1051,11 +1051,26 @@ impl ServerHandler for NookMcp {
 }
 
 /// The `/mcp` streamable-HTTP service as an axum router.
-pub fn router(backend: Arc<dyn NookBackend>) -> axum::Router {
+/// The transport config with OUR host allowlist in place of rmcp's
+/// loopback-only default (MAIN-190). Split out so the threading is testable:
+/// everything else stays at the crate's defaults.
+fn transport_config(
+    allowed_hosts: Vec<String>,
+) -> rmcp::transport::streamable_http_server::StreamableHttpServerConfig {
+    rmcp::transport::streamable_http_server::StreamableHttpServerConfig::default()
+        .with_allowed_hosts(allowed_hosts)
+}
+
+/// `allowed_hosts`: every Host header this service answers for — the caller
+/// derives them from its own config (public hostname, loopbacks, in-cluster
+/// service name). Port-less entries match any port. rmcp's DNS-rebinding
+/// protection 403s everything else, so an empty-feeling list here is an outage
+/// for every remote client, not a hardening win (MAIN-190).
+pub fn router(backend: Arc<dyn NookBackend>, allowed_hosts: Vec<String>) -> axum::Router {
     let service = StreamableHttpService::new(
         move || Ok(NookMcp::new(backend.clone())),
         LocalSessionManager::default().into(),
-        Default::default(),
+        transport_config(allowed_hosts),
     );
     axum::Router::new().fallback_service(service)
 }
@@ -1063,6 +1078,18 @@ pub fn router(backend: Arc<dyn NookBackend>) -> axum::Router {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// MAIN-190 AC-4: the given hosts land in the transport config verbatim —
+    /// and non-empty, because an empty list means allow-all in rmcp and a
+    /// defaulted one means loopback-only; both ends of that spectrum were the
+    /// bug and the anti-fix respectively.
+    #[test]
+    fn transport_config_threads_the_allowed_hosts() {
+        let hosts = vec!["nook.example.test".to_string(), "localhost".to_string()];
+        let cfg = transport_config(hosts.clone());
+        assert_eq!(cfg.allowed_hosts, hosts);
+        assert!(cfg.stateful_mode, "other defaults are preserved");
+    }
 
     fn parts_with(caller: Option<McpCaller>) -> Parts {
         let mut parts = axum::http::Request::builder()
