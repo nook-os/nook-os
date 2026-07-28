@@ -270,9 +270,16 @@ function EpicGroup({
         className="backlog-epic-head"
         onClick={() => onOpen(epic.key ?? epic.id)}
       >
+        {/* The collapse chevron is a PRIMARY affordance, so it uses its own
+           always-visible class — NOT `card-menu-btn`, which is `opacity:0` and
+           only revealed by `.board-card:hover`. The epic head is not a
+           `.board-card`, so as a `card-menu-btn` this control was permanently
+           invisible and users clicked the head (opening the epic) instead of
+           collapsing (MAIN-182 root cause). */}
         <button
-          className="card-menu-btn"
+          className="backlog-epic-collapse"
           title={collapsed ? "expand" : "collapse"}
+          aria-label={collapsed ? "expand epic" : "collapse epic"}
           onClick={(e) => {
             e.stopPropagation();
             onToggle();
