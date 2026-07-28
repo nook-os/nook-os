@@ -2932,6 +2932,29 @@ textarea.env-area.blurred {
   font-size: 10.5px;
 }
 .ctxmenu-sep { height: 1px; margin: 3px 4px; background: var(--nook-border); }
+.ctxmenu-label { display: inline-flex; align-items: center; gap: 6px; }
+.ctxmenu-icon { display: inline-flex; align-items: center; }
+.ctxmenu-arrow { color: var(--nook-fg-faint); margin-left: auto; }
+.ctxmenu-item.danger { color: var(--nook-err); }
+.ctxmenu-item.danger:hover:not(:disabled),
+.ctxmenu-item.danger:focus-visible {
+  background: color-mix(in srgb, var(--nook-err) 16%, transparent);
+  color: var(--nook-err);
+}
+/* One-level submenu (MAIN-168): anchored to the right of its host row. */
+.ctxmenu-subhost { position: relative; }
+.ctxmenu-submenu {
+  position: absolute;
+  left: 100%;
+  top: -3px;
+  min-width: 150px;
+  padding: 3px;
+  background: var(--nook-bg-panel);
+  border: 1px solid var(--nook-border-bright);
+  border-radius: var(--nook-radius);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.55);
+  z-index: 1;
+}
 
 /* ── Inline composer ────────────────────────────────────────────────────── */
 

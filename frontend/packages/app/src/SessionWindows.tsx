@@ -2,12 +2,11 @@
 // many windows — so this strip is how a session gets more than one terminal.
 // Switching, adding, splitting, renaming and closing all go through the node
 // and re-render from the list tmux reports back.
-import React, { useState } from "react";
+import React from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { CircleDot, Columns2, Loader2, Plus, Rows2, X } from "lucide-react";
 import { api } from "@nookos/api";
-import { TabMenu } from "./SessionTabs";
-import { nativeContextMenu } from "./contextMenu";
+import { ContextMenuRegion, type ContextMenuItem } from "./contextMenu";
 import { useLive, liveAgentMark } from "./live";
 import { askText } from "./dialogs";
 
@@ -19,9 +18,6 @@ export function SessionWindows({ sessionId }: { sessionId: string }) {
   // an agent reported before its session exited/errored/was killed must not
   // linger as a spinner on the term-chip.
   const agent = liveAgentMark(status, agentRaw);
-  const [menu, setMenu] = useState<{ index: number; x: number; y: number } | null>(
-    null,
-  );
   const key = ["session-windows", sessionId];
 
   const { data: windows } = useQuery({
@@ -48,21 +44,46 @@ export function SessionWindows({ sessionId }: { sessionId: string }) {
 
   const list = windows ?? [];
 
+  // A terminal chip's right-click menu, as items for the shared primitive
+  // (MAIN-168). Split acts on the active pane, as before.
+  const winMenu = (w: (typeof list)[number]): ContextMenuItem[] => [
+    { label: "Split Right", onSelect: () => act({ action: "split", vertical: false }) },
+    { label: "Split Down", onSelect: () => act({ action: "split", vertical: true }) },
+    { separator: true },
+    {
+      label: "Rename Terminal…",
+      onSelect: async () => {
+        const name = await askText({
+          title: "Rename terminal",
+          value: w.name,
+          confirmLabel: "rename",
+        });
+        if (name) act({ action: "rename", index: w.index, name });
+      },
+    },
+    {
+      label: "Close Terminal",
+      danger: true,
+      disabled: list.length < 2,
+      onSelect: () => act({ action: "close", index: w.index }),
+    },
+  ];
+
   return (
     <>
       <span className="term-strip">
         {list.map((w) => (
-          <div
+          // Right-click → the terminal menu, via the shared primitive (MAIN-168).
+          <ContextMenuRegion
             key={w.index}
+            style={{ display: "contents" }}
+            items={() => winMenu(w)}
+          >
+          <div
             role="button"
             tabIndex={0}
             className={`term-chip${w.active ? " active" : ""}`}
-            {...nativeContextMenu}
             onClick={() => act({ action: "select", index: w.index })}
-            onContextMenu={(e) => {
-              e.preventDefault();
-              setMenu({ index: w.index, x: e.clientX, y: e.clientY });
-            }}
             onDoubleClick={async () => {
               const name = await askText({
                 title: "Rename terminal",
@@ -103,6 +124,7 @@ export function SessionWindows({ sessionId }: { sessionId: string }) {
               </button>
             )}
           </div>
+          </ContextMenuRegion>
         ))}
         <button
           className="term-strip-add"
@@ -113,43 +135,6 @@ export function SessionWindows({ sessionId }: { sessionId: string }) {
           {list.length <= 1 && <span>terminal</span>}
         </button>
       </span>
-
-      {menu && (
-        <TabMenu
-          x={menu.x}
-          y={menu.y}
-          onClose={() => setMenu(null)}
-          items={[
-            {
-              label: "Split Right",
-              onSelect: () => act({ action: "split", vertical: false }),
-            },
-            {
-              label: "Split Down",
-              onSelect: () => act({ action: "split", vertical: true }),
-            },
-            {
-              label: "Rename Terminal…",
-              divider: true,
-              onSelect: async () => {
-                const w = list.find((x) => x.index === menu.index);
-                const name = await askText({
-                  title: "Rename terminal",
-                  value: w?.name ?? "",
-                  confirmLabel: "rename",
-                });
-                if (name) act({ action: "rename", index: menu.index, name });
-              },
-            },
-            {
-              label: "Close Terminal",
-              danger: true,
-              disabled: list.length < 2,
-              onSelect: () => act({ action: "close", index: menu.index }),
-            },
-          ]}
-        />
-      )}
     </>
   );
 }

@@ -102,6 +102,56 @@ describe("resolution", () => {
   });
 });
 
+describe("submenus (MAIN-168)", () => {
+  function renderSub(onDone: () => void) {
+    return render(
+      <MemoryRouter>
+        <ContextMenuProvider>
+          <ContextMenuRegion
+            items={[
+              {
+                label: "Move to",
+                children: [
+                  { label: "Todo", onSelect: () => {} },
+                  { label: "Done", onSelect: onDone },
+                ],
+              },
+            ]}
+          >
+            <div data-testid="card">a card</div>
+          </ContextMenuRegion>
+        </ContextMenuProvider>
+      </MemoryRouter>,
+    );
+  }
+
+  it("opens a submenu on hover and activates a child", async () => {
+    let done = false;
+    renderSub(() => {
+      done = true;
+    });
+    fireEvent.contextMenu(screen.getByTestId("card"));
+    const parent = await screen.findByText("Move to");
+    // Children are not shown until the parent row is hovered.
+    expect(screen.queryByText("Done")).toBeNull();
+    fireEvent.mouseEnter(parent.closest(".ctxmenu-subhost")!);
+    const done1 = await screen.findByText("Done");
+    fireEvent.click(done1);
+    expect(done).toBe(true);
+    // Activating a child closes the whole menu.
+    expect(screen.queryByText("Move to")).toBeNull();
+  });
+
+  it("does not close the menu when the parent row itself is clicked", async () => {
+    renderSub(() => {});
+    fireEvent.contextMenu(screen.getByTestId("card"));
+    const parent = await screen.findByText("Move to");
+    fireEvent.click(parent);
+    // The parent toggles its submenu open; the menu stays up.
+    expect(await screen.findByText("Done")).toBeTruthy();
+  });
+});
+
 describe("dismiss", () => {
   it("closes on Escape", async () => {
     renderApp();
