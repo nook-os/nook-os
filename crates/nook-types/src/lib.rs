@@ -39,6 +39,25 @@ macro_rules! id_type {
                     Ok(Self(Uuid::parse_str(s)?))
                 }
             }
+
+            // Bind as a dispatch parameter (MAIN-205). Implementing nook-db's
+            // IntoDbValue (a foreign trait) for this local newtype is allowed by
+            // the orphan rule where `From<Id> for DbValue` was not. The newtype
+            // is `#[sqlx(transparent)]` over `Uuid`, so this encodes exactly as
+            // binding the newtype did — `params![id]` needs no `.0` at the site.
+            impl nook_db::IntoDbValue for $name {
+                fn into_db_value(self) -> nook_db::DbValue {
+                    nook_db::DbValue::Uuid(Some(self.0))
+                }
+            }
+            impl nook_db::IntoDbValue for &$name {
+                fn into_db_value(self) -> nook_db::DbValue {
+                    nook_db::DbValue::Uuid(Some(self.0))
+                }
+            }
+            // `Option<$name>` can't impl IntoDbValue here (orphan rule: the local
+            // type is covered by foreign `Option`); such sites pass
+            // `opt.map(|x| x.0)` to reach the typed `Option<Uuid>` arm.
         )+
     };
 }

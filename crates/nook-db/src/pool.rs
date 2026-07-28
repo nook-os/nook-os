@@ -63,75 +63,56 @@ impl DbValue {
 }
 
 // ── ergonomic conversions ────────────────────────────────────────────────────
-// The `params![…]` sites lean on these so a call reads `params![tenant, id]`
-// rather than spelling every variant. UUID newtypes (`TenantId`, `NodeId`, …)
-// are `#[sqlx(transparent)]` over `Uuid`, so unwrapping to `Uuid` here encodes
-// identically to binding the newtype — the Postgres arm stays bit-identical.
 
-impl From<uuid::Uuid> for DbValue {
-    fn from(v: uuid::Uuid) -> Self {
-        DbValue::Uuid(Some(v))
-    }
+/// Conversion into a bound [`DbValue`], used by [`params!`]. Implemented here for
+/// the scalar/list/reference types, and in `nook-types` for the UUID newtype IDs
+/// (`TenantId`, `NodeId`, …) — a foreign-trait-for-local-type impl the orphan
+/// rule allows, which `From<Id> for DbValue` did not. That is what lets
+/// `params![tenant_id, opt_id, name]` take IDs, options, and scalars uniformly
+/// with no `.0` at the call site. UUID newtypes are `#[sqlx(transparent)]` over
+/// `Uuid`, so unwrapping encodes exactly as binding the newtype did — the
+/// Postgres arm stays bit-identical.
+pub trait IntoDbValue {
+    fn into_db_value(self) -> DbValue;
 }
-impl From<Option<uuid::Uuid>> for DbValue {
-    fn from(v: Option<uuid::Uuid>) -> Self {
-        DbValue::Uuid(v)
-    }
+
+macro_rules! into_db_value {
+    ($($t:ty => |$s:ident| $body:expr),+ $(,)?) => {
+        $( impl IntoDbValue for $t {
+            fn into_db_value(self) -> DbValue { let $s = self; $body }
+        } )+
+    };
 }
-impl From<String> for DbValue {
-    fn from(v: String) -> Self {
-        DbValue::Text(Some(v))
-    }
-}
-impl From<&str> for DbValue {
-    fn from(v: &str) -> Self {
-        DbValue::Text(Some(v.to_owned()))
-    }
-}
-impl From<Option<String>> for DbValue {
-    fn from(v: Option<String>) -> Self {
-        DbValue::Text(v)
-    }
-}
-impl From<bool> for DbValue {
-    fn from(v: bool) -> Self {
-        DbValue::Bool(Some(v))
-    }
-}
-impl From<i16> for DbValue {
-    fn from(v: i16) -> Self {
-        DbValue::I16(Some(v))
-    }
-}
-impl From<i32> for DbValue {
-    fn from(v: i32) -> Self {
-        DbValue::I32(Some(v))
-    }
-}
-impl From<i64> for DbValue {
-    fn from(v: i64) -> Self {
-        DbValue::I64(Some(v))
-    }
-}
-impl From<chrono::DateTime<chrono::Utc>> for DbValue {
-    fn from(v: chrono::DateTime<chrono::Utc>) -> Self {
-        DbValue::Timestamptz(Some(v))
-    }
-}
-impl From<serde_json::Value> for DbValue {
-    fn from(v: serde_json::Value) -> Self {
-        DbValue::Json(Some(v))
-    }
-}
-impl From<Vec<String>> for DbValue {
-    fn from(v: Vec<String>) -> Self {
-        DbValue::TextList(v)
-    }
-}
-impl From<Vec<uuid::Uuid>> for DbValue {
-    fn from(v: Vec<uuid::Uuid>) -> Self {
-        DbValue::UuidList(v)
-    }
+
+into_db_value! {
+    DbValue => |v| v,
+    uuid::Uuid => |v| DbValue::Uuid(Some(v)),
+    Option<uuid::Uuid> => |v| DbValue::Uuid(v),
+    &uuid::Uuid => |v| DbValue::Uuid(Some(*v)),
+    String => |v| DbValue::Text(Some(v)),
+    Option<String> => |v| DbValue::Text(v),
+    &str => |v| DbValue::Text(Some(v.to_owned())),
+    &String => |v| DbValue::Text(Some(v.clone())),
+    bool => |v| DbValue::Bool(Some(v)),
+    Option<bool> => |v| DbValue::Bool(v),
+    i16 => |v| DbValue::I16(Some(v)),
+    Option<i16> => |v| DbValue::I16(v),
+    i32 => |v| DbValue::I32(Some(v)),
+    Option<i32> => |v| DbValue::I32(v),
+    i64 => |v| DbValue::I64(Some(v)),
+    Option<i64> => |v| DbValue::I64(v),
+    f64 => |v| DbValue::F64(Some(v)),
+    chrono::DateTime<chrono::Utc> => |v| DbValue::Timestamptz(Some(v)),
+    Option<chrono::DateTime<chrono::Utc>> => |v| DbValue::Timestamptz(v),
+    serde_json::Value => |v| DbValue::Json(Some(v)),
+    Option<serde_json::Value> => |v| DbValue::Json(v),
+    &serde_json::Value => |v| DbValue::Json(Some(v.clone())),
+    Vec<u8> => |v| DbValue::Bytes(Some(v)),
+    Option<Vec<u8>> => |v| DbValue::Bytes(v),
+    Vec<String> => |v| DbValue::TextList(v),
+    Vec<uuid::Uuid> => |v| DbValue::UuidList(v),
+    Vec<i64> => |v| DbValue::I64List(v),
+    &[String] => |v| DbValue::TextList(v.to_vec()),
 }
 
 /// Build a `Vec<DbValue>` from a heterogeneous parameter list, in bind order.
@@ -145,7 +126,7 @@ impl From<Vec<uuid::Uuid>> for DbValue {
 #[macro_export]
 macro_rules! params {
     () => { ::std::vec::Vec::<$crate::DbValue>::new() };
-    ($($v:expr),+ $(,)?) => { ::std::vec![$($crate::DbValue::from($v)),+] };
+    ($($v:expr),+ $(,)?) => { ::std::vec![$($crate::IntoDbValue::into_db_value($v)),+] };
 }
 
 // ── argument encoding, per arm ───────────────────────────────────────────────
@@ -348,7 +329,10 @@ pub trait Db {
 impl Db for PgPool {
     async fn exec(&self, sql: &str, params: Vec<DbValue>) -> Result<u64, sqlx::Error> {
         let args = pg_args(params)?;
-        Ok(sqlx::query_with(sql, args).execute(self).await?.rows_affected())
+        Ok(sqlx::query_with(sql, args)
+            .execute(self)
+            .await?
+            .rows_affected())
     }
     async fn query_one<T>(&self, sql: &str, params: Vec<DbValue>) -> Result<T, sqlx::Error>
     where

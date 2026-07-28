@@ -276,7 +276,7 @@ pub async fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nook_db::{Postgres, TypeMapping};
+    use nook_db::{params, Db, Postgres, TypeMapping};
     use nook_infra::queue::NewWork;
     use nook_testkit::TestBed;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -328,14 +328,12 @@ mod tests {
     }
 
     async fn count_in(pool: &nook_db::DbPool, table: &str, ty: &str) -> i64 {
-        sqlx::query_as::<_, (i64,)>(&format!(
-            "SELECT count(*) FROM {table} WHERE work_type = $1"
-        ))
-        .bind(ty)
-        .fetch_one(pool)
+        pool.query_scalar::<i64>(
+            &format!("SELECT count(*) FROM {table} WHERE work_type = $1"),
+            params![ty],
+        )
         .await
         .unwrap()
-        .0
     }
 
     #[test]
@@ -465,14 +463,14 @@ mod tests {
                 1,
                 "dead-lettered"
             );
-            let reason: String = sqlx::query_as::<_, (String,)>(
-                "SELECT reason FROM work_queue_dead WHERE work_type = $1",
-            )
-            .bind(&ty)
-            .fetch_one(&bed.pool)
-            .await
-            .unwrap()
-            .0;
+            let reason: String = bed
+                .pool
+                .query_scalar(
+                    "SELECT reason FROM work_queue_dead WHERE work_type = $1",
+                    params![&ty],
+                )
+                .await
+                .unwrap();
             assert!(
                 reason.contains("no handler"),
                 "reason names the cause: {reason}"
@@ -509,15 +507,17 @@ mod tests {
                 0,
                 "not dead after one failure"
             );
-            let locked_future: bool = sqlx::query_as::<_, (bool,)>(&format!(
-                "SELECT locked_until > {} FROM work_queue WHERE id = $1",
-                Postgres.now()
-            ))
-            .bind(id)
-            .fetch_one(&bed.pool)
-            .await
-            .unwrap()
-            .0;
+            let locked_future: bool = bed
+                .pool
+                .query_scalar(
+                    &format!(
+                        "SELECT locked_until > {} FROM work_queue WHERE id = $1",
+                        Postgres.now()
+                    ),
+                    params![id],
+                )
+                .await
+                .unwrap();
             assert!(locked_future, "the item is held invisible by the backoff");
         })
         .await;
@@ -661,14 +661,14 @@ mod tests {
                 0,
                 "left the live queue"
             );
-            let reason: String = sqlx::query_as::<_, (String,)>(
-                "SELECT reason FROM work_queue_dead WHERE work_type = $1",
-            )
-            .bind(&ty)
-            .fetch_one(&bed.pool)
-            .await
-            .unwrap()
-            .0;
+            let reason: String = bed
+                .pool
+                .query_scalar(
+                    "SELECT reason FROM work_queue_dead WHERE work_type = $1",
+                    params![&ty],
+                )
+                .await
+                .unwrap();
             assert!(
                 reason.contains("handler always fails"),
                 "the dead-letter reason is the handler's error, not a generic one: {reason}"
