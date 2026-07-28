@@ -435,6 +435,159 @@ impl EnginePool {
             }
         }
     }
+
+    /// Fetch a single scalar (one column of one row), e.g. `SELECT count(*)`.
+    /// The counterpart to today's `sqlx::query_scalar`.
+    pub async fn fetch_scalar<T>(&self, sql: &str, params: Vec<DbValue>) -> Result<T, sqlx::Error>
+    where
+        T: Send + Unpin,
+        for<'r> T: sqlx::Decode<'r, sqlx::Postgres> + sqlx::Type<sqlx::Postgres>,
+        for<'r> T: sqlx::Decode<'r, sqlx::Sqlite> + sqlx::Type<sqlx::Sqlite>,
+    {
+        match &self.0 {
+            Arm::Pg(p) => {
+                let args = pg_args(params)?;
+                sqlx::query_scalar_with::<sqlx::Postgres, T, _>(sql, args)
+                    .fetch_one(p)
+                    .await
+            }
+            Arm::Sqlite(p) => {
+                let (sql, args) = sqlite_args(sql, params)?;
+                sqlx::query_scalar_with::<sqlx::Sqlite, T, _>(&sql, args)
+                    .fetch_one(p)
+                    .await
+            }
+        }
+    }
+
+    /// Begin a transaction. The returned [`DbTx`] carries the same dispatch
+    /// surface; finish with [`DbTx::commit`] or [`DbTx::rollback`] (dropping it
+    /// rolls back, exactly as an sqlx transaction does).
+    pub async fn begin(&self) -> Result<DbTx<'_>, sqlx::Error> {
+        match &self.0 {
+            Arm::Pg(p) => Ok(DbTx::Pg(p.begin().await?)),
+            Arm::Sqlite(p) => Ok(DbTx::Sqlite(p.begin().await?)),
+        }
+    }
+}
+
+/// An in-flight transaction, dispatching to whichever engine opened it. Mirrors
+/// [`EnginePool`]'s execute / fetch surface so a `db.begin()` block reads the
+/// same on either arm. Not `Clone`: a transaction is a single borrowed session.
+pub enum DbTx<'c> {
+    Pg(sqlx::Transaction<'c, sqlx::Postgres>),
+    Sqlite(sqlx::Transaction<'c, sqlx::Sqlite>),
+}
+
+impl DbTx<'_> {
+    /// Run a statement inside the transaction, returning affected rows.
+    pub async fn execute(&mut self, sql: &str, params: Vec<DbValue>) -> Result<u64, sqlx::Error> {
+        match self {
+            DbTx::Pg(tx) => {
+                let args = pg_args(params)?;
+                let r = sqlx::query_with(sql, args).execute(&mut **tx).await?;
+                Ok(r.rows_affected())
+            }
+            DbTx::Sqlite(tx) => {
+                let (sql, args) = sqlite_args(sql, params)?;
+                let r = sqlx::query_with(&sql, args).execute(&mut **tx).await?;
+                Ok(r.rows_affected())
+            }
+        }
+    }
+
+    /// Fetch exactly one row inside the transaction, mapped via `FromRow`.
+    pub async fn fetch_one<T>(&mut self, sql: &str, params: Vec<DbValue>) -> Result<T, sqlx::Error>
+    where
+        T: Send + Unpin,
+        T: for<'r> FromRow<'r, PgRow>,
+        T: for<'r> FromRow<'r, SqliteRow>,
+    {
+        match self {
+            DbTx::Pg(tx) => {
+                let args = pg_args(params)?;
+                sqlx::query_as_with::<sqlx::Postgres, T, _>(sql, args)
+                    .fetch_one(&mut **tx)
+                    .await
+            }
+            DbTx::Sqlite(tx) => {
+                let (sql, args) = sqlite_args(sql, params)?;
+                sqlx::query_as_with::<sqlx::Sqlite, T, _>(&sql, args)
+                    .fetch_one(&mut **tx)
+                    .await
+            }
+        }
+    }
+
+    /// Fetch at most one row inside the transaction, mapped via `FromRow`.
+    pub async fn fetch_optional<T>(
+        &mut self,
+        sql: &str,
+        params: Vec<DbValue>,
+    ) -> Result<Option<T>, sqlx::Error>
+    where
+        T: Send + Unpin,
+        T: for<'r> FromRow<'r, PgRow>,
+        T: for<'r> FromRow<'r, SqliteRow>,
+    {
+        match self {
+            DbTx::Pg(tx) => {
+                let args = pg_args(params)?;
+                sqlx::query_as_with::<sqlx::Postgres, T, _>(sql, args)
+                    .fetch_optional(&mut **tx)
+                    .await
+            }
+            DbTx::Sqlite(tx) => {
+                let (sql, args) = sqlite_args(sql, params)?;
+                sqlx::query_as_with::<sqlx::Sqlite, T, _>(&sql, args)
+                    .fetch_optional(&mut **tx)
+                    .await
+            }
+        }
+    }
+
+    /// Fetch a single scalar inside the transaction.
+    pub async fn fetch_scalar<T>(
+        &mut self,
+        sql: &str,
+        params: Vec<DbValue>,
+    ) -> Result<T, sqlx::Error>
+    where
+        T: Send + Unpin,
+        for<'r> T: sqlx::Decode<'r, sqlx::Postgres> + sqlx::Type<sqlx::Postgres>,
+        for<'r> T: sqlx::Decode<'r, sqlx::Sqlite> + sqlx::Type<sqlx::Sqlite>,
+    {
+        match self {
+            DbTx::Pg(tx) => {
+                let args = pg_args(params)?;
+                sqlx::query_scalar_with::<sqlx::Postgres, T, _>(sql, args)
+                    .fetch_one(&mut **tx)
+                    .await
+            }
+            DbTx::Sqlite(tx) => {
+                let (sql, args) = sqlite_args(sql, params)?;
+                sqlx::query_scalar_with::<sqlx::Sqlite, T, _>(&sql, args)
+                    .fetch_one(&mut **tx)
+                    .await
+            }
+        }
+    }
+
+    /// Commit the transaction.
+    pub async fn commit(self) -> Result<(), sqlx::Error> {
+        match self {
+            DbTx::Pg(tx) => tx.commit().await,
+            DbTx::Sqlite(tx) => tx.commit().await,
+        }
+    }
+
+    /// Roll the transaction back explicitly (dropping it rolls back too).
+    pub async fn rollback(self) -> Result<(), sqlx::Error> {
+        match self {
+            DbTx::Pg(tx) => tx.rollback().await,
+            DbTx::Sqlite(tx) => tx.rollback().await,
+        }
+    }
 }
 
 #[cfg(test)]
