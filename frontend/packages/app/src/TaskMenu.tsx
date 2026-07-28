@@ -19,6 +19,36 @@ import { VISIBILITY_META } from "@nookos/ui";
 import { askConfirm, notify } from "./dialogs";
 import type { ContextMenuItem } from "./contextMenu";
 import { createLoopJob, loopAction } from "./loop";
+import { priorityMeta } from "./taskmeta";
+import { formatAll, formatBody, formatTitleBody } from "./taskMarkdown";
+
+/**
+ * Put markdown on the clipboard from inside a user gesture (MAIN-188 AC-3).
+ * `Copy all` must fetch comments first, and an `await` before `writeText` loses
+ * the gesture in Safari — so we hand a Promise<Blob> to `ClipboardItem` and let
+ * the async work resolve inside the write, which Chrome/Safari honour. Firefox
+ * without `ClipboardItem` falls back to `writeText` (it tolerates the await).
+ * Either way the user gets a "Copied" notice, or a visible failure notice (AC-4).
+ */
+async function copyMarkdown(getText: () => string | Promise<string>): Promise<void> {
+  try {
+    const CI = typeof ClipboardItem !== "undefined" ? ClipboardItem : null;
+    if (CI && navigator.clipboard?.write) {
+      const blob = Promise.resolve(getText()).then(
+        (t) => new Blob([t], { type: "text/plain" }),
+      );
+      await navigator.clipboard.write([new CI({ "text/plain": blob })]);
+    } else {
+      await navigator.clipboard.writeText(await getText());
+    }
+    await notify("Copied", "Copied to the clipboard as markdown.");
+  } catch (e) {
+    await notify(
+      "Copy failed",
+      e instanceof Error ? e.message : "The clipboard write was refused.",
+    );
+  }
+}
 
 export interface MenuColumn {
   id: string;
@@ -192,6 +222,28 @@ export function taskMenuItems({
   items.push({ separator: true });
   if (task.key) items.push({ label: "Copy key", onSelect: () => copy(task.key!) });
   if (task.url) items.push({ label: "Copy link", onSelect: () => copy(task.url!) });
+
+  // Copy the card as markdown (MAIN-188) at three scopes. Body and title+body
+  // come straight off the row; "all" fetches the comments on demand.
+  const cardMeta = {
+    priorityLabel: priorityMeta(task.priority).label,
+    columnName: columns.find((c) => c.id === task.column_id)?.name ?? "—",
+  };
+  items.push({ label: "Copy body", onSelect: () => void copyMarkdown(() => formatBody(task)) });
+  items.push({
+    label: "Copy title + body",
+    onSelect: () => void copyMarkdown(() => formatTitleBody(task)),
+  });
+  items.push({
+    label: "Copy all (with comments)",
+    onSelect: () =>
+      void copyMarkdown(async () => {
+        const detail = (
+          await api.GET("/api/v1/tasks/{id}", { params: { path: { id: task.id } } })
+        ).data;
+        return formatAll(task, cardMeta, detail?.comments ?? []);
+      }),
+  });
 
   items.push({ separator: true });
   items.push({
