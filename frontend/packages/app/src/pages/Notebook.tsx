@@ -32,6 +32,7 @@ import {
   buildTree,
   type FolderNode,
 } from "./notebookTree";
+import { NotesMcpBanner } from "./NotesMcpBanner";
 
 /** The most a note title / folder name may be — surfaced from MAIN-84's
  *  server-side `MAX_NAME_LEN`, so the input can cap and count before the API
@@ -312,6 +313,7 @@ export function Notebook() {
           </span>
         }
       >
+        <NotesMcpBanner />
         <div className="notebook-search">
           <SearchInput
             onSearch={setQuery}
