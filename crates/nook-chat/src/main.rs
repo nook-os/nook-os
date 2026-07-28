@@ -82,10 +82,11 @@ async fn main() -> anyhow::Result<()> {
     ensure_chat_schema(&db).await?;
     MIGRATOR.run(&db).await?;
 
-    // Live fan-out: a local per-channel broadcast registry, plus a Postgres
-    // LISTEN/NOTIFY bus so a post on any instance reaches subscribers on all of
-    // them (AC-3). Held in memory — a restart drops subscriptions, and clients
-    // reconnect and backfill from history.
+    // Live fan-out: a local per-channel broadcast registry, plus a cross-instance
+    // bus (nook-db's event-bus seam — Postgres LISTEN/NOTIFY under the hood) so a
+    // post on any instance reaches subscribers on all of them (AC-3). Held in
+    // memory — a restart drops subscriptions, and clients reconnect and backfill
+    // from history.
     let registry = Arc::new(registry::Registry::new());
     bus::start(registry.clone(), db.clone());
 

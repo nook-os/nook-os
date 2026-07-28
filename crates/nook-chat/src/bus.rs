@@ -1,18 +1,24 @@
-//! Cross-instance chat fan-out over Postgres LISTEN/NOTIFY (MAIN-49 AC-3).
+//! Cross-instance chat fan-out over the event-bus seam (MAIN-49 AC-3).
 //!
-//! Mirrors the control plane's bus but far smaller: a post NOTIFYs the new
+//! Mirrors the control plane's bus but far smaller: a post publishes the new
 //! message's id and the instance that posted it; every instance's listener
 //! fetches that message and delivers it to its local subscribers, skipping the
 //! origin (which already delivered it locally). No extra infrastructure — the
 //! shared Postgres is the bus. A message's body can exceed NOTIFY's ~8 KB limit,
 //! so only the id travels in the payload and the row is read back by id.
+//!
+//! The transport itself — `pg_notify` to publish and a `LISTEN` connection to
+//! subscribe — lives in `nook-db`'s event-bus seam (`PgEventBus`, MAIN-200), so
+//! the Postgres-specific SQL is there, not here. This module only composes the
+//! `Notice` payload, picks the channel, and routes received notices to local
+//! subscribers.
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use nook_db::DbPool;
+use futures_util::StreamExt;
+use nook_db::{DbPool, EventBus, PgEventBus};
 use serde::{Deserialize, Serialize};
-use sqlx::postgres::PgListener;
 use uuid::Uuid;
 
 use crate::registry::Registry;
@@ -34,7 +40,7 @@ struct Notice {
 }
 
 /// Announce a posted OR updated message so peer instances deliver it too. Best
-/// effort: a failed NOTIFY costs cross-instance liveness for one message, never
+/// effort: a failed publish costs cross-instance liveness for one message, never
 /// correctness of what was stored.
 pub async fn publish(pool: &DbPool, message_id: Uuid, origin: Uuid, updated: bool) {
     let payload = serde_json::to_string(&Notice {
@@ -43,10 +49,10 @@ pub async fn publish(pool: &DbPool, message_id: Uuid, origin: Uuid, updated: boo
         updated,
     })
     .unwrap_or_default();
-    if let Err(e) = sqlx::query("SELECT pg_notify($1, $2)")
-        .bind(NOTIFY_CHANNEL)
-        .bind(payload)
-        .execute(pool)
+    // The NOTIFY itself lives in the event-bus seam's Postgres impl; chat only
+    // composes the payload and picks the channel.
+    if let Err(e) = PgEventBus::new(pool.clone())
+        .publish(NOTIFY_CHANNEL, &payload)
         .await
     {
         tracing::warn!(error = %e, "chat NOTIFY failed; peers miss this message live");
@@ -68,11 +74,14 @@ pub fn start(registry: Arc<Registry>, pool: DbPool) {
 }
 
 async fn run(registry: &Registry, pool: &DbPool) -> anyhow::Result<()> {
-    let mut listener = PgListener::connect_with(pool).await?;
-    listener.listen(NOTIFY_CHANNEL).await?;
-    loop {
-        let note = listener.recv().await?;
-        let Ok(notice) = serde_json::from_str::<Notice>(note.payload()) else {
+    // Subscribe through the event-bus seam: it owns the LISTEN connection and
+    // yields each peer's raw payload. Only the id travels in NOTIFY, so we still
+    // read the message body back by id through the same pool.
+    let mut notices = PgEventBus::new(pool.clone())
+        .subscribe(NOTIFY_CHANNEL)
+        .await?;
+    while let Some(payload) = notices.next().await {
+        let Ok(notice) = serde_json::from_str::<Notice>(&payload) else {
             continue;
         };
         // The origin instance already delivered this to its own subscribers.
@@ -89,5 +98,53 @@ async fn run(registry: &Registry, pool: &DbPool) -> anyhow::Result<()> {
             };
             registry.publish_local(event);
         }
+    }
+    // The subscription stream ends only when the LISTEN connection failed
+    // unrecoverably; surface it so `start` applies its reconnect backoff — the
+    // same self-healing the pre-seam `recv()?` produced.
+    anyhow::bail!("chat bus subscription ended; reconnecting")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A message published through `publish` reaches a subscriber on the same
+    /// channel via the event-bus seam, carrying the id/origin/updated we set —
+    /// i.e. chat's fan-out rides the trait, not inline `pg_notify`/`LISTEN`.
+    /// DB-backed; no-ops without `NOOK_REQUIRE_DB=1`, matching the suite.
+    #[tokio::test]
+    async fn publish_reaches_a_subscriber_through_the_seam() {
+        if std::env::var("NOOK_REQUIRE_DB").ok().as_deref() != Some("1") {
+            eprintln!(
+                "skipping publish_reaches_a_subscriber_through_the_seam — no NOOK_REQUIRE_DB"
+            );
+            return;
+        }
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            return;
+        };
+        let pool = nook_db::connect(&url, 2).await.expect("connect");
+
+        // Subscribe first (the seam's LISTEN), then publish, then read it back.
+        let mut sub = PgEventBus::new(pool.clone())
+            .subscribe(NOTIFY_CHANNEL)
+            .await
+            .expect("subscribe");
+        // Give LISTEN a beat to register before NOTIFY.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let id = Uuid::now_v7();
+        let origin = Uuid::now_v7();
+        publish(&pool, id, origin, true).await;
+
+        let payload = tokio::time::timeout(Duration::from_secs(3), sub.next())
+            .await
+            .expect("a notice arrives before the timeout")
+            .expect("stream yields the notice");
+        let notice: Notice = serde_json::from_str(&payload).expect("payload is a Notice");
+        assert_eq!(notice.id, id);
+        assert_eq!(notice.origin, origin);
+        assert!(notice.updated);
     }
 }
