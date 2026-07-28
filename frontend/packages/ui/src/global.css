@@ -4033,6 +4033,44 @@ a.toast-main:hover .toast-title { text-decoration: underline; }
   padding: 2px 4px;
 }
 
+/* ── Channel categories (MAIN-179) ──────────────────────────────────────── */
+.chat-cat-group { display: flex; flex-direction: column; }
+/* Highlight a group while a channel/category is dragged over it. */
+.chat-cat-group.drop-over { background: var(--nook-bg-raised); }
+.chat-cat-head {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 4px 8px 2px;
+  font-size: 10.5px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--nook-fg-dim);
+  user-select: none;
+}
+/* The header is a drag handle for admins (category reorder). */
+.chat-cat-head.draggable { cursor: grab; }
+.chat-cat-toggle {
+  display: inline-flex;
+  align-items: center;
+  width: 16px;
+  height: 16px;
+  flex: none;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--nook-fg-faint);
+  cursor: pointer;
+}
+.chat-cat-toggle:hover { color: var(--nook-accent); }
+.chat-cat-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chat-cat-body { display: flex; flex-direction: column; }
+.chat-cat-empty { padding: 2px 10px 4px 24px; }
+/* A draggable channel row: a plain wrapper whose button fills it. */
+.chat-cat-body .chat-channel-drag { display: flex; flex-direction: column; cursor: grab; }
+.chat-cat-body .chat-channel-drag.dragging { opacity: 0.5; }
+.chat-cat-body .chat-channel { padding-left: 20px; }
+
 .chat-main {
   display: flex;
   flex-direction: column;

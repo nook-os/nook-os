@@ -6,14 +6,20 @@
 // without a reload.
 import React, { useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Archive, ArchiveRestore, Pencil, Plus, X } from "lucide-react";
+import { Archive, ArchiveRestore, Pencil, Plus, Trash2, X } from "lucide-react";
 import {
+  createCategory,
   createChannel,
+  deleteCategory,
+  listCategories,
   listChannels,
+  placeChannel,
+  renameCategory,
   updateChannel,
+  type ChatCategory,
   type ChatChannel,
 } from "@nookos/api";
-import { askText, notify } from "../dialogs";
+import { askConfirm, askText, notify } from "../dialogs";
 import { ContextMenuRegion, type ContextMenuItem } from "../contextMenu";
 
 export function ChannelManager({ onClose }: { onClose: () => void }) {
@@ -35,7 +41,14 @@ export function ChannelManager({ onClose }: { onClose: () => void }) {
   const active = channels.filter((c) => !c.archived);
   const archived = channels.filter((c) => c.archived);
 
-  const refresh = () => qc.invalidateQueries({ queryKey: ["chat", "channels"] });
+  // Categories (MAIN-179): create/rename/delete + assign a channel's category.
+  const [catName, setCatName] = useState("");
+  const catsQuery = useQuery({ queryKey: ["chat", "categories"], queryFn: listCategories });
+  const categories = [...(catsQuery.data ?? [])].sort((a, b) => a.position - b.position);
+
+  // Invalidate the whole chat prefix so the sidebar (channels + categories) and
+  // this modal both refresh after any change.
+  const refresh = () => qc.invalidateQueries({ queryKey: ["chat"] });
 
   const create = async () => {
     const trimmed = name.trim();
@@ -77,6 +90,60 @@ export function ChannelManager({ onClose }: { onClose: () => void }) {
       refresh();
     } catch (e) {
       await notify("Could not update", e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  const createCat = async () => {
+    const trimmed = catName.trim();
+    if (!trimmed) return;
+    try {
+      await createCategory(trimmed);
+      setCatName("");
+      refresh();
+    } catch (e) {
+      await notify("Could not create category", e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  const renameCat = async (cat: ChatCategory) => {
+    const next = await askText({ title: "Rename category", label: "Name", value: cat.name });
+    if (!next || next === cat.name) return;
+    try {
+      await renameCategory(cat.id, next);
+      refresh();
+    } catch (e) {
+      await notify("Could not rename", e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  const deleteCat = async (cat: ChatCategory) => {
+    const ok = await askConfirm({
+      title: "Delete category",
+      description: `"${cat.name}" will be removed. Its channels are NOT deleted — they become uncategorized.`,
+      confirmLabel: "delete",
+      danger: true,
+    });
+    if (!ok) return;
+    try {
+      await deleteCategory(cat.id);
+      refresh();
+    } catch (e) {
+      await notify("Could not delete", e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  // Assign a channel to a category (or `null` for uncategorized); land it at the
+  // end of the target group, mirroring the sidebar's drop model.
+  const assignCategory = async (c: ChatChannel, categoryId: string | null) => {
+    const position =
+      channels
+        .filter((x) => (x.category_id ?? null) === categoryId)
+        .reduce((m, x) => Math.max(m, x.position ?? 0), -1) + 1;
+    try {
+      await placeChannel(c.id, { category_id: categoryId, position });
+      refresh();
+    } catch (e) {
+      await notify("Could not move", e instanceof Error ? e.message : String(e));
     }
   };
 
@@ -136,6 +203,53 @@ export function ChannelManager({ onClose }: { onClose: () => void }) {
           </div>
           {error && <div className="chan-manage-error">{error}</div>}
 
+          <div className="chan-manage-cats">
+            <div className="chan-manage-subhdr faint small">Categories</div>
+            <div className="chan-manage-create">
+              <input
+                className="chan-input"
+                value={catName}
+                placeholder="new-category"
+                aria-label="new category name"
+                onChange={(e) => setCatName(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") void createCat();
+                }}
+              />
+              <button className="btn small primary" onClick={createCat}>
+                <Plus size={12} /> add category
+              </button>
+            </div>
+            {categories.length === 0 ? (
+              <div className="faint small">No categories yet.</div>
+            ) : (
+              categories.map((cat) => (
+                <div key={cat.id} className="chan-manage-row">
+                  <span className="chan-manage-name">{cat.name}</span>
+                  {cat.owner_type === "org" && (
+                    <span className="chat-channel-org" title="Shared across your org">
+                      org
+                    </span>
+                  )}
+                  <button
+                    className="btn small"
+                    onClick={() => renameCat(cat)}
+                    title="rename category"
+                  >
+                    <Pencil size={11} />
+                  </button>
+                  <button
+                    className="btn small"
+                    onClick={() => deleteCat(cat)}
+                    title="delete category"
+                  >
+                    <Trash2 size={11} />
+                  </button>
+                </div>
+              ))
+            )}
+          </div>
+
           <div className="chan-manage-list">
             {q.isLoading ? (
               <div className="faint small">Loading…</div>
@@ -151,6 +265,19 @@ export function ChannelManager({ onClose }: { onClose: () => void }) {
                   <div className="chan-manage-row">
                     <span className="chat-channel-hash">#</span>
                     <span className="chan-manage-name">{c.name}</span>
+                    <select
+                      className="chan-owner-select"
+                      aria-label={`category for ${c.name}`}
+                      value={c.category_id ?? ""}
+                      onChange={(e) => void assignCategory(c, e.target.value || null)}
+                    >
+                      <option value="">(uncategorized)</option>
+                      {categories.map((cat) => (
+                        <option key={cat.id} value={cat.id}>
+                          {cat.name}
+                        </option>
+                      ))}
+                    </select>
                     <button className="btn small" onClick={() => rename(c)} title="rename">
                       <Pencil size={11} />
                     </button>

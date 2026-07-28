@@ -5,7 +5,7 @@
 // render). jsdom only, no chat service.
 import React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
@@ -18,7 +18,7 @@ const identity = vi.hoisted(() => ({ role: "member" as string | null }));
 // The channel list the mocked client returns, as a mutable server-of-record so
 // unread-badge tests (MAIN-117) can change it between refetches — a background
 // message raises a count, marking read zeroes it.
-const chatState = vi.hoisted(() => ({ channels: [] as any[] }));
+const chatState = vi.hoisted(() => ({ channels: [] as any[], categories: [] as any[] }));
 
 vi.mock("@nookos/api", () => ({
   // ChatView (in @nookos/ui) imports this from the same module; the whole-module
@@ -35,6 +35,13 @@ vi.mock("@nookos/api", () => ({
   createChannel: vi.fn(),
   updateChannel: vi.fn(),
   listChannels: vi.fn(async () => chatState.channels),
+  // Channel categories (MAIN-179).
+  listCategories: vi.fn(async () => chatState.categories),
+  placeChannel: vi.fn(async () => undefined),
+  reorderCategories: vi.fn(async () => chatState.categories),
+  createCategory: vi.fn(),
+  renameCategory: vi.fn(),
+  deleteCategory: vi.fn(),
   listDms: vi.fn(async () => []),
   // Marking a conversation read zeroes its unread on the server-of-record, so the
   // resync after it clears the badge (MAIN-117 AC-3).
@@ -118,14 +125,71 @@ beforeEach(() => {
       owner_type: "tenant",
       archived: false,
       unread_count: 0,
+      category_id: null,
+      position: 0,
       created_at: "2026-07-25T09:00:00Z",
     },
   ];
+  chatState.categories = [];
   // jsdom reports focus inconsistently; force it so the open/focus mark-read
   // effect (AC-3) runs deterministically.
   vi.spyOn(document, "hasFocus").mockReturnValue(true);
+  localStorage.clear(); // category collapse state must not leak between tests
 });
 afterEach(() => cleanup());
+
+// A category and two channels (one under it, one uncategorized) for the grouping
+// tests (MAIN-179).
+function withCategories() {
+  chatState.categories = [
+    { id: "cat1", name: "Team", owner_type: "tenant", position: 0, created_at: "2026-07-25T09:00:00Z" },
+  ];
+  chatState.channels = [
+    { id: "c1", name: "general", slug: "general", owner_type: "tenant", archived: false, unread_count: 0, category_id: null, position: 0, created_at: "2026-07-25T09:00:00Z" },
+    { id: "c2", name: "standup", slug: "standup", owner_type: "tenant", archived: false, unread_count: 0, category_id: "cat1", position: 0, created_at: "2026-07-25T09:00:00Z" },
+  ];
+}
+
+describe("ChatPage channel categories (MAIN-179)", () => {
+  it("groups channels under category headers with uncategorized on top (AC-1)", async () => {
+    identity.role = "admin";
+    withCategories();
+    renderPage();
+    // Scope to the sidebar — the active channel's name also shows in the main
+    // header, so match within the "Channels" aside.
+    const aside = await screen.findByLabelText("Channels");
+    expect(await within(aside).findByText("(uncategorized)")).toBeTruthy();
+    expect(within(aside).getByText("Team")).toBeTruthy();
+    expect(within(aside).getByText("general")).toBeTruthy();
+    expect(within(aside).getByText("standup")).toBeTruthy();
+    // Uncategorized renders before the category.
+    const uncat = within(aside).getByText("(uncategorized)");
+    const team = within(aside).getByText("Team");
+    expect(uncat.compareDocumentPosition(team) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it("collapsing a category hides its channels and persists (AC-1)", async () => {
+    identity.role = "admin";
+    withCategories();
+    renderPage();
+    await screen.findByText("standup");
+    fireEvent.click(await screen.findByLabelText("collapse Team"));
+    await waitFor(() => expect(screen.queryByText("standup")).toBeNull());
+    expect(
+      JSON.parse(localStorage.getItem("nook.chat.collapsedCategories") ?? "[]"),
+    ).toContain("cat1");
+  });
+
+  it("a non-admin sees the grouped list but no drag handle (AC-4)", async () => {
+    identity.role = "member";
+    withCategories();
+    renderPage();
+    expect(await screen.findByText("Team")).toBeTruthy();
+    // The header's drag-handle class is admin-only.
+    const head = screen.getByText("Team").closest(".chat-cat-head");
+    expect(head?.classList.contains("draggable")).toBe(false);
+  });
+});
 
 describe("ChatPage", () => {
   it("lists channels and shows history", async () => {
