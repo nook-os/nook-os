@@ -1,6 +1,5 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use sqlx::postgres::PgPoolOptions;
 use tracing_subscriber::EnvFilter;
 
 use nook_control::{routes, AppState, Config, MIGRATOR};
@@ -30,10 +29,12 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     let cfg = Config::from_env()?;
 
-    let db = PgPoolOptions::new()
-        .max_connections(10)
-        .connect(&cfg.database_url)
-        .await?;
+    // Select the engine from the DATABASE_URL scheme and refuse an unknown one
+    // here, at boot, with a pointed message (MAIN-195). Postgres connects exactly
+    // as before; the pool type is unchanged.
+    let db = nook_db::connect(&cfg.database_url, 10)
+        .await
+        .context("opening the database")?;
     MIGRATOR.run(&db).await?;
 
     match cli.command.unwrap_or(Command::Serve) {
