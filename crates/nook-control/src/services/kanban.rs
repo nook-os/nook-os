@@ -3,7 +3,7 @@
 //! external providers are registered but unconfigured in milestone 1.
 
 use async_trait::async_trait;
-use nook_db::DbPool;
+use nook_db::{DbPool, Postgres, TypeMapping};
 use nook_types::{
     Board, BoardDetail, BoardId, ColumnId, CreateTaskRequest, TaskId, TaskItem, TenantId,
     UpdateTaskRequest, UserId,
@@ -394,7 +394,7 @@ impl KanbanProvider for LocalBoardProvider {
             (None, None) => None,
         };
 
-        let updated: Option<TaskItem> = sqlx::query_as(
+        let updated: Option<TaskItem> = sqlx::query_as(&format!(
             // Workspace cannot use COALESCE like the rest: COALESCE reads a
             // NULL as "leave it", which is exactly the instruction to clear
             // it. The flag says whether the caller mentioned the field at all.
@@ -416,9 +416,10 @@ impl KanbanProvider for LocalBoardProvider {
                 parent_task_id = CASE WHEN $14 THEN $15 ELSE parent_task_id END,
                 updated_at = now()
              WHERE id = $1 AND tenant_id = $2
-               AND ($11::timestamptz IS NULL OR updated_at = $11)
+               AND ({guard} IS NULL OR updated_at = $11)
              RETURNING *",
-        )
+            guard = Postgres.cast("$11", "timestamptz")
+        ))
         .bind(task)
         .bind(tenant)
         .bind(&req.title)

@@ -11,7 +11,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::Json;
 use chrono::{DateTime, Utc};
-use nook_db::DbPool;
+use nook_db::{DbPool, Postgres, TypeMapping};
 use nook_types::{
     ChatMessage, ChatMessagePage, ChatReactionAggregate, ChatServerMessage, ChatThread,
     PostChatMessage, UpdateChatMessage,
@@ -251,7 +251,8 @@ pub async fn history(
     // reply rollups from the same query (AC-3).
     let rows = sqlx::query_as::<_, MessageRow>(&format!(
         "{SELECT_MESSAGE_WITH_REPLIES} WHERE m.channel_id = $1 AND m.parent_message_id IS NULL \
-         AND ($2::uuid IS NULL OR m.id < $2) ORDER BY m.id DESC LIMIT $3"
+         AND ({cursor} IS NULL OR m.id < $2) ORDER BY m.id DESC LIMIT $3",
+        cursor = Postgres.cast("$2", "uuid")
     ))
     .bind(channel_id)
     .bind(q.before)
@@ -331,8 +332,9 @@ pub async fn thread(
 
     let limit = q.limit.unwrap_or(50).clamp(1, 200);
     let rows = sqlx::query_as::<_, MessageRow>(&format!(
-        "{SELECT_MESSAGE} WHERE m.parent_message_id = $1 AND ($2::uuid IS NULL OR m.id < $2)
-         ORDER BY m.id DESC LIMIT $3"
+        "{SELECT_MESSAGE} WHERE m.parent_message_id = $1 AND ({cursor} IS NULL OR m.id < $2)
+         ORDER BY m.id DESC LIMIT $3",
+        cursor = Postgres.cast("$2", "uuid")
     ))
     .bind(message_id)
     .bind(q.before)

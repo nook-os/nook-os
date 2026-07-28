@@ -13,6 +13,7 @@
 
 use axum::extract::{Path, RawQuery, State};
 use axum::Json;
+use nook_db::{Postgres, TypeMapping};
 use nook_types::*;
 use serde::Deserialize;
 
@@ -262,18 +263,18 @@ pub async fn query_rows(
         .collect();
     let types: Vec<String> = f.type_.iter().map(|t| t.trim().to_lowercase()).collect();
 
-    let rows: Vec<TaskItem> = sqlx::query_as(
+    let rows: Vec<TaskItem> = sqlx::query_as(&format!(
         r#"
         SELECT t.* FROM tasks t
         JOIN boards b ON b.id = t.board_id
         JOIN board_columns c ON c.id = t.column_id
         WHERE t.tenant_id = $1
           AND ($2::text IS NULL OR b.id::text = $2 OR upper(b.key) = upper($2))
-          AND ($3::uuid IS NULL OR t.workspace_id = $3)
+          AND ({ws} IS NULL OR t.workspace_id = $3)
           AND ($4::text IS NULL OR c.type = $4)
           AND ($5::int  IS NULL OR t.priority = $5)
           AND (NOT $6::bool OR t.assignee_user_id IS NULL)
-          AND ($7::uuid IS NULL OR t.assignee_user_id = $7)
+          AND ({assignee} IS NULL OR t.assignee_user_id = $7)
           -- every required label must be present
           AND (cardinality($8::text[]) = 0 OR (
                 SELECT count(DISTINCT l.name) FROM task_labels tl
@@ -292,7 +293,7 @@ pub async fn query_rows(
                 JOIN board_columns bc ON bc.id = bt.column_id
                 WHERE r.to_task = t.id AND r.kind = 'blocks'
                   AND bc.type NOT IN ('completed', 'canceled')))
-          AND ($11::timestamptz IS NULL OR t.created_at > $11)
+          AND ({created} IS NULL OR t.created_at > $11)
           -- archived work is off the board and NEVER pickable unless explicitly asked for
           AND ($13::bool OR t.archived_at IS NULL)
           -- free-text search across title, description, and display key (MAIN-54).
@@ -322,18 +323,22 @@ pub async fn query_rows(
           -- the board), so it deliberately does NOT constrain the column type.
           -- BOTH this and the visibility predicate apply, so an epic's children
           -- are still filtered to what the viewer may see.
-          AND ($17::uuid IS NULL OR t.parent_task_id = $17)
+          AND ({parent} IS NULL OR t.parent_task_id = $17)
           -- backlog exclusion (MAIN-80): a `backlog`-type column is the human
           -- refinement space; the loop never draws from it unless `backlog=true`
           -- ($18). AC-3: a `parent=` query (an epic's children, which span
           -- backlog and board — $17 present) LIFTS this exclusion, so listing an
           -- epic's tickets never silently drops the ones still in triage.
-          AND ($18::bool OR $17::uuid IS NOT NULL OR c.type <> 'backlog')
+          AND ($18::bool OR {parent} IS NOT NULL OR c.type <> 'backlog')
         -- priority 0 means "unset", which sorts last rather than first
         ORDER BY CASE WHEN t.priority = 0 THEN 5 ELSE t.priority END, t.created_at
         LIMIT $12
         "#,
-    )
+        ws = Postgres.cast("$3", "uuid"),
+        assignee = Postgres.cast("$7", "uuid"),
+        created = Postgres.cast("$11", "timestamptz"),
+        parent = Postgres.cast("$17", "uuid"),
+    ))
     .bind(tenant)
     .bind(f.board.as_deref())
     .bind(f.workspace)
