@@ -821,6 +821,10 @@ async fn main() -> Result<()> {
                 std::env::set_var("NOOK_INSECURE", "1");
             }
             let cfg = NodeConfig::load()?;
+            // Plumb this node's tmux server socket BEFORE any tmux use, so every
+            // call lands on the node's own server (MAIN-108 AC-2). Absent →
+            // the default server, unchanged.
+            tmux::set_socket(cfg.tmux_socket.clone());
             // Reaches sessions that already exist (mouse/scrollback/clipboard).
             tmux::apply_server_defaults();
             // Mark this agent live so `nook migrate-workspaces --apply` refuses
@@ -1450,6 +1454,15 @@ async fn join(spec: JoinSpec) -> Result<()> {
         // default (MAIN-58 AC-1/AC-2).
         vec![crate::config::default_workspace_root(&server)]
     };
+    // Forward-only, like workspace_roots (MAIN-108 AC-1): a re-join KEEPS the
+    // node's existing socket — a pre-108 node's `None` stays `None` (byte-
+    // identical), and a private socket is never relocated out from under live
+    // sessions (AC-6). Only a genuine first join (no prior config) derives the
+    // private server.
+    let tmux_socket = match NodeConfig::load() {
+        Ok(existing) => existing.tmux_socket,
+        Err(_) => Some(crate::config::derived_tmux_socket(&server)),
+    };
     let cfg = NodeConfig {
         server,
         node_id: joined.node_id.to_string(),
@@ -1463,6 +1476,7 @@ async fn join(spec: JoinSpec) -> Result<()> {
         // Joining does not know about the agent port; `nook enroll` sets it.
         agent_server: NodeConfig::load().ok().and_then(|c| c.agent_server),
         service: NodeConfig::load().ok().and_then(|c| c.service),
+        tmux_socket,
     };
     cfg.save()?;
 

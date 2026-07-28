@@ -25,8 +25,9 @@ WorkingDirectory=/home/%NOOK_USER%
 # survive the agent restarting, and `Restart=always` means it will restart —
 # on a network blip, a control-plane deploy, a crash. systemd's default
 # KillMode kills the whole control group, which includes the tmux server the
-# agent started, so every one of those restarts would silently take the
-# user's terminals with it. Stop the agent only; leave its tmux alone.
+# agent started (its own private nook-<slug> server — MAIN-108), so every one
+# of those restarts would silently take the node's sessions with it.
+# Stop the agent only; leave its tmux alone.
 KillMode=process
 
 # The node's whole job is spawning dev tooling — keep hardening light but real.

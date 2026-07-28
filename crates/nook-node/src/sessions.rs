@@ -149,6 +149,13 @@ impl Manager {
             .context("openpty failed")?;
 
         let mut cmd = CommandBuilder::new("tmux");
+        // This attach spawns tmux directly through portable_pty, bypassing
+        // tmux.rs's `tmux_command()`, so it must carry the node's `-L <socket>`
+        // itself — and BEFORE `attach`, since the server flag precedes the
+        // subcommand (MAIN-108 AC-2). Absent socket → no flag, the default server.
+        if let Some(sock) = crate::tmux::socket_name() {
+            cmd.args(["-L", sock]);
+        }
         cmd.args(["attach", "-t", tmux_name]);
         // A UTF-8 locale on the attaching client is how modern tmux detects
         // UTF-8 (the old `-u` flag was removed in 2.2) — needed so wide/Unicode

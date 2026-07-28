@@ -4,11 +4,63 @@
 
 use anyhow::{Context, Result};
 use std::process::Command;
+use std::sync::OnceLock;
 
 pub const SESSION_PREFIX: &str = "nook_";
 
+/// The tmux server this node talks to, as an `-L <socket>` name (MAIN-108).
+/// `None` — the default, and what every unset call sees — means the user's
+/// DEFAULT tmux server, byte-identical to pre-108 nodes (AC-1). A configured
+/// socket gives the node a PRIVATE server, so two nodes on one host never see or
+/// clobber each other's sessions (AC-5). Set once at startup from `NodeConfig`.
+static TMUX_SOCKET: OnceLock<Option<String>> = OnceLock::new();
+
+/// Plumb the node's tmux socket, once, before any session work (`main`). Later
+/// calls are ignored — the value is process-wide and immutable, so no call site
+/// can pick up a different server mid-run.
+pub fn set_socket(socket: Option<String>) {
+    let _ = TMUX_SOCKET.set(socket);
+}
+
+fn socket() -> Option<&'static str> {
+    TMUX_SOCKET.get().and_then(|s| s.as_deref())
+}
+
+/// This node's tmux socket name, if a private server is configured — for the one
+/// caller that spawns tmux OUTSIDE this module and so cannot use `tmux_command()`
+/// (the `portable_pty` attach in `sessions.rs`). `None` = the default server.
+pub fn socket_name() -> Option<&'static str> {
+    socket()
+}
+
+/// A `tmux` command carrying the configured `-L <socket>` prefix (if any) ahead
+/// of its subcommand. THE one place the socket flag is added (AC-2) — `tmux()`
+/// and the three direct `Command` bypasses below all build from here, so a new
+/// call site cannot silently land on the wrong server. `-L` is a server option
+/// and must precede the tmux command, which is why it is prepended here.
+///
+/// The documented exceptions (AC-3) deliberately do NOT use this: `nook
+/// agent-state`'s in-pane `display-message` inherits `$TMUX` (adding `-L` would
+/// point it at the wrong server), and `capabilities.rs`'s `tmux -V` is
+/// socket-irrelevant.
+fn tmux_command() -> Command {
+    let mut cmd = Command::new("tmux");
+    cmd.args(socket_args(socket()));
+    cmd
+}
+
+/// The `-L <socket>` prefix for a socket — empty for `None` (the default
+/// server). Pure, so the present/absent construction is unit-tested without a
+/// running tmux or touching the process-wide socket.
+fn socket_args(socket: Option<&str>) -> Vec<String> {
+    match socket {
+        Some(s) => vec!["-L".into(), s.into()],
+        None => Vec::new(),
+    }
+}
+
 fn tmux(args: &[&str]) -> Result<String> {
-    let out = Command::new("tmux")
+    let out = tmux_command()
         .args(args)
         .output()
         .context("tmux not available")?;
@@ -22,10 +74,11 @@ fn tmux(args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
-/// Live NookOS-managed tmux sessions on this machine.
+/// Live NookOS-managed tmux sessions on this machine — on THIS node's server
+/// only (AC-5), via the configured socket.
 pub fn list_nook_sessions() -> Vec<String> {
     // tmux exits non-zero when no server is running — that's just "empty".
-    Command::new("tmux")
+    tmux_command()
         .args(["ls", "-F", "#{session_name}"])
         .output()
         .ok()
@@ -41,7 +94,7 @@ pub fn list_nook_sessions() -> Vec<String> {
 }
 
 pub fn session_exists(name: &str) -> bool {
-    Command::new("tmux")
+    tmux_command()
         .args(["has-session", "-t", name])
         .output()
         .is_ok_and(|o| o.status.success())
@@ -388,7 +441,7 @@ pub fn capture_pane(name: &str, history_lines: u32) -> Result<String> {
 /// cursor-addressed redraw through the existing PTY, so a (re)connecting
 /// browser gets a coherent screen instead of mid-stream deltas.
 pub fn repaint(session: &str) {
-    let ttys = Command::new("tmux")
+    let ttys = tmux_command()
         .args(["list-clients", "-t", session, "-F", "#{client_tty}"])
         .output()
         .ok()
@@ -396,9 +449,7 @@ pub fn repaint(session: &str) {
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
         .unwrap_or_default();
     for tty in ttys.lines().filter(|t| !t.is_empty()) {
-        let _ = Command::new("tmux")
-            .args(["refresh-client", "-t", tty])
-            .output();
+        let _ = tmux_command().args(["refresh-client", "-t", tty]).output();
     }
 }
 
@@ -500,6 +551,21 @@ pub fn rename_window(session: &str, index: u32, name: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The socket flag is present exactly when a socket is configured, and the
+    /// default-server path (None) adds no `-L` at all — the byte-identical
+    /// pre-108 behaviour (AC-1/AC-2).
+    #[test]
+    fn socket_args_present_only_when_configured() {
+        assert_eq!(
+            socket_args(Some("nook-crimson")),
+            vec!["-L".to_string(), "nook-crimson".to_string()]
+        );
+        assert!(
+            socket_args(None).is_empty(),
+            "the default server gets no -L flag"
+        );
+    }
 
     /// The wheel policy, in the order that matters. Getting this order wrong
     /// does not fail loudly — it just means scrolling types arrow keys into

@@ -117,6 +117,11 @@ pub async fn enroll(
         server_fingerprint: None,
         agent_server: None,
         service: None,
+        // Likewise a PRIVATE tmux server for every new node, so two nodes on one
+        // host never share a session server (MAIN-108 AC-1). Forward-only: only
+        // this fresh-config branch sets it — an `existing` node keeps the default
+        // server until its operator opts in.
+        tmux_socket: Some(crate::config::derived_tmux_socket(&server)),
     });
     // The agent endpoint is where the certificate is actually used; the API
     // may well live elsewhere, so record it separately rather than moving

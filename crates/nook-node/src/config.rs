@@ -42,6 +42,20 @@ pub struct NodeConfig {
     /// mistake is every machine at once.
     #[serde(default)]
     pub service: Option<String>,
+
+    /// The tmux server this node runs its sessions on, as an `-L <socket>` name
+    /// (MAIN-108). Absent means the user's DEFAULT tmux server — byte-identical
+    /// to a pre-108 node (AC-1). A fresh enrollment writes `nook-<cp-slug>`, so
+    /// every new node gets a PRIVATE server and two nodes on one host never see
+    /// or clobber each other's sessions.
+    ///
+    /// Cutover is forward-only and manual (AC-6): changing this on a node that
+    /// already has live sessions STRANDS them on the old server — the control
+    /// plane marks them exited on the next connect (its `live_tmux_sessions`
+    /// reconcile) and nothing adopts them across sockets. Change it only when the
+    /// node has no sessions worth keeping.
+    #[serde(default)]
+    pub tmux_socket: Option<String>,
 }
 
 impl NodeConfig {
@@ -311,6 +325,16 @@ pub fn default_workspace_root(server_url: &str) -> String {
     format!("~/.nook/workspace/{}", cp_slug(server_url))
 }
 
+/// The private tmux server name a fresh node enrolls with (MAIN-108):
+/// `nook-<cp-slug>`. Because the control plane's slug is part of the name, two
+/// nodes on one machine belonging to different control planes get different
+/// servers and never share sessions (AC-5). Forward-only — only a NEW node gets
+/// it; an existing node keeps the default server (`None`) until its operator
+/// opts in (AC-1/NG-1). See [`NodeConfig::tmux_socket`].
+pub fn derived_tmux_socket(server_url: &str) -> String {
+    format!("nook-{}", cp_slug(server_url))
+}
+
 #[cfg(test)]
 mod slug_tests {
     use super::*;
@@ -355,6 +379,21 @@ mod slug_tests {
         assert_eq!(a, "~/.nook/workspace/nook.hein.network");
         assert_eq!(b, "~/.nook/workspace/other.example.com");
         assert_ne!(a, b);
+    }
+
+    #[test]
+    fn derived_tmux_socket_is_nook_prefixed_and_per_control_plane() {
+        // The private server name a fresh node enrolls with (MAIN-108 AC-1): a
+        // `nook-` prefix plus the control-plane slug, so two nodes on one host
+        // belonging to different control planes get disjoint servers (AC-5).
+        assert_eq!(
+            derived_tmux_socket("https://nook.hein.network:8443/x"),
+            "nook-nook.hein.network"
+        );
+        assert_ne!(
+            derived_tmux_socket("https://nook.hein.network"),
+            derived_tmux_socket("https://other.example.com"),
+        );
     }
 }
 

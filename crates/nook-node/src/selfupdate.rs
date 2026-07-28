@@ -133,6 +133,7 @@ mod tests {
             server_fingerprint: None,
             agent_server: None,
             service: service.map(str::to_string),
+            tmux_socket: None,
         }
     }
 
