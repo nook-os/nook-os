@@ -15,6 +15,10 @@ let updateCallback: ((m: unknown) => void) | null = null;
 const dispose = vi.fn();
 // The caller's chat role, mutable so the admin-gate tests can flip it (AC-5).
 const identity = vi.hoisted(() => ({ role: "member" as string | null }));
+// The channel list the mocked client returns, as a mutable server-of-record so
+// unread-badge tests (MAIN-117) can change it between refetches — a background
+// message raises a count, marking read zeroes it.
+const chatState = vi.hoisted(() => ({ channels: [] as any[] }));
 
 vi.mock("@nookos/api", () => ({
   // ChatView (in @nookos/ui) imports this from the same module; the whole-module
@@ -30,10 +34,15 @@ vi.mock("@nookos/api", () => ({
   })),
   createChannel: vi.fn(),
   updateChannel: vi.fn(),
-  listChannels: vi.fn(async () => [
-    { id: "c1", name: "general", slug: "general", archived: false, created_at: "2026-07-25T09:00:00Z" },
-  ]),
+  listChannels: vi.fn(async () => chatState.channels),
   listDms: vi.fn(async () => []),
+  // Marking a conversation read zeroes its unread on the server-of-record, so the
+  // resync after it clears the badge (MAIN-117 AC-3).
+  markRead: vi.fn(async (id: string) => {
+    const c = chatState.channels.find((x) => x.id === id);
+    if (c) c.unread_count = 0;
+    return undefined;
+  }),
   openDm: vi.fn(),
   listPeople: vi.fn(async () => []),
   channelHistory: vi.fn(async () => ({
@@ -62,12 +71,8 @@ vi.mock("@nookos/api", () => ({
     replies: [],
     next_cursor: null,
   })),
-  connectChatSocket: vi.fn(
-    (
-      _channel: string,
-      onMessage: (m: unknown) => void,
-      handlers?: { onUpdate?: (m: unknown) => void },
-    ) => {
+  connectChatStream: vi.fn(
+    (onMessage: (m: unknown) => void, handlers?: { onUpdate?: (m: unknown) => void }) => {
       liveCallback = onMessage;
       updateCallback = handlers?.onUpdate ?? null;
       return dispose;
@@ -86,6 +91,7 @@ vi.mock("@nookos/api", () => ({
 }));
 
 import { ChatPage } from "./Chat";
+import { listChannels, markRead } from "@nookos/api";
 
 function renderPage() {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -101,6 +107,23 @@ beforeEach(() => {
   updateCallback = null;
   identity.role = "member";
   dispose.mockClear();
+  vi.mocked(markRead).mockClear();
+  vi.mocked(listChannels).mockClear();
+  // A single caught-up channel by default; badge tests override this.
+  chatState.channels = [
+    {
+      id: "c1",
+      name: "general",
+      slug: "general",
+      owner_type: "tenant",
+      archived: false,
+      unread_count: 0,
+      created_at: "2026-07-25T09:00:00Z",
+    },
+  ];
+  // jsdom reports focus inconsistently; force it so the open/focus mark-read
+  // effect (AC-3) runs deterministically.
+  vi.spyOn(document, "hasFocus").mockReturnValue(true);
 });
 afterEach(() => cleanup());
 
@@ -127,6 +150,55 @@ describe("ChatPage", () => {
       });
     });
     expect(await screen.findByText("live hello")).toBeTruthy();
+  });
+
+  // MAIN-117 AC-5/AC-6: a live message for a conversation the user is NOT viewing
+  // bumps that conversation's unread badge at once (via a list resync), without
+  // showing the message in the open channel and without polling.
+  it("bumps a background conversation's unread badge on a live message", async () => {
+    chatState.channels = [
+      { id: "c1", name: "general", slug: "general", owner_type: "tenant", archived: false, unread_count: 0, created_at: "2026-07-25T09:00:00Z" },
+      { id: "c2", name: "random", slug: "random", owner_type: "tenant", archived: false, unread_count: 0, created_at: "2026-07-25T09:00:00Z" },
+    ];
+    renderPage();
+    await screen.findByText("general");
+    await screen.findByText("random");
+    await waitFor(() => expect(liveCallback).not.toBeNull());
+    // c1 is auto-selected; both conversations start caught up, so no badge shows.
+    expect(screen.queryByLabelText(/unread/)).toBeNull();
+
+    // The server now reports an unread message in c2; a live frame for c2 (NOT the
+    // open channel) drives the resync that surfaces its badge.
+    chatState.channels = chatState.channels.map((c) =>
+      c.id === "c2" ? { ...c, unread_count: 3 } : c,
+    );
+    act(() => {
+      liveCallback!({
+        id: "bg1",
+        author_id: "u-carol",
+        channel_id: "c2",
+        body: "psst — over here",
+        created_at: "2026-07-25T10:02:00Z",
+      });
+    });
+
+    expect(await screen.findByLabelText("3 unread")).toBeTruthy();
+    // The background message never leaks into the open channel's view.
+    expect(screen.queryByText("psst — over here")).toBeNull();
+  });
+
+  // MAIN-117 AC-3: opening a conversation advances its read cursor and the resync
+  // clears its unread badge.
+  it("marks the open conversation read and clears its badge", async () => {
+    chatState.channels = [
+      { id: "c1", name: "general", slug: "general", owner_type: "tenant", archived: false, unread_count: 5, created_at: "2026-07-25T09:00:00Z" },
+    ];
+    renderPage();
+    await screen.findByText("general");
+    // Opening c1 (auto-selected) marks it read…
+    await waitFor(() => expect(vi.mocked(markRead)).toHaveBeenCalledWith("c1"));
+    // …and the badge that was showing "5 unread" clears on the resync.
+    await waitFor(() => expect(screen.queryByLabelText(/unread/)).toBeNull());
   });
 
   it("dedupes an optimistic post against its server echo", async () => {

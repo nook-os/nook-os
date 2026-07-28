@@ -2475,6 +2475,12 @@ pub struct ChatChannel {
     /// the sidebar orders by it (MAIN-178). `0` until an admin arranges it.
     #[serde(default)]
     pub position: i32,
+    /// Messages posted by others after the caller's read cursor (MAIN-117). The
+    /// API returns the real count with the caller's own messages excluded; the
+    /// UI caps the display ("99+"). `0` when the caller is caught up, and on
+    /// responses that don't compute it (create/update return a fresh channel).
+    #[serde(default)]
+    pub unread_count: i64,
     pub created_at: DateTime<Utc>,
 }
 
@@ -2640,6 +2646,10 @@ pub struct DmSummary {
     pub id: Uuid,
     pub created_at: DateTime<Utc>,
     pub participants: Vec<PersonRef>,
+    /// Unread messages from the other participant(s) after the caller's read
+    /// cursor (MAIN-117) — same semantics as [`ChatChannel::unread_count`].
+    #[serde(default)]
+    pub unread_count: i64,
 }
 
 /// Open (or reuse) a DM with these persons — the creator is always included, so

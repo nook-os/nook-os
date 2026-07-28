@@ -35,7 +35,8 @@ use uuid::Uuid;
 /// Chat's own migration set, embedded at compile time — applied into the `chat`
 /// schema, so it never touches the control plane's `public._sqlx_migrations`.
 /// Embedded: 0001_chat_init, 0002_chat_channel_archive, 0003_chat_dm,
-/// 0004_chat_threads, 0005_chat_reactions, 0006_chat_categories.
+/// 0004_chat_threads, 0005_chat_reactions, 0006_chat_categories,
+/// 0007_chat_read_cursors.
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
 #[derive(Clone)]
@@ -111,6 +112,8 @@ async fn main() -> anyhow::Result<()> {
             patch(categories::update).delete(categories::delete),
         )
         .route("/api/channels/{id}/placement", patch(channels::place))
+        // Advance the caller's read cursor for a channel (MAIN-117 AC-2).
+        .route("/api/channels/{id}/read", put(channels::mark_read))
         .route(
             "/api/channels/{id}/messages",
             get(messages::history).post(messages::post),
@@ -128,7 +131,10 @@ async fn main() -> anyhow::Result<()> {
             "/api/messages/{id}/reactions/{emoji}",
             put(messages::add_reaction).delete(messages::remove_reaction),
         )
-        .route("/api/channels/{id}/ws", get(ws::subscribe))
+        // ONE per-user live stream for every channel/DM the caller belongs to,
+        // tagged by channel_id (MAIN-117 AC-4/AC-6) — replaces the old
+        // per-open-channel socket.
+        .route("/api/ws", get(ws::stream))
         // Direct messages (MAIN-113): open-or-create + list the caller's DMs,
         // and the org-scoped people picker that feeds the new-DM affordance.
         .route("/api/dms", get(dms::list).post(dms::open))

@@ -7709,6 +7709,11 @@
           },
           "slug": {
             "type": "string"
+          },
+          "unread_count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Messages posted by others after the caller's read cursor (MAIN-117). The\nAPI returns the real count with the caller's own messages excluded; the\nUI caps the display (\"99+\"). `0` when the caller is caught up, and on\nresponses that don't compute it (create/update return a fresh channel)."
           }
         }
       },
@@ -8795,6 +8800,11 @@
             "items": {
               "$ref": "#/components/schemas/PersonRef"
             }
+          },
+          "unread_count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Unread messages from the other participant(s) after the caller's read\ncursor (MAIN-117) — same semantics as [`ChatChannel::unread_count`]."
           }
         }
       },

@@ -14,11 +14,12 @@ import { Settings } from "lucide-react";
 import {
   api,
   channelHistory,
-  connectChatSocket,
+  connectChatStream,
   deleteMessage,
   editMessage,
   listChannels,
   listDms,
+  markRead,
   me as chatMe,
   openDm,
   postMessage,
@@ -55,6 +56,11 @@ function dmName(dm: DmSummary, myPersonId: string | null | undefined): string {
  *  chat service's gate, so the UI never shows a control the server would 403. */
 function isAdminRole(role: string | null | undefined): boolean {
   return role === "owner" || role === "admin";
+}
+
+/** The compact unread label: the real count, capped for display (MAIN-117 AC-5). */
+function unreadLabel(n: number): string {
+  return n > 99 ? "99+" : String(n);
 }
 
 const PAGE_SIZE = 50;
@@ -117,14 +123,22 @@ export function ChatPage() {
     [renameChannel, setChannelArchived],
   );
 
+  // Each conversation's unread_count rides the channel/DM list (MAIN-117); the
+  // live app-wide chat stream bumps badges instantly, with refetch-on-focus and
+  // resync-on-reconnect as the safety nets (no polling).
   const channelsQuery = useQuery({
     queryKey: ["chat", "channels"],
     queryFn: () => listChannels(),
+    refetchOnWindowFocus: true,
   });
   const channels = channelsQuery.data ?? [];
 
   // The caller's direct messages (MAIN-113), listed beside the channels.
-  const dmsQuery = useQuery({ queryKey: ["chat", "dms"], queryFn: listDms });
+  const dmsQuery = useQuery({
+    queryKey: ["chat", "dms"],
+    queryFn: listDms,
+    refetchOnWindowFocus: true,
+  });
   const dms = dmsQuery.data ?? [];
 
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -265,36 +279,95 @@ export function ChatPage() {
     setThreadParentId(null);
   }, [selectedId]);
 
-  // One socket per open channel, torn down on switch/unmount so nothing leaks.
-  // A reconnect may have missed messages, so refetch history to close the gap.
+  // The active conversation, reachable from the always-on stream handler without
+  // re-subscribing on every switch.
+  const selectedIdRef = useRef<string | null>(selectedId);
   useEffect(() => {
-    if (!selectedId) return;
-    const dispose = connectChatSocket(
-      selectedId,
+    selectedIdRef.current = selectedId;
+  }, [selectedId]);
+
+  // ONE app-wide chat stream for the whole session (MAIN-117 AC-4): every
+  // channel/DM the caller belongs to arrives here, tagged by `channel_id`. A
+  // message for the OPEN conversation folds into `live`; a message for any OTHER
+  // conversation re-syncs the lists so its unread badge bumps at once — instant,
+  // no polling. Mounted once (stable deps) and torn down on unmount.
+  useEffect(() => {
+    const bumpBadges = () => {
+      void qc.invalidateQueries({ queryKey: ["chat", "channels"] });
+      void qc.invalidateQueries({ queryKey: ["chat", "dms"] });
+    };
+    const dispose = connectChatStream(
       (msg) => {
-        setLive((prev) => (prev.some((m) => m.id === msg.id) ? prev : [...prev, msg]));
-        // A NEW reply bumps its parent's count; record its id so an later update
-        // to it is not re-counted (MAIN-116 review fix).
-        if (msg.parent_message_id) {
-          setNewReplyIds((prev) =>
-            prev.has(msg.id) ? prev : new Set(prev).add(msg.id),
-          );
+        if (msg.channel_id === selectedIdRef.current) {
+          setLive((prev) => (prev.some((m) => m.id === msg.id) ? prev : [...prev, msg]));
+          // A NEW reply bumps its parent's count; record its id so a later update
+          // to it is not re-counted (MAIN-116 review fix).
+          if (msg.parent_message_id) {
+            setNewReplyIds((prev) => (prev.has(msg.id) ? prev : new Set(prev).add(msg.id)));
+          }
+        } else {
+          bumpBadges();
         }
       },
       {
         onReconnect: () => {
-          // The refetched history carries authoritative reply counts, so drop the
-          // optimistic new-reply bumps to avoid double-counting after the gap.
+          // Resync everything a gap could have staled: badge counts and the open
+          // conversation's history (which carries authoritative reply counts, so
+          // drop the optimistic new-reply bumps too).
           setNewReplyIds(new Set());
-          void qc.invalidateQueries({ queryKey: ["chat", "messages", selectedId] });
+          bumpBadges();
+          if (selectedIdRef.current) {
+            void qc.invalidateQueries({ queryKey: ["chat", "messages", selectedIdRef.current] });
+          }
         },
-        // An edit, soft-delete, or reaction toggle on any message in this
-        // channel — replies included, so an open thread updates too (AC-5).
-        onUpdate: applyBroadcast,
+        // An edit/soft-delete/reaction (AC-5): fold into the open conversation
+        // (replies included, so an open thread updates too); for a background one,
+        // re-sync badges since a soft-delete can lower a count.
+        onUpdate: (msg) => {
+          if (msg.channel_id === selectedIdRef.current) applyBroadcast(msg);
+          else bumpBadges();
+        },
       },
     );
     return dispose;
-  }, [selectedId, qc, applyBroadcast]);
+  }, [qc, applyBroadcast]);
+
+  // Advance the caller's read cursor for a conversation, then refresh the lists
+  // so its badge clears at once (MAIN-117 AC-3). Failures are swallowed — a
+  // missed mark-read self-heals on the next focus refetch.
+  const markConversationRead = useCallback(
+    (id: string) => {
+      void markRead(id)
+        .then(() => {
+          void qc.invalidateQueries({ queryKey: ["chat", "channels"] });
+          void qc.invalidateQueries({ queryKey: ["chat", "dms"] });
+        })
+        .catch(() => {});
+    },
+    [qc],
+  );
+
+  // Mark the open conversation read on open/focus and whenever a new message
+  // lands while it is on-screen and the tab is focused — scroll-to-bottom
+  // semantics (AC-3). `live.length` resets to 0 on switch, so the first pass is
+  // the open trigger; a backgrounded tab is left unread on purpose, and
+  // switching away simply stops advancing the cursor.
+  useEffect(() => {
+    if (!selectedId) return;
+    if (typeof document !== "undefined" && !document.hasFocus()) return;
+    markConversationRead(selectedId);
+  }, [selectedId, live.length, markConversationRead]);
+
+  // Regaining focus with a conversation open re-marks it read (MAIN-117 review
+  // should-fix): messages that arrived while the tab was backgrounded left the
+  // badge set, and the effect above doesn't re-fire on focus alone.
+  useEffect(() => {
+    const onFocus = () => {
+      if (selectedIdRef.current) markConversationRead(selectedIdRef.current);
+    };
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+  }, [markConversationRead]);
 
   const sendMutation = useMutation({
     mutationFn: (v: { tempId: string; body: string }) =>
@@ -406,6 +479,11 @@ export function ChatPage() {
                     org
                   </span>
                 )}
+                {(c.unread_count ?? 0) > 0 && (
+                  <span className="chat-unread" aria-label={`${c.unread_count} unread`}>
+                    {unreadLabel(c.unread_count ?? 0)}
+                  </span>
+                )}
               </button>
             );
             // Admins get the channel management menu on right-click (MAIN-177);
@@ -451,6 +529,11 @@ export function ChatPage() {
             >
               <span className="chat-channel-hash">@</span>
               {dmName(d, chatIdentity?.person_id)}
+              {(d.unread_count ?? 0) > 0 && (
+                <span className="chat-unread" aria-label={`${d.unread_count} unread`}>
+                  {unreadLabel(d.unread_count ?? 0)}
+                </span>
+              )}
             </button>
           ))
         )}

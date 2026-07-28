@@ -28,6 +28,11 @@ struct ChannelRow {
     archived_at: Option<DateTime<Utc>>,
     category_id: Option<Uuid>,
     position: i32,
+    // Filled only by the list query (MAIN-117); create/update don't select it, so
+    // `#[sqlx(default)]` leaves it 0 there — a freshly created/renamed channel
+    // reports no unread rather than running the aggregate.
+    #[sqlx(default)]
+    unread_count: i64,
     created_at: DateTime<Utc>,
 }
 
@@ -41,6 +46,7 @@ impl From<ChannelRow> for ChatChannel {
             archived: r.archived_at.is_some(),
             category_id: r.category_id,
             position: r.position,
+            unread_count: r.unread_count,
             created_at: r.created_at,
         }
     }
@@ -48,8 +54,29 @@ impl From<ChannelRow> for ChatChannel {
 
 /// The `chat_channels` columns every read of a channel selects — kept in one
 /// place so `category_id`/`position` (MAIN-178) can't be forgotten on a path.
+/// `unread_count` is NOT here: it is `#[sqlx(default)]` on `ChannelRow`, computed
+/// only by the list query via `unread_subquery` aliased `AS unread_count`.
 const CHANNEL_COLS: &str =
     "id, name, slug, owner_type, archived_at, category_id, position, created_at";
+
+/// A correlated subquery that counts a channel's messages newer than the reader's
+/// read cursor, excluding the reader's own messages and deleted ones (MAIN-117).
+/// `{chan}` is the channel-id expression to correlate on (`c.id` in the list) and
+/// `{reader}` the caller-user bind. No cursor row → `-infinity`, so every message
+/// counts until the first read. The boundary is strict (`>`): a message at the
+/// cursor instant is already read.
+fn unread_subquery(chan: &str, reader: &str) -> String {
+    format!(
+        "(SELECT count(*) FROM chat_messages m
+            WHERE m.channel_id = {chan}
+              AND m.author_id <> {reader}
+              AND m.deleted_at IS NULL
+              AND m.created_at > COALESCE(
+                  (SELECT r.last_read_at FROM chat_read_cursors r
+                     WHERE r.channel_id = {chan} AND r.user_id = {reader}),
+                  '-infinity'::timestamptz))"
+    )
+}
 
 /// A channel's scope facts, resolved once and reused by every handler that
 /// touches a channel by id.
@@ -220,16 +247,19 @@ pub async fn list(
     // tenant belongs to — one org per session, so an org channel appears once
     // (AC-1, AC-2). Cross-org isolation holds: only this tenant's org matches.
     let rows = sqlx::query_as::<_, ChannelRow>(&format!(
-        "SELECT {CHANNEL_COLS} FROM chat_channels
-         WHERE (
-                 (owner_type = 'tenant' AND owner_id = $1)
-              OR (owner_type = 'org' AND owner_id = (SELECT org_id FROM public.tenants WHERE id = $1))
-               )
-           AND ($2 OR archived_at IS NULL)
-         ORDER BY created_at"
+        "SELECT {CHANNEL_COLS}, {unread} AS unread_count
+           FROM chat_channels c
+          WHERE (
+                  (c.owner_type = 'tenant' AND c.owner_id = $1)
+               OR (c.owner_type = 'org' AND c.owner_id = (SELECT org_id FROM public.tenants WHERE id = $1))
+                )
+            AND ($2 OR c.archived_at IS NULL)
+          ORDER BY c.created_at",
+        unread = unread_subquery("c.id", "$3"),
     ))
     .bind(caller.tenant_id)
     .bind(q.include_archived)
+    .bind(caller.user_id)
     .fetch_all(&state.db)
     .await
     .map_err(|_| ChatError::Internal)?;
@@ -328,6 +358,31 @@ pub async fn place(
     Ok(Json(row.into()))
 }
 
+/// Advance the caller's read cursor for a channel to "now" (MAIN-117 AC-2). The
+/// cursor is monotonic: `GREATEST` keeps it from ever moving backward, so a
+/// late-arriving or duplicate call can only leave it where it is or ahead — the
+/// endpoint is idempotent. `access` scopes it, so this covers tenant, org, and
+/// DM channels alike (AC-4), and refuses a channel the caller can't see.
+pub async fn mark_read(
+    State(state): State<AppState>,
+    caller: Caller,
+    Path(id): Path<Uuid>,
+) -> Result<StatusCode, ChatError> {
+    access(&state.db, id, &caller).await?;
+    sqlx::query(
+        "INSERT INTO chat_read_cursors (channel_id, user_id, last_read_at)
+         VALUES ($1, $2, now())
+         ON CONFLICT (channel_id, user_id)
+         DO UPDATE SET last_read_at = GREATEST(chat_read_cursors.last_read_at, EXCLUDED.last_read_at)",
+    )
+    .bind(id)
+    .bind(caller.user_id)
+    .execute(&state.db)
+    .await
+    .map_err(|_| ChatError::Internal)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 fn is_unique_violation(e: &sqlx::Error) -> bool {
     matches!(e, sqlx::Error::Database(db) if db.code().as_deref() == Some("23505"))
 }
@@ -364,10 +419,11 @@ pub fn slugify(name: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{access, create, list, place, slugify, update, ListQuery};
+    use super::{access, create, list, mark_read, place, slugify, update, ListQuery};
     use crate::{AppState, Caller, ChatError};
     use axum::extract::{Path, Query, State};
     use axum::Json;
+    use chrono::{DateTime, Utc};
     use nook_types::{
         ChatChannelPlacement, CreateChatCategory, CreateChatChannel, ReorderChatCategories,
         UpdateChatChannel,
@@ -1042,5 +1098,286 @@ mod tests {
         assert_eq!(persisted, vec![b.id, a.id], "list reflects B before A");
 
         cleanup(&state.db, tenant).await;
+    }
+
+    // ── Unread counts + read cursors (MAIN-117) ─────────────────────────────
+
+    /// Insert a message into a channel, returning its `created_at` so a test can
+    /// pin a cursor exactly at or around it.
+    async fn post_msg(db: &PgPool, channel: Uuid, author: Uuid, tenant: Uuid) -> DateTime<Utc> {
+        let (ts,): (DateTime<Utc>,) = sqlx::query_as(
+            "INSERT INTO chat_messages (id, channel_id, author_id, tenant_id, body)
+             VALUES ($1, $2, $3, $4, 'hi') RETURNING created_at",
+        )
+        .bind(Uuid::now_v7())
+        .bind(channel)
+        .bind(author)
+        .bind(tenant)
+        .fetch_one(db)
+        .await
+        .unwrap();
+        ts
+    }
+
+    /// Force a read cursor to an exact instant — used to test the strict-`>`
+    /// boundary and the monotonic (`GREATEST`) guard directly.
+    async fn set_cursor(db: &PgPool, channel: Uuid, user: Uuid, at: DateTime<Utc>) {
+        sqlx::query(
+            "INSERT INTO chat_read_cursors (channel_id, user_id, last_read_at)
+             VALUES ($1, $2, $3)
+             ON CONFLICT (channel_id, user_id) DO UPDATE SET last_read_at = EXCLUDED.last_read_at",
+        )
+        .bind(channel)
+        .bind(user)
+        .bind(at)
+        .execute(db)
+        .await
+        .unwrap();
+    }
+
+    /// The channel's `unread_count` as the list endpoint reports it for `user`.
+    async fn unread_of(state: &AppState, user: Uuid, tenant: Uuid, channel: Uuid) -> i64 {
+        let rows = list(
+            State(state.clone()),
+            caller(user, tenant),
+            Query(ListQuery {
+                include_archived: false,
+            }),
+        )
+        .await
+        .expect("list")
+        .0;
+        rows.into_iter()
+            .find(|c| c.id == channel)
+            .expect("channel present")
+            .unread_count
+    }
+
+    /// Unread counts others' messages only, per-user; marking read clears the
+    /// caller's count without touching anyone else's (AC-2/AC-3, isolation).
+    #[tokio::test]
+    async fn unread_excludes_own_and_is_per_user() {
+        let Some(state) = setup().await else { return };
+        let tenant = new_tenant(&state.db).await;
+        let a = add_user(&state.db, tenant, "admin").await;
+        let b = add_user(&state.db, tenant, "member").await;
+        let ch = create(
+            State(state.clone()),
+            caller(a, tenant),
+            Json(CreateChatChannel {
+                name: "general".into(),
+                owner: None,
+            }),
+        )
+        .await
+        .expect("channel")
+        .1
+         .0;
+
+        // Two from B, one from A.
+        post_msg(&state.db, ch.id, b, tenant).await;
+        post_msg(&state.db, ch.id, b, tenant).await;
+        post_msg(&state.db, ch.id, a, tenant).await;
+
+        // A sees only B's two (own excluded); B sees only A's one.
+        assert_eq!(unread_of(&state, a, tenant, ch.id).await, 2);
+        assert_eq!(unread_of(&state, b, tenant, ch.id).await, 1);
+
+        // A marks read → A is caught up; B is untouched (per-user isolation).
+        assert_eq!(
+            mark_read(State(state.clone()), caller(a, tenant), Path(ch.id))
+                .await
+                .expect("mark read"),
+            axum::http::StatusCode::NO_CONTENT
+        );
+        assert_eq!(unread_of(&state, a, tenant, ch.id).await, 0);
+        assert_eq!(unread_of(&state, b, tenant, ch.id).await, 1);
+
+        cleanup(&state.db, tenant).await;
+    }
+
+    /// The cursor boundary is strict: a message exactly at the cursor is read; a
+    /// message strictly after it is unread (AC-2 "cursor boundary exact").
+    #[tokio::test]
+    async fn unread_boundary_is_strict() {
+        let Some(state) = setup().await else { return };
+        let tenant = new_tenant(&state.db).await;
+        let a = add_user(&state.db, tenant, "admin").await;
+        let b = add_user(&state.db, tenant, "member").await;
+        let ch = create(
+            State(state.clone()),
+            caller(a, tenant),
+            Json(CreateChatChannel {
+                name: "edge".into(),
+                owner: None,
+            }),
+        )
+        .await
+        .expect("channel")
+        .1
+         .0;
+
+        let t = post_msg(&state.db, ch.id, b, tenant).await;
+        // Cursor exactly at the message instant → that message is already read.
+        set_cursor(&state.db, ch.id, a, t).await;
+        assert_eq!(unread_of(&state, a, tenant, ch.id).await, 0);
+
+        // A message strictly after the cursor counts.
+        post_msg(&state.db, ch.id, b, tenant).await;
+        assert_eq!(unread_of(&state, a, tenant, ch.id).await, 1);
+
+        cleanup(&state.db, tenant).await;
+    }
+
+    /// The cursor never moves backward: with the cursor pinned in the future,
+    /// marking read at `now()` leaves it in the future (GREATEST), so messages
+    /// created after `now()` but before that future instant stay read (AC-2
+    /// idempotent/monotonic).
+    #[tokio::test]
+    async fn cursor_is_monotonic() {
+        let Some(state) = setup().await else { return };
+        let tenant = new_tenant(&state.db).await;
+        let a = add_user(&state.db, tenant, "admin").await;
+        let b = add_user(&state.db, tenant, "member").await;
+        let ch = create(
+            State(state.clone()),
+            caller(a, tenant),
+            Json(CreateChatChannel {
+                name: "future".into(),
+                owner: None,
+            }),
+        )
+        .await
+        .expect("channel")
+        .1
+         .0;
+
+        // Pin A's cursor an hour ahead.
+        let (future,): (DateTime<Utc>,) = sqlx::query_as("SELECT now() + interval '1 hour'")
+            .fetch_one(&state.db)
+            .await
+            .unwrap();
+        set_cursor(&state.db, ch.id, a, future).await;
+
+        // A message now (before the future cursor) is read.
+        post_msg(&state.db, ch.id, b, tenant).await;
+        assert_eq!(unread_of(&state, a, tenant, ch.id).await, 0);
+
+        // Marking read at now() must not drag the cursor back to now(): a further
+        // message, still before the future instant, remains read.
+        mark_read(State(state.clone()), caller(a, tenant), Path(ch.id))
+            .await
+            .expect("mark read");
+        post_msg(&state.db, ch.id, b, tenant).await;
+        assert_eq!(
+            unread_of(&state, a, tenant, ch.id).await,
+            0,
+            "cursor stayed in the future; it did not regress to now()"
+        );
+
+        cleanup(&state.db, tenant).await;
+    }
+
+    /// The per-user stream's authorization gate (MAIN-117 AC-6). Each firehose
+    /// event is forwarded only if `access` authorizes the caller for its channel
+    /// AT THAT MOMENT, so the boundary is fully dynamic: a cross-tenant intruder
+    /// never passes, a member ADDED mid-session begins passing (no reconnect), and
+    /// a member REMOVED stops passing immediately.
+    #[tokio::test]
+    async fn stream_gate_isolates_and_tracks_membership_changes() {
+        let Some(state) = setup().await else { return };
+        let org = new_org(&state.db).await;
+        let t_a = new_tenant_in_org(&state.db, org).await;
+        let t_b = new_tenant(&state.db).await; // a separate org — the intruder
+
+        let person_a = Uuid::now_v7();
+        let a = add_user_person(&state.db, t_a, person_a, "admin").await;
+        let person_c = Uuid::now_v7();
+        let c = add_user_person(&state.db, t_a, person_c, "member").await;
+        let b = add_user(&state.db, t_b, "admin").await;
+
+        let ch_a = create(
+            State(state.clone()),
+            caller(a, t_a),
+            Json(CreateChatChannel {
+                name: "team-a".into(),
+                owner: None,
+            }),
+        )
+        .await
+        .expect("channel a")
+        .1
+         .0;
+
+        // A DM created by person_a; person_c is NOT a participant yet.
+        let dm = Uuid::now_v7();
+        sqlx::query(
+            "INSERT INTO chat_channels (id, owner_type, owner_id, name, slug)
+             VALUES ($1, 'dm', $2, '', $3)",
+        )
+        .bind(dm)
+        .bind(person_a)
+        .bind(format!("dm-{}", dm.simple()))
+        .execute(&state.db)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO chat_channel_participants (channel_id, person_id) VALUES ($1, $2)",
+        )
+        .bind(dm)
+        .bind(person_a)
+        .execute(&state.db)
+        .await
+        .unwrap();
+
+        // Isolation: the tenant-B intruder is refused A's tenant channel and DM,
+        // so an event on either is never forwarded to them.
+        assert!(is_forbidden(
+            &access(&state.db, ch_a.id, &caller(b, t_b)).await
+        ));
+        assert!(is_forbidden(&access(&state.db, dm, &caller(b, t_b)).await));
+        // A, a member, is authorized for both.
+        assert!(access(&state.db, ch_a.id, &caller(a, t_a)).await.is_ok());
+        assert!(access(&state.db, dm, &caller(a, t_a)).await.is_ok());
+
+        // ADD: C is not yet in the DM → refused. Add the participant → now passes,
+        // so C's already-open stream starts delivering it without a reconnect.
+        assert!(
+            is_forbidden(&access(&state.db, dm, &caller(c, t_a)).await),
+            "C is refused before being added"
+        );
+        sqlx::query(
+            "INSERT INTO chat_channel_participants (channel_id, person_id) VALUES ($1, $2)",
+        )
+        .bind(dm)
+        .bind(person_c)
+        .execute(&state.db)
+        .await
+        .unwrap();
+        assert!(
+            access(&state.db, dm, &caller(c, t_a)).await.is_ok(),
+            "a participant added mid-session begins receiving"
+        );
+
+        // REMOVE: drop C again → refused immediately.
+        sqlx::query(
+            "DELETE FROM chat_channel_participants WHERE channel_id = $1 AND person_id = $2",
+        )
+        .bind(dm)
+        .bind(person_c)
+        .execute(&state.db)
+        .await
+        .unwrap();
+        assert!(
+            is_forbidden(&access(&state.db, dm, &caller(c, t_a)).await),
+            "a removed participant stops receiving"
+        );
+
+        let _ = sqlx::query("DELETE FROM chat_channels WHERE id = $1")
+            .bind(dm)
+            .execute(&state.db)
+            .await;
+        cleanup(&state.db, t_a).await;
+        cleanup(&state.db, t_b).await;
     }
 }

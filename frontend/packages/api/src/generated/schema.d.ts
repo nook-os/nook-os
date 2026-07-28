@@ -3363,6 +3363,14 @@ export interface components {
              */
             position?: number;
             slug: string;
+            /**
+             * Format: int64
+             * @description Messages posted by others after the caller's read cursor (MAIN-117). The
+             *     API returns the real count with the caller's own messages excluded; the
+             *     UI caps the display ("99+"). `0` when the caller is caught up, and on
+             *     responses that don't compute it (create/update return a fresh channel).
+             */
+            unread_count?: number;
         };
         /**
          * @description Place a channel (MAIN-178): set its category (`None` = uncategorized) and its
@@ -3802,6 +3810,12 @@ export interface components {
             /** Format: uuid */
             id: string;
             participants: components["schemas"]["PersonRef"][];
+            /**
+             * Format: int64
+             * @description Unread messages from the other participant(s) after the caller's read
+             *     cursor (MAIN-117) — same semantics as [`ChatChannel::unread_count`].
+             */
+            unread_count?: number;
         };
         /**
          * @description Whether the signed-in user's email is verified, and whether a local
