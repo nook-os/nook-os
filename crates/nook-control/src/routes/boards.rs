@@ -1,5 +1,6 @@
 use axum::extract::{Path, State};
 use axum::Json;
+use nook_db::{Postgres, TypeMapping};
 use nook_types::*;
 
 use crate::auth::AuthCtx;
@@ -315,11 +316,12 @@ pub(crate) async fn set_archived(
     archive: bool,
 ) -> ApiResult<TaskItem> {
     let id = crate::services::tasks::resolve_id(&state.db, auth.tenant_id, ident).await?;
-    let task: TaskItem = sqlx::query_as(
-        "UPDATE tasks SET archived_at = CASE WHEN $3 THEN now() ELSE NULL END,
-                          updated_at = now()
+    let task: TaskItem = sqlx::query_as(&format!(
+        "UPDATE tasks SET archived_at = CASE WHEN $3 THEN {now} ELSE NULL END,
+                          updated_at = {now}
          WHERE id = $1 AND tenant_id = $2 RETURNING *",
-    )
+        now = Postgres.now()
+    ))
     .bind(id)
     .bind(auth.tenant_id)
     .bind(archive)
@@ -407,11 +409,12 @@ pub async fn archive_completed_in_column(
         ));
     }
 
-    let ids: Vec<(TaskId,)> = sqlx::query_as(
-        "UPDATE tasks SET archived_at = now(), updated_at = now()
+    let ids: Vec<(TaskId,)> = sqlx::query_as(&format!(
+        "UPDATE tasks SET archived_at = {now}, updated_at = {now}
          WHERE column_id = $1 AND tenant_id = $2 AND archived_at IS NULL
          RETURNING id",
-    )
+        now = Postgres.now()
+    ))
     .bind(column_id)
     .bind(auth.tenant_id)
     .fetch_all(&state.db)
@@ -482,11 +485,12 @@ pub async fn update_board(
     if let Some(automation) = &req.automation {
         crate::services::triggers::validate(automation)?;
     }
-    let board: Option<Board> = sqlx::query_as(
+    let board: Option<Board> = sqlx::query_as(&format!(
         "UPDATE boards SET name = $3, key = COALESCE($4, key),
-                           automation = COALESCE($5, automation), updated_at = now()
+                           automation = COALESCE($5, automation), updated_at = {}
          WHERE id = $1 AND tenant_id = $2 RETURNING *",
-    )
+        Postgres.now()
+    ))
     .bind(id)
     .bind(auth.tenant_id)
     .bind(&req.name)

@@ -3,6 +3,7 @@
 
 use axum::extract::{Path, State};
 use axum::Json;
+use nook_db::{Postgres, TypeMapping};
 use nook_proto::ControlToNode;
 use nook_types::*;
 
@@ -695,7 +696,7 @@ async fn store_sealed(
         .vault
         .encrypt(&sealed.ciphertext)
         .map_err(ApiError::Internal)?;
-    sqlx::query(
+    sqlx::query(&format!(
         "INSERT INTO workspace_secrets
             (id, tenant_id, workspace_id, name, content_enc, kdf_salt, verifier, ephemeral)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
@@ -704,8 +705,9 @@ async fn store_sealed(
                        kdf_salt = EXCLUDED.kdf_salt,
                        verifier = EXCLUDED.verifier,
                        ephemeral = EXCLUDED.ephemeral,
-                       updated_at = now()",
-    )
+                       updated_at = {}",
+        Postgres.now()
+    ))
     .bind(nook_types::SettingId::new().0)
     .bind(auth.tenant_id)
     .bind(workspace_id)

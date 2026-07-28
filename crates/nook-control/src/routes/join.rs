@@ -3,6 +3,7 @@
 use axum::extract::State;
 use axum::Json;
 use chrono::{Duration, Utc};
+use nook_db::{Postgres, TypeMapping};
 use nook_types::*;
 use rand::distr::Alphanumeric;
 use rand::Rng;
@@ -115,11 +116,12 @@ pub async fn join(
     State(state): State<AppState>,
     Json(req): Json<JoinRequest>,
 ) -> ApiResult<Json<JoinResponse>> {
-    let row: Option<(JoinTokenId, TenantId, Option<uuid::Uuid>)> = sqlx::query_as(
-        "UPDATE join_tokens SET used_at = now()
-         WHERE token_hash = $1 AND expires_at > now()
+    let row: Option<(JoinTokenId, TenantId, Option<uuid::Uuid>)> = sqlx::query_as(&format!(
+        "UPDATE join_tokens SET used_at = {now}
+         WHERE token_hash = $1 AND expires_at > {now}
          RETURNING id, tenant_id, created_by",
-    )
+        now = Postgres.now()
+    ))
     .bind(hash_token(&req.token))
     .fetch_optional(&state.db)
     .await?;
@@ -140,15 +142,16 @@ pub async fn join(
     let node_token = random_token("nook_node_", 40);
 
     let (node_id,): (NodeId,) = sqlx::query_as(
-        "INSERT INTO nodes (id, tenant_id, name, hostname, platform, node_token_hash, status, owner_person_id)
+        &format!("INSERT INTO nodes (id, tenant_id, name, hostname, platform, node_token_hash, status, owner_person_id)
          VALUES ($1, $2, $3, $4, $5, $6, 'offline', $7)
          ON CONFLICT (tenant_id, name) DO UPDATE SET
             hostname = EXCLUDED.hostname,
             platform = EXCLUDED.platform,
             node_token_hash = EXCLUDED.node_token_hash,
             owner_person_id = COALESCE(nodes.owner_person_id, EXCLUDED.owner_person_id),
-            updated_at = now()
+            updated_at = {}
          RETURNING id",
+        Postgres.now())
     )
     .bind(NodeId::new())
     .bind(tenant_id)
@@ -196,11 +199,12 @@ pub async fn enroll(
 ) -> ApiResult<Json<EnrollResponse>> {
     // Spend the token first: a CSR that fails to sign must not leave a token
     // usable for a second attempt by someone else.
-    let row: Option<(uuid::Uuid, uuid::Uuid, Option<uuid::Uuid>)> = sqlx::query_as(
-        "UPDATE join_tokens SET used_at = now()
-         WHERE token_hash = $1 AND expires_at > now()
+    let row: Option<(uuid::Uuid, uuid::Uuid, Option<uuid::Uuid>)> = sqlx::query_as(&format!(
+        "UPDATE join_tokens SET used_at = {now}
+         WHERE token_hash = $1 AND expires_at > {now}
          RETURNING id, tenant_id, created_by",
-    )
+        now = Postgres.now()
+    ))
     .bind(hash_token(&req.token))
     .fetch_optional(&state.db)
     .await?;
@@ -221,14 +225,15 @@ pub async fn enroll(
 
     let name = req.name.unwrap_or_else(|| "node".to_string());
     let node_id = uuid::Uuid::now_v7();
-    let node_id: uuid::Uuid = sqlx::query_scalar(
+    let node_id: uuid::Uuid = sqlx::query_scalar(&format!(
         "INSERT INTO nodes (id, tenant_id, name, node_token_hash, status, owner_person_id)
          VALUES ($1, $2, $3, $4, 'offline', $5)
          ON CONFLICT (tenant_id, name) DO UPDATE SET
             owner_person_id = COALESCE(nodes.owner_person_id, EXCLUDED.owner_person_id),
-            updated_at = now()
+            updated_at = {}
          RETURNING id",
-    )
+        Postgres.now()
+    ))
     .bind(node_id)
     .bind(tenant)
     .bind(&name)
@@ -308,11 +313,12 @@ async fn issue(
 
     // Recording which CA signed it is what lets the retirement guard answer
     // "does this CA still have live leaves?".
-    sqlx::query(
+    sqlx::query(&format!(
         "UPDATE nodes SET ca_id = $2, cert_not_after = $3, cert_pem = $4,
-                public_key_pem = $5, updated_at = now()
+                public_key_pem = $5, updated_at = {}
           WHERE id = $1",
-    )
+        Postgres.now()
+    ))
     .bind(node_id)
     .bind(leaf.ca_id)
     .bind(leaf.not_after)

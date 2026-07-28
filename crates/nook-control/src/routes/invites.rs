@@ -7,7 +7,7 @@
 use axum::extract::{ConnectInfo, Path, Query, State};
 use axum::http::HeaderMap;
 use axum::Json;
-use nook_db::{Postgres, TimeMath};
+use nook_db::{Postgres, TimeMath, TypeMapping};
 use nook_types::*;
 use serde::Deserialize;
 use std::net::SocketAddr;
@@ -433,10 +433,13 @@ pub async fn accept_core(
     if status != "pending" {
         return decline("this invite has already been used or revoked");
     }
-    let (fresh,): (bool,) = sqlx::query_as("SELECT expires_at > now() FROM invites WHERE id = $1")
-        .bind(invite_id)
-        .fetch_one(db)
-        .await?;
+    let (fresh,): (bool,) = sqlx::query_as(&format!(
+        "SELECT expires_at > {} FROM invites WHERE id = $1",
+        Postgres.now()
+    ))
+    .bind(invite_id)
+    .fetch_one(db)
+    .await?;
     if !fresh {
         return decline("this invite has expired");
     }
@@ -546,10 +549,11 @@ pub async fn preview(
 
     // One lookup by token hash. `invited_by` is nullable, and validity is
     // computed in SQL so the row is the same shape whatever the status.
-    let row: Option<(TenantId, String, Option<uuid::Uuid>, bool)> = sqlx::query_as(
-        "SELECT tenant_id, email, invited_by, (status = 'pending' AND expires_at > now())
+    let row: Option<(TenantId, String, Option<uuid::Uuid>, bool)> = sqlx::query_as(&format!(
+        "SELECT tenant_id, email, invited_by, (status = 'pending' AND expires_at > {})
          FROM invites WHERE token_hash = $1",
-    )
+        Postgres.now()
+    ))
     .bind(hash_token(&params.token))
     .fetch_optional(&state.db)
     .await?;
@@ -617,10 +621,11 @@ pub async fn register(
 
     // The invite: tenant, the email the account MUST use, the role acceptance
     // will apply, and whether it is pending + unexpired.
-    let invite: Option<(TenantId, String, String, bool)> = sqlx::query_as(
-        "SELECT tenant_id, email, role, (status = 'pending' AND expires_at > now())
+    let invite: Option<(TenantId, String, String, bool)> = sqlx::query_as(&format!(
+        "SELECT tenant_id, email, role, (status = 'pending' AND expires_at > {})
          FROM invites WHERE token_hash = $1",
-    )
+        Postgres.now()
+    ))
     .bind(hash_token(&req.token))
     .fetch_optional(&state.db)
     .await?;
@@ -751,6 +756,7 @@ mod db_tests {
     use super::accept_core;
     use crate::seed::hash_token;
     use nook_db::{DbPool, Json};
+    use nook_db::{Postgres, TypeMapping};
     use nook_types::TenantId;
     use sqlx::postgres::PgPoolOptions;
     use uuid::Uuid;
@@ -788,10 +794,12 @@ mod db_tests {
     async fn invite(db: &DbPool, tenant: Uuid, email: &str, days: i64) -> String {
         let token = format!("inv_{}", Uuid::new_v4().simple());
         // Stored hashed at rest (AC-9); the helper hands back the plaintext.
-        sqlx::query(
+        sqlx::query(&format!(
             "INSERT INTO invites (id,tenant_id,email,role,token_hash,status,expires_at)
-             VALUES ($1,$2,$3,'member',$4,'pending', now() + make_interval(days => $5::int))",
-        )
+             VALUES ($1,$2,$3,'member',$4,'pending', {now} + make_interval(days => {days}))",
+            now = Postgres.now(),
+            days = Postgres.cast("$5", "int")
+        ))
         .bind(Uuid::new_v4())
         .bind(tenant)
         .bind(email)
@@ -808,8 +816,9 @@ mod db_tests {
     async fn verify(db: &DbPool, user_id: Uuid, email: &str) {
         let sql = format!(
             "INSERT INTO identities (id,user_id,issuer,subject,email,raw_claims,email_verified_at)
-             VALUES ($1,$2,'local',$3,$4,{}, now())",
-            nook_db::Postgres.literal("{}")
+             VALUES ($1,$2,'local',$3,$4,{}, {now})",
+            nook_db::Postgres.literal("{}"),
+            now = Postgres.now()
         );
         sqlx::query(&sql)
             .bind(Uuid::now_v7())
