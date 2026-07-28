@@ -1246,6 +1246,28 @@ table.nook-table tr.clickable { cursor: pointer; }
 .backlog-epic-title { color: var(--nook-fg-bright); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .backlog-epic-progress { margin-left: auto; font-size: 11px; flex: 0 0 auto; }
 .backlog-epic-head .card-menu-btn { margin-left: 4px; }
+/* The epic-collapse chevron (MAIN-182): a primary affordance, so ALWAYS visible
+   and inline at the row start — deliberately NOT `.card-menu-btn`, which is
+   opacity:0 until a `.board-card` hover the epic head never triggers. */
+.backlog-epic-collapse {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  flex: none;
+  padding: 0;
+  background: transparent;
+  border: 0;
+  border-radius: 2px;
+  color: var(--nook-fg-faint);
+  cursor: pointer;
+}
+.backlog-epic-collapse:hover {
+  color: var(--nook-accent);
+  background: var(--nook-bg-raised);
+}
+.backlog-epic-collapse:focus-visible { outline: 1px solid var(--nook-accent); }
 .backlog-epic-body { display: flex; flex-direction: column; }
 .backlog-epic-body .backlog-row { padding-left: 22px; }
 .backlog-epic-empty { padding: 4px 10px 4px 22px; }
