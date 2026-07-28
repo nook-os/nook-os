@@ -24,7 +24,7 @@ import {
   Users,
 } from "lucide-react";
 import { Plus } from "lucide-react";
-import { api, type MeResponse } from "@nookos/api";
+import { api, listChannels, listDms, type MeResponse } from "@nookos/api";
 import { useLive } from "./live";
 import { TenantSwitcher } from "./TenantSwitcher";
 import { useControlPlaneVersion } from "./NodeFacts";
@@ -233,6 +233,23 @@ export function Shell({ me }: { me: MeResponse }) {
     refetchInterval: 30000,
   });
 
+  // Total chat unread for the rail badge (MAIN-117 AC-5). Shares the Chat page's
+  // query keys, so when chat is open the live stream's invalidations bump this
+  // badge too; off the chat page, refetch-on-focus keeps it fresh (no polling).
+  const { data: chatChannels } = useQuery({
+    queryKey: ["chat", "channels"],
+    queryFn: () => listChannels(),
+    refetchOnWindowFocus: true,
+  });
+  const { data: chatDms } = useQuery({
+    queryKey: ["chat", "dms"],
+    queryFn: () => listDms(),
+    refetchOnWindowFocus: true,
+  });
+  const chatUnread =
+    (chatChannels ?? []).reduce((n, c) => n + (c.unread_count ?? 0), 0) +
+    (chatDms ?? []).reduce((n, d) => n + (d.unread_count ?? 0), 0);
+
   const online = (nodes ?? []).filter((n) => n.status === "online").length;
   const cpVersion = useControlPlaneVersion();
   const activeSessions = (sessions ?? []).filter((s) =>
@@ -341,6 +358,11 @@ export function Shell({ me }: { me: MeResponse }) {
             }
           >
             <s.icon size={19} />
+            {s.to === "/chat" && chatUnread > 0 && (
+              <span className="rail-badge" aria-label={`${chatUnread} unread`}>
+                {chatUnread > 99 ? "99+" : chatUnread}
+              </span>
+            )}
           </NavLink>
         ))}
         <div className="spacer" />

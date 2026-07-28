@@ -116,7 +116,7 @@ async function chatWrite<T>(
     reportWriteFailure({ method, path: full, status: res.status, message });
     throw new Error(message);
   }
-  // A 204 (e.g. category delete) has no body to parse.
+  // A 204 (category delete, mark-read) has no body to parse.
   if (res.status === 204) return undefined as T;
   return (await res.json()) as T;
 }
@@ -152,6 +152,15 @@ export function createChannel(
 /** The caller's direct-message conversations, newest first (MAIN-113). */
 export function listDms(): Promise<DmSummary[]> {
   return chatGet<DmSummary[]>("/dms");
+}
+
+/**
+ * Advance the caller's read cursor for a channel or DM to now (MAIN-117). The
+ * server clamps it monotonically, so calling this while already caught up is a
+ * harmless no-op. Resolves once the 204 lands.
+ */
+export function markRead(channelId: string): Promise<void> {
+  return chatWrite<void>("PUT", `/channels/${channelId}/read`);
 }
 
 /**
@@ -338,27 +347,30 @@ export function deleteMessage(messageId: string): Promise<ChatMessage> {
 }
 
 /**
- * Open the channel's live socket. Mirrors `openSocket` so the auth subprotocol
- * is reused — the desktop app authenticates its sockets by bearer token, not a
- * cookie, and this is the only way that token reaches the chat WS.
+ * Open the caller's ONE app-wide live stream (MAIN-117). Every channel/DM the
+ * caller belongs to multiplexes into this single socket, each frame tagged by
+ * `channel_id`. Mirrors `openSocket` so the auth subprotocol is reused — the
+ * desktop app authenticates its sockets by bearer token, not a cookie, and this
+ * is the only way that token reaches the chat WS.
  *
- * Prefer `connectChatSocket` in the app; this raw opener exists for tests and
+ * Prefer `connectChatStream` in the app; this raw opener exists for tests and
  * for callers that manage their own lifecycle.
  */
-export function openChatSocket(channelId: string): WebSocket {
-  return openSocket(`${CHAT_PREFIX}/channels/${channelId}/ws`);
+export function openChatStream(): WebSocket {
+  return openSocket(`${CHAT_PREFIX}/ws`);
 }
 
 /**
- * Subscribe to a channel's live messages with automatic reconnect + backoff,
- * mirroring `connectUiSocket`. Returns a disposer that permanently closes the
- * socket — call it when switching channels or unmounting, so connections never
- * leak. The server replays nothing on reconnect; `onReconnect` is the caller's
- * cue to refetch recent history and close any gap opened while the socket was
- * down.
+ * Subscribe to the caller's whole chat stream with automatic reconnect + backoff,
+ * mirroring `connectUiSocket`. ONE socket carries every channel/DM the caller
+ * belongs to — messages arrive for conversations the user is NOT viewing too, so
+ * their unread badges bump instantly with no polling. Each delivered message
+ * carries `channel_id`; the caller routes on it. Returns a disposer that
+ * permanently closes the socket — call it on unmount so connections never leak.
+ * The server replays nothing on reconnect; `onReconnect` is the caller's cue to
+ * resync (refetch the channel/DM lists + open history) and close any gap.
  */
-export function connectChatSocket(
-  channelId: string,
+export function connectChatStream(
   onMessage: (message: ChatMessage) => void,
   handlers?: {
     onOpen?: () => void;
@@ -367,8 +379,7 @@ export function connectChatSocket(
     /** An existing message changed — an edit, soft-delete, or reaction toggle
      *  (MAIN-116 AC-5). Carries the message's current, viewer-NEUTRAL state
      *  (`reacted` is always false in the broadcast); the caller merges it,
-     *  preserving its own `reacted`. Delivered on the message's own channel, so
-     *  a reply update reaches an open thread too. */
+     *  preserving its own `reacted`. Tagged by `channel_id` like `onMessage`. */
     onUpdate?: (message: ChatMessage) => void;
   },
 ): () => void {
@@ -379,7 +390,7 @@ export function connectChatSocket(
 
   const open = () => {
     if (closed) return;
-    socket = openChatSocket(channelId);
+    socket = openChatStream();
     socket.onopen = () => {
       backoff = 1000;
       handlers?.onOpen?.();

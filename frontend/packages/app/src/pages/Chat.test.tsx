@@ -34,6 +34,7 @@ vi.mock("@nookos/api", () => ({
     { id: "c1", name: "general", slug: "general", archived: false, created_at: "2026-07-25T09:00:00Z" },
   ]),
   listDms: vi.fn(async () => []),
+  markRead: vi.fn(async () => undefined),
   openDm: vi.fn(),
   listPeople: vi.fn(async () => []),
   channelHistory: vi.fn(async () => ({
@@ -62,12 +63,8 @@ vi.mock("@nookos/api", () => ({
     replies: [],
     next_cursor: null,
   })),
-  connectChatSocket: vi.fn(
-    (
-      _channel: string,
-      onMessage: (m: unknown) => void,
-      handlers?: { onUpdate?: (m: unknown) => void },
-    ) => {
+  connectChatStream: vi.fn(
+    (onMessage: (m: unknown) => void, handlers?: { onUpdate?: (m: unknown) => void }) => {
       liveCallback = onMessage;
       updateCallback = handlers?.onUpdate ?? null;
       return dispose;

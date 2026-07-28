@@ -213,6 +213,22 @@ code,
   background: color-mix(in srgb, var(--nook-accent) 12%, transparent);
 }
 
+/* Summed chat-unread badge on the rail's Chat button (MAIN-117 AC-5) — the same
+   compact red pill as the notification bell, tucked into the top-right corner. */
+.rail-badge {
+  position: absolute;
+  top: 3px;
+  right: 3px;
+  min-width: 14px;
+  padding: 0 3px;
+  background: var(--nook-err);
+  color: #fff;
+  border-radius: 999px;
+  font-size: 9px;
+  line-height: 13px;
+  text-align: center;
+}
+
 .nook-rail-btn.active::before {
   content: "";
   position: absolute;
@@ -3946,6 +3962,23 @@ a.toast-main:hover .toast-title { text-decoration: underline; }
   color: var(--nook-accent);
 }
 .chat-main-head .chat-channel-org { margin-left: 8px; }
+/* Per-channel/DM unread badge in the sidebar (MAIN-117 AC-5): a compact count
+   pill pushed to the row's right edge. */
+.chat-unread {
+  margin-left: auto;
+  min-width: 15px;
+  padding: 0 4px;
+  background: var(--nook-err);
+  color: #fff;
+  border-radius: 999px;
+  font-size: 9px;
+  line-height: 14px;
+  text-align: center;
+}
+/* When a channel is both org-shared and unread, keep the org pill and the count
+   pill together at the right rather than each grabbing its own free space. */
+.chat-channel-org:has(+ .chat-unread) { margin-left: auto; }
+.chat-channel-org:has(+ .chat-unread) + .chat-unread { margin-left: 4px; }
 .chan-owner-select {
   background: var(--nook-bg-raised);
   color: var(--nook-fg);

@@ -16,8 +16,9 @@ const CHANNEL_CAP: usize = 256;
 
 /// The channel a server-message event belongs to. Both variants carry a
 /// [`ChatMessage`], so a new post and an update (edit/delete/reaction — MAIN-116)
-/// route to the same per-channel subscribers.
-fn event_channel(event: &ChatServerMessage) -> Uuid {
+/// route to the same per-channel subscribers. `pub(crate)` so the per-user stream
+/// (MAIN-117) can re-authorize each delivered event by its channel.
+pub(crate) fn event_channel(event: &ChatServerMessage) -> Uuid {
     match event {
         ChatServerMessage::Message(m) | ChatServerMessage::MessageUpdated(m) => m.channel_id,
     }

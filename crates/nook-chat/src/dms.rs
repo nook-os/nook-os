@@ -109,7 +109,7 @@ pub async fn list(
 
     let mut out = Vec::with_capacity(ids.len());
     for id in ids {
-        out.push(summary(&state.db, id).await?);
+        out.push(summary(&state.db, id, caller.user_id).await?);
     }
     Ok(Json(out))
 }
@@ -146,7 +146,10 @@ pub async fn open(
 
     // Open-or-create: an existing DM with this exact participant set wins.
     if let Some(id) = find_exact(&state.db, &persons).await? {
-        return Ok((StatusCode::OK, Json(summary(&state.db, id).await?)));
+        return Ok((
+            StatusCode::OK,
+            Json(summary(&state.db, id, caller.user_id).await?),
+        ));
     }
 
     let id = Uuid::now_v7();
@@ -177,7 +180,10 @@ pub async fn open(
     }
     tx.commit().await.map_err(|_| ChatError::Internal)?;
 
-    Ok((StatusCode::CREATED, Json(summary(&state.db, id).await?)))
+    Ok((
+        StatusCode::CREATED,
+        Json(summary(&state.db, id, caller.user_id).await?),
+    ))
 }
 
 /// A `dm` channel whose participant set is *exactly* `persons`. Count-equality
@@ -203,7 +209,7 @@ async fn find_exact(db: &sqlx::PgPool, persons: &[Uuid]) -> Result<Option<Uuid>,
 }
 
 /// A DM's summary: its id, creation time, and participants with display names.
-async fn summary(db: &sqlx::PgPool, id: Uuid) -> Result<DmSummary, ChatError> {
+async fn summary(db: &sqlx::PgPool, id: Uuid, reader: Uuid) -> Result<DmSummary, ChatError> {
     let (created_at,): (chrono::DateTime<chrono::Utc>,) =
         sqlx::query_as("SELECT created_at FROM chat_channels WHERE id = $1")
             .bind(id)
@@ -221,6 +227,24 @@ async fn summary(db: &sqlx::PgPool, id: Uuid) -> Result<DmSummary, ChatError> {
     .fetch_all(db)
     .await
     .map_err(|_| ChatError::Internal)?;
+    // Unread from the other participant(s) since the reader's cursor (MAIN-117),
+    // same semantics as a channel: the reader's own messages and deleted ones
+    // don't count, and no cursor row means everything counts.
+    let (unread_count,): (i64,) = sqlx::query_as(
+        "SELECT count(*) FROM chat_messages m
+          WHERE m.channel_id = $1
+            AND m.author_id <> $2
+            AND m.deleted_at IS NULL
+            AND m.created_at > COALESCE(
+                (SELECT r.last_read_at FROM chat_read_cursors r
+                   WHERE r.channel_id = $1 AND r.user_id = $2),
+                '-infinity'::timestamptz)",
+    )
+    .bind(id)
+    .bind(reader)
+    .fetch_one(db)
+    .await
+    .map_err(|_| ChatError::Internal)?;
     Ok(DmSummary {
         id,
         created_at,
@@ -231,6 +255,7 @@ async fn summary(db: &sqlx::PgPool, id: Uuid) -> Result<DmSummary, ChatError> {
                 display_name: name.unwrap_or_default(),
             })
             .collect(),
+        unread_count,
     })
 }
 
