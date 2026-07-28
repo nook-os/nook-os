@@ -8,9 +8,11 @@
 //! name a loop job and/or a ticket, so the loop-jobs chain (MAIN-127) is the
 //! first consumer, not the only one.
 //!
-//! This slice deliberately does NOT touch job lifecycle (NG-3): raising an
-//! interaction neither moves the job to `waiting_on_human` nor writes its
-//! transcript — the bridging ticket (MAIN-162) wires those together.
+//! Job bridging (MAIN-162): a job-scoped ask now pauses its run
+//! (`running → waiting_on_human`) and records the question on the job
+//! transcript; answering it records the answer and resumes the run
+//! (`waiting_on_human → running`). A job that fails or is canceled cancels its
+//! pending ask (see [`cancel_for_job`]).
 
 use nook_types::*;
 use serde_json::json;
@@ -19,6 +21,7 @@ use uuid::Uuid;
 use crate::auth::{AuthCtx, Principal};
 use crate::error::{ApiError, ApiResult};
 use crate::events::{self, EventDraft};
+use crate::services::jobs;
 use crate::state::AppState;
 
 async fn load(state: &AppState, tenant: TenantId, id: InteractionId) -> ApiResult<Interaction> {
@@ -154,6 +157,23 @@ pub async fn create(
     .fetch_one(&state.db)
     .await?;
 
+    // MAIN-162 bridging: a job-scoped ask pauses its run. Record the question on
+    // the job transcript, then move a RUNNING job to `waiting_on_human` (persisted,
+    // so the pause outlives CP/node restarts). The move is guarded on `running`
+    // inside `pause_for_human`, so a job in any other state is left as-is.
+    if let Some(job_id) = job_id {
+        let mut q = format!("paused for human input: {prompt}");
+        if let Some(choices) = interaction.choices.as_deref().filter(|c| !c.is_empty()) {
+            q.push_str(&format!(" [{}]", choices.join(", ")));
+        }
+        jobs::append_transcript(state, job_id, "system", &q)
+            .await
+            .ok();
+        if let Err(e) = jobs::pause_for_human(state, tenant, job_id).await {
+            tracing::warn!(job = %job_id.0, error = %e, "could not pause job on interaction");
+        }
+    }
+
     // Private subject → the tenant-wide bell must not surface it (mirrors jobs);
     // the activity event still records. A subject-less ask is tenant business.
     let private = match task_id {
@@ -261,24 +281,58 @@ pub async fn answer(
     .await?;
 
     let Some(interaction) = updated else {
-        // Lost the race, or it was canceled — either way it is no longer
-        // pending. A distinct 409, no prompt leaked.
+        // No longer pending. Distinguish a canceled ask (its job ended — MAIN-162
+        // AC-3) from one already answered, so a human answering a moot ask gets a
+        // clear reason rather than a misleading "already answered". No prompt leaked.
+        let current = load(state, tenant, id).await?;
         return Err(ApiError::Conflict(
-            "this interaction has already been answered".into(),
+            match current.state.as_str() {
+                "canceled" => {
+                    "this interaction was canceled (its job ended) and can no longer be answered"
+                }
+                _ => "this interaction has already been answered",
+            }
+            .into(),
         ));
     };
 
     // Push the answer to the node that asked, so a waiting executor is unblocked
     // without polling (AC-4). Best-effort: `ask --wait` also pulls via `get`, so
     // an offline node still gets its answer when it reconnects and re-reads.
-    if let Some(node) = interaction.requested_by_node_id {
-        state.registry.send_to_node(
+    let pushed = match interaction.requested_by_node_id {
+        Some(node) => state.registry.send_to_node(
             node,
             nook_proto::ControlToNode::InteractionAnswer {
                 request_id: interaction.id.0.to_string(),
                 answer: response.clone(),
             },
-        );
+        ),
+        None => false,
+    };
+
+    // MAIN-162 bridging: record the answer on the job transcript and resume the
+    // paused run (`waiting_on_human → running`). If the executor node was offline
+    // (the push did not land), the resumed run cannot actually continue there —
+    // note it on the transcript; MAIN-164's reaper fails such a job and it can be
+    // re-run. This is the dead-executor seam the ticket owns.
+    if let Some(job_id) = interaction.job_id {
+        jobs::append_transcript(state, job_id, "human", &format!("answered: {response}"))
+            .await
+            .ok();
+        if let Err(e) = jobs::resume_from_human(state, tenant, job_id).await {
+            tracing::warn!(job = %job_id.0, error = %e, "could not resume job on answer");
+        }
+        if !pushed {
+            jobs::append_transcript(
+                state,
+                job_id,
+                "system",
+                "answer recorded, but the executor node is offline — the run cannot \
+                 continue here and must be re-run",
+            )
+            .await
+            .ok();
+        }
     }
 
     // `interaction.answered` is activity-only (not catalogued → no tenant-wide
@@ -343,6 +397,45 @@ pub async fn cancel(
     .await;
     publish_changed(state, tenant, &interaction);
     Ok(interaction)
+}
+
+/// Cancel every pending interaction a job raised (MAIN-162 AC-3) — called from
+/// `jobs::transition` when the job reaches a terminal `failed`/`canceled` state,
+/// so a paused ask on dead work stops waiting. System-initiated: no viewer gate
+/// (the job lifecycle is the authority), and best-effort — a failure here must
+/// not fail the job transition that triggered it. Each cancel records its
+/// activity event and fans the live `InteractionChanged` signal, like `cancel`.
+pub async fn cancel_for_job(state: &AppState, tenant: TenantId, job_id: JobId) {
+    let canceled: Vec<Interaction> = match sqlx::query_as(
+        "UPDATE interactions
+            SET state = 'canceled', updated_at = now()
+          WHERE job_id = $1 AND tenant_id = $2 AND state = 'pending'
+          RETURNING *",
+    )
+    .bind(job_id)
+    .bind(tenant)
+    .fetch_all(&state.db)
+    .await
+    {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::warn!(job = %job_id.0, error = %e, "could not cancel pending interactions for job");
+            return;
+        }
+    };
+    for interaction in &canceled {
+        record(
+            state,
+            tenant,
+            "system",
+            Uuid::nil(),
+            "interaction.canceled",
+            interaction,
+            false,
+        )
+        .await;
+        publish_changed(state, tenant, interaction);
+    }
 }
 
 /// Record the lifecycle event (activity + maybe a notification) AND fan the live

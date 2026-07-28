@@ -1,7 +1,7 @@
 ---
 name: nook-epic
 description: "Walk opted-in NookOS epics and draft the next sub-ticket, grounded in the epic's own (free-form) body plus the current code. Attended by default: asks the human when it needs discovery, and shows the finished draft for a go-ahead before filing. Unattended (files without a read, escalates via comments) only when /loop passes the `unattended` flag. One ticket per pass."
-version: 2.2.0
+version: 2.3.0
 author: NookOS
 license: MIT
 platforms: [linux, macos]
@@ -38,9 +38,22 @@ The opt-in is the `auto-spec` label. An epic without it is never touched.
   to ask — when the epic can't answer, **escalate via a comment** (§5b) and end
   the pass. Unattended needs enough structure in the body to be deterministic
   (see §2b); a free-form body it cannot resolve alone is itself an escalation.
+- **Detached loop job** (`NOOK_JOB_ID` is set — a decompose job is running you on
+  an executor node): there is no terminal, but a human is reachable
+  asynchronously. Where attended asks inline (§5a) and unattended escalates by
+  comment (§5b), you instead raise a durable interaction and **block** on it —
+
+  ```bash
+  nook interactions ask --wait "<the exact decision>" --choice A --choice B
+  ```
+
+  — which auto-anchors to this job via `NOOK_JOB_ID`, pauses the job to
+  `waiting_on_human`, resumes it when the answer lands, and prints the answer to
+  stdout. Everything else — the discovery logic (§2), the confidence test, and the
+  file/escalate gates — is **byte-identical**; only the ask primitive changes.
 
 Everything below is shared; the two places the mode matters are §2 (how much you
-may infer) and §5 (ask vs comment).
+may infer) and §5 (ask inline · ask durably · comment).
 
 ## 0. Preflight
 
