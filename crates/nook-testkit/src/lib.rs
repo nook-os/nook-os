@@ -238,6 +238,21 @@ impl TestBed {
     }
 }
 
+/// Hard per-test deadline (MAIN-185 AC-2). Wrap a DB-backed test body so a
+/// hang fails THAT test in `secs` seconds with a pointed message, instead of
+/// stalling the whole binary until the CI job's `timeout-minutes` cancels the
+/// run — a failure mode indistinguishable from infrastructure flake, which is
+/// exactly how the TestBed::Drop deadlock burned six PRs before being found.
+pub async fn deadline<T>(secs: u64, fut: impl std::future::Future<Output = T>) -> T {
+    match tokio::time::timeout(std::time::Duration::from_secs(secs), fut).await {
+        Ok(v) => v,
+        Err(_) => panic!(
+            "test exceeded its {secs}s deadline — that is a hang, not slowness \
+             (see MAIN-185); failing fast here instead of eating the CI job"
+        ),
+    }
+}
+
 /// Rewrite the database segment of a Postgres URL, preserving any query params.
 fn swap_db(base: &str, db: &str) -> String {
     let (scheme, rest) = base.split_once("://").unwrap_or(("postgres", base));
@@ -273,17 +288,22 @@ async fn drop_database(base_url: &str, db: &str) -> Result<()> {
 
 impl Drop for TestBed {
     fn drop(&mut self) {
-        // Safety net: if the test panicked before `teardown().await`, drop the
-        // database anyway. Drop is sync and the test's runtime may be unwinding,
-        // so do the async work on a throwaway current-thread runtime on a fresh
-        // OS thread — never blocking the test's runtime.
+        // Safety net: if the test skipped `teardown().await` (or panicked before
+        // it), drop the database anyway. Drop is sync, so the async work runs on
+        // a throwaway current-thread runtime on a fresh OS thread.
+        //
+        // This thread must NEVER touch `self.pool` (MAIN-185): the pool's
+        // connections are I/O objects registered with the TEST's runtime, and
+        // the `join()` below has that runtime frozen — closing them from here
+        // deadlocks both threads (gdb-verified; the hang that ate whole CI jobs).
+        // `drop_database`'s `WITH (FORCE)` severs those connections server-side
+        // instead, and the pool itself drops inertly on the test thread after.
         if self.dropped || self.keep {
             return;
         }
         self.dropped = true;
         let base = self.base_url.clone();
         let name = self.db_name.clone();
-        let pool = self.pool.clone();
         let _ = std::thread::spawn(move || {
             let Ok(rt) = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -292,7 +312,6 @@ impl Drop for TestBed {
                 return;
             };
             rt.block_on(async {
-                pool.close().await;
                 let _ = drop_database(&base, &name).await;
             });
         })
@@ -303,6 +322,20 @@ impl Drop for TestBed {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The wrapper itself must be proven to fire (MAIN-185 AC-2 test
+    /// expectation): a deliberately-hung future fails with the deadline
+    /// message. `start_paused` auto-advances time, so the 60s fires instantly.
+    #[tokio::test(start_paused = true)]
+    #[should_panic(expected = "exceeded its 60s deadline")]
+    async fn deadline_flags_a_hung_future() {
+        deadline(60, std::future::pending::<()>()).await;
+    }
+
+    #[tokio::test]
+    async fn deadline_passes_a_prompt_future_through() {
+        assert_eq!(deadline(60, async { 7 }).await, 7);
+    }
 
     #[test]
     fn swap_db_rewrites_only_the_database_segment() {
