@@ -157,7 +157,7 @@ function WorkspaceSwitcher() {
 
   return (
     <div className="ws-switcher" ref={ref}>
-      <button className="ws-switcher-btn" onClick={() => setOpen((o) => !o)}>
+      <button className="ws-switcher-btn" title="switch workspace" onClick={() => setOpen((o) => !o)}>
         <Boxes size={14} />
         <span className="slash">~/</span>
         <span className="name">{current?.name ?? "all workspaces"}</span>
@@ -316,7 +316,7 @@ export function Shell({ me }: { me: MeResponse }) {
           >
             <FileText size={14} /> Docs
           </NavLink>
-          <button className="terminal-pill" onClick={openTerminal}>
+          <button className="terminal-pill" title="open a terminal" onClick={openTerminal}>
             <SquareTerminal size={14} />
             terminal
             {activeSessions.length > 0 && <span>· {activeSessions.length}</span>}

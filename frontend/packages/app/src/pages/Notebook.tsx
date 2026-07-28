@@ -317,6 +317,7 @@ export function Notebook() {
             onSearch={setQuery}
             placeholder="Search notes…"
             ariaLabel="Search notes"
+            iconTitle="Search notes"
           />
         </div>
         <div className="notebook-tree">

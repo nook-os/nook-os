@@ -15,6 +15,7 @@ export function SearchInput({
   delay = 300,
   initial = "",
   ariaLabel = "Search",
+  iconTitle,
 }: {
   onSearch: (q: string) => void;
   placeholder?: string;
@@ -22,6 +23,9 @@ export function SearchInput({
   delay?: number;
   initial?: string;
   ariaLabel?: string;
+  /** Hover tooltip on the magnifier icon (MAIN-176 AC-2). Opt-in so callers that
+   *  don't want it (e.g. Settings) are unchanged. */
+  iconTitle?: string;
 }) {
   const [value, setValue] = useState(initial);
 
@@ -31,7 +35,11 @@ export function SearchInput({
 
   return (
     <span className="search-input">
-      <Search size={13} className="search-input-icon" aria-hidden="true" />
+      {/* The tooltip lives on a wrapping span — lucide icons don't take `title`
+          (MAIN-176 AC-2). The magnifier stays decorative (aria-hidden). */}
+      <span className="search-input-icon" title={iconTitle} aria-hidden="true">
+        <Search size={13} />
+      </span>
       <input
         className="search-input-field"
         type="search"
