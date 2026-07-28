@@ -2647,6 +2647,7 @@ name = "nook-db"
 version = "0.4.22"
 dependencies = [
  "sqlx",
+ "tokio",
 ]
 
 [[package]]
