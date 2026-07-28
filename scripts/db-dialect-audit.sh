@@ -21,6 +21,12 @@
 # see a false positive than miss a real one.
 set -euo pipefail
 
+# Byte-order collation, so `sort` (and the character classes in grep) order the
+# report identically regardless of the caller's locale — a report generated under
+# en_US.UTF-8 must byte-match one generated under C, or "re-runs diff cleanly"
+# (AC-5) fails across machines. Fixed to C here rather than trusting the env.
+export LC_ALL=C
+
 cd "$(dirname "$0")/.."
 
 # Scan roots: the four crates' source, plus the two migration sets that exist.
