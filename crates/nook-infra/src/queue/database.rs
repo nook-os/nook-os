@@ -18,7 +18,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use nook_db::DbPool;
+use nook_db::{AtomicClaim, DbPool, Postgres};
 use uuid::Uuid;
 
 use super::{Nack, NewWork, Queue, QueueStats, WorkEnvelope};
@@ -108,9 +108,11 @@ impl Queue for DbQueue {
         let mut tx = self.db.begin().await?;
 
         // Claim candidates. The row locks taken here are what make two
-        // concurrent receivers disjoint; SKIP LOCKED means neither waits on the
-        // other, it just moves past rows already claimed.
-        let candidates = sqlx::query_as::<_, WorkRow>(
+        // concurrent receivers disjoint; the atomic-claim seam supplies the
+        // engine's lock-and-skip clause (Postgres: `FOR UPDATE SKIP LOCKED`),
+        // so the Postgres-specific SQL lives in the trait, not inline here
+        // (MAIN-199). Behavior is bit-identical.
+        let claim_sql = format!(
             "SELECT id, tenant_id, work_type, payload, attempts, max_attempts, \
                     not_before, enqueued_at \
              FROM work_queue \
@@ -118,13 +120,15 @@ impl Queue for DbQueue {
                AND not_before <= now() \
                AND ($1::text[] IS NULL OR work_type = ANY($1)) \
              ORDER BY enqueued_at \
-             FOR UPDATE SKIP LOCKED \
+             {} \
              LIMIT $2",
-        )
-        .bind(&type_filter)
-        .bind(max as i64)
-        .fetch_all(&mut *tx)
-        .await?;
+            Postgres.claim_lock_clause()
+        );
+        let candidates = sqlx::query_as::<_, WorkRow>(&claim_sql)
+            .bind(&type_filter)
+            .bind(max as i64)
+            .fetch_all(&mut *tx)
+            .await?;
 
         let mut delivered = Vec::with_capacity(candidates.len());
         for row in candidates {
