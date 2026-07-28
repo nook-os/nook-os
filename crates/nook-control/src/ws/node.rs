@@ -16,7 +16,7 @@ use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Response};
 use futures_util::{SinkExt, StreamExt};
-use nook_db::{Json, Postgres};
+use nook_db::{Json, Postgres, TypeMapping};
 use nook_proto::{ControlToNode, NodeToControl, UiEvent};
 use nook_types::{NodeId, TenantId};
 use tokio::sync::mpsc;
@@ -117,11 +117,12 @@ async fn handle(
     );
     // Claim the ownership lease: this instance holds the node's socket. A
     // reconnect elsewhere overwrites it — last writer wins, matching reality.
-    let _ = sqlx::query(
+    let _ = sqlx::query(&format!(
         "UPDATE nodes SET owning_instance_id = $2,
-            lease_expires_at = now() + make_interval(secs => $3)
+            lease_expires_at = {now} + make_interval(secs => $3)
          WHERE id = $1",
-    )
+        now = Postgres.now()
+    ))
     .bind(node_id)
     .bind(state.registry.instance_id())
     .bind(crate::ws::bus::LEASE_SECONDS as f64)
@@ -192,11 +193,12 @@ async fn handle(
     state.registry.unregister_node(node_id, epoch);
     // Release the lease and mark offline — but only if WE still own it; the
     // node may have already reconnected to another instance.
-    let _ = sqlx::query(
-        "UPDATE nodes SET status = 'offline', updated_at = now(),
+    let _ = sqlx::query(&format!(
+        "UPDATE nodes SET status = 'offline', updated_at = {now},
             owning_instance_id = NULL, lease_expires_at = NULL
          WHERE id = $1 AND owning_instance_id = $2",
-    )
+        now = Postgres.now()
+    ))
     .bind(node_id)
     .bind(state.registry.instance_id())
     .execute(&state.db)
@@ -237,11 +239,12 @@ async fn handle_message(
             capabilities,
             live_tmux_sessions,
         } => {
-            sqlx::query(
+            sqlx::query(&format!(
                 "UPDATE nodes SET capabilities = $2, hostname = $3, platform = $4,
-                        status = 'online', last_seen_at = now(), updated_at = now()
+                        status = 'online', last_seen_at = {now}, updated_at = {now}
                  WHERE id = $1",
-            )
+                now = Postgres.now()
+            ))
             .bind(node_id)
             .bind(serde_json::to_value(&capabilities)?)
             .bind(&capabilities.hostname)
@@ -251,12 +254,13 @@ async fn handle_message(
 
             // Reconcile: node-reported tmux state is the truth. Any session
             // this node owns whose tmux session no longer exists has exited.
-            sqlx::query(
-                "UPDATE sessions SET status = 'exited', ended_at = now(), updated_at = now()
+            sqlx::query(&format!(
+                "UPDATE sessions SET status = 'exited', ended_at = {now}, updated_at = {now}
                  WHERE node_id = $1
                    AND status IN ('starting', 'running', 'detached')
                    AND (tmux_session IS NULL OR tmux_session != ALL($2))",
-            )
+                now = Postgres.now()
+            ))
             .bind(node_id)
             .bind(&live_tmux_sessions)
             .execute(&state.db)
@@ -342,13 +346,14 @@ async fn handle_message(
         }
         NodeToControl::Heartbeat { load } => {
             // Also renews the ownership lease (only while we still hold it).
-            sqlx::query(
-                "UPDATE nodes SET last_seen_at = now(), resources = $2,
+            sqlx::query(&format!(
+                "UPDATE nodes SET last_seen_at = {now}, resources = $2,
                     lease_expires_at = CASE WHEN owning_instance_id = $3
-                        THEN now() + make_interval(secs => $4)
+                        THEN {now} + make_interval(secs => $4)
                         ELSE lease_expires_at END
                  WHERE id = $1",
-            )
+                now = Postgres.now()
+            ))
             .bind(node_id)
             .bind(&load)
             .bind(state.registry.instance_id())
@@ -439,8 +444,9 @@ async fn handle_message(
             let update_sql = format!(
                 "UPDATE nodes
                  SET capabilities = {merge},
-                     updated_at = now()
-                 WHERE id = $1"
+                     updated_at = {now}
+                 WHERE id = $1",
+                now = Postgres.now()
             );
             let _ = sqlx::query(&update_sql)
                 .bind(node_id)
@@ -460,10 +466,11 @@ async fn handle_message(
             session_id,
             tmux_session,
         } => {
-            sqlx::query(
-                "UPDATE sessions SET status = 'running', tmux_session = $2, updated_at = now()
+            sqlx::query(&format!(
+                "UPDATE sessions SET status = 'running', tmux_session = $2, updated_at = {now}
                  WHERE id = $1 AND tenant_id = $3",
-            )
+                now = Postgres.now()
+            ))
             .bind(session_id)
             .bind(&tmux_session)
             .bind(tenant)
@@ -499,10 +506,11 @@ async fn handle_message(
             session_id,
             exit_code,
         } => {
-            sqlx::query(
-                "UPDATE sessions SET status = 'exited', ended_at = now(), updated_at = now()
+            sqlx::query(&format!(
+                "UPDATE sessions SET status = 'exited', ended_at = {now}, updated_at = {now}
                  WHERE id = $1 AND tenant_id = $2",
-            )
+                now = Postgres.now()
+            ))
             .bind(session_id)
             .bind(tenant)
             .execute(&state.db)
@@ -545,11 +553,12 @@ async fn handle_message(
             // The session never opened. Record why on the row and tell both the
             // dashboard and anyone already staring at the terminal, rather than
             // leaving it stuck on "starting".
-            sqlx::query(
-                "UPDATE sessions SET status = 'error', error = $3, ended_at = now(),
-                        updated_at = now()
+            sqlx::query(&format!(
+                "UPDATE sessions SET status = 'error', error = $3, ended_at = {now},
+                        updated_at = {now}
                  WHERE id = $1 AND tenant_id = $2",
-            )
+                now = Postgres.now()
+            ))
             .bind(session_id)
             .bind(tenant)
             .bind(&message)

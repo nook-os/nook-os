@@ -20,7 +20,7 @@
 
 use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Duration, Utc};
-use nook_db::DbPool;
+use nook_db::{DbPool, Postgres, TypeMapping};
 use nook_types::TenantId;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
@@ -362,12 +362,13 @@ pub async fn promote(db: &DbPool, tenant: TenantId, ca_id: Uuid) -> Result<()> {
 ///
 /// The retirement guard, and the number an admin watches during a rotation.
 pub async fn live_leaves(db: &DbPool, tenant: TenantId, ca_id: Uuid) -> Result<i64> {
-    let (n,): (i64,) = sqlx::query_as(
+    let (n,): (i64,) = sqlx::query_as(&format!(
         "SELECT count(*) FROM nodes
           WHERE tenant_id = $1 AND ca_id = $2
             AND revoked_at IS NULL
-            AND cert_not_after IS NOT NULL AND cert_not_after > now()",
-    )
+            AND cert_not_after IS NOT NULL AND cert_not_after > {now}",
+        now = Postgres.now()
+    ))
     .bind(tenant)
     .bind(ca_id)
     .fetch_one(db)

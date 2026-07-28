@@ -7,6 +7,7 @@ use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, State};
 use axum::response::{IntoResponse, Response};
 use futures_util::{SinkExt, StreamExt};
+use nook_db::{Postgres, TypeMapping};
 use nook_proto::{AttachClientMessage, AttachServerMessage, ControlToNode, UiEvent};
 use nook_types::{Session, SessionId};
 
@@ -177,10 +178,11 @@ async fn handle(state: AppState, socket: WebSocket, session: Session) {
 }
 
 async fn mark_status(state: &AppState, session: &Session, status: &str) {
-    let res = sqlx::query(
-        "UPDATE sessions SET status = $2, updated_at = now()
+    let res = sqlx::query(&format!(
+        "UPDATE sessions SET status = $2, updated_at = {now}
          WHERE id = $1 AND status IN ('starting', 'running', 'detached')",
-    )
+        now = Postgres.now()
+    ))
     .bind(session.id)
     .bind(status)
     .execute(&state.db)
