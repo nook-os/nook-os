@@ -10,6 +10,10 @@ import {
   epicOptions,
   activeChips,
   isFilterActive,
+  searchTypeParam,
+  matchedEpicHeaders,
+  exactKeyMatch,
+  BACKLOG_TYPES,
   type BoardFilter,
 } from "./pages/Board";
 
@@ -333,5 +337,83 @@ describe("archive visibility (MAIN-15 AC-5)", () => {
     expect(showsUnderArchive(false, null)).toBe(true); // live
     expect(showsUnderArchive(false, "2026-01-01T00:00:00Z")).toBe(false); // archived, hidden
     expect(showsUnderArchive(true, "2026-01-01T00:00:00Z")).toBe(true); // archived, shown
+  });
+});
+
+const EMPTY: BoardFilter = {
+  label: [],
+  not_label: [],
+  type: [],
+  visibility: [],
+  assignee: "any",
+  priority: null,
+  blocked: null,
+  epic: null,
+  workspace: null,
+  showArchived: false,
+  q: "",
+  view: "board",
+};
+
+describe("backlog search includes epics (MAIN-181 AC-1)", () => {
+  it("asks for ALL types incl. epic on the backlog tab with no explicit type", () => {
+    const t = searchTypeParam({ ...EMPTY, view: "backlog", q: "auth" });
+    expect(t).toEqual([...BACKLOG_TYPES]);
+    expect(t).toContain("epic");
+  });
+
+  it("respects an explicit type filter verbatim (any tab)", () => {
+    expect(searchTypeParam({ ...EMPTY, view: "backlog", type: ["bug"] })).toEqual(["bug"]);
+    expect(searchTypeParam({ ...EMPTY, view: "board", type: ["story", "epic"] })).toEqual([
+      "story",
+      "epic",
+    ]);
+  });
+
+  it("omits the type param on the kanban tab (epics never render there)", () => {
+    expect(searchTypeParam({ ...EMPTY, view: "board", q: "auth" })).toBeUndefined();
+  });
+});
+
+describe("grouping survives search: a matching child shows its epic header (MAIN-181 AC-2)", () => {
+  it("pulls in the epic header for a matched child even when the epic didn't match", () => {
+    const epic = mk({ id: "e1", type: "epic", key: "MAIN-1" });
+    const child = mk({ id: "c1", parent_task_id: "e1", key: "MAIN-2", title: "matched child" });
+    const other = mk({ id: "e2", type: "epic", key: "MAIN-9" }); // unrelated epic
+
+    // The search matched only the child (not its epic, not the other epic).
+    const headers = matchedEpicHeaders([child], [epic, other, child]);
+    expect(headers.map((t) => t.id)).toEqual(["e1"]);
+
+    // Feeding those headers into groupByEpic renders the child under its header.
+    const g = groupByEpic([child, ...headers], new Map([["col-backlog", "backlog"]]));
+    const section = g.epics.find((s) => s.epic.id === "e1");
+    expect(section).toBeTruthy();
+    expect(section!.children.map((c) => c.id)).toEqual(["c1"]);
+  });
+
+  it("does not re-add an epic that itself matched (already visible)", () => {
+    const epic = mk({ id: "e1", type: "epic" });
+    const child = mk({ id: "c1", parent_task_id: "e1" });
+    expect(matchedEpicHeaders([epic, child], [epic, child])).toEqual([]);
+  });
+});
+
+describe("exact-key search hit (MAIN-181 AC-3)", () => {
+  const tasks = [
+    mk({ id: "t34", key: "MAIN-34", title: "the one" }),
+    mk({ id: "t340", key: "MAIN-340", title: "a longer key" }),
+  ];
+
+  it("matches a full key case-insensitively", () => {
+    expect(exactKeyMatch(tasks, "MAIN-34")).toBe("t34");
+    expect(exactKeyMatch(tasks, "main-34")).toBe("t34");
+    expect(exactKeyMatch(tasks, "  MAIN-34 ")).toBe("t34");
+  });
+
+  it("does not treat a partial/other query as an exact hit", () => {
+    expect(exactKeyMatch(tasks, "MAIN-3")).toBeNull(); // partial
+    expect(exactKeyMatch(tasks, "the one")).toBeNull(); // title, not a key
+    expect(exactKeyMatch(tasks, "")).toBeNull();
   });
 });
