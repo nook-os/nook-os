@@ -30,6 +30,7 @@ import {
 import { PRIORITIES } from "./taskmeta";
 import { toggleTaskCheckbox } from "./taskCheckbox";
 import { TaskInteractions } from "./Interactions";
+import { LoopPanel } from "./LoopPanel";
 
 /** The "no workspace" option's value. `Select` needs a string, and an empty
  *  one cannot collide with a uuid. */
@@ -343,6 +344,10 @@ export function TaskDetail({
               a ticket, so its ask sits above the spec, not buried below it. Only
               renders when there is at least one pending interaction (MAIN-159). */}
           <TaskInteractions taskId={taskId} />
+
+          {/* The ticket's own loop run (MAIN-128): the spec/decompose job and
+              its live transcript, with the start / re-run action in its header. */}
+          <LoopPanel taskId={taskId} taskType={task.type} />
 
           <div className="task-section">
             <div className="task-section-h">

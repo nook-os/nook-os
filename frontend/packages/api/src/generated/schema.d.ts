@@ -2277,6 +2277,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/tasks/{task_id}/jobs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["task_jobs"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/tenant/cas": {
         parameters: {
             query?: never;
@@ -5189,6 +5205,19 @@ export interface components {
             };
             /** @enum {string} */
             type: "interaction_changed";
+        } | {
+            /**
+             * @description A loop job's transcript grew or its state changed (MAIN-128) — the nudge
+             *     that drives the ticket's live Loop panel. Carries the TARGET TICKET id
+             *     (not the job id), the same "what you have is stale" contract as
+             *     `TaskChanged`: the panel refetches the job + transcript for that ticket.
+             *     Visibility is enforced on the refetch, so the nudge itself leaks nothing.
+             */
+            data: {
+                task_id: components["schemas"]["TaskId"];
+            };
+            /** @enum {string} */
+            type: "job_changed";
         };
         /**
          * @description Unseal a note (MAIN-100): the client decrypted the sealed body locally and
@@ -9610,6 +9639,27 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+        };
+    };
+    task_jobs: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                task_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LoopJob"][];
+                };
             };
         };
     };

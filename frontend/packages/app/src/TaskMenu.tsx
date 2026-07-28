@@ -7,10 +7,12 @@
 // buttons nobody was looking at. Actions belong behind a deliberate gesture;
 // the card's job is to be readable.
 import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { api, type TaskItem } from "@nookos/api";
 import { VISIBILITY_META } from "@nookos/ui";
 import { askConfirm, notify } from "./dialogs";
 import { nativeContextMenu } from "./contextMenu";
+import { createLoopJob, fetchTaskJobs, loopAction, taskJobsKey } from "./loop";
 
 export interface MenuColumn {
   id: string;
@@ -79,6 +81,16 @@ export function TaskMenu({
     refresh();
     onClose();
   };
+
+  // The ticket's loop entry action (MAIN-128): an epic runs the decomposer, any
+  // other ticket drafts a spec. Disabled — with the reason as a tooltip — while
+  // a job is already active on it, exactly as the panel header decides.
+  const { data: jobs } = useQuery({
+    queryKey: taskJobsKey(task.id),
+    queryFn: () => fetchTaskJobs(task.id),
+  });
+  const loop = loopAction(task.type, jobs);
+  const startLoop = () => run(() => createLoopJob(loop.kind, task.id));
 
   const move = (column_id: string) =>
     run(() =>
@@ -293,6 +305,20 @@ export function TaskMenu({
 
       {task.key && item("Copy key", () => copy(task.key!, "key"))}
       {task.url && item("Copy link", () => copy(task.url!, "link"))}
+
+      <div className="ctx-sep" />
+
+      {/* The loop entry action (MAIN-128). Disabled with its reason as the
+          tooltip when a job is already active on this ticket. */}
+      <button
+        className="ctx-item"
+        onMouseDown={(e) => e.stopPropagation()}
+        onClick={() => !loop.disabled && startLoop()}
+        disabled={loop.disabled}
+        title={loop.reason ?? loop.label}
+      >
+        {loop.label}
+      </button>
 
       <div className="ctx-sep" />
 

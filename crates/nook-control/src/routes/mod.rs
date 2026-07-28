@@ -339,6 +339,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/jobs/{id}", get(jobs::get))
         .route("/jobs/{id}/cancel", post(jobs::cancel))
         .route("/jobs/{id}/rerun", post(jobs::rerun))
+        .route("/tasks/{task_id}/jobs", get(jobs::list_for_task))
         .route(
             "/interactions",
             get(interactions::list_pending).post(interactions::create),

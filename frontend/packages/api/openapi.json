@@ -5247,6 +5247,39 @@
         }
       }
     },
+    "/api/v1/tasks/{task_id}/jobs": {
+      "get": {
+        "tags": [
+          "crate::routes::jobs"
+        ],
+        "operationId": "task_jobs",
+        "parameters": [
+          {
+            "name": "task_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/LoopJob"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/tenant/cas": {
       "get": {
         "tags": [
@@ -12330,6 +12363,34 @@
                 "type": "string",
                 "enum": [
                   "interaction_changed"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "A loop job's transcript grew or its state changed (MAIN-128) — the nudge\nthat drives the ticket's live Loop panel. Carries the TARGET TICKET id\n(not the job id), the same \"what you have is stale\" contract as\n`TaskChanged`: the panel refetches the job + transcript for that ticket.\nVisibility is enforced on the refetch, so the nudge itself leaks nothing.",
+            "required": [
+              "data",
+              "type"
+            ],
+            "properties": {
+              "data": {
+                "type": "object",
+                "description": "A loop job's transcript grew or its state changed (MAIN-128) — the nudge\nthat drives the ticket's live Loop panel. Carries the TARGET TICKET id\n(not the job id), the same \"what you have is stale\" contract as\n`TaskChanged`: the panel refetches the job + transcript for that ticket.\nVisibility is enforced on the refetch, so the nudge itself leaks nothing.",
+                "required": [
+                  "task_id"
+                ],
+                "properties": {
+                  "task_id": {
+                    "$ref": "#/components/schemas/TaskId"
+                  }
+                }
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "job_changed"
                 ]
               }
             }
