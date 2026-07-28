@@ -9,6 +9,7 @@
 //! crate rather than a second login.
 
 mod bus;
+mod categories;
 mod channels;
 mod config;
 mod dms;
@@ -23,7 +24,7 @@ use axum::extract::{FromRequestParts, State};
 use axum::http::request::Parts;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, patch, put};
+use axum::routing::{get, patch, post, put};
 use axum::{Json, Router};
 use axum_extra::extract::CookieJar;
 use serde_json::{json, Value};
@@ -34,7 +35,7 @@ use uuid::Uuid;
 /// Chat's own migration set, embedded at compile time — applied into the `chat`
 /// schema, so it never touches the control plane's `public._sqlx_migrations`.
 /// Embedded: 0001_chat_init, 0002_chat_channel_archive, 0003_chat_dm,
-/// 0004_chat_threads, 0005_chat_reactions.
+/// 0004_chat_threads, 0005_chat_reactions, 0006_chat_categories.
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
 #[derive(Clone)]
@@ -98,6 +99,18 @@ async fn main() -> anyhow::Result<()> {
         // all tenant-scoped via the shared auth (AC-5).
         .route("/api/channels", get(channels::list).post(channels::create))
         .route("/api/channels/{id}", patch(channels::update))
+        // Channel categories (MAIN-178): member-visible list; admin-only
+        // create/rename/delete/reorder, and a channel's category+position.
+        .route(
+            "/api/categories",
+            get(categories::list).post(categories::create),
+        )
+        .route("/api/categories/reorder", post(categories::reorder))
+        .route(
+            "/api/categories/{id}",
+            patch(categories::update).delete(categories::delete),
+        )
+        .route("/api/channels/{id}/placement", patch(channels::place))
         .route(
             "/api/channels/{id}/messages",
             get(messages::history).post(messages::post),

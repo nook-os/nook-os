@@ -3321,10 +3321,31 @@ export interface components {
             id: string;
             label: string;
         };
+        /**
+         * @description A channel category (MAIN-178): a Discord-style group shared across a
+         *     tenant/org, ordered by `position`. Admin-defined; DMs are never categorized.
+         */
+        ChatCategory: {
+            /** Format: date-time */
+            created_at: string;
+            /** Format: uuid */
+            id: string;
+            name: string;
+            /** @description `"tenant"` or `"org"`, scoped exactly like a channel. */
+            owner_type: string;
+            /** Format: int32 */
+            position: number;
+        };
         /** @description A chat channel visible to a member. */
         ChatChannel: {
             /** @description Archived channels are hidden from the default list and refuse new posts. */
             archived: boolean;
+            /**
+             * Format: uuid
+             * @description The category this channel is grouped under (MAIN-178), or `None` when
+             *     uncategorized. Deleting a category resets this to `None` for its channels.
+             */
+            category_id?: string | null;
             /** Format: date-time */
             created_at: string;
             /** Format: uuid */
@@ -3335,7 +3356,23 @@ export interface components {
              *     every tenant under an org — MAIN-112). Drives the org badge in the UI.
              */
             owner_type: string;
+            /**
+             * Format: int32
+             * @description Ordering position within its category (or the uncategorized bucket) —
+             *     the sidebar orders by it (MAIN-178). `0` until an admin arranges it.
+             */
+            position?: number;
             slug: string;
+        };
+        /**
+         * @description Place a channel (MAIN-178): set its category (`None` = uncategorized) and its
+         *     ordering position within that group.
+         */
+        ChatChannelPlacement: {
+            /** Format: uuid */
+            category_id?: string | null;
+            /** Format: int32 */
+            position: number;
         };
         /**
          * @description A posted message. `id` is a UUID v7, so history paginates by keyset on it
@@ -3489,6 +3526,11 @@ export interface components {
             kinds?: string[];
             levels?: string[];
             name: string;
+        };
+        /** @description Create a category. `owner` is `"tenant"` (default) or `"org"`, like a channel. */
+        CreateChatCategory: {
+            name: string;
+            owner?: string | null;
         };
         /** @description Create a channel: a human name. The slug is derived server-side. */
         CreateChatChannel: {
@@ -4646,6 +4688,13 @@ export interface components {
             csr_pem: string;
             node_id: components["schemas"]["NodeId"];
         };
+        /**
+         * @description Reorder categories (MAIN-178): the new order, as category ids. Each id's
+         *     `position` becomes its index; ids outside the caller's scope are ignored.
+         */
+        ReorderChatCategories: {
+            ordered_ids: string[];
+        };
         /** @description A hook reporting what the agent in a session is doing. */
         ReportAgentStateRequest: {
             /** @description `running` | `waiting` | `idle`. */
@@ -5291,6 +5340,10 @@ export interface components {
             kinds?: string[] | null;
             levels?: string[] | null;
             name?: string | null;
+        };
+        /** @description Rename a category (MAIN-178). */
+        UpdateChatCategory: {
+            name: string;
         };
         /** @description Rename and/or archive a channel. Absent fields are left unchanged. */
         UpdateChatChannel: {
