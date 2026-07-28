@@ -16,6 +16,7 @@ use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Response};
 use futures_util::{SinkExt, StreamExt};
+use nook_db::{Json, Postgres};
 use nook_proto::{ControlToNode, NodeToControl, UiEvent};
 use nook_types::{NodeId, TenantId};
 use tokio::sync::mpsc;
@@ -431,16 +432,21 @@ async fn handle_message(
             // NodeStatus event is only the "refetch this node" signal the Nodes
             // queries already listen for.
             let value = serde_json::to_value(&profiles).unwrap_or_else(|_| serde_json::json!([]));
-            let _ = sqlx::query(
+            // The capabilities merge routes through the json seam's `set`
+            // (MAIN-201): the node-supplied profiles stay bound to `$2`; only the
+            // static `{runtime_auth}` path and create-missing live in the SQL.
+            let merge = Postgres.set("capabilities", "{runtime_auth}", "$2");
+            let update_sql = format!(
                 "UPDATE nodes
-                 SET capabilities = jsonb_set(capabilities, '{runtime_auth}', $2, true),
+                 SET capabilities = {merge},
                      updated_at = now()
-                 WHERE id = $1",
-            )
-            .bind(node_id)
-            .bind(&value)
-            .execute(&state.db)
-            .await;
+                 WHERE id = $1"
+            );
+            let _ = sqlx::query(&update_sql)
+                .bind(node_id)
+                .bind(&value)
+                .execute(&state.db)
+                .await;
             state.registry.publish(
                 tenant,
                 UiEvent::NodeStatus {
