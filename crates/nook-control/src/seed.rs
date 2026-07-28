@@ -2,7 +2,7 @@
 //! brings the same predictable environment back on every reboot.
 
 use anyhow::Result;
-use nook_db::DbPool;
+use nook_db::{DbPool, Postgres, TimeMath};
 use nook_types::*;
 
 use crate::config::Config;
@@ -321,11 +321,12 @@ pub async fn run(db: &DbPool, cfg: &Config) -> Result<()> {
 
     // Well-known join token so the compose node can auto-join on boot.
     if let Some(token) = &cfg.dev_join_token {
-        sqlx::query(
+        sqlx::query(&format!(
             "INSERT INTO join_tokens (id, tenant_id, token_hash, name, expires_at)
-             VALUES ($1, $2, $3, 'dev auto-join', now() + interval '10 years')
+             VALUES ($1, $2, $3, 'dev auto-join', {expiry})
              ON CONFLICT (token_hash) DO NOTHING",
-        )
+            expiry = Postgres.now_plus("10 years")
+        ))
         .bind(JoinTokenId::new())
         .bind(tenant.id)
         .bind(hash_token(token))

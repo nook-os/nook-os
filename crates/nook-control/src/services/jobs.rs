@@ -6,7 +6,7 @@
 //!
 //! Shared by the REST handlers (and, later, MCP) so the surfaces never drift.
 
-use nook_db::{Json, Postgres};
+use nook_db::{Json, Postgres, TimeMath};
 use nook_types::*;
 use serde_json::json;
 use uuid::Uuid;
@@ -777,19 +777,21 @@ async fn fail_with(state: &AppState, tenant: TenantId, id: JobId, reason: &str) 
 /// double-fail a job, and a job that resumed or completed between scan and update
 /// falls out of the guard untouched. Returns how many jobs were reaped.
 pub async fn reap_stale_executors(state: &AppState, grace_secs: u64) -> ApiResult<u64> {
-    let reaped: Vec<(JobId, TenantId, TaskId, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
-        "UPDATE loop_jobs j
+    let reaped: Vec<(JobId, TenantId, TaskId, chrono::DateTime<chrono::Utc>)> =
+        sqlx::query_as(&format!(
+            "UPDATE loop_jobs j
             SET state = 'failed', updated_at = now()
            FROM nodes n
           WHERE j.executor_node_id = n.id
             AND j.state IN ('claimed', 'running')
             AND n.last_seen_at IS NOT NULL
-            AND n.last_seen_at < now() - ($1::bigint * interval '1 second')
+            AND n.last_seen_at < {cutoff}
         RETURNING j.id, j.tenant_id, j.target_task_id, n.last_seen_at",
-    )
-    .bind(grace_secs as i64)
-    .fetch_all(&state.db)
-    .await?;
+            cutoff = Postgres.now_minus_scaled("$1::bigint", "1 second")
+        ))
+        .bind(grace_secs as i64)
+        .fetch_all(&state.db)
+        .await?;
 
     for (id, tenant, target, last_seen) in &reaped {
         append_transcript(
