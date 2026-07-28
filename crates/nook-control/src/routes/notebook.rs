@@ -18,6 +18,7 @@
 
 use axum::extract::{Path, Query, State};
 use axum::Json;
+use nook_db::{CiMatch, Postgres};
 use nook_types::*;
 use serde::Deserialize;
 use uuid::Uuid;
@@ -247,7 +248,10 @@ pub(crate) async fn list_notes_for(
     person: Uuid,
     q: &str,
 ) -> ApiResult<Vec<UserNoteSummary>> {
-    let rows: Vec<UserNoteSummary> = sqlx::query_as(
+    // Case-insensitive search routed through the ci_match seam (MAIN-203
+    // exemplar): the Postgres arm emits the same `ILIKE '%' || $2 || '%'` as
+    // before; the bound term stays in $2. Behavior is bit-identical.
+    let rows: Vec<UserNoteSummary> = sqlx::query_as(&format!(
         r#"
         WITH RECURSIVE folder_path AS (
             SELECT id, name::text AS path, parent_id
@@ -266,11 +270,13 @@ pub(crate) async fn list_notes_for(
         LEFT JOIN folder_path fp ON fp.id = n.folder_id
         WHERE n.person_id = $1
           AND ($2 = ''
-               OR n.title ILIKE '%' || $2 || '%'
-               OR COALESCE(fp.path, '') ILIKE '%' || $2 || '%')
+               OR {title_match}
+               OR {path_match})
         ORDER BY n.updated_at DESC
         "#,
-    )
+        title_match = Postgres.ci_match("n.title", "'%' || $2 || '%'"),
+        path_match = Postgres.ci_match("COALESCE(fp.path, '')", "'%' || $2 || '%'"),
+    ))
     .bind(person)
     .bind(q)
     .fetch_all(&state.db)
