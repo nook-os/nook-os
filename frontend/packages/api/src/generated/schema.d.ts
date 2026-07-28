@@ -3355,6 +3355,14 @@ export interface components {
             channel_id: string;
             /** Format: date-time */
             created_at: string;
+            deleted?: boolean;
+            /**
+             * Format: date-time
+             * @description When the body was last edited (MAIN-116 AC-3); `None` if never — the UI's
+             *     "(edited)" marker. A deleted message carries the redacted placeholder body
+             *     and `deleted = true` (AC-4); its real content is never sent.
+             */
+            edited_at?: string | null;
             /** Format: uuid */
             id: string;
             /**
@@ -3368,6 +3376,11 @@ export interface components {
              *     message; a set value is always a top-level parent (one level, no nesting).
              */
             parent_message_id?: string | null;
+            /**
+             * @description This message's reactions, aggregated per emoji (MAIN-116 AC-2). Empty for
+             *     a message with no reactions (and for a deleted one).
+             */
+            reactions?: components["schemas"]["ChatReactionAggregate"][];
             /**
              * Format: int64
              * @description How many replies this message has — populated for parents in channel
@@ -3386,6 +3399,20 @@ export interface components {
             next_cursor?: string | null;
         };
         /**
+         * @description One emoji's reaction tally on a message (MAIN-116 AC-2): how many reacted and
+         *     whether the requesting caller is one of them (so a click toggles).
+         */
+        ChatReactionAggregate: {
+            /** Format: int64 */
+            count: number;
+            emoji: string;
+            /**
+             * @description Whether the caller has this reaction — the UI highlights it and a click
+             *     removes rather than adds.
+             */
+            reacted: boolean;
+        };
+        /**
          * @description What the chat websocket pushes to a subscribed client (AC-3). Adjacently
          *     tagged for clean generated TypeScript, like the node protocol.
          */
@@ -3394,6 +3421,16 @@ export interface components {
             data: components["schemas"]["ChatMessage"];
             /** @enum {string} */
             type: "message";
+        } | {
+            /**
+             * @description An existing message changed — an edit, a soft delete, or a reaction
+             *     toggle (MAIN-116 AC-5). Carries the message's current state (redacted +
+             *     reaction-aggregated); the client replaces it in place by `id`. Delivered
+             *     on the message's own channel, so a reply update reaches the thread too.
+             */
+            data: components["schemas"]["ChatMessage"];
+            /** @enum {string} */
+            type: "message_updated";
         };
         /**
          * @description A message thread (MAIN-114): the parent message plus a keyset page of its
@@ -5259,6 +5296,10 @@ export interface components {
         UpdateChatChannel: {
             archived?: boolean | null;
             name?: string | null;
+        };
+        /** @description Edit a message's body (MAIN-116 AC-3). Author-only, validated like a post. */
+        UpdateChatMessage: {
+            body: string;
         };
         UpdateColumnRequest: {
             name?: string | null;

@@ -4,11 +4,18 @@
 import { describe, expect, it } from "vitest";
 import type { ChatMessage } from "@nookos/api";
 import {
+  applyMessageUpdate,
   buildChatMessages,
   buildThreadMessages,
   reconcilePending,
   type PendingMessage,
 } from "./chatMessages";
+
+type Reaction = { emoji: string; count: number; reacted: boolean };
+const withReactions = (m: ChatMessage, reactions: Reaction[]): ChatMessage => ({
+  ...m,
+  reactions,
+});
 
 const msg = (id: string, author: string, body: string, t: string): ChatMessage => ({
   id,
@@ -116,6 +123,23 @@ describe("buildChatMessages", () => {
     const out = buildChatMessages([msg("p", "u1", "lonely", "2026-07-25T10:00:00Z")], [], [], "me");
     expect(out[0].replyCount).toBeUndefined();
   });
+
+  it("bumps only for NEW replies, not updates to pre-existing ones (review fix)", () => {
+    const parent: ChatMessage = {
+      ...msg("p", "u1", "parent", "2026-07-25T10:00:00Z"),
+      reply_count: 2, // two replies already counted by the server at load
+    };
+    // `r-old` is one of those two, re-entering `live` via a reaction/edit
+    // (message_updated); `r-new` is a genuinely new reply that arrived live.
+    const live = [
+      reply("r-old", "p", "2026-07-25T09:00:00Z"),
+      reply("r-new", "p", "2026-07-25T10:05:00Z"),
+    ];
+    // Only the NEW reply's id is in the set.
+    const out = buildChatMessages([parent], live, [], "me", {}, new Set(["r-new"]));
+    // Server 2 + one new arrival = 3, NOT 4 — the update to r-old is not counted.
+    expect(out.find((m) => m.id === "p")?.replyCount).toBe(3);
+  });
 });
 
 describe("buildThreadMessages", () => {
@@ -156,6 +180,67 @@ describe("buildThreadMessages", () => {
     const replies = [reply("r1", "p", "u1", "hi", "2026-07-25T10:00:01Z")];
     const out = buildThreadMessages(replies, [], [], "p", "me");
     expect(out[0].replyCount).toBeUndefined();
+  });
+});
+
+// MAIN-116: the reactions-merge rule + edited/deleted propagation. A
+// `message_updated` broadcast carries viewer-NEUTRAL reactions (reacted always
+// false); the client must keep its own `reacted` while taking the new counts.
+describe("applyMessageUpdate", () => {
+  const base = msg("m1", "u1", "hello", "2026-07-25T10:00:00Z");
+
+  it("takes the incoming counts but preserves the client's own reacted", () => {
+    const existing = withReactions(base, [{ emoji: "👍", count: 1, reacted: true }]);
+    // Someone else also reacted 👍 → broadcast count is 2, reacted neutral (false).
+    const incoming = withReactions(base, [{ emoji: "👍", count: 2, reacted: false }]);
+    const out = applyMessageUpdate(existing, incoming);
+    expect(out.reactions).toEqual([{ emoji: "👍", count: 2, reacted: true }]);
+  });
+
+  it("defaults reacted to false for an emoji the client never had", () => {
+    const existing = withReactions(base, [{ emoji: "👍", count: 1, reacted: true }]);
+    const incoming = withReactions(base, [
+      { emoji: "👍", count: 1, reacted: false },
+      { emoji: "🎉", count: 1, reacted: false }, // new emoji from someone else
+    ]);
+    const out = applyMessageUpdate(existing, incoming);
+    expect(out.reactions).toEqual([
+      { emoji: "👍", count: 1, reacted: true },
+      { emoji: "🎉", count: 1, reacted: false },
+    ]);
+  });
+
+  it("treats a missing existing as no prior reactions (all reacted false)", () => {
+    const incoming = withReactions(base, [{ emoji: "🚀", count: 3, reacted: false }]);
+    const out = applyMessageUpdate(undefined, incoming);
+    expect(out.reactions).toEqual([{ emoji: "🚀", count: 3, reacted: false }]);
+  });
+
+  it("carries the edited and deleted flags and the (possibly redacted) body", () => {
+    const edited = { ...base, body: "hello (fixed)", edited_at: "2026-07-25T10:05:00Z" };
+    expect(applyMessageUpdate(base, edited).edited_at).toBe("2026-07-25T10:05:00Z");
+    expect(applyMessageUpdate(base, edited).body).toBe("hello (fixed)");
+
+    const deleted = { ...base, body: "message deleted", deleted: true, reactions: [] };
+    const out = applyMessageUpdate(withReactions(base, [{ emoji: "👍", count: 1, reacted: true }]), deleted);
+    expect(out.deleted).toBe(true);
+    expect(out.reactions).toEqual([]);
+  });
+
+  it("surfaces reactions, the edited marker, and the deleted flag through the view", () => {
+    const reacted = withReactions(base, [{ emoji: "❤️", count: 2, reacted: true }]);
+    const edited = { ...reacted, edited_at: "2026-07-25T10:05:00Z" };
+    const [view] = buildChatMessages([edited], [], [], "me");
+    expect(view.reactions).toEqual([{ emoji: "❤️", count: 2, reacted: true }]);
+    expect(view.edited).toBe(true);
+    expect(view.deleted).toBe(false);
+
+    // A deleted message still renders (redacted), never dropped from the stream.
+    const gone = { ...base, body: "message deleted", deleted: true };
+    const out = buildChatMessages([gone], [], [], "me");
+    expect(out).toHaveLength(1);
+    expect(out[0].deleted).toBe(true);
+    expect(out[0].reactions).toBeUndefined();
   });
 });
 

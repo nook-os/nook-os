@@ -29,17 +29,15 @@ pub async fn subscribe(
     Ok(ws.on_upgrade(move |socket| pump(socket, rx)))
 }
 
-async fn pump(
-    socket: WebSocket,
-    mut rx: tokio::sync::broadcast::Receiver<nook_types::ChatMessage>,
-) {
+async fn pump(socket: WebSocket, mut rx: tokio::sync::broadcast::Receiver<ChatServerMessage>) {
     let (mut sink, mut stream) = socket.split();
     loop {
         tokio::select! {
-            // New message on the subscribed channel → push it.
+            // A new message OR an update (edit/delete/reaction — MAIN-116) on the
+            // subscribed channel → push it as-is; the event already carries its
+            // own variant (`message` / `message_updated`).
             delivered = rx.recv() => match delivered {
-                Ok(msg) => {
-                    let envelope = ChatServerMessage::Message(msg);
+                Ok(envelope) => {
                     let Ok(text) = serde_json::to_string(&envelope) else { continue };
                     if sink.send(Message::Text(text.into())).await.is_err() {
                         break; // the client went away

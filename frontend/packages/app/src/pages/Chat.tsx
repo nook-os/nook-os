@@ -15,18 +15,26 @@ import {
   api,
   channelHistory,
   connectChatSocket,
+  deleteMessage,
+  editMessage,
   listChannels,
   listDms,
   me as chatMe,
   openDm,
   postMessage,
+  toggleReaction,
   type ChatChannel,
   type ChatMessage,
   type DmSummary,
 } from "@nookos/api";
 import { Plus } from "lucide-react";
 import { ChatView } from "@nookos/ui";
-import { buildChatMessages, type PendingMessage } from "./chatMessages";
+import {
+  applyMessageUpdate,
+  buildChatMessages,
+  type PendingMessage,
+} from "./chatMessages";
+import { askConfirm } from "../dialogs";
 import { ChannelManager } from "./ChannelManager";
 import { DmPicker } from "./DmPicker";
 import { ThreadPanel } from "./ThreadPanel";
@@ -119,11 +127,98 @@ export function ChatPage() {
   // Live + optimistic state is per-open-channel; both reset on a channel switch.
   const [live, setLive] = useState<ChatMessage[]>([]);
   const [pending, setPending] = useState<PendingMessage[]>([]);
+  // Ids of replies that arrived as NEW posts this session (never updates), so a
+  // parent's "N replies" bumps only for genuine new arrivals and an edit/delete/
+  // reaction on a pre-existing reply can't inflate it (MAIN-116 review fix).
+  const [newReplyIds, setNewReplyIds] = useState<ReadonlySet<string>>(new Set());
   const tempCounter = useRef(0);
+
+  // The current history, reachable from stable callbacks (the socket handler and
+  // the fold helpers below capture it) without re-subscribing on every page.
+  const historyRef = useRef<ChatMessage[]>(history);
+  useEffect(() => {
+    historyRef.current = history;
+  }, [history]);
+
+  // Upsert a message into `live` by id — the single place an update lands. Used
+  // for the REST responses to our OWN reaction/edit/delete, whose `reacted` is
+  // viewer-accurate and taken verbatim (MAIN-116).
+  const upsertLive = useCallback((msg: ChatMessage) => {
+    setLive((prev) => {
+      const i = prev.findIndex((m) => m.id === msg.id);
+      if (i < 0) return [...prev, msg];
+      const copy = [...prev];
+      copy[i] = msg;
+      return copy;
+    });
+  }, []);
+
+  // Apply a `message_updated` broadcast (AC-5): merge onto our current copy —
+  // from `live` if we already updated it, else the history page — preserving our
+  // own `reacted` while taking the broadcast's neutral counts/body/flags.
+  const applyBroadcast = useCallback((incoming: ChatMessage) => {
+    setLive((prev) => {
+      const existing =
+        prev.find((m) => m.id === incoming.id) ??
+        historyRef.current.find((m) => m.id === incoming.id);
+      const merged = applyMessageUpdate(existing, incoming);
+      const i = prev.findIndex((m) => m.id === incoming.id);
+      if (i < 0) return [...prev, merged];
+      const copy = [...prev];
+      copy[i] = merged;
+      return copy;
+    });
+  }, []);
+
+  // Reaction/edit/delete actions (AC-2/3/4). Each REST call returns the updated
+  // message; we fold it straight into `live` so the actor sees the change at
+  // once, while the `message_updated` broadcast carries it to other viewers.
+  // Failures already surface through the shared write-failure path.
+  const onToggleReaction = useCallback(
+    async (messageId: string, emoji: string, on: boolean) => {
+      try {
+        upsertLive(await toggleReaction(messageId, emoji, on));
+      } catch {
+        // reported by the shared write-failure path
+      }
+    },
+    [upsertLive],
+  );
+
+  const onEditMessage = useCallback(
+    async (messageId: string, newBody: string) => {
+      try {
+        upsertLive(await editMessage(messageId, newBody));
+      } catch {
+        // reported by the shared write-failure path
+      }
+    },
+    [upsertLive],
+  );
+
+  const onDeleteMessage = useCallback(
+    async (messageId: string) => {
+      const ok = await askConfirm({
+        title: "Delete message?",
+        description:
+          "It will be replaced with a “message deleted” placeholder for everyone. This cannot be undone.",
+        confirmLabel: "delete",
+        danger: true,
+      });
+      if (!ok) return;
+      try {
+        upsertLive(await deleteMessage(messageId));
+      } catch {
+        // reported by the shared write-failure path
+      }
+    },
+    [upsertLive],
+  );
 
   useEffect(() => {
     setLive([]);
     setPending([]);
+    setNewReplyIds(new Set());
     setThreadParentId(null);
   }, [selectedId]);
 
@@ -133,15 +228,30 @@ export function ChatPage() {
     if (!selectedId) return;
     const dispose = connectChatSocket(
       selectedId,
-      (msg) => setLive((prev) => (prev.some((m) => m.id === msg.id) ? prev : [...prev, msg])),
+      (msg) => {
+        setLive((prev) => (prev.some((m) => m.id === msg.id) ? prev : [...prev, msg]));
+        // A NEW reply bumps its parent's count; record its id so an later update
+        // to it is not re-counted (MAIN-116 review fix).
+        if (msg.parent_message_id) {
+          setNewReplyIds((prev) =>
+            prev.has(msg.id) ? prev : new Set(prev).add(msg.id),
+          );
+        }
+      },
       {
         onReconnect: () => {
+          // The refetched history carries authoritative reply counts, so drop the
+          // optimistic new-reply bumps to avoid double-counting after the gap.
+          setNewReplyIds(new Set());
           void qc.invalidateQueries({ queryKey: ["chat", "messages", selectedId] });
         },
+        // An edit, soft-delete, or reaction toggle on any message in this
+        // channel — replies included, so an open thread updates too (AC-5).
+        onUpdate: applyBroadcast,
       },
     );
     return dispose;
-  }, [selectedId, qc]);
+  }, [selectedId, qc, applyBroadcast]);
 
   const sendMutation = useMutation({
     mutationFn: (v: { tempId: string; body: string }) =>
@@ -194,8 +304,8 @@ export function ChatPage() {
 
   const names = useMemo(() => (meId ? { [meId]: "You" } : {}), [meId]);
   const messages = useMemo(
-    () => buildChatMessages(history, live, pending, meId, names),
-    [history, live, pending, meId, names],
+    () => buildChatMessages(history, live, pending, meId, names, newReplyIds),
+    [history, live, pending, meId, names, newReplyIds],
   );
 
   // Resolve the open thread's parent message from what we already hold; a reply
@@ -312,6 +422,10 @@ export function ChatPage() {
             placeholder={activeTitle ? `Message ${activeTitle}` : "Select a conversation"}
             onRetry={onRetry}
             onOpenThread={(m) => setThreadParentId(m.id)}
+            onToggleReaction={onToggleReaction}
+            onEditMessage={onEditMessage}
+            onDeleteMessage={onDeleteMessage}
+            canDeleteAny={canManage}
           />
           {threadParent && selectedId && (
             <ThreadPanel
@@ -321,6 +435,10 @@ export function ChatPage() {
               meId={meId}
               names={names}
               onClose={() => setThreadParentId(null)}
+              onToggleReaction={onToggleReaction}
+              onEditMessage={onEditMessage}
+              onDeleteMessage={onDeleteMessage}
+              canDeleteAny={canManage}
             />
           )}
         </div>

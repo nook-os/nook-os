@@ -6,7 +6,7 @@
 //! is the local half, mirroring the control plane's registry/bus split.
 
 use dashmap::DashMap;
-use nook_types::ChatMessage;
+use nook_types::ChatServerMessage;
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
@@ -14,11 +14,20 @@ use uuid::Uuid;
 /// told to catch up rather than blocking the sender.
 const CHANNEL_CAP: usize = 256;
 
+/// The channel a server-message event belongs to. Both variants carry a
+/// [`ChatMessage`], so a new post and an update (edit/delete/reaction — MAIN-116)
+/// route to the same per-channel subscribers.
+fn event_channel(event: &ChatServerMessage) -> Uuid {
+    match event {
+        ChatServerMessage::Message(m) | ChatServerMessage::MessageUpdated(m) => m.channel_id,
+    }
+}
+
 pub struct Registry {
     /// This instance's id, so the bus can skip its own NOTIFYs and never deliver
     /// a message twice on the instance that posted it.
     instance: Uuid,
-    channels: DashMap<Uuid, broadcast::Sender<ChatMessage>>,
+    channels: DashMap<Uuid, broadcast::Sender<ChatServerMessage>>,
 }
 
 impl Registry {
@@ -33,20 +42,21 @@ impl Registry {
         self.instance
     }
 
-    /// Subscribe a websocket to a channel's live messages.
-    pub fn subscribe(&self, channel_id: Uuid) -> broadcast::Receiver<ChatMessage> {
+    /// Subscribe a websocket to a channel's live events (new messages AND
+    /// updates — MAIN-116 AC-5).
+    pub fn subscribe(&self, channel_id: Uuid) -> broadcast::Receiver<ChatServerMessage> {
         self.sender(channel_id).subscribe()
     }
 
-    /// Deliver a message to this instance's subscribers of its channel. Sending
+    /// Deliver an event to this instance's subscribers of its channel. Sending
     /// with no receivers is a no-op (nobody is watching that channel here).
-    pub fn publish_local(&self, msg: ChatMessage) {
-        if let Some(tx) = self.channels.get(&msg.channel_id) {
-            let _ = tx.send(msg);
+    pub fn publish_local(&self, event: ChatServerMessage) {
+        if let Some(tx) = self.channels.get(&event_channel(&event)) {
+            let _ = tx.send(event);
         }
     }
 
-    fn sender(&self, channel_id: Uuid) -> broadcast::Sender<ChatMessage> {
+    fn sender(&self, channel_id: Uuid) -> broadcast::Sender<ChatServerMessage> {
         self.channels
             .entry(channel_id)
             .or_insert_with(|| broadcast::channel(CHANNEL_CAP).0)
@@ -64,6 +74,7 @@ impl Default for Registry {
 mod tests {
     use super::*;
     use chrono::Utc;
+    use nook_types::ChatMessage;
 
     fn msg(channel: Uuid) -> ChatMessage {
         ChatMessage {
@@ -76,10 +87,13 @@ mod tests {
             reply_count: 0,
             last_reply_at: None,
             created_at: Utc::now(),
+            reactions: Vec::new(),
+            edited_at: None,
+            deleted: false,
         }
     }
 
-    /// A subscriber only receives its own channel's messages — the fan-out never
+    /// A subscriber only receives its own channel's events — the fan-out never
     /// crosses channels, and since a channel belongs to exactly one tenant this
     /// is the local half of tenant isolation (AC-3/AC-5).
     #[tokio::test]
@@ -90,12 +104,15 @@ mod tests {
         let mut rx = reg.subscribe(channel_a);
 
         // A message on another channel must not reach this subscriber.
-        reg.publish_local(msg(channel_b));
+        reg.publish_local(ChatServerMessage::Message(msg(channel_b)));
         // A message on the subscribed channel must.
         let sent = msg(channel_a);
-        reg.publish_local(sent.clone());
+        reg.publish_local(ChatServerMessage::Message(sent.clone()));
 
         let got = rx.try_recv().expect("the channel_a message is delivered");
+        let ChatServerMessage::Message(got) = got else {
+            panic!("expected a Message event");
+        };
         assert_eq!(got.id, sent.id);
         assert!(rx.try_recv().is_err(), "nothing else was delivered");
     }

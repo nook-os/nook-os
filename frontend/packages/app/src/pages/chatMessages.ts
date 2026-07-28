@@ -29,6 +29,7 @@ function toView(
   // Server-side count (from history, AC-3) plus replies that arrived live this
   // session (AC-4). `undefined` when zero so the view shows no affordance.
   const replyCount = (m.reply_count ?? 0) + extraReplies;
+  const reactions = m.reactions ?? [];
   return {
     id: m.id,
     authorId: m.author_id,
@@ -38,7 +39,35 @@ function toView(
     body: m.body,
     createdAt: m.created_at,
     replyCount: replyCount > 0 ? replyCount : undefined,
+    // MAIN-116: reactions (per-emoji tallies), the "(edited)" marker, and the
+    // soft-delete flag. Empty reactions collapse to `undefined` so the view
+    // renders no pill row.
+    reactions: reactions.length > 0 ? reactions : undefined,
+    edited: m.edited_at != null,
+    deleted: m.deleted ?? false,
   };
+}
+
+/**
+ * Merge a `message_updated` broadcast (MAIN-116 AC-5) onto the client's current
+ * copy of that message. The broadcast carries viewer-NEUTRAL reactions —
+ * `reacted` is always false, because the server cannot know each viewer — so we
+ * take the incoming counts, `body`, `edited_at`, `deleted`, and `reply_count`,
+ * but PRESERVE this client's own `reacted` per emoji from what it already held
+ * (learned from the REST response to its own PUT/DELETE). A reaction the client
+ * itself just toggled is reconciled by that REST response; someone else's
+ * toggle changes the count here without flipping the client's own `reacted`.
+ */
+export function applyMessageUpdate(
+  existing: ChatMessage | undefined,
+  incoming: ChatMessage,
+): ChatMessage {
+  const prior = existing?.reactions ?? [];
+  const reactions = (incoming.reactions ?? []).map((r) => ({
+    ...r,
+    reacted: prior.find((p) => p.emoji === r.emoji)?.reacted ?? false,
+  }));
+  return { ...incoming, reactions };
 }
 
 /** Sort confirmed messages oldest → newest. UUID v7 ids are time-ordered, so
@@ -87,6 +116,7 @@ export function buildChatMessages(
   pending: PendingMessage[],
   meId: string | undefined,
   names: Record<string, string> = {},
+  newReplyIds?: ReadonlySet<string>,
 ): ChatViewMessage[] {
   // Dedupe confirmed messages by id: a message can appear in both a refetched
   // history page and the live buffer.
@@ -94,12 +124,17 @@ export function buildChatMessages(
   for (const m of history) byId.set(m.id, m);
   for (const m of live) byId.set(m.id, m);
 
-  // Count replies we know about live, per parent, to bump the parent's count.
-  // History carries no replies (the server excludes them), so this counts only
-  // this session's live arrivals — added on top of the server `reply_count`.
+  // Bump each parent's "N replies" by the replies that arrived NEW this session,
+  // on top of the server `reply_count` (history carries no replies — the server
+  // excludes them). `newReplyIds` is the set of ids that arrived as NEW posts;
+  // an `message_updated` (edit/delete/reaction) to a PRE-EXISTING reply lands in
+  // `live` too, but it is already in the server count, so counting it would
+  // double-count and inflate the parent for every viewer (MAIN-116 review fix).
+  // When `newReplyIds` is omitted (the thread panel / older tests) all live
+  // replies count, as before.
   const liveReplies: Record<string, number> = {};
   for (const m of byId.values()) {
-    if (m.parent_message_id) {
+    if (m.parent_message_id && (!newReplyIds || newReplyIds.has(m.id))) {
       liveReplies[m.parent_message_id] = (liveReplies[m.parent_message_id] ?? 0) + 1;
     }
   }

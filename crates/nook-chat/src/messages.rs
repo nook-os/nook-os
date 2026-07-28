@@ -5,16 +5,25 @@
 //! subscribers and announced on the bus for peer instances. History pages
 //! newest-first with a `before=<id>` cursor.
 
+use std::collections::HashMap;
+
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::Json;
 use chrono::{DateTime, Utc};
-use nook_types::{ChatMessage, ChatMessagePage, ChatThread, PostChatMessage};
+use nook_types::{
+    ChatMessage, ChatMessagePage, ChatReactionAggregate, ChatServerMessage, ChatThread,
+    PostChatMessage, UpdateChatMessage,
+};
 use serde::Deserialize;
 use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::{AppState, Caller, ChatError};
+
+/// The body a deleted message shows in every payload — the real content is
+/// redacted server-side and never leaves the database (MAIN-116 AC-4).
+const DELETED_PLACEHOLDER: &str = "message deleted";
 
 #[derive(sqlx::FromRow)]
 struct MessageRow {
@@ -27,20 +36,97 @@ struct MessageRow {
     reply_count: i64,
     last_reply_at: Option<DateTime<Utc>>,
     created_at: DateTime<Utc>,
+    edited_at: Option<DateTime<Utc>>,
+    deleted_at: Option<DateTime<Utc>>,
 }
 
 impl From<MessageRow> for ChatMessage {
     fn from(r: MessageRow) -> Self {
+        // Redaction is centralized HERE — every read path funnels rows through
+        // this impl, so a deleted message's real body can never reach a payload
+        // (MAIN-116 AC-4). Reactions are attached separately (they need a viewer).
+        let deleted = r.deleted_at.is_some();
         ChatMessage {
             id: r.id,
             channel_id: r.channel_id,
             author_id: r.author_id,
             author_name: r.author_name,
-            body: r.body,
+            body: if deleted {
+                DELETED_PLACEHOLDER.to_string()
+            } else {
+                r.body
+            },
             parent_message_id: r.parent_message_id,
             reply_count: r.reply_count,
             last_reply_at: r.last_reply_at,
             created_at: r.created_at,
+            reactions: Vec::new(),
+            edited_at: r.edited_at,
+            deleted,
+        }
+    }
+}
+
+/// A reaction row from the aggregate query.
+#[derive(sqlx::FromRow)]
+struct ReactionRow {
+    message_id: Uuid,
+    emoji: String,
+    count: i64,
+    reacted: bool,
+}
+
+/// Aggregate the reactions for a set of messages in ONE query (no N+1). `viewer`
+/// scopes the per-emoji `reacted` flag to a caller; `None` (the bus/broadcast
+/// path, which has no single viewer) yields `reacted = false` everywhere — the
+/// counts are still accurate, and each client overlays its own reacted state.
+async fn load_reactions(
+    pool: &PgPool,
+    viewer: Option<Uuid>,
+    ids: &[Uuid],
+) -> HashMap<Uuid, Vec<ChatReactionAggregate>> {
+    if ids.is_empty() {
+        return HashMap::new();
+    }
+    let rows: Vec<ReactionRow> = sqlx::query_as(
+        "SELECT message_id, emoji, count(*)::bigint AS count,
+                COALESCE(bool_or(user_id = $2), false) AS reacted
+           FROM chat_reactions
+          WHERE message_id = ANY($1)
+          GROUP BY message_id, emoji
+          ORDER BY message_id, emoji",
+    )
+    .bind(ids)
+    .bind(viewer)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
+
+    let mut out: HashMap<Uuid, Vec<ChatReactionAggregate>> = HashMap::new();
+    for r in rows {
+        out.entry(r.message_id)
+            .or_default()
+            .push(ChatReactionAggregate {
+                emoji: r.emoji,
+                count: r.count,
+                reacted: r.reacted,
+            });
+    }
+    out
+}
+
+/// Attach reactions to a batch of messages for `viewer`. A deleted message keeps
+/// an empty reaction set (its content — and its tally — is gone from view).
+async fn attach_reactions(pool: &PgPool, viewer: Option<Uuid>, messages: &mut [ChatMessage]) {
+    let ids: Vec<Uuid> = messages
+        .iter()
+        .filter(|m| !m.deleted)
+        .map(|m| m.id)
+        .collect();
+    let mut map = load_reactions(pool, viewer, &ids).await;
+    for m in messages.iter_mut() {
+        if !m.deleted {
+            m.reactions = map.remove(&m.id).unwrap_or_default();
         }
     }
 }
@@ -56,6 +142,7 @@ impl From<MessageRow> for ChatMessage {
 /// history uses [`SELECT_MESSAGE_WITH_REPLIES`] instead, which fills them in.
 const SELECT_MESSAGE: &str = "SELECT m.id, m.channel_id, m.author_id, \
      u.display_name AS author_name, m.body, m.parent_message_id, m.created_at, \
+     m.edited_at, m.deleted_at, \
      0::bigint AS reply_count, NULL::timestamptz AS last_reply_at \
      FROM chat_messages m LEFT JOIN public.users u ON u.id = m.author_id";
 
@@ -65,6 +152,7 @@ const SELECT_MESSAGE: &str = "SELECT m.id, m.channel_id, m.author_id, \
 /// `chat_messages_parent_idx`.
 const SELECT_MESSAGE_WITH_REPLIES: &str = "SELECT m.id, m.channel_id, m.author_id, \
      u.display_name AS author_name, m.body, m.parent_message_id, m.created_at, \
+     m.edited_at, m.deleted_at, \
      (SELECT count(*) FROM chat_messages r WHERE r.parent_message_id = m.id) AS reply_count, \
      (SELECT max(r.created_at) FROM chat_messages r WHERE r.parent_message_id = m.id) \
        AS last_reply_at \
@@ -114,7 +202,7 @@ pub async fn post(
          VALUES ($1, $2, $3, $4, $5, $6)
          RETURNING id, channel_id, author_id,
              (SELECT display_name FROM public.users WHERE id = author_id) AS author_name,
-             body, parent_message_id, created_at,
+             body, parent_message_id, created_at, edited_at, deleted_at,
              0::bigint AS reply_count, NULL::timestamptz AS last_reply_at",
     )
     .bind(Uuid::now_v7())
@@ -126,12 +214,14 @@ pub async fn post(
     .fetch_one(&state.db)
     .await
     .map_err(|_| ChatError::Internal)?;
-    let msg: ChatMessage = row.into();
+    let msg: ChatMessage = row.into(); // no reactions on a brand-new message
 
     // Deliver to subscribers here now, and announce it so peer instances do the
     // same (AC-3). The origin guard on the bus stops a double send here.
-    state.registry.publish_local(msg.clone());
-    crate::bus::publish(&state.db, msg.id, state.registry.instance()).await;
+    state
+        .registry
+        .publish_local(ChatServerMessage::Message(msg.clone()));
+    crate::bus::publish(&state.db, msg.id, state.registry.instance(), false).await;
 
     Ok((StatusCode::CREATED, Json(msg)))
 }
@@ -174,22 +264,39 @@ pub async fn history(
     let next_cursor = (rows.len() as i64 == limit)
         .then(|| rows.last().map(|m| m.id))
         .flatten();
+    let mut messages: Vec<ChatMessage> = rows.into_iter().map(Into::into).collect();
+    attach_reactions(&state.db, Some(caller.user_id), &mut messages).await;
     Ok(Json(ChatMessagePage {
-        messages: rows.into_iter().map(Into::into).collect(),
+        messages,
         next_cursor,
     }))
 }
 
-/// Read one message back by id — used by the bus listener to deliver a peer
-/// instance's post to local subscribers.
+/// Read one message back by id, viewer-neutral (`reacted = false`) — used by the
+/// bus listener and the update handlers to build the broadcast payload. Uses the
+/// reply-rollup select so an edited/reacted PARENT keeps its `reply_count` in the
+/// update event (MAIN-116). Redaction + reactions applied.
 pub async fn fetch(pool: &PgPool, id: Uuid) -> Option<ChatMessage> {
-    sqlx::query_as::<_, MessageRow>(&format!("{SELECT_MESSAGE} WHERE m.id = $1"))
-        .bind(id)
-        .fetch_optional(pool)
-        .await
-        .ok()
-        .flatten()
-        .map(Into::into)
+    read_message(pool, None, id).await
+}
+
+/// One message by id with redaction + reactions attached for `viewer`.
+async fn read_message(pool: &PgPool, viewer: Option<Uuid>, id: Uuid) -> Option<ChatMessage> {
+    let row =
+        sqlx::query_as::<_, MessageRow>(&format!("{SELECT_MESSAGE_WITH_REPLIES} WHERE m.id = $1"))
+            .bind(id)
+            .fetch_optional(pool)
+            .await
+            .ok()
+            .flatten()?;
+    let mut msg: ChatMessage = row.into();
+    if !msg.deleted {
+        msg.reactions = load_reactions(pool, viewer, &[id])
+            .await
+            .remove(&id)
+            .unwrap_or_default();
+    }
+    Some(msg)
 }
 
 /// A message's thread: the parent plus a keyset page of its replies (MAIN-114
@@ -237,11 +344,219 @@ pub async fn thread(
     let next_cursor = (rows.len() as i64 == limit)
         .then(|| rows.last().map(|m| m.id))
         .flatten();
+    let mut parent: ChatMessage = parent.into();
+    let mut replies: Vec<ChatMessage> = rows.into_iter().map(Into::into).collect();
+    attach_reactions(
+        &state.db,
+        Some(caller.user_id),
+        std::slice::from_mut(&mut parent),
+    )
+    .await;
+    attach_reactions(&state.db, Some(caller.user_id), &mut replies).await;
     Ok(Json(ChatThread {
-        parent: parent.into(),
-        replies: rows.into_iter().map(Into::into).collect(),
+        parent,
+        replies,
         next_cursor,
     }))
+}
+
+// ── Reactions + edit/delete (MAIN-116) ───────────────────────────────────────
+
+/// A curated allowlist of reaction emoji (MAIN-116 AC-2). An allowlist is the
+/// "sane approach": it guarantees a single, renderable grapheme and blocks
+/// arbitrary text or oversized/compound sequences masquerading as an emoji,
+/// without pulling in a grapheme-segmentation dependency.
+const ALLOWED_EMOJI: &[&str] = &[
+    "👍", "👎", "❤️", "😄", "🎉", "😕", "🚀", "👀", "🙌", "🔥", "✅", "❌",
+];
+
+fn valid_emoji(emoji: &str) -> bool {
+    ALLOWED_EMOJI.contains(&emoji)
+}
+
+/// Load a message's `(channel_id, author_id, deleted_at)` for an authz decision.
+async fn message_meta(
+    pool: &PgPool,
+    id: Uuid,
+) -> Result<(Uuid, Uuid, Option<DateTime<Utc>>), ChatError> {
+    sqlx::query_as("SELECT channel_id, author_id, deleted_at FROM chat_messages WHERE id = $1")
+        .bind(id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|_| ChatError::Internal)?
+        .ok_or(ChatError::NotFound)
+}
+
+/// Announce a change to an existing message (edit/delete/reaction — AC-5): the
+/// `MessageUpdated` event locally, then the same over the bus so peers re-fetch
+/// and re-deliver. `read_message(None)` gives a viewer-neutral payload.
+async fn broadcast_update(state: &AppState, message_id: Uuid) {
+    if let Some(msg) = read_message(&state.db, None, message_id).await {
+        state
+            .registry
+            .publish_local(ChatServerMessage::MessageUpdated(msg));
+    }
+    crate::bus::publish(&state.db, message_id, state.registry.instance(), true).await;
+}
+
+/// Toggle the caller's reaction ON (`PUT`). Idempotent — a repeat is a no-op via
+/// the primary key. The caller must be able to see the message's channel.
+pub async fn add_reaction(
+    State(state): State<AppState>,
+    caller: Caller,
+    Path((message_id, emoji)): Path<(Uuid, String)>,
+) -> Result<Json<ChatMessage>, ChatError> {
+    react(&state, &caller, message_id, &emoji, true).await
+}
+
+/// Toggle the caller's reaction OFF (`DELETE`). Idempotent.
+pub async fn remove_reaction(
+    State(state): State<AppState>,
+    caller: Caller,
+    Path((message_id, emoji)): Path<(Uuid, String)>,
+) -> Result<Json<ChatMessage>, ChatError> {
+    react(&state, &caller, message_id, &emoji, false).await
+}
+
+async fn react(
+    state: &AppState,
+    caller: &Caller,
+    message_id: Uuid,
+    emoji: &str,
+    add: bool,
+) -> Result<Json<ChatMessage>, ChatError> {
+    if !valid_emoji(emoji) {
+        return Err(ChatError::BadRequest("not a supported reaction".into()));
+    }
+    let (channel_id, _author, deleted_at) = message_meta(&state.db, message_id).await?;
+    // Same visibility gate as reading — a caller who cannot see the channel
+    // cannot react in it. A deleted message takes no new reactions.
+    crate::channels::access(&state.db, channel_id, caller).await?;
+    if deleted_at.is_some() {
+        return Err(ChatError::Conflict("this message was deleted".into()));
+    }
+
+    if add {
+        sqlx::query(
+            "INSERT INTO chat_reactions (message_id, user_id, emoji) VALUES ($1, $2, $3)
+             ON CONFLICT DO NOTHING",
+        )
+        .bind(message_id)
+        .bind(caller.user_id)
+        .bind(emoji)
+        .execute(&state.db)
+        .await
+        .map_err(|_| ChatError::Internal)?;
+    } else {
+        sqlx::query(
+            "DELETE FROM chat_reactions WHERE message_id = $1 AND user_id = $2 AND emoji = $3",
+        )
+        .bind(message_id)
+        .bind(caller.user_id)
+        .bind(emoji)
+        .execute(&state.db)
+        .await
+        .map_err(|_| ChatError::Internal)?;
+    }
+
+    broadcast_update(state, message_id).await;
+    // The acting caller gets a viewer-accurate payload (its own `reacted` flags).
+    read_message(&state.db, Some(caller.user_id), message_id)
+        .await
+        .map(Json)
+        .ok_or(ChatError::NotFound)
+}
+
+/// Edit a message's body (`PATCH`) — author-only, validated like a post; the
+/// prior content is kept as a revision and `edited_at` is set (AC-3).
+pub async fn update(
+    State(state): State<AppState>,
+    caller: Caller,
+    Path(message_id): Path<Uuid>,
+    Json(req): Json<UpdateChatMessage>,
+) -> Result<Json<ChatMessage>, ChatError> {
+    let body = req.body.trim();
+    if body.is_empty() {
+        return Err(ChatError::BadRequest("a message needs a body".into()));
+    }
+    let (channel_id, author_id, deleted_at) = message_meta(&state.db, message_id).await?;
+    crate::channels::access(&state.db, channel_id, &caller).await?;
+    if author_id != caller.user_id {
+        return Err(ChatError::Forbidden);
+    }
+    if deleted_at.is_some() {
+        return Err(ChatError::Conflict("this message was deleted".into()));
+    }
+
+    // Record the prior content as an audit revision, then update in place. The
+    // revision INSERT reads the current body, so it must run before the UPDATE.
+    sqlx::query(
+        "INSERT INTO chat_message_revisions (id, message_id, prior_content, action, acted_by)
+         SELECT $1, id, body, 'edit', $2 FROM chat_messages WHERE id = $3",
+    )
+    .bind(Uuid::now_v7())
+    .bind(caller.user_id)
+    .bind(message_id)
+    .execute(&state.db)
+    .await
+    .map_err(|_| ChatError::Internal)?;
+    sqlx::query("UPDATE chat_messages SET body = $2, edited_at = now() WHERE id = $1")
+        .bind(message_id)
+        .bind(body)
+        .execute(&state.db)
+        .await
+        .map_err(|_| ChatError::Internal)?;
+
+    broadcast_update(&state, message_id).await;
+    read_message(&state.db, Some(caller.user_id), message_id)
+        .await
+        .map(Json)
+        .ok_or(ChatError::NotFound)
+}
+
+/// Soft-delete a message (`DELETE`) — author or tenant admin (AC-4). The content
+/// is redacted in every payload from now on; the row and its revisions are kept
+/// for audit. No hard delete exists.
+pub async fn delete(
+    State(state): State<AppState>,
+    caller: Caller,
+    Path(message_id): Path<Uuid>,
+) -> Result<Json<ChatMessage>, ChatError> {
+    let (channel_id, author_id, deleted_at) = message_meta(&state.db, message_id).await?;
+    crate::channels::access(&state.db, channel_id, &caller).await?;
+    // Author always may; otherwise the caller must be a tenant owner/admin.
+    if author_id != caller.user_id {
+        crate::require_admin(&state.db, &caller).await?;
+    }
+    if deleted_at.is_some() {
+        // Already gone — idempotent success with the current (redacted) state.
+        return read_message(&state.db, Some(caller.user_id), message_id)
+            .await
+            .map(Json)
+            .ok_or(ChatError::NotFound);
+    }
+
+    sqlx::query(
+        "INSERT INTO chat_message_revisions (id, message_id, prior_content, action, acted_by)
+         SELECT $1, id, body, 'delete', $2 FROM chat_messages WHERE id = $3",
+    )
+    .bind(Uuid::now_v7())
+    .bind(caller.user_id)
+    .bind(message_id)
+    .execute(&state.db)
+    .await
+    .map_err(|_| ChatError::Internal)?;
+    sqlx::query("UPDATE chat_messages SET deleted_at = now() WHERE id = $1")
+        .bind(message_id)
+        .execute(&state.db)
+        .await
+        .map_err(|_| ChatError::Internal)?;
+
+    broadcast_update(&state, message_id).await;
+    read_message(&state.db, Some(caller.user_id), message_id)
+        .await
+        .map(Json)
+        .ok_or(ChatError::NotFound)
 }
 
 #[cfg(test)]
@@ -282,8 +597,14 @@ mod tests {
     }
 
     fn caller(tenant: Uuid) -> Caller {
+        caller_as(tenant, Uuid::now_v7())
+    }
+
+    /// A caller with a specific user id — for reaction/author tests that need the
+    /// same identity to act twice or to be told apart from another.
+    fn caller_as(tenant: Uuid, user: Uuid) -> Caller {
         Caller {
-            user_id: Uuid::now_v7(),
+            user_id: user,
             tenant_id: tenant,
             cookie_session: true,
         }
@@ -726,5 +1047,215 @@ mod tests {
         .await
         .expect_err("cross-tenant thread read refused");
         assert!(matches!(err, ChatError::Forbidden));
+    }
+
+    // ── Reactions + edit/delete (MAIN-116) ──
+
+    async fn post_as(
+        state: &AppState,
+        tenant: Uuid,
+        channel: Uuid,
+        author: Uuid,
+        body: &str,
+    ) -> ChatMessage {
+        let (_, Json(m)) = post(
+            State(state.clone()),
+            caller_as(tenant, author),
+            Path(channel),
+            Json(PostChatMessage {
+                body: body.into(),
+                parent_message_id: None,
+            }),
+        )
+        .await
+        .unwrap();
+        m
+    }
+
+    #[tokio::test]
+    async fn reactions_toggle_aggregate_and_are_per_viewer() {
+        let Some(state) = state().await else { return };
+        let tenant = Uuid::now_v7();
+        let channel = make_channel(&state, tenant, "react").await;
+        let alice = Uuid::now_v7();
+        let bob = Uuid::now_v7();
+        let m = post_as(&state, tenant, channel, alice, "hi").await;
+
+        // Alice reacts 👍 — she sees her own reaction, count 1.
+        let Json(a) = add_reaction(
+            State(state.clone()),
+            caller_as(tenant, alice),
+            Path((m.id, "👍".into())),
+        )
+        .await
+        .unwrap();
+        assert_eq!(a.reactions.len(), 1);
+        assert_eq!(
+            (a.reactions[0].emoji.as_str(), a.reactions[0].count),
+            ("👍", 1)
+        );
+        assert!(a.reactions[0].reacted);
+
+        // A repeat add is a no-op (idempotent via the PK, AC-2).
+        let Json(again) = add_reaction(
+            State(state.clone()),
+            caller_as(tenant, alice),
+            Path((m.id, "👍".into())),
+        )
+        .await
+        .unwrap();
+        assert_eq!(again.reactions[0].count, 1);
+
+        // Bob reacts too → count 2.
+        let Json(b) = add_reaction(
+            State(state.clone()),
+            caller_as(tenant, bob),
+            Path((m.id, "👍".into())),
+        )
+        .await
+        .unwrap();
+        assert_eq!(b.reactions[0].count, 2);
+
+        // A third viewer reading history sees count 2 but reacted=false.
+        let Json(page) = history(
+            State(state.clone()),
+            caller(tenant),
+            Path(channel),
+            Query(HistoryQuery {
+                before: None,
+                limit: None,
+            }),
+        )
+        .await
+        .unwrap();
+        let hm = page.messages.iter().find(|x| x.id == m.id).unwrap();
+        assert_eq!(hm.reactions[0].count, 2);
+        assert!(!hm.reactions[0].reacted, "a non-reactor sees reacted=false");
+
+        // Alice removes hers → count 1, no longer reacted.
+        let Json(rm) = remove_reaction(
+            State(state.clone()),
+            caller_as(tenant, alice),
+            Path((m.id, "👍".into())),
+        )
+        .await
+        .unwrap();
+        assert_eq!(rm.reactions[0].count, 1);
+        assert!(!rm.reactions[0].reacted);
+
+        // An emoji outside the allowlist is refused (AC-2 validation).
+        let bad = add_reaction(
+            State(state.clone()),
+            caller_as(tenant, alice),
+            Path((m.id, "notemoji".into())),
+        )
+        .await;
+        assert!(matches!(bad, Err(ChatError::BadRequest(_))));
+    }
+
+    #[tokio::test]
+    async fn edit_is_author_only_and_records_a_revision() {
+        let Some(state) = state().await else { return };
+        let tenant = Uuid::now_v7();
+        let channel = make_channel(&state, tenant, "edit").await;
+        let author = Uuid::now_v7();
+        let m = post_as(&state, tenant, channel, author, "typ0").await;
+
+        // A non-author is refused BEFORE any change (AC-3).
+        let refused = update(
+            State(state.clone()),
+            caller_as(tenant, Uuid::now_v7()),
+            Path(m.id),
+            Json(UpdateChatMessage {
+                body: "hijack".into(),
+            }),
+        )
+        .await;
+        assert!(matches!(refused, Err(ChatError::Forbidden)));
+
+        // The author edits (validated + trimmed like a post); edited_at is set.
+        let Json(edited) = update(
+            State(state.clone()),
+            caller_as(tenant, author),
+            Path(m.id),
+            Json(UpdateChatMessage {
+                body: "  typo  ".into(),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(edited.body, "typo");
+        assert!(edited.edited_at.is_some());
+
+        // The prior content is preserved in the audit trail.
+        let prior: String = sqlx::query_scalar(
+            "SELECT prior_content FROM chat_message_revisions WHERE message_id = $1 AND action = 'edit'",
+        )
+        .bind(m.id)
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
+        assert_eq!(prior, "typ0");
+    }
+
+    #[tokio::test]
+    async fn delete_redacts_everywhere_and_keeps_the_audit_trail() {
+        let Some(state) = state().await else { return };
+        let tenant = Uuid::now_v7();
+        let channel = make_channel(&state, tenant, "del").await;
+        let author = Uuid::now_v7();
+        let m = post_as(&state, tenant, channel, author, "secret").await;
+
+        // The author soft-deletes → redacted placeholder, deleted flag set (AC-4).
+        let Json(deleted) = delete(State(state.clone()), caller_as(tenant, author), Path(m.id))
+            .await
+            .unwrap();
+        assert!(deleted.deleted);
+        assert_eq!(deleted.body, DELETED_PLACEHOLDER);
+
+        // Channel history redacts it too — still present, never the real content.
+        let Json(page) = history(
+            State(state.clone()),
+            caller(tenant),
+            Path(channel),
+            Query(HistoryQuery {
+                before: None,
+                limit: None,
+            }),
+        )
+        .await
+        .unwrap();
+        let hm = page.messages.iter().find(|x| x.id == m.id).unwrap();
+        assert!(hm.deleted);
+        assert_eq!(hm.body, DELETED_PLACEHOLDER);
+
+        // The real content survives ONLY in the audit trail.
+        let prior: String = sqlx::query_scalar(
+            "SELECT prior_content FROM chat_message_revisions WHERE message_id = $1 AND action = 'delete'",
+        )
+        .bind(m.id)
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
+        assert_eq!(prior, "secret");
+
+        // A deleted message refuses further edits and reactions.
+        let e = update(
+            State(state.clone()),
+            caller_as(tenant, author),
+            Path(m.id),
+            Json(UpdateChatMessage {
+                body: "back".into(),
+            }),
+        )
+        .await;
+        assert!(matches!(e, Err(ChatError::Conflict(_))));
+        let r = add_reaction(
+            State(state.clone()),
+            caller_as(tenant, author),
+            Path((m.id, "👍".into())),
+        )
+        .await;
+        assert!(matches!(r, Err(ChatError::Conflict(_))));
     }
 }
