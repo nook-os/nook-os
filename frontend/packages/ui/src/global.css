@@ -1087,6 +1087,19 @@ table.nook-table tr.clickable { cursor: pointer; }
   box-shadow: inset 2px 0 0 var(--nook-accent);
 }
 
+/* The exact-key search hit (MAIN-181 AC-3): a full amber ring + glow so the
+   jumped-to card/row is unmistakable on either tab. */
+.board-card.hit,
+.backlog-row.hit,
+.backlog-epic.hit > .backlog-epic-head {
+  border-color: var(--nook-accent);
+  box-shadow: 0 0 0 1px var(--nook-accent), var(--nook-glow);
+}
+.backlog-row.hit,
+.backlog-epic.hit > .backlog-epic-head {
+  border-radius: var(--nook-radius);
+}
+
 /* Blocked work is dimmed rather than hidden: it still occupies a place in the
    queue, and seeing WHY the column is not moving is the point. */
 .board-card.blocked { opacity: 0.55; border-style: dashed; }

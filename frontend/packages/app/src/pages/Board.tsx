@@ -52,6 +52,7 @@ function Card({
   onMenu,
   selected,
   blocked,
+  hit = false,
 }: {
   task: TaskItem;
   /** The task's workspace, resolved to a name. Shown so a busy board tells you
@@ -61,13 +62,26 @@ function Card({
   onMenu: (anchor: { x: number; y: number }) => void;
   selected: boolean;
   blocked: boolean;
+  /** This card is the exact-key search hit — highlighted + scrolled into view
+   *  (MAIN-181 AC-3). */
+  hit?: boolean;
 }) {
   const { attributes, listeners, setNodeRef, transform, isDragging } =
     useDraggable({ id: task.id });
+  // Compose dnd-kit's draggable ref with our own so an exact-key hit can be
+  // scrolled into view (AC-3) without losing drag behaviour.
+  const node = React.useRef<HTMLElement | null>(null);
+  const setRefs = (el: HTMLElement | null) => {
+    node.current = el;
+    setNodeRef(el);
+  };
+  React.useEffect(() => {
+    if (hit) node.current?.scrollIntoView({ block: "center", behavior: "smooth" });
+  }, [hit]);
   return (
     <div
-      ref={setNodeRef}
-      className={`board-card${selected ? " selected" : ""}${blocked ? " blocked" : ""}${
+      ref={setRefs}
+      className={`board-card${selected ? " selected" : ""}${hit ? " hit" : ""}${blocked ? " blocked" : ""}${
         task.archived_at ? " archived" : ""
       }`}
       style={{
@@ -184,6 +198,7 @@ function Column({
   onMenu,
   onArchiveCompleted,
   selectedId,
+  hitId = null,
   blockedIds,
   wsName,
 }: {
@@ -200,6 +215,8 @@ function Column({
    *  completed/canceled columns (AC-4). */
   onArchiveCompleted: () => void;
   selectedId: string | null;
+  /** The exact-key search hit's task id — the card to highlight/scroll (AC-3). */
+  hitId?: string | null;
   blockedIds: Set<string>;
   /** workspace id → name, so cards can label their repo without each fetching. */
   wsName: Map<string, string>;
@@ -285,6 +302,7 @@ function Column({
             onOpen={() => onOpen(t.key ?? t.id)}
             onMenu={(anchor) => onMenu(t, anchor)}
             selected={selectedId === t.key || selectedId === t.id}
+            hit={hitId === t.id}
             blocked={blockedIds.has(t.id)}
           />
         ))}
@@ -749,6 +767,33 @@ export interface BoardFilter {
 
 export type BoardView = "board" | "backlog";
 
+/// Every task type the Backlog tab lists, INCLUDING `epic`. Listing epic
+/// explicitly opts a filtered fetch out of the server's default epic-exclusion
+/// (MAIN-80), so a backlog search finds epics (MAIN-181 AC-1).
+export const BACKLOG_TYPES = ["task", "bug", "story", "chore", "epic"] as const;
+
+/// The `type` query param a filtered board/backlog fetch should send (MAIN-181
+/// AC-1): an explicit type filter always wins; with none, the Backlog tab asks
+/// for all types incl. epic (so epics stay searchable), and the kanban tab sends
+/// nothing (epics never render there). `undefined` means "omit the param". Pure
+/// and exported for the query-composition test (AC-5).
+export function searchTypeParam(filter: BoardFilter): string[] | undefined {
+  if (filter.type.length) return filter.type;
+  if (filter.view === "backlog") return [...BACKLOG_TYPES];
+  return undefined;
+}
+
+/// The id of the task whose display key EXACTLY equals the query (case-
+/// insensitive), or null — the exact-key search hit to highlight and scroll to
+/// (MAIN-181 AC-3). A partial query (not a whole key) matches nothing here; the
+/// server ILIKE still lists partial matches, this only drives the jump-to. Pure
+/// and exported for the test.
+export function exactKeyMatch(tasks: TaskItem[], q: string): string | null {
+  const key = q.trim().toLowerCase();
+  if (!key) return null;
+  return tasks.find((t) => (t.key ?? "").toLowerCase() === key)?.id ?? null;
+}
+
 /// Which tab a task belongs to (MAIN-82). A task lives in the Backlog tab when
 /// its column is backlog-type OR it is an epic — epics never render on the
 /// kanban tab (they are containers, shown flat in the backlog for now). Pure and
@@ -822,6 +867,20 @@ export function groupByEpic(
     .slice()
     .sort(pickOrder);
   return { epics, noEpic };
+}
+
+/// The epic rows to add to a FILTERED backlog grouping so a matching child shows
+/// under its epic's header even when the epic itself did not match the search
+/// (MAIN-181 AC-2). Returns the epics that are (a) not already in `visible` and
+/// (b) referenced as a parent by some visible task. Pure and unit-tested.
+export function matchedEpicHeaders(visible: TaskItem[], allTasks: TaskItem[]): TaskItem[] {
+  const inVisible = new Set(visible.map((t) => t.id));
+  const parents = new Set(
+    visible.map((t) => t.parent_task_id).filter((p): p is string => !!p),
+  );
+  return allTasks.filter(
+    (t) => t.type === "epic" && !inVisible.has(t.id) && parents.has(t.id),
+  );
 }
 
 /// The epics a task may be filed under (MAIN-83 AC-4/AC-5): every epic on the
@@ -1176,7 +1235,11 @@ export function BoardPage() {
               limit: 200,
               ...(filter.label.length ? { label: filter.label } : {}),
               ...(filter.not_label.length ? { not_label: filter.not_label } : {}),
-              ...(filter.type.length ? { type: filter.type } : {}),
+              // Type surface (MAIN-181 AC-1) — see `searchTypeParam`: on the
+              // Backlog tab, no explicit type filter asks for ALL types incl.
+              // `epic`, so a search/filter doesn't drop epics to the server's
+              // default exclusion (MAIN-80).
+              ...(searchTypeParam(filter) ? { type: searchTypeParam(filter) } : {}),
               // Server-driven, no client re-filter: the visibility param NARROWS
               // within what the viewer may already see (MAIN-103).
               ...(filter.visibility.length ? { visibility: filter.visibility } : {}),
@@ -1350,7 +1413,16 @@ export function BoardPage() {
       t.parent_task_id &&
       epicIds.has(t.parent_task_id),
   );
-  const allBacklogGroups = groupByEpic([...visible, ...archivedEpicChildren], colTypeById);
+  // Grouping survives search (MAIN-181 AC-2): a matching CHILD must render under
+  // its epic's header even when the epic itself did not match. When filtering,
+  // pull in the epic rows referenced by visible children so `groupByEpic` makes
+  // their sections; without it the child (an epic-parented non-epic) is orphaned
+  // and vanishes. Not needed unfiltered — every epic is already visible.
+  const shownEpicHeaders = filterActive ? matchedEpicHeaders(visible, detail.tasks) : [];
+  const allBacklogGroups = groupByEpic(
+    [...visible, ...archivedEpicChildren, ...shownEpicHeaders],
+    colTypeById,
+  );
   // Epic filter on the Backlog tab: show ONLY that epic's section (AC-3). The
   // kanban tab narrows server-side via the `parent` query param instead.
   const backlogGroups = filter.epic
@@ -1360,6 +1432,12 @@ export function BoardPage() {
       }
     : allBacklogGroups;
   const epics = detail.tasks.filter((t) => t.type === "epic");
+
+  // The exact-key search hit (MAIN-181 AC-3): a case-insensitive FULL-key match,
+  // so typing `MAIN-34` / `main-34` highlights and scrolls to that ticket on
+  // whichever tab renders it — regardless of type, column, or collapse. `null`
+  // when the query is not a whole key.
+  const exactKeyHitId = exactKeyMatch(detail.tasks, filter.q);
 
   const addTask = async (columnId: string, title: string) => {
     await api.POST("/api/v1/boards/{id}/tasks", {
@@ -1563,6 +1641,8 @@ export function BoardPage() {
               colTypeById={colTypeById}
               wsName={wsName}
               activeId={openTask}
+              hitId={exactKeyHitId}
+              searching={filterActive}
               selected={selected}
               blockedIds={blockedIds}
               canSendToBoard={!!unstartedColumn}
@@ -1600,6 +1680,7 @@ export function BoardPage() {
                       onMenu={(t, anchor) => setMenu({ task: t, anchor })}
                       onArchiveCompleted={() => archiveCompleted(c.id)}
                       selectedId={openTask}
+                      hitId={exactKeyHitId}
                       blockedIds={blockedIds}
                       wsName={wsName}
                     />

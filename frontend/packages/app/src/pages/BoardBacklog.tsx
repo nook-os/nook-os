@@ -3,7 +3,7 @@
 // epic, each with a done/total progress count and all its children; a final "No
 // epic" section holds parentless backlog tasks. Fed by the same board_detail
 // fetch as the kanban tab; no new endpoint. Rows reuse the card helpers.
-import React, { useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { ArrowRight, ChevronDown, ChevronRight, MoreHorizontal, Plus, Rocket } from "lucide-react";
 import { type BoardColumn, type TaskItem } from "@nookos/api";
 import { TypeBadge } from "@nookos/ui";
@@ -17,6 +17,21 @@ import { nextCollapsed, selectableRowIds, useBacklogSelection } from "./backlogS
 const BULK_TYPES = ["task", "bug", "story", "chore"] as const;
 
 const COLLAPSE_KEY = "nook.backlog.collapsed";
+
+/** A stable empty set — the "all expanded" collapse state used while searching,
+ *  so a hit never hides in a collapsed epic without mutating the stored collapse
+ *  (MAIN-181 AC-3; the toggle behaviour itself is untouched — NG-2). */
+const NONE_COLLAPSED: Set<string> = new Set();
+
+/** Scroll an element into view once when `when` flips true — used to bring the
+ *  exact-key search hit into view (MAIN-181 AC-3). */
+function useScrollToWhen<T extends HTMLElement>(when: boolean) {
+  const ref = useRef<T>(null);
+  useEffect(() => {
+    if (when) ref.current?.scrollIntoView({ block: "center", behavior: "smooth" });
+  }, [when]);
+  return ref;
+}
 
 /// Collapse state that survives a reload (MAIN-83 AC-1), keyed by epic id in
 /// localStorage. Returns the set of collapsed ids and a toggle. The toggle rule
@@ -93,6 +108,7 @@ function BacklogRow({
   workspaceName,
   status,
   active,
+  hit = false,
   selectable,
   selected,
   blocked,
@@ -110,6 +126,9 @@ function BacklogRow({
   /** This row's task is the currently-OPEN card — drives the open-highlight.
    *  Distinct from `selected`, which is the bulk-selection checkbox state. */
   active: boolean;
+  /** This row is the exact-key search hit — highlighted and scrolled into view
+   *  (MAIN-181 AC-3). */
+  hit?: boolean;
   /** Whether this row carries a selection checkbox (MAIN-123 AC-1). */
   selectable: boolean;
   /** Whether this row is checked in the bulk selection. */
@@ -125,9 +144,11 @@ function BacklogRow({
 }) {
   const isEpic = task.type === "epic";
   const prio = priorityMeta(task.priority ?? 0);
+  const hitRef = useScrollToWhen<HTMLDivElement>(hit);
   return (
     <div
-      className={`backlog-row${active ? " active" : ""}${selected ? " selected" : ""}${blocked ? " blocked" : ""}${task.archived_at ? " archived" : ""}`}
+      ref={hitRef}
+      className={`backlog-row${active ? " active" : ""}${hit ? " hit" : ""}${selected ? " selected" : ""}${blocked ? " blocked" : ""}${task.archived_at ? " archived" : ""}`}
       onClick={onOpen}
     >
       {selectable && (
@@ -202,6 +223,7 @@ function EpicGroup({
   colTypeById,
   wsName,
   activeId,
+  hitId,
   selected,
   blockedIds,
   canSendToBoard,
@@ -219,6 +241,8 @@ function EpicGroup({
   wsName: Map<string, string>;
   /** The currently-open task id/key — drives the open-highlight, not selection. */
   activeId: string | null;
+  /** The exact-key search hit's task id (AC-3) — an epic head or a child row. */
+  hitId: string | null;
   /** The bulk-selection set (task ids). */
   selected: Set<string>;
   blockedIds: Set<string>;
@@ -233,13 +257,16 @@ function EpicGroup({
   onAddChild: (epicId: string, title: string) => void;
 }) {
   const { epic, children, done, total } = section;
+  const epicHit = hitId === epic.id;
+  const hitRef = useScrollToWhen<HTMLDivElement>(epicHit);
   return (
-    <div className="backlog-epic">
+    <div className={`backlog-epic${epicHit ? " hit" : ""}`}>
       {/* Clicking the head opens the epic's detail like any other row; the
          chevron is its own button so collapsing the group stays separate from
          opening it (MAIN-83 — the head used to only toggle, so an epic could
          never be opened). */}
       <div
+        ref={hitRef}
         className="backlog-epic-head"
         onClick={() => onOpen(epic.key ?? epic.id)}
       >
@@ -294,6 +321,7 @@ function EpicGroup({
                   workspaceName={t.workspace_id ? wsName.get(t.workspace_id) : undefined}
                   status={statusOf(t, colTypeById)}
                   active={activeId === t.key || activeId === t.id}
+                  hit={hitId === t.id}
                   selectable
                   selected={selected.has(t.id)}
                   blocked={blockedIds.has(t.id)}
@@ -323,6 +351,8 @@ export function BoardBacklog({
   colTypeById,
   wsName,
   activeId,
+  hitId = null,
+  searching = false,
   selected,
   blockedIds,
   canSendToBoard,
@@ -343,6 +373,12 @@ export function BoardBacklog({
   wsName: Map<string, string>;
   /** The currently-open task id/key — the open-highlight, NOT the selection. */
   activeId: string | null;
+  /** The exact-key search hit's task id — highlighted + scrolled to (AC-3). */
+  hitId?: string | null;
+  /** A backlog filter/search is active: render every epic section EXPANDED so a
+   *  matching child or an exact-key hit never hides in a collapsed epic (AC-2/
+   *  AC-3). The stored collapse state is left untouched (NG-2). */
+  searching?: boolean;
   /** The bulk-selection set (task ids), sourced from the selection store. */
   selected: Set<string>;
   blockedIds: Set<string>;
@@ -364,6 +400,10 @@ export function BoardBacklog({
   onBulk: (action: string, value?: string) => Promise<string | null>;
 }) {
   const [collapsed, toggle] = useCollapsed();
+  // While filtering/searching, treat every section as expanded so a match never
+  // hides in a collapsed epic (AC-2/AC-3) — the stored collapse is untouched, so
+  // clearing the search restores it exactly (AC-4, NG-2).
+  const effectiveCollapsed = searching ? NONE_COLLAPSED : collapsed;
   // Select-all and clear come straight from the store: they replace the whole
   // set at once, so there's no per-row callback to thread for them.
   const setSelection = useBacklogSelection((s) => s.setSelection);
@@ -390,7 +430,7 @@ export function BoardBacklog({
   // Every currently-VISIBLE selectable row — respects filters (already applied
   // to `groups`) and collapsed epics (their hidden children drop out). This is
   // exactly what select-all targets and what the "all selected?" check reads.
-  const visibleIds = selectableRowIds(groups, collapsed);
+  const visibleIds = selectableRowIds(groups, effectiveCollapsed);
   const allSelected =
     visibleIds.length > 0 && visibleIds.every((id) => selected.has(id));
   const toggleAll = () => {
@@ -539,10 +579,11 @@ export function BoardBacklog({
           colTypeById={colTypeById}
           wsName={wsName}
           activeId={activeId}
+          hitId={hitId}
           selected={selected}
           blockedIds={blockedIds}
           canSendToBoard={canSendToBoard}
-          collapsed={collapsed.has(section.epic.id)}
+          collapsed={effectiveCollapsed.has(section.epic.id)}
           onToggle={() => toggle(section.epic.id)}
           onOpen={onOpen}
           onMenu={onMenu}
@@ -566,6 +607,7 @@ export function BoardBacklog({
               task={t}
               workspaceName={t.workspace_id ? wsName.get(t.workspace_id) : undefined}
               active={activeId === t.key || activeId === t.id}
+              hit={hitId === t.id}
               selectable
               selected={selected.has(t.id)}
               blocked={blockedIds.has(t.id)}
