@@ -276,16 +276,16 @@ pub async fn query_rows(
           AND (NOT {unassigned_bool} OR t.assignee_user_id IS NULL)
           AND ({assignee} IS NULL OR t.assignee_user_id = $7)
           -- every required label must be present
-          AND (cardinality($8::text[]) = 0 OR (
+          AND (cardinality({labels_arr}) = 0 OR (
                 SELECT count(DISTINCT l.name) FROM task_labels tl
                 JOIN labels l ON l.id = tl.label_id
                 WHERE tl.task_id = t.id AND l.name = ANY($8)
-              ) = cardinality($8::text[]))
+              ) = cardinality({labels_arr}))
           -- and none of the excluded ones
           AND NOT EXISTS (
                 SELECT 1 FROM task_labels tl
                 JOIN labels l ON l.id = tl.label_id
-                WHERE tl.task_id = t.id AND l.name = ANY($9::text[]))
+                WHERE tl.task_id = t.id AND l.name = ANY({not_labels_arr}))
           -- blocked is DERIVED: an unfinished task pointing here with `blocks`
           AND ({blocked_bool} IS NULL OR $10 = EXISTS (
                 SELECT 1 FROM task_relations r
@@ -308,7 +308,7 @@ pub async fn query_rows(
           -- `epic` passes — an epic is a container, never a unit of work the
           -- loop should pick. Labels (incl. agent-ready) have no bearing.
           AND (t.type = ANY($15)
-               OR (cardinality($15::text[]) = 0 AND t.type <> 'epic'))
+               OR (cardinality({types_arr}) = 0 AND t.type <> 'epic'))
           -- per-task visibility (MAIN-76): a `private` card is seen only by its
           -- creator or assignee; `team`/`org` are tenant-visible. Same predicate
           -- an agent's claim path enforces, so the list never shows work it
@@ -317,7 +317,7 @@ pub async fn query_rows(
           -- explicit visibility filter (MAIN-103 AC-3): ANDs with the viewer
           -- predicate above, so it can only NARROW — `visibility=private` still
           -- shows only the caller's own private cards, never a teammate's.
-          AND (cardinality($19::text[]) = 0 OR t.visibility = ANY($19))
+          AND (cardinality({vis_arr}) = 0 OR t.visibility = ANY($19))
           -- epic children (MAIN-81): when a parent is given, restrict to its
           -- tickets. This spans every column (children live in backlog and on
           -- the board), so it deliberately does NOT constrain the column type.
@@ -348,6 +348,10 @@ pub async fn query_rows(
         q_text = Postgres.cast("$14", "text"),
         number_text = Postgres.cast("t.number", "text"),
         backlog_bool = Postgres.cast("$18", "bool"),
+        labels_arr = Postgres.cast("$8", "text[]"),
+        not_labels_arr = Postgres.cast("$9", "text[]"),
+        types_arr = Postgres.cast("$15", "text[]"),
+        vis_arr = Postgres.cast("$19", "text[]"),
     ))
     .bind(tenant)
     .bind(f.board.as_deref())
