@@ -17,6 +17,7 @@ import {
   connectChatStream,
   deleteMessage,
   editMessage,
+  listCategories,
   listChannels,
   listDms,
   markRead,
@@ -37,8 +38,9 @@ import {
   type PendingMessage,
 } from "./chatMessages";
 import { askConfirm, askText, notify } from "../dialogs";
-import { ContextMenuRegion, type ContextMenuItem } from "../contextMenu";
+import { type ContextMenuItem } from "../contextMenu";
 import { ChannelManager } from "./ChannelManager";
+import { ChannelSidebar } from "./ChannelSidebar";
 import { DmPicker } from "./DmPicker";
 import { ThreadPanel } from "./ThreadPanel";
 
@@ -132,6 +134,15 @@ export function ChatPage() {
     refetchOnWindowFocus: true,
   });
   const channels = channelsQuery.data ?? [];
+
+  // The channel categories (MAIN-178/179): the sidebar groups channels under
+  // these, admin-reorderable. Empty for a tenant that hasn't made any.
+  const categoriesQuery = useQuery({
+    queryKey: ["chat", "categories"],
+    queryFn: listCategories,
+    refetchOnWindowFocus: true,
+  });
+  const categories = categoriesQuery.data ?? [];
 
   // The caller's direct messages (MAIN-113), listed beside the channels.
   const dmsQuery = useQuery({
@@ -459,51 +470,15 @@ export function ChatPage() {
             </button>
           )}
         </div>
-        {channelsQuery.isLoading ? (
-          <div className="chat-channels-empty">Loading…</div>
-        ) : channels.length === 0 ? (
-          <div className="chat-channels-empty">No channels yet.</div>
-        ) : (
-          channels.map((c: ChatChannel) => {
-            const btn = (
-              <button
-                key={c.id}
-                type="button"
-                className={`chat-channel${c.id === selectedId ? " active" : ""}`}
-                onClick={() => setSelectedId(c.id)}
-              >
-                <span className="chat-channel-hash">#</span>
-                {c.name}
-                {c.owner_type === "org" && (
-                  <span className="chat-channel-org" title="Shared across your org">
-                    org
-                  </span>
-                )}
-                {(c.unread_count ?? 0) > 0 && (
-                  <span className="chat-unread" aria-label={`${c.unread_count} unread`}>
-                    {unreadLabel(c.unread_count ?? 0)}
-                  </span>
-                )}
-              </button>
-            );
-            // Admins get the channel management menu on right-click (MAIN-177);
-            // a non-admin has no region, so the app-wide Copy/Paste fallback
-            // shows instead (AC-2). `items` is a function so it reads live
-            // archived state at open time. `display:contents` keeps the sidebar
-            // layout unchanged.
-            return canManage ? (
-              <ContextMenuRegion
-                key={c.id}
-                items={() => channelMenuItems(c)}
-                style={{ display: "contents" }}
-              >
-                {btn}
-              </ContextMenuRegion>
-            ) : (
-              btn
-            );
-          })
-        )}
+        <ChannelSidebar
+          channels={channels}
+          categories={categories}
+          selectedId={selectedId}
+          onSelect={setSelectedId}
+          canManage={canManage}
+          menuItems={channelMenuItems}
+          loading={channelsQuery.isLoading}
+        />
 
         <div className="chat-channels-head">
           <span>Direct Messages</span>
