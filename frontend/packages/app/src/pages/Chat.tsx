@@ -23,6 +23,7 @@ import {
   openDm,
   postMessage,
   toggleReaction,
+  updateChannel,
   type ChatChannel,
   type ChatMessage,
   type DmSummary,
@@ -34,7 +35,8 @@ import {
   buildChatMessages,
   type PendingMessage,
 } from "./chatMessages";
-import { askConfirm } from "../dialogs";
+import { askConfirm, askText, notify } from "../dialogs";
+import { ContextMenuRegion, type ContextMenuItem } from "../contextMenu";
 import { ChannelManager } from "./ChannelManager";
 import { DmPicker } from "./DmPicker";
 import { ThreadPanel } from "./ThreadPanel";
@@ -73,6 +75,47 @@ export function ChatPage() {
     queryFn: chatMe,
   });
   const canManage = isAdminRole(chatIdentity?.role);
+
+  // Channel management from the sidebar right-click menu (MAIN-177) — the SAME
+  // rename dialog + `updateChannel` PATCH the admin modal uses (NG-1), and the
+  // same `["chat","channels"]` invalidation, so the sidebar (and the modal)
+  // refresh without a reload.
+  const renameChannel = useCallback(
+    async (c: ChatChannel) => {
+      const next = await askText({ title: "Rename channel", label: "Name", value: c.name });
+      if (!next || next === c.name) return;
+      try {
+        await updateChannel(c.id, { name: next });
+        qc.invalidateQueries({ queryKey: ["chat", "channels"] });
+      } catch (e) {
+        await notify("Could not rename", e instanceof Error ? e.message : String(e));
+      }
+    },
+    [qc],
+  );
+  const setChannelArchived = useCallback(
+    async (c: ChatChannel, value: boolean) => {
+      try {
+        await updateChannel(c.id, { archived: value });
+        qc.invalidateQueries({ queryKey: ["chat", "channels"] });
+      } catch (e) {
+        await notify("Could not update", e instanceof Error ? e.message : String(e));
+      }
+    },
+    [qc],
+  );
+  // The admin-only right-click items for a channel (MAIN-177 AC-1): Rename +
+  // Archive/Unarchive. No delete anywhere (NG-2/AC-4).
+  const channelMenuItems = useCallback(
+    (c: ChatChannel): ContextMenuItem[] => [
+      { label: "Rename…", onSelect: () => void renameChannel(c) },
+      {
+        label: c.archived ? "Unarchive" : "Archive",
+        onSelect: () => void setChannelArchived(c, !c.archived),
+      },
+    ],
+    [renameChannel, setChannelArchived],
+  );
 
   const channelsQuery = useQuery({
     queryKey: ["chat", "channels"],
@@ -348,22 +391,40 @@ export function ChatPage() {
         ) : channels.length === 0 ? (
           <div className="chat-channels-empty">No channels yet.</div>
         ) : (
-          channels.map((c: ChatChannel) => (
-            <button
-              key={c.id}
-              type="button"
-              className={`chat-channel${c.id === selectedId ? " active" : ""}`}
-              onClick={() => setSelectedId(c.id)}
-            >
-              <span className="chat-channel-hash">#</span>
-              {c.name}
-              {c.owner_type === "org" && (
-                <span className="chat-channel-org" title="Shared across your org">
-                  org
-                </span>
-              )}
-            </button>
-          ))
+          channels.map((c: ChatChannel) => {
+            const btn = (
+              <button
+                key={c.id}
+                type="button"
+                className={`chat-channel${c.id === selectedId ? " active" : ""}`}
+                onClick={() => setSelectedId(c.id)}
+              >
+                <span className="chat-channel-hash">#</span>
+                {c.name}
+                {c.owner_type === "org" && (
+                  <span className="chat-channel-org" title="Shared across your org">
+                    org
+                  </span>
+                )}
+              </button>
+            );
+            // Admins get the channel management menu on right-click (MAIN-177);
+            // a non-admin has no region, so the app-wide Copy/Paste fallback
+            // shows instead (AC-2). `items` is a function so it reads live
+            // archived state at open time. `display:contents` keeps the sidebar
+            // layout unchanged.
+            return canManage ? (
+              <ContextMenuRegion
+                key={c.id}
+                items={() => channelMenuItems(c)}
+                style={{ display: "contents" }}
+              >
+                {btn}
+              </ContextMenuRegion>
+            ) : (
+              btn
+            );
+          })
         )}
 
         <div className="chat-channels-head">
