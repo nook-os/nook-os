@@ -14,6 +14,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::Json;
 use chrono::{DateTime, Utc};
+use nook_db::{Postgres, TypeMapping};
 use nook_types::{ChatChannel, ChatChannelPlacement, CreateChatChannel, UpdateChatChannel};
 use uuid::Uuid;
 
@@ -74,7 +75,8 @@ fn unread_subquery(chan: &str, reader: &str) -> String {
               AND m.created_at > COALESCE(
                   (SELECT r.last_read_at FROM chat_read_cursors r
                      WHERE r.channel_id = {chan} AND r.user_id = {reader}),
-                  '-infinity'::timestamptz))"
+                  {ninf}))",
+        ninf = Postgres.cast("'-infinity'", "timestamptz")
     )
 }
 
@@ -295,11 +297,12 @@ pub async fn update(
         "UPDATE chat_channels
          SET name = COALESCE($2, name),
              archived_at = CASE
-                 WHEN $3 THEN (CASE WHEN $4 THEN now() ELSE NULL END)
+                 WHEN $3 THEN (CASE WHEN $4 THEN {now} ELSE NULL END)
                  ELSE archived_at
              END
          WHERE id = $1
-         RETURNING {CHANNEL_COLS}"
+         RETURNING {CHANNEL_COLS}",
+        now = Postgres.now(),
     ))
     .bind(id)
     .bind(req.name.as_deref().map(str::trim))
@@ -369,12 +372,13 @@ pub async fn mark_read(
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode, ChatError> {
     access(&state.db, id, &caller).await?;
-    sqlx::query(
+    sqlx::query(&format!(
         "INSERT INTO chat_read_cursors (channel_id, user_id, last_read_at)
-         VALUES ($1, $2, now())
+         VALUES ($1, $2, {})
          ON CONFLICT (channel_id, user_id)
          DO UPDATE SET last_read_at = GREATEST(chat_read_cursors.last_read_at, EXCLUDED.last_read_at)",
-    )
+        Postgres.now()
+    ))
     .bind(id)
     .bind(caller.user_id)
     .execute(&state.db)
@@ -1274,7 +1278,7 @@ mod tests {
         assert_eq!(
             unread_of(&state, a, tenant, ch.id).await,
             0,
-            "cursor stayed in the future; it did not regress to now()"
+            "cursor stayed in the future; it did not regress to the present"
         );
 
         cleanup(&state.db, tenant).await;

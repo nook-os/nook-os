@@ -88,14 +88,15 @@ async fn load_reactions(
     if ids.is_empty() {
         return HashMap::new();
     }
-    let rows: Vec<ReactionRow> = sqlx::query_as(
-        "SELECT message_id, emoji, count(*)::bigint AS count,
+    let rows: Vec<ReactionRow> = sqlx::query_as(&format!(
+        "SELECT message_id, emoji, {cnt} AS count,
                 COALESCE(bool_or(user_id = $2), false) AS reacted
            FROM chat_reactions
           WHERE message_id = ANY($1)
           GROUP BY message_id, emoji
           ORDER BY message_id, emoji",
-    )
+        cnt = Postgres.cast("count(*)", "bigint")
+    ))
     .bind(ids)
     .bind(viewer)
     .fetch_all(pool)
@@ -140,13 +141,21 @@ async fn attach_reactions(pool: &DbPool, viewer: Option<Uuid>, messages: &mut [C
 /// `reply_count`/`last_reply_at` are the cheap constants here — the single-row
 /// reads (`fetch`, and a reply in a thread) don't need thread rollups. Channel
 /// history uses [`SELECT_MESSAGE_WITH_REPLIES`] instead, which fills them in.
-const SELECT_MESSAGE: &str = "SELECT m.id, m.channel_id, m.author_id, \
-     u.display_name AS author_name, m.body, m.parent_message_id, m.created_at, \
-     m.edited_at, m.deleted_at, \
-     0::bigint AS reply_count, NULL::timestamptz AS last_reply_at \
-     FROM chat_messages m LEFT JOIN public.users u ON u.id = m.author_id";
+/// A fn (not a const) because the `0`/`NULL` result-column casts route through
+/// the type-mapping seam (MAIN-212), which is a runtime call.
+fn select_message() -> String {
+    format!(
+        "SELECT m.id, m.channel_id, m.author_id, \
+         u.display_name AS author_name, m.body, m.parent_message_id, m.created_at, \
+         m.edited_at, m.deleted_at, \
+         {zero} AS reply_count, {null_ts} AS last_reply_at \
+         FROM chat_messages m LEFT JOIN public.users u ON u.id = m.author_id",
+        zero = Postgres.cast("0", "bigint"),
+        null_ts = Postgres.cast("NULL", "timestamptz"),
+    )
+}
 
-/// As [`SELECT_MESSAGE`], but with per-parent thread rollups so a parent in
+/// As [`select_message`], but with per-parent thread rollups so a parent in
 /// channel history carries its `reply_count` and `last_reply_at` (MAIN-114 AC-3)
 /// in the same query — no N+1. The correlated subqueries hit
 /// `chat_messages_parent_idx`.
@@ -197,14 +206,16 @@ pub async fn post(
         }
     }
 
-    let row = sqlx::query_as::<_, MessageRow>(
+    let row = sqlx::query_as::<_, MessageRow>(&format!(
         "INSERT INTO chat_messages (id, channel_id, author_id, tenant_id, body, parent_message_id)
          VALUES ($1, $2, $3, $4, $5, $6)
          RETURNING id, channel_id, author_id,
              (SELECT display_name FROM public.users WHERE id = author_id) AS author_name,
              body, parent_message_id, created_at, edited_at, deleted_at,
-             0::bigint AS reply_count, NULL::timestamptz AS last_reply_at",
-    )
+             {zero} AS reply_count, {null_ts} AS last_reply_at",
+        zero = Postgres.cast("0", "bigint"),
+        null_ts = Postgres.cast("NULL", "timestamptz"),
+    ))
     .bind(Uuid::now_v7())
     .bind(channel_id)
     .bind(caller.user_id)
@@ -332,8 +343,9 @@ pub async fn thread(
 
     let limit = q.limit.unwrap_or(50).clamp(1, 200);
     let rows = sqlx::query_as::<_, MessageRow>(&format!(
-        "{SELECT_MESSAGE} WHERE m.parent_message_id = $1 AND ({cursor} IS NULL OR m.id < $2)
+        "{sel} WHERE m.parent_message_id = $1 AND ({cursor} IS NULL OR m.id < $2)
          ORDER BY m.id DESC LIMIT $3",
+        sel = select_message(),
         cursor = Postgres.cast("$2", "uuid")
     ))
     .bind(message_id)
@@ -502,12 +514,15 @@ pub async fn update(
     .execute(&state.db)
     .await
     .map_err(|_| ChatError::Internal)?;
-    sqlx::query("UPDATE chat_messages SET body = $2, edited_at = now() WHERE id = $1")
-        .bind(message_id)
-        .bind(body)
-        .execute(&state.db)
-        .await
-        .map_err(|_| ChatError::Internal)?;
+    sqlx::query(&format!(
+        "UPDATE chat_messages SET body = $2, edited_at = {} WHERE id = $1",
+        Postgres.now()
+    ))
+    .bind(message_id)
+    .bind(body)
+    .execute(&state.db)
+    .await
+    .map_err(|_| ChatError::Internal)?;
 
     broadcast_update(&state, message_id).await;
     read_message(&state.db, Some(caller.user_id), message_id)
@@ -548,11 +563,14 @@ pub async fn delete(
     .execute(&state.db)
     .await
     .map_err(|_| ChatError::Internal)?;
-    sqlx::query("UPDATE chat_messages SET deleted_at = now() WHERE id = $1")
-        .bind(message_id)
-        .execute(&state.db)
-        .await
-        .map_err(|_| ChatError::Internal)?;
+    sqlx::query(&format!(
+        "UPDATE chat_messages SET deleted_at = {} WHERE id = $1",
+        Postgres.now()
+    ))
+    .bind(message_id)
+    .execute(&state.db)
+    .await
+    .map_err(|_| ChatError::Internal)?;
 
     broadcast_update(&state, message_id).await;
     read_message(&state.db, Some(caller.user_id), message_id)
@@ -780,11 +798,14 @@ mod tests {
         // Archive it directly (create/update are admin-gated on a `public.users`
         // lookup this chat-only pool cannot resolve — MAIN-94; these tests are
         // about posting, not channel-management auth).
-        sqlx::query("UPDATE chat_channels SET archived_at = now() WHERE id = $1")
-            .bind(channel)
-            .execute(&state.db)
-            .await
-            .unwrap();
+        sqlx::query(&format!(
+            "UPDATE chat_channels SET archived_at = {} WHERE id = $1",
+            Postgres.now()
+        ))
+        .bind(channel)
+        .execute(&state.db)
+        .await
+        .unwrap();
 
         // Posting is refused…
         let err = post(

@@ -11,6 +11,7 @@
 
 use axum::extract::{Json, State};
 use axum::http::StatusCode;
+use nook_db::{Postgres, TypeMapping};
 use nook_types::{DmSummary, OpenDmRequest, PersonRef};
 use uuid::Uuid;
 
@@ -230,7 +231,7 @@ async fn summary(db: &nook_db::DbPool, id: Uuid, reader: Uuid) -> Result<DmSumma
     // Unread from the other participant(s) since the reader's cursor (MAIN-117),
     // same semantics as a channel: the reader's own messages and deleted ones
     // don't count, and no cursor row means everything counts.
-    let (unread_count,): (i64,) = sqlx::query_as(
+    let (unread_count,): (i64,) = sqlx::query_as(&format!(
         "SELECT count(*) FROM chat_messages m
           WHERE m.channel_id = $1
             AND m.author_id <> $2
@@ -238,8 +239,9 @@ async fn summary(db: &nook_db::DbPool, id: Uuid, reader: Uuid) -> Result<DmSumma
             AND m.created_at > COALESCE(
                 (SELECT r.last_read_at FROM chat_read_cursors r
                    WHERE r.channel_id = $1 AND r.user_id = $2),
-                '-infinity'::timestamptz)",
-    )
+                {})",
+        Postgres.cast("'-infinity'", "timestamptz")
+    ))
     .bind(id)
     .bind(reader)
     .fetch_one(db)
