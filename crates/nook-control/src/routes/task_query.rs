@@ -13,7 +13,7 @@
 
 use axum::extract::{Path, RawQuery, State};
 use axum::Json;
-use nook_db::{Postgres, TypeMapping};
+use nook_db::{CiMatch, Postgres, TypeMapping};
 use nook_types::*;
 use serde::Deserialize;
 
@@ -299,9 +299,9 @@ pub async fn query_rows(
           -- free-text search across title, description, and display key (MAIN-54).
           -- Substring, case-insensitive; ANDs with every filter above.
           AND ({q_text} IS NULL OR (
-                    t.title ILIKE $14
-                 OR t.description ILIKE $14
-                 OR (b.key || '-' || {number_text}) ILIKE $14))
+                    {title_match}
+                 OR {desc_match}
+                 OR {key_match}))
           -- issue-type filter (MAIN-59) + epic exclusion (MAIN-80): with an
           -- explicit type filter the requested types pass (so `type=epic`
           -- surfaces epics on purpose); with no type filter, everything EXCEPT
@@ -346,7 +346,12 @@ pub async fn query_rows(
         blocked_bool = Postgres.cast("$10", "bool"),
         archived_bool = Postgres.cast("$13", "bool"),
         q_text = Postgres.cast("$14", "text"),
-        number_text = Postgres.cast("t.number", "text"),
+        title_match = Postgres.ci_match("t.title", "$14"),
+        desc_match = Postgres.ci_match("t.description", "$14"),
+        key_match = Postgres.ci_match(
+            &format!("(b.key || '-' || {})", Postgres.cast("t.number", "text")),
+            "$14"
+        ),
         backlog_bool = Postgres.cast("$18", "bool"),
         labels_arr = Postgres.cast("$8", "text[]"),
         not_labels_arr = Postgres.cast("$9", "text[]"),

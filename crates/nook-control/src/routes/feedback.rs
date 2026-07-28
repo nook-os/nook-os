@@ -8,7 +8,7 @@
 use axum::extract::{Path, State};
 use axum::Json;
 use base64::Engine;
-use nook_db::{Postgres, TypeMapping};
+use nook_db::{CiMatch, Postgres, TypeMapping};
 use nook_proto::ControlToNode;
 use nook_types::*;
 
@@ -271,13 +271,14 @@ pub async fn submit(
     // who opens a session and calls it "Nook@OS: Feedback Session" has told us
     // plainly where feedback should go, and spawning a second agent beside it
     // — which is what an exact match did — is both wasteful and invisible.
-    let existing: Option<(SessionId, NodeId)> = sqlx::query_as(
+    let existing: Option<(SessionId, NodeId)> = sqlx::query_as(&format!(
         "SELECT id, node_id FROM sessions
          WHERE tenant_id = $1 AND workspace_id = $2
-           AND (name = $3 OR name ILIKE '%feedback%')
+           AND (name = $3 OR {})
            AND status IN ('starting', 'running', 'detached')
          ORDER BY (name = $3) DESC, created_at DESC LIMIT 1",
-    )
+        Postgres.ci_match("name", "'%feedback%'")
+    ))
     .bind(auth.tenant_id)
     .bind(workspace_id)
     .bind(SESSION_NAME)

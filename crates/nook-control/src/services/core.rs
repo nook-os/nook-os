@@ -1,7 +1,7 @@
 //! Shared queries used by both REST handlers and MCP tools.
 
 use chrono::{DateTime, Utc};
-use nook_db::{DbPool, Postgres, TypeMapping};
+use nook_db::{CiMatch, DbPool, Postgres, TypeMapping};
 use nook_types::*;
 use uuid::Uuid;
 
@@ -334,14 +334,18 @@ pub async fn operator_audit_page(
          WHERE (e.kind LIKE 'operator.%' OR e.kind LIKE 'rbac.%'
                 OR e.kind LIKE 'node.%'  OR e.kind LIKE 'user.%')
            AND ({term} IS NULL OR (
-                    e.kind ILIKE '%' || $2 || '%'
-                 OR t.slug ILIKE '%' || $2 || '%'
-                 OR e.actor_type ILIKE '%' || $2 || '%'
-                 OR e.actor_id::text ILIKE '%' || $2 || '%'))
+                    {m_kind}
+                 OR {m_slug}
+                 OR {m_atype}
+                 OR {m_aid}))
            AND ({cursor} IS NULL OR e.id < $3)
          ORDER BY e.id DESC
          LIMIT $1",
-        cursor = Postgres.cast("$3", "uuid")
+        cursor = Postgres.cast("$3", "uuid"),
+        m_kind = Postgres.ci_match("e.kind", "'%' || $2 || '%'"),
+        m_slug = Postgres.ci_match("t.slug", "'%' || $2 || '%'"),
+        m_atype = Postgres.ci_match("e.actor_type", "'%' || $2 || '%'"),
+        m_aid = Postgres.ci_match(&Postgres.cast("e.actor_id", "text"), "'%' || $2 || '%'")
     ))
     .bind(limit)
     .bind(q)
@@ -383,11 +387,13 @@ pub async fn operator_tenants_page(
                     AND s.status IN ('starting','running','detached'))     AS active_sessions,
                 (SELECT count(*) FROM workspaces w WHERE w.tenant_id = t.id) AS workspaces
          FROM tenants t
-         WHERE ({term} IS NULL OR t.slug ILIKE '%' || $2 || '%' OR t.name ILIKE '%' || $2 || '%')
+         WHERE ({term} IS NULL OR {m_slug} OR {m_name})
            AND ({cursor} IS NULL OR t.id < $3)
          ORDER BY t.id DESC
          LIMIT $1",
-        cursor = Postgres.cast("$3", "uuid")
+        cursor = Postgres.cast("$3", "uuid"),
+        m_slug = Postgres.ci_match("t.slug", "'%' || $2 || '%'"),
+        m_name = Postgres.ci_match("t.name", "'%' || $2 || '%'")
     ))
     .bind(limit)
     .bind(q)
@@ -420,14 +426,18 @@ pub async fn operator_nodes_page(
                     AND s.status IN ('starting','running','detached')) AS active_sessions
          FROM nodes n JOIN tenants t ON t.id = n.tenant_id
          WHERE ({term} IS NULL OR (
-                    n.name ILIKE '%' || $2 || '%'
-                 OR t.slug ILIKE '%' || $2 || '%'
-                 OR n.platform ILIKE '%' || $2 || '%'
-                 OR n.status ILIKE '%' || $2 || '%'))
+                    {m_name}
+                 OR {m_slug}
+                 OR {m_platform}
+                 OR {m_status}))
            AND ({cursor} IS NULL OR n.id < $3)
          ORDER BY n.id DESC
          LIMIT $1",
-        cursor = Postgres.cast("$3", "uuid")
+        cursor = Postgres.cast("$3", "uuid"),
+        m_name = Postgres.ci_match("n.name", "'%' || $2 || '%'"),
+        m_slug = Postgres.ci_match("t.slug", "'%' || $2 || '%'"),
+        m_platform = Postgres.ci_match("n.platform", "'%' || $2 || '%'"),
+        m_status = Postgres.ci_match("n.status", "'%' || $2 || '%'")
     ))
     .bind(limit)
     .bind(q)
@@ -460,14 +470,18 @@ pub async fn operator_bindings_page(
          LEFT JOIN orgs o    ON b.scope_type = 'org'    AND o.id = b.scope_id
          LEFT JOIN tenants t ON b.scope_type = 'tenant' AND t.id = b.scope_id
          WHERE ({term} IS NULL OR (
-                    u.email ILIKE '%' || $2 || '%'
-                 OR b.role_key ILIKE '%' || $2 || '%'
-                 OR b.scope_type ILIKE '%' || $2 || '%'
-                 OR COALESCE(o.slug, t.slug) ILIKE '%' || $2 || '%'))
+                    {m_email}
+                 OR {m_role}
+                 OR {m_scope}
+                 OR {m_label}))
            AND ({cursor} IS NULL OR b.id < $3)
          ORDER BY b.id DESC
          LIMIT $1",
-        cursor = Postgres.cast("$3", "uuid")
+        cursor = Postgres.cast("$3", "uuid"),
+        m_email = Postgres.ci_match("u.email", "'%' || $2 || '%'"),
+        m_role = Postgres.ci_match("b.role_key", "'%' || $2 || '%'"),
+        m_scope = Postgres.ci_match("b.scope_type", "'%' || $2 || '%'"),
+        m_label = Postgres.ci_match("COALESCE(o.slug, t.slug)", "'%' || $2 || '%'")
     ))
     .bind(limit)
     .bind(q)
@@ -501,13 +515,16 @@ pub async fn tenant_members_page(
          JOIN users u ON u.id = m.principal_id
          WHERE m.tenant_id = $1 AND m.principal_type = 'user'
            AND ({term} IS NULL OR (
-                    u.email ILIKE '%' || $3 || '%'
-                 OR u.display_name ILIKE '%' || $3 || '%'
-                 OR m.role ILIKE '%' || $3 || '%'))
+                    {m_email}
+                 OR {m_name}
+                 OR {m_role}))
            AND ({cursor} IS NULL OR m.principal_id < $4)
          ORDER BY m.principal_id DESC
          LIMIT $2",
-        cursor = Postgres.cast("$4", "uuid")
+        cursor = Postgres.cast("$4", "uuid"),
+        m_email = Postgres.ci_match("u.email", "'%' || $3 || '%'"),
+        m_name = Postgres.ci_match("u.display_name", "'%' || $3 || '%'"),
+        m_role = Postgres.ci_match("m.role", "'%' || $3 || '%'")
     ))
     .bind(tenant)
     .bind(limit)
