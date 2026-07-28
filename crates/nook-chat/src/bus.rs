@@ -25,15 +25,22 @@ const NOTIFY_CHANNEL: &str = "nook_chat_msg";
 struct Notice {
     id: Uuid,
     origin: Uuid,
+    /// Whether this announces a CHANGE to an existing message (edit/delete/
+    /// reaction — MAIN-116) rather than a brand-new post, so peers re-deliver it
+    /// under the right WS variant. `#[serde(default)]` keeps old-format notices
+    /// (none in flight, but harmless) readable as new posts.
+    #[serde(default)]
+    updated: bool,
 }
 
-/// Announce a freshly posted message so peer instances deliver it too. Best
+/// Announce a posted OR updated message so peer instances deliver it too. Best
 /// effort: a failed NOTIFY costs cross-instance liveness for one message, never
 /// correctness of what was stored.
-pub async fn publish(pool: &PgPool, message_id: Uuid, origin: Uuid) {
+pub async fn publish(pool: &PgPool, message_id: Uuid, origin: Uuid, updated: bool) {
     let payload = serde_json::to_string(&Notice {
         id: message_id,
         origin,
+        updated,
     })
     .unwrap_or_default();
     if let Err(e) = sqlx::query("SELECT pg_notify($1, $2)")
@@ -73,7 +80,14 @@ async fn run(registry: &Registry, pool: &PgPool) -> anyhow::Result<()> {
             continue;
         }
         if let Some(msg) = crate::messages::fetch(pool, notice.id).await {
-            registry.publish_local(msg);
+            // Re-deliver under the right variant so a peer's edit/delete/reaction
+            // arrives as an update, not a duplicate new message (MAIN-116 AC-5).
+            let event = if notice.updated {
+                nook_types::ChatServerMessage::MessageUpdated(msg)
+            } else {
+                nook_types::ChatServerMessage::Message(msg)
+            };
+            registry.publish_local(event);
         }
     }
 }

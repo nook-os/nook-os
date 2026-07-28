@@ -7667,6 +7667,17 @@
             "type": "string",
             "format": "date-time"
           },
+          "deleted": {
+            "type": "boolean"
+          },
+          "edited_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When the body was last edited (MAIN-116 AC-3); `None` if never — the UI's\n\"(edited)\" marker. A deleted message carries the redacted placeholder body\nand `deleted = true` (AC-4); its real content is never sent."
+          },
           "id": {
             "type": "string",
             "format": "uuid"
@@ -7686,6 +7697,13 @@
             ],
             "format": "uuid",
             "description": "The message this one replies to, if any (MAIN-114). `None` for a top-level\nmessage; a set value is always a top-level parent (one level, no nesting)."
+          },
+          "reactions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ChatReactionAggregate"
+            },
+            "description": "This message's reactions, aggregated per emoji (MAIN-116 AC-2). Empty for\na message with no reactions (and for a deleted one)."
           },
           "reply_count": {
             "type": "integer",
@@ -7717,6 +7735,28 @@
           }
         }
       },
+      "ChatReactionAggregate": {
+        "type": "object",
+        "description": "One emoji's reaction tally on a message (MAIN-116 AC-2): how many reacted and\nwhether the requesting caller is one of them (so a click toggles).",
+        "required": [
+          "emoji",
+          "count",
+          "reacted"
+        ],
+        "properties": {
+          "count": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "emoji": {
+            "type": "string"
+          },
+          "reacted": {
+            "type": "boolean",
+            "description": "Whether the caller has this reaction — the UI highlights it and a click\nremoves rather than adds."
+          }
+        }
+      },
       "ChatServerMessage": {
         "oneOf": [
           {
@@ -7735,6 +7775,26 @@
                 "type": "string",
                 "enum": [
                   "message"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "An existing message changed — an edit, a soft delete, or a reaction\ntoggle (MAIN-116 AC-5). Carries the message's current state (redacted +\nreaction-aggregated); the client replaces it in place by `id`. Delivered\non the message's own channel, so a reply update reaches the thread too.",
+            "required": [
+              "data",
+              "type"
+            ],
+            "properties": {
+              "data": {
+                "$ref": "#/components/schemas/ChatMessage",
+                "description": "An existing message changed — an edit, a soft delete, or a reaction\ntoggle (MAIN-116 AC-5). Carries the message's current state (redacted +\nreaction-aggregated); the client replaces it in place by `id`. Delivered\non the message's own channel, so a reply update reaches the thread too."
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "message_updated"
                 ]
               }
             }
@@ -12427,6 +12487,18 @@
               "string",
               "null"
             ]
+          }
+        }
+      },
+      "UpdateChatMessage": {
+        "type": "object",
+        "description": "Edit a message's body (MAIN-116 AC-3). Author-only, validated like a post.",
+        "required": [
+          "body"
+        ],
+        "properties": {
+          "body": {
+            "type": "string"
           }
         }
       },

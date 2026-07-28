@@ -23,7 +23,7 @@ use axum::extract::{FromRequestParts, State};
 use axum::http::request::Parts;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, patch};
+use axum::routing::{get, patch, put};
 use axum::{Json, Router};
 use axum_extra::extract::CookieJar;
 use serde_json::{json, Value};
@@ -34,7 +34,7 @@ use uuid::Uuid;
 /// Chat's own migration set, embedded at compile time — applied into the `chat`
 /// schema, so it never touches the control plane's `public._sqlx_migrations`.
 /// Embedded: 0001_chat_init, 0002_chat_channel_archive, 0003_chat_dm,
-/// 0004_chat_threads.
+/// 0004_chat_threads, 0005_chat_reactions.
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
 #[derive(Clone)]
@@ -105,6 +105,16 @@ async fn main() -> anyhow::Result<()> {
         // A message's thread: the parent plus a keyset page of its replies
         // (MAIN-114 AC-2), authorized on the parent's channel.
         .route("/api/messages/{id}/thread", get(messages::thread))
+        // Edit (author) + soft-delete (author or admin) a message (MAIN-116).
+        .route(
+            "/api/messages/{id}",
+            patch(messages::update).delete(messages::delete),
+        )
+        // Toggle the caller's reaction on a message (MAIN-116 AC-2).
+        .route(
+            "/api/messages/{id}/reactions/{emoji}",
+            put(messages::add_reaction).delete(messages::remove_reaction),
+        )
         .route("/api/channels/{id}/ws", get(ws::subscribe))
         // Direct messages (MAIN-113): open-or-create + list the caller's DMs,
         // and the org-scoped people picker that feeds the new-DM affordance.

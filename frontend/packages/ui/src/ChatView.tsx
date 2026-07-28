@@ -19,6 +19,17 @@
 // Everything else (channel list, websockets, dedupe) belongs to the caller.
 
 import React, { useCallback, useLayoutEffect, useRef, useState } from "react";
+import { SmilePlus } from "lucide-react";
+import { ALLOWED_REACTIONS } from "@nookos/api";
+
+/** One emoji's tally on a message: how many reacted and whether the viewer is
+ *  one of them (so a click toggles it off). Structurally the chat service's
+ *  `ChatReactionAggregate`, but named locally to keep the view backend-agnostic. */
+export interface ChatViewReaction {
+  emoji: string;
+  count: number;
+  reacted: boolean;
+}
 
 /** The minimal message shape the view needs. Deliberately not the chat
  *  service's DTO — any source that can produce these fields can drive it. */
@@ -37,6 +48,13 @@ export interface ChatViewMessage {
   /** How many threaded replies hang off this message (MAIN-114). When > 0 the
    *  view shows a "N replies" affordance that opens the thread. */
   replyCount?: number;
+  /** Reaction tallies (MAIN-116 AC-2). Absent/empty → no pill row. */
+  reactions?: ChatViewReaction[];
+  /** The body was edited (MAIN-116 AC-3) → an "(edited)" marker. */
+  edited?: boolean;
+  /** Soft-deleted (MAIN-116 AC-4): render a placeholder, suppress reactions and
+   *  per-message actions. The body already arrives redacted. */
+  deleted?: boolean;
 }
 
 export interface ChatViewProps {
@@ -61,6 +79,17 @@ export interface ChatViewProps {
    *  Omit it — as the thread panel's own reply list does — to render a plain
    *  list with no per-message thread actions (no nesting, NG-1). */
   onOpenThread?: (message: ChatViewMessage) => void;
+  /** Toggle a reaction (MAIN-116 AC-2). `on` is the desired next state: clicking
+   *  an un-highlighted pill or picking from the "add reaction" menu calls it
+   *  with `true`; clicking a highlighted pill calls it with `false`. Available
+   *  to everyone; omit to render read-only reactions with no picker. */
+  onToggleReaction?: (messageId: string, emoji: string, on: boolean) => void;
+  /** Save an inline edit (MAIN-116 AC-3). Only offered on the viewer's own,
+   *  non-deleted messages; omit to suppress the Edit action entirely. */
+  onEditMessage?: (messageId: string, newBody: string) => void;
+  /** Delete a message (MAIN-116 AC-4). Only offered on the viewer's own,
+   *  non-deleted messages; the caller owns any confirmation. Omit to suppress. */
+  onDeleteMessage?: (messageId: string) => void;
 }
 
 const GROUP_GAP_MS = 5 * 60 * 1000;
@@ -96,9 +125,32 @@ export function ChatView({
   emptyLabel = "No messages yet.",
   onRetry,
   onOpenThread,
+  onToggleReaction,
+  onEditMessage,
+  onDeleteMessage,
 }: ChatViewProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const [draft, setDraft] = useState("");
+  // Which message's body is being edited inline (MAIN-116 AC-3), and the
+  // in-progress draft; and which message's "add reaction" picker is open.
+  const [editing, setEditing] = useState<{ id: string; draft: string } | null>(null);
+  const [pickerFor, setPickerFor] = useState<string | null>(null);
+
+  const beginEdit = useCallback((m: ChatViewMessage) => {
+    setPickerFor(null);
+    setEditing({ id: m.id, draft: m.body });
+  }, []);
+  const cancelEdit = useCallback(() => setEditing(null), []);
+  const commitEdit = useCallback(
+    (original: ChatViewMessage) => {
+      if (!editing) return;
+      const next = editing.draft.trim();
+      setEditing(null);
+      // An empty or unchanged edit is a no-op — treat it as a cancel.
+      if (next && next !== original.body) onEditMessage?.(original.id, next);
+    },
+    [editing, onEditMessage],
+  );
 
   // Scroll bookkeeping. `nearBottom` tracks whether appends should follow;
   // `prependRef` records a pending older-page load so its layout effect can
@@ -170,12 +222,20 @@ export function ChatView({
           messages.map((m, i) => {
             const head = startsGroup(m, messages[i - 1]);
             const mine = currentUserId != null && m.authorId === currentUserId;
+            // Reactions and edit/delete/react actions only apply to a settled,
+            // non-deleted message. A deleted one shows only its placeholder.
+            const settled = !m.pending && !m.failed && !m.deleted;
+            const canReact = settled && !!onToggleReaction;
+            const canEdit = settled && mine && !!onEditMessage;
+            const canDelete = settled && mine && !!onDeleteMessage;
+            const isEditing = editing?.id === m.id;
+            const reactions = m.reactions ?? [];
             return (
               <div
                 key={m.id}
                 className={`chat-msg${head ? " head" : ""}${mine ? " mine" : ""}${
                   m.pending ? " pending" : ""
-                }${m.failed ? " failed" : ""}`}
+                }${m.failed ? " failed" : ""}${m.deleted ? " deleted" : ""}`}
               >
                 {head && (
                   <div className="chat-msg-head">
@@ -183,7 +243,32 @@ export function ChatView({
                     <span className="chat-time">{timeLabel(m.createdAt)}</span>
                   </div>
                 )}
-                <div className="chat-body">{m.body}</div>
+                {m.deleted ? (
+                  <div className="chat-body deleted">message deleted</div>
+                ) : isEditing ? (
+                  <textarea
+                    className="chat-edit-input"
+                    aria-label="Edit message"
+                    autoFocus
+                    rows={1}
+                    value={editing.draft}
+                    onChange={(e) => setEditing({ id: m.id, draft: e.target.value })}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" && !e.shiftKey) {
+                        e.preventDefault();
+                        commitEdit(m);
+                      } else if (e.key === "Escape") {
+                        e.preventDefault();
+                        cancelEdit();
+                      }
+                    }}
+                  />
+                ) : (
+                  <div className="chat-body">
+                    {m.body}
+                    {m.edited && <span className="chat-edited"> (edited)</span>}
+                  </div>
+                )}
                 {m.failed && (
                   <button
                     type="button"
@@ -192,6 +277,86 @@ export function ChatView({
                   >
                     Failed — retry
                   </button>
+                )}
+                {!m.deleted && reactions.length > 0 && (
+                  <div className="chat-reactions">
+                    {reactions.map((r) => (
+                      <button
+                        key={r.emoji}
+                        type="button"
+                        className={`chat-reaction${r.reacted ? " on" : ""}`}
+                        aria-pressed={r.reacted}
+                        aria-label={`${r.emoji} ${r.count}${
+                          r.reacted ? ", remove your reaction" : ""
+                        }`}
+                        disabled={!onToggleReaction}
+                        onClick={() => onToggleReaction?.(m.id, r.emoji, !r.reacted)}
+                      >
+                        <span className="chat-reaction-emoji">{r.emoji}</span>
+                        <span className="chat-reaction-count">{r.count}</span>
+                      </button>
+                    ))}
+                  </div>
+                )}
+                {!isEditing && (canReact || canEdit || canDelete) && (
+                  <div className="chat-msg-actions">
+                    {canReact && (
+                      <div className="chat-react-wrap">
+                        <button
+                          type="button"
+                          className={`chat-act chat-act-react${
+                            pickerFor === m.id ? " open" : ""
+                          }`}
+                          aria-label="Add reaction"
+                          aria-expanded={pickerFor === m.id}
+                          onClick={() =>
+                            setPickerFor((cur) => (cur === m.id ? null : m.id))
+                          }
+                        >
+                          <SmilePlus size={13} />
+                        </button>
+                        {pickerFor === m.id && (
+                          <div className="chat-react-picker" role="menu">
+                            {ALLOWED_REACTIONS.map((emoji) => (
+                              <button
+                                key={emoji}
+                                type="button"
+                                className="chat-react-opt"
+                                role="menuitem"
+                                aria-label={`React with ${emoji}`}
+                                onClick={() => {
+                                  setPickerFor(null);
+                                  onToggleReaction?.(m.id, emoji, true);
+                                }}
+                              >
+                                {emoji}
+                              </button>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                    {canEdit && (
+                      <button
+                        type="button"
+                        className="chat-act"
+                        aria-label="Edit message"
+                        onClick={() => beginEdit(m)}
+                      >
+                        Edit
+                      </button>
+                    )}
+                    {canDelete && (
+                      <button
+                        type="button"
+                        className="chat-act chat-act-danger"
+                        aria-label="Delete message"
+                        onClick={() => onDeleteMessage?.(m.id)}
+                      >
+                        Delete
+                      </button>
+                    )}
+                  </div>
                 )}
                 {onOpenThread && !m.pending && !m.failed && (
                   <div className="chat-msg-thread">

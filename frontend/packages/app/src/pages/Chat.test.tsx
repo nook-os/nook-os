@@ -9,13 +9,17 @@ import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
-// Capture the live-socket callback so the test can push messages through it.
+// Capture the live-socket callbacks so the test can push messages through them.
 let liveCallback: ((m: unknown) => void) | null = null;
+let updateCallback: ((m: unknown) => void) | null = null;
 const dispose = vi.fn();
 // The caller's chat role, mutable so the admin-gate tests can flip it (AC-5).
 const identity = vi.hoisted(() => ({ role: "member" as string | null }));
 
 vi.mock("@nookos/api", () => ({
+  // ChatView (in @nookos/ui) imports this from the same module; the whole-module
+  // mock must provide it or the picker crashes.
+  ALLOWED_REACTIONS: ["👍", "👎", "❤️", "😄", "🎉", "😕", "🚀", "👀", "🙌", "🔥", "✅", "❌"],
   api: { GET: vi.fn(async () => ({ data: { user: { id: "me" } } })) },
   me: vi.fn(async () => ({
     user_id: "me",
@@ -58,10 +62,27 @@ vi.mock("@nookos/api", () => ({
     replies: [],
     next_cursor: null,
   })),
-  connectChatSocket: vi.fn((_channel: string, onMessage: (m: unknown) => void) => {
-    liveCallback = onMessage;
-    return dispose;
-  }),
+  connectChatSocket: vi.fn(
+    (
+      _channel: string,
+      onMessage: (m: unknown) => void,
+      handlers?: { onUpdate?: (m: unknown) => void },
+    ) => {
+      liveCallback = onMessage;
+      updateCallback = handlers?.onUpdate ?? null;
+      return dispose;
+    },
+  ),
+  toggleReaction: vi.fn(async (id: string, emoji: string, on: boolean) => ({
+    id,
+    author_id: "u-bob",
+    channel_id: "c1",
+    body: "old message",
+    created_at: "2026-07-25T09:30:00Z",
+    reactions: [{ emoji, count: 1, reacted: on }],
+  })),
+  editMessage: vi.fn(),
+  deleteMessage: vi.fn(),
 }));
 
 import { ChatPage } from "./Chat";
@@ -77,6 +98,7 @@ function renderPage() {
 
 beforeEach(() => {
   liveCallback = null;
+  updateCallback = null;
   identity.role = "member";
   dispose.mockClear();
 });
@@ -154,6 +176,54 @@ describe("ChatPage", () => {
     renderPage();
     await screen.findByText("general");
     expect(await screen.findByLabelText("manage channels")).toBeTruthy();
+  });
+
+  // MAIN-116 AC-5: a message_updated edit is applied in place, no refetch.
+  it("applies a message_updated edit in place", async () => {
+    renderPage();
+    await screen.findByText("old message");
+    await waitFor(() => expect(updateCallback).not.toBeNull());
+    act(() => {
+      updateCallback!({
+        id: "h1",
+        author_id: "u-bob",
+        channel_id: "c1",
+        body: "edited message",
+        created_at: "2026-07-25T09:30:00Z",
+        edited_at: "2026-07-25T10:00:00Z",
+      });
+    });
+    expect(await screen.findByText("edited message")).toBeTruthy();
+    expect(screen.getByText("(edited)")).toBeTruthy();
+    expect(screen.queryByText("old message")).toBeNull();
+  });
+
+  // MAIN-116 AC-4: a soft-delete arriving over the socket redacts in place.
+  it("renders a message_updated soft-delete as a placeholder", async () => {
+    renderPage();
+    await screen.findByText("old message");
+    await waitFor(() => expect(updateCallback).not.toBeNull());
+    act(() => {
+      updateCallback!({
+        id: "h1",
+        author_id: "u-bob",
+        channel_id: "c1",
+        body: "message deleted",
+        created_at: "2026-07-25T09:30:00Z",
+        deleted: true,
+      });
+    });
+    expect(await screen.findByText("message deleted")).toBeTruthy();
+    expect(screen.queryByText("old message")).toBeNull();
+  });
+
+  // MAIN-116 AC-2: reacting folds the REST response into the stream at once.
+  it("shows a reaction pill after toggling a reaction", async () => {
+    renderPage();
+    await screen.findByText("old message");
+    await userEvent.click(await screen.findByLabelText("Add reaction"));
+    await userEvent.click(await screen.findByLabelText("React with 👍"));
+    expect(await screen.findByLabelText(/👍 1/)).toBeTruthy();
   });
 
   // MAIN-114 AC-5: opening a message's thread mounts the thread panel beside the

@@ -20,6 +20,12 @@ export interface ThreadPanelProps {
   meId: string | undefined;
   names: Record<string, string>; // e.g. { [meId]: "You" }
   onClose: () => void;
+  // MAIN-116: the same reaction/edit/delete handlers the channel uses. They
+  // fold their REST response into the shared `live` buffer in Chat.tsx, so a
+  // toggle/edit/delete here is reflected in both the thread and the channel.
+  onToggleReaction?: (messageId: string, emoji: string, on: boolean) => void;
+  onEditMessage?: (messageId: string, newBody: string) => void;
+  onDeleteMessage?: (messageId: string) => void;
 }
 
 const PAGE_SIZE = 50;
@@ -31,6 +37,9 @@ export function ThreadPanel({
   meId,
   names,
   onClose,
+  onToggleReaction,
+  onEditMessage,
+  onDeleteMessage,
 }: ThreadPanelProps) {
   const threadQuery = useInfiniteQuery({
     queryKey: ["chat", "thread", parent.id],
@@ -123,7 +132,14 @@ export function ThreadPanel({
       </div>
       <div className="chat-thread-parent">
         <span className="chat-author">{parentAuthor}</span>
-        <div className="chat-thread-body">{parent.body}</div>
+        {/* The pinned parent tracks its own edits/deletion from the live buffer
+            (AC-4: a deleted parent shows the placeholder here too). */}
+        <div className={`chat-thread-body${parent.deleted ? " deleted" : ""}`}>
+          {parent.deleted ? "message deleted" : parent.body}
+          {!parent.deleted && parent.edited_at != null && (
+            <span className="chat-edited"> (edited)</span>
+          )}
+        </div>
       </div>
       <ChatView
         messages={messages}
@@ -135,6 +151,9 @@ export function ThreadPanel({
         onRetry={onRetry}
         emptyLabel="No replies yet."
         placeholder="Reply…"
+        onToggleReaction={onToggleReaction}
+        onEditMessage={onEditMessage}
+        onDeleteMessage={onDeleteMessage}
       />
     </aside>
   );

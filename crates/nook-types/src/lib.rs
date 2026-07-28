@@ -2495,6 +2495,28 @@ pub struct ChatMessage {
     #[serde(default)]
     pub last_reply_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
+    /// This message's reactions, aggregated per emoji (MAIN-116 AC-2). Empty for
+    /// a message with no reactions (and for a deleted one).
+    #[serde(default)]
+    pub reactions: Vec<ChatReactionAggregate>,
+    /// When the body was last edited (MAIN-116 AC-3); `None` if never — the UI's
+    /// "(edited)" marker. A deleted message carries the redacted placeholder body
+    /// and `deleted = true` (AC-4); its real content is never sent.
+    #[serde(default)]
+    pub edited_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub deleted: bool,
+}
+
+/// One emoji's reaction tally on a message (MAIN-116 AC-2): how many reacted and
+/// whether the requesting caller is one of them (so a click toggles).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ChatReactionAggregate {
+    pub emoji: String,
+    pub count: i64,
+    /// Whether the caller has this reaction — the UI highlights it and a click
+    /// removes rather than adds.
+    pub reacted: bool,
 }
 
 /// One page of channel history, newest-first, keyset-paginated on message id.
@@ -2546,6 +2568,12 @@ pub struct PostChatMessage {
     pub parent_message_id: Option<Uuid>,
 }
 
+/// Edit a message's body (MAIN-116 AC-3). Author-only, validated like a post.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct UpdateChatMessage {
+    pub body: String,
+}
+
 /// A person the caller may address in a DM (MAIN-113 AC-4): the stable
 /// cross-tenant `person_id` and a display name resolved from `public.users`.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -2578,4 +2606,9 @@ pub struct OpenDmRequest {
 pub enum ChatServerMessage {
     /// A new message posted to the subscribed channel.
     Message(ChatMessage),
+    /// An existing message changed — an edit, a soft delete, or a reaction
+    /// toggle (MAIN-116 AC-5). Carries the message's current state (redacted +
+    /// reaction-aggregated); the client replaces it in place by `id`. Delivered
+    /// on the message's own channel, so a reply update reaches the thread too.
+    MessageUpdated(ChatMessage),
 }

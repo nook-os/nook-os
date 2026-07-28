@@ -29,6 +29,7 @@ function toView(
   // Server-side count (from history, AC-3) plus replies that arrived live this
   // session (AC-4). `undefined` when zero so the view shows no affordance.
   const replyCount = (m.reply_count ?? 0) + extraReplies;
+  const reactions = m.reactions ?? [];
   return {
     id: m.id,
     authorId: m.author_id,
@@ -38,7 +39,35 @@ function toView(
     body: m.body,
     createdAt: m.created_at,
     replyCount: replyCount > 0 ? replyCount : undefined,
+    // MAIN-116: reactions (per-emoji tallies), the "(edited)" marker, and the
+    // soft-delete flag. Empty reactions collapse to `undefined` so the view
+    // renders no pill row.
+    reactions: reactions.length > 0 ? reactions : undefined,
+    edited: m.edited_at != null,
+    deleted: m.deleted ?? false,
   };
+}
+
+/**
+ * Merge a `message_updated` broadcast (MAIN-116 AC-5) onto the client's current
+ * copy of that message. The broadcast carries viewer-NEUTRAL reactions —
+ * `reacted` is always false, because the server cannot know each viewer — so we
+ * take the incoming counts, `body`, `edited_at`, `deleted`, and `reply_count`,
+ * but PRESERVE this client's own `reacted` per emoji from what it already held
+ * (learned from the REST response to its own PUT/DELETE). A reaction the client
+ * itself just toggled is reconciled by that REST response; someone else's
+ * toggle changes the count here without flipping the client's own `reacted`.
+ */
+export function applyMessageUpdate(
+  existing: ChatMessage | undefined,
+  incoming: ChatMessage,
+): ChatMessage {
+  const prior = existing?.reactions ?? [];
+  const reactions = (incoming.reactions ?? []).map((r) => ({
+    ...r,
+    reacted: prior.find((p) => p.emoji === r.emoji)?.reacted ?? false,
+  }));
+  return { ...incoming, reactions };
 }
 
 /** Sort confirmed messages oldest → newest. UUID v7 ids are time-ordered, so

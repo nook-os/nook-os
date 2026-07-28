@@ -13,10 +13,32 @@ type ChatChannel = Schemas["ChatChannel"];
 type ChatMessage = Schemas["ChatMessage"];
 type ChatMessagePage = Schemas["ChatMessagePage"];
 export type ChatThread = Schemas["ChatThread"];
+export type ChatReactionAggregate = Schemas["ChatReactionAggregate"];
 type CreateChatChannel = Schemas["CreateChatChannel"];
 type UpdateChatChannel = Schemas["UpdateChatChannel"];
+type UpdateChatMessage = Schemas["UpdateChatMessage"];
 export type DmSummary = Schemas["DmSummary"];
 export type PersonRef = Schemas["PersonRef"];
+
+/**
+ * The one set of reactions the UI offers and the server accepts (MAIN-116
+ * NG-1: no custom emoji). Kept in lockstep with the chat service's allowlist —
+ * the "add reaction" picker renders exactly these, in this order.
+ */
+export const ALLOWED_REACTIONS = [
+  "👍",
+  "👎",
+  "❤️",
+  "😄",
+  "🎉",
+  "😕",
+  "🚀",
+  "👀",
+  "🙌",
+  "🔥",
+  "✅",
+  "❌",
+] as const;
 
 /** `GET /api/me` — the caller as chat resolves them, including their tenant
  *  `role` so the UI can gate channel management to admins (MAIN-94 AC-5). */
@@ -47,24 +69,29 @@ async function chatGet<T>(path: string): Promise<T> {
 }
 
 /**
- * A write against the chat service (POST/PATCH), routed through the same
- * `authHeaders` and the shared write-failure path as `postMessage`, and
+ * A write against the chat service (POST/PATCH/PUT/DELETE), routed through the
+ * same `authHeaders` and the shared write-failure path as `postMessage`, and
  * rethrowing so a caller can surface an inline error. Mirrors the control-plane
- * client's write handling so a failed channel edit looks like any other.
+ * client's write handling so a failed channel edit looks like any other. Omit
+ * `body` for the bodiless writes (reaction toggles, soft-delete) — no
+ * `Content-Type` is sent and no body is serialised.
  */
 async function chatWrite<T>(
-  method: "POST" | "PATCH",
+  method: "POST" | "PATCH" | "PUT" | "DELETE",
   path: string,
-  body: unknown,
+  body?: unknown,
 ): Promise<T> {
   const full = `${CHAT_PREFIX}${path}`;
+  const hasBody = body !== undefined;
   let res: Response;
   try {
     res = await fetch(apiUrl(full), {
       method,
-      headers: { ...authHeaders(), "Content-Type": "application/json" },
+      headers: hasBody
+        ? { ...authHeaders(), "Content-Type": "application/json" }
+        : { ...authHeaders() },
       credentials: "same-origin",
-      body: JSON.stringify(body),
+      body: hasBody ? JSON.stringify(body) : undefined,
     });
   } catch (err) {
     reportWriteFailure({
@@ -226,6 +253,44 @@ export async function postMessage(
 }
 
 /**
+ * Toggle the caller's reaction on a message (MAIN-116 AC-2). `on` PUTs the
+ * reaction, `off` DELETEs it; either way the server returns the message's
+ * current state with viewer-accurate `reacted`, so the caller folds the
+ * response in and sees its own toggle immediately. The emoji is URL-encoded —
+ * it is a path segment, and every allowed reaction is multi-byte.
+ */
+export function toggleReaction(
+  messageId: string,
+  emoji: string,
+  on: boolean,
+): Promise<ChatMessage> {
+  const seg = encodeURIComponent(emoji);
+  return chatWrite<ChatMessage>(
+    on ? "PUT" : "DELETE",
+    `/messages/${messageId}/reactions/${seg}`,
+  );
+}
+
+/**
+ * Edit a message's body (MAIN-116 AC-3). Author-only server-side (403 for
+ * anyone else); returns the updated message carrying a fresh `edited_at` the UI
+ * renders as "(edited)".
+ */
+export function editMessage(messageId: string, body: string): Promise<ChatMessage> {
+  const patch: UpdateChatMessage = { body };
+  return chatWrite<ChatMessage>("PATCH", `/messages/${messageId}`, patch);
+}
+
+/**
+ * Soft-delete a message (MAIN-116 AC-4). Author or tenant admin server-side;
+ * returns the redacted message (`deleted = true`, placeholder body) so every
+ * surface renders the "message deleted" placeholder in place.
+ */
+export function deleteMessage(messageId: string): Promise<ChatMessage> {
+  return chatWrite<ChatMessage>("DELETE", `/messages/${messageId}`);
+}
+
+/**
  * Open the channel's live socket. Mirrors `openSocket` so the auth subprotocol
  * is reused — the desktop app authenticates its sockets by bearer token, not a
  * cookie, and this is the only way that token reaches the chat WS.
@@ -248,7 +313,17 @@ export function openChatSocket(channelId: string): WebSocket {
 export function connectChatSocket(
   channelId: string,
   onMessage: (message: ChatMessage) => void,
-  handlers?: { onOpen?: () => void; onReconnect?: () => void; onClose?: () => void },
+  handlers?: {
+    onOpen?: () => void;
+    onReconnect?: () => void;
+    onClose?: () => void;
+    /** An existing message changed — an edit, soft-delete, or reaction toggle
+     *  (MAIN-116 AC-5). Carries the message's current, viewer-NEUTRAL state
+     *  (`reacted` is always false in the broadcast); the caller merges it,
+     *  preserving its own `reacted`. Delivered on the message's own channel, so
+     *  a reply update reaches an open thread too. */
+    onUpdate?: (message: ChatMessage) => void;
+  },
 ): () => void {
   let closed = false;
   let socket: WebSocket | null = null;
@@ -268,6 +343,7 @@ export function connectChatSocket(
       try {
         const frame = JSON.parse(e.data) as Schemas["ChatServerMessage"];
         if (frame.type === "message") onMessage(frame.data);
+        else if (frame.type === "message_updated") handlers?.onUpdate?.(frame.data);
       } catch {
         // ignore malformed frames
       }
