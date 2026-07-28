@@ -425,6 +425,7 @@ mod tests {
     use axum::Json;
     use chrono::{DateTime, Utc};
     use nook_db::DbPool;
+    use nook_db::{Postgres, TimeMath};
     use nook_types::{
         ChatChannelPlacement, CreateChatCategory, CreateChatChannel, ReorderChatCategories,
         UpdateChatChannel,
@@ -1253,10 +1254,11 @@ mod tests {
          .0;
 
         // Pin A's cursor an hour ahead.
-        let (future,): (DateTime<Utc>,) = sqlx::query_as("SELECT now() + interval '1 hour'")
-            .fetch_one(&state.db)
-            .await
-            .unwrap();
+        let (future,): (DateTime<Utc>,) =
+            sqlx::query_as(&format!("SELECT {}", Postgres.now_plus("1 hour")))
+                .fetch_one(&state.db)
+                .await
+                .unwrap();
         set_cursor(&state.db, ch.id, a, future).await;
 
         // A message now (before the future cursor) is read.

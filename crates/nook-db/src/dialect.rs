@@ -88,6 +88,28 @@ pub trait TypeMapping {
     fn now(&self) -> &'static str;
 }
 
+// ── time-math (interval arithmetic) ──────────────────────────────────────────
+
+/// `now() ± interval …` arithmetic (audit (d): INTERVAL arithmetic, MAIN-204).
+/// The WHOLE expression is abstracted, not just the interval literal, because a
+/// second engine expresses it entirely differently — SQLite has no `+ interval`
+/// operator and would emit `datetime('now', '+14 days')`. Postgres delegates to
+/// `now() ± interval '…'`. The `spec`/`unit` strings are **static**,
+/// code-controlled interval literals (e.g. `"14 days"`), never user input —
+/// spliced like [`Json::get_text`]'s key; bind a parameter for any variable
+/// amount (see [`TimeMath::now_minus_scaled`]).
+pub trait TimeMath {
+    /// `now()` plus a fixed interval. Postgres: `now() + interval '{spec}'`.
+    fn now_plus(&self, spec: &str) -> String;
+    /// `now()` minus a fixed interval. Postgres: `now() - interval '{spec}'`.
+    fn now_minus(&self, spec: &str) -> String;
+    /// `now()` minus a **bound** multiple of a unit interval — `count` is a
+    /// composed SQL expression (bind a parameter, e.g. `"$1::bigint"`) so the
+    /// variable amount stays parameterized. Postgres:
+    /// `now() - ({count} * interval '{unit}')`.
+    fn now_minus_scaled(&self, count: &str, unit: &str) -> String;
+}
+
 // ── event-bus ───────────────────────────────────────────────────────────────
 
 /// Cross-instance event fan-out (audit (c): `LISTEN`/`NOTIFY`). Postgres
@@ -153,6 +175,18 @@ impl TypeMapping for Postgres {
     }
     fn now(&self) -> &'static str {
         "now()"
+    }
+}
+
+impl TimeMath for Postgres {
+    fn now_plus(&self, spec: &str) -> String {
+        format!("now() + interval '{spec}'")
+    }
+    fn now_minus(&self, spec: &str) -> String {
+        format!("now() - interval '{spec}'")
+    }
+    fn now_minus_scaled(&self, count: &str, unit: &str) -> String {
+        format!("now() - ({count} * interval '{unit}')")
     }
 }
 
@@ -244,6 +278,19 @@ mod tests {
         assert_eq!(pg.now(), "now()");
     }
 
+    #[test]
+    fn time_math_is_pg_interval_arithmetic() {
+        let pg = Postgres;
+        // The exact audited forms (MAIN-204), byte-for-byte.
+        assert_eq!(pg.now_plus("14 days"), "now() + interval '14 days'");
+        assert_eq!(pg.now_minus("60 seconds"), "now() - interval '60 seconds'");
+        // A bound multiplier stays parameterized (the jobs.rs reaper cutoff).
+        assert_eq!(
+            pg.now_minus_scaled("$1::bigint", "1 second"),
+            "now() - ($1::bigint * interval '1 second')"
+        );
+    }
+
     // ── Postgres SQL is real, not plausible (needs a DB) ───────────────────
     // These connect to DATABASE_URL directly (nook-db is below nook-testkit) and
     // skip when it is absent, matching the suite's DB-optional convention.
@@ -290,6 +337,33 @@ mod tests {
             .await
             .expect("jsonb_set executes with a bound value");
         assert_eq!(merged, "{\"a\": 1, \"b\": 2}");
+    }
+
+    #[tokio::test]
+    async fn pg_interval_expressions_execute() {
+        let Some(pool) = pool().await else { return };
+        let pg = Postgres;
+        // A fixed positive offset lands in the future; a negative one in the past.
+        let (future_ok, past_ok): (bool, bool) = sqlx::query_as(&format!(
+            "SELECT ({plus}) > now(), ({minus}) < now()",
+            plus = pg.now_plus("1 hour"),
+            minus = pg.now_minus("1 hour"),
+        ))
+        .fetch_one(&pool)
+        .await
+        .expect("now() ± interval executes");
+        assert!(future_ok && past_ok);
+        // The bound-multiplier form runs and scales by the parameter: 3600s ago
+        // is ~1 hour in the past.
+        let scaled_ok: bool = sqlx::query_scalar(&format!(
+            "SELECT ({cutoff}) < now()",
+            cutoff = pg.now_minus_scaled("$1::bigint", "1 second"),
+        ))
+        .bind(3600_i64)
+        .fetch_one(&pool)
+        .await
+        .expect("now() - ($1 * interval) executes with a bound multiplier");
+        assert!(scaled_ok);
     }
 
     #[tokio::test]

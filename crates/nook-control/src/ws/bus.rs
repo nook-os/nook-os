@@ -8,7 +8,7 @@
 
 use std::sync::Arc;
 
-use nook_db::DbPool;
+use nook_db::{DbPool, Postgres, TimeMath};
 use nook_proto::{AttachServerMessage, ControlToNode, UiEvent};
 use nook_types::{NodeId, SessionId, TenantId};
 use serde::{Deserialize, Serialize};
@@ -221,9 +221,10 @@ pub(crate) fn start(
         loop {
             tick.tick().await;
             registry.refresh_lease_cache(&pool).await;
-            let _ = sqlx::query(
-                "DELETE FROM bus_outbox WHERE created_at < now() - interval '60 seconds'",
-            )
+            let _ = sqlx::query(&format!(
+                "DELETE FROM bus_outbox WHERE created_at < {cutoff}",
+                cutoff = Postgres.now_minus("60 seconds")
+            ))
             .execute(&pool)
             .await;
         }

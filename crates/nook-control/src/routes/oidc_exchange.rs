@@ -15,6 +15,7 @@
 
 use axum::extract::State;
 use axum::Json;
+use nook_db::{Postgres, TimeMath};
 use nook_types::*;
 use openidconnect::core::{CoreClient, CoreIdToken};
 use openidconnect::{ClientId, IssuerUrl, Nonce};
@@ -105,10 +106,11 @@ pub async fn exchange(
     let (user, tenant) = login_identity(&state, identity).await?;
 
     let token_value = crate::routes::join::random_token(crate::auth::USER_TOKEN_PREFIX, 32);
-    sqlx::query(
+    sqlx::query(&format!(
         "INSERT INTO user_tokens (id, user_id, tenant_id, token_hash, name, expires_at)
-         VALUES ($1, $2, $3, $4, $5, now() + interval '365 days')",
-    )
+         VALUES ($1, $2, $3, $4, $5, {expiry})",
+        expiry = Postgres.now_plus("365 days")
+    ))
     .bind(uuid::Uuid::now_v7())
     .bind(user.id)
     .bind(tenant.id)

@@ -7,6 +7,7 @@
 use axum::extract::{ConnectInfo, Path, Query, State};
 use axum::http::HeaderMap;
 use axum::Json;
+use nook_db::{Postgres, TimeMath};
 use nook_types::*;
 use serde::Deserialize;
 use std::net::SocketAddr;
@@ -189,11 +190,12 @@ pub async fn create(
 
     // Only the hash is stored; the plaintext rides in the accept link (AC-9).
     let token = new_token();
-    let mut invite: Invite = sqlx::query_as(
+    let mut invite: Invite = sqlx::query_as(&format!(
         "INSERT INTO invites (id, tenant_id, email, role, token_hash, status, invited_by, expires_at)
-         VALUES ($1, $2, $3, $4, $5, 'pending', $6, now() + interval '14 days')
+         VALUES ($1, $2, $3, $4, $5, 'pending', $6, {expiry})
          RETURNING id, email, role, status, created_at, expires_at",
-    )
+        expiry = Postgres.now_plus("14 days")
+    ))
     .bind(uuid::Uuid::now_v7())
     .bind(tenant)
     .bind(email)
@@ -293,12 +295,13 @@ pub async fn resend(
     // plaintext is unrecoverable — a resend issues a FRESH token, invalidating
     // the old link, and re-stamps the expiry before emailing the new link.
     let token = new_token();
-    let mut invite: Invite = sqlx::query_as(
+    let mut invite: Invite = sqlx::query_as(&format!(
         "UPDATE invites
-            SET token_hash = $1, expires_at = now() + interval '14 days'
+            SET token_hash = $1, expires_at = {expiry}
           WHERE id = $2 AND tenant_id = $3 AND status = 'pending'
       RETURNING id, email, role, status, created_at, expires_at",
-    )
+        expiry = Postgres.now_plus("14 days")
+    ))
     .bind(hash_token(&token))
     .bind(invite_id)
     .bind(tenant)

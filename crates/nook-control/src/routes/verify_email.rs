@@ -11,6 +11,7 @@
 //! user's address) is the proof.
 
 use axum::extract::{Json, State};
+use nook_db::{Postgres, TimeMath};
 
 use crate::auth::AuthCtx;
 use crate::error::{ApiError, ApiResult};
@@ -93,10 +94,11 @@ pub async fn request_core(
         .await?;
 
     let token = random_token("evr_", 32);
-    sqlx::query(
+    sqlx::query(&format!(
         "INSERT INTO email_verification_tokens (id, user_id, email, token_hash, expires_at)
-         VALUES ($1, $2, $3, $4, now() + interval '24 hours')",
-    )
+         VALUES ($1, $2, $3, $4, {expiry})",
+        expiry = Postgres.now_plus("24 hours")
+    ))
     .bind(uuid::Uuid::now_v7())
     .bind(user_id)
     .bind(&email)
@@ -226,6 +228,7 @@ mod tests {
     use crate::services::identity::email_is_verified;
     use crate::state::AppState;
     use nook_db::DbPool;
+    use nook_db::{Postgres, TimeMath};
     use nook_types::UserId;
     use sqlx::postgres::PgPoolOptions;
     use uuid::Uuid;
@@ -363,10 +366,11 @@ mod tests {
 
         // A live token inserted directly with a known plaintext.
         let token = "evr_known_token_value_0000000000";
-        sqlx::query(
+        sqlx::query(&format!(
             "INSERT INTO email_verification_tokens (id, user_id, email, token_hash, expires_at)
-             VALUES ($1, $2, 'c@vr.test', $3, now() + interval '1 hour')",
-        )
+             VALUES ($1, $2, 'c@vr.test', $3, {expiry})",
+            expiry = Postgres.now_plus("1 hour")
+        ))
         .bind(Uuid::now_v7())
         .bind(uid)
         .bind(hash_token(token))
@@ -394,10 +398,11 @@ mod tests {
 
         // An expired token is refused (AC-2).
         let expired_plain = "evr_expired_000000000000000000000";
-        sqlx::query(
+        sqlx::query(&format!(
             "INSERT INTO email_verification_tokens (id, user_id, email, token_hash, expires_at)
-             VALUES ($1, $2, 'c@vr.test', $3, now() - interval '1 hour')",
-        )
+             VALUES ($1, $2, 'c@vr.test', $3, {expiry})",
+            expiry = Postgres.now_minus("1 hour")
+        ))
         .bind(Uuid::now_v7())
         .bind(uid)
         .bind(hash_token(expired_plain))

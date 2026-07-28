@@ -25,7 +25,7 @@ pub type DbPool = sqlx::PgPool;
 /// The engine seams (MAIN-198): atomic-claim / json / type-mapping / event-bus
 /// traits + the Postgres arm, for the coming dialect sweep to dispatch on.
 pub mod dialect;
-pub use dialect::{AtomicClaim, EventBus, Json, PgEventBus, Postgres, TypeMapping};
+pub use dialect::{AtomicClaim, EventBus, Json, PgEventBus, Postgres, TimeMath, TypeMapping};
 
 use std::fmt;
 
