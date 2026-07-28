@@ -2482,6 +2482,18 @@ pub struct ChatMessage {
     /// AC-4). `None` only if the author row is gone.
     pub author_name: Option<String>,
     pub body: String,
+    /// The message this one replies to, if any (MAIN-114). `None` for a top-level
+    /// message; a set value is always a top-level parent (one level, no nesting).
+    #[serde(default)]
+    pub parent_message_id: Option<Uuid>,
+    /// How many replies this message has — populated for parents in channel
+    /// history so the UI can show a thread affordance without an N+1 (AC-3). `0`
+    /// for a reply or a childless message.
+    #[serde(default)]
+    pub reply_count: i64,
+    /// When the latest reply landed, for ordering/preview; `None` with no replies.
+    #[serde(default)]
+    pub last_reply_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -2490,6 +2502,18 @@ pub struct ChatMessage {
 pub struct ChatMessagePage {
     pub messages: Vec<ChatMessage>,
     /// Pass as `before=` to fetch the next (older) page; `None` at the end.
+    pub next_cursor: Option<Uuid>,
+}
+
+/// A message thread (MAIN-114): the parent message plus a keyset page of its
+/// replies. Replies page newest-first on id like channel history — pass the last
+/// reply's id as `before=` for the next (older) page; the client orders them
+/// oldest-first for reading.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ChatThread {
+    pub parent: ChatMessage,
+    pub replies: Vec<ChatMessage>,
+    /// `None` when the oldest reply has been reached.
     pub next_cursor: Option<Uuid>,
 }
 
@@ -2512,10 +2536,14 @@ pub struct UpdateChatChannel {
     pub archived: Option<bool>,
 }
 
-/// Post a message to a channel.
+/// Post a message to a channel. `parent_message_id`, when set, makes this a
+/// threaded reply (MAIN-114) — the parent must be in the same channel and must
+/// not itself be a reply (one level, no nesting).
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct PostChatMessage {
     pub body: String,
+    #[serde(default)]
+    pub parent_message_id: Option<Uuid>,
 }
 
 /// A person the caller may address in a DM (MAIN-113 AC-4): the stable

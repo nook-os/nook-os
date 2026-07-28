@@ -3948,6 +3948,85 @@ a.toast-main:hover .toast-title { text-decoration: underline; }
   text-decoration: underline;
 }
 
+/* ── Thread affordances (MAIN-114) ─────────────────────────────────────────
+   Per-message reply actions under the body. "Reply in thread" stays quiet
+   (revealed on hover) so a flat channel isn't visually noisy; a message with
+   replies shows its count persistently as the way into the thread. */
+.chat-msg-thread { margin-top: 2px; }
+.chat-thread-reply,
+.chat-thread-count {
+  border: 0;
+  background: transparent;
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+  padding: 0;
+}
+.chat-thread-reply {
+  color: var(--nook-fg-faint);
+  opacity: 0;
+  transition: opacity 0.1s;
+}
+.chat-msg:hover .chat-thread-reply,
+.chat-thread-reply:focus-visible { opacity: 1; }
+.chat-thread-count {
+  color: var(--nook-info);
+  font-weight: 600;
+}
+.chat-thread-count::before {
+  content: "↳ ";
+  color: var(--nook-fg-faint);
+  font-weight: 400;
+}
+
+/* ── Thread panel (MAIN-114 AC-5) ──────────────────────────────────────────
+   A right-hand panel over the channel view: parent pinned atop, its replies in
+   a ChatView below, composer at its bottom. Dense, thin-bordered, amber-CRT. */
+.chat-thread-panel {
+  display: flex;
+  flex-direction: column;
+  width: 340px;
+  min-width: 280px;
+  border-left: 1px solid var(--nook-border);
+  background: var(--nook-bg-panel);
+}
+.chat-thread-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--nook-border);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--nook-fg);
+}
+.chat-thread-close {
+  border: 0;
+  background: transparent;
+  color: var(--nook-fg-faint);
+  font: inherit;
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+}
+.chat-thread-parent {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--nook-border);
+  background: var(--nook-bg);
+}
+.chat-thread-parent .chat-author { color: var(--nook-accent); }
+.chat-thread-body {
+  color: var(--nook-fg);
+  font-size: 13px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+  margin-top: 2px;
+}
+/* The replies ChatView fills the rest of the panel. */
+.chat-thread-panel .chat-view { flex: 1; min-height: 0; }
+
 .chat-composer {
   display: flex;
   gap: 6px;

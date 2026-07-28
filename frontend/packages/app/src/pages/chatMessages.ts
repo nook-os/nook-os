@@ -21,7 +21,14 @@ export interface PendingMessage {
   failed?: boolean;
 }
 
-function toView(m: ChatMessage, names: Record<string, string>): ChatViewMessage {
+function toView(
+  m: ChatMessage,
+  names: Record<string, string>,
+  extraReplies = 0,
+): ChatViewMessage {
+  // Server-side count (from history, AC-3) plus replies that arrived live this
+  // session (AC-4). `undefined` when zero so the view shows no affordance.
+  const replyCount = (m.reply_count ?? 0) + extraReplies;
   return {
     id: m.id,
     authorId: m.author_id,
@@ -30,6 +37,7 @@ function toView(m: ChatMessage, names: Record<string, string>): ChatViewMessage 
     authorName: names[m.author_id] ?? m.author_name ?? undefined,
     body: m.body,
     createdAt: m.created_at,
+    replyCount: replyCount > 0 ? replyCount : undefined,
   };
 }
 
@@ -66,7 +74,13 @@ export function reconcilePending(
   return remaining;
 }
 
-/** Merge the three sources into the chronological list `ChatView` renders. */
+/** Merge the three sources into the chronological list `ChatView` renders.
+ *
+ *  Threaded replies (a message with `parent_message_id`) never appear in this
+ *  channel stream — they live only under their parent's thread (MAIN-114 AC-2).
+ *  They still arrive over the channel socket, so each live reply instead bumps
+ *  its parent's reply count here (AC-4); the thread panel renders the reply
+ *  itself. */
 export function buildChatMessages(
   history: ChatMessage[],
   live: ChatMessage[],
@@ -79,12 +93,41 @@ export function buildChatMessages(
   const byId = new Map<string, ChatMessage>();
   for (const m of history) byId.set(m.id, m);
   for (const m of live) byId.set(m.id, m);
-  const confirmed = [...byId.values()].sort(chrono);
 
-  const liveFromMe = meId ? live.filter((m) => m.author_id === meId) : [];
+  // Count replies we know about live, per parent, to bump the parent's count.
+  // History carries no replies (the server excludes them), so this counts only
+  // this session's live arrivals — added on top of the server `reply_count`.
+  const liveReplies: Record<string, number> = {};
+  for (const m of byId.values()) {
+    if (m.parent_message_id) {
+      liveReplies[m.parent_message_id] = (liveReplies[m.parent_message_id] ?? 0) + 1;
+    }
+  }
+
+  // Only top-level messages render in the channel stream (AC-2).
+  const confirmed = [...byId.values()]
+    .filter((m) => !m.parent_message_id)
+    .sort(chrono);
+
+  // Reconcile only against my own TOP-LEVEL live echoes — a reply I posted must
+  // never cancel an optimistic channel message that happens to share its body.
+  const liveFromMe = meId
+    ? live.filter((m) => m.author_id === meId && !m.parent_message_id)
+    : [];
   const remaining = reconcilePending(pending, liveFromMe);
 
-  const pendingViews: ChatViewMessage[] = remaining.map((p) => ({
+  return [
+    ...confirmed.map((m) => toView(m, names, liveReplies[m.id] ?? 0)),
+    ...pendingViews(remaining, names),
+  ];
+}
+
+/** Optimistic bubbles → view messages, marked pending (or failed for retry). */
+function pendingViews(
+  remaining: PendingMessage[],
+  names: Record<string, string>,
+): ChatViewMessage[] {
+  return remaining.map((p) => ({
     id: p.tempId,
     authorId: p.authorId,
     authorName: names[p.authorId],
@@ -93,6 +136,36 @@ export function buildChatMessages(
     pending: !p.failed,
     failed: p.failed,
   }));
+}
 
-  return [...confirmed.map((m) => toView(m, names)), ...pendingViews];
+/** Merge a thread's replies for the ChatView inside the thread panel (MAIN-114
+ *  AC-5). The INVERSE of `buildChatMessages`: it keeps ONLY replies to
+ *  `parentId` — never the parent, never other threads' replies, never the
+ *  top-level channel chatter that shares the same live buffer. Replies are not
+ *  themselves threadable (NG-1), so the caller omits `onOpenThread` on this
+ *  ChatView; no reply affordance is emitted here. */
+export function buildThreadMessages(
+  replies: ChatMessage[],
+  live: ChatMessage[],
+  pending: PendingMessage[],
+  parentId: string,
+  meId: string | undefined,
+  names: Record<string, string> = {},
+): ChatViewMessage[] {
+  const byId = new Map<string, ChatMessage>();
+  for (const m of replies) byId.set(m.id, m);
+  // The channel socket carries every message; take only this thread's replies.
+  for (const m of live) {
+    if (m.parent_message_id === parentId) byId.set(m.id, m);
+  }
+  const confirmed = [...byId.values()]
+    .filter((m) => m.parent_message_id === parentId)
+    .sort(chrono);
+
+  const liveFromMe = meId
+    ? live.filter((m) => m.author_id === meId && m.parent_message_id === parentId)
+    : [];
+  const remaining = reconcilePending(pending, liveFromMe);
+
+  return [...confirmed.map((m) => toView(m, names)), ...pendingViews(remaining, names)];
 }

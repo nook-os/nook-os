@@ -59,6 +59,7 @@ export type BindingRow = Schemas["BindingRow"];
 export type ChatChannel = Schemas["ChatChannel"];
 export type ChatMessage = Schemas["ChatMessage"];
 export type ChatMessagePage = Schemas["ChatMessagePage"];
+export type ChatThread = Schemas["ChatThread"];
 export type ChatServerMessage = Schemas["ChatServerMessage"];
 export type UserToken = Schemas["UserToken"];
 export type VaultPasskey = Schemas["VaultPasskey"];

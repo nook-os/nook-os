@@ -3,7 +3,12 @@
 // dedupe actually lives.
 import { describe, expect, it } from "vitest";
 import type { ChatMessage } from "@nookos/api";
-import { buildChatMessages, reconcilePending, type PendingMessage } from "./chatMessages";
+import {
+  buildChatMessages,
+  buildThreadMessages,
+  reconcilePending,
+  type PendingMessage,
+} from "./chatMessages";
 
 const msg = (id: string, author: string, body: string, t: string): ChatMessage => ({
   id,
@@ -67,6 +72,90 @@ describe("buildChatMessages", () => {
     const pending = [pend("t1", "me", "ok")];
     const out = buildChatMessages(history, [], pending, "me");
     expect(out.filter((m) => m.pending)).toHaveLength(1);
+  });
+
+  // ── Threaded replies (MAIN-114) ──
+  const reply = (id: string, parent: string, t: string): ChatMessage => ({
+    ...msg(id, "u1", "a reply", t),
+    parent_message_id: parent,
+  });
+
+  it("excludes replies from the channel stream (AC-2)", () => {
+    const history = [
+      { ...msg("p", "u1", "parent", "2026-07-25T10:00:00Z") },
+      reply("r", "p", "2026-07-25T10:00:01Z"),
+    ];
+    const out = buildChatMessages(history, [], [], "me");
+    expect(out.map((m) => m.id)).toEqual(["p"]);
+  });
+
+  it("surfaces the server reply_count on a history parent (AC-3)", () => {
+    const parent: ChatMessage = {
+      ...msg("p", "u1", "parent", "2026-07-25T10:00:00Z"),
+      reply_count: 3,
+    };
+    const out = buildChatMessages([parent], [], [], "me");
+    expect(out[0].replyCount).toBe(3);
+  });
+
+  it("routes a live reply to a count bump, not the main stream (AC-4)", () => {
+    const parent: ChatMessage = {
+      ...msg("p", "u1", "parent", "2026-07-25T10:00:00Z"),
+      reply_count: 1, // one reply existed at load
+    };
+    // A new reply arrives live over the channel socket.
+    const live = [reply("r-live", "p", "2026-07-25T10:05:00Z")];
+    const out = buildChatMessages([parent], live, [], "me");
+    // The reply never shows in the stream…
+    expect(out.map((m) => m.id)).toEqual(["p"]);
+    // …but the parent's count bumps from 1 → 2.
+    expect(out[0].replyCount).toBe(2);
+  });
+
+  it("leaves a childless message with no reply affordance", () => {
+    const out = buildChatMessages([msg("p", "u1", "lonely", "2026-07-25T10:00:00Z")], [], [], "me");
+    expect(out[0].replyCount).toBeUndefined();
+  });
+});
+
+describe("buildThreadMessages", () => {
+  const reply = (id: string, parent: string, author: string, body: string, t: string): ChatMessage => ({
+    ...msg(id, author, body, t),
+    parent_message_id: parent,
+  });
+
+  it("keeps only this parent's replies, oldest → newest", () => {
+    const replies = [
+      reply("r2", "p", "u1", "second", "2026-07-25T10:00:02Z"),
+      reply("r1", "p", "u1", "first", "2026-07-25T10:00:01Z"),
+    ];
+    // The live buffer also holds channel chatter and another thread's reply.
+    const live = [
+      msg("top", "u1", "channel msg", "2026-07-25T10:00:03Z"),
+      reply("other", "q", "u1", "elsewhere", "2026-07-25T10:00:04Z"),
+    ];
+    const out = buildThreadMessages(replies, live, [], "p", "me");
+    expect(out.map((m) => m.id)).toEqual(["r1", "r2"]);
+  });
+
+  it("folds a live reply into the thread and reconciles my optimistic reply", () => {
+    const pending = [pend("t1", "me", "hello")];
+    const before = buildThreadMessages([], [], pending, "p", "me");
+    expect(before).toHaveLength(1);
+    expect(before[0].pending).toBe(true);
+
+    // My reply echoes back live, tagged to this parent.
+    const echo = [reply("r-real", "p", "me", "hello", "2026-07-25T10:00:05Z")];
+    const after = buildThreadMessages([], echo, pending, "p", "me");
+    expect(after).toHaveLength(1);
+    expect(after[0].id).toBe("r-real");
+    expect(after[0].pending).toBeUndefined();
+  });
+
+  it("never emits a reply affordance inside a thread (no nesting, NG-1)", () => {
+    const replies = [reply("r1", "p", "u1", "hi", "2026-07-25T10:00:01Z")];
+    const out = buildThreadMessages(replies, [], [], "p", "me");
+    expect(out[0].replyCount).toBeUndefined();
   });
 });
 

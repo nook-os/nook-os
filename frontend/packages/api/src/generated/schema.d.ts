@@ -3341,6 +3341,24 @@ export interface components {
             created_at: string;
             /** Format: uuid */
             id: string;
+            /**
+             * Format: date-time
+             * @description When the latest reply landed, for ordering/preview; `None` with no replies.
+             */
+            last_reply_at?: string | null;
+            /**
+             * Format: uuid
+             * @description The message this one replies to, if any (MAIN-114). `None` for a top-level
+             *     message; a set value is always a top-level parent (one level, no nesting).
+             */
+            parent_message_id?: string | null;
+            /**
+             * Format: int64
+             * @description How many replies this message has — populated for parents in channel
+             *     history so the UI can show a thread affordance without an N+1 (AC-3). `0`
+             *     for a reply or a childless message.
+             */
+            reply_count?: number;
         };
         /** @description One page of channel history, newest-first, keyset-paginated on message id. */
         ChatMessagePage: {
@@ -3360,6 +3378,21 @@ export interface components {
             data: components["schemas"]["ChatMessage"];
             /** @enum {string} */
             type: "message";
+        };
+        /**
+         * @description A message thread (MAIN-114): the parent message plus a keyset page of its
+         *     replies. Replies page newest-first on id like channel history — pass the last
+         *     reply's id as `before=` for the next (older) page; the client orders them
+         *     oldest-first for reading.
+         */
+        ChatThread: {
+            /**
+             * Format: uuid
+             * @description `None` when the oldest reply has been reached.
+             */
+            next_cursor?: string | null;
+            parent: components["schemas"]["ChatMessage"];
+            replies: components["schemas"]["ChatMessage"][];
         };
         /** @description `POST /tasks/{id}/claim` — take the work without racing another agent. */
         ClaimTaskRequest: {
@@ -4477,9 +4510,15 @@ export interface components {
             enabled: boolean;
             field: string;
         };
-        /** @description Post a message to a channel. */
+        /**
+         * @description Post a message to a channel. `parent_message_id`, when set, makes this a
+         *     threaded reply (MAIN-114) — the parent must be in the same channel and must
+         *     not itself be a reply (one level, no nesting).
+         */
         PostChatMessage: {
             body: string;
+            /** Format: uuid */
+            parent_message_id?: string | null;
         };
         PutSecretRequest: {
             content: string;

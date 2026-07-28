@@ -34,6 +34,9 @@ export interface ChatViewMessage {
   pending?: boolean;
   /** The send failed; offer a retry. */
   failed?: boolean;
+  /** How many threaded replies hang off this message (MAIN-114). When > 0 the
+   *  view shows a "N replies" affordance that opens the thread. */
+  replyCount?: number;
 }
 
 export interface ChatViewProps {
@@ -53,6 +56,11 @@ export interface ChatViewProps {
   emptyLabel?: string;
   /** Retry a failed optimistic send. */
   onRetry?: (message: ChatViewMessage) => void;
+  /** Open a message's thread (MAIN-114). When set, each confirmed message shows
+   *  a "Reply in thread" action, and a "N replies" affordance when it has any.
+   *  Omit it — as the thread panel's own reply list does — to render a plain
+   *  list with no per-message thread actions (no nesting, NG-1). */
+  onOpenThread?: (message: ChatViewMessage) => void;
 }
 
 const GROUP_GAP_MS = 5 * 60 * 1000;
@@ -87,6 +95,7 @@ export function ChatView({
   placeholder = "Message…",
   emptyLabel = "No messages yet.",
   onRetry,
+  onOpenThread,
 }: ChatViewProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const [draft, setDraft] = useState("");
@@ -183,6 +192,28 @@ export function ChatView({
                   >
                     Failed — retry
                   </button>
+                )}
+                {onOpenThread && !m.pending && !m.failed && (
+                  <div className="chat-msg-thread">
+                    {m.replyCount && m.replyCount > 0 ? (
+                      <button
+                        type="button"
+                        className="chat-thread-count"
+                        onClick={() => onOpenThread(m)}
+                      >
+                        {m.replyCount} {m.replyCount === 1 ? "reply" : "replies"}
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        className="chat-thread-reply"
+                        onClick={() => onOpenThread(m)}
+                        aria-label="Reply in thread"
+                      >
+                        Reply in thread
+                      </button>
+                    )}
+                  </div>
                 )}
               </div>
             );

@@ -29,6 +29,7 @@ import { ChatView } from "@nookos/ui";
 import { buildChatMessages, type PendingMessage } from "./chatMessages";
 import { ChannelManager } from "./ChannelManager";
 import { DmPicker } from "./DmPicker";
+import { ThreadPanel } from "./ThreadPanel";
 
 /** A DM has no name of its own — label it by its OTHER participants (MAIN-113
  *  AC-5). Falls back to "Direct message" if names haven't resolved yet. */
@@ -78,6 +79,8 @@ export function ChatPage() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [managing, setManaging] = useState(false);
   const [pickingDm, setPickingDm] = useState(false);
+  // The open thread's parent id, or null when no thread panel is showing.
+  const [threadParentId, setThreadParentId] = useState<string | null>(null);
 
   // Auto-select the first channel once the list loads, but never fight a user's
   // choice or point at a conversation (channel OR dm) that has since vanished.
@@ -121,6 +124,7 @@ export function ChatPage() {
   useEffect(() => {
     setLive([]);
     setPending([]);
+    setThreadParentId(null);
   }, [selectedId]);
 
   // One socket per open channel, torn down on switch/unmount so nothing leaks.
@@ -192,6 +196,16 @@ export function ChatPage() {
   const messages = useMemo(
     () => buildChatMessages(history, live, pending, meId, names),
     [history, live, pending, meId, names],
+  );
+
+  // Resolve the open thread's parent message from what we already hold; a reply
+  // is never a valid parent, so it can only match a top-level channel message.
+  const threadParent = useMemo(
+    () =>
+      threadParentId
+        ? ([...history, ...live].find((x) => x.id === threadParentId) ?? null)
+        : null,
+    [threadParentId, history, live],
   );
 
   const activeChannel = channels.find((c) => c.id === selectedId);
@@ -286,17 +300,30 @@ export function ChatPage() {
             "Select a conversation"
           )}
         </header>
-        <ChatView
-          messages={messages}
-          onSend={onSend}
-          onLoadOlder={() => void historyQuery.fetchNextPage()}
-          hasMore={historyQuery.hasNextPage}
-          loadingOlder={historyQuery.isFetchingNextPage}
-          currentUserId={meId}
-          disabled={!selectedId}
-          placeholder={activeTitle ? `Message ${activeTitle}` : "Select a conversation"}
-          onRetry={onRetry}
-        />
+        <div className="chat-main-body" style={{ display: "flex", flex: 1, minHeight: 0 }}>
+          <ChatView
+            messages={messages}
+            onSend={onSend}
+            onLoadOlder={() => void historyQuery.fetchNextPage()}
+            hasMore={historyQuery.hasNextPage}
+            loadingOlder={historyQuery.isFetchingNextPage}
+            currentUserId={meId}
+            disabled={!selectedId}
+            placeholder={activeTitle ? `Message ${activeTitle}` : "Select a conversation"}
+            onRetry={onRetry}
+            onOpenThread={(m) => setThreadParentId(m.id)}
+          />
+          {threadParent && selectedId && (
+            <ThreadPanel
+              channelId={selectedId}
+              parent={threadParent}
+              live={live}
+              meId={meId}
+              names={names}
+              onClose={() => setThreadParentId(null)}
+            />
+          )}
+        </div>
       </section>
       {managing && canManage && <ChannelManager onClose={() => setManaging(false)} />}
       {pickingDm && <DmPicker onClose={() => setPickingDm(false)} onOpened={onDmOpened} />}
