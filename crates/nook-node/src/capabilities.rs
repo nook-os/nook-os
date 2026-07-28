@@ -44,6 +44,8 @@ pub fn detect_docker() -> bool {
 }
 
 pub fn detect_tmux() -> Option<String> {
+    // MAIN-108 exception: `tmux -V` reports the binary version and never touches
+    // a server, so the node's `-L <socket>` is irrelevant here — unchanged.
     run("tmux", &["-V"]).map(|v| v.trim_start_matches("tmux ").to_string())
 }
 

@@ -1384,6 +1384,10 @@ pub async fn agent_state(state: &str) -> Result<()> {
     }
     // The tmux window the agent is in, so the right in-session terminal chip
     // lights up rather than the whole strip. Absent when not under tmux.
+    //
+    // MAIN-108 exception: this runs INSIDE a session pane and must inherit the
+    // pane's `$TMUX` — it deliberately gets NO `-L`. Adding the node's socket
+    // here would point it at the wrong server (or none) and lose the window.
     let window = std::process::Command::new("tmux")
         .args(["display-message", "-p", "#{window_index}"])
         .output()

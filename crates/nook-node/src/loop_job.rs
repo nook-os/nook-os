@@ -330,6 +330,12 @@ fn drive_session(
     };
 
     let mut cmd = CommandBuilder::new("tmux");
+    // Like the session attach in sessions.rs, this spawns tmux directly through
+    // portable_pty and so must carry the node's `-L <socket>` itself, BEFORE
+    // `attach` — the job's session lives on that private server (MAIN-108 AC-2).
+    if let Some(sock) = crate::tmux::socket_name() {
+        cmd.args(["-L", sock]);
+    }
     cmd.args(["attach", "-t", tmux_name]);
     cmd.env("TERM", "xterm-256color");
     cmd.env("LANG", "C.UTF-8");
