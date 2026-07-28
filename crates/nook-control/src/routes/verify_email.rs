@@ -11,7 +11,7 @@
 //! user's address) is the proof.
 
 use axum::extract::{Json, State};
-use nook_db::{Postgres, TimeMath};
+use nook_db::{Postgres, TimeMath, TypeMapping};
 
 use crate::auth::AuthCtx;
 use crate::error::{ApiError, ApiResult};
@@ -180,10 +180,11 @@ pub async fn confirm_core(
         Option<chrono::DateTime<chrono::Utc>>,
         bool,
     );
-    let row: Option<TokenRow> = sqlx::query_as(
-        "SELECT id, user_id, email, consumed_at, expires_at < now()
+    let row: Option<TokenRow> = sqlx::query_as(&format!(
+        "SELECT id, user_id, email, consumed_at, expires_at < {}
              FROM email_verification_tokens WHERE token_hash = $1",
-    )
+        Postgres.now()
+    ))
     .bind(hash_token(token))
     .fetch_optional(db)
     .await?;
@@ -208,10 +209,13 @@ pub async fn confirm_core(
     }
 
     // Consume then verify, in that order — a replayed token finds it consumed.
-    sqlx::query("UPDATE email_verification_tokens SET consumed_at = now() WHERE id = $1")
-        .bind(id)
-        .execute(db)
-        .await?;
+    sqlx::query(&format!(
+        "UPDATE email_verification_tokens SET consumed_at = {} WHERE id = $1",
+        Postgres.now()
+    ))
+    .bind(id)
+    .execute(db)
+    .await?;
     mark_local_email_verified(db, user_id, &email).await?;
 
     Ok(ConfirmVerificationResult {

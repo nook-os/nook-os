@@ -13,6 +13,7 @@
 
 use axum::extract::{Path, State};
 use axum::Json;
+use nook_db::{Postgres, TypeMapping};
 use nook_types::*;
 use sha2::{Digest, Sha256};
 
@@ -43,13 +44,14 @@ pub async fn list(
     State(state): State<AppState>,
     auth: AuthCtx,
 ) -> ApiResult<Json<Vec<SkillSummary>>> {
-    let rows: Vec<SkillSummary> = sqlx::query_as(
-        "SELECT s.id, s.name, s.sha256, length(s.content)::bigint AS size, s.updated_at,
+    let rows: Vec<SkillSummary> = sqlx::query_as(&format!(
+        "SELECT s.id, s.name, s.sha256, {} AS size, s.updated_at,
                 u.display_name AS updated_by
          FROM skills s
          LEFT JOIN users u ON u.id = s.updated_by
          WHERE s.tenant_id = $1 ORDER BY s.name",
-    )
+        Postgres.cast("length(s.content)", "bigint")
+    ))
     .bind(auth.tenant_id)
     .fetch_all(&state.db)
     .await?;
@@ -128,17 +130,19 @@ pub async fn teach(
     )?;
     let sha = digest(&req.content);
 
-    let summary: SkillSummary = sqlx::query_as(
+    let summary: SkillSummary = sqlx::query_as(&format!(
         "INSERT INTO skills (id, tenant_id, name, content, sha256, updated_by)
          VALUES ($1, $2, $3, $4, $5, $6)
          ON CONFLICT (tenant_id, name) DO UPDATE
            SET content = EXCLUDED.content,
                sha256 = EXCLUDED.sha256,
-               updated_at = now(),
+               updated_at = {now},
                updated_by = EXCLUDED.updated_by
-         RETURNING id, name, sha256, length(content)::bigint AS size, updated_at,
+         RETURNING id, name, sha256, {size} AS size, updated_at,
            (SELECT display_name FROM users WHERE id = $6) AS updated_by",
-    )
+        now = Postgres.now(),
+        size = Postgres.cast("length(content)", "bigint"),
+    ))
     .bind(uuid::Uuid::now_v7())
     .bind(auth.tenant_id)
     .bind(&name)

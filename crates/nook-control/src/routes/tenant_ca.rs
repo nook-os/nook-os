@@ -17,6 +17,7 @@
 
 use axum::extract::{Path, State};
 use axum::Json;
+use nook_db::{Postgres, TypeMapping};
 use nook_types::*;
 
 use crate::auth::AuthCtx;
@@ -287,10 +288,11 @@ pub async fn revoke_node(
 
     // Scoped to the caller's tenant: an admin cannot reach another tenant's
     // machines even by guessing an id.
-    let done = sqlx::query(
-        "UPDATE nodes SET revoked_at = now(), updated_at = now()
+    let done = sqlx::query(&format!(
+        "UPDATE nodes SET revoked_at = {now}, updated_at = {now}
           WHERE id = $1 AND tenant_id = $2",
-    )
+        now = Postgres.now()
+    ))
     .bind(id)
     .bind(auth.tenant_id)
     .execute(&state.db)

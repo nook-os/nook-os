@@ -24,6 +24,7 @@
 
 use axum::extract::{Path, Query, State};
 use axum::Json;
+use nook_db::{Postgres, TypeMapping};
 use nook_types::*;
 use serde::Deserialize;
 use uuid::Uuid;
@@ -360,10 +361,11 @@ pub async fn create_org(
         .map(str::to_lowercase)
         .unwrap_or_else(|| slugify(name));
 
-    let row: OperatorOrg = sqlx::query_as(
+    let row: OperatorOrg = sqlx::query_as(&format!(
         "INSERT INTO orgs (id, name, slug) VALUES ($1, $2, $3)
-         RETURNING id, name, slug, created_at, 0::bigint AS tenants",
-    )
+         RETURNING id, name, slug, created_at, {} AS tenants",
+        Postgres.cast("0", "bigint")
+    ))
     .bind(Uuid::now_v7())
     .bind(name)
     .bind(&slug)
@@ -394,11 +396,12 @@ pub async fn rename_org(
     // holding anything at the deployment.
     auth.require(&state, Permission::OrgManage, Scope::Org(id))
         .await?;
-    let row: Option<OperatorOrg> = sqlx::query_as(
-        "UPDATE orgs SET name = $2, updated_at = now() WHERE id = $1
+    let row: Option<OperatorOrg> = sqlx::query_as(&format!(
+        "UPDATE orgs SET name = $2, updated_at = {} WHERE id = $1
          RETURNING id, name, slug, created_at,
                    (SELECT count(*) FROM tenants t WHERE t.org_id = orgs.id) AS tenants",
-    )
+        Postgres.now()
+    ))
     .bind(id)
     .bind(req.name.trim())
     .fetch_optional(&state.db)
@@ -444,11 +447,14 @@ pub async fn move_tenant(
     auth.require(&state, Permission::OrgManage, Scope::Org(req.org_id))
         .await?;
 
-    sqlx::query("UPDATE tenants SET org_id = $2, updated_at = now() WHERE id = $1")
-        .bind(id)
-        .bind(req.org_id)
-        .execute(&state.db)
-        .await?;
+    sqlx::query(&format!(
+        "UPDATE tenants SET org_id = $2, updated_at = {} WHERE id = $1",
+        Postgres.now()
+    ))
+    .bind(id)
+    .bind(req.org_id)
+    .execute(&state.db)
+    .await?;
 
     audit_write(
         &state,
@@ -523,10 +529,13 @@ pub async fn revoke_node(
     let tenant = crate::routes::nodes::node_tenant(&state, id).await?;
     auth.require(&state, Permission::NodeManage, Scope::Tenant(tenant))
         .await?;
-    sqlx::query("UPDATE nodes SET revoked_at = now(), updated_at = now() WHERE id = $1")
-        .bind(id)
-        .execute(&state.db)
-        .await?;
+    sqlx::query(&format!(
+        "UPDATE nodes SET revoked_at = {now}, updated_at = {now} WHERE id = $1",
+        now = Postgres.now()
+    ))
+    .bind(id)
+    .execute(&state.db)
+    .await?;
     audit_write(
         &state,
         &auth,

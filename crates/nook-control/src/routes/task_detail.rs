@@ -16,6 +16,7 @@
 
 use axum::extract::{Path, State};
 use axum::Json;
+use nook_db::{Postgres, TypeMapping};
 use nook_types::*;
 
 use crate::auth::{AuthCtx, Principal};
@@ -157,12 +158,13 @@ pub async fn update_comment(
     Json(req): Json<UpdateCommentRequest>,
 ) -> ApiResult<Json<TaskComment>> {
     owned_comment(&state, &auth, id).await?;
-    let row: TaskComment = sqlx::query_as(
-        "UPDATE task_comments SET body_md = $1, updated_at = now()
+    let row: TaskComment = sqlx::query_as(&format!(
+        "UPDATE task_comments SET body_md = $1, updated_at = {}
          WHERE id = $2 AND tenant_id = $3
          RETURNING id, tenant_id, task_id, author_type, author_id, author_name,
                    body_md, created_at, updated_at",
-    )
+        Postgres.now()
+    ))
     .bind(&req.body_md)
     .bind(id)
     .bind(auth.tenant_id)
@@ -427,9 +429,9 @@ pub async fn detail(
     // created nor is assigned must not leak its title/key through epic detail —
     // the same predicate the list/board reads enforce.
     let children: Vec<EpicChild> = if task.type_ == "epic" {
-        sqlx::query_as(
+        sqlx::query_as(&format!(
             "SELECT t.id,
-                    (b.key || '-' || t.number::text) AS key,
+                    (b.key || '-' || {}) AS key,
                     t.title, t.type, t.priority,
                     bc.type AS column_type,
                     t.archived_at
@@ -439,7 +441,8 @@ pub async fn detail(
              WHERE t.parent_task_id = $1
                AND (t.visibility <> 'private' OR t.created_by = $2 OR t.assignee_user_id = $2)
              ORDER BY CASE WHEN t.priority = 0 THEN 5 ELSE t.priority END, t.created_at",
-        )
+            Postgres.cast("t.number", "text")
+        ))
         .bind(id)
         .bind(viewer)
         .fetch_all(&state.db)

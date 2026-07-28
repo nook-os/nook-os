@@ -7,6 +7,7 @@
 
 use axum::extract::{Path, Query, State};
 use axum::Json;
+use nook_db::{Postgres, TypeMapping};
 use nook_types::*;
 use serde::Deserialize;
 
@@ -32,7 +33,7 @@ pub async fn list(
     Query(q): Query<InboxQuery>,
 ) -> ApiResult<Json<NotificationPage>> {
     let limit = q.limit.unwrap_or(50).clamp(1, 200);
-    let rows: Vec<Notification> = sqlx::query_as(
+    let rows: Vec<Notification> = sqlx::query_as(&format!(
         "SELECT id, tenant_id, user_id, level, title, body, kind, link, payload,
                 read_at, created_at
          FROM notifications
@@ -40,10 +41,11 @@ pub async fn list(
            -- Tenant-wide (user_id IS NULL) or addressed to this person. Never
            -- somebody else's.
            AND (user_id IS NULL OR user_id = $2)
-           AND (NOT $3::bool OR read_at IS NULL)
+           AND (NOT {} OR read_at IS NULL)
          ORDER BY created_at DESC
          LIMIT $4",
-    )
+        Postgres.cast("$3", "bool")
+    ))
     .bind(auth.tenant_id)
     .bind(auth.user_id.0)
     .bind(q.unread.unwrap_or(false))
@@ -81,20 +83,22 @@ pub async fn mark_read(
             let uuid: uuid::Uuid = id
                 .parse()
                 .map_err(|_| ApiError::BadRequest("that is not a notification id".into()))?;
-            sqlx::query(
-                "UPDATE notifications SET read_at = now()
+            sqlx::query(&format!(
+                "UPDATE notifications SET read_at = {}
                  WHERE id = $1 AND tenant_id = $2 AND read_at IS NULL",
-            )
+                Postgres.now()
+            ))
             .bind(uuid)
             .bind(auth.tenant_id)
             .execute(&state.db)
             .await?;
         }
         None => {
-            sqlx::query(
-                "UPDATE notifications SET read_at = now()
+            sqlx::query(&format!(
+                "UPDATE notifications SET read_at = {}
                  WHERE tenant_id = $1 AND (user_id IS NULL OR user_id = $2) AND read_at IS NULL",
-            )
+                Postgres.now()
+            ))
             .bind(auth.tenant_id)
             .bind(auth.user_id.0)
             .execute(&state.db)
@@ -292,18 +296,19 @@ pub async fn update_channel(
     // COALESCE on config means omitting it keeps the stored secrets. A UI that
     // cannot read them back must be able to save a name change without
     // blanking the token it never saw.
-    let row: Option<NotificationChannel> = sqlx::query_as(
+    let row: Option<NotificationChannel> = sqlx::query_as(&format!(
         "UPDATE notification_channels SET
             name = COALESCE($3, name),
             config = COALESCE($4, config),
             enabled = COALESCE($5, enabled),
             levels = COALESCE($6, levels),
             kinds = COALESCE($7, kinds),
-            updated_at = now()
+            updated_at = {}
          WHERE id = $1 AND tenant_id = $2
          RETURNING id, tenant_id, kind, name, enabled, levels, kinds,
                    last_ok_at, last_error, created_at, updated_at",
-    )
+        Postgres.now()
+    ))
     .bind(id)
     .bind(auth.tenant_id)
     .bind(req.name.as_deref())

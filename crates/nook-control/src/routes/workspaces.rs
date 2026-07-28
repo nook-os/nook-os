@@ -1,5 +1,6 @@
 use axum::extract::{Path, State};
 use axum::Json;
+use nook_db::{Postgres, TypeMapping};
 use nook_types::*;
 
 use crate::auth::AuthCtx;
@@ -148,10 +149,11 @@ pub async fn rename(
             .await?;
     let (previous,) = previous.ok_or(ApiError::NotFound)?;
 
-    let workspace: Workspace = sqlx::query_as(
-        "UPDATE workspaces SET name = $3, updated_at = now()
+    let workspace: Workspace = sqlx::query_as(&format!(
+        "UPDATE workspaces SET name = $3, updated_at = {}
          WHERE id = $1 AND tenant_id = $2 RETURNING *",
-    )
+        Postgres.now()
+    ))
     .bind(id)
     .bind(auth.tenant_id)
     .bind(name)

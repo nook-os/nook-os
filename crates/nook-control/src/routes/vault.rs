@@ -9,6 +9,7 @@
 
 use axum::extract::State;
 use axum::Json;
+use nook_db::{Postgres, TypeMapping};
 use nook_types::*;
 
 use crate::auth::AuthCtx;
@@ -289,10 +290,13 @@ pub async fn touch_passkey(
 ) -> ApiResult<axum::http::StatusCode> {
     // Bookkeeping for a human's device.
     auth.require_user()?;
-    sqlx::query("UPDATE user_passkeys SET last_used_at = now() WHERE id = $1 AND user_id = $2")
-        .bind(id)
-        .bind(auth.user_id)
-        .execute(&state.db)
-        .await?;
+    sqlx::query(&format!(
+        "UPDATE user_passkeys SET last_used_at = {} WHERE id = $1 AND user_id = $2",
+        Postgres.now()
+    ))
+    .bind(id)
+    .bind(auth.user_id)
+    .execute(&state.db)
+    .await?;
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
