@@ -213,80 +213,73 @@ fn sqlite_args(
     Ok((rewritten, a))
 }
 
-/// Rewrite `$1,$2,…`-numbered SQL so each list parameter's single placeholder
-/// becomes a parenthesised group of scalar placeholders, renumbering the rest,
-/// and flatten the parameters to match. Pure and engine-agnostic; the SQLite arm
-/// is its only user today.
+/// Rewrite Postgres array-membership predicates into their SQLite equivalents
+/// and flatten list parameters to scalar binds.
+///
+/// SQLite has no array type, so a list bound to `= ANY($n)` — or `!= ALL($n)` /
+/// `<> ALL($n)` — cannot travel as one value. The predicate becomes
+/// `IN ($a, $b, …)` (`NOT IN (…)` for the `ALL` forms), one scalar placeholder
+/// per element, with every later placeholder renumbered and the parameters
+/// flattened to match. `= ANY($n)` left as `ANY($n, …)` is not valid SQLite —
+/// the operator itself must change, not only the placeholder count. Pure and
+/// engine-agnostic; the SQLite arm is its only user today (Postgres binds the
+/// array directly and never calls this).
+///
+/// An empty list renders `IN (NULL)` / `NOT IN (NULL)` — always-unknown, so a
+/// `= ANY(empty)` still matches nothing, exactly as Postgres. (Its dual
+/// `!= ALL(empty)` is vacuously *true* in Postgres — matching everything — which
+/// `NOT IN (NULL)` does not reproduce; no call site binds an empty list to an
+/// `ALL` predicate, and MAIN-196, where SQLite is actually executed, owns that
+/// edge if one ever arises.)
 fn expand_lists(sql: &str, params: Vec<DbValue>) -> (String, Vec<DbValue>) {
     if !params.iter().any(DbValue::is_list) {
         return (sql.to_owned(), params);
     }
 
+    // Flatten every list into scalar binds. For each ORIGINAL placeholder record
+    // the new placeholder number(s) it maps to and whether it was a list — the
+    // walk below rewrites a list's enclosing `ANY`/`ALL` operator, a scalar's it
+    // leaves alone.
     let mut flat: Vec<DbValue> = Vec::new();
     let mut groups: Vec<Vec<usize>> = Vec::with_capacity(params.len());
+    let mut is_list: Vec<bool> = Vec::with_capacity(params.len());
     let mut next = 1usize;
     for p in params {
-        match p {
-            DbValue::TextList(xs) => {
-                let idxs = xs
-                    .into_iter()
-                    .map(|x| {
-                        flat.push(DbValue::Text(Some(x)));
-                        let i = next;
-                        next += 1;
-                        i
-                    })
-                    .collect();
-                groups.push(idxs);
-            }
-            DbValue::UuidList(xs) => {
-                let idxs = xs
-                    .into_iter()
-                    .map(|x| {
-                        flat.push(DbValue::Uuid(Some(x)));
-                        let i = next;
-                        next += 1;
-                        i
-                    })
-                    .collect();
-                groups.push(idxs);
-            }
-            DbValue::I64List(xs) => {
-                let idxs = xs
-                    .into_iter()
-                    .map(|x| {
-                        flat.push(DbValue::I64(Some(x)));
-                        let i = next;
-                        next += 1;
-                        i
-                    })
-                    .collect();
-                groups.push(idxs);
-            }
-            scalar => {
-                flat.push(scalar);
-                groups.push(vec![next]);
-                next += 1;
-            }
-        }
+        let list = p.is_list();
+        let idxs: Vec<usize> = match p {
+            DbValue::TextList(xs) => xs
+                .into_iter()
+                .map(|x| push_scalar(&mut flat, DbValue::Text(Some(x)), &mut next))
+                .collect(),
+            DbValue::UuidList(xs) => xs
+                .into_iter()
+                .map(|x| push_scalar(&mut flat, DbValue::Uuid(Some(x)), &mut next))
+                .collect(),
+            DbValue::I64List(xs) => xs
+                .into_iter()
+                .map(|x| push_scalar(&mut flat, DbValue::I64(Some(x)), &mut next))
+                .collect(),
+            scalar => vec![push_scalar(&mut flat, scalar, &mut next)],
+        };
+        groups.push(idxs);
+        is_list.push(list);
     }
 
-    let rewritten = replace_placeholders(sql, |k| {
-        let g = &groups[k - 1];
-        if g.is_empty() {
-            "NULL".to_owned()
-        } else {
-            g.iter()
-                .map(|i| format!("${i}"))
-                .collect::<Vec<_>>()
-                .join(", ")
-        }
-    });
-    (rewritten, flat)
+    (rewrite_membership(sql, &groups, &is_list), flat)
 }
 
-/// Walk `sql` replacing each `$N` placeholder (1-based) using `render`.
-fn replace_placeholders(sql: &str, mut render: impl FnMut(usize) -> String) -> String {
+/// Push one flattened scalar and hand back the placeholder number it takes.
+fn push_scalar(flat: &mut Vec<DbValue>, v: DbValue, next: &mut usize) -> usize {
+    flat.push(v);
+    let i = *next;
+    *next += 1;
+    i
+}
+
+/// Walk `sql`, substituting each `$k` placeholder (1-based, original numbering)
+/// with its flattened group and, for a list group, rewriting the Postgres
+/// array-membership operator that wraps it into SQLite's `IN` / `NOT IN`.
+fn rewrite_membership(sql: &str, groups: &[Vec<usize>], is_list: &[bool]) -> String {
     let bytes = sql.as_bytes();
     let mut out = String::with_capacity(sql.len() + 16);
     let mut i = 0;
@@ -298,7 +291,21 @@ fn replace_placeholders(sql: &str, mut render: impl FnMut(usize) -> String) -> S
                 n = n * 10 + (bytes[j] - b'0') as usize;
                 j += 1;
             }
-            out.push_str(&render(n));
+            let g = &groups[n - 1];
+            if is_list[n - 1] {
+                // The `<op> ANY(` / `<op> ALL(` opening this placeholder is
+                // already in `out`; convert it to `IN (` / `NOT IN (`.
+                open_membership(&mut out);
+                if g.is_empty() {
+                    out.push_str("NULL");
+                } else {
+                    let joined = g.iter().map(|i| format!("${i}")).collect::<Vec<_>>();
+                    out.push_str(&joined.join(", "));
+                }
+            } else {
+                out.push('$');
+                out.push_str(&g[0].to_string());
+            }
             i = j;
         } else {
             out.push(bytes[i] as char);
@@ -306,6 +313,63 @@ fn replace_placeholders(sql: &str, mut render: impl FnMut(usize) -> String) -> S
         }
     }
     out
+}
+
+/// `out` ends with the opening of a Postgres array-membership test that wraps a
+/// list placeholder — `<op> ANY(` or `<op> ALL(`, with `<op>` one of `=`, `!=`,
+/// `<>` and any whitespace between the tokens. Rewrite that tail in place to
+/// SQLite's `IN (` (for `ANY`) or `NOT IN (` (for `ALL`). If the tail is not a
+/// recognised membership open — which never happens for the generated SQL — the
+/// buffer is left exactly as it was.
+fn open_membership(out: &mut String) {
+    let original_len = out.len();
+    trim_end_ws(out);
+    if !out.ends_with('(') {
+        out.truncate(original_len);
+        return;
+    }
+    out.pop(); // the '('
+    trim_end_ws(out);
+    let negated = if ends_with_ci(out, "ALL") {
+        true
+    } else if ends_with_ci(out, "ANY") {
+        false
+    } else {
+        out.truncate(original_len);
+        return;
+    };
+    pop_chars(out, 3); // ANY / ALL
+    trim_end_ws(out);
+    if out.ends_with("!=") || out.ends_with("<>") {
+        pop_chars(out, 2);
+    } else if out.ends_with('=') {
+        pop_chars(out, 1);
+    }
+    trim_end_ws(out);
+    out.push(' ');
+    out.push_str(if negated { "NOT IN (" } else { "IN (" });
+}
+
+/// Drop trailing whitespace from `s` in place.
+fn trim_end_ws(s: &mut String) {
+    while s.chars().next_back().is_some_and(char::is_whitespace) {
+        s.pop();
+    }
+}
+
+/// Drop the last `n` `char`s from `s`.
+fn pop_chars(s: &mut String, n: usize) {
+    for _ in 0..n {
+        s.pop();
+    }
+}
+
+/// ASCII-case-insensitive suffix test on the raw bytes (the keyword is ASCII, so
+/// this needs no char-boundary care).
+fn ends_with_ci(s: &str, suffix: &str) -> bool {
+    let b = s.as_bytes();
+    let sb = suffix.as_bytes();
+    b.len() >= sb.len() && b[b.len() - sb.len()..].eq_ignore_ascii_case(sb)
 }
 
 // ── the dispatch surface ─────────────────────────────────────────────────────
@@ -843,7 +907,7 @@ mod tests {
     }
 
     #[test]
-    fn a_list_expands_and_renumbers_the_tail() {
+    fn a_list_expands_to_in_and_renumbers_the_tail() {
         let (sql, params) = expand_lists(
             "SELECT * FROM t WHERE tenant = $1 AND name = ANY($2) AND live = $3",
             vec![
@@ -852,9 +916,11 @@ mod tests {
                 DbValue::Bool(Some(true)),
             ],
         );
+        // `= ANY($2)` becomes `IN ($2, $3, $4)` — the operator changes, not just
+        // the placeholder count: `ANY($2, $3, $4)` is not valid SQLite.
         assert_eq!(
             sql,
-            "SELECT * FROM t WHERE tenant = $1 AND name = ANY($2, $3, $4) AND live = $5"
+            "SELECT * FROM t WHERE tenant = $1 AND name IN ($2, $3, $4) AND live = $5"
         );
         assert_eq!(params.len(), 5);
         assert!(matches!(params[0], DbValue::Uuid(_)));
@@ -863,17 +929,19 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_list_renders_null() {
+    fn an_empty_list_becomes_in_null() {
         let (sql, params) = expand_lists(
             "SELECT * FROM t WHERE id = ANY($1)",
             vec![DbValue::UuidList(vec![])],
         );
-        assert_eq!(sql, "SELECT * FROM t WHERE id = ANY(NULL)");
+        // `IN (NULL)` is valid SQLite and matches nothing, exactly as an empty
+        // `= ANY` does in Postgres.
+        assert_eq!(sql, "SELECT * FROM t WHERE id IN (NULL)");
         assert_eq!(params.len(), 0);
     }
 
     #[test]
-    fn two_lists_both_expand() {
+    fn two_lists_both_become_in() {
         let (sql, params) = expand_lists(
             "WHERE a = ANY($1) AND b = $2 AND c = ANY($3)",
             vec![
@@ -882,7 +950,49 @@ mod tests {
                 DbValue::TextList(vec!["x".into()]),
             ],
         );
-        assert_eq!(sql, "WHERE a = ANY($1, $2) AND b = $3 AND c = ANY($4)");
+        assert_eq!(sql, "WHERE a IN ($1, $2) AND b = $3 AND c IN ($4)");
         assert_eq!(params.len(), 4);
+    }
+
+    #[test]
+    fn not_all_becomes_not_in() {
+        // The `!= ALL($n)` form (discovery.rs / ws/node.rs) is non-membership.
+        let (sql, params) = expand_lists(
+            "DELETE FROM t WHERE node = $1 AND path != ALL($2)",
+            vec![
+                DbValue::Uuid(Some(uuid::Uuid::nil())),
+                DbValue::TextList(vec!["a".into(), "b".into()]),
+            ],
+        );
+        assert_eq!(
+            sql,
+            "DELETE FROM t WHERE node = $1 AND path NOT IN ($2, $3)"
+        );
+        assert_eq!(params.len(), 3);
+    }
+
+    #[test]
+    fn angle_all_also_becomes_not_in() {
+        let (sql, params) = expand_lists(
+            "WHERE tmux <> ALL($1)",
+            vec![DbValue::TextList(vec!["x".into()])],
+        );
+        assert_eq!(sql, "WHERE tmux NOT IN ($1)");
+        assert_eq!(params.len(), 1);
+    }
+
+    #[test]
+    fn no_lists_is_still_a_passthrough_with_any_present() {
+        // A bare `ANY` with no list bound to it (e.g. an `OptTextArray` under the
+        // Postgres arm) is untouched — only list groups trigger the rewrite.
+        let (sql, params) = expand_lists(
+            "WHERE x = ANY($1) AND y = ANY($2)",
+            vec![
+                DbValue::OptTextArray(Some(vec!["a".into()])),
+                DbValue::I64List(vec![7]),
+            ],
+        );
+        assert_eq!(sql, "WHERE x = ANY($1) AND y IN ($2)");
+        assert_eq!(params.len(), 2);
     }
 }
