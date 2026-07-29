@@ -797,6 +797,13 @@ pub struct TaskItem {
     pub worktree_node_id: Option<NodeId>,
     pub session_id: Option<SessionId>,
     pub pr_url: Option<String>,
+    /// Transient dispatch signal (MAIN-227), not a stored column: `true` when the
+    /// just-assigned node has no clone checkout of the task's workspace, so the
+    /// caller must clone there before start-work. Set only on the `dispatch`
+    /// result; `false` (its default) on every other read.
+    #[serde(default)]
+    #[sqlx(skip)]
+    pub needs_clone: bool,
     /// `0` none, `1` urgent, `2` high, `3` medium, `4` low — Linear's
     /// convention, so values port cleanly. Note `0` sorts LAST: "nobody set a
     /// priority" is not a claim that the work is least important.

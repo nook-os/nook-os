@@ -27,8 +27,11 @@ pub async fn node(
 ) -> ApiResult<Json<ScheduledNode>> {
     // The New Work "Auto" picker resolves only nodes the session user owns
     // (MAIN-131), matching where a session may actually start.
-    let node_id =
-        schedule::pick(&state, auth.tenant_id, Some(auth.user_id), q.workspace_id).await?;
+    // The picker only needs the chosen node here; needs-clone is surfaced at
+    // dispatch time (MAIN-227), not on this pre-selection.
+    let node_id = schedule::pick(&state, auth.tenant_id, Some(auth.user_id), q.workspace_id)
+        .await?
+        .node_id();
     let node_name = state
         .db
         .query_scalar::<String>("SELECT name FROM nodes WHERE id = $1", params![node_id])

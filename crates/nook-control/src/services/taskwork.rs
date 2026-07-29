@@ -94,10 +94,16 @@ pub async fn dispatch(
     // is the acting identity (None on the MCP path, which then has no eligible
     // node rather than a tenant-wide pick), distinct from `viewer`, which the
     // MCP path fills with the tenant owner for visibility only.
-    let node = crate::services::schedule::pick(state, tenant, user, task.workspace_id).await?;
+    let placement = crate::services::schedule::pick(state, tenant, user, task.workspace_id).await?;
+    let node = placement.node_id();
+    // MAIN-227 AC-3: when the chosen node has no clone checkout of the workspace,
+    // the node is still assigned but the outcome carries `needs_clone` — the
+    // "clone it there first" decision is surfaced here, not as a late start-work
+    // 400. Dispatch never auto-clones (NG-2).
+    let needs_clone = placement.needs_clone();
     let todo = column_id(state, task.board_id, "Todo", 1).await?;
 
-    let updated: TaskItem = state
+    let mut updated: TaskItem = state
         .db
         .query_one(
             &format!(
@@ -108,6 +114,7 @@ pub async fn dispatch(
             params![task_id, node, todo],
         )
         .await?;
+    updated.needs_clone = needs_clone;
 
     events::record(
         state,
@@ -116,7 +123,9 @@ pub async fn dispatch(
             // Attribute the dispatch to its acting user, like every other
             // lifecycle event, so activity scoping can place it (MAIN-134 AC-3).
             .actor("user", viewer.0)
-            .payload(serde_json::json!({ "task_id": task_id, "node_id": node })),
+            .payload(
+                serde_json::json!({ "task_id": task_id, "node_id": node, "needs_clone": needs_clone }),
+            ),
     )
     .await;
     fire_automation(state, tenant, &task, &updated).await;

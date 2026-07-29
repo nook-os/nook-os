@@ -12038,6 +12038,10 @@
             },
             "description": "Every label on this task. Populated by one query for a whole board\nrather than one per task."
           },
+          "needs_clone": {
+            "type": "boolean",
+            "description": "Transient dispatch signal (MAIN-227), not a stored column: `true` when the\njust-assigned node has no clone checkout of the task's workspace, so the\ncaller must clone there before start-work. Set only on the `dispatch`\nresult; `false` (its default) on every other read."
+          },
           "number": {
             "type": [
               "integer",

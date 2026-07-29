@@ -9,11 +9,69 @@
 //! rule; the spawn guard is the enforcing half.
 
 use nook_db::{params, Db};
-use nook_types::{NodeId, NodeResources, TenantId, UserId, WorkspaceId};
+use nook_types::{NodeId, NodeResources, NodeWorkspaceId, TenantId, UserId, WorkspaceId};
 use uuid::Uuid;
 
 use crate::error::{ApiError, ApiResult};
 use crate::state::AppState;
+
+/// The result of placement (MAIN-227): an explicit outcome, never a bare node
+/// that might have no checkout. `dispatch` and the New Work "Auto" picker both
+/// consume this instead of guessing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Placement {
+    /// An owned, online node that can host the work now: it has a `kind='clone'`,
+    /// present checkout of the workspace (`checkout_id = Some`), or the task has
+    /// no workspace at all (`checkout_id = None`, rank-only — needs-clone never
+    /// applies).
+    Placed {
+        node_id: NodeId,
+        checkout_id: Option<NodeWorkspaceId>,
+    },
+    /// The best owned online node was chosen, but it has no clone checkout of the
+    /// workspace — the caller must clone there first. Surfaced at dispatch time
+    /// (AC-3) instead of as a late start-work 400.
+    NeedsClone { node_id: NodeId },
+}
+
+impl Placement {
+    /// The node placement chose, whichever outcome.
+    pub fn node_id(&self) -> NodeId {
+        match self {
+            Placement::Placed { node_id, .. } | Placement::NeedsClone { node_id } => *node_id,
+        }
+    }
+
+    /// True only for the needs-clone outcome — what `dispatch` records.
+    pub fn needs_clone(&self) -> bool {
+        matches!(self, Placement::NeedsClone { .. })
+    }
+}
+
+/// The PRESENT clone checkouts of a workspace, keyed node → checkout id (first
+/// checkout per node, by discovery order). A `worktree` row, or a tombstoned
+/// (`missing_at` set) clone, is deliberately excluded — only a live clone makes a
+/// node a placement host (MAIN-227 AC-2, the worktree-from-clone-only invariant).
+pub async fn clone_hosts(
+    db: &nook_db::DbPool,
+    tenant: TenantId,
+    workspace: WorkspaceId,
+) -> ApiResult<std::collections::HashMap<NodeId, NodeWorkspaceId>> {
+    let hosts: Vec<(NodeId, NodeWorkspaceId)> = db
+        .query_all(
+            "SELECT node_id, id FROM node_workspaces
+             WHERE tenant_id = $1 AND workspace_id = $2
+               AND kind = 'clone' AND missing_at IS NULL
+             ORDER BY discovered_at",
+            params![tenant, workspace],
+        )
+        .await?;
+    let mut map = std::collections::HashMap::new();
+    for (node, checkout) in hosts {
+        map.entry(node).or_insert(checkout);
+    }
+    Ok(map)
+}
 
 /// The person behind a user — the identity a node's `owner_person_id` is keyed
 /// on. Resolved locally so scheduling carries no dependency on other modules'
@@ -69,7 +127,7 @@ pub async fn pick(
     tenant: TenantId,
     actor: Option<UserId>,
     workspace: Option<WorkspaceId>,
-) -> ApiResult<NodeId> {
+) -> ApiResult<Placement> {
     let Some(person) = (match actor {
         Some(u) => person_of(state, u).await?,
         None => None,
@@ -82,30 +140,37 @@ pub async fn pick(
         return Err(no_eligible());
     }
 
-    // Workspace affinity, preserved WITHIN the owned set: prefer an owned node
-    // that hosts the checkout, but never fall back to an unowned one — `among`
-    // and the final ranking both draw only from `all`, which is already
-    // ownership-filtered (AC-3).
-    if let Some(ws) = workspace {
-        let hosts: Vec<(NodeId,)> = state
-            .db
-            .query_all(
-                "SELECT DISTINCT node_id FROM node_workspaces
-                 WHERE tenant_id = $1 AND workspace_id = $2 AND missing_at IS NULL",
-                params![tenant, ws],
-            )
-            .await?;
-        let host_set: std::collections::HashSet<NodeId> =
-            hosts.into_iter().map(|(id,)| id).collect();
-        let among: Vec<(NodeId, NodeResources)> = all
-            .iter()
-            .filter(|(id, _)| host_set.contains(id))
-            .cloned()
-            .collect();
-        if let Some(node) = nook_dispatcher::pick_node(&among) {
-            return Ok(node);
-        }
+    // No workspace: rank across owned online nodes exactly as before; there is no
+    // checkout affinity and needs-clone does not apply (AC-3).
+    let Some(ws) = workspace else {
+        let node_id = nook_dispatcher::pick_node(&all).ok_or_else(no_eligible)?;
+        return Ok(Placement::Placed {
+            node_id,
+            checkout_id: None,
+        });
+    };
+
+    // A node HOSTS the workspace only when it has a `kind='clone'`, present
+    // checkout of it (MAIN-227 AC-2): a worktree, or a tombstoned clone, is not a
+    // placement host — the worktree-from-clone-only invariant.
+    let clone_at = clone_hosts(&state.db, tenant, ws).await?;
+
+    // Prefer an owned online node that already hosts a clone; rank only within
+    // that set (ownership-filtered `all`).
+    let among: Vec<(NodeId, NodeResources)> = all
+        .iter()
+        .filter(|(id, _)| clone_at.contains_key(id))
+        .cloned()
+        .collect();
+    if let Some(node_id) = nook_dispatcher::pick_node(&among) {
+        return Ok(Placement::Placed {
+            node_id,
+            checkout_id: clone_at.get(&node_id).copied(),
+        });
     }
 
-    nook_dispatcher::pick_node(&all).ok_or_else(no_eligible)
+    // None of the owned online nodes hosts a clone: name the best one to clone
+    // onto — an EXPLICIT needs-clone, not a silent placement that fails later.
+    let node_id = nook_dispatcher::pick_node(&all).ok_or_else(no_eligible)?;
+    Ok(Placement::NeedsClone { node_id })
 }

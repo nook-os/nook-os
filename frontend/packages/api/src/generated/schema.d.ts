@@ -5120,6 +5120,13 @@ export interface components {
              */
             labels?: components["schemas"]["Label"][];
             /**
+             * @description Transient dispatch signal (MAIN-227), not a stored column: `true` when the
+             *     just-assigned node has no clone checkout of the task's workspace, so the
+             *     caller must clone there before start-work. Set only on the `dispatch`
+             *     result; `false` (its default) on every other read.
+             */
+            needs_clone?: boolean;
+            /**
              * Format: int32
              * @description Per-board sequence behind the human key. `None` only for a task created
              *     before keys existed and not yet backfilled.
