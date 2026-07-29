@@ -3,7 +3,7 @@
 //! external providers are registered but unconfigured in milestone 1.
 
 use async_trait::async_trait;
-use nook_db::{DbPool, Postgres, TypeMapping};
+use nook_db::{params, Db, DbPool, Postgres, TypeMapping};
 use nook_types::{
     Board, BoardDetail, BoardId, ColumnId, CreateTaskRequest, TaskId, TaskItem, TenantId,
     UpdateTaskRequest, UserId,
@@ -82,13 +82,13 @@ async fn validate_parent(
                 "parent {parent_ref:?} is not a task in this tenant"
             ))
         })?;
-    let parent: Option<TaskItem> =
-        sqlx::query_as("SELECT * FROM tasks WHERE id = $1 AND tenant_id = $2")
-            .bind(parent_id)
-            .bind(tenant)
-            .fetch_optional(db)
-            .await
-            .map_err(ApiError::from)?;
+    let parent: Option<TaskItem> = db
+        .query_opt(
+            "SELECT * FROM tasks WHERE id = $1 AND tenant_id = $2",
+            params![parent_id, tenant],
+        )
+        .await
+        .map_err(ApiError::from)?;
     let parent = parent.ok_or_else(|| {
         ApiError::BadRequest(format!(
             "parent {parent_ref:?} is not a task in this tenant"
@@ -152,37 +152,43 @@ impl KanbanProvider for LocalBoardProvider {
     }
 
     async fn list_boards(&self, tenant: TenantId) -> ProviderResult<Vec<Board>> {
-        let boards = sqlx::query_as(
-            "SELECT * FROM boards WHERE tenant_id = $1 AND provider = 'local' ORDER BY created_at",
-        )
-        .bind(tenant)
-        .fetch_all(&self.db)
-        .await
-        .map_err(ApiError::from)?;
+        let boards: Vec<Board> = self
+            .db
+            .query_all(
+                "SELECT * FROM boards WHERE tenant_id = $1 AND provider = 'local' ORDER BY created_at",
+                params![tenant],
+            )
+            .await
+            .map_err(ApiError::from)?;
         Ok(boards)
     }
 
     async fn board_detail(&self, tenant: TenantId, board: BoardId) -> ProviderResult<BoardDetail> {
-        let b: Board = sqlx::query_as("SELECT * FROM boards WHERE id = $1 AND tenant_id = $2")
-            .bind(board)
-            .bind(tenant)
-            .fetch_optional(&self.db)
+        let b: Board = self
+            .db
+            .query_opt(
+                "SELECT * FROM boards WHERE id = $1 AND tenant_id = $2",
+                params![board, tenant],
+            )
             .await
             .map_err(ApiError::from)?
             .ok_or(ApiError::NotFound)?;
-        let columns = sqlx::query_as(
-            "SELECT * FROM board_columns WHERE board_id = $1 ORDER BY position, name",
-        )
-        .bind(board)
-        .fetch_all(&self.db)
-        .await
-        .map_err(ApiError::from)?;
-        let tasks =
-            sqlx::query_as("SELECT * FROM tasks WHERE board_id = $1 ORDER BY position, created_at")
-                .bind(board)
-                .fetch_all(&self.db)
-                .await
-                .map_err(ApiError::from)?;
+        let columns: Vec<nook_types::BoardColumn> = self
+            .db
+            .query_all(
+                "SELECT * FROM board_columns WHERE board_id = $1 ORDER BY position, name",
+                params![board],
+            )
+            .await
+            .map_err(ApiError::from)?;
+        let tasks: Vec<TaskItem> = self
+            .db
+            .query_all(
+                "SELECT * FROM tasks WHERE board_id = $1 ORDER BY position, created_at",
+                params![board],
+            )
+            .await
+            .map_err(ApiError::from)?;
         Ok(BoardDetail {
             board: b,
             columns,
@@ -223,24 +229,24 @@ impl KanbanProvider for LocalBoardProvider {
         let column_id: ColumnId = match (req.column_id, req.column_type.as_deref()) {
             (Some(c), _) => c,
             (None, Some(ct)) => crate::services::tasks::column_of_type(&self.db, board, ct).await?,
-            (None, None) => {
-                let (id,): (ColumnId,) = sqlx::query_as(
+            (None, None) => self
+                .db
+                .query_scalar_opt::<ColumnId>(
                     "SELECT id FROM board_columns WHERE board_id = $1 ORDER BY position LIMIT 1",
+                    params![board],
                 )
-                .bind(board)
-                .fetch_optional(&self.db)
                 .await
                 .map_err(ApiError::from)?
-                .ok_or_else(|| ApiError::BadRequest("board has no columns".into()))?;
-                id
-            }
+                .ok_or_else(|| ApiError::BadRequest("board has no columns".into()))?,
         };
-        let (max_pos,): (Option<i32>,) =
-            sqlx::query_as("SELECT max(position) FROM tasks WHERE column_id = $1")
-                .bind(column_id)
-                .fetch_one(&self.db)
-                .await
-                .map_err(ApiError::from)?;
+        let max_pos: Option<i32> = self
+            .db
+            .query_scalar(
+                "SELECT max(position) FROM tasks WHERE column_id = $1",
+                params![column_id],
+            )
+            .await
+            .map_err(ApiError::from)?;
 
         // Number allocation and the insert share one transaction, and the
         // board row is locked while it happens. Without the lock two concurrent
@@ -332,26 +338,28 @@ impl KanbanProvider for LocalBoardProvider {
         // Load the task's current type/board/parent once — the column-type
         // resolution, the epic-retype guard, and the parent validation all need
         // it, and one read keeps them consistent.
-        let (cur_type, cur_board, cur_parent): (String, BoardId, Option<TaskId>) = sqlx::query_as(
-            "SELECT type, board_id, parent_task_id FROM tasks WHERE id = $1 AND tenant_id = $2",
-        )
-        .bind(task)
-        .bind(tenant)
-        .fetch_optional(&self.db)
-        .await
-        .map_err(ApiError::from)?
-        .ok_or(ApiError::NotFound)?;
+        let (cur_type, cur_board, cur_parent): (String, BoardId, Option<TaskId>) = self
+            .db
+            .query_opt(
+                "SELECT type, board_id, parent_task_id FROM tasks WHERE id = $1 AND tenant_id = $2",
+                params![task, tenant],
+            )
+            .await
+            .map_err(ApiError::from)?
+            .ok_or(ApiError::NotFound)?;
 
         // AC-3: changing an epic's type away from `epic` while it still has
         // children is refused (naming the count) — the children would be
         // orphaned onto a non-epic parent.
         if cur_type == "epic" && req.type_.as_deref().is_some_and(|t| t != "epic") {
-            let (children,): (i64,) =
-                sqlx::query_as("SELECT count(*) FROM tasks WHERE parent_task_id = $1")
-                    .bind(task)
-                    .fetch_one(&self.db)
-                    .await
-                    .map_err(ApiError::from)?;
+            let children: i64 = self
+                .db
+                .query_scalar(
+                    "SELECT count(*) FROM tasks WHERE parent_task_id = $1",
+                    params![task],
+                )
+                .await
+                .map_err(ApiError::from)?;
             if children > 0 {
                 return Err(ApiError::BadRequest(format!(
                     "cannot change this epic's type: it still has {children} child ticket(s) — \
@@ -394,16 +402,19 @@ impl KanbanProvider for LocalBoardProvider {
             (None, None) => None,
         };
 
-        let updated: Option<TaskItem> = sqlx::query_as(&format!(
-            // Workspace cannot use COALESCE like the rest: COALESCE reads a
-            // NULL as "leave it", which is exactly the instruction to clear
-            // it. The flag says whether the caller mentioned the field at all.
-            //
-            // `$11` is the optimistic-concurrency precondition (MAIN-36): NULL
-            // means "unguarded" (behaviour unchanged), otherwise the row updates
-            // only while its `updated_at` still equals what the caller last saw.
-            // A guarded update that touches 0 rows is a lost race, handled below.
-            "UPDATE tasks SET
+        let updated: Option<TaskItem> = self
+            .db
+            .query_opt(
+                &format!(
+                    // Workspace cannot use COALESCE like the rest: COALESCE reads a
+                    // NULL as "leave it", which is exactly the instruction to clear
+                    // it. The flag says whether the caller mentioned the field at all.
+                    //
+                    // `$11` is the optimistic-concurrency precondition (MAIN-36): NULL
+                    // means "unguarded" (behaviour unchanged), otherwise the row updates
+                    // only while its `updated_at` still equals what the caller last saw.
+                    // A guarded update that touches 0 rows is a lost race, handled below.
+                    "UPDATE tasks SET
                 title = COALESCE($3, title),
                 description = COALESCE($4, description),
                 column_id = COALESCE($5, column_id),
@@ -418,30 +429,32 @@ impl KanbanProvider for LocalBoardProvider {
              WHERE id = $1 AND tenant_id = $2
                AND ({guard} IS NULL OR updated_at = $11)
              RETURNING *",
-            now = Postgres.now(),
-            guard = Postgres.cast("$11", "timestamptz")
-        ))
-        .bind(task)
-        .bind(tenant)
-        .bind(&req.title)
-        .bind(&req.description)
-        .bind(column_id)
-        .bind(req.position)
-        .bind(req.assignee_user_id)
-        .bind(req.priority.map(|p| p.clamp(0, 4)))
-        .bind(req.workspace_id.is_some())
-        .bind(req.workspace_id.flatten())
-        .bind(req.expected_updated_at)
-        // $12: absent leaves the type unchanged (COALESCE); validated above.
-        .bind(req.type_.as_deref())
-        // $13: absent leaves the visibility unchanged (COALESCE); validated above.
-        .bind(req.visibility.as_deref())
-        // $14/$15: the parent tri-state (set flag + value); validated above.
-        .bind(set_parent)
-        .bind(parent_val)
-        .fetch_optional(&self.db)
-        .await
-        .map_err(ApiError::from)?;
+                    now = Postgres.now(),
+                    guard = Postgres.cast("$11", "timestamptz")
+                ),
+                params![
+                    task,
+                    tenant,
+                    req.title,
+                    req.description,
+                    column_id.map(|c| c.0),
+                    req.position,
+                    req.assignee_user_id.map(|u| u.0),
+                    req.priority.map(|p| p.clamp(0, 4)),
+                    req.workspace_id.is_some(),
+                    req.workspace_id.flatten().map(|w| w.0),
+                    req.expected_updated_at,
+                    // $12: absent leaves the type unchanged (COALESCE); validated above.
+                    req.type_.as_deref(),
+                    // $13: absent leaves the visibility unchanged (COALESCE); validated above.
+                    req.visibility.as_deref(),
+                    // $14/$15: the parent tri-state (set flag + value); validated above.
+                    set_parent,
+                    parent_val.map(|t| t.0)
+                ],
+            )
+            .await
+            .map_err(ApiError::from)?;
 
         if let Some(t) = updated {
             return Ok(t);
@@ -451,13 +464,14 @@ impl KanbanProvider for LocalBoardProvider {
         // (404). With one, tell a lost race (409, carrying the CURRENT task so
         // the caller can reconcile without a second round-trip) apart from a
         // task that truly no longer exists (404).
-        let current: Option<TaskItem> =
-            sqlx::query_as("SELECT * FROM tasks WHERE id = $1 AND tenant_id = $2")
-                .bind(task)
-                .bind(tenant)
-                .fetch_optional(&self.db)
-                .await
-                .map_err(ApiError::from)?;
+        let current: Option<TaskItem> = self
+            .db
+            .query_opt(
+                "SELECT * FROM tasks WHERE id = $1 AND tenant_id = $2",
+                params![task, tenant],
+            )
+            .await
+            .map_err(ApiError::from)?;
         match current {
             Some(cur) if req.expected_updated_at.is_some() => {
                 let body = serde_json::to_string(&cur)
