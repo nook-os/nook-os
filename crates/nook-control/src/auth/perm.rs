@@ -20,6 +20,7 @@
 //! branching lives in `role_permissions` rows, where it can be listed and
 //! audited, rather than in code where it can only be read.
 
+use nook_db::{params, Db};
 use nook_types::TenantId;
 use uuid::Uuid;
 
@@ -117,8 +118,10 @@ impl AuthCtx {
             Scope::Tenant(t) => (org_of(state, t).await?, Some(t.0)),
         };
 
-        let hit: Option<(bool,)> = sqlx::query_as(
-            "SELECT true
+        let hit: Option<(bool,)> = state
+            .db
+            .query_opt(
+                "SELECT true
              FROM role_bindings b
              JOIN role_permissions rp ON rp.role_key = b.role_key
              WHERE b.subject_type = 'user'
@@ -133,13 +136,9 @@ impl AuthCtx {
                   OR (b.scope_type = 'tenant' AND b.scope_id = $4)
                )
              LIMIT 1",
-        )
-        .bind(self.user_id.0)
-        .bind(permission.key())
-        .bind(org_id)
-        .bind(tenant_id)
-        .fetch_optional(&state.db)
-        .await?;
+                params![self.user_id.0, permission.key(), org_id, tenant_id],
+            )
+            .await?;
 
         if hit.is_some() {
             return Ok(());
@@ -162,9 +161,9 @@ impl AuthCtx {
 }
 
 async fn org_of(state: &AppState, tenant: TenantId) -> Result<Option<Uuid>, ApiError> {
-    let row: Option<(Option<Uuid>,)> = sqlx::query_as("SELECT org_id FROM tenants WHERE id = $1")
-        .bind(tenant)
-        .fetch_optional(&state.db)
+    let row: Option<(Option<Uuid>,)> = state
+        .db
+        .query_opt("SELECT org_id FROM tenants WHERE id = $1", params![tenant])
         .await?;
     Ok(row.and_then(|(o,)| o))
 }

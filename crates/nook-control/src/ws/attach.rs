@@ -7,7 +7,7 @@ use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, State};
 use axum::response::{IntoResponse, Response};
 use futures_util::{SinkExt, StreamExt};
-use nook_db::{Postgres, TypeMapping};
+use nook_db::{params, Db, Postgres, TypeMapping};
 use nook_proto::{AttachClientMessage, AttachServerMessage, ControlToNode, UiEvent};
 use nook_types::{Session, SessionId};
 
@@ -21,9 +21,9 @@ pub async fn attach_ws(
     Path(id): Path<SessionId>,
     ws: WebSocketUpgrade,
 ) -> Response {
-    let session: Option<Session> = match sqlx::query_as("SELECT * FROM sessions WHERE id = $1")
-        .bind(id)
-        .fetch_optional(&state.db)
+    let session: Option<Session> = match state
+        .db
+        .query_opt::<Session>("SELECT * FROM sessions WHERE id = $1", params![id])
         .await
     {
         Ok(s) => s,
@@ -163,13 +163,15 @@ async fn handle(state: AppState, socket: WebSocket, session: Session) {
         state
             .registry
             .send_to_node(session.node_id, ControlToNode::DetachSession { session_id });
-        let still_running: Option<(String,)> =
-            sqlx::query_as("SELECT status FROM sessions WHERE id = $1")
-                .bind(session_id)
-                .fetch_optional(&state.db)
-                .await
-                .ok()
-                .flatten();
+        let still_running: Option<(String,)> = state
+            .db
+            .query_opt(
+                "SELECT status FROM sessions WHERE id = $1",
+                params![session_id],
+            )
+            .await
+            .ok()
+            .flatten();
         if matches!(still_running, Some((ref s,)) if s == "running" || s == "starting") {
             mark_status(&state, &session, "detached").await;
         }
@@ -178,16 +180,18 @@ async fn handle(state: AppState, socket: WebSocket, session: Session) {
 }
 
 async fn mark_status(state: &AppState, session: &Session, status: &str) {
-    let res = sqlx::query(&format!(
-        "UPDATE sessions SET status = $2, updated_at = {now}
+    let res = state
+        .db
+        .exec(
+            &format!(
+                "UPDATE sessions SET status = $2, updated_at = {now}
          WHERE id = $1 AND status IN ('starting', 'running', 'detached')",
-        now = Postgres.now()
-    ))
-    .bind(session.id)
-    .bind(status)
-    .execute(&state.db)
-    .await;
-    if matches!(res, Ok(r) if r.rows_affected() > 0) {
+                now = Postgres.now()
+            ),
+            params![session.id, status],
+        )
+        .await;
+    if matches!(res, Ok(r) if r > 0) {
         state.registry.publish(
             session.tenant_id,
             UiEvent::SessionStatus {

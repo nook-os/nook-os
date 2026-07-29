@@ -19,7 +19,7 @@
 //! visibility without anything having to insert defaults, and a bug in a
 //! seeding path cannot accidentally open a field.
 
-use nook_db::DbPool;
+use nook_db::{params, Db, DbPool};
 use nook_types::{PolicyField, TenantId};
 use uuid::Uuid;
 
@@ -81,15 +81,14 @@ impl Field {
 ///
 /// The newest row wins; no row means off.
 pub async fn enabled(db: &DbPool, org: Uuid, field: Field) -> ApiResult<bool> {
-    let row: Option<(bool,)> = sqlx::query_as(
-        "SELECT enabled FROM org_visibility_policy
+    let row: Option<(bool,)> = db
+        .query_opt(
+            "SELECT enabled FROM org_visibility_policy
          WHERE org_id = $1 AND field = $2
          ORDER BY changed_at DESC LIMIT 1",
-    )
-    .bind(org)
-    .bind(field.key())
-    .fetch_optional(db)
-    .await?;
+            params![org, field.key()],
+        )
+        .await?;
     Ok(row.map(|(e,)| e).unwrap_or(false))
 }
 
@@ -124,22 +123,19 @@ pub async fn set(
         .ok_or_else(|| ApiError::BadRequest(format!("{field:?} is not a policy field")))?;
 
     // Appended, never updated: the history IS the feature.
-    sqlx::query(
-        "INSERT INTO org_visibility_policy (id, org_id, field, enabled, changed_by)
+    state
+        .db
+        .exec(
+            "INSERT INTO org_visibility_policy (id, org_id, field, enabled, changed_by)
          VALUES ($1, $2, $3, $4, $5)",
-    )
-    .bind(Uuid::now_v7())
-    .bind(org)
-    .bind(f.key())
-    .bind(enabled_now)
-    .bind(by)
-    .execute(&state.db)
-    .await?;
+            params![Uuid::now_v7(), org, f.key(), enabled_now, by],
+        )
+        .await?;
 
     // Every tenant in the org hears about it, in their own tenant's feed.
-    let tenants: Vec<(TenantId,)> = sqlx::query_as("SELECT id FROM tenants WHERE org_id = $1")
-        .bind(org)
-        .fetch_all(&state.db)
+    let tenants: Vec<(TenantId,)> = state
+        .db
+        .query_all("SELECT id FROM tenants WHERE org_id = $1", params![org])
         .await?;
 
     for (tenant,) in tenants {

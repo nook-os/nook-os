@@ -12,7 +12,7 @@
 use axum::extract::{Path, State};
 use axum::Json;
 use chrono::{Duration, Utc};
-use nook_db::{Postgres, TypeMapping};
+use nook_db::{params, Db, Postgres, TypeMapping};
 use nook_types::*;
 use rand::distr::Alphanumeric;
 use rand::Rng;
@@ -57,18 +57,21 @@ pub async fn create(
     let token = format!("{USER_TOKEN_PREFIX}{body_chars}");
 
     let id = uuid::Uuid::now_v7();
-    sqlx::query(
-        "INSERT INTO user_tokens (id, tenant_id, user_id, token_hash, name, expires_at)
+    state
+        .db
+        .exec(
+            "INSERT INTO user_tokens (id, tenant_id, user_id, token_hash, name, expires_at)
          VALUES ($1, $2, $3, $4, $5, $6)",
-    )
-    .bind(id)
-    .bind(auth.tenant_id)
-    .bind(auth.user_id)
-    .bind(hash_token(&token))
-    .bind(name)
-    .bind(expires_at)
-    .execute(&state.db)
-    .await?;
+            params![
+                id,
+                auth.tenant_id,
+                auth.user_id,
+                hash_token(&token),
+                name,
+                expires_at
+            ],
+        )
+        .await?;
 
     events::record(
         &state,
@@ -95,14 +98,17 @@ pub async fn create(
     responses((status = 200, body = [UserToken])))]
 pub async fn list(State(state): State<AppState>, auth: AuthCtx) -> ApiResult<Json<Vec<UserToken>>> {
     auth.require_user()?;
-    let rows: Vec<UserToken> = sqlx::query_as(&format!(
-        "SELECT {}, name, last_used_at, expires_at, created_at
+    let rows: Vec<UserToken> = state
+        .db
+        .query_all(
+            &format!(
+                "SELECT {}, name, last_used_at, expires_at, created_at
          FROM user_tokens WHERE user_id = $1 ORDER BY created_at DESC",
-        Postgres.cast("id", "text")
-    ))
-    .bind(auth.user_id)
-    .fetch_all(&state.db)
-    .await?;
+                Postgres.cast("id", "text")
+            ),
+            params![auth.user_id],
+        )
+        .await?;
     Ok(Json(rows))
 }
 
@@ -123,12 +129,14 @@ pub async fn revoke(
 
     // Scoped to the caller: one user revoking another's credential is an
     // administrative act, not a self-service one.
-    let done = sqlx::query("DELETE FROM user_tokens WHERE id = $1 AND user_id = $2")
-        .bind(uuid)
-        .bind(auth.user_id)
-        .execute(&state.db)
+    let done = state
+        .db
+        .exec(
+            "DELETE FROM user_tokens WHERE id = $1 AND user_id = $2",
+            params![uuid, auth.user_id],
+        )
         .await?;
-    if done.rows_affected() == 0 {
+    if done == 0 {
         return Err(ApiError::NotFound);
     }
 
