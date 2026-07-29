@@ -1,7 +1,12 @@
 // Pure derivations for Mission Control (MAIN-226), kept out of the component so
-// grouping, ghosting, and the clone-only worktree rule are unit-testable without
-// a DOM.
-import type { Overview, OverviewCheckout, OverviewWorkspace } from "@nookos/api";
+// grouping, ghosting, lamp filtering, and the clone-only worktree rule are
+// unit-testable without a DOM.
+import type {
+  Overview,
+  OverviewCheckout,
+  OverviewWorkspace,
+  Session,
+} from "@nookos/api";
 
 export interface NodeGroup {
   nodeId: string;
@@ -12,7 +17,9 @@ export interface NodeGroup {
 
 /** One workspace's checkouts grouped by the node they live on, order preserved
  *  (the endpoint already sorts by node name then path). */
-export function groupCheckoutsByNode(checkouts: OverviewCheckout[]): NodeGroup[] {
+export function groupCheckoutsByNode(
+  checkouts: OverviewCheckout[],
+): NodeGroup[] {
   const order: string[] = [];
   const by: Record<string, NodeGroup> = {};
   for (const c of checkouts) {
@@ -30,8 +37,8 @@ export function groupCheckoutsByNode(checkouts: OverviewCheckout[]): NodeGroup[]
   return order.map((id) => by[id]);
 }
 
-/** A checkout that has vanished from disk (MAIN-220 tombstone) — the UI ghosts
- *  it rather than hiding it. */
+/** A checkout that has vanished from disk (MAIN-220 tombstone) — a "ghost".
+ *  Hidden by default behind the ghosts toggle; ghosted (not hidden) when shown. */
 export const isMissing = (c: OverviewCheckout): boolean => !!c.missing_at;
 
 /** "+ worktree" is offered on a present primary clone only (AC-4). */
@@ -60,8 +67,206 @@ export function matchesQuery(w: OverviewWorkspace, q: string): boolean {
   return hay.join(" ").toLowerCase().includes(needle);
 }
 
-/** The visible workspaces after applying the filter. */
-export function filterOverview(ov: Overview | undefined, q: string): OverviewWorkspace[] {
+// ── The annunciator deck ─────────────────────────────────────────────────────
+
+/** Orientation counters for the deck's left side. Nodes are the distinct
+ *  machines hosting a visible checkout. */
+export interface DeckStats {
+  nodesOnline: number;
+  nodesTotal: number;
+  repos: number;
+  checkouts: number;
+  sessions: number;
+}
+
+export function deckStats(ov: Overview | undefined): DeckStats {
+  const empty = {
+    nodesOnline: 0,
+    nodesTotal: 0,
+    repos: 0,
+    checkouts: 0,
+    sessions: 0,
+  };
+  if (!ov) return empty;
+  const nodes = new Map<string, string>();
+  let checkouts = 0;
+  let sessions = ov.loose_sessions.length;
+  for (const w of ov.workspaces) {
+    sessions += w.unbound_sessions.length;
+    for (const c of w.checkouts) {
+      nodes.set(c.node_id, c.node_status);
+      checkouts += 1;
+      sessions += c.sessions.length;
+    }
+  }
+  return {
+    nodesOnline: [...nodes.values()].filter((s) => s === "online").length,
+    nodesTotal: nodes.size,
+    repos: ov.workspaces.length,
+    checkouts,
+    sessions,
+  };
+}
+
+/** The annunciator lamps. Each lights only when its count is non-zero; clicking
+ *  a lit lamp filters the tree to the rows it counted. */
+export type Lamp = "dirty" | "missing" | "offline";
+
+export interface ExceptionCounts {
+  dirty: number;
+  missing: number;
+  offline: number;
+}
+
+export function exceptionCounts(ov: Overview | undefined): ExceptionCounts {
+  const out = { dirty: 0, missing: 0, offline: 0 };
+  if (!ov) return out;
+  const offlineNodes = new Set<string>();
+  for (const w of ov.workspaces) {
+    for (const c of w.checkouts) {
+      if (isMissing(c)) out.missing += 1;
+      else if (c.dirty) out.dirty += 1;
+      if (c.node_status !== "online") offlineNodes.add(c.node_id);
+    }
+  }
+  out.offline = offlineNodes.size;
+  return out;
+}
+
+/** Does this checkout belong under the given lamp? */
+export function lampMatches(c: OverviewCheckout, lamp: Lamp): boolean {
+  switch (lamp) {
+    case "dirty":
+      return c.dirty && !isMissing(c);
+    case "missing":
+      return isMissing(c);
+    case "offline":
+      return c.node_status !== "online";
+  }
+}
+
+// ── Visibility: filter → lamp → ghosts ───────────────────────────────────────
+
+/** What the tree renders for one workspace after the free-text filter, the
+ *  active lamp, and the ghosts toggle. `hiddenGhosts` is the count the repo
+ *  header hints at while the toggle is off. */
+export interface VisibleRepo {
+  workspace: OverviewWorkspace;
+  checkouts: OverviewCheckout[];
+  hiddenGhosts: number;
+}
+
+export function visibleRepos(
+  ov: Overview | undefined,
+  q: string,
+  lamp: Lamp | null,
+  showGhosts: boolean,
+): VisibleRepo[] {
   if (!ov) return [];
-  return ov.workspaces.filter((w) => matchesQuery(w, q));
+  const out: VisibleRepo[] = [];
+  for (const w of ov.workspaces) {
+    if (!matchesQuery(w, q)) continue;
+    let checkouts = w.checkouts;
+    if (lamp) checkouts = checkouts.filter((c) => lampMatches(c, lamp));
+    const ghosts = checkouts.filter(isMissing).length;
+    // The missing lamp is an explicit request to see ghosts; otherwise the
+    // toggle decides.
+    if (!showGhosts && lamp !== "missing") {
+      checkouts = checkouts.filter((c) => !isMissing(c));
+    }
+    if (lamp) {
+      // A lamp narrows to matching rows only.
+      if (checkouts.length === 0) continue;
+    } else if (
+      checkouts.length === 0 &&
+      w.unbound_sessions.length === 0 &&
+      ghosts === 0
+    ) {
+      continue;
+    }
+    out.push({
+      workspace: w,
+      checkouts,
+      hiddenGhosts: showGhosts || lamp === "missing" ? 0 : ghosts,
+    });
+  }
+  return out;
+}
+
+/** Repo-header rollup, so a collapsed repo still reports what it holds. */
+export function repoRollup(w: OverviewWorkspace): {
+  sessions: number;
+  checkouts: number;
+  dirty: number;
+  missing: number;
+} {
+  let sessions = w.unbound_sessions.length;
+  let dirty = 0;
+  let missing = 0;
+  for (const c of w.checkouts) {
+    sessions += c.sessions.length;
+    if (isMissing(c)) missing += 1;
+    else if (c.dirty) dirty += 1;
+  }
+  return { sessions, checkouts: w.checkouts.length, dirty, missing };
+}
+
+// ── Live overlay ─────────────────────────────────────────────────────────────
+
+/** The overview REST payload with the websocket deltas laid over it: node and
+ *  session statuses come from the live store when present, and a session that
+ *  died since the fetch drops out (the endpoint only ever returns active ones).
+ *  Everything downstream — deck, lamps, tree — reads the overlaid truth. */
+export function overlayLive(
+  ov: Overview | undefined,
+  nodeStatus: Record<string, string>,
+  sessionStatus: Record<string, string>,
+): Overview | undefined {
+  if (!ov) return ov;
+  const alive = (s: Session): boolean => {
+    const st = sessionStatus[s.id] ?? s.status;
+    return st !== "exited" && st !== "error" && st !== "killed";
+  };
+  const overlay = (s: Session): Session => ({
+    ...s,
+    status: sessionStatus[s.id] ?? s.status,
+  });
+  return {
+    workspaces: ov.workspaces.map((w) => ({
+      ...w,
+      checkouts: w.checkouts.map((c) => ({
+        ...c,
+        node_status: nodeStatus[c.node_id] ?? c.node_status,
+        sessions: c.sessions.filter(alive).map(overlay),
+      })),
+      unbound_sessions: w.unbound_sessions.filter(alive).map(overlay),
+    })),
+    loose_sessions: ov.loose_sessions.filter(alive).map(overlay),
+  };
+}
+
+// ── Collapse persistence ─────────────────────────────────────────────────────
+
+const COLLAPSE_KEY = "nook.mission.collapsed.v1";
+
+/** Repo ids the person collapsed, surviving reloads (localStorage). Fails open
+ *  — nothing collapsed — on any storage weirdness. */
+export function loadCollapsed(): Set<string> {
+  try {
+    const raw = window.localStorage.getItem(COLLAPSE_KEY);
+    const ids = raw ? (JSON.parse(raw) as unknown) : [];
+    return new Set(
+      Array.isArray(ids) ? ids.filter((v) => typeof v === "string") : [],
+    );
+  } catch {
+    return new Set();
+  }
+}
+
+export function saveCollapsed(ids: Set<string>): void {
+  try {
+    window.localStorage.setItem(COLLAPSE_KEY, JSON.stringify([...ids]));
+  } catch {
+    // Storage unavailable: collapse state just won't persist.
+  }
 }

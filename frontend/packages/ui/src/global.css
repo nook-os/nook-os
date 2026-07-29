@@ -4742,22 +4742,180 @@ a.toast-main:hover .toast-title { text-decoration: underline; }
   padding: 0;
 }
 
-/* Mission Control (MAIN-226): dense repo → node → checkout tree. Structural
-   spacing only — the console aesthetic comes from Panel / nook-table / Pill. */
-.mission-list { display: flex; flex-direction: column; gap: 10px; }
-.mission-repo {
+/* ── Mission Control (MAIN-226) ──────────────────────────────────────────────
+   An annunciator deck over a repo-first tree. Badges are exceptions-only: the
+   routine (clean, present, online, running) renders quiet; pills mean trouble.
+   The lamps are the signature: dark cockpit until something needs you. */
+
+.m-deck {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  padding: 7px 10px;
+  margin: 0 0 8px;
+  border: 1px solid var(--nook-border);
+  border-radius: var(--nook-radius);
+  background: var(--nook-bg-raised);
+}
+.m-deck-stats {
+  font-family: var(--nook-font-mono);
+  font-size: 11px;
+  color: var(--nook-fg-dim);
+  white-space: nowrap;
+}
+.m-deck-agents { display: inline-flex; flex-wrap: wrap; gap: 4px; }
+.m-agent {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 1px 9px 1px 7px;
+  border: 1px solid var(--nook-border-bright);
+  border-radius: 999px;
+  background: var(--nook-bg-panel);
+  color: var(--nook-fg);
+  font-family: var(--nook-font-mono);
+  font-size: 11px;
+  cursor: pointer;
+}
+.m-agent:hover { border-color: var(--nook-accent); color: var(--nook-fg-bright); }
+.m-agent.running svg { color: var(--nook-accent); }
+.m-agent.waiting { border-color: var(--nook-warn); }
+.m-agent.waiting svg { color: var(--nook-warn); }
+.m-deck-lamps { display: inline-flex; gap: 5px; margin-left: auto; }
+.m-lamp {
+  padding: 2px 9px;
+  border-radius: 3px;
+  font-family: var(--nook-font-mono);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  background: transparent;
+  cursor: pointer;
+}
+.m-lamp.warn { color: var(--nook-warn); border: 1px solid var(--nook-warn); }
+.m-lamp.err { color: var(--nook-err); border: 1px solid var(--nook-err); }
+.m-lamp:hover, .m-lamp.active { box-shadow: var(--nook-glow); }
+.m-lamp.active { background: var(--nook-selection); color: var(--nook-fg-bright); }
+
+.m-tree { display: flex; flex-direction: column; gap: 8px; overflow: auto; }
+.m-repo {
   border: 1px solid var(--nook-border);
   border-radius: var(--nook-radius);
   background: var(--nook-bg-panel);
+  overflow: hidden;
 }
-.mission-repo-head {
-  padding: 4px 8px;
-  border-bottom: 1px solid var(--nook-border);
+.m-repo-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 10px;
   background: var(--nook-bg-raised);
+  cursor: pointer;
+  user-select: none;
 }
-.mission-node { padding: 2px 0 2px 8px; }
-.mission-node-head {
-  display: flex; align-items: center; gap: 6px;
-  padding: 2px 4px; font-size: 11px;
+.m-repo-head.static { cursor: default; }
+.m-repo-head:focus-visible {
+  outline: 1px solid var(--nook-accent);
+  outline-offset: -1px;
 }
-.mission-repo tr.ghost td { color: var(--nook-fg-faint); }
+.m-repo-icon { flex: none; color: var(--nook-fg-dim); }
+.m-repo-name { font-family: var(--nook-font-mono); font-size: 12px; }
+.m-repo-remote {
+  font-family: var(--nook-font-mono);
+  font-size: 11px;
+  color: var(--nook-fg-faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+.m-repo-roll {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+  flex: none;
+  font-family: var(--nook-font-mono);
+  font-size: 11px;
+}
+.m-roll-live { color: var(--nook-ok); }
+.m-roll-dim { color: var(--nook-fg-faint); }
+
+/* Indent guides: each level hangs off a thin rule, like `tree` output. */
+.m-node { margin: 4px 0 6px 14px; border-left: 1px solid var(--nook-border); padding-left: 10px; }
+.m-node-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 0;
+  font-family: var(--nook-font-mono);
+  font-size: 11px;
+  color: var(--nook-fg-dim);
+}
+.m-node-name { color: var(--nook-fg); }
+.m-node-name.muted { color: var(--nook-fg-dim); }
+
+.m-co { margin: 1px 0 3px; }
+.m-co-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 6px 2px 2px;
+  border-radius: 3px;
+  min-height: 24px;
+}
+.m-co-row:hover { background: var(--nook-bg-raised); }
+.m-co-row.ghost { opacity: 0.45; }
+.m-co-kind { flex: none; color: var(--nook-fg-faint); display: inline-flex; }
+.m-co-branch {
+  font-family: var(--nook-font-mono);
+  font-size: 12px;
+  color: var(--nook-fg-bright);
+  flex: none;
+}
+.m-co-path {
+  font-family: var(--nook-font-mono);
+  font-size: 11px;
+  color: var(--nook-fg-faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+.m-co-actions {
+  display: inline-flex;
+  gap: 4px;
+  margin-left: auto;
+  flex: none;
+}
+
+.m-sess {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: 20px;
+  padding: 2px 6px;
+  border-radius: 3px;
+  font-size: 12px;
+}
+.m-sess:hover { background: var(--nook-bg-raised); }
+.m-sess-mark { flex: none; }
+.m-sess-mark.running { color: var(--nook-accent); }
+.m-sess-mark.waiting { color: var(--nook-warn); }
+.m-sess-mark.idle { color: var(--nook-fg-faint); }
+.m-sess-owner { margin-left: auto; flex: none; }
+
+.m-ghost-hint {
+  display: block;
+  margin: 0 10px 6px 24px;
+  padding: 1px 0;
+  background: none;
+  border: none;
+  color: var(--nook-fg-faint);
+  font-family: var(--nook-font-mono);
+  font-size: 11px;
+  cursor: pointer;
+  text-align: left;
+}
+.m-ghost-hint:hover { color: var(--nook-fg-dim); text-decoration: underline; }

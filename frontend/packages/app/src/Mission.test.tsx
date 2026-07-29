@@ -1,9 +1,16 @@
-// MAIN-226: Mission Control renders repo → node → checkout → sessions, ghosts
-// missing checkouts (not hidden), and offers "+ worktree" on primary clones only.
-// jsdom; heavy deps mocked.
+// MAIN-226: Mission Control renders the annunciator deck and the repo → node →
+// checkout → session tree; ghosts hide behind the toggle, "+ worktree" is
+// clone-only, lamps filter, and the live agent mark shows. jsdom; heavy deps
+// mocked.
 import React from "react";
-import { afterEach, describe, expect, it, vi } from "vitest";
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
@@ -27,7 +34,13 @@ const OVERVIEW = {
           dirty: false,
           missing_at: null,
           sessions: [
-            { id: "sess1", name: "claude-run", runtime: "claude", status: "running", created_by: "u1" },
+            {
+              id: "sess1",
+              name: "claude-run",
+              runtime: "claude",
+              status: "running",
+              created_by: "u1",
+            },
           ],
         },
         {
@@ -68,29 +81,67 @@ vi.mock("@nookos/api", () => ({
       if (path === "/api/v1/auth/me") return { data: { user: { id: "u1" } } };
       return { data: null };
     }),
-    POST: vi.fn(async () => ({ data: { id: "newsess" }, response: { ok: true } })),
+    POST: vi.fn(async () => ({
+      data: { id: "newsess" },
+      response: { ok: true },
+    })),
   },
 }));
 
 vi.mock("@nookos/ui", () => ({
-  Panel: ({ title, actions, children }: { title: string; actions?: React.ReactNode; children: React.ReactNode }) => (
+  Panel: ({
+    title,
+    actions,
+    children,
+  }: {
+    title: string;
+    actions?: React.ReactNode;
+    children: React.ReactNode;
+  }) => (
     <div>
       <div>{title}</div>
       {actions}
       {children}
     </div>
   ),
-  Pill: ({ children }: { children: React.ReactNode }) => <span>{children}</span>,
+  Pill: ({ children }: { children: React.ReactNode }) => (
+    <span>{children}</span>
+  ),
   StatusDot: () => <span />,
   Empty: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
+  statusTone: () => "ok",
 }));
 
-vi.mock("../newwork", () => ({ useNewWork: () => () => {} }));
-vi.mock("../sessionOwner", () => ({ SessionOwner: () => <span>owner</span> }));
-vi.mock("../dialogs", () => ({ notify: vi.fn() }));
+vi.mock("./newwork", () => ({ useNewWork: () => () => {} }));
+vi.mock("./sessionOwner", () => ({ SessionOwner: () => <span>owner</span> }));
+vi.mock("./dialogs", () => ({ notify: vi.fn() }));
+
+// A controllable stand-in for the live store: tests mutate `liveState` and the
+// component reads it through the same selector API.
+const liveState = {
+  nodeStatus: {} as Record<string, string>,
+  sessionStatus: {} as Record<string, string>,
+  agentState: {} as Record<
+    string,
+    { state: string; window: number | null; at: number }
+  >,
+};
+vi.mock("./live", () => ({
+  useLive: (sel: (s: typeof liveState) => unknown) => sel(liveState),
+  liveAgentMark: (status: string, agent?: { state: string }) =>
+    status === "exited" || status === "error" || status === "killed"
+      ? undefined
+      : agent,
+}));
 
 import { MissionPage } from "./pages/Mission";
 
+beforeEach(() => {
+  liveState.nodeStatus = {};
+  liveState.sessionStatus = {};
+  liveState.agentState = {};
+  window.localStorage.clear();
+});
 afterEach(cleanup);
 
 function renderPage() {
@@ -105,28 +156,62 @@ function renderPage() {
 }
 
 describe("Mission Control (MAIN-226)", () => {
-  it("renders checkouts with kind badges and the session under its checkout", async () => {
+  it("renders the deck stats and the checkout tree with the session under its clone", async () => {
     renderPage();
-    await waitFor(() => expect(screen.getByTestId("checkout-clone1")).toBeTruthy());
+    await waitFor(() =>
+      expect(screen.getByTestId("checkout-clone1")).toBeTruthy(),
+    );
     expect(screen.getByTestId("checkout-wt1")).toBeTruthy();
-    // The running session appears (under its clone).
     expect(screen.getByTestId("session-sess1")).toBeTruthy();
+    expect(screen.getByTestId("deck").textContent).toContain("1/1 node");
+    expect(screen.getByTestId("deck").textContent).toContain("3 checkouts");
   });
 
   it("offers + worktree on the primary clone only", async () => {
     renderPage();
-    await waitFor(() => expect(screen.getByTestId("worktree-clone1")).toBeTruthy());
-    // Not on a worktree checkout, and not on a missing one.
+    await waitFor(() =>
+      expect(screen.getByTestId("worktree-clone1")).toBeTruthy(),
+    );
     expect(screen.queryByTestId("worktree-wt1")).toBeNull();
     expect(screen.queryByTestId("worktree-gone1")).toBeNull();
   });
 
-  it("ghosts a missing checkout but still shows it, and hides its terminal action", async () => {
+  it("hides ghosts by default; the toggle reveals them ghosted, not hidden", async () => {
     renderPage();
+    await waitFor(() =>
+      expect(screen.getByTestId("checkout-clone1")).toBeTruthy(),
+    );
+    // Hidden by default, with a per-repo hint.
+    expect(screen.queryByTestId("checkout-gone1")).toBeNull();
+    expect(screen.getByTestId("ghosts-acme-api")).toBeTruthy();
+
+    fireEvent.click(screen.getByTestId("ghost-toggle"));
     const gone = await screen.findByTestId("checkout-gone1");
-    expect(gone.className).toContain("ghost"); // shown, not hidden
-    // A present checkout offers "terminal here"; a missing one does not.
-    expect(screen.getByTestId("terminal-clone1")).toBeTruthy();
-    expect(screen.queryByTestId("terminal-gone1")).toBeNull();
+    expect(gone.className).toContain("ghost"); // shown, ghosted
+    expect(screen.queryByTestId("terminal-gone1")).toBeNull(); // no actions on a ghost
+  });
+
+  it("lamps light for exceptions and filter the tree when clicked", async () => {
+    renderPage();
+    await waitFor(() => expect(screen.getByTestId("lamp-dirty")).toBeTruthy());
+    expect(screen.getByTestId("lamp-missing")).toBeTruthy();
+    expect(screen.queryByTestId("lamp-offline")).toBeNull(); // all nodes online
+
+    fireEvent.click(screen.getByTestId("lamp-dirty"));
+    // Only the dirty worktree remains.
+    expect(screen.getByTestId("checkout-wt1")).toBeTruthy();
+    expect(screen.queryByTestId("checkout-clone1")).toBeNull();
+
+    fireEvent.click(screen.getByTestId("lamp-dirty")); // click again clears
+    await waitFor(() =>
+      expect(screen.getByTestId("checkout-clone1")).toBeTruthy(),
+    );
+  });
+
+  it("shows the live agent mark on the session row and a deck chip", async () => {
+    liveState.agentState = { sess1: { state: "running", window: null, at: 0 } };
+    renderPage();
+    await waitFor(() => expect(screen.getByTestId("agent-sess1")).toBeTruthy());
+    expect(screen.getByTestId("chip-sess1")).toBeTruthy();
   });
 });
