@@ -17,7 +17,7 @@
 //! team tenant as well. Both are written here so the two never disagree.
 
 use chrono::{DateTime, Utc};
-use nook_db::{DbPool, Json, Postgres, TypeMapping};
+use nook_db::{params, Db, DbPool, Json, Postgres, TypeMapping};
 use nook_types::{IdentityId, Tenant, TenantId, TenantMembership, User, UserId};
 use serde_json::Value;
 
@@ -42,8 +42,9 @@ pub async fn memberships_for(
     user_id: UserId,
     active: TenantId,
 ) -> ApiResult<Vec<TenantMembership>> {
-    let rows: Vec<(TenantId, String, String, String, DateTime<Utc>)> = sqlx::query_as(
-        "SELECT t.id, t.name, t.slug, tm.role, t.created_at
+    let rows: Vec<(TenantId, String, String, String, DateTime<Utc>)> = db
+        .query_all(
+            "SELECT t.id, t.name, t.slug, tm.role, t.created_at
          FROM users me
          JOIN users u ON u.person_id = me.person_id
          JOIN tenant_members tm
@@ -53,10 +54,9 @@ pub async fn memberships_for(
          JOIN tenants t ON t.id = u.tenant_id
          WHERE me.id = $1
          ORDER BY t.created_at",
-    )
-    .bind(user_id)
-    .fetch_all(db)
-    .await?;
+            params![user_id],
+        )
+        .await?;
 
     Ok(to_memberships(rows, active))
 }
@@ -126,13 +126,13 @@ pub async fn invalidate_person_tenants(
     db: &DbPool,
     user_id: UserId,
 ) {
-    let ids: Vec<UserId> = sqlx::query_scalar(
-        "SELECT u.id FROM users me JOIN users u ON u.person_id = me.person_id WHERE me.id = $1",
-    )
-    .bind(user_id)
-    .fetch_all(db)
-    .await
-    .unwrap_or_default();
+    let ids: Vec<UserId> = db
+        .query_scalar_all(
+            "SELECT u.id FROM users me JOIN users u ON u.person_id = me.person_id WHERE me.id = $1",
+            params![user_id],
+        )
+        .await
+        .unwrap_or_default();
     // The join includes `me`, so an empty result means the row is gone; delete
     // its own key anyway as a floor.
     if ids.is_empty() {
@@ -172,8 +172,9 @@ pub async fn member_user_in_tenant(
     user_id: UserId,
     target: TenantId,
 ) -> ApiResult<Option<UserId>> {
-    let row: Option<(UserId,)> = sqlx::query_as(
-        "SELECT u.id
+    let row: Option<UserId> = db
+        .query_scalar_opt(
+            "SELECT u.id
          FROM users me
          JOIN users u ON u.person_id = me.person_id
          JOIN tenant_members tm
@@ -182,12 +183,10 @@ pub async fn member_user_in_tenant(
             AND tm.principal_id = u.id
          WHERE me.id = $1 AND u.tenant_id = $2
          LIMIT 1",
-    )
-    .bind(user_id)
-    .bind(target)
-    .fetch_optional(db)
-    .await?;
-    Ok(row.map(|(id,)| id))
+            params![user_id, target],
+        )
+        .await?;
+    Ok(row)
 }
 
 /// Does this user still have a live `tenant_members` grant in `tenant`?
@@ -203,15 +202,14 @@ pub async fn active_membership_exists(
     user_id: UserId,
     tenant: TenantId,
 ) -> ApiResult<bool> {
-    let row: Option<(i32,)> = sqlx::query_as(
-        "SELECT 1 FROM tenant_members
+    let row: Option<i32> = db
+        .query_scalar_opt(
+            "SELECT 1 FROM tenant_members
          WHERE tenant_id = $1 AND principal_type = 'user' AND principal_id = $2
          LIMIT 1",
-    )
-    .bind(tenant)
-    .bind(user_id)
-    .fetch_optional(db)
-    .await?;
+            params![tenant, user_id],
+        )
+        .await?;
     Ok(row.is_some())
 }
 
@@ -237,15 +235,15 @@ pub struct IdentityClaims {
 /// login whose IdP did not assert `email_verified`. This is the platform
 /// predicate invite acceptance and account-linking will gate on.
 pub async fn email_is_verified(db: &DbPool, user_id: UserId) -> ApiResult<bool> {
-    let (verified,): (bool,) = sqlx::query_as(
-        "SELECT EXISTS (
+    let verified: bool = db
+        .query_scalar(
+            "SELECT EXISTS (
              SELECT 1 FROM identities
              WHERE user_id = $1 AND email_verified_at IS NOT NULL
          )",
-    )
-    .bind(user_id)
-    .fetch_one(db)
-    .await?;
+            params![user_id],
+        )
+        .await?;
     Ok(verified)
 }
 
@@ -265,48 +263,52 @@ pub async fn mark_local_email_verified(db: &DbPool, user_id: UserId, email: &str
         Postgres.literal("{\"verified_via\":\"local\"}"),
         now = Postgres.now()
     );
-    sqlx::query(&sql)
-        .bind(uuid::Uuid::now_v7())
-        .bind(user_id)
-        .bind(user_id.0.to_string())
-        .bind(email)
-        .execute(db)
-        .await?;
+    db.exec(
+        &sql,
+        params![uuid::Uuid::now_v7(), user_id, user_id.0.to_string(), email],
+    )
+    .await?;
     Ok(())
 }
 
 pub async fn login_identity(state: &AppState, claims: IdentityClaims) -> ApiResult<(User, Tenant)> {
     // Existing identity → existing user.
-    let existing: Option<(UserId,)> =
-        sqlx::query_as("SELECT user_id FROM identities WHERE issuer = $1 AND subject = $2")
-            .bind(&claims.issuer)
-            .bind(&claims.subject)
-            .fetch_optional(&state.db)
-            .await?;
+    let existing: Option<UserId> = state
+        .db
+        .query_scalar_opt(
+            "SELECT user_id FROM identities WHERE issuer = $1 AND subject = $2",
+            params![&claims.issuer, &claims.subject],
+        )
+        .await?;
 
-    if let Some((user_id,)) = existing {
-        let user: User = sqlx::query_as("SELECT * FROM users WHERE id = $1")
-            .bind(user_id)
-            .fetch_one(&state.db)
+    if let Some(user_id) = existing {
+        let user: User = state
+            .db
+            .query_one("SELECT * FROM users WHERE id = $1", params![user_id])
             .await?;
-        let tenant: Tenant = sqlx::query_as("SELECT * FROM tenants WHERE id = $1")
-            .bind(user.tenant_id)
-            .fetch_one(&state.db)
+        let tenant: Tenant = state
+            .db
+            .query_one(
+                "SELECT * FROM tenants WHERE id = $1",
+                params![user.tenant_id],
+            )
             .await?;
         // A returning identity may have become verified since last time (the IdP
         // confirmed the address). Record it the first time we see the claim, and
         // never clear it — verification only moves one way, and only from a true
         // claim.
         if claims.email_verified {
-            sqlx::query(&format!(
-                "UPDATE identities SET email_verified_at = {}
+            state
+                .db
+                .exec(
+                    &format!(
+                        "UPDATE identities SET email_verified_at = {}
                  WHERE issuer = $1 AND subject = $2 AND email_verified_at IS NULL",
-                Postgres.now()
-            ))
-            .bind(&claims.issuer)
-            .bind(&claims.subject)
-            .execute(&state.db)
-            .await?;
+                        Postgres.now()
+                    ),
+                    params![&claims.issuer, &claims.subject],
+                )
+                .await?;
         }
         // The lock has to bind both directions, or it is not a lock: a tenant
         // running local accounts must not silently acquire OIDC identities
@@ -339,8 +341,9 @@ pub async fn login_identity(state: &AppState, claims: IdentityClaims) -> ApiResu
     // and was made its OWNER: full access to somebody else's nodes, workspaces
     // and secrets. "Is this instance empty?" is a question about people, and
     // there is only one table that knows.
-    let (user_count,): (i64,) = sqlx::query_as("SELECT count(*) FROM users")
-        .fetch_one(&state.db)
+    let user_count: i64 = state
+        .db
+        .query_scalar("SELECT count(*) FROM users", params![])
         .await?;
 
     let (tenant, role) = if user_count == 0 {
@@ -348,21 +351,20 @@ pub async fn login_identity(state: &AppState, claims: IdentityClaims) -> ApiResu
         // a duplicate beside it, and the first person owns it.
         let name = state.cfg.default_tenant_name.clone();
         let slug = slugify(&name);
-        let existing: Option<Tenant> = sqlx::query_as("SELECT * FROM tenants WHERE slug = $1")
-            .bind(&slug)
-            .fetch_optional(&state.db)
+        let existing: Option<Tenant> = state
+            .db
+            .query_opt("SELECT * FROM tenants WHERE slug = $1", params![&slug])
             .await?;
         let tenant = match existing {
             Some(t) => t,
             None => {
-                sqlx::query_as(
-                    "INSERT INTO tenants (id, name, slug) VALUES ($1, $2, $3) RETURNING *",
-                )
-                .bind(TenantId::new())
-                .bind(&name)
-                .bind(&slug)
-                .fetch_one(&state.db)
-                .await?
+                state
+                    .db
+                    .query_one(
+                        "INSERT INTO tenants (id, name, slug) VALUES ($1, $2, $3) RETURNING *",
+                        params![TenantId::new(), &name, &slug],
+                    )
+                    .await?
             }
         };
         (tenant, "owner")
@@ -378,12 +380,13 @@ pub async fn login_identity(state: &AppState, claims: IdentityClaims) -> ApiResu
 
     // Same email already present in the tenant (e.g. relinked IdP): attach the
     // new identity to that user instead of creating a duplicate.
-    let user: Option<User> =
-        sqlx::query_as("SELECT * FROM users WHERE tenant_id = $1 AND email = $2")
-            .bind(tenant.id)
-            .bind(&email)
-            .fetch_optional(&state.db)
-            .await?;
+    let user: Option<User> = state
+        .db
+        .query_opt(
+            "SELECT * FROM users WHERE tenant_id = $1 AND email = $2",
+            params![tenant.id, &email],
+        )
+        .await?;
 
     // Commit the tenant to OIDC before creating anything. A tenant already on
     // local accounts must be refused here, with nothing half-made left behind.
@@ -397,53 +400,59 @@ pub async fn login_identity(state: &AppState, claims: IdentityClaims) -> ApiResu
     let user = match user {
         Some(u) => u,
         None => {
-            sqlx::query_as(
-                "INSERT INTO users (id, tenant_id, display_name, email, avatar_url, role)
+            state
+                .db
+                .query_one(
+                    "INSERT INTO users (id, tenant_id, display_name, email, avatar_url, role)
                  VALUES ($1, $2, $3, $4, $5, $6) RETURNING *",
-            )
-            .bind(UserId::new())
-            .bind(tenant.id)
-            .bind(&display_name)
-            .bind(&email)
-            .bind(&claims.avatar_url)
-            .bind(role)
-            .fetch_one(&state.db)
-            .await?
+                    params![
+                        UserId::new(),
+                        tenant.id,
+                        &display_name,
+                        &email,
+                        claims.avatar_url.clone(),
+                        role
+                    ],
+                )
+                .await?
         }
     };
 
     // Membership mirrors the personal tenant. Written even in the single-tenant
     // case, so "which tenants can this user reach" has exactly one answer to
     // read — the table — rather than two rules to keep in step.
-    sqlx::query(
-        "INSERT INTO tenant_members (id, tenant_id, principal_type, principal_id, role)
+    state
+        .db
+        .exec(
+            "INSERT INTO tenant_members (id, tenant_id, principal_type, principal_id, role)
          VALUES ($1, $2, 'user', $3, $4)
          ON CONFLICT (tenant_id, principal_type, principal_id) DO NOTHING",
-    )
-    .bind(uuid::Uuid::now_v7())
-    .bind(tenant.id)
-    .bind(user.id.0)
-    .bind(role)
-    .execute(&state.db)
-    .await?;
+            params![uuid::Uuid::now_v7(), tenant.id, user.id.0, role],
+        )
+        .await?;
 
     // `email_verified_at` is stamped now ONLY when the IdP asserted the address;
     // otherwise it stays null. A CASE on the bound flag keeps "verified means a
     // real timestamp" true — nothing here derives it from the email string.
-    sqlx::query(&format!(
-        "INSERT INTO identities (id, user_id, issuer, subject, email, raw_claims, email_verified_at)
+    state
+        .db
+        .exec(
+            &format!(
+                "INSERT INTO identities (id, user_id, issuer, subject, email, raw_claims, email_verified_at)
          VALUES ($1, $2, $3, $4, $5, $6, CASE WHEN $7 THEN {} ELSE NULL END)",
-        Postgres.now()
-    ))
-    .bind(IdentityId::new())
-    .bind(user.id)
-    .bind(&claims.issuer)
-    .bind(&claims.subject)
-    .bind(&claims.email)
-    .bind(&claims.raw_claims)
-    .bind(claims.email_verified)
-    .execute(&state.db)
-    .await?;
+                Postgres.now()
+            ),
+            params![
+                IdentityId::new(),
+                user.id,
+                &claims.issuer,
+                &claims.subject,
+                claims.email.clone(),
+                &claims.raw_claims,
+                claims.email_verified
+            ],
+        )
+        .await?;
 
     // Somebody has to be able to run this deployment. Seeding cannot do it —
     // it runs before anybody has signed in — and "the next boot will pick it
@@ -490,13 +499,13 @@ async fn create_personal_tenant(
                 .collect();
             format!("{base}-{}", suffix.to_lowercase())
         };
-        let res: Result<Tenant, sqlx::Error> =
-            sqlx::query_as("INSERT INTO tenants (id, name, slug) VALUES ($1, $2, $3) RETURNING *")
-                .bind(TenantId::new())
-                .bind(&name)
-                .bind(&slug)
-                .fetch_one(&state.db)
-                .await;
+        let res: Result<Tenant, sqlx::Error> = state
+            .db
+            .query_one(
+                "INSERT INTO tenants (id, name, slug) VALUES ($1, $2, $3) RETURNING *",
+                params![TenantId::new(), &name, &slug],
+            )
+            .await;
         match res {
             Ok(tenant) => return Ok(tenant),
             Err(sqlx::Error::Database(d)) if d.is_unique_violation() => continue,
@@ -585,7 +594,7 @@ mod db_tests {
         invalidate_person_tenants, member_user_in_tenant, memberships_for,
     };
     use crate::cache::memory::MemoryCache;
-    use nook_db::{DbPool, Postgres, TypeMapping};
+    use nook_db::{params, Db, DbPool, Postgres, TypeMapping};
     use nook_types::{TenantId, UserId};
     use sqlx::postgres::PgPoolOptions;
     use uuid::Uuid;
@@ -617,13 +626,12 @@ mod db_tests {
         let id = Uuid::new_v4();
         // Slug is unique instance-wide; the uuid keeps parallel/repeat runs from
         // colliding.
-        sqlx::query("INSERT INTO tenants (id, name, slug) VALUES ($1, $2, $3)")
-            .bind(id)
-            .bind(name)
-            .bind(format!("main12-{id}"))
-            .execute(db)
-            .await
-            .unwrap();
+        db.exec(
+            "INSERT INTO tenants (id, name, slug) VALUES ($1, $2, $3)",
+            params![id, name, format!("main12-{id}")],
+        )
+        .await
+        .unwrap();
         TenantId(id)
     }
 
@@ -631,25 +639,18 @@ mod db_tests {
     /// `tenant_members` grant — the two knobs AC-3 turns.
     async fn member(db: &DbPool, tenant: TenantId, email: &str, person: Uuid) -> UserId {
         let uid = Uuid::new_v4();
-        sqlx::query(
+        db.exec(
             "INSERT INTO users (id, tenant_id, display_name, email, role, person_id)
              VALUES ($1, $2, 'T', $3, 'member', $4)",
+            params![uid, tenant.0, email, person],
         )
-        .bind(uid)
-        .bind(tenant.0)
-        .bind(email)
-        .bind(person)
-        .execute(db)
         .await
         .unwrap();
-        sqlx::query(
+        db.exec(
             "INSERT INTO tenant_members (id, tenant_id, principal_type, principal_id, role)
              VALUES ($1, $2, 'user', $3, 'member')",
+            params![Uuid::new_v4(), tenant.0, uid],
         )
-        .bind(Uuid::new_v4())
-        .bind(tenant.0)
-        .bind(uid)
-        .execute(db)
         .await
         .unwrap();
         UserId(uid)
@@ -657,17 +658,17 @@ mod db_tests {
 
     async fn cleanup(db: &DbPool, tenants: &[TenantId]) {
         for t in tenants {
-            let _ = sqlx::query("DELETE FROM tenant_members WHERE tenant_id = $1")
-                .bind(t.0)
-                .execute(db)
+            let _ = db
+                .exec(
+                    "DELETE FROM tenant_members WHERE tenant_id = $1",
+                    params![t.0],
+                )
                 .await;
-            let _ = sqlx::query("DELETE FROM users WHERE tenant_id = $1")
-                .bind(t.0)
-                .execute(db)
+            let _ = db
+                .exec("DELETE FROM users WHERE tenant_id = $1", params![t.0])
                 .await;
-            let _ = sqlx::query("DELETE FROM tenants WHERE id = $1")
-                .bind(t.0)
-                .execute(db)
+            let _ = db
+                .exec("DELETE FROM tenants WHERE id = $1", params![t.0])
                 .await;
         }
     }
@@ -750,8 +751,11 @@ mod db_tests {
 
         // Column exists and is NOT NULL (the query erroring would fail the test,
         // and the constraint guarantees no nulls — this also confirms 0002 ran).
-        let (nulls,): (i64,) = sqlx::query_as("SELECT count(*) FROM users WHERE person_id IS NULL")
-            .fetch_one(&db)
+        let nulls: i64 = db
+            .query_scalar(
+                "SELECT count(*) FROM users WHERE person_id IS NULL",
+                params![],
+            )
             .await
             .unwrap();
         assert_eq!(nulls, 0, "every users row has a person_id");
@@ -762,30 +766,24 @@ mod db_tests {
         let mut ids = Vec::new();
         for i in 0..3 {
             let uid = Uuid::new_v4();
-            sqlx::query(
+            db.exec(
                 "INSERT INTO users (id, tenant_id, display_name, email, role)
                  VALUES ($1, $2, 'D', $3, 'member')",
+                // Distinct emails only because of the per-tenant unique constraint;
+                // the point is that person_id is NOT derived from them.
+                params![uid, t.0, format!("d{i}@main12.test")],
             )
-            .bind(uid)
-            .bind(t.0)
-            // Distinct emails only because of the per-tenant unique constraint;
-            // the point is that person_id is NOT derived from them.
-            .bind(format!("d{i}@main12.test"))
-            .execute(&db)
             .await
             .unwrap();
             ids.push(uid);
         }
-        let persons: Vec<Uuid> = sqlx::query_as::<_, (Uuid,)>(
-            "SELECT person_id FROM users WHERE tenant_id = $1 ORDER BY id",
-        )
-        .bind(t.0)
-        .fetch_all(&db)
-        .await
-        .unwrap()
-        .into_iter()
-        .map(|(p,)| p)
-        .collect();
+        let persons: Vec<Uuid> = db
+            .query_scalar_all(
+                "SELECT person_id FROM users WHERE tenant_id = $1 ORDER BY id",
+                params![t.0],
+            )
+            .await
+            .unwrap();
 
         cleanup(&db, &[t]).await;
 
@@ -821,12 +819,12 @@ mod db_tests {
         let switch_live = member_user_in_tenant(&db, me, t).await.unwrap();
 
         // Revoke the grant (what member-management / a leave will do).
-        sqlx::query("DELETE FROM tenant_members WHERE tenant_id = $1 AND principal_id = $2")
-            .bind(t.0)
-            .bind(me.0)
-            .execute(&db)
-            .await
-            .unwrap();
+        db.exec(
+            "DELETE FROM tenant_members WHERE tenant_id = $1 AND principal_id = $2",
+            params![t.0, me.0],
+        )
+        .await
+        .unwrap();
 
         let revoked_ok = active_membership_exists(&db, me, t).await.unwrap();
         let switch_revoked = member_user_in_tenant(&db, me, t).await.unwrap();
@@ -864,14 +862,15 @@ mod db_tests {
         let local = member(&db, ta, "shared@main29.test", Uuid::new_v4()).await;
         // Another user, same email, with an (initially unverified) OIDC identity.
         let oidc = member(&db, tb, "shared@main29.test", Uuid::new_v4()).await;
-        sqlx::query(
+        db.exec(
             "INSERT INTO identities (id, user_id, issuer, subject, email, raw_claims)
              VALUES ($1, $2, 'idp', $3, 'shared@main29.test', '{}')",
+            params![
+                Uuid::new_v4(),
+                oidc.0,
+                format!("sub-{}", Uuid::new_v4().simple())
+            ],
         )
-        .bind(Uuid::new_v4())
-        .bind(oidc.0)
-        .bind(format!("sub-{}", Uuid::new_v4().simple()))
-        .execute(&db)
         .await
         .unwrap();
 
@@ -879,12 +878,13 @@ mod db_tests {
         let oidc_unverified = email_is_verified(&db, oidc).await.unwrap();
 
         // Now the IdP verifies the OIDC identity's address.
-        sqlx::query(&format!(
-            "UPDATE identities SET email_verified_at = {} WHERE user_id = $1",
-            Postgres.now()
-        ))
-        .bind(oidc.0)
-        .execute(&db)
+        db.exec(
+            &format!(
+                "UPDATE identities SET email_verified_at = {} WHERE user_id = $1",
+                Postgres.now()
+            ),
+            params![oidc.0],
+        )
         .await
         .unwrap();
         let oidc_verified = email_is_verified(&db, oidc).await.unwrap();
@@ -925,11 +925,12 @@ mod db_tests {
         assert_eq!(first.len(), 1, "the live membership is returned and cached");
 
         // Revoke the grant in the DB WITHOUT invalidating the cache.
-        sqlx::query("DELETE FROM tenant_members WHERE principal_id = $1")
-            .bind(uid.0)
-            .execute(&db)
-            .await
-            .unwrap();
+        db.exec(
+            "DELETE FROM tenant_members WHERE principal_id = $1",
+            params![uid.0],
+        )
+        .await
+        .unwrap();
 
         // A hit: the stale list is served, proving the join was skipped.
         let hit = cached_memberships_for(&cache, &db, uid, a).await.unwrap();
@@ -980,11 +981,12 @@ mod db_tests {
         );
 
         // A change on row B, invalidated via row B, must refresh row A too.
-        sqlx::query("DELETE FROM tenant_members WHERE principal_id = $1")
-            .bind(uid_b.0)
-            .execute(&db)
-            .await
-            .unwrap();
+        db.exec(
+            "DELETE FROM tenant_members WHERE principal_id = $1",
+            params![uid_b.0],
+        )
+        .await
+        .unwrap();
         invalidate_person_tenants(&cache, &db, uid_b).await;
 
         let a_fresh = cached_memberships_for(&cache, &db, uid_a, a).await.unwrap();
@@ -1018,11 +1020,12 @@ mod db_tests {
         assert!(active_membership_exists(&db, uid, a).await.unwrap());
 
         // Revoke, but do NOT invalidate: the display cache stays stale on purpose.
-        sqlx::query("DELETE FROM tenant_members WHERE principal_id = $1")
-            .bind(uid.0)
-            .execute(&db)
-            .await
-            .unwrap();
+        db.exec(
+            "DELETE FROM tenant_members WHERE principal_id = $1",
+            params![uid.0],
+        )
+        .await
+        .unwrap();
         assert_eq!(
             cached_memberships_for(&cache, &db, uid, a)
                 .await
