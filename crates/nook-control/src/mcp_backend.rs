@@ -2,7 +2,7 @@
 //! the same service layer the REST handlers use.
 
 use async_trait::async_trait;
-use nook_db::{Postgres, TypeMapping};
+use nook_db::{params, Db, Postgres, TypeMapping};
 use nook_mcp::NookBackend;
 use nook_proto::ControlToNode;
 use nook_types::*;
@@ -18,10 +18,14 @@ impl McpBackend {
     /// M1: the MCP token maps to the instance's first tenant (dev). Per-user
     /// MCP OAuth is post-M1.
     async fn tenant(&self) -> anyhow::Result<TenantId> {
-        let (id,): (TenantId,) =
-            sqlx::query_as("SELECT id FROM tenants ORDER BY created_at LIMIT 1")
-                .fetch_one(&self.state.db)
-                .await?;
+        let id: TenantId = self
+            .state
+            .db
+            .query_scalar(
+                "SELECT id FROM tenants ORDER BY created_at LIMIT 1",
+                params![],
+            )
+            .await?;
         Ok(id)
     }
 
@@ -32,11 +36,14 @@ impl McpBackend {
     /// null so a comment or a claim has an author that can be revoked.
     async fn user(&self) -> anyhow::Result<UserId> {
         let tenant = self.tenant().await?;
-        let (id,): (UserId,) =
-            sqlx::query_as("SELECT id FROM users WHERE tenant_id = $1 ORDER BY created_at LIMIT 1")
-                .bind(tenant)
-                .fetch_one(&self.state.db)
-                .await?;
+        let id: UserId = self
+            .state
+            .db
+            .query_scalar(
+                "SELECT id FROM users WHERE tenant_id = $1 ORDER BY created_at LIMIT 1",
+                params![tenant],
+            )
+            .await?;
         Ok(id)
     }
 
@@ -45,24 +52,27 @@ impl McpBackend {
         tenant: TenantId,
         name_or_slug: &str,
     ) -> anyhow::Result<WorkspaceId> {
-        let row: Option<(WorkspaceId,)> = sqlx::query_as(
-            "SELECT id FROM workspaces WHERE tenant_id = $1 AND (slug = $2 OR name = $2)",
-        )
-        .bind(tenant)
-        .bind(name_or_slug)
-        .fetch_optional(&self.state.db)
-        .await?;
-        row.map(|(id,)| id)
-            .ok_or_else(|| anyhow::anyhow!("no workspace named '{name_or_slug}'"))
+        let row: Option<WorkspaceId> = self
+            .state
+            .db
+            .query_scalar_opt(
+                "SELECT id FROM workspaces WHERE tenant_id = $1 AND (slug = $2 OR name = $2)",
+                params![tenant, name_or_slug],
+            )
+            .await?;
+        row.ok_or_else(|| anyhow::anyhow!("no workspace named '{name_or_slug}'"))
     }
 
     /// Resolve a node by name, or auto-pick an online node when omitted.
     async fn resolve_node(&self, tenant: TenantId, name: Option<String>) -> anyhow::Result<NodeId> {
-        let nodes: Vec<(NodeId, String)> =
-            sqlx::query_as("SELECT id, name FROM nodes WHERE tenant_id = $1")
-                .bind(tenant)
-                .fetch_all(&self.state.db)
-                .await?;
+        let nodes: Vec<(NodeId, String)> = self
+            .state
+            .db
+            .query_all(
+                "SELECT id, name FROM nodes WHERE tenant_id = $1",
+                params![tenant],
+            )
+            .await?;
         let online: Vec<(NodeId, String)> = nodes
             .into_iter()
             .filter(|(id, _)| self.state.registry.node_online(*id))
@@ -114,16 +124,17 @@ impl McpBackend {
         tenant: TenantId,
         task_id: TaskId,
     ) -> anyhow::Result<std::sync::Arc<dyn crate::services::kanban::KanbanProvider>> {
-        let (provider,): (String,) = sqlx::query_as(
-            "SELECT b.provider FROM boards b
+        let provider: String = self
+            .state
+            .db
+            .query_scalar_opt(
+                "SELECT b.provider FROM boards b
              JOIN tasks t ON t.board_id = b.id
              WHERE t.id = $1 AND t.tenant_id = $2",
-        )
-        .bind(task_id)
-        .bind(tenant)
-        .fetch_optional(&self.state.db)
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("no such task"))?;
+                params![task_id, tenant],
+            )
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("no such task"))?;
         self.state
             .kanban
             .get(&provider)
@@ -192,12 +203,14 @@ impl NookBackend for McpBackend {
         let id: SessionId = session_id
             .parse()
             .map_err(|_| anyhow::anyhow!("bad session id"))?;
-        let session: Option<Session> =
-            sqlx::query_as("SELECT * FROM sessions WHERE id = $1 AND tenant_id = $2")
-                .bind(id)
-                .bind(tenant)
-                .fetch_optional(&self.state.db)
-                .await?;
+        let session: Option<Session> = self
+            .state
+            .db
+            .query_opt(
+                "SELECT * FROM sessions WHERE id = $1 AND tenant_id = $2",
+                params![id, tenant],
+            )
+            .await?;
         let session = session.ok_or_else(|| anyhow::anyhow!("no such session"))?;
         // Ensure the node has a live PTY for this session first — after a node
         // restart the session map is empty and raw input would be dropped.
@@ -233,12 +246,14 @@ impl NookBackend for McpBackend {
         let id: SessionId = session_id
             .parse()
             .map_err(|_| anyhow::anyhow!("bad session id"))?;
-        let session: Option<Session> =
-            sqlx::query_as("SELECT * FROM sessions WHERE id = $1 AND tenant_id = $2")
-                .bind(id)
-                .bind(tenant)
-                .fetch_optional(&self.state.db)
-                .await?;
+        let session: Option<Session> = self
+            .state
+            .db
+            .query_opt(
+                "SELECT * FROM sessions WHERE id = $1 AND tenant_id = $2",
+                params![id, tenant],
+            )
+            .await?;
         let session = session.ok_or_else(|| anyhow::anyhow!("no such session"))?;
         let tmux_session = session
             .tmux_session
@@ -261,12 +276,14 @@ impl NookBackend for McpBackend {
         let id: SessionId = session_id
             .parse()
             .map_err(|_| anyhow::anyhow!("bad session id"))?;
-        let session: Option<Session> =
-            sqlx::query_as("SELECT * FROM sessions WHERE id = $1 AND tenant_id = $2")
-                .bind(id)
-                .bind(tenant)
-                .fetch_optional(&self.state.db)
-                .await?;
+        let session: Option<Session> = self
+            .state
+            .db
+            .query_opt(
+                "SELECT * FROM sessions WHERE id = $1 AND tenant_id = $2",
+                params![id, tenant],
+            )
+            .await?;
         let session = session.ok_or_else(|| anyhow::anyhow!("no such session"))?;
         if !self.state.registry.send_to_node(
             session.node_id,
@@ -318,26 +335,29 @@ impl NookBackend for McpBackend {
     async fn append_note(&self, workspace: String, content: String) -> anyhow::Result<Note> {
         let tenant = self.tenant().await?;
         let workspace_id = self.resolve_workspace(tenant, &workspace).await?;
-        let existing: Option<Note> = sqlx::query_as(
-            "SELECT * FROM notes WHERE tenant_id = $1 AND workspace_id = $2 AND kind = 'rolling'
+        let existing: Option<Note> = self
+            .state
+            .db
+            .query_opt(
+                "SELECT * FROM notes WHERE tenant_id = $1 AND workspace_id = $2 AND kind = 'rolling'
              ORDER BY updated_at DESC LIMIT 1",
-        )
-        .bind(tenant)
-        .bind(workspace_id)
-        .fetch_optional(&self.state.db)
-        .await?;
+                params![tenant, workspace_id],
+            )
+            .await?;
 
         let note = match existing {
             Some(note) => {
-                sqlx::query_as(&format!(
-                    "UPDATE notes SET content_md = content_md || $2, updated_at = {now}
+                self.state
+                    .db
+                    .query_one(
+                        &format!(
+                            "UPDATE notes SET content_md = content_md || $2, updated_at = {now}
                      WHERE id = $1 RETURNING *",
-                    now = Postgres.now()
-                ))
-                .bind(note.id)
-                .bind(format!("\n{content}"))
-                .fetch_one(&self.state.db)
-                .await?
+                            now = Postgres.now()
+                        ),
+                        params![note.id, format!("\n{content}")],
+                    )
+                    .await?
             }
             None => {
                 core::create_note(
@@ -436,17 +456,17 @@ impl NookBackend for McpBackend {
         let tenant = self.tenant().await?;
         let workspace_id = self.resolve_workspace(tenant, &workspace).await?;
         let node_id = self.resolve_node(tenant, node).await?;
-        let (repo_path,): (String,) = sqlx::query_as(
-            "SELECT path FROM node_workspaces
+        let repo_path: String = self
+            .state
+            .db
+            .query_scalar_opt(
+                "SELECT path FROM node_workspaces
              WHERE tenant_id = $1 AND workspace_id = $2 AND node_id = $3
              ORDER BY discovered_at LIMIT 1",
-        )
-        .bind(tenant)
-        .bind(workspace_id)
-        .bind(node_id)
-        .fetch_optional(&self.state.db)
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("workspace has no checkout on that node"))?;
+                params![tenant, workspace_id, node_id],
+            )
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("workspace has no checkout on that node"))?;
         self.run_op(
             node_id,
             |request_id| ControlToNode::AddWorktree {
@@ -535,12 +555,14 @@ impl NookBackend for McpBackend {
         // concurrent edit re-read and try again a bounded number of times, so an
         // agent's body edit never silently clobbers a human's change (AC-3).
         for _ in 0..5 {
-            let cur: Option<TaskItem> =
-                sqlx::query_as("SELECT * FROM tasks WHERE id = $1 AND tenant_id = $2")
-                    .bind(id)
-                    .bind(tenant)
-                    .fetch_optional(&self.state.db)
-                    .await?;
+            let cur: Option<TaskItem> = self
+                .state
+                .db
+                .query_opt(
+                    "SELECT * FROM tasks WHERE id = $1 AND tenant_id = $2",
+                    params![id, tenant],
+                )
+                .await?;
             let Some(cur) = cur else {
                 anyhow::bail!("no such task");
             };
@@ -649,15 +671,18 @@ impl NookBackend for McpBackend {
         let tenant = self.tenant().await?;
         let viewer = self.user().await?;
         let id = crate::services::tasks::resolve_id(&self.state.db, tenant, &task).await?;
-        let t: TaskItem = sqlx::query_as(&format!(
-            "UPDATE tasks SET assignee_user_id = NULL, updated_at = {now}
+        let t: TaskItem = self
+            .state
+            .db
+            .query_one(
+                &format!(
+                    "UPDATE tasks SET assignee_user_id = NULL, updated_at = {now}
              WHERE id = $1 AND tenant_id = $2 RETURNING *",
-            now = Postgres.now()
-        ))
-        .bind(id)
-        .bind(tenant)
-        .fetch_one(&self.state.db)
-        .await?;
+                    now = Postgres.now()
+                ),
+                params![id, tenant],
+            )
+            .await?;
         self.state
             .registry
             .publish(tenant, nook_proto::UiEvent::TaskChanged { task_id: id });
@@ -683,20 +708,17 @@ impl NookBackend for McpBackend {
         // rather than a person typing. The author_id remains the real user
         // whose token authorised it, so the record stays honest about both.
         let name = author_name.unwrap_or_else(|| "agent (mcp)".into());
-        let row: TaskComment = sqlx::query_as(
-            "INSERT INTO task_comments (id, tenant_id, task_id, author_type, author_id, author_name, body_md)
+        let row: TaskComment = self
+            .state
+            .db
+            .query_one(
+                "INSERT INTO task_comments (id, tenant_id, task_id, author_type, author_id, author_name, body_md)
              VALUES ($1, $2, $3, 'agent', $4, $5, $6)
              RETURNING id, tenant_id, task_id, author_type, author_id, author_name,
                        body_md, created_at, updated_at",
-        )
-        .bind(uuid::Uuid::now_v7())
-        .bind(tenant)
-        .bind(id)
-        .bind(user.0)
-        .bind(&name)
-        .bind(&body_md)
-        .fetch_one(&self.state.db)
-        .await?;
+                params![uuid::Uuid::now_v7(), tenant, id, user.0, &name, &body_md],
+            )
+            .await?;
         self.state
             .registry
             .publish(tenant, nook_proto::UiEvent::TaskChanged { task_id: id });
@@ -715,22 +737,22 @@ impl NookBackend for McpBackend {
         }
         let id = crate::services::tasks::resolve_id(&self.state.db, tenant, &task).await?;
         let name = label.trim().to_lowercase();
-        let (label_id,): (uuid::Uuid,) = sqlx::query_as(
-            "INSERT INTO labels (id, tenant_id, name) VALUES ($1, $2, $3)
+        let label_id: uuid::Uuid = self
+            .state
+            .db
+            .query_scalar(
+                "INSERT INTO labels (id, tenant_id, name) VALUES ($1, $2, $3)
              ON CONFLICT (tenant_id, name) DO UPDATE SET name = EXCLUDED.name RETURNING id",
-        )
-        .bind(uuid::Uuid::now_v7())
-        .bind(tenant)
-        .bind(&name)
-        .fetch_one(&self.state.db)
-        .await?;
-        sqlx::query(
-            "INSERT INTO task_labels (task_id, label_id) VALUES ($1, $2) ON CONFLICT DO NOTHING",
-        )
-        .bind(id)
-        .bind(label_id)
-        .execute(&self.state.db)
-        .await?;
+                params![uuid::Uuid::now_v7(), tenant, &name],
+            )
+            .await?;
+        self.state
+            .db
+            .exec(
+                "INSERT INTO task_labels (task_id, label_id) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+                params![id, label_id],
+            )
+            .await?;
         self.state
             .registry
             .publish(tenant, nook_proto::UiEvent::TaskChanged { task_id: id });
@@ -741,16 +763,15 @@ impl NookBackend for McpBackend {
         let tenant = self.tenant().await?;
         let id = crate::services::tasks::resolve_id(&self.state.db, tenant, &task).await?;
         let name = label.trim().to_lowercase();
-        sqlx::query(
-            "DELETE FROM task_labels tl USING labels l
+        self.state
+            .db
+            .exec(
+                "DELETE FROM task_labels tl USING labels l
              WHERE tl.label_id = l.id AND tl.task_id = $1
                AND l.tenant_id = $2 AND l.name = $3",
-        )
-        .bind(id)
-        .bind(tenant)
-        .bind(&name)
-        .execute(&self.state.db)
-        .await?;
+                params![id, tenant, &name],
+            )
+            .await?;
         self.state
             .registry
             .publish(tenant, nook_proto::UiEvent::TaskChanged { task_id: id });
@@ -761,16 +782,18 @@ impl NookBackend for McpBackend {
         let tenant = self.tenant().await?;
         let viewer = self.user().await?;
         let id = crate::services::tasks::resolve_id(&self.state.db, tenant, &task).await?;
-        let t: TaskItem = sqlx::query_as(&format!(
-            "UPDATE tasks SET priority = $3, updated_at = {now}
+        let t: TaskItem = self
+            .state
+            .db
+            .query_one(
+                &format!(
+                    "UPDATE tasks SET priority = $3, updated_at = {now}
              WHERE id = $1 AND tenant_id = $2 RETURNING *",
-            now = Postgres.now()
-        ))
-        .bind(id)
-        .bind(tenant)
-        .bind(priority.clamp(0, 4))
-        .fetch_one(&self.state.db)
-        .await?;
+                    now = Postgres.now()
+                ),
+                params![id, tenant, priority.clamp(0, 4)],
+            )
+            .await?;
         self.state
             .registry
             .publish(tenant, nook_proto::UiEvent::TaskChanged { task_id: id });
