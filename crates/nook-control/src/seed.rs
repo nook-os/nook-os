@@ -2,7 +2,7 @@
 //! brings the same predictable environment back on every reboot.
 
 use anyhow::Result;
-use nook_db::{DbPool, Postgres, TimeMath};
+use nook_db::{params, Db, DbPool, Postgres, TimeMath};
 use nook_types::*;
 
 use crate::config::Config;
@@ -277,16 +277,12 @@ pub async fn run(db: &DbPool, cfg: &Config) -> Result<()> {
         ("Phosphor Green", "phosphor-green", phosphor_green_tokens()),
         ("Daylight", "daylight", daylight_tokens()),
     ] {
-        sqlx::query(
+        db.exec(
             "INSERT INTO themes (id, tenant_id, name, slug, tokens)
              VALUES ($1, NULL, $2, $3, $4)
              ON CONFLICT (slug) DO UPDATE SET tokens = EXCLUDED.tokens",
+            params![ThemeId::new(), name, slug, tokens],
         )
-        .bind(ThemeId::new())
-        .bind(name)
-        .bind(slug)
-        .bind(tokens)
-        .execute(db)
         .await?;
     }
 
@@ -303,34 +299,31 @@ pub async fn run(db: &DbPool, cfg: &Config) -> Result<()> {
 
     // Dev tenant — adopted (as owner) by the first identity that logs in.
     let slug = crate::services::identity::slugify(&cfg.default_tenant_name);
-    let tenant: Tenant = match sqlx::query_as::<_, Tenant>("SELECT * FROM tenants WHERE slug = $1")
-        .bind(&slug)
-        .fetch_optional(db)
+    let tenant: Tenant = match db
+        .query_opt::<Tenant>("SELECT * FROM tenants WHERE slug = $1", params![&slug])
         .await?
     {
         Some(t) => t,
         None => {
-            sqlx::query_as("INSERT INTO tenants (id, name, slug) VALUES ($1, $2, $3) RETURNING *")
-                .bind(TenantId::new())
-                .bind(&cfg.default_tenant_name)
-                .bind(&slug)
-                .fetch_one(db)
-                .await?
+            db.query_one(
+                "INSERT INTO tenants (id, name, slug) VALUES ($1, $2, $3) RETURNING *",
+                params![TenantId::new(), &cfg.default_tenant_name, &slug],
+            )
+            .await?
         }
     };
 
     // Well-known join token so the compose node can auto-join on boot.
     if let Some(token) = &cfg.dev_join_token {
-        sqlx::query(&format!(
-            "INSERT INTO join_tokens (id, tenant_id, token_hash, name, expires_at)
+        db.exec(
+            &format!(
+                "INSERT INTO join_tokens (id, tenant_id, token_hash, name, expires_at)
              VALUES ($1, $2, $3, 'dev auto-join', {expiry})
              ON CONFLICT (token_hash) DO NOTHING",
-            expiry = Postgres.now_plus("10 years")
-        ))
-        .bind(JoinTokenId::new())
-        .bind(tenant.id)
-        .bind(hash_token(token))
-        .execute(db)
+                expiry = Postgres.now_plus("10 years")
+            ),
+            params![JoinTokenId::new(), tenant.id, hash_token(token)],
+        )
         .await?;
     }
 
@@ -342,33 +335,29 @@ pub async fn run(db: &DbPool, cfg: &Config) -> Result<()> {
     // visible from the very first board, instead of appearing only once
     // somebody already needed it.
     for (name, color) in [("agent-ready", "#48c78e"), ("blocked", "#f14668")] {
-        sqlx::query(
+        db.exec(
             "INSERT INTO labels (id, tenant_id, name, color) VALUES ($1, $2, $3, $4)
              ON CONFLICT (tenant_id, name) DO NOTHING",
+            params![uuid::Uuid::now_v7(), tenant.id, name, color],
         )
-        .bind(uuid::Uuid::now_v7())
-        .bind(tenant.id)
-        .bind(name)
-        .bind(color)
-        .execute(db)
         .await?;
     }
 
     // Sample local board with a few tasks.
-    let existing_board: Option<(BoardId,)> =
-        sqlx::query_as("SELECT id FROM boards WHERE tenant_id = $1 AND name = 'NookOS Bootstrap'")
-            .bind(tenant.id)
-            .fetch_optional(db)
-            .await?;
-    if existing_board.is_none() {
-        let board: Board = sqlx::query_as(
-            "INSERT INTO boards (id, tenant_id, name, key, provider)
-             VALUES ($1, $2, 'NookOS Bootstrap', 'NOOK', 'local') RETURNING *",
+    let existing_board: Option<BoardId> = db
+        .query_scalar_opt(
+            "SELECT id FROM boards WHERE tenant_id = $1 AND name = 'NookOS Bootstrap'",
+            params![tenant.id],
         )
-        .bind(BoardId::new())
-        .bind(tenant.id)
-        .fetch_one(db)
         .await?;
+    if existing_board.is_none() {
+        let board: Board = db
+            .query_one(
+                "INSERT INTO boards (id, tenant_id, name, key, provider)
+             VALUES ($1, $2, 'NookOS Bootstrap', 'NOOK', 'local') RETURNING *",
+                params![BoardId::new(), tenant.id],
+            )
+            .await?;
 
         // Name and TYPE together. The name is what a person reads and may
         // rename freely; the type is what automation targets, and seeding it
@@ -384,17 +373,13 @@ pub async fn run(db: &DbPool, cfg: &Config) -> Result<()> {
         .iter()
         .enumerate()
         {
-            let (id,): (ColumnId,) = sqlx::query_as(
-                "INSERT INTO board_columns (id, board_id, name, position, type)
+            let id: ColumnId = db
+                .query_scalar(
+                    "INSERT INTO board_columns (id, board_id, name, position, type)
                  VALUES ($1, $2, $3, $4, $5) RETURNING id",
-            )
-            .bind(ColumnId::new())
-            .bind(board.id)
-            .bind(name)
-            .bind(i as i32)
-            .bind(kind)
-            .fetch_one(db)
-            .await?;
+                    params![ColumnId::new(), board.id, *name, i as i32, *kind],
+                )
+                .await?;
             column_ids.push(id);
         }
 
@@ -431,26 +416,29 @@ pub async fn run(db: &DbPool, cfg: &Config) -> Result<()> {
             ),
         ];
         for (i, (title, desc, col)) in tasks.iter().enumerate() {
-            sqlx::query(
+            db.exec(
                 "INSERT INTO tasks (id, tenant_id, board_id, column_id, title, description, position)
                  VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                params![
+                    TaskId::new(),
+                    tenant.id,
+                    board.id,
+                    column_ids[*col],
+                    *title,
+                    *desc,
+                    i as i32
+                ],
             )
-            .bind(TaskId::new())
-            .bind(tenant.id)
-            .bind(board.id)
-            .bind(column_ids[*col])
-            .bind(title)
-            .bind(desc)
-            .bind(i as i32)
-            .execute(db)
             .await?;
         }
     }
 
     // A few historical events so the timeline isn't empty on first login.
-    let (event_count,): (i64,) = sqlx::query_as("SELECT count(*) FROM events WHERE tenant_id = $1")
-        .bind(tenant.id)
-        .fetch_one(db)
+    let event_count: i64 = db
+        .query_scalar(
+            "SELECT count(*) FROM events WHERE tenant_id = $1",
+            params![tenant.id],
+        )
         .await?;
     if event_count == 0 {
         for (kind, payload) in [
@@ -490,10 +478,12 @@ pub async fn run(db: &DbPool, cfg: &Config) -> Result<()> {
 /// whoever happened to be first if the users table were ever rebuilt. A second
 /// operator has to be a deliberate act.
 pub async fn bootstrap_operator(db: &DbPool) {
-    let existing: Result<Option<(uuid::Uuid,)>, _> =
-        sqlx::query_as("SELECT id FROM role_bindings WHERE scope_type = 'deployment' LIMIT 1")
-            .fetch_optional(db)
-            .await;
+    let existing: Result<Option<uuid::Uuid>, _> = db
+        .query_scalar_opt(
+            "SELECT id FROM role_bindings WHERE scope_type = 'deployment' LIMIT 1",
+            params![],
+        )
+        .await;
     match existing {
         Ok(Some(_)) => return,
         Ok(None) => {}
@@ -503,17 +493,19 @@ pub async fn bootstrap_operator(db: &DbPool) {
         }
     }
 
-    let first: Option<(uuid::Uuid, TenantId)> =
-        match sqlx::query_as("SELECT id, tenant_id FROM users ORDER BY created_at LIMIT 1")
-            .fetch_optional(db)
-            .await
-        {
-            Ok(u) => u,
-            Err(e) => {
-                tracing::warn!(error = %e, "could not find a first user");
-                return;
-            }
-        };
+    let first: Option<(uuid::Uuid, TenantId)> = match db
+        .query_opt(
+            "SELECT id, tenant_id FROM users ORDER BY created_at LIMIT 1",
+            params![],
+        )
+        .await
+    {
+        Ok(u) => u,
+        Err(e) => {
+            tracing::warn!(error = %e, "could not find a first user");
+            return;
+        }
+    };
     // No users yet. A fresh instance has nobody to appoint, which is why this
     // is ALSO called when the first user is created — seeding runs before
     // anybody has signed in, and "it will happen on the next boot" is not true
@@ -523,18 +515,17 @@ pub async fn bootstrap_operator(db: &DbPool) {
         return;
     };
 
-    let done = sqlx::query(
-        "INSERT INTO role_bindings (id, subject_type, subject_id, role_key, scope_type, scope_id)
+    let done = db
+        .exec(
+            "INSERT INTO role_bindings (id, subject_type, subject_id, role_key, scope_type, scope_id)
          VALUES ($1, 'user', $2, 'operator', 'deployment', NULL)
          ON CONFLICT DO NOTHING",
-    )
-    .bind(uuid::Uuid::now_v7())
-    .bind(user_id)
-    .execute(db)
-    .await;
+            params![uuid::Uuid::now_v7(), user_id],
+        )
+        .await;
 
     match done {
-        Ok(r) if r.rows_affected() > 0 => {
+        Ok(r) if r > 0 => {
             tracing::info!(user = %user_id, "granted operator @ deployment (bootstrap)");
             // Recorded, because "who became the operator, and when" is the
             // first question anybody audits.
