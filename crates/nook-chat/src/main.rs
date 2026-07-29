@@ -85,7 +85,10 @@ async fn main() -> anyhow::Result<()> {
     );
     // The schema must exist before the migrator creates chat._sqlx_migrations.
     ensure_chat_schema(&db).await?;
-    MIGRATOR.run(db.pg()).await?;
+    // Dev tolerates a chat ledger ahead of this checkout (warns + proceeds);
+    // production stays strictly fatal (MAIN-224). The pool's search_path pins
+    // `chat` first, so the orphan check reads `chat._sqlx_migrations`.
+    nook_db::migrate::run_with_dev_tolerance(&MIGRATOR, db.pg(), cfg.is_production()).await?;
 
     // Live fan-out: a local per-channel broadcast registry, plus a cross-instance
     // bus (nook-db's event-bus seam — Postgres LISTEN/NOTIFY under the hood) so a

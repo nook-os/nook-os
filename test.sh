@@ -85,7 +85,7 @@ run_lint() {
 
   say "shellcheck"
   lint_in koalaman/shellcheck:stable install/install.sh deploy/enable-agent-mtls.sh test.sh \
-    charts/nook-control/ci/validate.sh scripts/k8s-e2e.sh \
+    charts/nook-control/ci/validate.sh scripts/k8s-e2e.sh scripts/dev-db-heal.sh \
     scripts/check-release-version.sh scripts/check-release-version.test.sh \
     || die "shellcheck"
   pass "shell scripts clean"

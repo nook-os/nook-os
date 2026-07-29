@@ -12,6 +12,8 @@ futures-util = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
 serde_json = { workspace = true }
+# The boot-time migration runner (MAIN-224) shouts a WARN per orphan ledger row.
+tracing = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }

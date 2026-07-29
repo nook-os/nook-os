@@ -37,8 +37,10 @@ async fn main() -> Result<()> {
         .await
         .context("opening the database")?;
     // Migrations embed Postgres DDL (`sqlx::migrate!`); the SQLite track is
-    // MAIN-196. Run them against the pool's Postgres arm.
-    MIGRATOR.run(db.pg()).await?;
+    // MAIN-196. Run them against the pool's Postgres arm. Dev tolerates a ledger
+    // ahead of this checkout (warns + proceeds); production stays strictly fatal
+    // (MAIN-224).
+    nook_db::migrate::run_with_dev_tolerance(&MIGRATOR, db.pg(), cfg.is_production()).await?;
 
     match cli.command.unwrap_or(Command::Serve) {
         Command::Serve => {
