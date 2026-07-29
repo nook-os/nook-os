@@ -135,6 +135,7 @@ vi.mock("./live", () => ({
 }));
 
 import { MissionPage } from "./pages/Mission";
+import { ContextMenuProvider } from "./contextMenu";
 
 beforeEach(() => {
   liveState.nodeStatus = {};
@@ -149,7 +150,9 @@ function renderPage() {
   return render(
     <MemoryRouter>
       <QueryClientProvider client={qc}>
-        <MissionPage />
+        <ContextMenuProvider>
+          <MissionPage />
+        </ContextMenuProvider>
       </QueryClientProvider>
     </MemoryRouter>,
   );
@@ -167,13 +170,46 @@ describe("Mission Control (MAIN-226)", () => {
     expect(screen.getByTestId("deck").textContent).toContain("3 checkouts");
   });
 
-  it("offers + worktree on the primary clone only", async () => {
+  it("the row \u22ef menu offers worktree on the clone", async () => {
     renderPage();
     await waitFor(() =>
-      expect(screen.getByTestId("worktree-clone1")).toBeTruthy(),
+      expect(screen.getByTestId("rowmenu-clone1")).toBeTruthy(),
     );
-    expect(screen.queryByTestId("worktree-wt1")).toBeNull();
-    expect(screen.queryByTestId("worktree-gone1")).toBeNull();
+    fireEvent.click(screen.getByTestId("rowmenu-clone1"));
+    expect(screen.getByText("Terminal here")).toBeTruthy();
+    expect(screen.getByText("New worktree from this clone")).toBeTruthy();
+    expect(screen.getByText("Copy path")).toBeTruthy();
+  });
+
+  it("the row \u22ef menu on a worktree has no worktree item", async () => {
+    renderPage();
+    await waitFor(() => expect(screen.getByTestId("rowmenu-wt1")).toBeTruthy());
+    fireEvent.click(screen.getByTestId("rowmenu-wt1"));
+    expect(screen.getByText("Terminal here")).toBeTruthy();
+    expect(screen.queryByText("New worktree from this clone")).toBeNull();
+  });
+
+  it("switches between tree, grid, machines and matrix views", async () => {
+    renderPage();
+    await waitFor(() =>
+      expect(screen.getByTestId("checkout-clone1")).toBeTruthy(),
+    );
+
+    fireEvent.click(screen.getByTestId("view-grid"));
+    expect(screen.getByTestId("grid-view")).toBeTruthy();
+    expect(screen.getByTestId("card-acme-api")).toBeTruthy();
+
+    fireEvent.click(screen.getByTestId("view-machines"));
+    expect(screen.getByTestId("machines-view")).toBeTruthy();
+    expect(screen.getByTestId("machine-n1")).toBeTruthy();
+
+    fireEvent.click(screen.getByTestId("view-matrix"));
+    expect(screen.getByTestId("matrix-view")).toBeTruthy();
+
+    fireEvent.click(screen.getByTestId("view-tree"));
+    expect(screen.getByTestId("repo-acme-api")).toBeTruthy();
+    // The chosen view persists.
+    expect(window.localStorage.getItem("nook.mission.view.v1")).toBe("tree");
   });
 
   it("hides ghosts by default; the toggle reveals them ghosted, not hidden", async () => {
@@ -188,7 +224,6 @@ describe("Mission Control (MAIN-226)", () => {
     fireEvent.click(screen.getByTestId("ghost-toggle"));
     const gone = await screen.findByTestId("checkout-gone1");
     expect(gone.className).toContain("ghost"); // shown, ghosted
-    expect(screen.queryByTestId("terminal-gone1")).toBeNull(); // no actions on a ghost
   });
 
   it("lamps light for exceptions and filter the tree when clicked", async () => {

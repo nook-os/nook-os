@@ -4907,7 +4907,18 @@ a.toast-main:hover .toast-title { text-decoration: underline; }
 .m-sess-mark.running { color: var(--nook-accent); }
 .m-sess-mark.waiting { color: var(--nook-warn); }
 .m-sess-mark.idle { color: var(--nook-fg-faint); }
-.m-sess-owner { margin-left: auto; flex: none; }
+.m-sess-owner {
+  margin-left: auto;
+  flex: none;
+  font-family: var(--nook-font-mono);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--nook-fg-faint);
+  border: 1px solid var(--nook-border);
+  border-radius: 3px;
+  padding: 0 5px;
+}
 
 .m-ghost-hint {
   display: block;
@@ -4922,3 +4933,74 @@ a.toast-main:hover .toast-title { text-decoration: underline; }
   text-align: left;
 }
 .m-ghost-hint:hover { color: var(--nook-fg-dim); text-decoration: underline; }
+
+/* View switcher: a quiet segmented control — the flavors of the same fleet. */
+.m-views {
+  display: inline-flex;
+  border: 1px solid var(--nook-border);
+  border-radius: 3px;
+  overflow: hidden;
+}
+.m-view-btn {
+  padding: 2px 8px;
+  background: transparent;
+  border: none;
+  border-right: 1px solid var(--nook-border);
+  color: var(--nook-fg-dim);
+  font-family: var(--nook-font-mono);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  cursor: pointer;
+}
+.m-view-btn:last-child { border-right: none; }
+.m-view-btn:hover { color: var(--nook-fg); }
+.m-view-btn.active {
+  background: var(--nook-selection);
+  color: var(--nook-fg-bright);
+}
+
+/* Grid + machines flavors: cards in a responsive grid. */
+.m-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
+  gap: 8px;
+  align-items: start;
+  overflow: auto;
+}
+.m-card-body { padding: 4px 8px 6px; }
+.m-co-node {
+  font-family: var(--nook-font-mono);
+  font-size: 11px;
+  color: var(--nook-fg-faint);
+  flex: none;
+}
+.m-co-repo { font-family: var(--nook-font-mono); font-size: 12px; flex: none; }
+
+/* Matrix flavor: repos × machines; a chip per checkout, click = actions menu. */
+.m-matrix-wrap { overflow: auto; display: flex; flex-direction: column; gap: 8px; }
+.m-matrix th { white-space: nowrap; }
+.m-matrix-node { display: inline-flex; align-items: center; gap: 5px; }
+.m-matrix td { vertical-align: top; }
+.m-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin: 1px 3px 1px 0;
+  padding: 1px 7px;
+  border: 1px solid var(--nook-border-bright);
+  border-radius: 999px;
+  background: var(--nook-bg-raised);
+  color: var(--nook-fg);
+  font-family: var(--nook-font-mono);
+  font-size: 11px;
+  cursor: pointer;
+}
+.m-chip:hover { border-color: var(--nook-accent); color: var(--nook-fg-bright); }
+.m-chip.warn { border-color: var(--nook-warn); color: var(--nook-warn); }
+.m-chip.ghost { opacity: 0.45; }
+.m-chip-live { color: var(--nook-ok); font-size: 10px; }
+
+/* The ⋯ row menu trigger stays quiet until the row is alive under the pointer. */
+.m-row-menu { color: var(--nook-fg-dim); }
+.m-row-menu:hover { color: var(--nook-fg-bright); }

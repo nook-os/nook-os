@@ -245,6 +245,94 @@ export function overlayLive(
   };
 }
 
+// ── Alternate views ──────────────────────────────────────────────────────────
+
+/** How the fleet is organized on screen. All views share the deck, the filter,
+ *  the lamps and the ghosts toggle — only the grouping changes. */
+export type MissionView = "tree" | "grid" | "machines" | "matrix";
+
+const VIEW_KEY = "nook.mission.view.v1";
+
+export function loadView(): MissionView {
+  try {
+    const v = window.localStorage.getItem(VIEW_KEY);
+    return v === "grid" || v === "machines" || v === "matrix" ? v : "tree";
+  } catch {
+    return "tree";
+  }
+}
+
+export function saveView(v: MissionView): void {
+  try {
+    window.localStorage.setItem(VIEW_KEY, v);
+  } catch {
+    // Storage unavailable: the choice just won't persist.
+  }
+}
+
+/** Machine-first regrouping of the (already filtered) repos: one group per
+ *  node, holding every checkout on it with its owning workspace. Node order is
+ *  first-appearance, matching the tree's ordering. */
+export interface MachineGroup {
+  nodeId: string;
+  nodeName: string;
+  nodeStatus: string;
+  entries: { workspace: OverviewWorkspace; checkout: OverviewCheckout }[];
+}
+
+export function machineGroups(repos: VisibleRepo[]): MachineGroup[] {
+  const order: string[] = [];
+  const by: Record<string, MachineGroup> = {};
+  for (const { workspace, checkouts } of repos) {
+    for (const c of checkouts) {
+      if (!by[c.node_id]) {
+        by[c.node_id] = {
+          nodeId: c.node_id,
+          nodeName: c.node_name,
+          nodeStatus: c.node_status,
+          entries: [],
+        };
+        order.push(c.node_id);
+      }
+      by[c.node_id].entries.push({ workspace, checkout: c });
+    }
+  }
+  return order.map((id) => by[id]);
+}
+
+/** The repos × machines board: one column per node, one row per repo, each
+ *  cell the checkouts of that repo on that node. */
+export interface MatrixData {
+  nodes: { id: string; name: string; status: string }[];
+  rows: {
+    workspace: OverviewWorkspace;
+    cells: Record<string, OverviewCheckout[]>;
+  }[];
+}
+
+export function matrixData(repos: VisibleRepo[]): MatrixData {
+  const nodeOrder: string[] = [];
+  const nodes: Record<string, { id: string; name: string; status: string }> =
+    {};
+  const rows: MatrixData["rows"] = [];
+  for (const { workspace, checkouts } of repos) {
+    const cells: Record<string, OverviewCheckout[]> = {};
+    for (const c of checkouts) {
+      if (!nodes[c.node_id]) {
+        nodes[c.node_id] = {
+          id: c.node_id,
+          name: c.node_name,
+          status: c.node_status,
+        };
+        nodeOrder.push(c.node_id);
+      }
+      (cells[c.node_id] ??= []).push(c);
+    }
+    rows.push({ workspace, cells });
+  }
+  return { nodes: nodeOrder.map((id) => nodes[id]), rows };
+}
+
 // ── Collapse persistence ─────────────────────────────────────────────────────
 
 const COLLAPSE_KEY = "nook.mission.collapsed.v1";

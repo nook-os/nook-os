@@ -235,3 +235,53 @@ describe("rollups and live overlay", () => {
     expect(out.loose_sessions).toEqual([]); // s3 died → dropped
   });
 });
+
+describe("alternate views", () => {
+  const repos = (ov: Overview) =>
+    // Ghosts shown so grouping sees every row.
+    visibleRepos(ov, "", null, true);
+
+  const overview: Overview = {
+    workspaces: [
+      ws("api", [
+        co({ id: "a1", node_id: "n1", node_name: "alpha" }),
+        co({ id: "a2", node_id: "n2", node_name: "beta", kind: "worktree" }),
+      ]),
+      ws("web", [co({ id: "b1", node_id: "n1", node_name: "alpha" })]),
+    ],
+    loose_sessions: [],
+  };
+
+  it("machineGroups regroups the filtered repos node-first", async () => {
+    const { machineGroups } = await import("./mission");
+    const groups = machineGroups(repos(overview));
+    expect(groups.map((g) => g.nodeId)).toEqual(["n1", "n2"]);
+    expect(groups[0].entries.map((e) => e.checkout.id)).toEqual(["a1", "b1"]);
+    expect(groups[0].entries.map((e) => e.workspace.id)).toEqual([
+      "api",
+      "web",
+    ]);
+    expect(groups[1].entries.map((e) => e.checkout.id)).toEqual(["a2"]);
+  });
+
+  it("matrixData lays repos × machines with per-cell checkouts", async () => {
+    const { matrixData } = await import("./mission");
+    const m = matrixData(repos(overview));
+    expect(m.nodes.map((n) => n.id)).toEqual(["n1", "n2"]);
+    expect(m.rows.map((r) => r.workspace.id)).toEqual(["api", "web"]);
+    expect(m.rows[0].cells["n1"].map((c) => c.id)).toEqual(["a1"]);
+    expect(m.rows[0].cells["n2"].map((c) => c.id)).toEqual(["a2"]);
+    expect(m.rows[1].cells["n2"]).toBeUndefined(); // web has nothing on beta
+  });
+
+  it("view choice persists and falls back to tree on junk", async () => {
+    const { loadView, saveView } = await import("./mission");
+    window.localStorage.removeItem("nook.mission.view.v1");
+    expect(loadView()).toBe("tree");
+    saveView("matrix");
+    expect(loadView()).toBe("matrix");
+    window.localStorage.setItem("nook.mission.view.v1", "nonsense");
+    expect(loadView()).toBe("tree");
+    window.localStorage.removeItem("nook.mission.view.v1");
+  });
+});
