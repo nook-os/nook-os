@@ -115,6 +115,8 @@ into_db_value! {
     Vec<uuid::Uuid> => |v| DbValue::UuidList(v),
     Vec<i64> => |v| DbValue::I64List(v),
     &[String] => |v| DbValue::TextList(v.to_vec()),
+    &[uuid::Uuid] => |v| DbValue::UuidList(v.to_vec()),
+    &[i64] => |v| DbValue::I64List(v.to_vec()),
 }
 
 /// Build a `Vec<DbValue>` from a heterogeneous parameter list, in bind order.

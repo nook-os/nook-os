@@ -11,7 +11,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::Json;
 use chrono::{DateTime, Utc};
-use nook_db::{DbPool, Postgres, TypeMapping};
+use nook_db::{params, Db, DbPool, Postgres, TypeMapping};
 use nook_types::{
     ChatMessage, ChatMessagePage, ChatReactionAggregate, ChatServerMessage, ChatThread,
     PostChatMessage, UpdateChatMessage,
@@ -88,20 +88,21 @@ async fn load_reactions(
     if ids.is_empty() {
         return HashMap::new();
     }
-    let rows: Vec<ReactionRow> = sqlx::query_as(&format!(
-        "SELECT message_id, emoji, {cnt} AS count,
+    let rows: Vec<ReactionRow> = pool
+        .query_all(
+            &format!(
+                "SELECT message_id, emoji, {cnt} AS count,
                 COALESCE(bool_or(user_id = $2), false) AS reacted
            FROM chat_reactions
           WHERE message_id = ANY($1)
           GROUP BY message_id, emoji
           ORDER BY message_id, emoji",
-        cnt = Postgres.cast("count(*)", "bigint")
-    ))
-    .bind(ids)
-    .bind(viewer)
-    .fetch_all(pool)
-    .await
-    .unwrap_or_default();
+                cnt = Postgres.cast("count(*)", "bigint")
+            ),
+            params![ids, viewer],
+        )
+        .await
+        .unwrap_or_default();
 
     let mut out: HashMap<Uuid, Vec<ChatReactionAggregate>> = HashMap::new();
     for r in rows {
@@ -186,12 +187,14 @@ pub async fn post(
     // threads are one level deep (MAIN-114 AC-1). Both are the client's error, so
     // 400s with a specific message rather than a silent drop or a 500.
     if let Some(parent_id) = req.parent_message_id {
-        let parent: Option<(Uuid, Option<Uuid>)> =
-            sqlx::query_as("SELECT channel_id, parent_message_id FROM chat_messages WHERE id = $1")
-                .bind(parent_id)
-                .fetch_optional(&state.db)
-                .await
-                .map_err(|_| ChatError::Internal)?;
+        let parent: Option<(Uuid, Option<Uuid>)> = state
+            .db
+            .query_opt(
+                "SELECT channel_id, parent_message_id FROM chat_messages WHERE id = $1",
+                params![parent_id],
+            )
+            .await
+            .map_err(|_| ChatError::Internal)?;
         let (parent_channel, parents_parent) =
             parent.ok_or_else(|| ChatError::BadRequest("parent message not found".into()))?;
         if parent_channel != channel_id {
@@ -206,25 +209,30 @@ pub async fn post(
         }
     }
 
-    let row = sqlx::query_as::<_, MessageRow>(&format!(
-        "INSERT INTO chat_messages (id, channel_id, author_id, tenant_id, body, parent_message_id)
+    let row = state
+        .db
+        .query_one::<MessageRow>(
+            &format!(
+                "INSERT INTO chat_messages (id, channel_id, author_id, tenant_id, body, parent_message_id)
          VALUES ($1, $2, $3, $4, $5, $6)
          RETURNING id, channel_id, author_id,
              (SELECT display_name FROM public.users WHERE id = author_id) AS author_name,
              body, parent_message_id, created_at, edited_at, deleted_at,
              {zero} AS reply_count, {null_ts} AS last_reply_at",
-        zero = Postgres.cast("0", "bigint"),
-        null_ts = Postgres.cast("NULL", "timestamptz"),
-    ))
-    .bind(Uuid::now_v7())
-    .bind(channel_id)
-    .bind(caller.user_id)
-    .bind(caller.tenant_id)
-    .bind(body)
-    .bind(req.parent_message_id)
-    .fetch_one(&state.db)
-    .await
-    .map_err(|_| ChatError::Internal)?;
+                zero = Postgres.cast("0", "bigint"),
+                null_ts = Postgres.cast("NULL", "timestamptz"),
+            ),
+            params![
+                Uuid::now_v7(),
+                channel_id,
+                caller.user_id,
+                caller.tenant_id,
+                body,
+                req.parent_message_id
+            ],
+        )
+        .await
+        .map_err(|_| ChatError::Internal)?;
     let msg: ChatMessage = row.into(); // no reactions on a brand-new message
 
     // Deliver to subscribers here now, and announce it so peer instances do the
@@ -260,17 +268,18 @@ pub async fn history(
     // are excluded from channel history (`parent_message_id IS NULL`) — they live
     // only under their parent's thread (MAIN-114 AC-2); each parent carries its
     // reply rollups from the same query (AC-3).
-    let rows = sqlx::query_as::<_, MessageRow>(&format!(
-        "{SELECT_MESSAGE_WITH_REPLIES} WHERE m.channel_id = $1 AND m.parent_message_id IS NULL \
+    let rows = state
+        .db
+        .query_all::<MessageRow>(
+            &format!(
+                "{SELECT_MESSAGE_WITH_REPLIES} WHERE m.channel_id = $1 AND m.parent_message_id IS NULL \
          AND ({cursor} IS NULL OR m.id < $2) ORDER BY m.id DESC LIMIT $3",
-        cursor = Postgres.cast("$2", "uuid")
-    ))
-    .bind(channel_id)
-    .bind(q.before)
-    .bind(limit)
-    .fetch_all(&state.db)
-    .await
-    .map_err(|_| ChatError::Internal)?;
+                cursor = Postgres.cast("$2", "uuid")
+            ),
+            params![channel_id, q.before, limit],
+        )
+        .await
+        .map_err(|_| ChatError::Internal)?;
 
     // A full page implies there may be more; the cursor is the oldest id shown.
     let next_cursor = (rows.len() as i64 == limit)
@@ -294,13 +303,14 @@ pub async fn fetch(pool: &DbPool, id: Uuid) -> Option<ChatMessage> {
 
 /// One message by id with redaction + reactions attached for `viewer`.
 async fn read_message(pool: &DbPool, viewer: Option<Uuid>, id: Uuid) -> Option<ChatMessage> {
-    let row =
-        sqlx::query_as::<_, MessageRow>(&format!("{SELECT_MESSAGE_WITH_REPLIES} WHERE m.id = $1"))
-            .bind(id)
-            .fetch_optional(pool)
-            .await
-            .ok()
-            .flatten()?;
+    let row = pool
+        .query_opt::<MessageRow>(
+            &format!("{SELECT_MESSAGE_WITH_REPLIES} WHERE m.id = $1"),
+            params![id],
+        )
+        .await
+        .ok()
+        .flatten()?;
     let mut msg: ChatMessage = row.into();
     if !msg.deleted {
         msg.reactions = load_reactions(pool, viewer, &[id])
@@ -324,13 +334,15 @@ pub async fn thread(
     // Resolve the parent (with its reply rollups), then authorize on its channel
     // BEFORE revealing anything else — a cross-tenant caller gets 403, not the
     // is-it-a-reply distinction below.
-    let parent =
-        sqlx::query_as::<_, MessageRow>(&format!("{SELECT_MESSAGE_WITH_REPLIES} WHERE m.id = $1"))
-            .bind(message_id)
-            .fetch_optional(&state.db)
-            .await
-            .map_err(|_| ChatError::Internal)?
-            .ok_or(ChatError::NotFound)?;
+    let parent = state
+        .db
+        .query_opt::<MessageRow>(
+            &format!("{SELECT_MESSAGE_WITH_REPLIES} WHERE m.id = $1"),
+            params![message_id],
+        )
+        .await
+        .map_err(|_| ChatError::Internal)?
+        .ok_or(ChatError::NotFound)?;
     crate::channels::access(&state.db, parent.channel_id, &caller).await?;
 
     // A thread hangs off a top-level message; asking for a reply's thread is a
@@ -342,18 +354,19 @@ pub async fn thread(
     }
 
     let limit = q.limit.unwrap_or(50).clamp(1, 200);
-    let rows = sqlx::query_as::<_, MessageRow>(&format!(
-        "{sel} WHERE m.parent_message_id = $1 AND ({cursor} IS NULL OR m.id < $2)
+    let rows = state
+        .db
+        .query_all::<MessageRow>(
+            &format!(
+                "{sel} WHERE m.parent_message_id = $1 AND ({cursor} IS NULL OR m.id < $2)
          ORDER BY m.id DESC LIMIT $3",
-        sel = select_message(),
-        cursor = Postgres.cast("$2", "uuid")
-    ))
-    .bind(message_id)
-    .bind(q.before)
-    .bind(limit)
-    .fetch_all(&state.db)
-    .await
-    .map_err(|_| ChatError::Internal)?;
+                sel = select_message(),
+                cursor = Postgres.cast("$2", "uuid")
+            ),
+            params![message_id, q.before, limit],
+        )
+        .await
+        .map_err(|_| ChatError::Internal)?;
 
     let next_cursor = (rows.len() as i64 == limit)
         .then(|| rows.last().map(|m| m.id))
@@ -393,12 +406,13 @@ async fn message_meta(
     pool: &DbPool,
     id: Uuid,
 ) -> Result<(Uuid, Uuid, Option<DateTime<Utc>>), ChatError> {
-    sqlx::query_as("SELECT channel_id, author_id, deleted_at FROM chat_messages WHERE id = $1")
-        .bind(id)
-        .fetch_optional(pool)
-        .await
-        .map_err(|_| ChatError::Internal)?
-        .ok_or(ChatError::NotFound)
+    pool.query_opt::<(Uuid, Uuid, Option<DateTime<Utc>>)>(
+        "SELECT channel_id, author_id, deleted_at FROM chat_messages WHERE id = $1",
+        params![id],
+    )
+    .await
+    .map_err(|_| ChatError::Internal)?
+    .ok_or(ChatError::NotFound)
 }
 
 /// Announce a change to an existing message (edit/delete/reaction — AC-5): the
@@ -451,26 +465,24 @@ async fn react(
     }
 
     if add {
-        sqlx::query(
-            "INSERT INTO chat_reactions (message_id, user_id, emoji) VALUES ($1, $2, $3)
+        state
+            .db
+            .exec(
+                "INSERT INTO chat_reactions (message_id, user_id, emoji) VALUES ($1, $2, $3)
              ON CONFLICT DO NOTHING",
-        )
-        .bind(message_id)
-        .bind(caller.user_id)
-        .bind(emoji)
-        .execute(&state.db)
-        .await
-        .map_err(|_| ChatError::Internal)?;
+                params![message_id, caller.user_id, emoji],
+            )
+            .await
+            .map_err(|_| ChatError::Internal)?;
     } else {
-        sqlx::query(
-            "DELETE FROM chat_reactions WHERE message_id = $1 AND user_id = $2 AND emoji = $3",
-        )
-        .bind(message_id)
-        .bind(caller.user_id)
-        .bind(emoji)
-        .execute(&state.db)
-        .await
-        .map_err(|_| ChatError::Internal)?;
+        state
+            .db
+            .exec(
+                "DELETE FROM chat_reactions WHERE message_id = $1 AND user_id = $2 AND emoji = $3",
+                params![message_id, caller.user_id, emoji],
+            )
+            .await
+            .map_err(|_| ChatError::Internal)?;
     }
 
     broadcast_update(state, message_id).await;
@@ -504,25 +516,26 @@ pub async fn update(
 
     // Record the prior content as an audit revision, then update in place. The
     // revision INSERT reads the current body, so it must run before the UPDATE.
-    sqlx::query(
-        "INSERT INTO chat_message_revisions (id, message_id, prior_content, action, acted_by)
+    state
+        .db
+        .exec(
+            "INSERT INTO chat_message_revisions (id, message_id, prior_content, action, acted_by)
          SELECT $1, id, body, 'edit', $2 FROM chat_messages WHERE id = $3",
-    )
-    .bind(Uuid::now_v7())
-    .bind(caller.user_id)
-    .bind(message_id)
-    .execute(&state.db)
-    .await
-    .map_err(|_| ChatError::Internal)?;
-    sqlx::query(&format!(
-        "UPDATE chat_messages SET body = $2, edited_at = {} WHERE id = $1",
-        Postgres.now()
-    ))
-    .bind(message_id)
-    .bind(body)
-    .execute(&state.db)
-    .await
-    .map_err(|_| ChatError::Internal)?;
+            params![Uuid::now_v7(), caller.user_id, message_id],
+        )
+        .await
+        .map_err(|_| ChatError::Internal)?;
+    state
+        .db
+        .exec(
+            &format!(
+                "UPDATE chat_messages SET body = $2, edited_at = {} WHERE id = $1",
+                Postgres.now()
+            ),
+            params![message_id, body],
+        )
+        .await
+        .map_err(|_| ChatError::Internal)?;
 
     broadcast_update(&state, message_id).await;
     read_message(&state.db, Some(caller.user_id), message_id)
@@ -553,24 +566,26 @@ pub async fn delete(
             .ok_or(ChatError::NotFound);
     }
 
-    sqlx::query(
-        "INSERT INTO chat_message_revisions (id, message_id, prior_content, action, acted_by)
+    state
+        .db
+        .exec(
+            "INSERT INTO chat_message_revisions (id, message_id, prior_content, action, acted_by)
          SELECT $1, id, body, 'delete', $2 FROM chat_messages WHERE id = $3",
-    )
-    .bind(Uuid::now_v7())
-    .bind(caller.user_id)
-    .bind(message_id)
-    .execute(&state.db)
-    .await
-    .map_err(|_| ChatError::Internal)?;
-    sqlx::query(&format!(
-        "UPDATE chat_messages SET deleted_at = {} WHERE id = $1",
-        Postgres.now()
-    ))
-    .bind(message_id)
-    .execute(&state.db)
-    .await
-    .map_err(|_| ChatError::Internal)?;
+            params![Uuid::now_v7(), caller.user_id, message_id],
+        )
+        .await
+        .map_err(|_| ChatError::Internal)?;
+    state
+        .db
+        .exec(
+            &format!(
+                "UPDATE chat_messages SET deleted_at = {} WHERE id = $1",
+                Postgres.now()
+            ),
+            params![message_id],
+        )
+        .await
+        .map_err(|_| ChatError::Internal)?;
 
     broadcast_update(&state, message_id).await;
     read_message(&state.db, Some(caller.user_id), message_id)
@@ -637,16 +652,15 @@ mod tests {
     // exercise create's authorization.
     async fn make_channel(state: &AppState, tenant: Uuid, name: &str) -> Uuid {
         let id = Uuid::now_v7();
-        sqlx::query(
-            "INSERT INTO chat_channels (id, owner_type, owner_id, name, slug)
+        state
+            .db
+            .exec(
+                "INSERT INTO chat_channels (id, owner_type, owner_id, name, slug)
              VALUES ($1, 'tenant', $2, $3, $3)",
-        )
-        .bind(id)
-        .bind(tenant)
-        .bind(name)
-        .execute(&state.db)
-        .await
-        .unwrap();
+                params![id, tenant, name],
+            )
+            .await
+            .unwrap();
         id
     }
 
@@ -798,14 +812,17 @@ mod tests {
         // Archive it directly (create/update are admin-gated on a `public.users`
         // lookup this chat-only pool cannot resolve — MAIN-94; these tests are
         // about posting, not channel-management auth).
-        sqlx::query(&format!(
-            "UPDATE chat_channels SET archived_at = {} WHERE id = $1",
-            Postgres.now()
-        ))
-        .bind(channel)
-        .execute(&state.db)
-        .await
-        .unwrap();
+        state
+            .db
+            .exec(
+                &format!(
+                    "UPDATE chat_channels SET archived_at = {} WHERE id = $1",
+                    Postgres.now()
+                ),
+                params![channel],
+            )
+            .await
+            .unwrap();
 
         // Posting is refused…
         let err = post(
@@ -1211,13 +1228,14 @@ mod tests {
         assert!(edited.edited_at.is_some());
 
         // The prior content is preserved in the audit trail.
-        let prior: String = sqlx::query_scalar(
-            "SELECT prior_content FROM chat_message_revisions WHERE message_id = $1 AND action = 'edit'",
-        )
-        .bind(m.id)
-        .fetch_one(&state.db)
-        .await
-        .unwrap();
+        let prior: String = state
+            .db
+            .query_scalar(
+                "SELECT prior_content FROM chat_message_revisions WHERE message_id = $1 AND action = 'edit'",
+                params![m.id],
+            )
+            .await
+            .unwrap();
         assert_eq!(prior, "typ0");
     }
 
@@ -1253,13 +1271,14 @@ mod tests {
         assert_eq!(hm.body, DELETED_PLACEHOLDER);
 
         // The real content survives ONLY in the audit trail.
-        let prior: String = sqlx::query_scalar(
-            "SELECT prior_content FROM chat_message_revisions WHERE message_id = $1 AND action = 'delete'",
-        )
-        .bind(m.id)
-        .fetch_one(&state.db)
-        .await
-        .unwrap();
+        let prior: String = state
+            .db
+            .query_scalar(
+                "SELECT prior_content FROM chat_message_revisions WHERE message_id = $1 AND action = 'delete'",
+                params![m.id],
+            )
+            .await
+            .unwrap();
         assert_eq!(prior, "secret");
 
         // A deleted message refuses further edits and reactions.
