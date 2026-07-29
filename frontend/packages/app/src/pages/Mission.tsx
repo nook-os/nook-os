@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate } from "react-router-dom";
 import {
@@ -9,9 +9,14 @@ import {
   EyeOff,
   FolderGit2,
   GitBranch,
+  LayoutGrid,
+  ListTree,
   Loader2,
+  Map as MapIcon,
   MoreHorizontal,
+  Server,
   SquareTerminal,
+  Table2,
 } from "lucide-react";
 import { api } from "@nookos/api";
 import type { OverviewCheckout, OverviewWorkspace, Session } from "@nookos/api";
@@ -29,9 +34,11 @@ import {
   canAddWorktree,
   canOpenTerminal,
   deckStats,
+  defaultCanvasPosition,
   exceptionCounts,
   groupCheckoutsByNode,
   isMissing,
+  loadCanvasPositions,
   loadCollapsed,
   loadView,
   machineGroups,
@@ -39,13 +46,30 @@ import {
   overlayLive,
   repoRollup,
   repoTint,
+  saveCanvasPositions,
   saveCollapsed,
   saveView,
   visibleRepos,
+  type CanvasPositions,
   type Lamp,
+  type MachineGroup,
   type MissionView,
   type VisibleRepo,
 } from "../mission";
+
+/** The flavors, in keyboard order (1–5). Icons carry the switcher; the label
+ *  lives in the tooltip and the accessible name. */
+const VIEWS: { id: MissionView; label: string; Icon: typeof ListTree }[] = [
+  { id: "tree", label: "tree — repos with full detail", Icon: ListTree },
+  { id: "grid", label: "grid — repo cards side by side", Icon: LayoutGrid },
+  { id: "machines", label: "machines — what each box is doing", Icon: Server },
+  { id: "matrix", label: "matrix — repos × machines board", Icon: Table2 },
+  {
+    id: "canvas",
+    label: "canvas — arrange your machines spatially",
+    Icon: MapIcon,
+  },
+];
 
 /** Everything a checkout row can do, built once and served two ways: the row's
  *  ⋯ button and its right-click menu are the same list. */
@@ -131,6 +155,34 @@ export function MissionPage() {
   const [collapsed, setCollapsed] = useState<Set<string>>(() =>
     loadCollapsed(),
   );
+  const filterRef = useRef<HTMLInputElement>(null);
+
+  // Console keys: "/" jumps to the filter; 1–5 switch views. Never while
+  // typing in an input.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const t = e.target as HTMLElement | null;
+      if (
+        t &&
+        (t.tagName === "INPUT" ||
+          t.tagName === "TEXTAREA" ||
+          t.isContentEditable)
+      )
+        return;
+      if (e.key === "/") {
+        e.preventDefault();
+        filterRef.current?.focus();
+        return;
+      }
+      const i = Number(e.key) - 1;
+      if (i >= 0 && i < VIEWS.length) {
+        setView(VIEWS[i].id);
+        saveView(VIEWS[i].id);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
 
   const { data: me } = useQuery({
     queryKey: ["me"],
@@ -276,25 +328,26 @@ export function MissionPage() {
             style={{ display: "inline-flex", alignItems: "center", gap: 6 }}
           >
             <span className="m-views" role="tablist" aria-label="view">
-              {(["tree", "grid", "machines", "matrix"] as MissionView[]).map(
-                (v) => (
-                  <button
-                    key={v}
-                    role="tab"
-                    aria-selected={view === v}
-                    className={`m-view-btn${view === v ? " active" : ""}`}
-                    data-testid={`view-${v}`}
-                    onClick={() => {
-                      setView(v);
-                      saveView(v);
-                    }}
-                  >
-                    {v}
-                  </button>
-                ),
-              )}
+              {VIEWS.map(({ id, label, Icon }, i) => (
+                <button
+                  key={id}
+                  role="tab"
+                  aria-selected={view === id}
+                  aria-label={id}
+                  className={`m-view-btn${view === id ? " active" : ""}`}
+                  data-testid={`view-${id}`}
+                  title={`${label} (${i + 1})`}
+                  onClick={() => {
+                    setView(id);
+                    saveView(id);
+                  }}
+                >
+                  <Icon size={13} />
+                </button>
+              ))}
             </span>
             <input
+              ref={filterRef}
               className="input small mono"
               placeholder="filter repo / node / branch / session…"
               value={q}
@@ -438,6 +491,14 @@ export function MissionPage() {
           <MatrixView
             repos={repos}
             actionsFor={actionsFor}
+            looseSection={looseSection}
+          />
+        ) : view === "canvas" ? (
+          <CanvasView
+            groups={machineGroups(repos)}
+            actionsFor={actionsFor}
+            agentState={agentState}
+            meId={meId}
             looseSection={looseSection}
           />
         ) : (
@@ -707,6 +768,122 @@ function GridCard({
         )}
       </div>
     </section>
+  );
+}
+
+/** Canvas flavor: the fleet as a map. Each machine is a card you drag where
+ *  it lives in your head — the rack, the desk, the laptop bag — and the
+ *  arrangement persists. Same rows, same menus; only the geometry is yours. */
+function CanvasView({
+  groups,
+  actionsFor,
+  agentState,
+  meId,
+  looseSection,
+}: {
+  groups: MachineGroup[];
+  actionsFor: (ws: OverviewWorkspace) => RowActions;
+  agentState: Record<string, AgentState>;
+  meId?: string;
+  looseSection: React.ReactNode;
+}) {
+  const [pos, setPos] = useState<CanvasPositions>(() => loadCanvasPositions());
+  const drag = useRef<{ id: string; ox: number; oy: number } | null>(null);
+
+  const at = (id: string, i: number) => pos[id] ?? defaultCanvasPosition(i);
+
+  return (
+    <div className="m-canvas-wrap">
+      <div className="m-canvas" data-testid="canvas-view">
+        {groups.map((g, i) => {
+          const p = at(g.nodeId, i);
+          return (
+            <section
+              key={g.nodeId}
+              className="m-repo m-canvas-card"
+              data-testid={`canvas-${g.nodeId}`}
+              style={{ left: p.x, top: p.y }}
+            >
+              <div
+                className="m-repo-head static m-canvas-handle"
+                title="drag to arrange"
+                onPointerDown={(e) => {
+                  e.preventDefault();
+                  drag.current = {
+                    id: g.nodeId,
+                    ox: e.clientX - p.x,
+                    oy: e.clientY - p.y,
+                  };
+                  e.currentTarget.setPointerCapture(e.pointerId);
+                }}
+                onPointerMove={(e) => {
+                  const d = drag.current;
+                  if (!d || d.id !== g.nodeId) return;
+                  setPos((prev) => ({
+                    ...prev,
+                    [d.id]: {
+                      x: Math.max(0, e.clientX - d.ox),
+                      y: Math.max(0, e.clientY - d.oy),
+                    },
+                  }));
+                }}
+                onPointerUp={() => {
+                  if (!drag.current) return;
+                  drag.current = null;
+                  setPos((prev) => {
+                    saveCanvasPositions(prev);
+                    return prev;
+                  });
+                }}
+              >
+                <StatusDot status={g.nodeStatus} />
+                <span className="m-repo-name bright">{g.nodeName}</span>
+                {g.nodeStatus !== "online" && <Pill tone="err">offline</Pill>}
+                <span className="m-repo-roll">
+                  <span className="m-roll-dim">
+                    {g.entries.length} checkout
+                    {g.entries.length === 1 ? "" : "s"}
+                  </span>
+                </span>
+              </div>
+              <div className="m-card-body">
+                {g.entries.map(({ workspace, checkout: c }, j) => (
+                  <div key={c.id} className={`m-co${j % 2 ? " alt" : ""}`}>
+                    <CheckoutRow
+                      c={c}
+                      ws={workspace}
+                      actions={actionsFor(workspace)}
+                      prefix={
+                        <Link
+                          className="m-co-repo bright"
+                          to={`/workspaces/${workspace.id}`}
+                        >
+                          <span
+                            className="m-tint-dot"
+                            style={{ background: repoTint(workspace.slug) }}
+                          />
+                          {workspace.name}
+                        </Link>
+                      }
+                      showPath={false}
+                    />
+                    {c.sessions.map((sn) => (
+                      <SessionRow
+                        key={sn.id}
+                        s={sn}
+                        agentState={agentState}
+                        meId={meId}
+                      />
+                    ))}
+                  </div>
+                ))}
+              </div>
+            </section>
+          );
+        })}
+      </div>
+      {looseSection}
+    </div>
   );
 }
 

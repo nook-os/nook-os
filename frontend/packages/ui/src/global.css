@@ -5031,3 +5031,20 @@ a.toast-main:hover .toast-title { text-decoration: underline; }
   margin-right: 5px;
   vertical-align: middle;
 }
+
+/* Canvas flavor: machines as draggable cards on a dotted plot — arrange the
+   fleet the way it lives in your head; the geometry persists. */
+.m-canvas-wrap { display: flex; flex-direction: column; gap: 8px; overflow: auto; }
+.m-canvas {
+  position: relative;
+  min-height: 560px;
+  border: 1px solid var(--nook-border);
+  border-radius: var(--nook-radius);
+  background-image: radial-gradient(var(--nook-border) 1px, transparent 1px);
+  background-size: 22px 22px;
+  /* Cards dragged past the edge scroll into reach instead of clipping. */
+  overflow: auto;
+}
+.m-canvas-card { position: absolute; width: 360px; box-shadow: 0 2px 10px rgba(0, 0, 0, 0.35); }
+.m-canvas-handle { cursor: grab; touch-action: none; }
+.m-canvas-handle:active { cursor: grabbing; }

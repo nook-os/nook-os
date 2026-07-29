@@ -206,6 +206,10 @@ describe("Mission Control (MAIN-226)", () => {
     fireEvent.click(screen.getByTestId("view-matrix"));
     expect(screen.getByTestId("matrix-view")).toBeTruthy();
 
+    fireEvent.click(screen.getByTestId("view-canvas"));
+    expect(screen.getByTestId("canvas-view")).toBeTruthy();
+    expect(screen.getByTestId("canvas-n1")).toBeTruthy();
+
     fireEvent.click(screen.getByTestId("view-tree"));
     expect(screen.getByTestId("repo-acme-api")).toBeTruthy();
     // The chosen view persists.

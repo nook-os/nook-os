@@ -249,14 +249,16 @@ export function overlayLive(
 
 /** How the fleet is organized on screen. All views share the deck, the filter,
  *  the lamps and the ghosts toggle — only the grouping changes. */
-export type MissionView = "tree" | "grid" | "machines" | "matrix";
+export type MissionView = "tree" | "grid" | "machines" | "matrix" | "canvas";
 
 const VIEW_KEY = "nook.mission.view.v1";
 
 export function loadView(): MissionView {
   try {
     const v = window.localStorage.getItem(VIEW_KEY);
-    return v === "grid" || v === "machines" || v === "matrix" ? v : "tree";
+    return v === "grid" || v === "machines" || v === "matrix" || v === "canvas"
+      ? v
+      : "tree";
   } catch {
     return "tree";
   }
@@ -331,6 +333,50 @@ export function matrixData(repos: VisibleRepo[]): MatrixData {
     rows.push({ workspace, cells });
   }
   return { nodes: nodeOrder.map((id) => nodes[id]), rows };
+}
+
+// ── Canvas positions ─────────────────────────────────────────────────────────
+
+const CANVAS_KEY = "nook.mission.canvas.v1";
+
+export type CanvasPositions = Record<string, { x: number; y: number }>;
+
+/** Where each machine card sits on the canvas, surviving reloads. */
+export function loadCanvasPositions(): CanvasPositions {
+  try {
+    const raw = window.localStorage.getItem(CANVAS_KEY);
+    const v = raw ? (JSON.parse(raw) as unknown) : {};
+    if (v && typeof v === "object" && !Array.isArray(v)) {
+      const out: CanvasPositions = {};
+      for (const [k, p] of Object.entries(v as Record<string, unknown>)) {
+        if (
+          p &&
+          typeof p === "object" &&
+          typeof (p as { x: unknown }).x === "number" &&
+          typeof (p as { y: unknown }).y === "number"
+        ) {
+          out[k] = { x: (p as { x: number }).x, y: (p as { y: number }).y };
+        }
+      }
+      return out;
+    }
+    return {};
+  } catch {
+    return {};
+  }
+}
+
+export function saveCanvasPositions(p: CanvasPositions): void {
+  try {
+    window.localStorage.setItem(CANVAS_KEY, JSON.stringify(p));
+  } catch {
+    // Storage unavailable: the arrangement just won't persist.
+  }
+}
+
+/** Staggered starting spot for the i-th card a person hasn't placed yet. */
+export function defaultCanvasPosition(i: number): { x: number; y: number } {
+  return { x: 20 + (i % 3) * 380, y: 20 + Math.floor(i / 3) * 260 };
 }
 
 // ── Collapse persistence ─────────────────────────────────────────────────────
