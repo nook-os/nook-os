@@ -2756,6 +2756,29 @@ export interface paths {
         patch: operations["rename_workspace"];
         trace?: never;
     };
+    "/api/v1/workspaces/{id}/clone": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Clone this workspace's **stored** remote onto a node (MAIN-223 AC-2).
+         * @description The caller names only the node — the URL comes off the workspace — and the
+         *     resulting checkout is associated with THIS workspace id, not re-derived from
+         *     the remote by the next discovery scan. Authorization is the same
+         *     person-based rule sessions use: the node must be the caller's own or shared.
+         */
+        post: operations["clone_workspace_to_node"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workspaces/{id}/git": {
         parameters: {
             query?: never;
@@ -5670,12 +5693,33 @@ export interface components {
             /** Format: date-time */
             created_at: string;
             description?: string | null;
+            /**
+             * @description The normalized form of [`Self::git_remote_url`] used to match a discovered
+             *     checkout back to its workspace (host+path, scheme/creds/`.git` stripped).
+             */
+            git_remote_normalized?: string | null;
+            /**
+             * @description The repository this workspace is — the clone URL, lifted off the scattered
+             *     checkout rows so the UI can say what repo it is and clone-to-node needs no
+             *     re-supplied URL (MAIN-223). NULL when the workspace's checkouts disagree
+             *     or none carry a remote.
+             */
+            git_remote_url?: string | null;
             id: components["schemas"]["WorkspaceId"];
             name: string;
             slug: string;
             tenant_id: components["schemas"]["TenantId"];
             /** Format: date-time */
             updated_at: string;
+        };
+        /**
+         * @description Clone a workspace's *stored* remote onto a node (MAIN-223 AC-2). Unlike
+         *     [`CloneRequest`], the caller supplies no URL — the workspace already knows it —
+         *     and the resulting checkout is associated with this workspace by id.
+         */
+        WorkspaceCloneRequest: {
+            credential_id?: null | components["schemas"]["GitCredentialId"];
+            node_id: components["schemas"]["NodeId"];
         };
         WorkspaceDetail: components["schemas"]["Workspace"] & {
             locations: components["schemas"]["WorkspaceLocation"][];
@@ -10674,6 +10718,49 @@ export interface operations {
                 };
             };
             400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    clone_workspace_to_node: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WorkspaceCloneRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OpResponse"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            403: {
                 headers: {
                     [name: string]: unknown;
                 };

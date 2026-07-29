@@ -91,11 +91,16 @@ pub trait NookBackend: Send + Sync + 'static {
     ) -> anyhow::Result<String>;
 
     // ── Kanban-driven work ──────────────────────────────────────────────────
-    /// Triage-dispatch a task: the scheduler picks the best online node.
-    async fn dispatch_task(&self, task_id: String) -> anyhow::Result<TaskItem>;
+    /// Triage-dispatch a task: the scheduler picks the best online node the
+    /// **caller** may use. `caller` is the authenticated MCP person (MAIN-223
+    /// AC-4) — the same person-based authorization the HTTP route applies.
+    async fn dispatch_task(&self, caller: McpCaller, task_id: String) -> anyhow::Result<TaskItem>;
     /// Start work on a task: worktree + session. `runtime` defaults to bash.
+    /// `caller` is the authenticated MCP person, threaded so spawn authorization
+    /// (own/shared node rules) applies exactly as on the HTTP route (AC-4).
     async fn start_work(
         &self,
+        caller: McpCaller,
         task_id: String,
         runtime: Option<String>,
         node: Option<String>,
@@ -411,16 +416,20 @@ fn backend_err(e: anyhow::Error) -> McpError {
 /// notebook tool returns for the static `MCP_TOKEN` path (which carries no
 /// person). The identity rides in the request's extensions (see [`McpCaller`]).
 fn require_person(parts: &Parts) -> Result<Uuid, McpError> {
-    parts
-        .extensions
-        .get::<McpCaller>()
-        .map(|c| c.person_id)
-        .ok_or_else(|| {
-            McpError::invalid_request(
-                "MCP is not authenticated as a user — connect with your own token".to_string(),
-                None,
-            )
-        })
+    require_caller(parts).map(|c| c.person_id)
+}
+
+/// The full authenticated MCP caller, or the same pointed refusal `require_person`
+/// gives the static-`MCP_TOKEN` path. Kanban work tools (dispatch/start-work) need
+/// the caller's `user_id`/`tenant_id`, not just the person, to authorize exactly
+/// as the HTTP routes do (MAIN-223 AC-4).
+fn require_caller(parts: &Parts) -> Result<McpCaller, McpError> {
+    parts.extensions.get::<McpCaller>().cloned().ok_or_else(|| {
+        McpError::invalid_request(
+            "MCP is not authenticated as a user — connect with your own token".to_string(),
+            None,
+        )
+    })
 }
 
 fn parse_note_id(s: &str) -> Result<UserNoteId, McpError> {
@@ -655,12 +664,14 @@ impl NookMcp {
     )]
     async fn dispatch_task(
         &self,
+        Extension(parts): Extension<Parts>,
         Parameters(p): Parameters<TaskIdParams>,
     ) -> Result<CallToolResult, McpError> {
+        let caller = require_caller(&parts)?;
         to_result(
             &self
                 .backend
-                .dispatch_task(p.task_id)
+                .dispatch_task(caller, p.task_id)
                 .await
                 .map_err(backend_err)?,
         )
@@ -671,12 +682,14 @@ impl NookMcp {
     )]
     async fn start_work(
         &self,
+        Extension(parts): Extension<Parts>,
         Parameters(p): Parameters<StartWorkParams>,
     ) -> Result<CallToolResult, McpError> {
+        let caller = require_caller(&parts)?;
         to_result(
             &self
                 .backend
-                .start_work(p.task_id, p.runtime, p.node)
+                .start_work(caller, p.task_id, p.runtime, p.node)
                 .await
                 .map_err(backend_err)?,
         )
@@ -1119,6 +1132,29 @@ mod tests {
         // No McpCaller in extensions — the MCP_TOKEN path. Every notebook tool
         // takes this branch and must refuse (AC-3).
         let err = require_person(&parts_with(None)).unwrap_err();
+        assert!(
+            err.message.contains("not authenticated as a user"),
+            "pointed not-a-user error: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn require_caller_yields_the_whole_identity_or_refuses_the_static_token() {
+        // MAIN-223 AC-4: dispatch/start-work need the full caller (user + tenant),
+        // not just the person — so they authorize exactly as the HTTP routes do.
+        let caller = McpCaller {
+            person_id: Uuid::now_v7(),
+            user_id: UserId::new(),
+            tenant_id: TenantId::new(),
+        };
+        let got = require_caller(&parts_with(Some(caller.clone()))).unwrap();
+        assert_eq!(got.user_id, caller.user_id);
+        assert_eq!(got.tenant_id, caller.tenant_id);
+
+        // The static MCP_TOKEN path carries no caller: the work tools refuse it
+        // with the same pointed error, never a silent dead end.
+        let err = require_caller(&parts_with(None)).unwrap_err();
         assert!(
             err.message.contains("not authenticated as a user"),
             "pointed not-a-user error: {}",

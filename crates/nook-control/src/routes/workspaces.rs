@@ -83,6 +83,196 @@ pub async fn git_status(
     }))
 }
 
+/// Clone this workspace's **stored** remote onto a node (MAIN-223 AC-2).
+///
+/// The caller names only the node — the URL comes off the workspace — and the
+/// resulting checkout is associated with THIS workspace id, not re-derived from
+/// the remote by the next discovery scan. Authorization is the same
+/// person-based rule sessions use: the node must be the caller's own or shared.
+#[utoipa::path(post, path = "/api/v1/workspaces/{id}/clone",
+    operation_id = "clone_workspace_to_node",
+    params(("id" = String, Path,)),
+    request_body = WorkspaceCloneRequest,
+    responses((status = 200, body = OpResponse), (status = 400), (status = 403), (status = 404)))]
+pub async fn clone_to_node(
+    State(state): State<AppState>,
+    auth: AuthCtx,
+    Path(id): Path<WorkspaceId>,
+    Json(req): Json<WorkspaceCloneRequest>,
+) -> ApiResult<Json<OpResponse>> {
+    // The workspace must exist in this tenant and carry a stored URL.
+    let row: Option<(Option<String>,)> = state
+        .db
+        .query_opt(
+            "SELECT git_remote_url FROM workspaces WHERE id = $1 AND tenant_id = $2",
+            params![id, auth.tenant_id],
+        )
+        .await?;
+    let (url,) = row.ok_or(ApiError::NotFound)?;
+    let url = url.ok_or_else(|| {
+        ApiError::BadRequest(
+            "this workspace has no stored git remote URL — clone it once with an \
+             explicit URL first, and the workspace will remember it"
+                .into(),
+        )
+    })?;
+
+    // Same person-based authorization as starting a session: own or shared node.
+    crate::auth::require_person_may_use_node(
+        &state,
+        auth.tenant_id,
+        Some(auth.user_id),
+        req.node_id,
+    )
+    .await?;
+
+    // Decrypt the chosen tenant credential (if any) for transient node use.
+    let ssh_key = match req.credential_id {
+        None => None,
+        Some(cred_id) => {
+            let enc: Option<Vec<u8>> = state
+                .db
+                .query_scalar_opt(
+                    "SELECT secret_enc FROM git_credentials WHERE id = $1 AND tenant_id = $2",
+                    params![cred_id, auth.tenant_id],
+                )
+                .await?;
+            let enc = enc.ok_or(ApiError::NotFound)?;
+            Some(
+                state
+                    .vault
+                    .decrypt_string(&enc)
+                    .map_err(ApiError::Internal)?,
+            )
+        }
+    };
+
+    let job_id = uuid::Uuid::now_v7().to_string();
+    events::record(
+        &state,
+        auth.tenant_id,
+        EventDraft::new("git.clone_started")
+            .actor("user", auth.user_id.0)
+            .node(req.node_id)
+            .workspace(id)
+            .payload(serde_json::json!({ "url": url, "job_id": job_id })),
+    )
+    .await;
+
+    // Let the node derive the directory from the URL, exactly like a manual clone.
+    let rx = state
+        .registry
+        .request_op(req.node_id, |request_id| ControlToNode::CloneRepo {
+            request_id,
+            url: url.clone(),
+            dest_name: None,
+            ssh_key,
+        })
+        .ok_or_else(|| ApiError::BadRequest("node is offline".into()))?;
+
+    let payload = match tokio::time::timeout(std::time::Duration::from_secs(90), rx).await {
+        Ok(Ok(p)) => p,
+        Ok(Err(_)) => return Err(ApiError::BadRequest("node disconnected mid-clone".into())),
+        Err(_) => {
+            return Ok(Json(OpResponse {
+                ok: false,
+                path: None,
+                message: "clone still running — watch the activity feed".into(),
+            }))
+        }
+    };
+
+    // Associate the fresh checkout with THIS workspace id — no name/remote
+    // re-derivation roulette.
+    if payload.ok {
+        if let Some(path) = payload.path.as_deref() {
+            associate_cloned_checkout(&state, auth.tenant_id, req.node_id, id, path, &url).await?;
+        }
+    }
+
+    events::record(
+        &state,
+        auth.tenant_id,
+        EventDraft::new("git.clone_finished")
+            .actor("user", auth.user_id.0)
+            .node(req.node_id)
+            .workspace(id)
+            .payload(serde_json::json!({
+                "url": url, "ok": payload.ok, "message": payload.message, "job_id": job_id
+            })),
+    )
+    .await;
+
+    Ok(Json(OpResponse {
+        ok: payload.ok,
+        path: payload.path,
+        message: payload.message,
+    }))
+}
+
+/// Pin a freshly-cloned checkout to `workspace_id` (MAIN-223 AC-2), bypassing the
+/// normalized-remote matching discovery would otherwise use. `ON CONFLICT
+/// (node_id, path)` heals a re-clone in place; `kind = 'clone'` so worktrees and
+/// clone-only picks resolve it. Also adopts the remote onto the workspace when it
+/// had none, keeping its identity fresh.
+pub async fn associate_cloned_checkout(
+    state: &AppState,
+    tenant: TenantId,
+    node_id: NodeId,
+    workspace_id: WorkspaceId,
+    path: &str,
+    url: &str,
+) -> ApiResult<()> {
+    let normalized = crate::services::discovery::normalize_remote(url);
+    state
+        .db
+        .exec(
+            &format!(
+                "INSERT INTO node_workspaces
+                   (id, tenant_id, node_id, workspace_id, path, git_remote_url,
+                    git_remote_normalized, git_status, kind)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, '{{}}'::jsonb, 'clone')
+                 ON CONFLICT (node_id, path) DO UPDATE SET
+                   workspace_id = EXCLUDED.workspace_id,
+                   git_remote_url = EXCLUDED.git_remote_url,
+                   git_remote_normalized = EXCLUDED.git_remote_normalized,
+                   kind = EXCLUDED.kind,
+                   missing_at = NULL,
+                   last_scanned_at = {}",
+                Postgres.now()
+            ),
+            params![
+                NodeWorkspaceId::new(),
+                tenant,
+                node_id,
+                workspace_id,
+                path,
+                url,
+                &normalized
+            ],
+        )
+        .await?;
+    // Adopt the normalized remote onto the workspace when it has none — but only
+    // if no OTHER workspace already owns it. `workspaces_remote_idx` is unique per
+    // (tenant, normalized), so an unguarded UPDATE would abort the whole clone on a
+    // repo that is already known under a different workspace. The checkout is
+    // pinned by id regardless (that is the point), so skipping the adoption here
+    // costs nothing.
+    state
+        .db
+        .exec(
+            "UPDATE workspaces SET git_remote_normalized = $2
+             WHERE id = $1 AND git_remote_normalized IS NULL
+               AND NOT EXISTS (
+                   SELECT 1 FROM workspaces
+                   WHERE tenant_id = $3 AND git_remote_normalized = $2
+               )",
+            params![workspace_id, &normalized, tenant],
+        )
+        .await?;
+    Ok(())
+}
+
 #[utoipa::path(post, path = "/api/v1/workspaces",
     operation_id = "create_workspace",
     request_body = CreateWorkspaceRequest,

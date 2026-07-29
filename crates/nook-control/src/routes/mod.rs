@@ -140,6 +140,7 @@ pub fn build_router(state: AppState) -> Router {
                 .delete(workspaces::delete),
         )
         .route("/workspaces/{id}/git", get(workspaces::git_status))
+        .route("/workspaces/{id}/clone", post(workspaces::clone_to_node))
         .route("/workspaces/{id}/worktrees", post(gitops::add_worktree))
         .route("/workspaces/{id}/git/commit", post(gitops::git_commit))
         .route("/workspaces/{id}/git/push", post(gitops::git_push))
