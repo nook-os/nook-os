@@ -38,6 +38,11 @@ pub use dialect::{
 pub mod pool;
 pub use pool::{Db, DbTx, DbValue, EnginePool, IntoDbValue};
 
+/// Boot-time migration runner with dev tolerance for a ledger ahead of the
+/// checked-out migration set (MAIN-224). Both services' boot paths run through
+/// [`migrate::run_with_dev_tolerance`], so they get identical treatment.
+pub mod migrate;
+
 use std::fmt;
 
 /// The database engine, selected from the `DATABASE_URL` scheme (MAIN-195). This
