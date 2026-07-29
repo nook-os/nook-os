@@ -35,3 +35,8 @@ frontend/apps/desktop/src-tauri/gen/
 deploy/dev-certs/agent.key
 
 certs/
+
+# The fleet's Claude device-auth session (MAIN-238). Real credentials — never
+# committed, and deliberately separate from the host's ~/.claude so swapping
+# the fleet's identity cannot disturb a personal login.
+.nook-secrets/
