@@ -5,7 +5,7 @@
 //! given tenant uses one or the other, never both. See `auth_mode` below.
 
 use anyhow::Result;
-use nook_db::{DbPool, Postgres, TypeMapping};
+use nook_db::{params, Db, DbPool, Postgres, TypeMapping};
 use nook_types::{Tenant, TenantId, User, UserId};
 
 use crate::auth::password;
@@ -37,11 +37,12 @@ impl AuthMode {
 
 /// Read a tenant's mode. `None` means nobody has signed in yet.
 pub async fn mode_of(db: &DbPool, tenant: TenantId) -> Result<Option<AuthMode>, sqlx::Error> {
-    let row: Option<(Option<String>,)> =
-        sqlx::query_as("SELECT auth_mode FROM tenants WHERE id = $1")
-            .bind(tenant)
-            .fetch_optional(db)
-            .await?;
+    let row: Option<(Option<String>,)> = db
+        .query_opt(
+            "SELECT auth_mode FROM tenants WHERE id = $1",
+            params![tenant],
+        )
+        .await?;
     Ok(row.and_then(|(m,)| m).and_then(|m| AuthMode::parse(&m)))
 }
 
@@ -52,14 +53,13 @@ pub async fn mode_of(db: &DbPool, tenant: TenantId) -> Result<Option<AuthMode>, 
 /// both see "undecided" and each set their own answer, and the loser would be
 /// silently locked out of an instance they thought they had just claimed.
 pub async fn claim_mode(db: &DbPool, tenant: TenantId, want: AuthMode) -> ApiResult<()> {
-    let settled: Option<(Option<String>,)> = sqlx::query_as(
-        "UPDATE tenants SET auth_mode = $2 WHERE id = $1 AND auth_mode IS NULL
+    let settled: Option<(Option<String>,)> = db
+        .query_opt(
+            "UPDATE tenants SET auth_mode = $2 WHERE id = $1 AND auth_mode IS NULL
          RETURNING auth_mode",
-    )
-    .bind(tenant)
-    .bind(want.as_str())
-    .fetch_optional(db)
-    .await?;
+            params![tenant, want.as_str()],
+        )
+        .await?;
 
     if settled.is_some() {
         return Ok(()); // We set it.
@@ -95,15 +95,14 @@ pub async fn login(
     identifier: &str,
     supplied: &str,
 ) -> ApiResult<(User, Tenant)> {
-    let row: Option<(UserId, Option<String>)> = sqlx::query_as(
-        "SELECT id, password_hash FROM users
+    let row: Option<(UserId, Option<String>)> = db
+        .query_opt(
+            "SELECT id, password_hash FROM users
          WHERE tenant_id = $1
            AND (lower(username) = lower($2) OR lower(email) = lower($2))",
-    )
-    .bind(tenant)
-    .bind(identifier)
-    .fetch_optional(db)
-    .await?;
+            params![tenant, identifier],
+        )
+        .await?;
 
     // One failure for every reason: no such user, no password set (an OIDC
     // account), or the wrong password. Distinguishing them turns this endpoint
@@ -121,13 +120,14 @@ pub async fn login(
     // caller with a wrong password lock an instance out of OIDC forever.
     claim_mode(db, tenant, AuthMode::Local).await?;
 
-    let user: User = sqlx::query_as("SELECT * FROM users WHERE id = $1")
-        .bind(user_id)
-        .fetch_one(db)
+    let user: User = db
+        .query_one("SELECT * FROM users WHERE id = $1", params![user_id])
         .await?;
-    let tenant: Tenant = sqlx::query_as("SELECT * FROM tenants WHERE id = $1")
-        .bind(user.tenant_id)
-        .fetch_one(db)
+    let tenant: Tenant = db
+        .query_one(
+            "SELECT * FROM tenants WHERE id = $1",
+            params![user.tenant_id],
+        )
         .await?;
     Ok((user, tenant))
 }
@@ -149,43 +149,46 @@ pub async fn create(
     validate_username(username).map_err(ApiError::BadRequest)?;
     let hash = password::hash(plaintext).map_err(|e| ApiError::BadRequest(e.to_string()))?;
 
-    let user: User = sqlx::query_as(
-        "INSERT INTO users (id, tenant_id, display_name, email, username, password_hash, role)
+    let user: User = db
+        .query_one(
+            "INSERT INTO users (id, tenant_id, display_name, email, username, password_hash, role)
          VALUES ($1, $2, $3, $4, $5, $6, $7)
          RETURNING *",
-    )
-    .bind(UserId::new())
-    .bind(tenant)
-    .bind(display_name)
-    .bind(email)
-    .bind(username)
-    .bind(&hash)
-    .bind(if is_first { "owner" } else { "member" })
-    .fetch_one(db)
-    .await
-    .map_err(|e| match &e {
-        // The unique index on (tenant, lower(username)).
-        sqlx::Error::Database(d) if d.is_unique_violation() => {
-            ApiError::BadRequest(format!("the username '{username}' is already taken"))
-        }
-        _ => ApiError::from(e),
-    })?;
+            params![
+                UserId::new(),
+                tenant,
+                display_name,
+                email,
+                username,
+                &hash,
+                if is_first { "owner" } else { "member" }
+            ],
+        )
+        .await
+        .map_err(|e| match &e {
+            // The unique index on (tenant, lower(username)).
+            sqlx::Error::Database(d) if d.is_unique_violation() => {
+                ApiError::BadRequest(format!("the username '{username}' is already taken"))
+            }
+            _ => ApiError::from(e),
+        })?;
 
     // Grant tenant membership, exactly as the OIDC path does in
     // `login_identity`. `tenant_members` is the single source of truth for who
     // can reach a tenant (AC-7); a local user missing this row would be listed
     // in no tenant by `/me/tenants` and — now that `AuthCtx` enforces membership
     // per request — locked out of their own tenant. Idempotent on conflict.
-    sqlx::query(
+    db.exec(
         "INSERT INTO tenant_members (id, tenant_id, principal_type, principal_id, role)
          VALUES ($1, $2, 'user', $3, $4)
          ON CONFLICT (tenant_id, principal_type, principal_id) DO NOTHING",
+        params![
+            uuid::Uuid::now_v7(),
+            tenant,
+            user.id.0,
+            if is_first { "owner" } else { "member" }
+        ],
     )
-    .bind(uuid::Uuid::now_v7())
-    .bind(tenant)
-    .bind(user.id.0)
-    .bind(if is_first { "owner" } else { "member" })
-    .execute(db)
     .await?;
 
     Ok(user)
@@ -214,26 +217,28 @@ pub async fn register_invited(
     validate_username(username).map_err(ApiError::BadRequest)?;
     let hash = password::hash(plaintext).map_err(|e| ApiError::BadRequest(e.to_string()))?;
 
-    let user: User = sqlx::query_as(
-        "INSERT INTO users (id, tenant_id, display_name, email, username, password_hash, role)
+    let user: User = db
+        .query_one(
+            "INSERT INTO users (id, tenant_id, display_name, email, username, password_hash, role)
          VALUES ($1, $2, $3, $4, $5, $6, $7)
          RETURNING *",
-    )
-    .bind(UserId::new())
-    .bind(tenant)
-    .bind(display_name)
-    .bind(email)
-    .bind(username)
-    .bind(&hash)
-    .bind(role)
-    .fetch_one(db)
-    .await
-    .map_err(|e| match &e {
-        sqlx::Error::Database(d) if d.is_unique_violation() => {
-            ApiError::BadRequest(format!("the username '{username}' is already taken"))
-        }
-        _ => ApiError::from(e),
-    })?;
+            params![
+                UserId::new(),
+                tenant,
+                display_name,
+                email,
+                username,
+                &hash,
+                role
+            ],
+        )
+        .await
+        .map_err(|e| match &e {
+            sqlx::Error::Database(d) if d.is_unique_violation() => {
+                ApiError::BadRequest(format!("the username '{username}' is already taken"))
+            }
+            _ => ApiError::from(e),
+        })?;
     Ok(user)
 }
 
@@ -244,11 +249,12 @@ pub async fn change_password(
     current: &str,
     next: &str,
 ) -> ApiResult<()> {
-    let row: Option<(Option<String>,)> =
-        sqlx::query_as("SELECT password_hash FROM users WHERE id = $1")
-            .bind(user_id)
-            .fetch_optional(db)
-            .await?;
+    let row: Option<(Option<String>,)> = db
+        .query_opt(
+            "SELECT password_hash FROM users WHERE id = $1",
+            params![user_id],
+        )
+        .await?;
     let Some((Some(hash),)) = row else {
         // An OIDC account has no password here, and must not gain one: two
         // ways to become someone, only one of them revocable by the provider.
@@ -260,13 +266,13 @@ pub async fn change_password(
         return Err(ApiError::Unauthorized);
     }
     let next_hash = password::hash(next).map_err(|e| ApiError::BadRequest(e.to_string()))?;
-    sqlx::query(&format!(
-        "UPDATE users SET password_hash = $2, updated_at = {} WHERE id = $1",
-        Postgres.now()
-    ))
-    .bind(user_id)
-    .bind(next_hash)
-    .execute(db)
+    db.exec(
+        &format!(
+            "UPDATE users SET password_hash = $2, updated_at = {} WHERE id = $1",
+            Postgres.now()
+        ),
+        params![user_id, next_hash],
+    )
     .await?;
     Ok(())
 }
