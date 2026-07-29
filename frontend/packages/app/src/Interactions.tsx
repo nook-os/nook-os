@@ -157,17 +157,46 @@ export function PendingInteractions() {
   );
 }
 
+/** Answer a pending interaction from anywhere, without the surrounding
+ *  `InteractionAnswer` chrome (MAIN-237): the loop panel routes its reply
+ *  through the shared chat composer instead, so the answer POST and the cache
+ *  invalidation must live somewhere both can call. Same endpoint, same
+ *  invalidations — the two paths cannot drift into answering differently. */
+export async function answerInteraction(
+  qc: ReturnType<typeof useQueryClient>,
+  interaction: Interaction,
+  response: string,
+): Promise<void> {
+  const trimmed = response.trim();
+  if (!trimmed) return;
+  await api.POST("/api/v1/interactions/{id}/answer", {
+    params: { path: { id: interaction.id } },
+    body: { response: trimmed },
+  });
+  qc.invalidateQueries({ queryKey: PENDING_KEY });
+  if (interaction.task_id) {
+    qc.invalidateQueries({
+      queryKey: ["interactions", "task", interaction.task_id],
+    });
+  }
+}
+
+/** The pending asks for one ticket. Exported so the loop panel can drive its
+ *  composer from the same list the modal section renders (MAIN-237). */
+export function useTaskInteractions(taskId: string): Interaction[] {
+  const { data } = useQuery({
+    queryKey: ["interactions", "task", taskId],
+    queryFn: fetchPending,
+  });
+  return (data ?? []).filter((ixn) => ixn.task_id === taskId);
+}
+
 /** The per-ticket surface (MAIN-159): the pending asks for THIS ticket, inline
  *  in its detail modal. Reads the same pending list and filters to the ticket,
  *  so it shares the top bar's cache and its live invalidation. Renders nothing
  *  when the ticket has no pending ask. */
 export function TaskInteractions({ taskId }: { taskId: string }) {
-  const { data } = useQuery({
-    queryKey: ["interactions", "task", taskId],
-    queryFn: fetchPending,
-  });
-
-  const mine = (data ?? []).filter((ixn) => ixn.task_id === taskId);
+  const mine = useTaskInteractions(taskId);
   if (mine.length === 0) return null;
 
   return (

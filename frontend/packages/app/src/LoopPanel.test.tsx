@@ -163,8 +163,10 @@ describe("LoopPanel transcript states", () => {
     renderPanel();
 
     expect(await screen.findByText("waiting on human")).toBeTruthy();
-    expect(screen.getByText("The agent is waiting on a human.")).toBeTruthy();
+    // MAIN-237: the ask now sits above the SHARED composer rather than in its
+    // own bespoke block — the prompt and its choices, then one themed input.
     expect(await screen.findByText("Which branch should I base this on?")).toBeTruthy();
+    expect(screen.getByLabelText("Message")).toBeTruthy();
 
     await userEvent.click(screen.getByText("develop"));
     await waitFor(() => expect(post).toHaveBeenCalled());
@@ -232,5 +234,84 @@ describe("LoopActionButton", () => {
     const btn = await screen.findByLabelText("Draft a spec");
     await waitFor(() => expect((btn as HTMLButtonElement).disabled).toBe(true));
     expect(btn.getAttribute("title")).toBe("no eligible executor available");
+  });
+});
+
+// MAIN-237: the loop transcript is the shared chat component now, not a fork.
+describe("shared chat surface (MAIN-237)", () => {
+  it("renders the transcript through ChatView, not the old loop-line rows", async () => {
+    state.jobs = [job({ state: "running" })];
+    state.detail = job({
+      state: "running",
+      transcript: [line({ source: "system", content: "dispatched to executor node" })],
+    });
+    const { container } = renderPanel();
+
+    expect(await screen.findByText("dispatched to executor node")).toBeTruthy();
+    // The shared surface…
+    expect(container.querySelector(".chat-view")).toBeTruthy();
+    expect(container.querySelector(".chat-log")).toBeTruthy();
+    // …and none of the fork it replaced.
+    expect(container.querySelector(".loop-line")).toBeNull();
+  });
+
+  it("shows an activity indicator while the agent works, and not once it stops", async () => {
+    state.jobs = [job({ state: "running" })];
+    state.detail = job({ state: "running", transcript: [] });
+    const { unmount } = renderPanel();
+    expect(await screen.findByText("the operator agent is working…")).toBeTruthy();
+    unmount();
+
+    // Paused on a human is NOT working — the interaction says what is happening.
+    state.jobs = [job({ state: "waiting_on_human" })];
+    state.detail = job({ state: "waiting_on_human", transcript: [] });
+    const paused = renderPanel();
+    await waitFor(() => expect(screen.getByText("waiting on human")).toBeTruthy());
+    expect(screen.queryByText("the operator agent is working…")).toBeNull();
+    paused.unmount();
+
+    // Neither is a finished one.
+    state.jobs = [job({ state: "completed" })];
+    state.detail = job({ state: "completed", transcript: [] });
+    renderPanel();
+    await waitFor(() => expect(screen.getByText("done")).toBeTruthy());
+    expect(screen.queryByText("the operator agent is working…")).toBeNull();
+  });
+
+  it("answers the pending ask through the shared composer", async () => {
+    state.jobs = [job({ state: "waiting_on_human" })];
+    state.detail = job({ state: "waiting_on_human", transcript: [] });
+    state.pending = [
+      {
+        id: "ixn-9",
+        tenant_id: "t",
+        task_id: TASK,
+        prompt: "Ship it?",
+        choices: [],
+        state: "pending",
+        created_at: "2026-07-27T10:00:00Z",
+        updated_at: "2026-07-27T10:00:00Z",
+      },
+    ];
+    renderPanel();
+
+    const box = await screen.findByLabelText("Message");
+    await userEvent.type(box, "yes, ship it");
+    await userEvent.click(screen.getByText("Send"));
+
+    await waitFor(() => expect(post).toHaveBeenCalled());
+    expect(post).toHaveBeenCalledWith("/api/v1/interactions/{id}/answer", {
+      params: { path: { id: "ixn-9" } },
+      body: { response: "yes, ship it" },
+    });
+  });
+
+  it("with nothing to answer, the composer says so instead of taking dead text", async () => {
+    state.jobs = [job({ state: "running" })];
+    state.detail = job({ state: "running", transcript: [] });
+    renderPanel();
+    const box = (await screen.findByLabelText("Message")) as HTMLTextAreaElement;
+    expect(box.disabled).toBe(true);
+    expect(box.placeholder).toBe("Nothing to answer right now");
   });
 });
