@@ -204,8 +204,9 @@ pub async fn clone_repo(
     Path(node_id): Path<NodeId>,
     Json(req): Json<CloneRequest>,
 ) -> ApiResult<Json<OpResponse>> {
-    // Cloning runs git on that machine, with its credentials.
-    auth.require_node_self(node_id)?;
+    // Cloning mutates a checkout on that machine, so it needs session-start-grade
+    // authorization: that node itself, or a person who owns or shares it (MAIN-227).
+    auth.require_node_may_use(&state, node_id).await?;
     // Tenant must own the node.
     let owned: Option<NodeId> = state
         .db
@@ -344,8 +345,9 @@ pub async fn add_worktree(
     Path(workspace_id): Path<WorkspaceId>,
     Json(req): Json<WorktreeRequest>,
 ) -> ApiResult<Json<OpResponse>> {
-    // The worktree is created on the node named in the request.
-    auth.require_node_self(req.node_id)?;
+    // Adding a worktree mutates a checkout on that machine — session-start-grade
+    // authorization (that node, or a person who owns/shares it) (MAIN-227).
+    auth.require_node_may_use(&state, req.node_id).await?;
     let row: Option<String> = state
         .db
         .query_scalar_opt(
@@ -426,8 +428,9 @@ pub async fn git_commit(
     Path(workspace_id): Path<WorkspaceId>,
     Json(req): Json<GitCommitRequest>,
 ) -> ApiResult<Json<OpResponse>> {
-    // Committing runs git on that machine.
-    auth.require_node_self(req.node_id)?;
+    // Committing mutates a checkout on that machine — person must own/share the
+    // node, or be the node itself (MAIN-227).
+    auth.require_node_may_use(&state, req.node_id).await?;
     if req.message.trim().is_empty() {
         return Err(ApiError::BadRequest("a commit needs a message".into()));
     }
@@ -480,8 +483,9 @@ pub async fn git_push(
     Path(workspace_id): Path<WorkspaceId>,
     Json(req): Json<GitPushRequest>,
 ) -> ApiResult<Json<OpResponse>> {
-    // Pushing runs git on that machine, with its credentials.
-    auth.require_node_self(req.node_id)?;
+    // Pushing acts on a checkout on that machine — person must own/share the node,
+    // or be the node itself (MAIN-227).
+    auth.require_node_may_use(&state, req.node_id).await?;
     let path = checkout_path(&state, &auth, workspace_id, req.node_id).await?;
 
     // Same credential story as clone: decrypted here, written 0600 on the node
@@ -548,8 +552,9 @@ pub async fn remove_worktree(
     Path(workspace_id): Path<WorkspaceId>,
     Json(req): Json<RemoveWorktreeRequest>,
 ) -> ApiResult<Json<OpResponse>> {
-    // Removing a checkout deletes files on that machine.
-    auth.require_node_self(req.node_id)?;
+    // Removing a checkout deletes files on that machine — session-start-grade
+    // authorization (own/share the node, or be it) (MAIN-227).
+    auth.require_node_may_use(&state, req.node_id).await?;
     // The path must be a known checkout of this workspace on that node.
     let owned: Option<String> = state
         .db
@@ -607,8 +612,9 @@ pub async fn init_project(
     Path(node_id): Path<NodeId>,
     Json(req): Json<InitProjectRequest>,
 ) -> ApiResult<Json<OpResponse>> {
-    // Same: this writes to a workspace root on that machine.
-    auth.require_node_self(node_id)?;
+    // Initialising a project writes a checkout on that machine — session-start-grade
+    // authorization (own/share the node, or be it) (MAIN-227).
+    auth.require_node_may_use(&state, node_id).await?;
     let owned: Option<NodeId> = state
         .db
         .query_scalar_opt(

@@ -65,7 +65,8 @@ async fn pick_chooses_an_owned_node_and_never_a_teammates() {
 
     let picked = nook_control::services::schedule::pick(&state, tenant, Some(me), None)
         .await
-        .expect("an owned node is online");
+        .expect("an owned node is online")
+        .node_id();
     assert_eq!(
         picked, mine,
         "placement must choose my node, never the teammate's better-resourced one"
