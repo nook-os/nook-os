@@ -3525,8 +3525,11 @@ a.toast-main:hover .toast-title { text-decoration: underline; }
   min-width: 0;
   height: 24px;
   padding: 0 6px;
-  background: var(--nook-bg-input, var(--nook-bg-raised));
-  border: 1px solid var(--nook-border);
+  /* Was `var(--nook-bg-input, …)` — a token that is defined nowhere, so it
+     silently always fell through. Use the same surface the chat composer does
+     (MAIN-237 AC-5): these are the same control in two places. */
+  background: var(--nook-bg);
+  border: 1px solid var(--nook-border-bright);
   border-radius: var(--nook-radius);
   color: var(--nook-fg);
   font: inherit;
@@ -3535,6 +3538,7 @@ a.toast-main:hover .toast-title { text-decoration: underline; }
 .ixn-input:focus {
   outline: none;
   border-color: var(--nook-accent);
+  box-shadow: var(--nook-glow);
 }
 
 /* ── Loop panel (MAIN-128) ──────────────────────────────────────────────── */
@@ -3566,28 +3570,6 @@ a.toast-main:hover .toast-title { text-decoration: underline; }
 }
 
 .loop-transcript { display: flex; flex-direction: column; gap: 4px; }
-.loop-line {
-  border-left: 2px solid var(--nook-border-bright);
-  padding: 2px 0 2px 7px;
-}
-.loop-line-system { border-left-color: var(--nook-accent); }
-.loop-line-human { border-left-color: var(--nook-ok); }
-.loop-line-agent { border-left-color: var(--nook-border); opacity: 0.85; }
-.loop-line-head { display: flex; align-items: baseline; gap: 6px; }
-.loop-line-src {
-  font-size: 10px;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  color: var(--nook-fg-faint);
-}
-.loop-line-ts { font-size: 10px; }
-.loop-line-body {
-  font-size: 12px;
-  color: var(--nook-fg);
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-}
-
 .loop-agent-fold { display: flex; flex-direction: column; gap: 4px; }
 .loop-fold-toggle {
   display: inline-flex;
@@ -5141,3 +5123,42 @@ a.toast-main:hover .toast-title { text-decoration: underline; }
 .lw-composer-row textarea { flex: 1 1 auto; resize: vertical; }
 .lw-seed-label { text-transform: uppercase; font-size: 10px; letter-spacing: 0.06em; color: var(--nook-fg-dim); }
 .lw-closed { flex-direction: row; align-items: center; justify-content: space-between; }
+
+/* Someone — or something — is composing (MAIN-237). Lives inside the chat log
+   so it scrolls with the conversation. Three dots, staggered, so "working" is
+   legible at a glance without reading the label. */
+.chat-typing {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 0 2px;
+  font-size: 11px;
+  color: var(--nook-fg-dim);
+}
+.chat-typing-dots { display: inline-flex; gap: 3px; }
+.chat-typing-dots i {
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--nook-accent);
+  animation: nook-typing 1.2s infinite ease-in-out;
+}
+.chat-typing-dots i:nth-child(2) { animation-delay: 0.15s; }
+.chat-typing-dots i:nth-child(3) { animation-delay: 0.3s; }
+@keyframes nook-typing {
+  0%, 60%, 100% { opacity: 0.25; }
+  30% { opacity: 1; }
+}
+/* Respect a reader who asked the OS for less motion; the label still says it. */
+@media (prefers-reduced-motion: reduce) {
+  .chat-typing-dots i { animation: none; opacity: 0.7; }
+}
+
+/* The loop's pending ask, above the shared composer. */
+.loop-ask {
+  padding: 6px 8px;
+  border-top: 1px solid var(--nook-border);
+  border-left: 2px solid var(--nook-accent);
+}
+.loop-ask-prompt { color: var(--nook-fg-bright); font-size: 12px; margin-bottom: 6px; }
+.loop-ask-choices { display: flex; flex-wrap: wrap; gap: 4px; }

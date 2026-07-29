@@ -21,7 +21,48 @@ import {
   loopAction,
   taskJobsKey,
 } from "./loop";
-import { TaskInteractions } from "./Interactions";
+import { ChatView, type ChatViewMessage } from "@nookos/ui";
+import { answerInteraction, useTaskInteractions } from "./Interactions";
+
+/** The job transcript as chat messages (MAIN-237). One shared component now
+ *  renders this and team chat, so the loop cannot drift off-theme again — the
+ *  bespoke `loop-line` rows this replaces were the fork the MAIN-128 comment
+ *  admitted to ("rather than importing the coupled ChatView"). */
+export function transcriptMessages(
+  lines: LoopJobTranscriptEntry[],
+): ChatViewMessage[] {
+  return lines.map((l) => ({
+    id: l.id,
+    // The SOURCE is the author here — `system`, `agent`, `human`. Grouping then
+    // falls out for free: a run of agent narration collapses under one header
+    // exactly as a run from one person does in team chat.
+    authorId: l.source,
+    authorName: l.source,
+    body: l.content,
+    createdAt: l.at,
+  }));
+}
+
+/** What the activity indicator should say for a job in `state`, or null for no
+ *  indicator (MAIN-237 AC-4).
+ *
+ *  Only a job that could still be producing output gets one. A job paused on a
+ *  human is NOT working — it is waiting on you, which the interaction surface
+ *  says far better — and a finished job is finished. Showing "working…" in
+ *  either case is the specific lie this is meant to prevent: it is the operator's
+ *  only cue that the agent is alive. */
+export function agentActivityLabel(state: string): string | null {
+  switch (state) {
+    case "queued":
+      return "waiting for an executor…";
+    case "claimed":
+      return "the operator agent is starting…";
+    case "running":
+      return "the operator agent is working…";
+    default:
+      return null;
+  }
+}
 
 /** The entry action's button — start a spec/decompose run, or re-run. Shared
  *  shape so the panel header and any other home read identically. Disabled with
@@ -66,24 +107,6 @@ export function LoopActionButton({
   );
 }
 
-/** One transcript line. Mirrors the dense chat message row — an author tag and a
- *  body — using the app's own tokens rather than importing the coupled ChatView.
- *  `system`/`human` (and anything that isn't agent narration) render prominent;
- *  agent lines are folded by the caller. */
-function TranscriptLine({ line }: { line: LoopJobTranscriptEntry }) {
-  return (
-    <div className={`loop-line loop-line-${line.source}`}>
-      <div className="loop-line-head">
-        <span className="loop-line-src">{line.source}</span>
-        <span className="faint small loop-line-ts">
-          {new Date(line.at).toLocaleTimeString()}
-        </span>
-      </div>
-      <div className="loop-line-body">{line.content}</div>
-    </div>
-  );
-}
-
 /** The panel body once the ticket has at least one job. */
 function LoopJobView({
   taskId,
@@ -96,6 +119,7 @@ function LoopJobView({
 }) {
   const qc = useQueryClient();
   const [showAgent, setShowAgent] = useState(false);
+  const asks = useTaskInteractions(taskId);
 
   const { data: detail } = useQuery({
     queryKey: jobKey(jobId),
@@ -121,12 +145,19 @@ function LoopJobView({
 
   const meta = jobStateMeta(detail.state);
   const active = isActiveJob(detail);
-  const waiting = detail.state === "waiting_on_human";
   const failed = detail.state === "failed";
 
   const transcript = detail.transcript ?? [];
   const agentLines = transcript.filter((l) => l.source === "agent");
-  const prominent = transcript.filter((l) => l.source !== "agent");
+  // Agent narration still folds away by default — the panel is 420px and the
+  // raw stream drowns the turns that matter. The fold is the CALLER's job:
+  // ChatView renders whatever list it is handed, so this stays a filter.
+  const shown = showAgent ? transcript : transcript.filter((l) => l.source !== "agent");
+
+  // The composer answers the pending ask, when there is one. With nothing to
+  // answer there is nobody listening, so it says so rather than accepting text
+  // that would go nowhere.
+  const ask = asks[0];
 
   return (
     <div className="loop-job">
@@ -162,42 +193,48 @@ function LoopJobView({
         </span>
       </div>
 
-      {/* The agent is blocked on a person — raise the answer surface right here,
-          reusing the MAIN-159 component whole (options as chips + free text; the
-          answer resumes the job server-side). */}
-      {waiting && (
-        <div className="loop-waiting">
-          <div className="loop-waiting-h">The agent is waiting on a human.</div>
-          <TaskInteractions taskId={taskId} />
-        </div>
+      {agentLines.length > 0 && (
+        <button
+          className="loop-fold-toggle"
+          onClick={() => setShowAgent((v) => !v)}
+          aria-expanded={showAgent}
+        >
+          {showAgent ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
+          {showAgent ? "Hide" : "Show"} agent narration ({agentLines.length} line
+          {agentLines.length === 1 ? "" : "s"})
+        </button>
       )}
 
-      {transcript.length === 0 ? (
-        <div className="faint small loop-empty">
-          No transcript yet — it fills in as the agent works.
-        </div>
-      ) : (
-        <div className="loop-transcript">
-          {prominent.map((l) => (
-            <TranscriptLine key={l.id} line={l} />
-          ))}
-          {agentLines.length > 0 && (
-            <div className="loop-agent-fold">
-              <button
-                className="loop-fold-toggle"
-                onClick={() => setShowAgent((v) => !v)}
-                aria-expanded={showAgent}
-              >
-                {showAgent ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
-                {showAgent ? "Hide" : "Show"} agent narration ({agentLines.length} line
-                {agentLines.length === 1 ? "" : "s"})
-              </button>
-              {showAgent &&
-                agentLines.map((l) => <TranscriptLine key={l.id} line={l} />)}
+      <ChatView
+        messages={transcriptMessages(shown)}
+        emptyLabel="No transcript yet — it fills in as the agent works."
+        typing={agentActivityLabel(detail.state)}
+        disabled={!ask}
+        placeholder={ask ? "Answer the agent…" : "Nothing to answer right now"}
+        onSend={(body) => {
+          if (ask) void answerInteraction(qc, ask, body);
+        }}
+        beforeComposer={
+          ask ? (
+            <div className="loop-ask">
+              <div className="loop-ask-prompt">{ask.prompt}</div>
+              {(ask.choices ?? []).length > 0 && (
+                <div className="loop-ask-choices">
+                  {(ask.choices ?? []).map((c) => (
+                    <button
+                      key={c}
+                      className="btn small"
+                      onClick={() => void answerInteraction(qc, ask, c)}
+                    >
+                      {c}
+                    </button>
+                  ))}
+                </div>
+              )}
             </div>
-          )}
-        </div>
-      )}
+          ) : null
+        }
+      />
 
       <div className="loop-job-foot">
         {/* Start-a-fresh action lives in the header; once a job is here, the way

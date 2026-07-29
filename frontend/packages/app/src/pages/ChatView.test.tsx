@@ -193,3 +193,59 @@ describe("ChatView reactions/edit/delete", () => {
     expect(screen.queryByLabelText(/remove your reaction/)).toBeNull();
   });
 });
+
+// MAIN-237: the shared surface both team chat and the loop render through.
+// These cover the props the loop added, since team chat's own behaviour is
+// covered above and must not change.
+describe("ChatView shared-surface props (MAIN-237)", () => {
+  it("shows the activity indicator only when a label is given", () => {
+    const { rerender, container } = render(
+      <ChatView messages={[]} onSend={() => {}} />,
+    );
+    expect(container.querySelector(".chat-typing")).toBeNull();
+
+    rerender(
+      <ChatView messages={[]} onSend={() => {}} typing="the operator agent is working…" />,
+    );
+    const el = container.querySelector(".chat-typing");
+    expect(el).toBeTruthy();
+    expect(el!.textContent).toContain("the operator agent is working…");
+    // Announced, not just drawn — this is the cue that the agent is alive.
+    expect(el!.getAttribute("role")).toBe("status");
+
+    rerender(<ChatView messages={[]} onSend={() => {}} typing={null} />);
+    expect(container.querySelector(".chat-typing")).toBeNull();
+  });
+
+  it("renders a caller's controls between the log and the composer", () => {
+    const { container } = render(
+      <ChatView
+        messages={[]}
+        onSend={() => {}}
+        beforeComposer={<button>choice A</button>}
+      />,
+    );
+    expect(screen.getByText("choice A")).toBeTruthy();
+    // Order matters: the ask belongs with the reply, below the conversation.
+    const kids = [...container.querySelector(".chat-view")!.children].map(
+      (c) => c.className,
+    );
+    expect(kids[0]).toContain("chat-log");
+    expect(kids[kids.length - 1]).toContain("chat-composer");
+  });
+
+  it("hides the composer entirely when there is nothing to say to", () => {
+    const { container } = render(
+      <ChatView messages={[]} onSend={() => {}} hideComposer />,
+    );
+    expect(container.querySelector(".chat-composer")).toBeNull();
+  });
+
+  it("still sends through the callback, unchanged", async () => {
+    const onSend = vi.fn();
+    render(<ChatView messages={[]} onSend={onSend} />);
+    await userEvent.type(screen.getByLabelText("Message"), "hello");
+    await userEvent.click(screen.getByText("Send"));
+    expect(onSend).toHaveBeenCalledWith("hello");
+  });
+});
