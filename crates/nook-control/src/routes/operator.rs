@@ -24,7 +24,7 @@
 
 use axum::extract::{Path, Query, State};
 use axum::Json;
-use nook_db::{Postgres, TypeMapping};
+use nook_db::{params, Db, Postgres, TypeMapping};
 use nook_types::*;
 use serde::Deserialize;
 use uuid::Uuid;
@@ -64,13 +64,15 @@ pub async fn orgs(
 ) -> ApiResult<Json<Vec<OperatorOrg>>> {
     auth.require(&state, Permission::OrgView, Scope::Deployment)
         .await?;
-    let rows: Vec<OperatorOrg> = sqlx::query_as(
-        "SELECT o.id, o.name, o.slug, o.created_at,
+    let rows: Vec<OperatorOrg> = state
+        .db
+        .query_all(
+            "SELECT o.id, o.name, o.slug, o.created_at,
                 (SELECT count(*) FROM tenants t WHERE t.org_id = o.id) AS tenants
          FROM orgs o ORDER BY o.name",
-    )
-    .fetch_all(&state.db)
-    .await?;
+            params![],
+        )
+        .await?;
     audit(&state, &auth, "orgs", None).await;
     Ok(Json(rows))
 }
@@ -130,12 +132,13 @@ async fn enrich(state: &AppState, row: &mut OperatorTenant) -> ApiResult<()> {
     let Some(org) = row.org_id else { return Ok(()) };
 
     if policy::enabled(&state.db, org, Field::RepositoryNames).await? {
-        let names: Vec<(String,)> = sqlx::query_as(
-            "SELECT name FROM workspaces WHERE tenant_id = $1 ORDER BY name LIMIT 50",
-        )
-        .bind(row.id)
-        .fetch_all(&state.db)
-        .await?;
+        let names: Vec<(String,)> = state
+            .db
+            .query_all(
+                "SELECT name FROM workspaces WHERE tenant_id = $1 ORDER BY name LIMIT 50",
+                params![row.id],
+            )
+            .await?;
         row.repositories = Some(names.into_iter().map(|(n,)| n).collect());
     }
     if policy::enabled(&state.db, org, Field::TaskTitles).await? {
@@ -144,14 +147,15 @@ async fn enrich(state: &AppState, row: &mut OperatorTenant) -> ApiResult<()> {
         // because the policy is ADDITIVE (it adds titles, it does not filter),
         // so a private card must simply never be selected here — a missed filter
         // would fail open.
-        let titles: Vec<(String,)> = sqlx::query_as(
-            "SELECT title FROM tasks
+        let titles: Vec<(String,)> = state
+            .db
+            .query_all(
+                "SELECT title FROM tasks
              WHERE tenant_id = $1 AND visibility <> 'private'
              ORDER BY created_at DESC LIMIT 50",
-        )
-        .bind(row.id)
-        .fetch_all(&state.db)
-        .await?;
+                params![row.id],
+            )
+            .await?;
         row.task_titles = Some(titles.into_iter().map(|(t,)| t).collect());
     }
     Ok(())
@@ -260,34 +264,34 @@ pub async fn grant(
     auth.require(&state, Permission::RbacGrant, Scope::Deployment)
         .await?;
 
-    let user: Option<(uuid::Uuid,)> =
-        sqlx::query_as("SELECT id FROM users WHERE lower(email) = lower($1)")
-            .bind(&req.email)
-            .fetch_optional(&state.db)
-            .await?;
+    let user: Option<(uuid::Uuid,)> = state
+        .db
+        .query_opt(
+            "SELECT id FROM users WHERE lower(email) = lower($1)",
+            params![&req.email],
+        )
+        .await?;
     let (user_id,) = user.ok_or_else(|| crate::error::ApiError::NotFound)?;
 
     if req.revoke {
-        sqlx::query(
-            "DELETE FROM role_bindings
+        state
+            .db
+            .exec(
+                "DELETE FROM role_bindings
              WHERE subject_id = $1 AND role_key = $2 AND scope_type = 'deployment'",
-        )
-        .bind(user_id)
-        .bind(&req.role)
-        .execute(&state.db)
-        .await?;
+                params![user_id, &req.role],
+            )
+            .await?;
     } else {
-        sqlx::query(
-            "INSERT INTO role_bindings (id, subject_type, subject_id, role_key, scope_type, scope_id, created_by)
+        state
+            .db
+            .exec(
+                "INSERT INTO role_bindings (id, subject_type, subject_id, role_key, scope_type, scope_id, created_by)
              VALUES ($1, 'user', $2, $3, 'deployment', NULL, $4)
              ON CONFLICT DO NOTHING",
-        )
-        .bind(uuid::Uuid::now_v7())
-        .bind(user_id)
-        .bind(&req.role)
-        .bind(auth.user_id.0)
-        .execute(&state.db)
-        .await?;
+                params![uuid::Uuid::now_v7(), user_id, &req.role, auth.user_id.0],
+            )
+            .await?;
     }
 
     // Who gained power over this deployment, granted by whom, is the single
@@ -361,16 +365,17 @@ pub async fn create_org(
         .map(str::to_lowercase)
         .unwrap_or_else(|| slugify(name));
 
-    let row: OperatorOrg = sqlx::query_as(&format!(
-        "INSERT INTO orgs (id, name, slug) VALUES ($1, $2, $3)
+    let row: OperatorOrg = state
+        .db
+        .query_one(
+            &format!(
+                "INSERT INTO orgs (id, name, slug) VALUES ($1, $2, $3)
          RETURNING id, name, slug, created_at, {} AS tenants",
-        Postgres.cast("0", "bigint")
-    ))
-    .bind(Uuid::now_v7())
-    .bind(name)
-    .bind(&slug)
-    .fetch_one(&state.db)
-    .await?;
+                Postgres.cast("0", "bigint")
+            ),
+            params![Uuid::now_v7(), name, &slug],
+        )
+        .await?;
 
     audit_write(
         &state,
@@ -396,16 +401,18 @@ pub async fn rename_org(
     // holding anything at the deployment.
     auth.require(&state, Permission::OrgManage, Scope::Org(id))
         .await?;
-    let row: Option<OperatorOrg> = sqlx::query_as(&format!(
-        "UPDATE orgs SET name = $2, updated_at = {} WHERE id = $1
+    let row: Option<OperatorOrg> = state
+        .db
+        .query_opt(
+            &format!(
+                "UPDATE orgs SET name = $2, updated_at = {} WHERE id = $1
          RETURNING id, name, slug, created_at,
                    (SELECT count(*) FROM tenants t WHERE t.org_id = orgs.id) AS tenants",
-        Postgres.now()
-    ))
-    .bind(id)
-    .bind(req.name.trim())
-    .fetch_optional(&state.db)
-    .await?;
+                Postgres.now()
+            ),
+            params![id, req.name.trim()],
+        )
+        .await?;
     let row = row.ok_or(crate::error::ApiError::NotFound)?;
     audit_write(
         &state,
@@ -433,11 +440,13 @@ pub async fn move_tenant(
     Path(id): Path<TenantId>,
     Json(req): Json<MoveTenantRequest>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let current: Option<(Option<Uuid>, String)> =
-        sqlx::query_as("SELECT org_id, slug FROM tenants WHERE id = $1")
-            .bind(id)
-            .fetch_optional(&state.db)
-            .await?;
+    let current: Option<(Option<Uuid>, String)> = state
+        .db
+        .query_opt(
+            "SELECT org_id, slug FROM tenants WHERE id = $1",
+            params![id],
+        )
+        .await?;
     let (from, slug) = current.ok_or(crate::error::ApiError::NotFound)?;
 
     if let Some(from) = from {
@@ -447,14 +456,16 @@ pub async fn move_tenant(
     auth.require(&state, Permission::OrgManage, Scope::Org(req.org_id))
         .await?;
 
-    sqlx::query(&format!(
-        "UPDATE tenants SET org_id = $2, updated_at = {} WHERE id = $1",
-        Postgres.now()
-    ))
-    .bind(id)
-    .bind(req.org_id)
-    .execute(&state.db)
-    .await?;
+    state
+        .db
+        .exec(
+            &format!(
+                "UPDATE tenants SET org_id = $2, updated_at = {} WHERE id = $1",
+                Postgres.now()
+            ),
+            params![id, req.org_id],
+        )
+        .await?;
 
     audit_write(
         &state,
@@ -529,13 +540,16 @@ pub async fn revoke_node(
     let tenant = crate::routes::nodes::node_tenant(&state, id).await?;
     auth.require(&state, Permission::NodeManage, Scope::Tenant(tenant))
         .await?;
-    sqlx::query(&format!(
-        "UPDATE nodes SET revoked_at = {now}, updated_at = {now} WHERE id = $1",
-        now = Postgres.now()
-    ))
-    .bind(id)
-    .execute(&state.db)
-    .await?;
+    state
+        .db
+        .exec(
+            &format!(
+                "UPDATE nodes SET revoked_at = {now}, updated_at = {now} WHERE id = $1",
+                now = Postgres.now()
+            ),
+            params![id],
+        )
+        .await?;
     audit_write(
         &state,
         &auth,
@@ -557,9 +571,9 @@ pub async fn remove_node(
     let tenant = crate::routes::nodes::node_tenant(&state, id).await?;
     auth.require(&state, Permission::NodeManage, Scope::Tenant(tenant))
         .await?;
-    sqlx::query("DELETE FROM nodes WHERE id = $1")
-        .bind(id)
-        .execute(&state.db)
+    state
+        .db
+        .exec("DELETE FROM nodes WHERE id = $1", params![id])
         .await?;
     audit_write(
         &state,
