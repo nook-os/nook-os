@@ -133,10 +133,8 @@ impl Queue for DbQueue {
             tf_cast = Postgres.cast("$1", "text[]"),
             lock = Postgres.claim_lock_clause(),
         );
-        let candidates = sqlx::query_as::<_, WorkRow>(&claim_sql)
-            .bind(&type_filter)
-            .bind(max as i64)
-            .fetch_all(&mut *tx)
+        let candidates: Vec<WorkRow> = tx
+            .query_all(&claim_sql, params![type_filter, max as i64])
             .await?;
 
         let mut delivered = Vec::with_capacity(candidates.len());
@@ -149,14 +147,14 @@ impl Queue for DbQueue {
                 continue;
             }
             let now = Postgres.now();
-            sqlx::query(&format!(
-                "UPDATE work_queue \
+            tx.exec(
+                &format!(
+                    "UPDATE work_queue \
                  SET attempts = attempts + 1, locked_until = {now} + make_interval(secs => $2) \
                  WHERE id = $1",
-            ))
-            .bind(row.id)
-            .bind(secs(visibility))
-            .execute(&mut *tx)
+                ),
+                params![row.id, secs(visibility)],
+            )
             .await?;
 
             let mut env = row.into_envelope();
@@ -239,24 +237,16 @@ impl Queue for DbQueue {
 
 /// Move a row from `work_queue` to `work_queue_dead` with `reason`, within the
 /// caller's transaction. A no-op if the id is already gone.
-async fn dead_letter(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    id: Uuid,
-    reason: &str,
-) -> Result<()> {
-    sqlx::query(
+async fn dead_letter(tx: &mut nook_db::DbTx<'_>, id: Uuid, reason: &str) -> Result<()> {
+    tx.exec(
         "INSERT INTO work_queue_dead \
            (id, tenant_id, work_type, payload, attempts, max_attempts, enqueued_at, reason) \
          SELECT id, tenant_id, work_type, payload, attempts, max_attempts, enqueued_at, $2 \
          FROM work_queue WHERE id = $1",
+        params![id, reason],
     )
-    .bind(id)
-    .bind(reason)
-    .execute(&mut **tx)
     .await?;
-    sqlx::query("DELETE FROM work_queue WHERE id = $1")
-        .bind(id)
-        .execute(&mut **tx)
+    tx.exec("DELETE FROM work_queue WHERE id = $1", params![id])
         .await?;
     Ok(())
 }
@@ -281,7 +271,7 @@ mod tests {
         // MAIN-146 NG-2: the migration set stays owned by nook-control; this
         // crate pulls it in as a dev-dependency only to build the test schema.
         nook_control::MIGRATOR.run(&db).await.ok()?;
-        Some(DbQueue::new(db))
+        Some(DbQueue::new(nook_db::EnginePool::from_pg(db)))
     }
 
     /// Reads the dead-letter table for the parameterized contract runners.

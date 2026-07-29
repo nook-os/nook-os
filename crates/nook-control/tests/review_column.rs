@@ -106,7 +106,7 @@ async fn review_is_a_valid_type_and_resolves_by_type() {
     add_col(&bed.pool, board, "In Review", 1, "review").await;
     add_col(&bed.pool, board, "Done", 2, "completed").await;
 
-    let review = column_of_type(&bed.pool, board, "review")
+    let review = column_of_type(&bed.db(), board, "review")
         .await
         .expect("review resolves");
     let by_pos = cols(&bed.pool, board).await;
@@ -134,7 +134,7 @@ async fn submit_pr_resolution_prefers_review_then_falls_back_to_completed() {
     add_col(&bed.pool, with_review, "In Progress", 0, "started").await;
     add_col(&bed.pool, with_review, "In Review", 1, "review").await;
     add_col(&bed.pool, with_review, "Done", 2, "completed").await;
-    assert!(column_of_type(&bed.pool, with_review, "review")
+    assert!(column_of_type(&bed.db(), with_review, "review")
         .await
         .is_ok());
 
@@ -144,13 +144,13 @@ async fn submit_pr_resolution_prefers_review_then_falls_back_to_completed() {
     add_col(&bed.pool, no_review, "In Progress", 0, "started").await;
     add_col(&bed.pool, no_review, "Done", 1, "completed").await;
     assert!(
-        column_of_type(&bed.pool, no_review, "review")
+        column_of_type(&bed.db(), no_review, "review")
             .await
             .is_err(),
         "a board with no review column has none to resolve"
     );
     assert!(
-        column_of_type(&bed.pool, no_review, "completed")
+        column_of_type(&bed.db(), no_review, "completed")
             .await
             .is_ok(),
         "so submit_pr falls back to the completed column"

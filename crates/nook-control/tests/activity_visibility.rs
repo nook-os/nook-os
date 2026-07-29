@@ -193,14 +193,14 @@ async fn events_list_scopes_members_to_their_own_activity() {
     let e_owner_node = add_event(&bed.pool, tenant, None, Some(owner_node), None).await;
 
     // Member: sees the three that are theirs, none of the teammate's.
-    let scope = ActivityScope::load(&bed.pool, tenant, &user_ctx(member, tenant))
+    let scope = ActivityScope::load(&bed.db(), tenant, &user_ctx(member, tenant))
         .await
         .expect("scope");
     assert!(
         matches!(scope, ActivityScope::Member { .. }),
         "a member resolves to a scoped view"
     );
-    let seen = core::events_page(&bed.pool, tenant, None, None, None, 200, &scope)
+    let seen = core::events_page(&bed.db(), tenant, None, None, None, 200, &scope)
         .await
         .expect("list")
         .events;
@@ -218,14 +218,14 @@ async fn events_list_scopes_members_to_their_own_activity() {
     );
 
     // Owner: the full audit feed sees all five.
-    let admin_scope = ActivityScope::load(&bed.pool, tenant, &user_ctx(owner, tenant))
+    let admin_scope = ActivityScope::load(&bed.db(), tenant, &user_ctx(owner, tenant))
         .await
         .expect("scope");
     assert!(
         matches!(admin_scope, ActivityScope::All),
         "an owner resolves to the unfiltered feed"
     );
-    let all_seen = core::events_page(&bed.pool, tenant, None, None, None, 200, &admin_scope)
+    let all_seen = core::events_page(&bed.db(), tenant, None, None, None, 200, &admin_scope)
         .await
         .expect("list")
         .events;
@@ -257,7 +257,7 @@ async fn a_node_credential_resolves_to_the_unfiltered_feed() {
         principal: Principal::Node(NodeId::new()),
         cookie_session: false,
     };
-    let scope = ActivityScope::load(&bed.pool, tenant, &node_ctx)
+    let scope = ActivityScope::load(&bed.db(), tenant, &node_ctx)
         .await
         .expect("scope");
     assert!(

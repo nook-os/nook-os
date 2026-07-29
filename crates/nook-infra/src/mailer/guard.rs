@@ -250,7 +250,7 @@ mod tests {
         // MAIN-146 NG-2: the migration set stays owned by nook-control. This
         // crate pulls it in as a dev-dependency only to build the test schema.
         nook_control::MIGRATOR.run(&db).await.ok()?;
-        Some(db)
+        Some(nook_db::EnginePool::from_pg(db))
     }
 
     fn guard(cap: Arc<CaptureMailer>, db: &DbPool, cfg: &Config) -> GuardedMailer {

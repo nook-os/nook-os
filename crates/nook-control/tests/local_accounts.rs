@@ -32,22 +32,22 @@ async fn an_account_signs_in_with_its_password_and_not_with_another() {
     };
     let t = seed_tenant(&bed.pool).await;
 
-    local_auth::create(&bed.pool, t, "ryan", "ryan@example.com", "Ryan", GOOD, true)
+    local_auth::create(&bed.db(), t, "ryan", "ryan@example.com", "Ryan", GOOD, true)
         .await
         .expect("create");
 
-    let (user, _) = local_auth::login(&bed.pool, t, "ryan", GOOD)
+    let (user, _) = local_auth::login(&bed.db(), t, "ryan", GOOD)
         .await
         .expect("the right password must work");
     assert_eq!(user.role, "owner", "the first account owns the instance");
 
     assert!(
-        local_auth::login(&bed.pool, t, "ryan", "wrong password entirely")
+        local_auth::login(&bed.db(), t, "ryan", "wrong password entirely")
             .await
             .is_err()
     );
     // Usernames are case-insensitive: Alice and alice must be one person.
-    assert!(local_auth::login(&bed.pool, t, "RYAN", GOOD).await.is_ok());
+    assert!(local_auth::login(&bed.db(), t, "RYAN", GOOD).await.is_ok());
 
     bed.teardown().await;
 }
@@ -63,25 +63,25 @@ async fn choosing_a_sign_in_method_is_one_way() {
     let t = seed_tenant(&bed.pool).await;
 
     assert_eq!(
-        local_auth::mode_of(&bed.pool, t).await.unwrap(),
+        local_auth::mode_of(&bed.db(), t).await.unwrap(),
         None,
         "a fresh tenant has not chosen yet"
     );
 
-    local_auth::claim_mode(&bed.pool, t, AuthMode::Oidc)
+    local_auth::claim_mode(&bed.db(), t, AuthMode::Oidc)
         .await
         .expect("first claim wins");
     assert_eq!(
-        local_auth::mode_of(&bed.pool, t).await.unwrap(),
+        local_auth::mode_of(&bed.db(), t).await.unwrap(),
         Some(AuthMode::Oidc)
     );
 
     // Claiming the same mode again is fine — every later sign-in does it.
-    local_auth::claim_mode(&bed.pool, t, AuthMode::Oidc)
+    local_auth::claim_mode(&bed.db(), t, AuthMode::Oidc)
         .await
         .expect("re-claiming the same mode must be idempotent");
 
-    let err = local_auth::claim_mode(&bed.pool, t, AuthMode::Local)
+    let err = local_auth::claim_mode(&bed.db(), t, AuthMode::Local)
         .await
         .expect_err("switching must be refused");
     let msg = format!("{err:?}");
@@ -102,11 +102,11 @@ async fn a_failed_login_does_not_claim_the_mode() {
     };
     let t = seed_tenant(&bed.pool).await;
 
-    assert!(local_auth::login(&bed.pool, t, "nobody", "wrong")
+    assert!(local_auth::login(&bed.db(), t, "nobody", "wrong")
         .await
         .is_err());
     assert_eq!(
-        local_auth::mode_of(&bed.pool, t).await.unwrap(),
+        local_auth::mode_of(&bed.db(), t).await.unwrap(),
         None,
         "a failed sign-in must leave the choice open"
     );
@@ -124,7 +124,7 @@ async fn the_password_hash_never_leaves_the_database() {
     };
     let t = seed_tenant(&bed.pool).await;
 
-    let user = local_auth::create(&bed.pool, t, "ryan", "r@example.com", "Ryan", GOOD, true)
+    let user = local_auth::create(&bed.db(), t, "ryan", "r@example.com", "Ryan", GOOD, true)
         .await
         .expect("create");
 
@@ -180,13 +180,13 @@ async fn an_oidc_account_cannot_be_given_a_password() {
     .unwrap();
 
     assert!(
-        local_auth::change_password(&bed.pool, id, "anything", "a-new-long-password")
+        local_auth::change_password(&bed.db(), id, "anything", "a-new-long-password")
             .await
             .is_err(),
         "an account with no local password must not acquire one this way"
     );
     // And it cannot be signed into locally either.
-    assert!(local_auth::login(&bed.pool, t, "fed", GOOD).await.is_err());
+    assert!(local_auth::login(&bed.db(), t, "fed", GOOD).await.is_err());
 
     bed.teardown().await;
 }
@@ -198,25 +198,25 @@ async fn changing_a_password_requires_the_current_one() {
     };
     let t = seed_tenant(&bed.pool).await;
 
-    let user = local_auth::create(&bed.pool, t, "ryan", "r@example.com", "Ryan", GOOD, true)
+    let user = local_auth::create(&bed.db(), t, "ryan", "r@example.com", "Ryan", GOOD, true)
         .await
         .unwrap();
 
     assert!(local_auth::change_password(
-        &bed.pool,
+        &bed.db(),
         user.id,
         "not the current one",
         "another-long-one"
     )
     .await
     .is_err());
-    local_auth::change_password(&bed.pool, user.id, GOOD, "another-long-password")
+    local_auth::change_password(&bed.db(), user.id, GOOD, "another-long-password")
         .await
         .expect("the right current password must work");
 
-    assert!(local_auth::login(&bed.pool, t, "ryan", GOOD).await.is_err());
+    assert!(local_auth::login(&bed.db(), t, "ryan", GOOD).await.is_err());
     assert!(
-        local_auth::login(&bed.pool, t, "ryan", "another-long-password")
+        local_auth::login(&bed.db(), t, "ryan", "another-long-password")
             .await
             .is_ok()
     );
@@ -231,17 +231,17 @@ async fn usernames_are_unique_within_a_tenant_case_insensitively() {
     };
     let t = seed_tenant(&bed.pool).await;
 
-    local_auth::create(&bed.pool, t, "ryan", "a@example.com", "A", GOOD, true)
+    local_auth::create(&bed.db(), t, "ryan", "a@example.com", "A", GOOD, true)
         .await
         .unwrap();
-    let err = local_auth::create(&bed.pool, t, "RYAN", "b@example.com", "B", GOOD, false)
+    let err = local_auth::create(&bed.db(), t, "RYAN", "b@example.com", "B", GOOD, false)
         .await
         .expect_err("differing only by case must collide");
     assert!(format!("{err:?}").contains("already taken"), "{err:?}");
 
     // A different tenant is a different namespace.
     let other = seed_tenant(&bed.pool).await;
-    local_auth::create(&bed.pool, other, "ryan", "c@example.com", "C", GOOD, true)
+    local_auth::create(&bed.db(), other, "ryan", "c@example.com", "C", GOOD, true)
         .await
         .expect("the same name in another tenant is fine");
 
@@ -258,7 +258,7 @@ async fn a_weak_password_creates_nothing() {
     let t = seed_tenant(&bed.pool).await;
 
     assert!(
-        local_auth::create(&bed.pool, t, "ryan", "r@e.com", "R", "short", true)
+        local_auth::create(&bed.db(), t, "ryan", "r@e.com", "R", "short", true)
             .await
             .is_err()
     );

@@ -287,8 +287,7 @@ mod tests {
     async fn setup() -> Option<(TestBed, Arc<dyn Queue>)> {
         let bed = TestBed::new().await?;
         let cfg = nook_infra::Config::for_test();
-        let q: Arc<dyn Queue> =
-            Arc::from(nook_infra::queue::from_config(&cfg, bed.pool.clone()).await);
+        let q: Arc<dyn Queue> = Arc::from(nook_infra::queue::from_config(&cfg, bed.db()).await);
         Some((bed, q))
     }
 
@@ -439,12 +438,12 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(
-                count_in(&bed.pool, "work_queue_dead", &ty).await,
+                count_in(&bed.db(), "work_queue_dead", &ty).await,
                 0,
                 "not dead on the first pass"
             );
             assert_eq!(
-                count_in(&bed.pool, "work_queue", &ty).await,
+                count_in(&bed.db(), "work_queue", &ty).await,
                 1,
                 "back in the queue"
             );
@@ -454,12 +453,12 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(
-                count_in(&bed.pool, "work_queue", &ty).await,
+                count_in(&bed.db(), "work_queue", &ty).await,
                 0,
                 "left the live queue"
             );
             assert_eq!(
-                count_in(&bed.pool, "work_queue_dead", &ty).await,
+                count_in(&bed.db(), "work_queue_dead", &ty).await,
                 1,
                 "dead-lettered"
             );
@@ -498,12 +497,12 @@ mod tests {
 
             // Not acked, not dead — still present, and invisible into the future.
             assert_eq!(
-                count_in(&bed.pool, "work_queue", &ty).await,
+                count_in(&bed.db(), "work_queue", &ty).await,
                 1,
                 "still queued"
             );
             assert_eq!(
-                count_in(&bed.pool, "work_queue_dead", &ty).await,
+                count_in(&bed.db(), "work_queue_dead", &ty).await,
                 0,
                 "not dead after one failure"
             );
@@ -541,7 +540,7 @@ mod tests {
             assert_eq!(n, 1);
             // Treated as a failure: backed off, still present, not dead.
             assert_eq!(
-                count_in(&bed.pool, "work_queue", &ty).await,
+                count_in(&bed.db(), "work_queue", &ty).await,
                 1,
                 "a panic is a failure, not a loss"
             );
@@ -569,7 +568,7 @@ mod tests {
 
             // Wait until the three items are drained, then signal shutdown.
             for _ in 0..50 {
-                if count_in(&bed.pool, "work_queue", &ty).await == 0 {
+                if count_in(&bed.db(), "work_queue", &ty).await == 0 {
                     break;
                 }
                 tokio::time::sleep(Duration::from_millis(50)).await;
@@ -657,7 +656,7 @@ mod tests {
                 .unwrap();
 
             assert_eq!(
-                count_in(&bed.pool, "work_queue", &ty).await,
+                count_in(&bed.db(), "work_queue", &ty).await,
                 0,
                 "left the live queue"
             );

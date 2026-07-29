@@ -117,9 +117,10 @@ async fn resolve_session_resolves_public_auth_tables_on_the_chat_first_pool() {
     // tables and ledger resolve there, `public` as the fallback for the shared
     // auth tables. This must resolve the session.
     let chat_pool = pool(&url, "chat,public").await;
-    let resolved = nook_auth::resolve_session(&chat_pool, session)
-        .await
-        .expect("resolve_session must resolve the public auth tables through chat,public");
+    let resolved =
+        nook_auth::resolve_session(&nook_db::EnginePool::from_pg(chat_pool.clone()), session)
+            .await
+            .expect("resolve_session must resolve the public auth tables through chat,public");
     assert_eq!(resolved.tenant_id, tenant);
 
     // The guard bites: a `chat`-only search_path — the bug — cannot resolve
@@ -127,7 +128,7 @@ async fn resolve_session_resolves_public_auth_tables_on_the_chat_first_pool() {
     // service's search_path back to `chat`, the assertion above starts failing.
     let chat_only = pool(&url, "chat").await;
     assert!(
-        nook_auth::resolve_session(&chat_only, session)
+        nook_auth::resolve_session(&nook_db::EnginePool::from_pg(chat_only.clone()), session)
             .await
             .is_err(),
         "a chat-only search_path must NOT resolve the public auth tables — \

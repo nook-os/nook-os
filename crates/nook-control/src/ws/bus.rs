@@ -166,7 +166,7 @@ pub(crate) fn start(
     let listen_registry = registry.clone();
     tokio::spawn(async move {
         loop {
-            let mut listener = match PgListener::connect_with(&listen_pool).await {
+            let mut listener = match PgListener::connect_with(listen_pool.pg()).await {
                 Ok(l) => l,
                 Err(e) => {
                     tracing::warn!(error = %e, "bus listener connect failed");

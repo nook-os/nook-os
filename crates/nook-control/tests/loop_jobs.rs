@@ -629,7 +629,7 @@ async fn jobs_accept_a_board_key_and_reject_unknown() {
 
     // the list route resolves the key the same way (resolve_id → list service):
     // the key names the same task, and its jobs list back.
-    let resolved = nook_control::services::tasks::resolve_id(&bed.pool, tenant, &key)
+    let resolved = nook_control::services::tasks::resolve_id(&bed.db(), tenant, &key)
         .await
         .expect("resolve key");
     assert_eq!(resolved, task_id);

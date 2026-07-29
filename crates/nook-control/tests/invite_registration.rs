@@ -115,7 +115,7 @@ async fn register_makes_an_unverified_memberless_user_and_leaves_the_invite_pend
     );
     // Unverified — no verified identity row.
     assert!(
-        !identity::email_is_verified(&bed.pool, UserId(user))
+        !identity::email_is_verified(&bed.db(), UserId(user))
             .await
             .unwrap(),
         "the account starts unverified"
@@ -143,7 +143,7 @@ async fn login_by_username_or_email_works_for_a_memberless_user() {
     let email = format!("m-{}@example.test", Uuid::now_v7().simple());
     let username = format!("mem{}", tenant.0.simple());
     let user = local_auth::register_invited(
-        &bed.pool,
+        &bed.db(),
         tenant,
         &username,
         &email,
@@ -161,13 +161,13 @@ async fn login_by_username_or_email_works_for_a_memberless_user() {
 
     // Zero memberships, yet login succeeds — by username AND by email.
     assert!(
-        local_auth::login(&bed.pool, tenant, &username, "s3cret-passphrase")
+        local_auth::login(&bed.db(), tenant, &username, "s3cret-passphrase")
             .await
             .is_ok(),
         "login by username"
     );
     assert!(
-        local_auth::login(&bed.pool, tenant, &email, "s3cret-passphrase")
+        local_auth::login(&bed.db(), tenant, &email, "s3cret-passphrase")
             .await
             .is_ok(),
         "login by email"
@@ -175,7 +175,7 @@ async fn login_by_username_or_email_works_for_a_memberless_user() {
     // Case-insensitive, and a wrong password still fails.
     assert!(
         local_auth::login(
-            &bed.pool,
+            &bed.db(),
             tenant,
             &email.to_uppercase(),
             "s3cret-passphrase"
@@ -185,7 +185,7 @@ async fn login_by_username_or_email_works_for_a_memberless_user() {
         "identifier match is case-insensitive"
     );
     assert!(
-        local_auth::login(&bed.pool, tenant, &username, "wrong")
+        local_auth::login(&bed.db(), tenant, &username, "wrong")
             .await
             .is_err(),
         "a wrong password is refused"
@@ -202,7 +202,7 @@ async fn identity_context_resolves_the_session_but_tenant_scoped_rejects_it() {
     let tenant = bed.tenant("t").await;
     let email = format!("id-{}@example.test", Uuid::now_v7().simple());
     let user = local_auth::register_invited(
-        &bed.pool,
+        &bed.db(),
         tenant,
         &format!("id{}", tenant.0.simple()),
         &email,
@@ -227,7 +227,7 @@ async fn identity_context_resolves_the_session_but_tenant_scoped_rejects_it() {
     .unwrap();
 
     // Identity-only resolution succeeds and reports non-membership...
-    let (resolved, is_member) = nook_auth::resolve_session_identity(&bed.pool, sid)
+    let (resolved, is_member) = nook_auth::resolve_session_identity(&bed.db(), sid)
         .await
         .unwrap();
     assert_eq!(resolved.user_id, user.id.0);
@@ -235,7 +235,7 @@ async fn identity_context_resolves_the_session_but_tenant_scoped_rejects_it() {
     // ...while the membership-requiring resolution refuses it (a 403, not a 401).
     assert!(
         matches!(
-            nook_auth::resolve_session(&bed.pool, sid).await,
+            nook_auth::resolve_session(&bed.db(), sid).await,
             Err(nook_auth::AuthError::Forbidden)
         ),
         "tenant-scoped resolution must reject a memberless session with Forbidden"
@@ -253,7 +253,7 @@ async fn acceptance_needs_a_verified_email_then_creates_membership_with_the_invi
     let email = format!("acc-{}@example.test", Uuid::now_v7().simple());
     let token = add_invite(&bed.pool, tenant, &email, "admin").await;
     let user = local_auth::register_invited(
-        &bed.pool,
+        &bed.db(),
         tenant,
         &format!("acc{}", tenant.0.simple()),
         &email,
@@ -265,7 +265,7 @@ async fn acceptance_needs_a_verified_email_then_creates_membership_with_the_invi
     .unwrap();
 
     // Unverified: acceptance is declined and NO membership is created (AC-2).
-    let declined = invites::accept_core(&bed.pool, user.id.0, tenant, &token)
+    let declined = invites::accept_core(&bed.db(), user.id.0, tenant, &token)
         .await
         .unwrap();
     assert!(!declined.accepted, "unverified acceptance is declined");
@@ -276,10 +276,10 @@ async fn acceptance_needs_a_verified_email_then_creates_membership_with_the_invi
     );
 
     // Verify, then accept: membership is created carrying the INVITED role.
-    identity::mark_local_email_verified(&bed.pool, user.id, &email)
+    identity::mark_local_email_verified(&bed.db(), user.id, &email)
         .await
         .unwrap();
-    let accepted = invites::accept_core(&bed.pool, user.id.0, tenant, &token)
+    let accepted = invites::accept_core(&bed.db(), user.id.0, tenant, &token)
         .await
         .unwrap();
     assert!(accepted.accepted, "a verified account accepts");
@@ -312,7 +312,7 @@ async fn a_mismatched_or_invalid_invite_creates_no_membership() {
     let token = add_invite(&bed.pool, tenant, "someone-else@example.test", "member").await;
     let email = format!("me-{}@example.test", Uuid::now_v7().simple());
     let user = local_auth::register_invited(
-        &bed.pool,
+        &bed.db(),
         tenant,
         &format!("me{}", tenant.0.simple()),
         &email,
@@ -322,19 +322,19 @@ async fn a_mismatched_or_invalid_invite_creates_no_membership() {
     )
     .await
     .unwrap();
-    identity::mark_local_email_verified(&bed.pool, user.id, &email)
+    identity::mark_local_email_verified(&bed.db(), user.id, &email)
         .await
         .unwrap();
 
     // Verified, but the invite's email is not this account's — declined.
-    let declined = invites::accept_core(&bed.pool, user.id.0, tenant, &token)
+    let declined = invites::accept_core(&bed.db(), user.id.0, tenant, &token)
         .await
         .unwrap();
     assert!(!declined.accepted, "an email mismatch is declined");
     assert_eq!(member_count(&bed.pool, tenant, user.id.0).await, 0);
 
     // An unknown token is declined too.
-    let bad = invites::accept_core(&bed.pool, user.id.0, tenant, "nonsense-token")
+    let bad = invites::accept_core(&bed.db(), user.id.0, tenant, "nonsense-token")
         .await
         .unwrap();
     assert!(!bad.accepted);
@@ -353,7 +353,7 @@ async fn accept_moves_the_memberless_session_onto_the_accepted_tenant() {
     let email = format!("sw-{}@example.test", Uuid::now_v7().simple());
     let token = add_invite(&bed.pool, tenant, &email, "member").await;
     let user = local_auth::register_invited(
-        &bed.pool,
+        &bed.db(),
         tenant,
         &format!("sw{}", tenant.0.simple()),
         &email,
@@ -363,7 +363,7 @@ async fn accept_moves_the_memberless_session_onto_the_accepted_tenant() {
     )
     .await
     .unwrap();
-    identity::mark_local_email_verified(&bed.pool, user.id, &email)
+    identity::mark_local_email_verified(&bed.db(), user.id, &email)
         .await
         .unwrap();
 
@@ -416,7 +416,7 @@ async fn accept_moves_the_memberless_session_onto_the_accepted_tenant() {
 
     // And that session now passes the membership-requiring resolution.
     assert!(
-        nook_auth::resolve_session(&bed.pool, sid).await.is_ok(),
+        nook_auth::resolve_session(&bed.db(), sid).await.is_ok(),
         "after accept, the session is member-scoped"
     );
 

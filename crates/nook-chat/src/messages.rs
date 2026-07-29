@@ -618,13 +618,15 @@ mod tests {
         let opts = PgConnectOptions::from_str(&url)
             .ok()?
             .options([("search_path", "chat")]);
-        let db = PgPoolOptions::new()
-            .max_connections(2)
-            .connect_with(opts)
-            .await
-            .ok()?;
+        let db = nook_db::EnginePool::from_pg(
+            PgPoolOptions::new()
+                .max_connections(2)
+                .connect_with(opts)
+                .await
+                .ok()?,
+        );
         crate::ensure_chat_schema(&db).await.ok()?;
-        crate::MIGRATOR.run(&db).await.ok()?;
+        crate::MIGRATOR.run(db.pg()).await.ok()?;
         Some(AppState {
             db,
             registry: Arc::new(crate::registry::Registry::new()),

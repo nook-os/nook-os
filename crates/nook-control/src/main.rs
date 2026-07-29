@@ -36,7 +36,9 @@ async fn main() -> Result<()> {
     let db = nook_db::connect(&cfg.database_url, 10)
         .await
         .context("opening the database")?;
-    MIGRATOR.run(&db).await?;
+    // Migrations embed Postgres DDL (`sqlx::migrate!`); the SQLite track is
+    // MAIN-196. Run them against the pool's Postgres arm.
+    MIGRATOR.run(db.pg()).await?;
 
     match cli.command.unwrap_or(Command::Serve) {
         Command::Serve => {

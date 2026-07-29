@@ -609,34 +609,30 @@ pub async fn delete_folder(
     // rise one level, then the folder itself goes. All in one transaction so a
     // partial failure cannot orphan anything.
     let mut tx = state.db.begin().await?;
-    let parent: Option<(Option<UserNoteFolderId>,)> =
-        sqlx::query_as("SELECT parent_id FROM user_note_folders WHERE id = $1 AND person_id = $2")
-            .bind(id)
-            .bind(person)
-            .fetch_optional(&mut *tx)
-            .await?;
+    let parent: Option<(Option<UserNoteFolderId>,)> = tx
+        .query_opt(
+            "SELECT parent_id FROM user_note_folders WHERE id = $1 AND person_id = $2",
+            params![id, person],
+        )
+        .await?;
     let Some((parent_id,)) = parent else {
         return Err(ApiError::NotFound);
     };
-    sqlx::query("UPDATE user_notes SET folder_id = $3 WHERE folder_id = $1 AND person_id = $2")
-        .bind(id)
-        .bind(person)
-        .bind(parent_id)
-        .execute(&mut *tx)
-        .await?;
-    sqlx::query(
-        "UPDATE user_note_folders SET parent_id = $3 WHERE parent_id = $1 AND person_id = $2",
+    tx.exec(
+        "UPDATE user_notes SET folder_id = $3 WHERE folder_id = $1 AND person_id = $2",
+        params![id, person, parent_id.map(|f| f.0)],
     )
-    .bind(id)
-    .bind(person)
-    .bind(parent_id)
-    .execute(&mut *tx)
     .await?;
-    sqlx::query("DELETE FROM user_note_folders WHERE id = $1 AND person_id = $2")
-        .bind(id)
-        .bind(person)
-        .execute(&mut *tx)
-        .await?;
+    tx.exec(
+        "UPDATE user_note_folders SET parent_id = $3 WHERE parent_id = $1 AND person_id = $2",
+        params![id, person, parent_id.map(|f| f.0)],
+    )
+    .await?;
+    tx.exec(
+        "DELETE FROM user_note_folders WHERE id = $1 AND person_id = $2",
+        params![id, person],
+    )
+    .await?;
     tx.commit().await?;
     Ok(axum::http::StatusCode::NO_CONTENT)
 }

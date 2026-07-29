@@ -77,12 +77,17 @@ async fn task(
 async fn pick_ids(db: &PgPool, tenant: TenantId, f: &TaskFilter) -> Vec<TaskId> {
     // These fixtures set no visibility (default non-private), so any viewer sees
     // them; the pick's MAIN-76 predicate is exercised by task_visibility.rs.
-    query_rows(db, tenant, UserId::new(), f)
-        .await
-        .expect("pick")
-        .into_iter()
-        .map(|t| t.id)
-        .collect()
+    query_rows(
+        &nook_db::EnginePool::from_pg(db.clone()),
+        tenant,
+        UserId::new(),
+        f,
+    )
+    .await
+    .expect("pick")
+    .into_iter()
+    .map(|t| t.id)
+    .collect()
 }
 
 #[tokio::test]
@@ -281,7 +286,7 @@ async fn claim_refuses_backlog_and_epic_with_distinct_messages() {
     .fetch_one(&bed.pool)
     .await
     .expect("key");
-    let resolved = nook_control::services::tasks::resolve_id(&bed.pool, tenant, &key)
+    let resolved = nook_control::services::tasks::resolve_id(&bed.db(), tenant, &key)
         .await
         .expect("backlog task resolves by key");
     assert_eq!(

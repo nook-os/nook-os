@@ -542,10 +542,10 @@ impl Db for SqlitePool {
 /// The engine-dispatching pool. Cheap to clone (each arm is an `sqlx` pool
 /// handle). At the MAIN-205 flip this becomes the workspace's `DbPool`; its [`Db`]
 /// impl simply forwards to whichever concrete pool it holds.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct EnginePool(Arm);
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 enum Arm {
     Pg(PgPool),
     Sqlite(SqlitePool),
@@ -567,6 +567,21 @@ impl EnginePool {
         match self.0 {
             Arm::Pg(_) => Engine::Postgres,
             Arm::Sqlite(_) => Engine::Sqlite,
+        }
+    }
+
+    /// The underlying Postgres pool, for the two sqlx APIs that are not part of
+    /// the [`Db`] dispatch surface and stay Postgres-shaped for now: schema
+    /// migrations (`sqlx::migrate!` embeds Postgres DDL; the SQLite migration
+    /// track is MAIN-196) and any boot-time bootstrap that must reach the raw
+    /// pool. Panics on the SQLite arm — callers here only ever run under Postgres
+    /// until MAIN-196 supplies the SQLite path.
+    pub fn pg(&self) -> &PgPool {
+        match &self.0 {
+            Arm::Pg(p) => p,
+            Arm::Sqlite(_) => {
+                panic!("EnginePool::pg() on a SQLite pool — migrations are Postgres-only until MAIN-196")
+            }
         }
     }
 
@@ -764,6 +779,33 @@ impl DbTx<'_> {
                 let (sql, args) = sqlite_args(sql, params)?;
                 sqlx::query_scalar_with::<sqlx::Sqlite, T, _>(&sql, args)
                     .fetch_one(&mut **tx)
+                    .await
+            }
+        }
+    }
+
+    /// Fetch every row inside the transaction, mapped via `FromRow`.
+    pub async fn query_all<T>(
+        &mut self,
+        sql: &str,
+        params: Vec<DbValue>,
+    ) -> Result<Vec<T>, sqlx::Error>
+    where
+        T: Send + Unpin,
+        T: for<'r> FromRow<'r, PgRow>,
+        T: for<'r> FromRow<'r, SqliteRow>,
+    {
+        match self {
+            DbTx::Pg(tx) => {
+                let args = pg_args(params)?;
+                sqlx::query_as_with::<sqlx::Postgres, T, _>(sql, args)
+                    .fetch_all(&mut **tx)
+                    .await
+            }
+            DbTx::Sqlite(tx) => {
+                let (sql, args) = sqlite_args(sql, params)?;
+                sqlx::query_as_with::<sqlx::Sqlite, T, _>(&sql, args)
+                    .fetch_all(&mut **tx)
                     .await
             }
         }

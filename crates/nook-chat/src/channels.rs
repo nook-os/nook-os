@@ -467,11 +467,13 @@ mod tests {
         let opts = PgConnectOptions::from_str(url)
             .unwrap()
             .options([("search_path", search_path)]);
-        PgPoolOptions::new()
-            .max_connections(2)
-            .connect_with(opts)
-            .await
-            .unwrap()
+        nook_db::EnginePool::from_pg(
+            PgPoolOptions::new()
+                .max_connections(2)
+                .connect_with(opts)
+                .await
+                .unwrap(),
+        )
     }
 
     /// The service's pool, with the `public` auth/user tables and the `chat`
@@ -485,9 +487,9 @@ mod tests {
         let url = std::env::var("DATABASE_URL").ok()?;
         let bootstrap = pool(&url, "public").await;
         crate::ensure_chat_schema(&bootstrap).await.unwrap();
-        nook_control::MIGRATOR.run(&bootstrap).await.unwrap();
+        nook_control::MIGRATOR.run(bootstrap.pg()).await.unwrap();
         let db = pool(&url, "chat,public").await;
-        crate::MIGRATOR.run(&db).await.unwrap();
+        crate::MIGRATOR.run(db.pg()).await.unwrap();
         Some(AppState {
             db,
             registry: Arc::new(crate::registry::Registry::new()),

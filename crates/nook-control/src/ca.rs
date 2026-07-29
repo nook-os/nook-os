@@ -337,22 +337,20 @@ pub async fn promote(db: &DbPool, tenant: TenantId, ca_id: Uuid) -> Result<()> {
     let mut tx = db.begin().await?;
     // Demote first: the partial unique index allows only one active row, so
     // the order matters.
-    sqlx::query(
+    tx.exec(
         "UPDATE tenant_cas SET state = 'retiring'
           WHERE tenant_id = $1 AND state = 'active'",
+        params![tenant],
     )
-    .bind(tenant)
-    .execute(&mut *tx)
     .await?;
-    let done = sqlx::query(
-        "UPDATE tenant_cas SET state = 'active'
+    let done = tx
+        .exec(
+            "UPDATE tenant_cas SET state = 'active'
           WHERE id = $1 AND tenant_id = $2 AND state = 'staged'",
-    )
-    .bind(ca_id)
-    .bind(tenant)
-    .execute(&mut *tx)
-    .await?;
-    if done.rows_affected() == 0 {
+            params![ca_id, tenant],
+        )
+        .await?;
+    if done == 0 {
         tx.rollback().await?;
         bail!("no staged CA {ca_id} for this tenant to promote");
     }

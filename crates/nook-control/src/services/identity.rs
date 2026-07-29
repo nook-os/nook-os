@@ -619,7 +619,7 @@ mod db_tests {
         // regression errored out before it could assert anything. `MIGRATOR` is
         // idempotent, so running it here is a no-op on an already-migrated DB.
         crate::MIGRATOR.run(&db).await.ok()?;
-        Some(db)
+        Some(nook_db::EnginePool::from_pg(db))
     }
 
     async fn tenant(db: &DbPool, name: &str) -> TenantId {

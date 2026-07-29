@@ -38,11 +38,11 @@ async fn generates_and_loads_a_verified_signer() {
     let v = vault();
     let tenant = seed_tenant(&bed.pool).await;
 
-    let ca = ca::generate(&bed.pool, &v, tenant, true).await.unwrap();
+    let ca = ca::generate(&bed.db(), &v, tenant, true).await.unwrap();
     assert_eq!(ca.state, "active");
     assert!(ca.cert_pem.contains("BEGIN CERTIFICATE"));
 
-    let (loaded, key_pem) = ca::load_signer(&bed.pool, &v, tenant).await.unwrap();
+    let (loaded, key_pem) = ca::load_signer(&bed.db(), &v, tenant).await.unwrap();
     assert_eq!(loaded.id, ca.id);
     assert!(key_pem.contains("PRIVATE KEY"), "key must decrypt");
     // The fingerprint is computed from the certificate, not merely stored.
@@ -63,12 +63,12 @@ async fn tenants_do_not_share_a_ca() {
     let v = vault();
     let (a, b) = (seed_tenant(&bed.pool).await, seed_tenant(&bed.pool).await);
 
-    let ca_a = ca::generate(&bed.pool, &v, a, true).await.unwrap();
-    let ca_b = ca::generate(&bed.pool, &v, b, true).await.unwrap();
+    let ca_a = ca::generate(&bed.db(), &v, a, true).await.unwrap();
+    let ca_b = ca::generate(&bed.db(), &v, b, true).await.unwrap();
     assert_ne!(ca_a.fingerprint, ca_b.fingerprint);
 
     // Each tenant's bundle contains only its own CA.
-    let bundle_a = ca::trust_bundle(&bed.pool, a).await.unwrap();
+    let bundle_a = ca::trust_bundle(&bed.db(), a).await.unwrap();
     assert_eq!(bundle_a.len(), 1);
     assert_eq!(bundle_a[0].id, ca_a.id);
     assert!(
@@ -88,10 +88,10 @@ async fn refuses_a_signer_whose_fingerprint_does_not_match() {
     };
     let v = vault();
     let tenant = seed_tenant(&bed.pool).await;
-    ca::generate(&bed.pool, &v, tenant, true).await.unwrap();
+    ca::generate(&bed.db(), &v, tenant, true).await.unwrap();
 
     // Swap in a different (validly-formed) certificate behind the fingerprint.
-    let other = ca::generate(&bed.pool, &v, seed_tenant(&bed.pool).await, false)
+    let other = ca::generate(&bed.db(), &v, seed_tenant(&bed.pool).await, false)
         .await
         .unwrap();
     sqlx::query("UPDATE tenant_cas SET cert_pem = $2 WHERE tenant_id = $1 AND state = 'active'")
@@ -101,7 +101,7 @@ async fn refuses_a_signer_whose_fingerprint_does_not_match() {
         .await
         .unwrap();
 
-    let err = ca::load_signer(&bed.pool, &v, tenant).await.unwrap_err();
+    let err = ca::load_signer(&bed.db(), &v, tenant).await.unwrap_err();
     assert!(
         err.to_string().contains("fingerprint"),
         "must refuse on fingerprint mismatch, got: {err}"
@@ -120,7 +120,7 @@ async fn rotation_distributes_then_switches_then_retires() {
     let v = vault();
     let tenant = seed_tenant(&bed.pool).await;
 
-    let old = ca::generate(&bed.pool, &v, tenant, true).await.unwrap();
+    let old = ca::generate(&bed.db(), &v, tenant, true).await.unwrap();
 
     // A node holding a live leaf signed by the old CA.
     let node = Uuid::now_v7();
@@ -137,24 +137,24 @@ async fn rotation_distributes_then_switches_then_retires() {
     .unwrap();
 
     // ── distribute ──────────────────────────────────────────────────────
-    let new = ca::generate(&bed.pool, &v, tenant, false).await.unwrap();
+    let new = ca::generate(&bed.db(), &v, tenant, false).await.unwrap();
     assert_eq!(new.state, "staged");
-    let bundle = ca::trust_bundle(&bed.pool, tenant).await.unwrap();
+    let bundle = ca::trust_bundle(&bed.db(), tenant).await.unwrap();
     assert_eq!(bundle.len(), 2, "both CAs are trusted during a rotation");
     // ...but the signer is still the old one.
-    let (signer, _) = ca::load_signer(&bed.pool, &v, tenant).await.unwrap();
+    let (signer, _) = ca::load_signer(&bed.db(), &v, tenant).await.unwrap();
     assert_eq!(signer.id, old.id, "staging must not change who signs");
 
     // ── switch ──────────────────────────────────────────────────────────
-    ca::promote(&bed.pool, tenant, new.id).await.unwrap();
-    let (signer, _) = ca::load_signer(&bed.pool, &v, tenant).await.unwrap();
+    ca::promote(&bed.db(), tenant, new.id).await.unwrap();
+    let (signer, _) = ca::load_signer(&bed.db(), &v, tenant).await.unwrap();
     assert_eq!(signer.id, new.id);
     // The old CA is still trusted — nodes have not renewed yet.
-    assert_eq!(ca::trust_bundle(&bed.pool, tenant).await.unwrap().len(), 2);
+    assert_eq!(ca::trust_bundle(&bed.db(), tenant).await.unwrap().len(), 2);
 
     // ── the guard ───────────────────────────────────────────────────────
-    assert_eq!(ca::live_leaves(&bed.pool, tenant, old.id).await.unwrap(), 1);
-    let err = ca::retire(&bed.pool, tenant, old.id).await.unwrap_err();
+    assert_eq!(ca::live_leaves(&bed.db(), tenant, old.id).await.unwrap(), 1);
+    let err = ca::retire(&bed.db(), tenant, old.id).await.unwrap_err();
     assert!(
         err.to_string().contains("still hold unexpired"),
         "must refuse to retire a CA with live leaves, got: {err}"
@@ -168,10 +168,10 @@ async fn rotation_distributes_then_switches_then_retires() {
         .execute(&bed.pool)
         .await
         .unwrap();
-    assert_eq!(ca::live_leaves(&bed.pool, tenant, old.id).await.unwrap(), 0);
+    assert_eq!(ca::live_leaves(&bed.db(), tenant, old.id).await.unwrap(), 0);
 
-    ca::retire(&bed.pool, tenant, old.id).await.unwrap();
-    let bundle = ca::trust_bundle(&bed.pool, tenant).await.unwrap();
+    ca::retire(&bed.db(), tenant, old.id).await.unwrap();
+    let bundle = ca::trust_bundle(&bed.db(), tenant).await.unwrap();
     assert_eq!(bundle.len(), 1);
     assert_eq!(bundle[0].id, new.id);
 
@@ -187,9 +187,9 @@ async fn the_active_signer_cannot_be_retired() {
     };
     let v = vault();
     let tenant = seed_tenant(&bed.pool).await;
-    let ca_row = ca::generate(&bed.pool, &v, tenant, true).await.unwrap();
+    let ca_row = ca::generate(&bed.db(), &v, tenant, true).await.unwrap();
 
-    let err = ca::retire(&bed.pool, tenant, ca_row.id).await.unwrap_err();
+    let err = ca::retire(&bed.db(), tenant, ca_row.id).await.unwrap_err();
     assert!(err.to_string().contains("no retirable CA"), "got: {err}");
 
     bed.teardown().await;

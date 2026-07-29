@@ -266,31 +266,31 @@ pub async fn migrate_paths(
     let mut node_workspaces_updated: u32 = 0;
     let mut tasks_updated: u32 = 0;
     for pair in pairs {
-        let nw = sqlx::query(&format!(
-            "UPDATE node_workspaces SET path = $3, last_scanned_at = {}
+        let nw = tx
+            .exec(
+                &format!(
+                    "UPDATE node_workspaces SET path = $3, last_scanned_at = {}
              WHERE node_id = $1 AND path = $2",
-            Postgres.now()
-        ))
-        .bind(node_id)
-        .bind(&pair.old)
-        .bind(&pair.new)
-        .execute(&mut *tx)
-        .await?;
-        node_workspaces_updated += nw.rows_affected() as u32;
+                    Postgres.now()
+                ),
+                params![node_id, &pair.old, &pair.new],
+            )
+            .await?;
+        node_workspaces_updated += nw as u32;
 
         // A task's worktree lives on a specific node; scope the rewrite to this
         // one so an identical relative path on another machine is never touched.
-        let t = sqlx::query(&format!(
-            "UPDATE tasks SET worktree_path = $3, updated_at = {}
+        let t = tx
+            .exec(
+                &format!(
+                    "UPDATE tasks SET worktree_path = $3, updated_at = {}
              WHERE worktree_node_id = $1 AND worktree_path = $2",
-            Postgres.now()
-        ))
-        .bind(node_id)
-        .bind(&pair.old)
-        .bind(&pair.new)
-        .execute(&mut *tx)
-        .await?;
-        tasks_updated += t.rows_affected() as u32;
+                    Postgres.now()
+                ),
+                params![node_id, &pair.old, &pair.new],
+            )
+            .await?;
+        tasks_updated += t as u32;
     }
     tx.commit().await?;
 

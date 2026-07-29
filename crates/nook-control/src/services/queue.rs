@@ -68,6 +68,7 @@ mod tests {
             .connect(&url)
             .await
             .ok()
+            .map(nook_db::EnginePool::from_pg)
     }
 
     #[tokio::test]

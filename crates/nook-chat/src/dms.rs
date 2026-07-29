@@ -162,23 +162,18 @@ pub async fn open(
     // owner_id = the creating person; name is empty (the UI names a DM by its
     // counterparts). The generated slug keeps the (owner_type, owner_id, slug)
     // uniqueness constraint satisfied without any human-facing slug.
-    sqlx::query(
+    tx.exec(
         "INSERT INTO chat_channels (id, owner_type, owner_id, name, slug)
          VALUES ($1, 'dm', $2, '', $3)",
+        params![id, me, &slug],
     )
-    .bind(id)
-    .bind(me)
-    .bind(&slug)
-    .execute(&mut *tx)
     .await
     .map_err(|_| ChatError::Internal)?;
     for &p in &persons {
-        sqlx::query(
+        tx.exec(
             "INSERT INTO chat_channel_participants (channel_id, person_id) VALUES ($1, $2)",
+            params![id, p],
         )
-        .bind(id)
-        .bind(p)
-        .execute(&mut *tx)
         .await
         .map_err(|_| ChatError::Internal)?;
     }
@@ -281,11 +276,13 @@ mod tests {
         let opts = PgConnectOptions::from_str(url)
             .unwrap()
             .options([("search_path", search_path)]);
-        PgPoolOptions::new()
-            .max_connections(4)
-            .connect_with(opts)
-            .await
-            .unwrap()
+        nook_db::EnginePool::from_pg(
+            PgPoolOptions::new()
+                .max_connections(4)
+                .connect_with(opts)
+                .await
+                .unwrap(),
+        )
     }
 
     // DB-backed; a no-op without NOOK_REQUIRE_DB=1, matching the suite convention.
@@ -297,9 +294,9 @@ mod tests {
         let url = std::env::var("DATABASE_URL").ok()?;
         let bootstrap = pool(&url, "public").await;
         crate::ensure_chat_schema(&bootstrap).await.unwrap();
-        nook_control::MIGRATOR.run(&bootstrap).await.unwrap();
+        nook_control::MIGRATOR.run(bootstrap.pg()).await.unwrap();
         let db = pool(&url, "chat,public").await;
-        crate::MIGRATOR.run(&db).await.unwrap();
+        crate::MIGRATOR.run(db.pg()).await.unwrap();
         Some(AppState {
             db,
             registry: Arc::new(crate::registry::Registry::new()),

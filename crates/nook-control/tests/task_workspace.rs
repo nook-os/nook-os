@@ -122,9 +122,7 @@ async fn workspace_can_be_set_changed_and_cleared() {
         return;
     };
     let (tenant, board, ws_a, ws_b) = fixture(&bed.pool).await;
-    let provider = LocalBoardProvider {
-        db: bed.pool.clone(),
-    };
+    let provider = LocalBoardProvider { db: bed.db() };
 
     // Filed with no workspace — the state every ticket on the board was in.
     let task = new_task(&provider, tenant, board, None).await;
@@ -185,9 +183,7 @@ async fn an_absent_workspace_leaves_the_existing_one_alone() {
         return;
     };
     let (tenant, board, ws_a, _) = fixture(&bed.pool).await;
-    let provider = LocalBoardProvider {
-        db: bed.pool.clone(),
-    };
+    let provider = LocalBoardProvider { db: bed.db() };
 
     let task = new_task(&provider, tenant, board, Some(ws_a)).await;
     assert_eq!(task.workspace_id, Some(ws_a));
@@ -243,9 +239,7 @@ async fn expected_updated_at_guards_the_body() {
         return;
     };
     let (tenant, board, _a, _b) = fixture(&bed.pool).await;
-    let provider = LocalBoardProvider {
-        db: bed.pool.clone(),
-    };
+    let provider = LocalBoardProvider { db: bed.db() };
     let task = new_task(&provider, tenant, board, None).await;
 
     // Matching version → applies.
@@ -346,9 +340,7 @@ async fn two_edits_from_one_base_version_the_second_conflicts() {
         return;
     };
     let (tenant, board, _a, _b) = fixture(&bed.pool).await;
-    let provider = LocalBoardProvider {
-        db: bed.pool.clone(),
-    };
+    let provider = LocalBoardProvider { db: bed.db() };
     let task = new_task(&provider, tenant, board, None).await;
     let base = task.updated_at;
 

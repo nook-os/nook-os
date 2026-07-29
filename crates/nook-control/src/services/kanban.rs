@@ -255,41 +255,43 @@ impl KanbanProvider for LocalBoardProvider {
         // wrong to cause. `FOR UPDATE` makes the second create wait rather than
         // fail, so `NOOK-7` is allocated exactly once.
         let mut tx = self.db.begin().await.map_err(ApiError::from)?;
-        let (number,): (i32,) = sqlx::query_as(
-            "UPDATE boards SET next_number = next_number + 1
+        let number: i32 = tx
+            .query_scalar(
+                "UPDATE boards SET next_number = next_number + 1
              WHERE id = (SELECT id FROM boards WHERE id = $1 FOR UPDATE)
              RETURNING next_number - 1",
-        )
-        .bind(board)
-        .fetch_one(&mut *tx)
-        .await
-        .map_err(ApiError::from)?;
+                params![board],
+            )
+            .await
+            .map_err(ApiError::from)?;
 
-        let task: TaskItem = sqlx::query_as(
-            "INSERT INTO tasks (id, tenant_id, board_id, column_id, title, description,
+        let task: TaskItem = tx
+            .query_one(
+                "INSERT INTO tasks (id, tenant_id, board_id, column_id, title, description,
                                 position, workspace_id, priority, type, number,
                                 visibility, created_by, parent_task_id)
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14) RETURNING *",
-        )
-        .bind(TaskId::new())
-        .bind(tenant)
-        .bind(board)
-        .bind(column_id)
-        .bind(&req.title)
-        .bind(&req.description)
-        .bind(max_pos.unwrap_or(-1) + 1)
-        .bind(req.workspace_id)
-        .bind(req.priority.unwrap_or(0).clamp(0, 4))
-        // Omitted → the column DEFAULT ('task'); validated above (AC-2).
-        .bind(req.type_.as_deref().unwrap_or("task"))
-        .bind(number)
-        // Omitted → the column DEFAULT ('team'), reproducing today's behaviour.
-        .bind(req.visibility.as_deref().unwrap_or("team"))
-        .bind(created_by)
-        .bind(parent_task_id)
-        .fetch_one(&mut *tx)
-        .await
-        .map_err(ApiError::from)?;
+                params![
+                    TaskId::new(),
+                    tenant,
+                    board,
+                    column_id,
+                    &req.title,
+                    req.description,
+                    max_pos.unwrap_or(-1) + 1,
+                    req.workspace_id.map(|w| w.0),
+                    req.priority.unwrap_or(0).clamp(0, 4),
+                    // Omitted → the column DEFAULT ('task'); validated above (AC-2).
+                    req.type_.as_deref().unwrap_or("task"),
+                    number,
+                    // Omitted → the column DEFAULT ('team'), reproducing today's behaviour.
+                    req.visibility.as_deref().unwrap_or("team"),
+                    created_by.map(|u| u.0),
+                    parent_task_id.map(|t| t.0)
+                ],
+            )
+            .await
+            .map_err(ApiError::from)?;
 
         // Labels by NAME, created if new: a filer knows `agent-ready`, not its
         // uuid. Inside the transaction so a task never exists momentarily
@@ -299,24 +301,20 @@ impl KanbanProvider for LocalBoardProvider {
             if name.is_empty() {
                 continue;
             }
-            let (label_id,): (uuid::Uuid,) = sqlx::query_as(
-                "INSERT INTO labels (id, tenant_id, name) VALUES ($1, $2, $3)
+            let label_id: uuid::Uuid = tx
+                .query_scalar(
+                    "INSERT INTO labels (id, tenant_id, name) VALUES ($1, $2, $3)
                  ON CONFLICT (tenant_id, name) DO UPDATE SET name = EXCLUDED.name
                  RETURNING id",
-            )
-            .bind(uuid::Uuid::now_v7())
-            .bind(tenant)
-            .bind(&name)
-            .fetch_one(&mut *tx)
-            .await
-            .map_err(ApiError::from)?;
-            sqlx::query(
+                    params![uuid::Uuid::now_v7(), tenant, &name],
+                )
+                .await
+                .map_err(ApiError::from)?;
+            tx.exec(
                 "INSERT INTO task_labels (task_id, label_id) VALUES ($1, $2)
                  ON CONFLICT DO NOTHING",
+                params![task.id, label_id],
             )
-            .bind(task.id)
-            .bind(label_id)
-            .execute(&mut *tx)
             .await
             .map_err(ApiError::from)?;
         }

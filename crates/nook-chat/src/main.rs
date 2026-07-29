@@ -74,13 +74,18 @@ async fn main() -> anyhow::Result<()> {
     // shares a name with a public one, so `chat` winning first is safe.
     let opts =
         PgConnectOptions::from_str(&cfg.database_url)?.options([("search_path", "chat,public")]);
-    let db = PgPoolOptions::new()
-        .max_connections(10)
-        .connect_with(opts)
-        .await?;
+    // Chat sets a custom `search_path`, so it builds its raw pool here rather than
+    // through `nook_db::connect`, then wraps it in the workspace `EnginePool`
+    // (MAIN-205). Schema creation + migrations run on the Postgres arm.
+    let db = nook_db::EnginePool::from_pg(
+        PgPoolOptions::new()
+            .max_connections(10)
+            .connect_with(opts)
+            .await?,
+    );
     // The schema must exist before the migrator creates chat._sqlx_migrations.
     ensure_chat_schema(&db).await?;
-    MIGRATOR.run(&db).await?;
+    MIGRATOR.run(db.pg()).await?;
 
     // Live fan-out: a local per-channel broadcast registry, plus a cross-instance
     // bus (nook-db's event-bus seam — Postgres LISTEN/NOTIFY under the hood) so a

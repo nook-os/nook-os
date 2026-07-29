@@ -865,7 +865,7 @@ mod db_tests {
             .await
             .ok()?;
         crate::MIGRATOR.run(&db).await.ok()?;
-        Some(db)
+        Some(nook_db::EnginePool::from_pg(db))
     }
 
     async fn tenant(db: &DbPool, slug: &str) -> TenantId {
