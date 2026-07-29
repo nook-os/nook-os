@@ -1,0 +1,214 @@
+//! The SQLite track's frozen `0001_init` actually builds a database (MAIN-236
+//! AC-4).
+//!
+//! The scaffold was generated from the schema the Postgres migrations produce
+//! and then hand-owned; the generator is gone. What keeps it honest from here is
+//! this: an empty SQLite database migrated through the committed file must come
+//! out with the expected tables and the mapped column types.
+//!
+//! Deliberately NOT a boot test — no MIGRATOR, no engine selection, no pool
+//! plumbing (NG-1, MAIN-196 owns that). It executes the file and inspects the
+//! result, which is the whole claim the file makes today.
+//!
+//! No Postgres required: SQLite runs in memory.
+
+use sqlx::sqlite::SqlitePoolOptions;
+use sqlx::{Row, SqlitePool};
+
+const CONTROL: &str = include_str!("../migrations_sqlite/0001_init.sql");
+const CHAT: &str = include_str!("../../nook-chat/migrations_sqlite/0001_chat_init.sql");
+
+/// Strip `--` comments, so a semicolon inside prose cannot look like the end of
+/// a statement. (It can: a hand-correction note in the file says "…is faithful;
+/// a trigger faking one would only hide a missing write", and splitting on that
+/// truncated a CREATE TABLE into `incomplete input`.)
+fn strip_comments(sql: &str) -> String {
+    sql.lines()
+        .map(|l| match l.find("--") {
+            Some(i) => &l[..i],
+            None => l,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Apply a scaffold to a fresh in-memory database, statement by statement.
+///
+/// sqlx's `execute` takes one statement at a time. Splitting on `;` is wrong in
+/// general, but exact for this file once comments are gone: it is generated DDL
+/// with no procedural bodies and no semicolons inside string literals. A
+/// statement SQLite rejects fails the test, which is the point — this proves it
+/// accepts every line.
+async fn apply(sql: &str) -> SqlitePool {
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .expect("open in-memory sqlite");
+
+    for stmt in strip_comments(sql).split(';') {
+        let stmt = stmt.trim();
+        // Skip blanks and comment-only chunks.
+        if stmt.is_empty() {
+            continue;
+        }
+        sqlx::query(stmt)
+            .execute(&pool)
+            .await
+            .unwrap_or_else(|e| panic!("sqlite rejected:\n{stmt}\n\nerror: {e}"));
+    }
+    pool
+}
+
+async fn tables(pool: &SqlitePool) -> Vec<String> {
+    sqlx::query("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
+        .fetch_all(pool)
+        .await
+        .expect("list tables")
+        .iter()
+        .map(|r| r.get::<String, _>("name"))
+        .collect()
+}
+
+/// `(name, declared type, not-null)` for one table, via SQLite's own pragma.
+async fn columns(pool: &SqlitePool, table: &str) -> Vec<(String, String, bool)> {
+    sqlx::query(&format!("PRAGMA table_info({table})"))
+        .fetch_all(pool)
+        .await
+        .expect("table_info")
+        .iter()
+        .map(|r| {
+            (
+                r.get::<String, _>("name"),
+                r.get::<String, _>("type"),
+                r.get::<i64, _>("notnull") == 1,
+            )
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn the_control_scaffold_builds_a_sqlite_database() {
+    let pool = apply(CONTROL).await;
+    let t = tables(&pool).await;
+
+    // Representative tables across the whole surface, not just the first few:
+    // identity, the board, the fleet, and the newest additions.
+    for expected in [
+        "tenants",
+        "users",
+        "boards",
+        "board_columns",
+        "tasks",
+        "workspaces",
+        "nodes",
+        "node_workspaces",
+        "sessions",
+        "events",
+        "loop_jobs",
+        "loop_job_transcript",
+        "interactions",
+        "notes",
+        "roles",
+        "permissions",
+    ] {
+        assert!(
+            t.contains(&expected.to_string()),
+            "missing table {expected}; got {t:?}"
+        );
+    }
+    // The Postgres schema has 50 base tables today. A floor rather than an
+    // equality: a new migration adding one should not fail this test, but the
+    // scaffold silently losing half the schema should.
+    assert!(
+        t.len() >= 50,
+        "expected the whole schema (>=50 tables), got {}: {t:?}",
+        t.len()
+    );
+}
+
+/// The type map is the thing most likely to rot, so assert it on real columns
+/// rather than trusting the generator that is no longer here to re-run.
+#[tokio::test]
+async fn column_types_follow_the_documented_map() {
+    let pool = apply(CONTROL).await;
+    let cols = columns(&pool, "tasks").await;
+    let ty = |name: &str| {
+        cols.iter()
+            .find(|(n, _, _)| n == name)
+            .unwrap_or_else(|| panic!("tasks has no column {name}; got {cols:?}"))
+            .clone()
+    };
+
+    // uuid -> TEXT
+    assert_eq!(ty("id").1, "TEXT");
+    assert_eq!(ty("tenant_id").1, "TEXT");
+    // timestamptz -> TEXT
+    assert_eq!(ty("created_at").1, "TEXT");
+    // bigint/integer -> INTEGER
+    assert_eq!(ty("number").1, "INTEGER");
+    // NOT NULL survives the mapping — it is a real constraint, not decoration.
+    assert!(ty("id").2, "tasks.id stays NOT NULL");
+
+    // jsonb -> TEXT, checked where one actually lives.
+    let boards = columns(&pool, "boards").await;
+    let automation = boards
+        .iter()
+        .find(|(n, _, _)| n == "automation")
+        .expect("boards.automation");
+    assert_eq!(automation.1, "TEXT");
+}
+
+/// `now()` became `CURRENT_TIMESTAMP`, and `::type` casts are gone — the two
+/// mechanical rewrites the audit's type map calls for. Checked against the file
+/// text as well as the built database, because a cast that survived would be a
+/// syntax error SQLite reports only when that statement runs.
+#[tokio::test]
+async fn mechanical_rewrites_left_no_postgres_isms() {
+    for (name, sql) in [("control", CONTROL), ("chat", CHAT)] {
+        // Only the SQL matters — the header comment names the constructs it
+        // rewrote, and matching on that would be checking the documentation.
+        let code = strip_comments(sql);
+        for pgism in [
+            "now()",
+            "::",
+            "USING btree",
+            "jsonb",
+            "timestamptz",
+            "ANY (ARRAY",
+            "gen_random_uuid",
+        ] {
+            assert!(
+                !code.contains(pgism),
+                "{name}: {pgism:?} survived into the SQLite scaffold"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn the_chat_scaffold_builds_its_own_schema() {
+    let pool = apply(CHAT).await;
+    let t = tables(&pool).await;
+    // Chat's tables carry the `chat_` prefix even inside their own schema.
+    for expected in ["chat_channels", "chat_messages", "chat_channel_members"] {
+        assert!(
+            t.contains(&expected.to_string()),
+            "missing {expected}; got {t:?}"
+        );
+    }
+}
+
+/// The seeded role model has to come across too: a SQLite boot with an empty
+/// `roles`/`permissions` table would have no authorization model at all.
+#[tokio::test]
+async fn the_scaffold_carries_the_seed_rows() {
+    let pool = apply(CONTROL).await;
+    for (table, least) in [("roles", 1), ("permissions", 1), ("role_permissions", 1)] {
+        let n: i64 = sqlx::query_scalar(&format!("SELECT count(*) FROM {table}"))
+            .fetch_one(&pool)
+            .await
+            .expect("count");
+        assert!(n >= least, "{table} came across empty");
+    }
+}
