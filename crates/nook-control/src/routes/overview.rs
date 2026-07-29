@@ -36,8 +36,19 @@ pub async fn overview(
         )
     };
     let session_creator = if sees_all { None } else { Some(auth.user_id) };
+    // Card visibility is a per-task owner predicate, not a role (MAIN-76), so it
+    // is scoped by the same `sees_all` union: an admin/node sees every ticket on
+    // a visible checkout, a member only the ones they could open on the board.
+    let task_viewer = if sees_all { None } else { Some(auth.user_id) };
 
     Ok(Json(
-        core::overview(&state.db, auth.tenant_id, node_owner, session_creator).await?,
+        core::overview(
+            &state.db,
+            auth.tenant_id,
+            node_owner,
+            session_creator,
+            task_viewer,
+        )
+        .await?,
     ))
 }

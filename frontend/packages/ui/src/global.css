@@ -5141,3 +5141,31 @@ a.toast-main:hover .toast-title { text-decoration: underline; }
 .lw-composer-row textarea { flex: 1 1 auto; resize: vertical; }
 .lw-seed-label { text-transform: uppercase; font-size: 10px; letter-spacing: 0.06em; color: var(--nook-fg-dim); }
 .lw-closed { flex-direction: row; align-items: center; justify-content: space-between; }
+
+/* The ticket a checkout is working (MAIN-230). Reads as a label on the row, not
+   a button: it is context first, a link second. Tone follows the column TYPE so
+   a renamed column cannot restyle it. */
+.m-task-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 0 4px;
+  border: 1px solid var(--nook-border);
+  border-radius: 2px;
+  font-size: 11px;
+  line-height: 16px;
+  letter-spacing: 0.02em;
+  text-decoration: none;
+  color: var(--nook-fg-dim);
+  white-space: nowrap;
+  flex: 0 0 auto;
+}
+.m-task-chip:hover { color: var(--nook-primary); border-color: var(--nook-primary); }
+.m-task-chip.started {
+  color: var(--nook-primary);
+  border-color: color-mix(in srgb, var(--nook-primary) 55%, transparent);
+}
+.m-task-chip.review { color: var(--nook-warn); border-color: color-mix(in srgb, var(--nook-warn) 55%, transparent); }
+.m-task-chip.completed, .m-task-chip.canceled { opacity: 0.6; }
+/* On a deck agent chip the key leads, so "what is waiting" is readable before
+   the session name. */
+.m-agent-key { font-weight: 600; letter-spacing: 0.02em; }

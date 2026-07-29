@@ -11139,6 +11139,35 @@
             "items": {
               "$ref": "#/components/schemas/Session"
             }
+          },
+          "tasks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/OverviewTask"
+            },
+            "description": "The ticket(s) this checkout is working (MAIN-230) — what turns \"some\nworktree on builder-1\" into \"MAIN-42 on builder-1\". Empty for a checkout\nno task points at. Visibility-filtered exactly like any other read of a\ncard, so a private ticket never surfaces here."
+          }
+        }
+      },
+      "OverviewTask": {
+        "type": "object",
+        "description": "A ticket as Mission Control needs it: enough to label a row, link to the\nboard card, and tell done from in-flight. Deliberately not the whole\n`TaskItem` — this rides on every checkout in the fleet.",
+        "required": [
+          "key",
+          "title",
+          "column_type"
+        ],
+        "properties": {
+          "column_type": {
+            "type": "string",
+            "description": "The task's column TYPE (`started`, `review`, `completed`, …), not its\nname: a board that renames \"In Progress\" must not restyle the chip."
+          },
+          "key": {
+            "type": "string",
+            "description": "The board key (`MAIN-42`) — the label, and the `/board?task=` target."
+          },
+          "title": {
+            "type": "string"
           }
         }
       },

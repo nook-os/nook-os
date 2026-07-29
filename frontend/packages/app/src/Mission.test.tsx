@@ -42,6 +42,9 @@ const OVERVIEW = {
               created_by: "u1",
             },
           ],
+          tasks: [
+            { key: "MAIN-42", title: "Seed and steer", column_type: "started" },
+          ],
         },
         {
           id: "wt1",
@@ -252,5 +255,51 @@ describe("Mission Control (MAIN-226)", () => {
     renderPage();
     await waitFor(() => expect(screen.getByTestId("agent-sess1")).toBeTruthy());
     expect(screen.getByTestId("chip-sess1")).toBeTruthy();
+  });
+});
+
+// MAIN-230: Mission Control names the ticket. The page could always say which
+// machine and which session; the missing third corner was which piece of WORK.
+describe("ticket context (MAIN-230)", () => {
+  it("labels the checkout with its ticket, linking to the board card", async () => {
+    renderPage();
+    const chip = await screen.findByTestId("task-MAIN-42");
+    expect(chip.getAttribute("href")).toBe("/board?task=MAIN-42");
+    // The title carries the human-readable half; the chip stays key-sized.
+    expect(chip.getAttribute("title")).toBe("MAIN-42 — Seed and steer");
+    expect(chip.textContent).toBe("MAIN-42");
+    // The tone follows the column TYPE, not its name.
+    expect(chip.className).toContain("started");
+  });
+
+  it("a checkout with no ticket gets no chip", async () => {
+    renderPage();
+    await waitFor(() => expect(screen.getByTestId("checkout-wt1")).toBeTruthy());
+    // Exactly one chip on the page — the clone's.
+    expect(screen.getAllByTestId(/^task-/)).toHaveLength(1);
+  });
+
+  it("the deck's agent chip says WHAT is waiting, not just that something is", async () => {
+    liveState.agentState = { sess1: { state: "waiting", window: null, at: 0 } };
+    renderPage();
+    const chip = await screen.findByTestId("chip-sess1");
+    expect(chip.textContent).toContain("MAIN-42");
+    expect(chip.textContent).toContain("claude-run");
+    expect(chip.getAttribute("title")).toContain("MAIN-42");
+  });
+
+  it("the filter matches a ticket key and its title", async () => {
+    renderPage();
+    await waitFor(() => expect(screen.getByTestId("checkout-clone1")).toBeTruthy());
+    const filter = screen.getByPlaceholderText(/filter/i);
+
+    fireEvent.change(filter, { target: { value: "MAIN-42" } });
+    expect(screen.getByTestId("checkout-clone1")).toBeTruthy();
+
+    fireEvent.change(filter, { target: { value: "Seed and steer" } });
+    expect(screen.getByTestId("checkout-clone1")).toBeTruthy();
+
+    fireEvent.change(filter, { target: { value: "MAIN-999" } });
+    expect(screen.queryByTestId("checkout-clone1")).toBeNull();
   });
 });

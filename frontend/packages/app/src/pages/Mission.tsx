@@ -19,7 +19,12 @@ import {
   Table2,
 } from "lucide-react";
 import { api } from "@nookos/api";
-import type { OverviewCheckout, OverviewWorkspace, Session } from "@nookos/api";
+import type {
+  OverviewCheckout,
+  OverviewTask,
+  OverviewWorkspace,
+  Session,
+} from "@nookos/api";
 import { Empty, Panel, Pill, StatusDot, statusTone } from "@nookos/ui";
 import { useNewWork } from "../newwork";
 import { notify } from "../dialogs";
@@ -214,16 +219,21 @@ export function MissionPage() {
   // it sits in the tree. Waiting first — those are waiting on YOU.
   const chips = useMemo(() => {
     if (!live) return [];
-    const out: { id: string; name: string; state: string }[] = [];
-    const consider = (s: Session) => {
+    const out: { id: string; name: string; state: string; key?: string }[] = [];
+    // The ticket the session's own checkout is working. "Something is waiting on
+    // you" is half an answer; WHAT is waiting is the other half (AC-3).
+    const consider = (s: Session, key?: string) => {
       const mark = liveAgentMark(s.status, agentState[s.id]);
-      if (mark) out.push({ id: s.id, name: s.name, state: mark.state });
+      if (mark) out.push({ id: s.id, name: s.name, state: mark.state, key });
     };
     for (const w of live.workspaces) {
-      for (const c of w.checkouts) c.sessions.forEach(consider);
-      w.unbound_sessions.forEach(consider);
+      for (const c of w.checkouts) {
+        const key = c.tasks?.[0]?.key;
+        c.sessions.forEach((s) => consider(s, key));
+      }
+      w.unbound_sessions.forEach((s) => consider(s));
     }
-    live.loose_sessions.forEach(consider);
+    live.loose_sessions.forEach((s) => consider(s));
     return out.sort((a, b) =>
       a.state === b.state ? 0 : a.state === "waiting" ? -1 : 1,
     );
@@ -384,9 +394,10 @@ export function MissionPage() {
                   className={`m-agent ${c.state}`}
                   data-testid={`chip-${c.id}`}
                   title={
-                    c.state === "waiting"
+                    (c.key ? `${c.key} — ` : "") +
+                    (c.state === "waiting"
                       ? "agent is waiting on you — open the session"
-                      : "agent is working — open the session"
+                      : "agent is working — open the session")
                   }
                   onClick={() => navigate(`/sessions/${c.id}`)}
                 >
@@ -395,6 +406,7 @@ export function MissionPage() {
                   ) : (
                     <CircleDot size={11} />
                   )}
+                  {c.key && <span className="m-agent-key">{c.key}</span>}
                   {c.name}
                 </button>
               ))}
@@ -526,6 +538,25 @@ export function MissionPage() {
 /** One checkout line, shared by the tree / grid / machines views: kind glyph,
  *  bright branch, optional faint path, exception pill, the ⋯ menu — and the
  *  same menu on right-click. */
+/** The ticket a checkout is working (MAIN-230). The one thing Mission Control
+ *  could not say before: which piece of WORK this worktree is. Clicking opens
+ *  the board card — the other half of the task ↔ machine ↔ session triangle,
+ *  whose session half is the row's session name. `column_type` (not the column
+ *  NAME) drives the tone, so renaming "In Progress" cannot restyle it. */
+function TaskChip({ task }: { task: OverviewTask }) {
+  return (
+    <Link
+      className={`m-task-chip ${task.column_type}`}
+      to={`/board?task=${task.key}`}
+      title={`${task.key} — ${task.title}`}
+      data-testid={`task-${task.key}`}
+      onClick={(e) => e.stopPropagation()}
+    >
+      {task.key}
+    </Link>
+  );
+}
+
 function CheckoutRow({
   c,
   ws,
@@ -557,6 +588,9 @@ function CheckoutRow({
         </span>
         {prefix}
         <span className="m-co-branch">{c.branch ?? "—"}</span>
+        {(c.tasks ?? []).map((t) => (
+          <TaskChip key={t.key} task={t} />
+        ))}
         {suffix}
         {showPath && (
           <span className="m-co-path" title={c.path}>
@@ -938,7 +972,12 @@ function MatrixView({
                         <button
                           key={c.id}
                           className={`m-chip${isMissing(c) ? " ghost" : c.dirty ? " warn" : ""}`}
-                          title={c.path}
+                          // The matrix trades detail for density, so the ticket
+                          // rides in the tooltip rather than the cell (AC-2).
+                          title={[
+                            ...(c.tasks ?? []).map((t) => `${t.key} — ${t.title}`),
+                            c.path,
+                          ].join("\n")}
                           onClick={(e) => {
                             const r = e.currentTarget.getBoundingClientRect();
                             menu.openAt(
