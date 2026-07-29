@@ -60,7 +60,7 @@ export function MissionPage() {
   return (
     <div className="nook-grid" style={{ gridTemplateColumns: "1fr", gridTemplateRows: "auto 1fr" }}>
       <Panel
-        title="Mission"
+        title="Mission Control"
         actions={
           <input
             className="input small mono"

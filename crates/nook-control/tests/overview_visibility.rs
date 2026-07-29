@@ -188,3 +188,48 @@ async fn overview_groups_the_hierarchy_and_omits_empty_workspaces() {
 
     bed.teardown().await;
 }
+
+// ── MAIN-226 review fix: the dev seed populates Mission Control ──────────────
+
+#[tokio::test]
+async fn dev_seed_populates_mission_control() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    // TestBed's template runs `seed::run` (Config::for_test, tenant slug "test"),
+    // which now seeds the Mission Control demo: a repo with a remote, a clone + a
+    // worktree, a tombstoned checkout, a bound session, and a loose terminal.
+    let tenant: TenantId = sqlx::query_scalar("SELECT id FROM tenants WHERE slug = 'test'")
+        .fetch_one(&bed.pool)
+        .await
+        .expect("the seeded dev tenant");
+
+    let ov = overview(&bed.db(), tenant, None, None).await.unwrap();
+    let demo = ov
+        .workspaces
+        .iter()
+        .find(|w| w.slug == "mission-demo")
+        .expect("the demo workspace is seeded");
+
+    assert!(
+        demo.git_remote_url.is_some(),
+        "the demo repo shows its remote"
+    );
+    assert_eq!(demo.checkouts.len(), 3, "clone + worktree + tombstoned");
+    assert!(demo.checkouts.iter().any(|c| c.kind == "clone"));
+    assert!(demo.checkouts.iter().any(|c| c.kind == "worktree"));
+    assert!(
+        demo.checkouts.iter().any(|c| c.missing_at.is_some()),
+        "a tombstoned checkout for the ghosting"
+    );
+    assert!(
+        demo.checkouts.iter().any(|c| !c.sessions.is_empty()),
+        "a session bound to a checkout"
+    );
+    assert!(
+        !ov.loose_sessions.is_empty(),
+        "a loose $HOME terminal with no workspace"
+    );
+
+    bed.teardown().await;
+}

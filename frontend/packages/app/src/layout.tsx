@@ -42,7 +42,7 @@ import { FeedbackModalHost, useFeedbackModal } from "./FeedbackModal";
 // for CONTEXT (the selected workspace's views).
 const SECTIONS = [
   { to: "/", label: "Dashboard", icon: LayoutDashboard, end: true },
-  { to: "/mission", label: "Mission", icon: Radar },
+  { to: "/mission", label: "Mission Control", icon: Radar },
   { to: "/workspaces", label: "Workspaces", icon: FolderGit2 },
   { to: "/sessions", label: "Sessions", icon: SquareTerminal },
   { to: "/board", label: "Board", icon: KanbanSquare },
