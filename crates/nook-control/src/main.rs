@@ -3,7 +3,7 @@ use clap::{Parser, Subcommand};
 use nook_db::{params, Db, Postgres, TypeMapping};
 use tracing_subscriber::EnvFilter;
 
-use nook_control::{routes, AppState, Config, MIGRATOR};
+use nook_control::{routes, AppState, Config, MIGRATOR, SQUASH_MANIFEST};
 
 #[derive(Parser)]
 #[command(name = "nook-control", about = "NookOS control plane")]
@@ -40,7 +40,11 @@ async fn main() -> Result<()> {
     // MAIN-196. Run them against the pool's Postgres arm. Dev tolerates a ledger
     // ahead of this checkout (warns + proceeds); production stays strictly fatal
     // (MAIN-224).
-    nook_db::migrate::run_with_dev_tolerance(&MIGRATOR, db.pg(), cfg.is_production()).await?;
+    // A pre-squash ledger collapses to the canonical row first (MAIN-235), so
+    // the image that carries a squash carries its own re-stamp — never the
+    // two-step ordering that caused the documented prod near-miss.
+    nook_db::migrate::run_boot_migrations(&MIGRATOR, db.pg(), cfg.is_production(), SQUASH_MANIFEST)
+        .await?;
 
     match cli.command.unwrap_or(Command::Serve) {
         Command::Serve => {
