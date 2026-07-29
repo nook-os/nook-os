@@ -2280,6 +2280,11 @@ pub struct LoopJob {
     /// specific gate that failed while it waits `queued`. `None` once claimed.
     #[serde(default)]
     pub queued_reason: Option<String>,
+    /// The general idea the run starts from (MAIN-231) — the human's opening
+    /// brief, set at create time and carried into the executor's session.
+    /// `None` when the job was opened with nothing but its ticket.
+    #[serde(default)]
+    pub seed: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -2314,6 +2319,20 @@ pub struct CreateLoopJobRequest {
     /// server-side like every other task-addressed route (MAIN-209), so the Loop
     /// panel (which opens by key) and CLI/MCP callers can both target by key.
     pub target_task_id: String,
+    /// The general idea to start from (MAIN-231) — free text, optional. Stored
+    /// on the job, delivered into the run's session as its opening brief, and
+    /// echoed as the first `human` transcript line. Omit it and the run starts
+    /// from the ticket alone, exactly as before.
+    #[serde(default)]
+    pub seed: Option<String>,
+}
+
+/// Send an unsolicited steering message to a live job (MAIN-231) — the input
+/// half of the loop. Additive to, and independent of, the interaction ask/answer
+/// model: a human may say something the agent never asked for.
+#[derive(Debug, Clone, Deserialize, ToSchema)]
+pub struct CreateJobMessageRequest {
+    pub body: String,
 }
 
 // ── Interactions (MAIN-159) ──────────────────────────────────────────────────

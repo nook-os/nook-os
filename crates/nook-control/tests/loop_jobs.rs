@@ -95,6 +95,7 @@ async fn create_enqueues_a_work_item_and_records_an_event() {
         CreateLoopJobRequest {
             kind: "spec".into(),
             target_task_id: target.to_string(),
+            seed: None,
         },
     )
     .await
@@ -151,6 +152,7 @@ async fn decompose_requires_an_epic_target() {
         CreateLoopJobRequest {
             kind: "decompose".into(),
             target_task_id: plain.to_string(),
+            seed: None,
         },
     )
     .await
@@ -164,6 +166,7 @@ async fn decompose_requires_an_epic_target() {
         CreateLoopJobRequest {
             kind: "decompose".into(),
             target_task_id: epic.to_string(),
+            seed: None,
         },
     )
     .await
@@ -177,6 +180,7 @@ async fn decompose_requires_an_epic_target() {
         CreateLoopJobRequest {
             kind: "translate".into(),
             target_task_id: epic.to_string(),
+            seed: None,
         },
     )
     .await
@@ -197,6 +201,7 @@ async fn lifecycle_allows_legal_transitions_and_refuses_illegal_ones() {
     let spec = CreateLoopJobRequest {
         kind: "spec".into(),
         target_task_id: target.to_string(),
+        seed: None,
     };
 
     // The happy path: queued → claimed → running → completed.
@@ -244,6 +249,7 @@ async fn cancel_works_from_live_states_and_is_refused_once_terminal() {
         CreateLoopJobRequest {
             kind: "spec".into(),
             target_task_id: target.to_string(),
+            seed: None,
         },
     )
     .await
@@ -279,6 +285,7 @@ async fn cancel_works_from_live_states_and_is_refused_once_terminal() {
         CreateLoopJobRequest {
             kind: "spec".into(),
             target_task_id: target.to_string(),
+            seed: None,
         },
     )
     .await
@@ -316,6 +323,7 @@ async fn transcript_appends_and_reads_back_in_order() {
         CreateLoopJobRequest {
             kind: "spec".into(),
             target_task_id: target.to_string(),
+            seed: None,
         },
     )
     .await
@@ -360,6 +368,7 @@ async fn rerun_forks_a_fresh_queued_job_linked_to_its_predecessor() {
         CreateLoopJobRequest {
             kind: "decompose".into(),
             target_task_id: epic.to_string(),
+            seed: None,
         },
     )
     .await
@@ -430,6 +439,7 @@ async fn private_target_job_is_hidden_from_a_non_owner() {
         CreateLoopJobRequest {
             kind: "spec".into(),
             target_task_id: secret.to_string(),
+            seed: None,
         },
     )
     .await
@@ -461,6 +471,7 @@ async fn private_target_job_is_hidden_from_a_non_owner() {
         CreateLoopJobRequest {
             kind: "spec".into(),
             target_task_id: secret.to_string(),
+            seed: None,
         },
     )
     .await
@@ -487,6 +498,7 @@ async fn list_for_task_returns_the_tickets_jobs_newest_first_and_is_visibility_g
         CreateLoopJobRequest {
             kind: "spec".into(),
             target_task_id: target.to_string(),
+            seed: None,
         },
     )
     .await
@@ -500,6 +512,7 @@ async fn list_for_task_returns_the_tickets_jobs_newest_first_and_is_visibility_g
         CreateLoopJobRequest {
             kind: "spec".into(),
             target_task_id: target.to_string(),
+            seed: None,
         },
     )
     .await
@@ -533,6 +546,7 @@ async fn list_for_task_returns_the_tickets_jobs_newest_first_and_is_visibility_g
         CreateLoopJobRequest {
             kind: "spec".into(),
             target_task_id: secret.to_string(),
+            seed: None,
         },
     )
     .await
@@ -591,6 +605,7 @@ async fn jobs_accept_a_board_key_and_reject_unknown() {
         CreateLoopJobRequest {
             kind: "spec".into(),
             target_task_id: key.clone(),
+            seed: None,
         },
     )
     .await
@@ -605,6 +620,7 @@ async fn jobs_accept_a_board_key_and_reject_unknown() {
         CreateLoopJobRequest {
             kind: "spec".into(),
             target_task_id: task_id.to_string(),
+            seed: None,
         },
     )
     .await
@@ -619,6 +635,7 @@ async fn jobs_accept_a_board_key_and_reject_unknown() {
         CreateLoopJobRequest {
             kind: "spec".into(),
             target_task_id: format!("{board_key}-9999"),
+            seed: None,
         },
     )
     .await;

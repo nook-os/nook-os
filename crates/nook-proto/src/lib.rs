@@ -392,6 +392,19 @@ pub enum ControlToNode {
         repo_url: String,
         /// The branch the per-job worktree is based on.
         branch: String,
+        /// The human's opening brief for this run (MAIN-231), if one was given
+        /// at create time. Delivered into the session's environment as
+        /// `NOOK_JOB_SEED` and typed alongside the skill command.
+        #[serde(default)]
+        seed: Option<String>,
+    },
+    /// An unsolicited steering message from a human to a running loop job
+    /// (MAIN-231). Pushed to the executor, which types it into the job's live
+    /// session. Unlike `InteractionAnswer` this answers no ask — it is the
+    /// human volunteering direction mid-run.
+    JobMessage {
+        job_id: String,
+        body: String,
     },
     Ping,
 }

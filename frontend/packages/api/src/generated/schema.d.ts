@@ -720,6 +720,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/jobs/{id}/messages": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["job_message"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/jobs/{id}/rerun": {
         parameters: {
             query?: never;
@@ -3663,6 +3679,14 @@ export interface components {
             /** @description `member` | `admin`. `owner` is never invitable (NG-3). */
             role?: string | null;
         };
+        /**
+         * @description Send an unsolicited steering message to a live job (MAIN-231) — the input
+         *     half of the loop. Additive to, and independent of, the interaction ask/answer
+         *     model: a human may say something the agent never asked for.
+         */
+        CreateJobMessageRequest: {
+            body: string;
+        };
         CreateJoinTokenResponse: {
             /**
              * @description Where the joining machine should point its **agent** connection.
@@ -3697,6 +3721,13 @@ export interface components {
          */
         CreateLoopJobRequest: {
             kind: string;
+            /**
+             * @description The general idea to start from (MAIN-231) — free text, optional. Stored
+             *     on the job, delivered into the run's session as its opening brief, and
+             *     echoed as the first `human` transcript line. Omit it and the run starts
+             *     from the ticket alone, exactly as before.
+             */
+            seed?: string | null;
             /**
              * @description The target ticket, as a UUID **or** a board key (`MAIN-42`) — resolved
              *     server-side like every other task-addressed route (MAIN-209), so the Loop
@@ -4242,6 +4273,12 @@ export interface components {
              */
             queued_reason?: string | null;
             requested_by: components["schemas"]["UserId"];
+            /**
+             * @description The general idea the run starts from (MAIN-231) — the human's opening
+             *     brief, set at create time and carried into the executor's session.
+             *     `None` when the job was opened with nothing but its ticket.
+             */
+            seed?: string | null;
             /** @description One of `queued|claimed|running|waiting_on_human|completed|failed|canceled`. */
             state: string;
             /** @description The ticket a spec job targets, or the epic a decompose job breaks down. */
@@ -7024,6 +7061,31 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["LoopJob"];
+                };
+            };
+        };
+    };
+    job_message: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateJobMessageRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LoopJobTranscriptEntry"];
                 };
             };
         };

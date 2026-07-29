@@ -699,6 +699,7 @@ pub async fn connect_once(cfg: &NodeConfig) -> Result<()> {
                 target_task_key,
                 repo_url,
                 branch,
+                seed,
             } => {
                 // git + tmux + PTY are all blocking, so the runner lives on a
                 // blocking thread with its own cloned sender and config —
@@ -715,8 +716,27 @@ pub async fn connect_once(cfg: &NodeConfig) -> Result<()> {
                             target_task_key,
                             repo_url,
                             branch,
+                            seed,
                         },
                     );
+                });
+            }
+            ControlToNode::JobMessage { job_id, body } => {
+                // MAIN-231: a human steered a run mid-flight. Type it into the
+                // job's live session. tmux is blocking, so this goes on a
+                // blocking thread like the runner itself; a message that finds
+                // no session is reported back on the transcript, so the human
+                // never reads "sent" as "the agent saw it".
+                let tx = out_tx.clone();
+                tokio::task::spawn_blocking(move || {
+                    if let Err(e) = crate::loop_job::deliver_message(&job_id, &body) {
+                        tracing::warn!(job = %job_id, error = %e, "could not deliver job message");
+                        let _ = tx.blocking_send(NodeToControl::JobTranscript {
+                            job_id,
+                            source: "system".into(),
+                            content: format!("message not delivered to the run: {e}"),
+                        });
+                    }
                 });
             }
             ControlToNode::ForgetSkill { name } => {

@@ -1470,6 +1470,46 @@
         }
       }
     },
+    "/api/v1/jobs/{id}/messages": {
+      "post": {
+        "tags": [
+          "crate::routes::jobs"
+        ],
+        "operationId": "job_message",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateJobMessageRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LoopJobTranscriptEntry"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/jobs/{id}/rerun": {
       "post": {
         "tags": [
@@ -8374,6 +8414,18 @@
           }
         }
       },
+      "CreateJobMessageRequest": {
+        "type": "object",
+        "description": "Send an unsolicited steering message to a live job (MAIN-231) — the input\nhalf of the loop. Additive to, and independent of, the interaction ask/answer\nmodel: a human may say something the agent never asked for.",
+        "required": [
+          "body"
+        ],
+        "properties": {
+          "body": {
+            "type": "string"
+          }
+        }
+      },
       "CreateJoinTokenResponse": {
         "type": "object",
         "required": [
@@ -8432,6 +8484,13 @@
         "properties": {
           "kind": {
             "type": "string"
+          },
+          "seed": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The general idea to start from (MAIN-231) — free text, optional. Stored\non the job, delivered into the run's session as its opening brief, and\nechoed as the first `human` transcript line. Omit it and the run starts\nfrom the ticket alone, exactly as before."
           },
           "target_task_id": {
             "type": "string",
@@ -9895,6 +9954,13 @@
           },
           "requested_by": {
             "$ref": "#/components/schemas/UserId"
+          },
+          "seed": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The general idea the run starts from (MAIN-231) — the human's opening\nbrief, set at create time and carried into the executor's session.\n`None` when the job was opened with nothing but its ticket."
           },
           "state": {
             "type": "string",

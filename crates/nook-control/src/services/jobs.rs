@@ -160,13 +160,22 @@ pub async fn create(
         ));
     }
 
+    // The seed is the human's opening brief (MAIN-231). Blank is the same as
+    // absent — a job opened with whitespace starts from the ticket alone.
+    let seed = req
+        .seed
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+
     let id = JobId::new();
     let job: LoopJob = state
         .db
         .query_one(
             "INSERT INTO loop_jobs
-            (id, tenant_id, kind, target_task_id, workspace_id, requested_by, state)
-         VALUES ($1, $2, $3, $4, $5, $6, 'queued')
+            (id, tenant_id, kind, target_task_id, workspace_id, requested_by, state, seed)
+         VALUES ($1, $2, $3, $4, $5, $6, 'queued', $7)
          RETURNING *",
             params![
                 id,
@@ -174,10 +183,18 @@ pub async fn create(
                 &req.kind,
                 target_id,
                 target.workspace_id.map(|w| w.0),
-                requested_by
+                requested_by,
+                seed.as_deref()
             ],
         )
         .await?;
+
+    // The brief opens the transcript as the human line it is, so every viewing
+    // surface shows what the run was asked to do before the agent says anything
+    // (AC-1/AC-4 — `append_transcript` fans the live `JobChanged`).
+    if let Some(seed) = seed.as_deref() {
+        append_transcript(state, job.id, "human", seed).await.ok();
+    }
 
     // Ride the generic queue (AC-2). Payload is the job id as JSON — the
     // consumer re-fetches the row rather than trusting anything else on the
@@ -351,8 +368,8 @@ pub async fn rerun(
         .query_one(
             "INSERT INTO loop_jobs
             (id, tenant_id, kind, target_task_id, workspace_id, requested_by,
-             state, predecessor_job_id)
-         VALUES ($1, $2, $3, $4, $5, $6, 'queued', $7)
+             state, predecessor_job_id, seed)
+         VALUES ($1, $2, $3, $4, $5, $6, 'queued', $7, $8)
          RETURNING *",
             params![
                 new_id,
@@ -361,10 +378,17 @@ pub async fn rerun(
                 prev.target_task_id,
                 prev.workspace_id.map(|w| w.0),
                 requested_by,
-                prev.id
+                prev.id,
+                prev.seed.as_deref()
             ],
         )
         .await?;
+
+    // The brief is part of what the job IS, so the successor starts from the
+    // same one — a re-run that quietly dropped it would run different work.
+    if let Some(seed) = prev.seed.as_deref() {
+        append_transcript(state, job.id, "human", seed).await.ok();
+    }
 
     state
         .queue
@@ -377,6 +401,75 @@ pub async fn rerun(
 
     record_job_event(state, tenant, "job.created", &job, is_private(&target)).await;
     detail(state, job).await
+}
+
+/// Send an unsolicited steering message to a job (MAIN-231) — the input half of
+/// the loop, parallel to (and independent of) the interaction ask/answer model.
+///
+/// Authorization is the job's subject visibility, exactly as answering an ask:
+/// a caller who cannot see the target card gets `NotFound`, never a hint that
+/// the job exists. A terminal job is refused with the reason (AC-3) — there is
+/// no session left to steer and appending would pretend otherwise.
+///
+/// On success the message lands in the transcript as `human` (durable and
+/// ordered, AC-3; the append fans the live `JobChanged`, AC-4), is pushed to the
+/// executor node for delivery into the live session, and — if the run was paused
+/// on a human — resumes it exactly like an answer does. A push that does not
+/// land is recorded honestly on the transcript rather than silently dropped.
+pub async fn post_message(
+    state: &AppState,
+    tenant: TenantId,
+    viewer: UserId,
+    id: JobId,
+    body: &str,
+) -> ApiResult<LoopJobTranscriptEntry> {
+    let body = body.trim();
+    if body.is_empty() {
+        return Err(ApiError::BadRequest("a message needs a body".into()));
+    }
+    let (job, _) = load_visible(state, tenant, viewer, id).await?;
+    if is_terminal(&job.state) {
+        return Err(ApiError::Conflict(format!(
+            "this job is {} and can no longer be sent messages",
+            job.state
+        )));
+    }
+
+    let entry = append_transcript(state, id, "human", body).await?;
+
+    // Deliver into the run. A job still `queued` has no executor yet — the
+    // message waits in the transcript, which the run reads as its context.
+    let pushed = match job.executor_node_id {
+        Some(node) => state.registry.send_to_node(
+            node,
+            nook_proto::ControlToNode::JobMessage {
+                job_id: job.id.0.to_string(),
+                body: body.to_string(),
+            },
+        ),
+        None => false,
+    };
+
+    // A steering message that reached no live session must say so, for the same
+    // reason an undelivered interaction answer does: the human should not read
+    // "sent" as "the agent saw it".
+    if !pushed && job.executor_node_id.is_some() {
+        append_transcript(
+            state,
+            id,
+            "system",
+            "message recorded, but the executor node is offline — it did not reach the run",
+        )
+        .await
+        .ok();
+    }
+
+    // A paused run resumes on unsolicited input exactly as it does on an answer
+    // (AC-3): the human has spoken, so the wait is over.
+    if let Err(e) = resume_from_human(state, tenant, id).await {
+        tracing::warn!(job = %id.0, error = %e, "could not resume job on steering message");
+    }
+    Ok(entry)
 }
 
 /// Append one line to a job's transcript (AC-3). The writer API MAIN-161's node
@@ -708,6 +801,7 @@ pub async fn dispatch_to_node(state: &AppState, tenant: TenantId, job: &LoopJob)
             target_task_key,
             repo_url,
             branch,
+            seed: job.seed.clone(),
         },
     );
     if !sent {
