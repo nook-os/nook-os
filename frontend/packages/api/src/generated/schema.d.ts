@@ -196,6 +196,30 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/auth/purge-test-tenants": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * POST /api/v1/auth/purge-test-tenants — dev-only cleanup of the legacy
+         *     pre-testkit pollution: tenants named/slugged `test-<uuid>` from the old
+         *     shared-DB `test_config` path (MAIN-221 AC-3). Cascades (every `tenant_id` FK
+         *     is `ON DELETE CASCADE`), is idempotent (a second run deletes 0), and is
+         *     refused unless dev mode is on and this is not production — the same gate the
+         *     rest of the dev hatch uses. Keyed strictly to the `test-%` marker (NG-3).
+         */
+        post: operations["purge_test_tenants"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/auth/verify-email/confirm": {
         parameters: {
             query?: never;
@@ -3769,6 +3793,20 @@ export interface components {
             email: string;
             tenant_slug: string;
         };
+        /**
+         * @description The dev account picker's response: a capped page plus the full match count,
+         *     so the UI can show a "N more — refine" hint when the list is truncated
+         *     (MAIN-221 AC-4).
+         */
+        DevAccountsResponse: {
+            accounts: components["schemas"]["DevAccount"][];
+            /**
+             * Format: int64
+             * @description Total accounts matching the (optional) search — may exceed
+             *     `accounts.len()` when the page was capped.
+             */
+            total: number;
+        };
         DevLoginRequest: {
             display_name?: string | null;
             email?: string | null;
@@ -4633,6 +4671,14 @@ export interface components {
             body: string;
             /** Format: uuid */
             parent_message_id?: string | null;
+        };
+        /** @description Result of the dev-only `purge-test-tenants` sweep (MAIN-221 AC-3). */
+        PurgeTestTenantsResponse: {
+            /**
+             * Format: int64
+             * @description How many `test-%` tenants were deleted (0 on a second, idempotent run).
+             */
+            deleted: number;
         };
         PutSecretRequest: {
             content: string;
@@ -5659,7 +5705,13 @@ export type $defs = Record<string, never>;
 export interface operations {
     dev_accounts: {
         parameters: {
-            query?: never;
+            query?: {
+                /**
+                 * @description Optional case-insensitive substring over email / display name / tenant
+                 *     slug. Absent or blank returns the newest accounts up to the cap.
+                 */
+                q?: string | null;
+            };
             header?: never;
             path?: never;
             cookie?: never;
@@ -5671,7 +5723,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["DevAccount"][];
+                    "application/json": components["schemas"]["DevAccountsResponse"];
                 };
             };
             403: {
@@ -5909,6 +5961,31 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["AuthProviders"];
                 };
+            };
+        };
+    };
+    purge_test_tenants: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PurgeTestTenantsResponse"];
+                };
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
         };
     };

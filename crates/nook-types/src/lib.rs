@@ -968,6 +968,24 @@ pub struct DevAccount {
     pub deployment_roles: Vec<String>,
 }
 
+/// The dev account picker's response: a capped page plus the full match count,
+/// so the UI can show a "N more — refine" hint when the list is truncated
+/// (MAIN-221 AC-4).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct DevAccountsResponse {
+    pub accounts: Vec<DevAccount>,
+    /// Total accounts matching the (optional) search — may exceed
+    /// `accounts.len()` when the page was capped.
+    pub total: i64,
+}
+
+/// Result of the dev-only `purge-test-tenants` sweep (MAIN-221 AC-3).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct PurgeTestTenantsResponse {
+    /// How many `test-%` tenants were deleted (0 on a second, idempotent run).
+    pub deleted: i64,
+}
+
 // ── Orgs, roles, and the operator surface ────────────────────────────────────
 
 /// An org: the layer between a deployment and its tenants.

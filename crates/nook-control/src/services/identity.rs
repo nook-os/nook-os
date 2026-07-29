@@ -271,7 +271,20 @@ pub async fn mark_local_email_verified(db: &DbPool, user_id: UserId, email: &str
     Ok(())
 }
 
+/// The pseudo-issuer the dev-login hatch stamps on its identities. It is never a
+/// real IdP, and it is only ever produced behind `dev_login`'s
+/// `AUTH_DEV_MODE && !production` gate — so recognising it here is exactly as
+/// narrow as that gate (MAIN-221 AC-1). Its purpose: the dev hatch bypasses the
+/// auth-mode lock, which would otherwise refuse a dev sign-in on a tenant that
+/// mode-locked to `local`.
+pub const DEV_ISSUER: &str = "nookos-dev";
+
 pub async fn login_identity(state: &AppState, claims: IdentityClaims) -> ApiResult<(User, Tenant)> {
+    // The dev hatch is allowed to sign in without claiming (or being refused by)
+    // the tenant's auth mode — it is a testing tool, not a real IdP, and it must
+    // work on a `local`-locked instance. Every real issuer still claims the mode
+    // below, so the one-way lock is untouched for genuine sign-ins (AC-2, NG-1).
+    let claims_the_mode = claims.issuer != DEV_ISSUER;
     // Existing identity → existing user.
     let existing: Option<UserId> = state
         .db
@@ -313,13 +326,15 @@ pub async fn login_identity(state: &AppState, claims: IdentityClaims) -> ApiResu
         // The lock has to bind both directions, or it is not a lock: a tenant
         // running local accounts must not silently acquire OIDC identities
         // beside them, which is exactly the duplicate-person problem the mode
-        // exists to prevent.
-        crate::services::local_auth::claim_mode(
-            &state.db,
-            tenant.id,
-            crate::services::local_auth::AuthMode::Oidc,
-        )
-        .await?;
+        // exists to prevent. (Skipped for the dev hatch — AC-1.)
+        if claims_the_mode {
+            crate::services::local_auth::claim_mode(
+                &state.db,
+                tenant.id,
+                crate::services::local_auth::AuthMode::Oidc,
+            )
+            .await?;
+        }
         return Ok((user, tenant));
     }
 
@@ -390,12 +405,15 @@ pub async fn login_identity(state: &AppState, claims: IdentityClaims) -> ApiResu
 
     // Commit the tenant to OIDC before creating anything. A tenant already on
     // local accounts must be refused here, with nothing half-made left behind.
-    crate::services::local_auth::claim_mode(
-        &state.db,
-        tenant.id,
-        crate::services::local_auth::AuthMode::Oidc,
-    )
-    .await?;
+    // (Skipped for the dev hatch — AC-1; the dev issuer never locks the mode.)
+    if claims_the_mode {
+        crate::services::local_auth::claim_mode(
+            &state.db,
+            tenant.id,
+            crate::services::local_auth::AuthMode::Oidc,
+        )
+        .await?;
+    }
 
     let user = match user {
         Some(u) => u,

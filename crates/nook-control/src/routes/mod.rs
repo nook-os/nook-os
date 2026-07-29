@@ -89,6 +89,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/auth/callback", get(auth::callback))
         .route("/auth/dev-login", post(auth::dev_login))
         .route("/auth/dev-accounts", get(auth::dev_accounts))
+        .route("/auth/purge-test-tenants", post(auth::purge_test_tenants))
         .route("/auth/logout", post(auth::logout))
         .route("/auth/me", get(auth::me))
         .route("/me/tenants", get(auth::my_tenants))
