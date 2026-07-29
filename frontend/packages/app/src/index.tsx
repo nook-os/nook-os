@@ -30,6 +30,7 @@ import { SettingsPage } from "./pages/Settings";
 import { TeamPage } from "./pages/Team";
 import { VerifyEmailPage } from "./pages/VerifyEmail";
 import { WorkspaceDetail, WorkspacesPage } from "./pages/Workspaces";
+import { MissionPage } from "./pages/Mission";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -150,6 +151,7 @@ function AuthGate() {
     <Routes>
       <Route element={<Shell me={me} />}>
         <Route index element={<Dashboard />} />
+        <Route path="mission" element={<MissionPage />} />
         <Route path="workspaces" element={<WorkspacesPage />} />
         <Route path="workspaces/:id" element={<WorkspaceDetail />} />
         <Route path="sessions" element={<SessionsPage />} />

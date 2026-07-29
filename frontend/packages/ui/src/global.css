@@ -4741,3 +4741,23 @@ a.toast-main:hover .toast-title { text-decoration: underline; }
   flex: none;
   padding: 0;
 }
+
+/* Mission Control (MAIN-226): dense repo → node → checkout tree. Structural
+   spacing only — the console aesthetic comes from Panel / nook-table / Pill. */
+.mission-list { display: flex; flex-direction: column; gap: 10px; }
+.mission-repo {
+  border: 1px solid var(--nook-border);
+  border-radius: var(--nook-radius);
+  background: var(--nook-bg-panel);
+}
+.mission-repo-head {
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--nook-border);
+  background: var(--nook-bg-raised);
+}
+.mission-node { padding: 2px 0 2px 8px; }
+.mission-node-head {
+  display: flex; align-items: center; gap: 6px;
+  padding: 2px 4px; font-size: 11px;
+}
+.mission-repo tr.ghost td { color: var(--nook-fg-faint); }

@@ -100,6 +100,8 @@ export function startLive(queryClient: QueryClient) {
       }));
       queryClient.invalidateQueries({ queryKey: ["nodes"] });
       queryClient.invalidateQueries({ queryKey: ["workspaces"] });
+      // Mission Control groups by node and shows node status per checkout.
+      queryClient.invalidateQueries({ queryKey: ["overview"] });
     } else if (event.type === "node_resources") {
       useLive.setState((s) => ({
         nodeResources: {
@@ -115,6 +117,8 @@ export function startLive(queryClient: QueryClient) {
         },
       }));
       queryClient.invalidateQueries({ queryKey: ["sessions"] });
+      // Mission Control shows sessions under the checkout they run in.
+      queryClient.invalidateQueries({ queryKey: ["overview"] });
     } else if (event.type === "session_agent_state") {
       // What the agent in a session is doing right now. `idle` is the absence
       // of a mark, so remove the entry rather than storing it — that keeps the

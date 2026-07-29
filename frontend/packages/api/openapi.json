@@ -3730,6 +3730,26 @@
         }
       }
     },
+    "/api/v1/overview": {
+      "get": {
+        "tags": [
+          "crate::routes::overview"
+        ],
+        "operationId": "get_overview",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Overview"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/relations/{id}": {
       "delete": {
         "tags": [
@@ -10972,6 +10992,134 @@
           },
           "slug": {
             "type": "string"
+          }
+        }
+      },
+      "Overview": {
+        "type": "object",
+        "description": "The whole fleet in one payload: every workspace the caller can see anything\nof, its checkouts on visible nodes, and the active sessions bound to each —\nthe hierarchy repo → node → checkout → sessions. Visibility composes the\nexisting node (own+shared) and session (MAIN-133) rules exactly; it grants no\nnew powers, and a workspace with nothing visible is simply absent.",
+        "required": [
+          "workspaces",
+          "loose_sessions"
+        ],
+        "properties": {
+          "loose_sessions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Session"
+            },
+            "description": "Ad-hoc `$HOME` terminals with no workspace — surfaced so no running\nsession is invisible on the fleet view."
+          },
+          "workspaces": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/OverviewWorkspace"
+            }
+          }
+        }
+      },
+      "OverviewCheckout": {
+        "type": "object",
+        "description": "A single checkout on a node, with the sessions running in it.",
+        "required": [
+          "id",
+          "node_id",
+          "node_name",
+          "node_status",
+          "path",
+          "kind",
+          "dirty",
+          "sessions"
+        ],
+        "properties": {
+          "branch": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "dirty": {
+            "type": "boolean"
+          },
+          "id": {
+            "$ref": "#/components/schemas/NodeWorkspaceId"
+          },
+          "kind": {
+            "type": "string",
+            "description": "`clone` | `worktree` | `mirror` — drives the kind badge and gates the\n\"+ worktree\" action (clone-only)."
+          },
+          "missing_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When set, this checkout has vanished from disk (MAIN-220 tombstone). The\nUI ghosts it rather than hiding it."
+          },
+          "node_id": {
+            "$ref": "#/components/schemas/NodeId"
+          },
+          "node_name": {
+            "type": "string"
+          },
+          "node_status": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "sessions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Session"
+            }
+          }
+        }
+      },
+      "OverviewWorkspace": {
+        "type": "object",
+        "description": "One repository on the overview: its identity plus every visible checkout and\nthe sessions that could not be pinned under a visible checkout.",
+        "required": [
+          "id",
+          "name",
+          "slug",
+          "checkouts",
+          "unbound_sessions"
+        ],
+        "properties": {
+          "checkouts": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/OverviewCheckout"
+            }
+          },
+          "git_remote_normalized": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "git_remote_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "$ref": "#/components/schemas/WorkspaceId"
+          },
+          "name": {
+            "type": "string"
+          },
+          "slug": {
+            "type": "string"
+          },
+          "unbound_sessions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Session"
+            },
+            "description": "Sessions in this workspace not bound to a listed checkout (its checkout\nwas pruned, or sits on a node the caller cannot see) — kept so work is\nnever lost from the view."
           }
         }
       },
