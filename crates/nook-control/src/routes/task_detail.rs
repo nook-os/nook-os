@@ -16,7 +16,7 @@
 
 use axum::extract::{Path, State};
 use axum::Json;
-use nook_db::{Postgres, TypeMapping};
+use nook_db::{params, Db, Postgres, TypeMapping};
 use nook_types::*;
 
 use crate::auth::{AuthCtx, Principal};
@@ -41,14 +41,15 @@ pub async fn list_comments(
 pub async fn comments_of(state: &AppState, task: TaskId) -> ApiResult<Vec<TaskComment>> {
     // Oldest first: a comment thread is read as a narrative, and the loop
     // parses the latest verdict by taking the last one.
-    let rows: Vec<TaskComment> = sqlx::query_as(
-        "SELECT id, tenant_id, task_id, author_type, author_id, author_name,
+    let rows: Vec<TaskComment> = state
+        .db
+        .query_all(
+            "SELECT id, tenant_id, task_id, author_type, author_id, author_name,
                 body_md, created_at, updated_at
          FROM task_comments WHERE task_id = $1 ORDER BY created_at",
-    )
-    .bind(task)
-    .fetch_all(&state.db)
-    .await?;
+            params![task],
+        )
+        .await?;
     Ok(rows)
 }
 
@@ -79,21 +80,24 @@ pub async fn create_comment(
         _ => display_name(&state, auth.user_id).await,
     };
 
-    let row: TaskComment = sqlx::query_as(
-        "INSERT INTO task_comments (id, tenant_id, task_id, author_type, author_id, author_name, body_md)
+    let row: TaskComment = state
+        .db
+        .query_one(
+            "INSERT INTO task_comments (id, tenant_id, task_id, author_type, author_id, author_name, body_md)
          VALUES ($1, $2, $3, $4, $5, $6, $7)
          RETURNING id, tenant_id, task_id, author_type, author_id, author_name,
                    body_md, created_at, updated_at",
-    )
-    .bind(uuid::Uuid::now_v7())
-    .bind(auth.tenant_id)
-    .bind(task)
-    .bind(author_type)
-    .bind(author_id)
-    .bind(&name)
-    .bind(&req.body_md)
-    .fetch_one(&state.db)
-    .await?;
+            params![
+                uuid::Uuid::now_v7(),
+                auth.tenant_id,
+                task,
+                author_type,
+                author_id,
+                &name,
+                &req.body_md
+            ],
+        )
+        .await?;
 
     // Comments are the content; events remain the timeline. Both, so the
     // activity feed still shows that something was said without becoming the
@@ -104,15 +108,15 @@ pub async fn create_comment(
     // event carries neither — its body must not reach the tenant-wide feed or a
     // channel, and the absence of an excerpt is exactly what keeps it silent
     // (NG-4, matching MAIN-76's title omission).
-    let meta: Option<(String, Option<i32>, Option<String>)> = sqlx::query_as(
-        "SELECT t.visibility, t.number, b.key FROM tasks t
+    let meta: Option<(String, Option<i32>, Option<String>)> = state
+        .db
+        .query_opt(
+            "SELECT t.visibility, t.number, b.key FROM tasks t
          JOIN boards b ON b.id = t.board_id
          WHERE t.id = $1 AND t.tenant_id = $2",
-    )
-    .bind(task)
-    .bind(auth.tenant_id)
-    .fetch_optional(&state.db)
-    .await?;
+            params![task, auth.tenant_id],
+        )
+        .await?;
     let mut payload = serde_json::json!({ "task_id": task, "author": name });
     if let Some((visibility, number, board_key)) = meta {
         if visibility != "private" {
@@ -158,18 +162,19 @@ pub async fn update_comment(
     Json(req): Json<UpdateCommentRequest>,
 ) -> ApiResult<Json<TaskComment>> {
     owned_comment(&state, &auth, id).await?;
-    let row: TaskComment = sqlx::query_as(&format!(
-        "UPDATE task_comments SET body_md = $1, updated_at = {}
+    let row: TaskComment = state
+        .db
+        .query_one(
+            &format!(
+                "UPDATE task_comments SET body_md = $1, updated_at = {}
          WHERE id = $2 AND tenant_id = $3
          RETURNING id, tenant_id, task_id, author_type, author_id, author_name,
                    body_md, created_at, updated_at",
-        Postgres.now()
-    ))
-    .bind(&req.body_md)
-    .bind(id)
-    .bind(auth.tenant_id)
-    .fetch_one(&state.db)
-    .await?;
+                Postgres.now()
+            ),
+            params![&req.body_md, id, auth.tenant_id],
+        )
+        .await?;
     state.registry.publish(
         auth.tenant_id,
         nook_proto::UiEvent::TaskChanged {
@@ -188,10 +193,12 @@ pub async fn delete_comment(
     Path(id): Path<uuid::Uuid>,
 ) -> ApiResult<axum::http::StatusCode> {
     let task = owned_comment(&state, &auth, id).await?;
-    sqlx::query("DELETE FROM task_comments WHERE id = $1 AND tenant_id = $2")
-        .bind(id)
-        .bind(auth.tenant_id)
-        .execute(&state.db)
+    state
+        .db
+        .exec(
+            "DELETE FROM task_comments WHERE id = $1 AND tenant_id = $2",
+            params![id, auth.tenant_id],
+        )
         .await?;
     state.registry.publish(
         auth.tenant_id,
@@ -204,13 +211,13 @@ pub async fn delete_comment(
 ///
 /// Returns the comment's task so callers can publish a change for it.
 async fn owned_comment(state: &AppState, auth: &AuthCtx, id: uuid::Uuid) -> ApiResult<TaskId> {
-    let row: Option<(Option<uuid::Uuid>, TaskId)> = sqlx::query_as(
-        "SELECT author_id, task_id FROM task_comments WHERE id = $1 AND tenant_id = $2",
-    )
-    .bind(id)
-    .bind(auth.tenant_id)
-    .fetch_optional(&state.db)
-    .await?;
+    let row: Option<(Option<uuid::Uuid>, TaskId)> = state
+        .db
+        .query_opt(
+            "SELECT author_id, task_id FROM task_comments WHERE id = $1 AND tenant_id = $2",
+            params![id, auth.tenant_id],
+        )
+        .await?;
     let (author_id, task) = row.ok_or(ApiError::NotFound)?;
     if author_id != Some(auth.user_id.0) {
         return Err(ApiError::ForbiddenMsg(
@@ -221,13 +228,15 @@ async fn owned_comment(state: &AppState, auth: &AuthCtx, id: uuid::Uuid) -> ApiR
 }
 
 async fn display_name(state: &AppState, user: UserId) -> String {
-    sqlx::query_as::<_, (String,)>("SELECT display_name FROM users WHERE id = $1")
-        .bind(user)
-        .fetch_optional(&state.db)
+    state
+        .db
+        .query_scalar_opt::<String>(
+            "SELECT display_name FROM users WHERE id = $1",
+            params![user],
+        )
         .await
         .ok()
         .flatten()
-        .map(|r| r.0)
         .unwrap_or_else(|| "unknown".into())
 }
 
@@ -279,10 +288,12 @@ pub async fn link(
     // own detail — a private task they neither created nor are assigned. A
     // private endpoint they cannot see is refused as NotFound.
     for end in [from, to] {
-        let t: TaskItem = sqlx::query_as("SELECT * FROM tasks WHERE id = $1 AND tenant_id = $2")
-            .bind(end)
-            .bind(tenant)
-            .fetch_optional(&state.db)
+        let t: TaskItem = state
+            .db
+            .query_opt(
+                "SELECT * FROM tasks WHERE id = $1 AND tenant_id = $2",
+                params![end, tenant],
+            )
             .await?
             .ok_or(ApiError::NotFound)?;
         if !tasks::visible_to(&t, viewer) {
@@ -301,19 +312,16 @@ pub async fn link(
         ));
     }
 
-    let row: TaskRelation = sqlx::query_as(
-        "INSERT INTO task_relations (id, tenant_id, from_task, to_task, kind)
+    let row: TaskRelation = state
+        .db
+        .query_one(
+            "INSERT INTO task_relations (id, tenant_id, from_task, to_task, kind)
          VALUES ($1, $2, $3, $4, $5)
          ON CONFLICT (from_task, to_task, kind) DO UPDATE SET kind = EXCLUDED.kind
          RETURNING id, tenant_id, from_task, to_task, kind, created_at",
-    )
-    .bind(uuid::Uuid::now_v7())
-    .bind(tenant)
-    .bind(from)
-    .bind(to)
-    .bind(kind)
-    .fetch_one(&state.db)
-    .await?;
+            params![uuid::Uuid::now_v7(), tenant, from, to, kind],
+        )
+        .await?;
 
     state
         .registry
@@ -328,8 +336,10 @@ pub async fn link(
 /// terminates it — an existing cycle in the data would otherwise make the walk
 /// itself run forever.
 async fn reaches(state: &AppState, start: TaskId, target: TaskId) -> ApiResult<bool> {
-    let hit: Option<(bool,)> = sqlx::query_as(
-        "WITH RECURSIVE reachable(id) AS (
+    let hit: Option<bool> = state
+        .db
+        .query_scalar_opt(
+            "WITH RECURSIVE reachable(id) AS (
              SELECT to_task FROM task_relations WHERE from_task = $1 AND kind = 'blocks'
              UNION
              SELECT r.to_task FROM task_relations r
@@ -337,11 +347,9 @@ async fn reaches(state: &AppState, start: TaskId, target: TaskId) -> ApiResult<b
              WHERE r.kind = 'blocks'
          )
          SELECT true FROM reachable WHERE id = $2 LIMIT 1",
-    )
-    .bind(start)
-    .bind(target)
-    .fetch_optional(&state.db)
-    .await?;
+            params![start, target],
+        )
+        .await?;
     Ok(hit.is_some())
 }
 
@@ -353,12 +361,14 @@ pub async fn delete_relation(
     auth: AuthCtx,
     Path(id): Path<uuid::Uuid>,
 ) -> ApiResult<axum::http::StatusCode> {
-    let res = sqlx::query("DELETE FROM task_relations WHERE id = $1 AND tenant_id = $2")
-        .bind(id)
-        .bind(auth.tenant_id)
-        .execute(&state.db)
+    let res = state
+        .db
+        .exec(
+            "DELETE FROM task_relations WHERE id = $1 AND tenant_id = $2",
+            params![id, auth.tenant_id],
+        )
         .await?;
-    if res.rows_affected() == 0 {
+    if res == 0 {
         return Err(ApiError::NotFound);
     }
     Ok(axum::http::StatusCode::NO_CONTENT)
@@ -386,10 +396,12 @@ pub async fn detail(
     viewer: UserId,
     id: TaskId,
 ) -> ApiResult<TaskDetail> {
-    let task: TaskItem = sqlx::query_as("SELECT * FROM tasks WHERE id = $1 AND tenant_id = $2")
-        .bind(id)
-        .bind(tenant)
-        .fetch_optional(&state.db)
+    let task: TaskItem = state
+        .db
+        .query_opt(
+            "SELECT * FROM tasks WHERE id = $1 AND tenant_id = $2",
+            params![id, tenant],
+        )
         .await?
         .ok_or(ApiError::NotFound)?;
     // MAIN-76: a private card is a 404 for anyone but its creator or assignee.
@@ -429,8 +441,11 @@ pub async fn detail(
     // created nor is assigned must not leak its title/key through epic detail —
     // the same predicate the list/board reads enforce.
     let children: Vec<EpicChild> = if task.type_ == "epic" {
-        sqlx::query_as(&format!(
-            "SELECT t.id,
+        state
+            .db
+            .query_all(
+                &format!(
+                    "SELECT t.id,
                     (b.key || '-' || {}) AS key,
                     t.title, t.type, t.priority,
                     bc.type AS column_type,
@@ -441,12 +456,11 @@ pub async fn detail(
              WHERE t.parent_task_id = $1
                AND (t.visibility <> 'private' OR t.created_by = $2 OR t.assignee_user_id = $2)
              ORDER BY CASE WHEN t.priority = 0 THEN 5 ELSE t.priority END, t.created_at",
-            Postgres.cast("t.number", "text")
-        ))
-        .bind(id)
-        .bind(viewer)
-        .fetch_all(&state.db)
-        .await?
+                    Postgres.cast("t.number", "text")
+                ),
+                params![id, viewer],
+            )
+            .await?
     } else {
         Vec::new()
     };
@@ -474,8 +488,10 @@ async fn related_tasks(
     // The OTHER side of each relation is filtered by visibility (MAIN-76): a
     // private task the viewer neither created nor is assigned must not surface
     // its title/key through a relation on a task they can see.
-    let rows: Vec<RelatedTask> = sqlx::query_as(
-        "SELECT r.id AS relation_id, t.id, t.title,
+    let rows: Vec<RelatedTask> = state
+        .db
+        .query_all(
+            "SELECT r.id AS relation_id, t.id, t.title,
                 CASE WHEN b.key IS NOT NULL AND t.number IS NOT NULL
                      THEN b.key || '-' || t.number END AS key,
                 CASE WHEN r.kind = 'blocks' AND r.to_task = $1 THEN 'blocked_by'
@@ -489,10 +505,8 @@ async fn related_tasks(
          WHERE (r.from_task = $1 OR r.to_task = $1)
            AND (t.visibility <> 'private' OR t.created_by = $2 OR t.assignee_user_id = $2)
          ORDER BY t.number",
-    )
-    .bind(id)
-    .bind(viewer)
-    .fetch_all(&state.db)
-    .await?;
+            params![id, viewer],
+        )
+        .await?;
     Ok(rows)
 }
