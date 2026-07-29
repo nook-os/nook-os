@@ -6307,6 +6307,57 @@
         }
       }
     },
+    "/api/v1/workspaces/{id}/clone": {
+      "post": {
+        "tags": [
+          "crate::routes::workspaces"
+        ],
+        "summary": "Clone this workspace's **stored** remote onto a node (MAIN-223 AC-2).",
+        "description": "The caller names only the node — the URL comes off the workspace — and the\nresulting checkout is associated with THIS workspace id, not re-derived from\nthe remote by the next discovery scan. Authorization is the same\nperson-based rule sessions use: the node must be the caller's own or shared.",
+        "operationId": "clone_workspace_to_node",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WorkspaceCloneRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OpResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": ""
+          },
+          "403": {
+            "description": ""
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      }
+    },
     "/api/v1/workspaces/{id}/git": {
       "get": {
         "tags": [
@@ -13485,6 +13536,20 @@
               "null"
             ]
           },
+          "git_remote_normalized": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The normalized form of [`Self::git_remote_url`] used to match a discovered\ncheckout back to its workspace (host+path, scheme/creds/`.git` stripped)."
+          },
+          "git_remote_url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The repository this workspace is — the clone URL, lifted off the scattered\ncheckout rows so the UI can say what repo it is and clone-to-node needs no\nre-supplied URL (MAIN-223). NULL when the workspace's checkouts disagree\nor none carry a remote."
+          },
           "id": {
             "$ref": "#/components/schemas/WorkspaceId"
           },
@@ -13500,6 +13565,29 @@
           "updated_at": {
             "type": "string",
             "format": "date-time"
+          }
+        }
+      },
+      "WorkspaceCloneRequest": {
+        "type": "object",
+        "description": "Clone a workspace's *stored* remote onto a node (MAIN-223 AC-2). Unlike\n[`CloneRequest`], the caller supplies no URL — the workspace already knows it —\nand the resulting checkout is associated with this workspace by id.",
+        "required": [
+          "node_id"
+        ],
+        "properties": {
+          "credential_id": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/GitCredentialId",
+                "description": "Tenant git credential to clone with (private repos over SSH)."
+              }
+            ]
+          },
+          "node_id": {
+            "$ref": "#/components/schemas/NodeId"
           }
         }
       },

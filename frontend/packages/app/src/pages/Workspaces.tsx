@@ -283,6 +283,56 @@ export function WorkspaceDetail() {
       ).data ?? [],
     enabled: !!id,
   });
+  const { data: nodes } = useQuery({
+    queryKey: ["nodes"],
+    queryFn: async () => (await api.GET("/api/v1/nodes")).data ?? [],
+  });
+  const queryClient = useQueryClient();
+
+  // Clone this workspace's STORED remote onto another node — no URL to re-type
+  // (MAIN-223 AC-2). The server authorizes the node (own/shared) and pins the new
+  // checkout to this workspace id.
+  const cloneToNode = async () => {
+    if (!ws?.git_remote_url) {
+      await notify(
+        "No stored repo URL",
+        "This workspace doesn't know its git remote yet. Clone it once with an explicit URL (+ New Work) and it will remember it.",
+      );
+      return;
+    }
+    const here = new Set(ws.locations.map((l) => l.node_id));
+    const candidates = (nodes ?? []).filter((n) => n.status === "online");
+    if (candidates.length === 0) {
+      await notify("No online nodes", "Bring a node online to clone onto it.");
+      return;
+    }
+    const nodeId = await askChoice({
+      title: `Clone "${ws.name}" to another node`,
+      description: ws.git_remote_url,
+      choices: candidates.map((n) => ({
+        value: n.id,
+        label: n.name,
+        description: here.has(n.id)
+          ? "Already has a checkout — re-clone heals it in place."
+          : undefined,
+      })),
+      confirmLabel: "clone",
+    });
+    if (!nodeId) return;
+    const { error, response } = await api.POST("/api/v1/workspaces/{id}/clone", {
+      params: { path: { id: id! } },
+      body: { node_id: nodeId },
+    });
+    if (error || !response.ok) {
+      await notify(
+        "Clone failed",
+        error ? String((error as { error: unknown }).error) : response.statusText,
+      );
+      return;
+    }
+    await queryClient.invalidateQueries({ queryKey: ["workspaces", id] });
+    await notify("Clone requested", "The checkout will appear here once the node finishes.");
+  };
 
   if (!ws) return <Empty>Loading…</Empty>;
 
@@ -294,12 +344,25 @@ export function WorkspaceDetail() {
       <Panel
         title={`Workspace · ${ws.name}`}
         actions={
-          <button
-            className="btn primary small"
-            onClick={() => showNewWork({ workspaceId: ws.id })}
-          >
-            start work
-          </button>
+          <>
+            <button
+              className="btn small"
+              title={
+                ws.git_remote_url
+                  ? "Clone this workspace's stored remote onto another node"
+                  : "This workspace has no stored git remote URL yet"
+              }
+              onClick={cloneToNode}
+            >
+              clone to node…
+            </button>
+            <button
+              className="btn primary small"
+              onClick={() => showNewWork({ workspaceId: ws.id })}
+            >
+              start work
+            </button>
+          </>
         }
       >
         <table className="nook-table">

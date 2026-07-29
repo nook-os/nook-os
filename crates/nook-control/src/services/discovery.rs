@@ -145,6 +145,20 @@ pub async fn reconcile(
             }
         };
 
+        // Keep the workspace's own repo identity fresh (MAIN-223): adopt this
+        // checkout's raw URL when the workspace carries none yet. NULL-guarded, so
+        // an agreed or hand-set value is never clobbered by one checkout.
+        if let Some(raw) = &d.git_remote_url {
+            state
+                .db
+                .exec(
+                    "UPDATE workspaces SET git_remote_url = $2
+                     WHERE id = $1 AND git_remote_url IS NULL",
+                    params![workspace_id, raw],
+                )
+                .await?;
+        }
+
         let known: Option<NodeWorkspaceId> = state
             .db
             .query_scalar_opt(

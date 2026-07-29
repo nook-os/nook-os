@@ -613,6 +613,14 @@ pub struct Workspace {
     pub name: String,
     pub slug: String,
     pub description: Option<String>,
+    /// The repository this workspace is — the clone URL, lifted off the scattered
+    /// checkout rows so the UI can say what repo it is and clone-to-node needs no
+    /// re-supplied URL (MAIN-223). NULL when the workspace's checkouts disagree
+    /// or none carry a remote.
+    pub git_remote_url: Option<String>,
+    /// The normalized form of [`Self::git_remote_url`] used to match a discovered
+    /// checkout back to its workspace (host+path, scheme/creds/`.git` stripped).
+    pub git_remote_normalized: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -1886,6 +1894,16 @@ pub struct CloneRequest {
     /// clone to finish. Progress arrives as activity events carrying `job_id`.
     #[serde(default)]
     pub background: bool,
+}
+
+/// Clone a workspace's *stored* remote onto a node (MAIN-223 AC-2). Unlike
+/// [`CloneRequest`], the caller supplies no URL — the workspace already knows it —
+/// and the resulting checkout is associated with this workspace by id.
+#[derive(Debug, Clone, Deserialize, ToSchema)]
+pub struct WorkspaceCloneRequest {
+    pub node_id: NodeId,
+    /// Tenant git credential to clone with (private repos over SSH).
+    pub credential_id: Option<GitCredentialId>,
 }
 
 /// A long-running operation the caller can watch instead of blocking on.

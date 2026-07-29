@@ -3,7 +3,7 @@
 
 use async_trait::async_trait;
 use nook_db::{params, Db, Postgres, TypeMapping};
-use nook_mcp::NookBackend;
+use nook_mcp::{McpCaller, NookBackend};
 use nook_proto::ControlToNode;
 use nook_types::*;
 
@@ -47,20 +47,68 @@ impl McpBackend {
         Ok(id)
     }
 
-    async fn resolve_workspace(
+    /// Resolve a workspace by **id or slug** (both unique), falling back to name
+    /// as a documented convenience that errors on ambiguity rather than silently
+    /// picking one (MAIN-223 AC-3). The old `slug = $2 OR name = $2` conflated the
+    /// two and returned an arbitrary row when a name matched several workspaces.
+    pub async fn resolve_workspace(
         &self,
         tenant: TenantId,
-        name_or_slug: &str,
+        key: &str,
     ) -> anyhow::Result<WorkspaceId> {
-        let row: Option<WorkspaceId> = self
+        // Unique key #1: the id.
+        if let Ok(uuid) = key.parse::<uuid::Uuid>() {
+            if let Some(id) = self
+                .state
+                .db
+                .query_scalar_opt::<WorkspaceId>(
+                    "SELECT id FROM workspaces WHERE tenant_id = $1 AND id = $2",
+                    params![tenant, WorkspaceId(uuid)],
+                )
+                .await?
+            {
+                return Ok(id);
+            }
+        }
+        // Unique key #2: the slug.
+        if let Some(id) = self
             .state
             .db
-            .query_scalar_opt(
-                "SELECT id FROM workspaces WHERE tenant_id = $1 AND (slug = $2 OR name = $2)",
-                params![tenant, name_or_slug],
+            .query_scalar_opt::<WorkspaceId>(
+                "SELECT id FROM workspaces WHERE tenant_id = $1 AND slug = $2",
+                params![tenant, key],
+            )
+            .await?
+        {
+            return Ok(id);
+        }
+        // Convenience: a bare name, which is NOT unique. One match resolves; more
+        // than one is an error that names the slugs to disambiguate with.
+        let matches: Vec<(WorkspaceId, String)> = self
+            .state
+            .db
+            .query_all(
+                "SELECT id, slug FROM workspaces WHERE tenant_id = $1 AND name = $2 ORDER BY slug",
+                params![tenant, key],
             )
             .await?;
-        row.ok_or_else(|| anyhow::anyhow!("no workspace named '{name_or_slug}'"))
+        match matches.as_slice() {
+            [(id, _)] => Ok(*id),
+            [] => Err(anyhow::anyhow!(
+                "no workspace with id, slug, or name '{key}'"
+            )),
+            many => {
+                let slugs = many
+                    .iter()
+                    .map(|(_, slug)| slug.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                Err(anyhow::anyhow!(
+                    "'{key}' names {} workspaces — use a unique slug: {slugs}",
+                    many.len()
+                ))
+            }
+        }
     }
 
     /// Resolve a node by name, or auto-pick an online node when omitted.
@@ -481,38 +529,44 @@ impl NookBackend for McpBackend {
         .await
     }
 
-    async fn dispatch_task(&self, task_id: String) -> anyhow::Result<TaskItem> {
-        let tenant = self.tenant().await?;
+    async fn dispatch_task(&self, caller: McpCaller, task_id: String) -> anyhow::Result<TaskItem> {
         let id: TaskId = task_id
             .parse()
             .map_err(|_| anyhow::anyhow!("bad task id"))?;
-        let viewer = self.user().await?;
-        // MCP carries no per-user identity, so it has no acting person to place
-        // work for: `None` → the no-eligible-node error, never a tenant-wide
-        // pick onto a machine the caller does not own (MAIN-131 AC-2).
-        Ok(crate::services::taskwork::dispatch(&self.state, tenant, viewer, None, id).await?)
+        // The authenticated caller is both the viewer (visibility) and the acting
+        // person the scheduler places for (MAIN-223 AC-4): auto-placement is
+        // confined to nodes that person may use, exactly as on the HTTP route. A
+        // static-token call never reaches here — the tool refuses it first.
+        Ok(crate::services::taskwork::dispatch(
+            &self.state,
+            caller.tenant_id,
+            caller.user_id,
+            Some(caller.user_id),
+            id,
+        )
+        .await?)
     }
 
     async fn start_work(
         &self,
+        caller: McpCaller,
         task_id: String,
         runtime: Option<String>,
         node: Option<String>,
     ) -> anyhow::Result<Session> {
-        let tenant = self.tenant().await?;
         let id: TaskId = task_id
             .parse()
             .map_err(|_| anyhow::anyhow!("bad task id"))?;
         let node_id = match node {
-            Some(n) => Some(self.resolve_node(tenant, Some(n)).await?),
+            Some(n) => Some(self.resolve_node(caller.tenant_id, Some(n)).await?),
             None => None,
         };
-        let viewer = self.user().await?;
+        // Spawn authorization runs against the caller's own/shared nodes (AC-4).
         let (_, session) = crate::services::taskwork::start_work(
             &self.state,
-            tenant,
-            viewer,
-            None,
+            caller.tenant_id,
+            caller.user_id,
+            Some(caller.user_id),
             id,
             crate::services::taskwork::StartWork {
                 node_id,
