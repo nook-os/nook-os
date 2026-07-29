@@ -285,3 +285,23 @@ describe("alternate views", () => {
     window.localStorage.removeItem("nook.mission.view.v1");
   });
 });
+
+describe("context bits", () => {
+  it("age renders compact relative durations", async () => {
+    const { age } = await import("./mission");
+    const now = Date.parse("2026-07-29T12:00:00Z");
+    expect(age("2026-07-29T11:59:40Z", now)).toBe("now");
+    expect(age("2026-07-29T11:55:00Z", now)).toBe("5m");
+    expect(age("2026-07-29T10:00:00Z", now)).toBe("2h");
+    expect(age("2026-07-26T12:00:00Z", now)).toBe("3d");
+    expect(age(undefined, now)).toBe("");
+    expect(age("garbage", now)).toBe("");
+  });
+
+  it("repoTint is deterministic per slug", async () => {
+    const { repoTint } = await import("./mission");
+    expect(repoTint("acme-api")).toBe(repoTint("acme-api"));
+    expect(repoTint("acme-api")).toMatch(/^hsl\(\d+ 45% 55%\)$/);
+    expect(repoTint("acme-api")).not.toBe(repoTint("acme-web"));
+  });
+});

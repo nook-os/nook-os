@@ -358,3 +358,27 @@ export function saveCollapsed(ids: Set<string>): void {
     // Storage unavailable: collapse state just won't persist.
   }
 }
+
+// ── Context bits ─────────────────────────────────────────────────────────────
+
+/** Compact relative age: "now", "5m", "2h", "3d". Empty for missing input, so
+ *  a fixture without timestamps renders nothing rather than crashing. */
+export function age(iso: string | null | undefined, now = Date.now()): string {
+  if (!iso) return "";
+  const t = Date.parse(iso);
+  if (Number.isNaN(t)) return "";
+  const s = Math.max(0, Math.floor((now - t) / 1000));
+  if (s < 60) return "now";
+  if (s < 3600) return `${Math.floor(s / 60)}m`;
+  if (s < 86400) return `${Math.floor(s / 3600)}h`;
+  return `${Math.floor(s / 86400)}d`;
+}
+
+/** A stable identity color per repo, hashed from its slug — the same hue in
+ *  every view, so "the teal one" means the same repo everywhere. Muted
+ *  saturation/lightness to sit inside the console palette. */
+export function repoTint(slug: string): string {
+  let h = 0;
+  for (let i = 0; i < slug.length; i++) h = (h * 31 + slug.charCodeAt(i)) >>> 0;
+  return `hsl(${h % 360} 45% 55%)`;
+}

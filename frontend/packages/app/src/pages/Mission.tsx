@@ -25,6 +25,7 @@ import {
   type ContextMenuItem,
 } from "../contextMenu";
 import {
+  age,
   canAddWorktree,
   canOpenTerminal,
   deckStats,
@@ -37,6 +38,7 @@ import {
   matrixData,
   overlayLive,
   repoRollup,
+  repoTint,
   saveCollapsed,
   saveView,
   visibleRepos,
@@ -397,8 +399,8 @@ export function MissionPage() {
                   </span>
                 </div>
                 <div className="m-card-body">
-                  {g.entries.map(({ workspace, checkout: c }) => (
-                    <div key={c.id} className="m-co">
+                  {g.entries.map(({ workspace, checkout: c }, i) => (
+                    <div key={c.id} className={`m-co${i % 2 ? " alt" : ""}`}>
                       <CheckoutRow
                         c={c}
                         ws={workspace}
@@ -408,6 +410,10 @@ export function MissionPage() {
                             className="m-co-repo bright"
                             to={`/workspaces/${workspace.id}`}
                           >
+                            <span
+                              className="m-tint-dot"
+                              style={{ background: repoTint(workspace.slug) }}
+                            />
                             {workspace.name}
                           </Link>
                         }
@@ -534,7 +540,11 @@ function RepoSection({
   const nodes = groupCheckoutsByNode(checkouts);
   const roll = repoRollup(w);
   return (
-    <section className="m-repo" data-testid={`repo-${w.slug}`}>
+    <section
+      className="m-repo"
+      data-testid={`repo-${w.slug}`}
+      style={{ borderLeft: `2px solid ${repoTint(w.slug)}` }}
+    >
       <div
         className="m-repo-head"
         role="button"
@@ -592,8 +602,8 @@ function RepoSection({
               <span className="m-node-name">{n.nodeName}</span>
               {n.nodeStatus !== "online" && <Pill tone="err">offline</Pill>}
             </div>
-            {n.checkouts.map((c) => (
-              <div key={c.id} className="m-co">
+            {n.checkouts.map((c, i) => (
+              <div key={c.id} className={`m-co${i % 2 ? " alt" : ""}`}>
                 <CheckoutRow c={c} ws={w} actions={actions} />
                 {c.sessions.map((s) => (
                   <SessionRow
@@ -653,7 +663,11 @@ function GridCard({
   const { workspace: w, checkouts, hiddenGhosts } = r;
   const roll = repoRollup(w);
   return (
-    <section className="m-repo" data-testid={`card-${w.slug}`}>
+    <section
+      className="m-repo"
+      data-testid={`card-${w.slug}`}
+      style={{ borderLeft: `2px solid ${repoTint(w.slug)}` }}
+    >
       <div className="m-repo-head static">
         <FolderGit2 size={13} className="m-repo-icon" />
         <Link className="m-repo-name bright" to={`/workspaces/${w.id}`}>
@@ -667,8 +681,8 @@ function GridCard({
         </span>
       </div>
       <div className="m-card-body">
-        {checkouts.map((c) => (
-          <div key={c.id} className="m-co">
+        {checkouts.map((c, i) => (
+          <div key={c.id} className={`m-co${i % 2 ? " alt" : ""}`}>
             <CheckoutRow
               c={c}
               ws={w}
@@ -729,6 +743,10 @@ function MatrixView({
             <tr key={row.workspace.id}>
               <td>
                 <Link className="bright" to={`/workspaces/${row.workspace.id}`}>
+                  <span
+                    className="m-tint-dot"
+                    style={{ background: repoTint(row.workspace.slug) }}
+                  />
                   {row.workspace.name}
                 </Link>
               </td>
@@ -821,6 +839,14 @@ function SessionRow({
       <Pill tone="accent">{s.runtime}</Pill>
       {s.status !== "running" && (
         <Pill tone={statusTone(s.status)}>{s.status}</Pill>
+      )}
+      {age(s.created_at) && (
+        <span
+          className="m-sess-age"
+          title={new Date(s.created_at).toLocaleString()}
+        >
+          {age(s.created_at)}
+        </span>
       )}
       {s.created_by && meId && s.created_by !== meId && (
         <span className="m-sess-owner" title="started by a teammate">

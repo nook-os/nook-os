@@ -5004,3 +5004,30 @@ a.toast-main:hover .toast-title { text-decoration: underline; }
 /* The ⋯ row menu trigger stays quiet until the row is alive under the pointer. */
 .m-row-menu { color: var(--nook-fg-dim); }
 .m-row-menu:hover { color: var(--nook-fg-bright); }
+
+/* Context bits: zebra bands tie a checkout to its sessions and alternate for
+   scan rhythm; sticky repo headers keep orientation on long lists; the tint
+   edge/dot is a repo's stable identity color across every view. */
+.m-co.alt { background: color-mix(in srgb, var(--nook-fg) 4%, transparent); border-radius: 3px; }
+.m-repo { overflow: visible; }
+.m-repo-head {
+  position: sticky;
+  top: -8px; /* cancels the panel-body inset so headers pin flush */
+  z-index: 2;
+  border-radius: var(--nook-radius) var(--nook-radius) 0 0;
+}
+.m-repo-head.static { position: static; }
+.m-sess-age {
+  font-family: var(--nook-font-mono);
+  font-size: 10px;
+  color: var(--nook-fg-faint);
+  flex: none;
+}
+.m-tint-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  margin-right: 5px;
+  vertical-align: middle;
+}
