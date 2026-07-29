@@ -1,6 +1,6 @@
 use axum::extract::{Path, State};
 use axum::Json;
-use nook_db::{Postgres, TypeMapping};
+use nook_db::{params, Db, Postgres, TypeMapping};
 use nook_types::*;
 
 use crate::auth::AuthCtx;
@@ -56,19 +56,19 @@ pub async fn update(
     Path(id): Path<NoteId>,
     Json(req): Json<UpdateNoteRequest>,
 ) -> ApiResult<Json<Note>> {
-    let note: Option<Note> = sqlx::query_as(&format!(
-        "UPDATE notes SET
+    let note: Option<Note> = state
+        .db
+        .query_opt::<Note>(
+            &format!(
+                "UPDATE notes SET
             title = COALESCE($3, title),
             content_md = COALESCE($4, content_md),
             updated_at = {}
          WHERE id = $1 AND tenant_id = $2 RETURNING *",
-        Postgres.now()
-    ))
-    .bind(id)
-    .bind(auth.tenant_id)
-    .bind(&req.title)
-    .bind(&req.content_md)
-    .fetch_optional(&state.db)
-    .await?;
+                Postgres.now()
+            ),
+            params![id, auth.tenant_id, req.title, req.content_md],
+        )
+        .await?;
     note.map(Json).ok_or(ApiError::NotFound)
 }

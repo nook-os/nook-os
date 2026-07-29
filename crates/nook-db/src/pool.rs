@@ -119,6 +119,13 @@ into_db_value! {
     &[i64] => |v| DbValue::I64List(v.to_vec()),
 }
 
+// Lifetime-carrying reference conversions the `$t:ty` macro can't express.
+impl IntoDbValue for Option<&str> {
+    fn into_db_value(self) -> DbValue {
+        DbValue::Text(self.map(str::to_owned))
+    }
+}
+
 /// Build a `Vec<DbValue>` from a heterogeneous parameter list, in bind order.
 ///
 /// ```ignore

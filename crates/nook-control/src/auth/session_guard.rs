@@ -23,6 +23,7 @@
 //! If you are here to add "…unless the caller is an operator", the answer is
 //! no. That is the feature this file exists to prevent.
 
+use nook_db::{params, Db};
 use nook_types::TenantId;
 
 use crate::auth::{AuthCtx, Principal};
@@ -57,15 +58,15 @@ impl AuthCtx {
 
         // Explicit membership. This query is the entire authorization surface
         // for session content — `role_bindings` is deliberately not joined.
-        let member: Option<(bool,)> = sqlx::query_as(
-            "SELECT true FROM tenant_members
+        let member: Option<(bool,)> = state
+            .db
+            .query_opt(
+                "SELECT true FROM tenant_members
              WHERE tenant_id = $1 AND principal_type = 'user' AND principal_id = $2
              LIMIT 1",
-        )
-        .bind(tenant)
-        .bind(self.user_id.0)
-        .fetch_optional(&state.db)
-        .await?;
+                params![tenant, self.user_id.0],
+            )
+            .await?;
 
         if member.is_some() {
             Ok(())
