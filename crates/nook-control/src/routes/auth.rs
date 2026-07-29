@@ -764,8 +764,12 @@ mod tests {
             body.contains("UPDATE sessions_auth"),
             "switching is a move of the browser session's active tenant"
         );
+        // The guard is on the affected-row count of the UPDATE: `exec` returns
+        // rows-affected (MAIN-205's dispatch API), so a zero-row update — a
+        // credential with no `sessions_auth` row (a user token) — is caught by
+        // `res == 0` rather than being a silent no-op.
         assert!(
-            body.contains("rows_affected() == 0"),
+            body.contains("res == 0"),
             "a credential with no sessions_auth row (a user token) must be told \
              switching is browser-only, not silently no-op"
         );
