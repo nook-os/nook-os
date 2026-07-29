@@ -1,6 +1,6 @@
 use axum::extract::{Path, State};
 use axum::Json;
-use nook_db::{Postgres, TypeMapping};
+use nook_db::{params, Db, Postgres, TypeMapping};
 use nook_types::*;
 
 use crate::auth::AuthCtx;
@@ -33,17 +33,20 @@ pub async fn create(
         None => unique_key(&state, auth.tenant_id, &req.name).await?,
     };
 
-    let board: Board = sqlx::query_as(
-        "INSERT INTO boards (id, tenant_id, workspace_id, name, key, provider)
+    let board: Board = state
+        .db
+        .query_one(
+            "INSERT INTO boards (id, tenant_id, workspace_id, name, key, provider)
          VALUES ($1, $2, $3, $4, $5, 'local') RETURNING *",
-    )
-    .bind(BoardId::new())
-    .bind(auth.tenant_id)
-    .bind(req.workspace_id)
-    .bind(&req.name)
-    .bind(&key)
-    .fetch_one(&state.db)
-    .await?;
+            params![
+                BoardId::new(),
+                auth.tenant_id,
+                req.workspace_id.map(|w| w.0),
+                &req.name,
+                &key
+            ],
+        )
+        .await?;
 
     // Name AND type. A board whose columns have no types is one automation
     // cannot navigate — "move it to started" has nothing to resolve.
@@ -58,17 +61,14 @@ pub async fn create(
     .iter()
     .enumerate()
     {
-        let col: BoardColumn = sqlx::query_as(
-            "INSERT INTO board_columns (id, board_id, name, position, type)
+        let col: BoardColumn = state
+            .db
+            .query_one(
+                "INSERT INTO board_columns (id, board_id, name, position, type)
              VALUES ($1, $2, $3, $4, $5) RETURNING *",
-        )
-        .bind(ColumnId::new())
-        .bind(board.id)
-        .bind(name)
-        .bind(i as i32)
-        .bind(kind)
-        .fetch_one(&state.db)
-        .await?;
+                params![ColumnId::new(), board.id, *name, i as i32, *kind],
+            )
+            .await?;
         columns.push(col);
     }
 
@@ -229,10 +229,12 @@ pub async fn update_task(
     // Load the whole task so visibility is checked before any change: a private
     // card cannot be seen OR altered by anyone but its owner (MAIN-76 AC-5),
     // including a tenant admin — refused as NotFound, consistent with the read.
-    let existing: TaskItem = sqlx::query_as("SELECT * FROM tasks WHERE id = $1 AND tenant_id = $2")
-        .bind(id)
-        .bind(auth.tenant_id)
-        .fetch_optional(&state.db)
+    let existing: TaskItem = state
+        .db
+        .query_opt(
+            "SELECT * FROM tasks WHERE id = $1 AND tenant_id = $2",
+            params![id, auth.tenant_id],
+        )
         .await?
         .ok_or(ApiError::NotFound)?;
     if !crate::services::tasks::visible_to(&existing, auth.user_id) {
@@ -316,18 +318,19 @@ pub(crate) async fn set_archived(
     archive: bool,
 ) -> ApiResult<TaskItem> {
     let id = crate::services::tasks::resolve_id(&state.db, auth.tenant_id, ident).await?;
-    let task: TaskItem = sqlx::query_as(&format!(
-        "UPDATE tasks SET archived_at = CASE WHEN $3 THEN {now} ELSE NULL END,
+    let task: TaskItem = state
+        .db
+        .query_opt(
+            &format!(
+                "UPDATE tasks SET archived_at = CASE WHEN $3 THEN {now} ELSE NULL END,
                           updated_at = {now}
          WHERE id = $1 AND tenant_id = $2 RETURNING *",
-        now = Postgres.now()
-    ))
-    .bind(id)
-    .bind(auth.tenant_id)
-    .bind(archive)
-    .fetch_optional(&state.db)
-    .await?
-    .ok_or(ApiError::NotFound)?;
+                now = Postgres.now()
+            ),
+            params![id, auth.tenant_id, archive],
+        )
+        .await?
+        .ok_or(ApiError::NotFound)?;
 
     events::record(
         state,
@@ -393,36 +396,38 @@ pub async fn archive_completed_in_column(
 ) -> ApiResult<Json<nook_types::OpResponse>> {
     auth.require_user()?;
     // board_columns has no tenant_id; scope through its board.
-    let col: Option<(String,)> = sqlx::query_as(
-        "SELECT c.type FROM board_columns c
+    let col: Option<String> = state
+        .db
+        .query_scalar_opt(
+            "SELECT c.type FROM board_columns c
          JOIN boards b ON b.id = c.board_id
          WHERE c.id = $1 AND b.tenant_id = $2",
-    )
-    .bind(column_id)
-    .bind(auth.tenant_id)
-    .fetch_optional(&state.db)
-    .await?;
-    let (col_type,) = col.ok_or(ApiError::NotFound)?;
+            params![column_id, auth.tenant_id],
+        )
+        .await?;
+    let col_type = col.ok_or(ApiError::NotFound)?;
     if col_type != "completed" && col_type != "canceled" {
         return Err(ApiError::ForbiddenMsg(
             "bulk archive is only for completed or canceled columns".into(),
         ));
     }
 
-    let ids: Vec<(TaskId,)> = sqlx::query_as(&format!(
-        "UPDATE tasks SET archived_at = {now}, updated_at = {now}
+    let ids: Vec<TaskId> = state
+        .db
+        .query_scalar_all(
+            &format!(
+                "UPDATE tasks SET archived_at = {now}, updated_at = {now}
          WHERE column_id = $1 AND tenant_id = $2 AND archived_at IS NULL
          RETURNING id",
-        now = Postgres.now()
-    ))
-    .bind(column_id)
-    .bind(auth.tenant_id)
-    .fetch_all(&state.db)
-    .await?;
+                now = Postgres.now()
+            ),
+            params![column_id, auth.tenant_id],
+        )
+        .await?;
 
     // One TaskChanged per card so each disappears live; the board query
     // invalidation keys off any of them (AC-7).
-    for (id,) in &ids {
+    for id in &ids {
         state.registry.publish(
             auth.tenant_id,
             nook_proto::UiEvent::TaskChanged { task_id: *id },
@@ -454,12 +459,14 @@ pub async fn delete_task(
     Path(ident): Path<String>,
 ) -> ApiResult<axum::http::StatusCode> {
     let id = crate::services::tasks::resolve_id(&state.db, auth.tenant_id, &ident).await?;
-    let res = sqlx::query("DELETE FROM tasks WHERE id = $1 AND tenant_id = $2")
-        .bind(id)
-        .bind(auth.tenant_id)
-        .execute(&state.db)
+    let res = state
+        .db
+        .exec(
+            "DELETE FROM tasks WHERE id = $1 AND tenant_id = $2",
+            params![id, auth.tenant_id],
+        )
         .await?;
-    if res.rows_affected() == 0 {
+    if res == 0 {
         return Err(ApiError::NotFound);
     }
     Ok(axum::http::StatusCode::NO_CONTENT)
@@ -485,19 +492,18 @@ pub async fn update_board(
     if let Some(automation) = &req.automation {
         crate::services::triggers::validate(automation)?;
     }
-    let board: Option<Board> = sqlx::query_as(&format!(
-        "UPDATE boards SET name = $3, key = COALESCE($4, key),
+    let board: Option<Board> = state
+        .db
+        .query_opt(
+            &format!(
+                "UPDATE boards SET name = $3, key = COALESCE($4, key),
                            automation = COALESCE($5, automation), updated_at = {}
          WHERE id = $1 AND tenant_id = $2 RETURNING *",
-        Postgres.now()
-    ))
-    .bind(id)
-    .bind(auth.tenant_id)
-    .bind(&req.name)
-    .bind(&key)
-    .bind(&req.automation)
-    .fetch_optional(&state.db)
-    .await?;
+                Postgres.now()
+            ),
+            params![id, auth.tenant_id, &req.name, key, req.automation],
+        )
+        .await?;
     board.map(Json).ok_or(ApiError::NotFound)
 }
 
@@ -553,12 +559,13 @@ async fn unique_key(state: &AppState, tenant: TenantId, name: &str) -> ApiResult
         } else {
             format!("{base}{n}")
         };
-        let taken: Option<(uuid::Uuid,)> =
-            sqlx::query_as("SELECT id FROM boards WHERE tenant_id = $1 AND key = $2")
-                .bind(tenant)
-                .bind(&candidate)
-                .fetch_optional(&state.db)
-                .await?;
+        let taken: Option<uuid::Uuid> = state
+            .db
+            .query_scalar_opt(
+                "SELECT id FROM boards WHERE tenant_id = $1 AND key = $2",
+                params![tenant, &candidate],
+            )
+            .await?;
         if taken.is_none() {
             return Ok(candidate);
         }
@@ -636,12 +643,14 @@ pub async fn delete_board(
     auth: AuthCtx,
     Path(id): Path<BoardId>,
 ) -> ApiResult<axum::http::StatusCode> {
-    let res = sqlx::query("DELETE FROM boards WHERE id = $1 AND tenant_id = $2")
-        .bind(id)
-        .bind(auth.tenant_id)
-        .execute(&state.db)
+    let res = state
+        .db
+        .exec(
+            "DELETE FROM boards WHERE id = $1 AND tenant_id = $2",
+            params![id, auth.tenant_id],
+        )
         .await?;
-    if res.rows_affected() == 0 {
+    if res == 0 {
         return Err(ApiError::NotFound);
     }
     Ok(axum::http::StatusCode::NO_CONTENT)
@@ -659,30 +668,36 @@ pub async fn add_column(
     Json(req): Json<CreateColumnRequest>,
 ) -> ApiResult<Json<BoardColumn>> {
     // Tenant must own the board.
-    let owned: Option<(BoardId,)> =
-        sqlx::query_as("SELECT id FROM boards WHERE id = $1 AND tenant_id = $2")
-            .bind(board_id)
-            .bind(auth.tenant_id)
-            .fetch_optional(&state.db)
-            .await?;
+    let owned: Option<BoardId> = state
+        .db
+        .query_scalar_opt(
+            "SELECT id FROM boards WHERE id = $1 AND tenant_id = $2",
+            params![board_id, auth.tenant_id],
+        )
+        .await?;
     if owned.is_none() {
         return Err(ApiError::NotFound);
     }
-    let (max_pos,): (Option<i32>,) =
-        sqlx::query_as("SELECT max(position) FROM board_columns WHERE board_id = $1")
-            .bind(board_id)
-            .fetch_one(&state.db)
-            .await?;
-    let col: BoardColumn = sqlx::query_as(
-        "INSERT INTO board_columns (id, board_id, name, position)
+    let max_pos: Option<i32> = state
+        .db
+        .query_scalar(
+            "SELECT max(position) FROM board_columns WHERE board_id = $1",
+            params![board_id],
+        )
+        .await?;
+    let col: BoardColumn = state
+        .db
+        .query_one(
+            "INSERT INTO board_columns (id, board_id, name, position)
          VALUES ($1, $2, $3, $4) RETURNING *",
-    )
-    .bind(ColumnId::new())
-    .bind(board_id)
-    .bind(&req.name)
-    .bind(max_pos.unwrap_or(-1) + 1)
-    .fetch_one(&state.db)
-    .await?;
+            params![
+                ColumnId::new(),
+                board_id,
+                &req.name,
+                max_pos.unwrap_or(-1) + 1
+            ],
+        )
+        .await?;
     Ok(Json(col))
 }
 
@@ -698,19 +713,17 @@ pub async fn update_column(
     Json(req): Json<UpdateColumnRequest>,
 ) -> ApiResult<Json<BoardColumn>> {
     // Column must belong to a board the tenant owns.
-    let col: Option<BoardColumn> = sqlx::query_as(
-        "UPDATE board_columns SET
+    let col: Option<BoardColumn> = state
+        .db
+        .query_opt(
+            "UPDATE board_columns SET
             name = COALESCE($2, name),
             position = COALESCE($3, position)
          WHERE id = $1 AND board_id IN (SELECT id FROM boards WHERE tenant_id = $4)
          RETURNING *",
-    )
-    .bind(id)
-    .bind(&req.name)
-    .bind(req.position)
-    .bind(auth.tenant_id)
-    .fetch_optional(&state.db)
-    .await?;
+            params![id, req.name, req.position, auth.tenant_id],
+        )
+        .await?;
     col.map(Json).ok_or(ApiError::NotFound)
 }
 
@@ -724,15 +737,15 @@ pub async fn delete_column(
     Path(id): Path<ColumnId>,
 ) -> ApiResult<axum::http::StatusCode> {
     // Deleting a column cascades its tasks (schema ON DELETE CASCADE).
-    let res = sqlx::query(
-        "DELETE FROM board_columns
+    let res = state
+        .db
+        .exec(
+            "DELETE FROM board_columns
          WHERE id = $1 AND board_id IN (SELECT id FROM boards WHERE tenant_id = $2)",
-    )
-    .bind(id)
-    .bind(auth.tenant_id)
-    .execute(&state.db)
-    .await?;
-    if res.rows_affected() == 0 {
+            params![id, auth.tenant_id],
+        )
+        .await?;
+    if res == 0 {
         return Err(ApiError::NotFound);
     }
     Ok(axum::http::StatusCode::NO_CONTENT)
@@ -743,12 +756,13 @@ pub(crate) async fn provider_for_board(
     tenant: TenantId,
     board: BoardId,
 ) -> ApiResult<String> {
-    let (provider,): (String,) =
-        sqlx::query_as("SELECT provider FROM boards WHERE id = $1 AND tenant_id = $2")
-            .bind(board)
-            .bind(tenant)
-            .fetch_optional(&state.db)
-            .await?
-            .ok_or(ApiError::NotFound)?;
+    let provider: String = state
+        .db
+        .query_scalar_opt(
+            "SELECT provider FROM boards WHERE id = $1 AND tenant_id = $2",
+            params![board, tenant],
+        )
+        .await?
+        .ok_or(ApiError::NotFound)?;
     Ok(provider)
 }
