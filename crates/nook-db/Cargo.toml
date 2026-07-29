@@ -14,6 +14,8 @@ chrono = { workspace = true }
 serde_json = { workspace = true }
 # The boot-time migration runner (MAIN-224) shouts a WARN per orphan ledger row.
 tracing = { workspace = true }
+# The squash re-stamp (MAIN-235) refuses an unrecognised ledger with a reason.
+thiserror = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }

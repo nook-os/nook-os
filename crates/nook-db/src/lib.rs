@@ -43,6 +43,11 @@ pub use pool::{Db, DbTx, DbValue, EnginePool, IntoDbValue};
 /// [`migrate::run_with_dev_tolerance`], so they get identical treatment.
 pub mod migrate;
 
+/// Boot-time collapse of a pre-squash migration ledger (MAIN-235). The image
+/// that ships a squash performs its own re-stamp, so the ordering that caused
+/// the documented prod near-miss cannot be gotten wrong by an operator.
+pub mod restamp;
+
 use std::fmt;
 
 /// The database engine, selected from the `DATABASE_URL` scheme (MAIN-195). This

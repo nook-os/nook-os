@@ -36,3 +36,9 @@ pub use state::AppState;
 // 0025_checkout_kind_and_session_checkout, 0026_workspace_git_remote_url,
 // 0027_task_checkout_id.
 pub static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
+
+/// The squash manifest shipped alongside those migrations (MAIN-235): which
+/// pre-squash ledger the canonical `0001` replaced, so a database carrying that
+/// ledger re-stamps itself at boot instead of failing on 28 "missing" versions.
+/// A file with no `new` line means this build ships no squash.
+pub static SQUASH_MANIFEST: &str = include_str!("../migrations/squash-manifest.txt");

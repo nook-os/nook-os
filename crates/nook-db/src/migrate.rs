@@ -92,3 +92,67 @@ pub async fn orphan_versions(migrator: &Migrator, pool: &PgPool) -> Result<Vec<i
         .filter(|v| !migrator.version_exists(*v))
         .collect())
 }
+
+/// The one boot-time database step both services run: collapse a pre-squash
+/// ledger if this build ships a squash (MAIN-235), then migrate with MAIN-224's
+/// dev tolerance.
+///
+/// The two halves belong together because their failure modes interact. A
+/// database still carrying the pre-squash ledger looks, to the migrator, exactly
+/// like a database with 28 orphan rows — and dev tolerance would happily boot
+/// past it, leaving the ledger permanently wrong. Doing the re-stamp first means
+/// tolerance only ever sees what it is actually for: a stray row from someone's
+/// unmerged branch.
+///
+/// `manifest_text` is the crate's embedded `squash-manifest.txt`. A file with no
+/// `new` line means "this build ships no squash" and the whole step is skipped,
+/// so carrying a placeholder costs nothing.
+///
+/// The dev/prod split is the same one MAIN-224 established, applied to the new
+/// failure: an unrecognised ledger is **fatal in production** — we will not boot
+/// a control plane whose schema history we cannot account for — and in dev it is
+/// a loud WARN, because there the overwhelmingly likely cause is a branch's
+/// stray migration, and tolerance already knows how to carry that boot.
+pub async fn run_boot_migrations(
+    migrator: &Migrator,
+    pool: &PgPool,
+    is_production: bool,
+    manifest_text: &str,
+) -> Result<(), BootMigrateError> {
+    let manifest = crate::restamp::parse_manifest(manifest_text);
+
+    match crate::restamp::restamp(pool, manifest.as_ref(), "_sqlx_migrations").await {
+        Ok(crate::restamp::Restamp::Collapsed { replaced }) => {
+            tracing::info!(
+                replaced,
+                "collapsed this database's pre-squash migration ledger to the single \
+                 canonical row (MAIN-235). This runs once; later boots are a no-op."
+            );
+        }
+        Ok(_) => {}
+        Err(e) => {
+            if is_production {
+                return Err(BootMigrateError::Restamp(e));
+            }
+            tracing::warn!(
+                error = %e,
+                "the squash re-stamp did not recognise this database's ledger and left \
+                 it untouched. Proceeding (dev only; production refuses to boot here)."
+            );
+        }
+    }
+
+    run_with_dev_tolerance(migrator, pool, is_production)
+        .await
+        .map_err(BootMigrateError::Migrate)
+}
+
+/// Why a boot's database step failed. Split so the caller's log says whether the
+/// schema or the ledger was the problem — they need different fixes.
+#[derive(Debug, thiserror::Error)]
+pub enum BootMigrateError {
+    #[error(transparent)]
+    Migrate(#[from] MigrateError),
+    #[error(transparent)]
+    Restamp(#[from] crate::restamp::RestampError),
+}

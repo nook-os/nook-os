@@ -39,6 +39,9 @@ use uuid::Uuid;
 /// 0007_chat_read_cursors.
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
+/// Chat's squash manifest (MAIN-235); see `nook_control::SQUASH_MANIFEST`.
+static SQUASH_MANIFEST: &str = include_str!("../migrations/squash-manifest.txt");
+
 #[derive(Clone)]
 pub(crate) struct AppState {
     pub(crate) db: DbPool,
@@ -88,7 +91,10 @@ async fn main() -> anyhow::Result<()> {
     // Dev tolerates a chat ledger ahead of this checkout (warns + proceeds);
     // production stays strictly fatal (MAIN-224). The pool's search_path pins
     // `chat` first, so the orphan check reads `chat._sqlx_migrations`.
-    nook_db::migrate::run_with_dev_tolerance(&MIGRATOR, db.pg(), cfg.is_production()).await?;
+    // Chat's own squash manifest and its own ledger — the search_path keeps
+    // both in the `chat` schema (MAIN-235).
+    nook_db::migrate::run_boot_migrations(&MIGRATOR, db.pg(), cfg.is_production(), SQUASH_MANIFEST)
+        .await?;
 
     // Live fan-out: a local per-channel broadcast registry, plus a cross-instance
     // bus (nook-db's event-bus seam — Postgres LISTEN/NOTIFY under the hood) so a
