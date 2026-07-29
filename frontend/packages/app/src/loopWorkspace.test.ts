@@ -66,9 +66,12 @@ describe("looksLikeDraft", () => {
 describe("filedKeys", () => {
   const line = (content: string) => ({ content });
 
-  it("collects board keys in first-mention order, deduped", () => {
+  it("collects this board's keys in first-mention order, deduped", () => {
     expect(
-      filedKeys([line("Filed MAIN-42."), line("and MAIN-43"), line("MAIN-42 again")]),
+      filedKeys(
+        [line("Filed MAIN-42."), line("and MAIN-43"), line("MAIN-42 again")],
+        "MAIN-7",
+      ),
     ).toEqual(["MAIN-42", "MAIN-43"]);
   });
 
@@ -78,12 +81,40 @@ describe("filedKeys", () => {
     ]);
   });
 
+  // The defect this closes: a drafted spec is FULL of AC-N/NG-N, so an
+  // unanchored "uppercase word dash digits" match turned every draft into a
+  // header of links to tickets that do not exist.
+  it("never offers a draft's AC-N / NG-N tags, or other dashed tokens", () => {
+    const draft = line(
+      "## Acceptance Criteria\n- [ ] AC-1 — x\n- [ ] AC-2 — y\n" +
+        "## Non-goals\n- NG-1 — z\nencode as UTF-8, hash with SHA-256",
+    );
+    expect(filedKeys([draft], "MAIN-7")).toEqual([]);
+    // …and a real key in the same draft still comes through.
+    expect(
+      filedKeys([draft, line("Filed MAIN-88 under the epic.")], "MAIN-7"),
+    ).toEqual(["MAIN-88"]);
+  });
+
+  it("ignores another board's keys — this run cannot have filed there", () => {
+    expect(filedKeys([line("see OTHER-3 and MAIN-4")], "MAIN-7")).toEqual([
+      "MAIN-4",
+    ]);
+  });
+
+  it("offers nothing without a usable self key — no prefix to trust", () => {
+    expect(filedKeys([line("Filed MAIN-42.")], null)).toEqual([]);
+    expect(filedKeys([line("Filed MAIN-42.")], "not-a-key")).toEqual([]);
+  });
+
   it("ignores lowercase words and bare numbers", () => {
-    expect(filedKeys([line("see main-1 and issue 42 and PR #7")])).toEqual([]);
+    expect(filedKeys([line("see main-1 and issue 42 and PR #7")], "MAIN-7")).toEqual(
+      [],
+    );
   });
 
   it("is empty for an absent transcript", () => {
-    expect(filedKeys(undefined)).toEqual([]);
-    expect(filedKeys(null)).toEqual([]);
+    expect(filedKeys(undefined, "MAIN-7")).toEqual([]);
+    expect(filedKeys(null, "MAIN-7")).toEqual([]);
   });
 });

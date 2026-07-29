@@ -12,7 +12,12 @@ import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
-const TASK = "MAIN-42";
+// The route param the board menu uses is the KEY; the uuid is what interaction
+// rows carry and what `live.ts` invalidates. Keeping them DIFFERENT here is the
+// point: identical values masked a defect where the page keyed on the key and
+// so never rendered asks or heard the live events.
+const TASK_KEY = "MAIN-42";
+const TASK_ID = "019fafd1-7667-70a3-9cdd-84f8f5a561b5";
 
 const state = vi.hoisted(() => ({
   jobs: [] as unknown[],
@@ -30,7 +35,9 @@ vi.mock("@nookos/api", () => ({
       if (path === "/api/v1/interactions") return { data: state.pending };
       if (path === "/api/v1/tasks/{id}")
         return {
-          data: { task: { id: TASK, key: TASK, title: "Seed and steer", type: "task" } },
+          data: {
+            task: { id: TASK_ID, key: TASK_KEY, title: "Seed and steer", type: "task" },
+          },
         };
       return { data: null };
     }),
@@ -57,7 +64,7 @@ function job(over: Record<string, unknown> = {}) {
     id: "job-1",
     kind: "spec",
     state: "running",
-    target_task_id: TASK,
+    target_task_id: TASK_ID,
     tenant_id: "t",
     requested_by: "u",
     seed: null,
@@ -94,7 +101,7 @@ function withJob(over: Record<string, unknown> = {}, transcript: unknown[] = [])
 function renderPage() {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const utils = render(
-    <MemoryRouter initialEntries={[`/loop/${TASK}`]}>
+    <MemoryRouter initialEntries={[`/loop/${TASK_KEY}`]}>
       <QueryClientProvider client={qc}>
         <Routes>
           <Route path="/loop/:taskId" element={<LoopPage />} />
@@ -125,7 +132,7 @@ describe("Loop workspace (MAIN-233)", () => {
     expect(post).toHaveBeenCalledWith("/api/v1/jobs", {
       body: {
         kind: "spec",
-        target_task_id: TASK,
+        target_task_id: TASK_ID,
         seed: "focus on the migration path",
       },
     });
@@ -138,7 +145,7 @@ describe("Loop workspace (MAIN-233)", () => {
 
     await waitFor(() => expect(post).toHaveBeenCalled());
     expect(post).toHaveBeenCalledWith("/api/v1/jobs", {
-      body: { kind: "spec", target_task_id: TASK },
+      body: { kind: "spec", target_task_id: TASK_ID },
     });
   });
 
@@ -150,7 +157,9 @@ describe("Loop workspace (MAIN-233)", () => {
       if (path === "/api/v1/jobs/{id}") return { data: state.detail };
       if (path === "/api/v1/interactions") return { data: state.pending };
       if (path === "/api/v1/tasks/{id}")
-        return { data: { task: { id: TASK, key: TASK, title: "An epic", type: "epic" } } };
+        return {
+          data: { task: { id: TASK_ID, key: TASK_KEY, title: "An epic", type: "epic" } },
+        };
       return { data: null };
     });
     renderPage();
@@ -185,7 +194,7 @@ describe("Loop workspace (MAIN-233)", () => {
     state.pending = [
       {
         id: "ixn-1",
-        task_id: TASK,
+        task_id: TASK_ID,
         job_id: "job-1",
         prompt: "Postgres or Redis?",
         choices: ["Postgres", "Redis"],
@@ -213,7 +222,10 @@ describe("Loop workspace (MAIN-233)", () => {
         content:
           "## Problem\n\nNo composer.\n\n## Acceptance Criteria\n\n- [ ] AC-1 — a box\n",
       }),
-      line({ source: "system", content: "Filed MAIN-99 — the composer." }),
+      line({
+        source: "system",
+        content: "Filed MAIN-99 — the composer. NG-1 held; encoded as UTF-8.",
+      }),
     ]);
     renderPage();
 
@@ -226,7 +238,27 @@ describe("Loop workspace (MAIN-233)", () => {
     // The filed ticket is a link back; the job's own target is not offered.
     const filed = screen.getByTitle("open MAIN-99");
     expect(filed.getAttribute("href")).toBe("/board?task=MAIN-99");
-    expect(screen.queryByTitle(`open ${TASK}`)).toBeNull();
+    expect(screen.queryByTitle(`open ${TASK_KEY}`)).toBeNull();
+    // …and the draft's own AC-N / NG-N tags are not mistaken for tickets.
+    expect(screen.queryByTitle("open AC-1")).toBeNull();
+    expect(screen.queryByTitle("open NG-1")).toBeNull();
+  });
+
+  // Both halves of the uuid-vs-key fix, on the board menu's entry path (the
+  // route param here is the KEY). The asks test above already proves the
+  // filter; this proves the JOBS list is keyed on the uuid, which is what
+  // `job_changed` invalidates and what the composer's mode is derived from.
+  it("hears a live job_changed on the uuid key, even when routed by board key", async () => {
+    withJob({ state: "running" }, []);
+    const { qc } = renderPage();
+    expect(await screen.findByTestId("composer-steer")).toBeTruthy();
+
+    // The run finishes. `live.ts` invalidates by UUID — never by key.
+    withJob({ state: "completed" }, [line({ source: "system", content: "done" })]);
+    qc.invalidateQueries({ queryKey: ["task", TASK_ID, "jobs"] });
+
+    // The composer notices, because the list it reads is keyed the same way.
+    expect(await screen.findByTestId("composer-readonly")).toBeTruthy();
   });
 
   it("repaints when the live event invalidates the job — no reload", async () => {

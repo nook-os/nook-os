@@ -57,13 +57,20 @@ function useTask(taskId: string) {
 }
 
 /** This ticket's pending asks. The same list the top bar reads, filtered here —
- *  so answering in either place resolves the one row (MAIN-159). */
-function useAsks(taskId: string) {
+ *  so answering in either place resolves the one row (MAIN-159).
+ *
+ *  `id` MUST be the ticket's uuid, not the route param: `Interaction.task_id` is
+ *  a uuid, and `live.ts` invalidates `["interactions", "task", <uuid>]`. Keyed
+ *  or filtered on a board key, this renders nothing and never refreshes — which
+ *  is exactly what the board-menu entry path did. `undefined` until the ticket
+ *  resolves, which also holds the query. */
+function useAsks(id: string | undefined) {
   const { data } = useQuery({
-    queryKey: ["interactions", "task", taskId],
+    queryKey: ["interactions", "task", id ?? "unresolved"],
     queryFn: async () => (await api.GET("/api/v1/interactions")).data ?? [],
+    enabled: !!id,
   });
-  return (data ?? []).filter((i) => i.task_id === taskId);
+  return (data ?? []).filter((i) => i.task_id === id);
 }
 
 /**
@@ -257,14 +264,21 @@ function ClosedComposer({
 
 /** The full-page Loop workspace. */
 export function LoopPage() {
-  const { taskId = "" } = useParams();
+  // The route param is whatever the caller had — the board menu navigates by
+  // KEY, the modal by uuid, and both are legal (the server resolves either).
+  // Everything downstream keys on the resolved UUID, because that is what the
+  // interaction rows carry and what `live.ts` invalidates: keyed on a board key,
+  // the asks never match and the jobs list never hears `job_changed`, so the
+  // composer sits in a stale mode. Resolve first, then key on `id`.
+  const { taskId: routeParam = "" } = useParams();
   const qc = useQueryClient();
-  const { data: task } = useTask(taskId);
+  const { data: task } = useTask(routeParam);
+  const taskId = task?.id;
   const asks = useAsks(taskId);
 
   const { data: jobs, isLoading } = useQuery({
-    queryKey: taskJobsKey(taskId),
-    queryFn: () => fetchTaskJobs(taskId),
+    queryKey: taskJobsKey(taskId ?? "unresolved"),
+    queryFn: () => fetchTaskJobs(taskId!),
     enabled: !!taskId,
   });
 
@@ -287,7 +301,7 @@ export function LoopPage() {
         params: { path: { id: latest!.id } },
       }),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: taskJobsKey(taskId) });
+      if (taskId) qc.invalidateQueries({ queryKey: taskJobsKey(taskId) });
       if (latest) qc.invalidateQueries({ queryKey: jobKey(latest.id) });
     },
   });
@@ -315,7 +329,7 @@ export function LoopPage() {
           <ArrowLeft size={12} /> Board
         </Link>
         <div className="lw-title">
-          <span className="lw-key">{task?.key ?? taskId}</span>
+          <span className="lw-key">{task?.key ?? routeParam}</span>
           <span className="lw-task-title">{task?.title ?? ""}</span>
         </div>
         {meta && (
@@ -390,13 +404,13 @@ export function LoopPage() {
       </div>
 
       <div className="lw-foot">
-        {mode === "seed" && (
+        {taskId && mode === "seed" && (
           <SeedComposer taskId={taskId} taskType={task?.type} jobs={jobs} />
         )}
-        {mode === "steer" && latest && (
+        {taskId && mode === "steer" && latest && (
           <MessageComposer taskId={taskId} jobId={latest.id} />
         )}
-        {mode === "readonly" && latest && (
+        {taskId && mode === "readonly" && latest && (
           <ClosedComposer taskId={taskId} job={latest} />
         )}
       </div>

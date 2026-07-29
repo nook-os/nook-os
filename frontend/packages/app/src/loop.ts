@@ -159,20 +159,35 @@ export function looksLikeDraft(content: string): boolean {
   );
 }
 
-/** Board keys (`MAIN-42`) named anywhere in a job's transcript — what the run
- *  filed, so the page can link back to it (AC-4). Deduped, in first-mention
- *  order, with the job's own target excluded: a spec job always names the
- *  ticket it is speccing, and offering that as "what it filed" would be a lie. */
+/**
+ * Board keys named anywhere in a job's transcript — what the run filed, so the
+ * page can link back to it (AC-4). Deduped, in first-mention order.
+ *
+ * Matching is anchored to `selfKey`'s OWN board prefix, and that is the whole
+ * design. "Uppercase word, dash, digits" is not a board key — it is also
+ * `AC-1`, `NG-2`, `UTF-8`, `SHA-256`. A drafted spec contains `AC-N` and `NG-N`
+ * lines *by definition*, so the unanchored form turned every draft into a
+ * header full of links to tickets that do not exist. Only keys on this ticket's
+ * board can be things this run filed, so only those are offered.
+ *
+ * `selfKey` is also the exclusion: a spec job always names the ticket it is
+ * speccing, and offering that as "what it filed" would be a lie. Without a
+ * usable `selfKey` there is no prefix to trust, so nothing is offered — an
+ * empty header beats a wrong link.
+ */
 export function filedKeys(
   transcript: { content: string }[] | null | undefined,
-  exclude?: string | null,
+  selfKey?: string | null,
 ): string[] {
+  const prefix = /^([A-Z][A-Z0-9]{0,9})-\d+$/.exec(selfKey ?? "")?.[1];
+  if (!prefix) return [];
+  const re = new RegExp(`\\b${prefix}-\\d+\\b`, "g");
   const seen = new Set<string>();
   const out: string[] = [];
   for (const line of transcript ?? []) {
-    for (const m of stripAnsi(line.content).matchAll(/\b[A-Z][A-Z0-9]{1,9}-\d+\b/g)) {
+    for (const m of stripAnsi(line.content).matchAll(re)) {
       const key = m[0];
-      if (key === exclude || seen.has(key)) continue;
+      if (key === selfKey || seen.has(key)) continue;
       seen.add(key);
       out.push(key);
     }
