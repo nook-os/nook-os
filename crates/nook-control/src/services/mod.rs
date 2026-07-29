@@ -18,3 +18,4 @@ pub mod secrets;
 pub mod tasks;
 pub mod taskwork;
 pub mod triggers;
+pub mod workspace_reaper;

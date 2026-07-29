@@ -90,7 +90,8 @@ pub async fn pick(
         let hosts: Vec<(NodeId,)> = state
             .db
             .query_all(
-                "SELECT DISTINCT node_id FROM node_workspaces WHERE tenant_id = $1 AND workspace_id = $2",
+                "SELECT DISTINCT node_id FROM node_workspaces
+                 WHERE tenant_id = $1 AND workspace_id = $2 AND missing_at IS NULL",
                 params![tenant, ws],
             )
             .await?;

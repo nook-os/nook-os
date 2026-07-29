@@ -104,15 +104,20 @@ pub async fn reconcile(
                         .await?;
                 }
                 if let Some((_, repo)) = d.name.split_once('/') {
+                    // MAIN-220 AC-4: relabel the display name only — the slug is
+                    // stable after creation. Rewriting the slug on a bare-name
+                    // match broke every client holding the old slug mid-scan, and
+                    // could collide with the unique-slug constraint and abort the
+                    // whole reconcile. The name may still be qualified in place.
                     state
                         .db
                         .exec(
                             &format!(
-                                "UPDATE workspaces SET name = $2, slug = $3, updated_at = {}
-                         WHERE id = $1 AND name = $4",
+                                "UPDATE workspaces SET name = $2, updated_at = {}
+                         WHERE id = $1 AND name = $3",
                                 Postgres.now()
                             ),
-                            params![id, &d.name, slugify(&d.name), repo],
+                            params![id, &d.name, repo],
                         )
                         .await?;
                 }
@@ -163,6 +168,7 @@ pub async fn reconcile(
                git_remote_normalized = EXCLUDED.git_remote_normalized,
                git_branch = EXCLUDED.git_branch,
                git_status = EXCLUDED.git_status,
+               missing_at = NULL,
                last_scanned_at = {}",
                     Postgres.now()
                 ),
@@ -196,11 +202,30 @@ pub async fn reconcile(
         }
     }
 
-    // Checkouts that disappeared from this node.
+    // Checkouts that disappeared from this node are TOMBSTONED, never deleted
+    // (MAIN-220). Mark newly-missing rows with the moment they went missing, and
+    // leave already-missing rows' timestamps alone (`missing_at IS NULL` guard)
+    // so the retention clock does not reset on every scan. A later re-report
+    // heals the row above (missing_at = NULL, SAME id); hard deletion is the
+    // retention sweep's job.
+    if reported_paths.is_empty() {
+        // An empty report — an unmounted root, or a scan that panicked into
+        // `unwrap_or_default()` — vacuously matches every row. Marking instead
+        // of deleting makes that recoverable, but it is still worth shouting
+        // about: zero checkouts is almost always a scan fault, not reality.
+        tracing::warn!(
+            %node_id,
+            "node reported zero checkouts — marking all of its checkouts missing (not deleting)"
+        );
+    }
     state
         .db
         .exec(
-            "DELETE FROM node_workspaces WHERE node_id = $1 AND path != ALL($2)",
+            &format!(
+                "UPDATE node_workspaces SET missing_at = {}
+                 WHERE node_id = $1 AND path != ALL($2) AND missing_at IS NULL",
+                Postgres.now()
+            ),
             params![node_id, reported_paths],
         )
         .await?;

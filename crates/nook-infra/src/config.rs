@@ -212,6 +212,15 @@ pub struct Config {
     /// before the reaper fails a job it was running (MAIN-164), so a dead
     /// operator container cannot strand work forever. Default 180.
     pub job_reap_grace_secs: u64,
+
+    // ── Workspace discovery ─────────────────────────────────────────────
+    /// How many seconds a checkout may stay tombstoned (`node_workspaces
+    /// .missing_at`) before the retention sweep hard-deletes it (MAIN-220). A
+    /// node that stops reporting a checkout no longer erases it immediately;
+    /// the row is marked missing and only reaped after this window, so a
+    /// transient unmount or a moved directory heals with its id intact. Default
+    /// 604800 (7 days).
+    pub workspace_missing_retention_secs: u64,
 }
 
 /// Parse one entry of `NOOK_TRUSTED_PROXIES`: a CIDR (`10.0.0.0/8`) or a bare
@@ -334,6 +343,10 @@ impl Config {
             job_reap_grace_secs: env_opt("NOOK_JOB_REAP_GRACE_SECS")
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(180),
+
+            workspace_missing_retention_secs: env_opt("NOOK_WORKSPACE_MISSING_RETENTION_SECS")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(604_800),
         };
 
         if cfg.is_production() && cfg.auth_dev_mode {
@@ -467,6 +480,7 @@ impl Config {
             mail_max_per_day: None,
             trusted_proxies: Vec::new(),
             job_reap_grace_secs: 180,
+            workspace_missing_retention_secs: 604_800,
         }
     }
 }

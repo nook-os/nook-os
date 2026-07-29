@@ -412,7 +412,7 @@ pub async fn restart(
                 .db
                 .query_opt(
                     "SELECT path FROM node_workspaces
-                 WHERE workspace_id = $1 AND node_id = $2
+                 WHERE workspace_id = $1 AND node_id = $2 AND missing_at IS NULL
                  ORDER BY discovered_at LIMIT 1",
                     params![workspace_id, session.node_id],
                 )

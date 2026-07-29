@@ -100,7 +100,8 @@ pub async fn wipe_ephemeral_for_session(state: &AppState, tenant: TenantId, sess
     let paths: Vec<(String,)> = state
         .db
         .query_all(
-            "SELECT path FROM node_workspaces WHERE workspace_id = $1 AND node_id = $2",
+            "SELECT path FROM node_workspaces
+             WHERE workspace_id = $1 AND node_id = $2 AND missing_at IS NULL",
             params![workspace_id, node_id],
         )
         .await
@@ -135,7 +136,8 @@ pub async fn push_one(
     let locations: Vec<(NodeId, String)> = state
         .db
         .query_all(
-            "SELECT node_id, path FROM node_workspaces WHERE tenant_id = $1 AND workspace_id = $2",
+            "SELECT node_id, path FROM node_workspaces
+             WHERE tenant_id = $1 AND workspace_id = $2 AND missing_at IS NULL",
             params![tenant, workspace],
         )
         .await
