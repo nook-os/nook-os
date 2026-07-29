@@ -8,6 +8,7 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::Json;
 use chrono::{DateTime, Utc};
+use nook_db::{params, Db};
 use nook_types::{ChatCategory, CreateChatCategory, ReorderChatCategories, UpdateChatCategory};
 use uuid::Uuid;
 
@@ -48,9 +49,11 @@ fn scope_with(bind: &str) -> String {
 
 /// The org a tenant belongs to (`tenants.org_id`).
 async fn org_of(db: &nook_db::DbPool, tenant: Uuid) -> Result<Uuid, ChatError> {
-    let (org,): (Uuid,) = sqlx::query_as("SELECT org_id FROM public.tenants WHERE id = $1")
-        .bind(tenant)
-        .fetch_one(db)
+    let org = db
+        .query_scalar::<Uuid>(
+            "SELECT org_id FROM public.tenants WHERE id = $1",
+            params![tenant],
+        )
         .await
         .map_err(|_| ChatError::Internal)?;
     Ok(org)
@@ -59,15 +62,17 @@ async fn org_of(db: &nook_db::DbPool, tenant: Uuid) -> Result<Uuid, ChatError> {
 /// A scope's categories in display order — the shared read behind the list
 /// endpoint and the reorder response.
 async fn scoped(db: &nook_db::DbPool, tenant: Uuid) -> Result<Vec<ChatCategory>, ChatError> {
-    let rows = sqlx::query_as::<_, CategoryRow>(&format!(
-        "SELECT {CATEGORY_COLS} FROM chat_channel_categories
+    let rows = db
+        .query_all::<CategoryRow>(
+            &format!(
+                "SELECT {CATEGORY_COLS} FROM chat_channel_categories
          WHERE {scope} ORDER BY position, created_at",
-        scope = scope_with("$1"),
-    ))
-    .bind(tenant)
-    .fetch_all(db)
-    .await
-    .map_err(|_| ChatError::Internal)?;
+                scope = scope_with("$1"),
+            ),
+            params![tenant],
+        )
+        .await
+        .map_err(|_| ChatError::Internal)?;
     Ok(rows.into_iter().map(Into::into).collect())
 }
 
@@ -100,26 +105,25 @@ pub async fn create(
         }
     };
     // Sort last: position = how many categories the scope already has.
-    let (count,): (i64,) = sqlx::query_as(
-        "SELECT count(*) FROM chat_channel_categories WHERE owner_type = $1 AND owner_id = $2",
-    )
-    .bind(owner_type)
-    .bind(owner_id)
-    .fetch_one(&state.db)
-    .await
-    .map_err(|_| ChatError::Internal)?;
-    let row = sqlx::query_as::<_, CategoryRow>(&format!(
-        "INSERT INTO chat_channel_categories (id, owner_type, owner_id, name, position)
+    let count = state
+        .db
+        .query_scalar::<i64>(
+            "SELECT count(*) FROM chat_channel_categories WHERE owner_type = $1 AND owner_id = $2",
+            params![owner_type, owner_id],
+        )
+        .await
+        .map_err(|_| ChatError::Internal)?;
+    let row = state
+        .db
+        .query_one::<CategoryRow>(
+            &format!(
+                "INSERT INTO chat_channel_categories (id, owner_type, owner_id, name, position)
          VALUES ($1, $2, $3, $4, $5) RETURNING {CATEGORY_COLS}"
-    ))
-    .bind(Uuid::now_v7())
-    .bind(owner_type)
-    .bind(owner_id)
-    .bind(name)
-    .bind(count as i32)
-    .fetch_one(&state.db)
-    .await
-    .map_err(|_| ChatError::Internal)?;
+            ),
+            params![Uuid::now_v7(), owner_type, owner_id, name, count as i32],
+        )
+        .await
+        .map_err(|_| ChatError::Internal)?;
     Ok((StatusCode::CREATED, Json(row.into())))
 }
 
@@ -138,18 +142,19 @@ pub async fn update(
             "a category name cannot be blank".into(),
         ));
     }
-    let row = sqlx::query_as::<_, CategoryRow>(&format!(
-        "UPDATE chat_channel_categories SET name = $2
+    let row = state
+        .db
+        .query_opt::<CategoryRow>(
+            &format!(
+                "UPDATE chat_channel_categories SET name = $2
          WHERE id = $1 AND {scope} RETURNING {CATEGORY_COLS}",
-        scope = scope_with("$3"),
-    ))
-    .bind(id)
-    .bind(name)
-    .bind(caller.tenant_id)
-    .fetch_optional(&state.db)
-    .await
-    .map_err(|_| ChatError::Internal)?
-    .ok_or(ChatError::NotFound)?;
+                scope = scope_with("$3"),
+            ),
+            params![id, name, caller.tenant_id],
+        )
+        .await
+        .map_err(|_| ChatError::Internal)?
+        .ok_or(ChatError::NotFound)?;
     Ok(Json(row.into()))
 }
 
@@ -161,16 +166,18 @@ pub async fn delete(
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode, ChatError> {
     crate::require_admin(&state.db, &caller).await?;
-    let res = sqlx::query(&format!(
-        "DELETE FROM chat_channel_categories WHERE id = $1 AND {scope}",
-        scope = scope_with("$2"),
-    ))
-    .bind(id)
-    .bind(caller.tenant_id)
-    .execute(&state.db)
-    .await
-    .map_err(|_| ChatError::Internal)?;
-    if res.rows_affected() == 0 {
+    let affected = state
+        .db
+        .exec(
+            &format!(
+                "DELETE FROM chat_channel_categories WHERE id = $1 AND {scope}",
+                scope = scope_with("$2"),
+            ),
+            params![id, caller.tenant_id],
+        )
+        .await
+        .map_err(|_| ChatError::Internal)?;
+    if affected == 0 {
         return Err(ChatError::NotFound);
     }
     Ok(StatusCode::NO_CONTENT)
@@ -186,16 +193,17 @@ pub async fn reorder(
 ) -> Result<Json<Vec<ChatCategory>>, ChatError> {
     crate::require_admin(&state.db, &caller).await?;
     for (i, id) in req.ordered_ids.iter().enumerate() {
-        sqlx::query(&format!(
-            "UPDATE chat_channel_categories SET position = $2 WHERE id = $1 AND {scope}",
-            scope = scope_with("$3"),
-        ))
-        .bind(id)
-        .bind(i as i32)
-        .bind(caller.tenant_id)
-        .execute(&state.db)
-        .await
-        .map_err(|_| ChatError::Internal)?;
+        state
+            .db
+            .exec(
+                &format!(
+                    "UPDATE chat_channel_categories SET position = $2 WHERE id = $1 AND {scope}",
+                    scope = scope_with("$3"),
+                ),
+                params![id, i as i32, caller.tenant_id],
+            )
+            .await
+            .map_err(|_| ChatError::Internal)?;
     }
     Ok(Json(scoped(&state.db, caller.tenant_id).await?))
 }
