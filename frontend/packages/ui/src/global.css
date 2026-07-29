@@ -4747,6 +4747,9 @@ a.toast-main:hover .toast-title { text-decoration: underline; }
    routine (clean, present, online, running) renders quiet; pills mean trouble.
    The lamps are the signature: dark cockpit until something needs you. */
 
+/* Breathing room for the whole panel: deck, tree and empty states alike. */
+.m-panel > .nook-panel-body { padding: 8px 10px; }
+
 .m-deck {
   display: flex;
   align-items: center;

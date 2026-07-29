@@ -163,6 +163,7 @@ export function MissionPage() {
       style={{ gridTemplateColumns: "1fr", gridTemplateRows: "1fr" }}
     >
       <Panel
+        className="m-panel"
         title="Mission Control"
         actions={
           <span
