@@ -13,8 +13,12 @@
 //! `nook_testkit::TestBed` (NG-4 — no test-suite changes).
 
 use axum::extract::{Query, State};
+use axum::Json;
+use axum_extra::extract::cookie::CookieJar;
 use nook_control::error::ApiError;
-use nook_control::routes::auth::{dev_accounts, purge_test_tenants, DevAccountsQuery};
+use nook_control::routes::auth::{
+    dev_accounts, dev_login, purge_test_tenants, DevAccountsQuery, DevLoginRequest,
+};
 use nook_control::services::identity::{login_identity, IdentityClaims, DEV_ISSUER};
 use nook_control::services::local_auth::{self, AuthMode};
 use nook_control::{AppState, Config};
@@ -101,6 +105,64 @@ async fn dev_issuer_signs_in_on_a_local_locked_tenant() {
         local_auth::mode_of(&bed.db(), t).await.unwrap(),
         Some(AuthMode::Local),
         "a dev sign-in must not relock or alter the tenant's mode"
+    );
+
+    bed.teardown().await;
+}
+
+/// The bug the operator hit in the browser: clicking a listed account POSTed
+/// dev-login (200, cookie set) but the very next /auth/me came back 403, because
+/// `resolve_session` refuses a session whose user has no `tenant_members` grant
+/// (a memberless session). Legacy accounts have none, so the dev hatch must
+/// ensure one — otherwise "click a name" never actually signs you in (AC-1).
+#[tokio::test]
+async fn dev_login_lands_a_usable_session_for_a_memberless_account() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let t = locked_local_tenant(&bed).await;
+    let email = format!("orphan-{}@example.test", Uuid::now_v7().simple());
+    let u = seed_user(&bed.pool, t, &email).await;
+
+    let member_count = |bed: &TestBed| {
+        let pool = bed.pool.clone();
+        async move {
+            let (n,): (i64,) = sqlx::query_as(
+                "SELECT count(*) FROM tenant_members
+                 WHERE tenant_id = $1 AND principal_type = 'user' AND principal_id = $2",
+            )
+            .bind(t)
+            .bind(u)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            n
+        }
+    };
+    assert_eq!(
+        member_count(&bed).await,
+        0,
+        "the account starts memberless — exactly the state whose session 403'd"
+    );
+
+    let state = bed.app_state().await;
+    dev_login(
+        State(state),
+        CookieJar::new(),
+        Json(DevLoginRequest {
+            email: Some(email),
+            display_name: None,
+        }),
+    )
+    .await
+    .expect("dev sign-in as an existing account must succeed");
+
+    // With a grant now present, resolve_session accepts the session — the app is
+    // actually reachable signed in, not bounced by /auth/me.
+    assert_eq!(
+        member_count(&bed).await,
+        1,
+        "the dev hatch ensures a membership so the created session resolves"
     );
 
     bed.teardown().await;

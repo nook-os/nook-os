@@ -331,11 +331,29 @@ pub async fn dev_login(
         .await?;
 
     if let Some((user_id, tenant_id)) = existing {
-        let session_id = create_auth_session(&state, user_id, tenant_id).await?;
         let user: nook_types::User = state
             .db
             .query_one("SELECT * FROM users WHERE id = $1", params![user_id])
             .await?;
+
+        // Land an ACTUALLY-usable session. `resolve_session` 403s a session whose
+        // user has no `tenant_members` grant on its tenant (a memberless session,
+        // MAIN-98) — and legacy accounts seeded before the membership model, or by
+        // the old shared-DB test path, have none. Without this, "click a name"
+        // sets a cookie and then bounces off /auth/me with 403 instead of signing
+        // you in (MAIN-221 AC-1). Dev-only (this whole handler is gated) and
+        // idempotent; it grants the user's own role, never elevating.
+        state
+            .db
+            .exec(
+                "INSERT INTO tenant_members (id, tenant_id, principal_type, principal_id, role)
+                 VALUES ($1, $2, 'user', $3, $4)
+                 ON CONFLICT (tenant_id, principal_type, principal_id) DO NOTHING",
+                params![uuid::Uuid::now_v7(), tenant_id, user_id, &user.role],
+            )
+            .await?;
+
+        let session_id = create_auth_session(&state, user_id, tenant_id).await?;
         let tenant: nook_types::Tenant = state
             .db
             .query_one("SELECT * FROM tenants WHERE id = $1", params![tenant_id])
