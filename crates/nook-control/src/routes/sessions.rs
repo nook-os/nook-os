@@ -1,6 +1,6 @@
 use axum::extract::{Path, Query, State};
 use axum::Json;
-use nook_db::{Postgres, TypeMapping};
+use nook_db::{params, Db, Postgres, TypeMapping};
 use nook_proto::{ControlToNode, UiEvent, WindowAction};
 use nook_types::*;
 use serde::Deserialize;
@@ -23,9 +23,9 @@ async fn session_for_content(
     auth: &AuthCtx,
     id: SessionId,
 ) -> ApiResult<Session> {
-    let session: Option<Session> = sqlx::query_as("SELECT * FROM sessions WHERE id = $1")
-        .bind(id)
-        .fetch_optional(&state.db)
+    let session: Option<Session> = state
+        .db
+        .query_opt("SELECT * FROM sessions WHERE id = $1", params![id])
         .await?;
     let session = session.ok_or(ApiError::NotFound)?;
     auth.require_session_access(state, session.tenant_id)
@@ -307,16 +307,17 @@ pub async fn update(
     if name.is_empty() {
         return Err(ApiError::BadRequest("name cannot be empty".into()));
     }
-    let session: Option<Session> = sqlx::query_as(&format!(
-        "UPDATE sessions SET name = $3, updated_at = {}
+    let session: Option<Session> = state
+        .db
+        .query_opt(
+            &format!(
+                "UPDATE sessions SET name = $3, updated_at = {}
          WHERE id = $1 AND tenant_id = $2 RETURNING *",
-        Postgres.now()
-    ))
-    .bind(id)
-    .bind(auth.tenant_id)
-    .bind(name)
-    .fetch_optional(&state.db)
-    .await?;
+                Postgres.now()
+            ),
+            params![id, auth.tenant_id, name],
+        )
+        .await?;
     let session = session.ok_or(ApiError::NotFound)?;
     // A node may only touch sessions running on itself.
     auth.require_node_self(session.node_id)?;
@@ -407,15 +408,15 @@ pub async fn restart(
             // Reuse the checkout the session was started in; fall back to any
             // checkout of its workspace on that node (the original may have
             // been pruned).
-            let path: Option<(String,)> = sqlx::query_as(
-                "SELECT path FROM node_workspaces
+            let path: Option<(String,)> = state
+                .db
+                .query_opt(
+                    "SELECT path FROM node_workspaces
                  WHERE workspace_id = $1 AND node_id = $2
                  ORDER BY discovered_at LIMIT 1",
-            )
-            .bind(workspace_id)
-            .bind(session.node_id)
-            .fetch_optional(&state.db)
-            .await?;
+                    params![workspace_id, session.node_id],
+                )
+                .await?;
             match path {
                 Some((p,)) => p,
                 None => {
@@ -441,15 +442,18 @@ pub async fn restart(
         return Err(ApiError::BadRequest("node went offline".into()));
     }
 
-    let session: Session = sqlx::query_as(&format!(
-        "UPDATE sessions SET status = 'starting', error = NULL, ended_at = NULL,
+    let session: Session = state
+        .db
+        .query_one(
+            &format!(
+                "UPDATE sessions SET status = 'starting', error = NULL, ended_at = NULL,
                 updated_at = {}
          WHERE id = $1 RETURNING *",
-        Postgres.now()
-    ))
-    .bind(id)
-    .fetch_one(&state.db)
-    .await?;
+                Postgres.now()
+            ),
+            params![id],
+        )
+        .await?;
     state.registry.publish(
         auth.tenant_id,
         UiEvent::SessionStatus {
@@ -490,10 +494,12 @@ pub async fn delete(
             ControlToNode::KillSession { session_id: id },
         );
     }
-    sqlx::query("DELETE FROM sessions WHERE id = $1 AND tenant_id = $2")
-        .bind(id)
-        .bind(auth.tenant_id)
-        .execute(&state.db)
+    state
+        .db
+        .exec(
+            "DELETE FROM sessions WHERE id = $1 AND tenant_id = $2",
+            params![id, auth.tenant_id],
+        )
         .await?;
     events::record(
         &state,

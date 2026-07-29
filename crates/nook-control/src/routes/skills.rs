@@ -13,7 +13,7 @@
 
 use axum::extract::{Path, State};
 use axum::Json;
-use nook_db::{Postgres, TypeMapping};
+use nook_db::{params, Db, Postgres, TypeMapping};
 use nook_types::*;
 use sha2::{Digest, Sha256};
 
@@ -44,17 +44,20 @@ pub async fn list(
     State(state): State<AppState>,
     auth: AuthCtx,
 ) -> ApiResult<Json<Vec<SkillSummary>>> {
-    let rows: Vec<SkillSummary> = sqlx::query_as(&format!(
-        "SELECT s.id, s.name, s.sha256, {} AS size, s.updated_at,
+    let rows: Vec<SkillSummary> = state
+        .db
+        .query_all(
+            &format!(
+                "SELECT s.id, s.name, s.sha256, {} AS size, s.updated_at,
                 u.display_name AS updated_by
          FROM skills s
          LEFT JOIN users u ON u.id = s.updated_by
          WHERE s.tenant_id = $1 ORDER BY s.name",
-        Postgres.cast("length(s.content)", "bigint")
-    ))
-    .bind(auth.tenant_id)
-    .fetch_all(&state.db)
-    .await?;
+                Postgres.cast("length(s.content)", "bigint")
+            ),
+            params![auth.tenant_id],
+        )
+        .await?;
     Ok(Json(rows))
 }
 
@@ -67,14 +70,14 @@ pub async fn get_one(
     auth: AuthCtx,
     Path(name): Path<String>,
 ) -> ApiResult<Json<Skill>> {
-    let row: Option<Skill> = sqlx::query_as(
-        "SELECT id, tenant_id, name, content, sha256, updated_at, updated_by
+    let row: Option<Skill> = state
+        .db
+        .query_opt(
+            "SELECT id, tenant_id, name, content, sha256, updated_at, updated_by
          FROM skills WHERE tenant_id = $1 AND name = $2",
-    )
-    .bind(auth.tenant_id)
-    .bind(&name)
-    .fetch_optional(&state.db)
-    .await?;
+            params![auth.tenant_id, &name],
+        )
+        .await?;
     row.map(Json).ok_or(ApiError::NotFound)
 }
 
@@ -130,8 +133,11 @@ pub async fn teach(
     )?;
     let sha = digest(&req.content);
 
-    let summary: SkillSummary = sqlx::query_as(&format!(
-        "INSERT INTO skills (id, tenant_id, name, content, sha256, updated_by)
+    let summary: SkillSummary = state
+        .db
+        .query_one(
+            &format!(
+                "INSERT INTO skills (id, tenant_id, name, content, sha256, updated_by)
          VALUES ($1, $2, $3, $4, $5, $6)
          ON CONFLICT (tenant_id, name) DO UPDATE
            SET content = EXCLUDED.content,
@@ -140,17 +146,19 @@ pub async fn teach(
                updated_by = EXCLUDED.updated_by
          RETURNING id, name, sha256, {size} AS size, updated_at,
            (SELECT display_name FROM users WHERE id = $6) AS updated_by",
-        now = Postgres.now(),
-        size = Postgres.cast("length(content)", "bigint"),
-    ))
-    .bind(uuid::Uuid::now_v7())
-    .bind(auth.tenant_id)
-    .bind(&name)
-    .bind(&req.content)
-    .bind(&sha)
-    .bind(auth.user_id.0)
-    .fetch_one(&state.db)
-    .await?;
+                now = Postgres.now(),
+                size = Postgres.cast("length(content)", "bigint"),
+            ),
+            params![
+                uuid::Uuid::now_v7(),
+                auth.tenant_id,
+                &name,
+                &req.content,
+                &sha,
+                auth.user_id.0
+            ],
+        )
+        .await?;
 
     let (delivered_to, offline) = fan_out(
         &state,
@@ -201,12 +209,14 @@ pub async fn unteach(
         Scope::Tenant(auth.tenant_id),
     )
     .await?;
-    let deleted = sqlx::query("DELETE FROM skills WHERE tenant_id = $1 AND name = $2")
-        .bind(auth.tenant_id)
-        .bind(&name)
-        .execute(&state.db)
+    let deleted = state
+        .db
+        .exec(
+            "DELETE FROM skills WHERE tenant_id = $1 AND name = $2",
+            params![auth.tenant_id, &name],
+        )
         .await?;
-    if deleted.rows_affected() == 0 {
+    if deleted == 0 {
         return Err(ApiError::NotFound);
     }
 
@@ -247,11 +257,13 @@ async fn fan_out(
     tenant_id: TenantId,
     msg: nook_proto::ControlToNode,
 ) -> Result<(Vec<String>, Vec<String>), ApiError> {
-    let nodes: Vec<(NodeId, String)> =
-        sqlx::query_as("SELECT id, name FROM nodes WHERE tenant_id = $1 ORDER BY name")
-            .bind(tenant_id)
-            .fetch_all(&state.db)
-            .await?;
+    let nodes: Vec<(NodeId, String)> = state
+        .db
+        .query_all(
+            "SELECT id, name FROM nodes WHERE tenant_id = $1 ORDER BY name",
+            params![tenant_id],
+        )
+        .await?;
 
     let mut delivered = Vec::new();
     let mut offline = Vec::new();
@@ -275,11 +287,12 @@ pub async fn all_for_tenant(
     db: &nook_db::DbPool,
     tenant_id: TenantId,
 ) -> Result<Vec<nook_proto::ControlToNode>, sqlx::Error> {
-    let rows: Vec<(String, String, String)> =
-        sqlx::query_as("SELECT name, content, sha256 FROM skills WHERE tenant_id = $1")
-            .bind(tenant_id)
-            .fetch_all(db)
-            .await?;
+    let rows: Vec<(String, String, String)> = db
+        .query_all(
+            "SELECT name, content, sha256 FROM skills WHERE tenant_id = $1",
+            params![tenant_id],
+        )
+        .await?;
     Ok(rows
         .into_iter()
         .map(
