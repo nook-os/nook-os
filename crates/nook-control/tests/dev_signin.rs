@@ -110,6 +110,37 @@ async fn dev_issuer_signs_in_on_a_local_locked_tenant() {
     bed.teardown().await;
 }
 
+/// The headline fix's OTHER half: a FRESH dev email (no existing user or
+/// identity) drives `login_identity`'s NEW-identity branch, where the second
+/// `claim_mode` call lives. The dev issuer must sign in AND leave the freshly
+/// created tenant's mode unclaimed — without the skip, `claim_mode(Oidc)` there
+/// would have locked that tenant to `oidc` (AC-1). The existing tests only cover
+/// the existing-identity and existing-account branches, so this guards the
+/// second skip directly.
+#[tokio::test]
+async fn dev_new_identity_signs_in_without_locking_the_mode() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let state = bed.app_state().await;
+
+    // A never-seen email/subject → the new-identity branch (no `identities` row).
+    let fresh = format!("fresh-{}@example.test", Uuid::now_v7().simple());
+    let (user, tenant) = login_identity(&state, claims(DEV_ISSUER, &fresh, &fresh))
+        .await
+        .expect("a fresh dev identity must sign in through the new-identity path");
+    assert_eq!(user.email, fresh, "signs in as the newly-created dev user");
+    // The proof of the second skip: the brand-new tenant is NOT locked to a mode.
+    // Without the dev-issuer guard, claim_mode(Oidc) would have set NULL → oidc.
+    assert_eq!(
+        local_auth::mode_of(&bed.db(), tenant.id).await.unwrap(),
+        None,
+        "a dev sign-in must not claim/lock the new tenant's auth mode"
+    );
+
+    bed.teardown().await;
+}
+
 /// The bug the operator hit in the browser: clicking a listed account POSTed
 /// dev-login (200, cookie set) but the very next /auth/me came back 403, because
 /// `resolve_session` refuses a session whose user has no `tenant_members` grant
