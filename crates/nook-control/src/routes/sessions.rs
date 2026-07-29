@@ -426,10 +426,10 @@ pub async fn restart(
                 // NULL binding, or the bound checkout is gone: fall back to the
                 // deterministic clone-only pick (AC-3), and say so.
                 None => {
-                    let fallback: Option<(String,)> = state
+                    let fallback: Option<(NodeWorkspaceId, String)> = state
                         .db
                         .query_opt(
-                            "SELECT path FROM node_workspaces
+                            "SELECT id, path FROM node_workspaces
                          WHERE workspace_id = $1 AND node_id = $2
                            AND kind = 'clone' AND missing_at IS NULL
                          ORDER BY discovered_at LIMIT 1",
@@ -437,10 +437,21 @@ pub async fn restart(
                         )
                         .await?;
                     match fallback {
-                        Some((p,)) => {
+                        Some((clone_id, p)) => {
+                            // Re-bind to the clone the session now actually runs
+                            // in, so the summary chip names it — not the pruned
+                            // worktree it started in. The RETURNING * below picks
+                            // this up for the response.
+                            state
+                                .db
+                                .exec(
+                                    "UPDATE sessions SET checkout_id = $2 WHERE id = $1",
+                                    params![id, clone_id],
+                                )
+                                .await?;
                             tracing::info!(
                                 session_id = %id,
-                                "restart: bound checkout absent — falling back to the primary clone"
+                                "restart: bound checkout absent — rebound to the primary clone"
                             );
                             p
                         }

@@ -250,6 +250,59 @@ async fn the_deterministic_pick_is_clone_only_and_present_only() {
 }
 
 #[tokio::test]
+async fn create_binds_checkout_by_path() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let f = seed(&bed.pool).await;
+    let clone = NodeWorkspaceId::new();
+    let wt = NodeWorkspaceId::new();
+    let gone = NodeWorkspaceId::new();
+    seed_checkout(
+        &bed.pool, &f, clone, "/w/clone", "clone", "main", 100, false,
+    )
+    .await;
+    seed_checkout(&bed.pool, &f, wt, "/w/wt", "worktree", "feat", 50, false).await;
+    seed_checkout(&bed.pool, &f, gone, "/w/gone", "clone", "main", 10, true).await;
+
+    // The exact resolution create_session_at runs to bind `checkout_id`.
+    let resolve = |path: &'static str, pool: PgPool, node: NodeId| async move {
+        sqlx::query_as::<_, (NodeWorkspaceId,)>(
+            "SELECT id FROM node_workspaces WHERE node_id = $1 AND path = $2 AND missing_at IS NULL",
+        )
+        .bind(node)
+        .bind(path)
+        .fetch_optional(&pool)
+        .await
+        .expect("resolve")
+        .map(|(id,)| id)
+    };
+
+    assert_eq!(
+        resolve("/w/clone", bed.pool.clone(), f.node).await,
+        Some(clone),
+        "an explicit clone path binds that exact row"
+    );
+    assert_eq!(
+        resolve("/w/wt", bed.pool.clone(), f.node).await,
+        Some(wt),
+        "an explicit worktree path binds that exact row — kind is not filtered when a path is named"
+    );
+    assert_eq!(
+        resolve("/w/nope", bed.pool.clone(), f.node).await,
+        None,
+        "an unknown path binds nothing (NULL checkout_id)"
+    );
+    assert_eq!(
+        resolve("/w/gone", bed.pool.clone(), f.node).await,
+        None,
+        "a tombstoned checkout at that path is never bound"
+    );
+
+    bed.teardown().await;
+}
+
+#[tokio::test]
 async fn hydrate_fills_the_checkout_summary_and_leaves_ad_hoc_null() {
     let Some(mut bed) = TestBed::new().await else {
         return;
@@ -378,6 +431,45 @@ async fn restart_reuses_the_bound_checkout_then_falls_back_when_it_is_gone() {
         Some("/w/clone"),
         "the fallback is the primary clone, not a worktree"
     );
+
+    // The should-fix: on fallback, restart re-binds the session's checkout_id to
+    // the clone, so its summary chip names where it now runs — not the pruned
+    // worktree it started in.
+    let s = SessionId::new();
+    sqlx::query(
+        "INSERT INTO sessions (id, tenant_id, workspace_id, node_id, name, runtime, status, checkout_id)
+         VALUES ($1,$2,$3,$4,'s','bash','running',$5)",
+    )
+    .bind(s)
+    .bind(f.tenant)
+    .bind(f.workspace)
+    .bind(f.node)
+    .bind(wt) // started in the (now pruned) worktree
+    .execute(&bed.pool)
+    .await
+    .expect("session");
+    // The exact rebind the restart handler performs on fallback.
+    sqlx::query("UPDATE sessions SET checkout_id = $2 WHERE id = $1")
+        .bind(s)
+        .bind(clone)
+        .execute(&bed.pool)
+        .await
+        .unwrap();
+    let sessions = core::list_sessions(&bed.db(), f.tenant, None, false, None)
+        .await
+        .expect("list");
+    let summary = sessions
+        .iter()
+        .find(|x| x.id == s)
+        .expect("session")
+        .checkout
+        .as_ref()
+        .expect("summary");
+    assert_eq!(
+        summary.id, clone,
+        "after fallback the chip names the clone, not the pruned worktree"
+    );
+    assert_eq!(summary.kind, "clone");
 
     bed.teardown().await;
 }
