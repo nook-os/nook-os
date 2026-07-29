@@ -11,7 +11,7 @@
 //! user's address) is the proof.
 
 use axum::extract::{Json, State};
-use nook_db::{Postgres, TimeMath, TypeMapping};
+use nook_db::{params, Db, Postgres, TimeMath, TypeMapping};
 
 use crate::auth::AuthCtx;
 use crate::error::{ApiError, ApiResult};
@@ -27,11 +27,13 @@ use nook_types::{
 /// Load the signed-in user's email and whether they are a local account (a
 /// password hash → local; OIDC users have none).
 async fn user_email_and_local(state: &AppState, user_id: UserId) -> ApiResult<(String, bool)> {
-    let (email, password_hash): (String, Option<String>) =
-        sqlx::query_as("SELECT email, password_hash FROM users WHERE id = $1")
-            .bind(user_id)
-            .fetch_one(&state.db)
-            .await?;
+    let (email, password_hash): (String, Option<String>) = state
+        .db
+        .query_one(
+            "SELECT email, password_hash FROM users WHERE id = $1",
+            params![user_id],
+        )
+        .await?;
     Ok((email, password_hash.is_some()))
 }
 
@@ -88,23 +90,26 @@ pub async fn request_core(
     }
 
     // One live token per user: drop any outstanding one first (AC-3).
-    sqlx::query("DELETE FROM email_verification_tokens WHERE user_id = $1 AND consumed_at IS NULL")
-        .bind(user_id)
-        .execute(&state.db)
+    state
+        .db
+        .exec(
+            "DELETE FROM email_verification_tokens WHERE user_id = $1 AND consumed_at IS NULL",
+            params![user_id],
+        )
         .await?;
 
     let token = random_token("evr_", 32);
-    sqlx::query(&format!(
-        "INSERT INTO email_verification_tokens (id, user_id, email, token_hash, expires_at)
+    state
+        .db
+        .exec(
+            &format!(
+                "INSERT INTO email_verification_tokens (id, user_id, email, token_hash, expires_at)
          VALUES ($1, $2, $3, $4, {expiry})",
-        expiry = Postgres.now_plus("24 hours")
-    ))
-    .bind(uuid::Uuid::now_v7())
-    .bind(user_id)
-    .bind(&email)
-    .bind(hash_token(&token))
-    .execute(&state.db)
-    .await?;
+                expiry = Postgres.now_plus("24 hours")
+            ),
+            params![uuid::Uuid::now_v7(), user_id, &email, hash_token(&token)],
+        )
+        .await?;
 
     let link = format!(
         "{}/verify-email?token={token}",
@@ -124,9 +129,12 @@ pub async fn request_core(
         None,
         crate::mailer::Category::Transactional,
     );
-    let tenant: uuid::Uuid = sqlx::query_scalar("SELECT tenant_id FROM users WHERE id = $1")
-        .bind(user_id)
-        .fetch_one(&state.db)
+    let tenant: uuid::Uuid = state
+        .db
+        .query_scalar(
+            "SELECT tenant_id FROM users WHERE id = $1",
+            params![user_id],
+        )
         .await?;
     match crate::services::queue::enqueue_email(state, tenant, &job).await {
         Ok(()) => Ok(RequestVerificationResult {
@@ -180,14 +188,16 @@ pub async fn confirm_core(
         Option<chrono::DateTime<chrono::Utc>>,
         bool,
     );
-    let row: Option<TokenRow> = sqlx::query_as(&format!(
-        "SELECT id, user_id, email, consumed_at, expires_at < {}
+    let row: Option<TokenRow> = db
+        .query_opt(
+            &format!(
+                "SELECT id, user_id, email, consumed_at, expires_at < {}
              FROM email_verification_tokens WHERE token_hash = $1",
-        Postgres.now()
-    ))
-    .bind(hash_token(token))
-    .fetch_optional(db)
-    .await?;
+                Postgres.now()
+            ),
+            params![hash_token(token)],
+        )
+        .await?;
 
     let Some((id, user_id, email, consumed_at, expired)) = row else {
         return decline("this verification link is not valid");
@@ -209,12 +219,13 @@ pub async fn confirm_core(
     }
 
     // Consume then verify, in that order — a replayed token finds it consumed.
-    sqlx::query(&format!(
-        "UPDATE email_verification_tokens SET consumed_at = {} WHERE id = $1",
-        Postgres.now()
-    ))
-    .bind(id)
-    .execute(db)
+    db.exec(
+        &format!(
+            "UPDATE email_verification_tokens SET consumed_at = {} WHERE id = $1",
+            Postgres.now()
+        ),
+        params![id],
+    )
     .await?;
     mark_local_email_verified(db, user_id, &email).await?;
 
@@ -232,7 +243,7 @@ mod tests {
     use crate::services::identity::email_is_verified;
     use crate::state::AppState;
     use nook_db::DbPool;
-    use nook_db::{Postgres, TimeMath};
+    use nook_db::{params, Db, Postgres, TimeMath};
     use nook_types::UserId;
     use sqlx::postgres::PgPoolOptions;
     use uuid::Uuid;
@@ -252,13 +263,12 @@ mod tests {
 
     async fn tenant(db: &DbPool, name: &str) -> Uuid {
         let id = Uuid::new_v4();
-        sqlx::query("INSERT INTO tenants (id, name, slug) VALUES ($1,$2,$3)")
-            .bind(id)
-            .bind(name)
-            .bind(format!("{name}-{id}"))
-            .execute(db)
-            .await
-            .unwrap();
+        db.exec(
+            "INSERT INTO tenants (id, name, slug) VALUES ($1,$2,$3)",
+            params![id, name, format!("{name}-{id}")],
+        )
+        .await
+        .unwrap();
         id
     }
 
@@ -266,27 +276,27 @@ mod tests {
     /// account) or none (OIDC-style).
     async fn user(db: &DbPool, tenant: Uuid, email: &str, local: bool) -> UserId {
         let id = Uuid::new_v4();
-        sqlx::query(
+        db.exec(
             "INSERT INTO users (id, tenant_id, display_name, email, username, password_hash, role, person_id)
              VALUES ($1, $2, 'U', $3, $4, $5, 'member', gen_random_uuid())",
+            params![
+                id,
+                tenant,
+                email,
+                if local { Some(email) } else { None },
+                if local { Some("argon2$hash") } else { None }
+            ],
         )
-        .bind(id)
-        .bind(tenant)
-        .bind(email)
-        .bind(if local { Some(email) } else { None })
-        .bind(if local { Some("argon2$hash") } else { None })
-        .execute(db)
         .await
         .unwrap();
         UserId(id)
     }
 
     async fn live_tokens(db: &DbPool, uid: UserId) -> Vec<(String,)> {
-        sqlx::query_as(
+        db.query_all(
             "SELECT token_hash FROM email_verification_tokens WHERE user_id = $1 AND consumed_at IS NULL",
+            params![uid],
         )
-        .bind(uid)
-        .fetch_all(db)
         .await
         .unwrap()
     }
@@ -294,19 +304,19 @@ mod tests {
     async fn cleanup(db: &DbPool, tenants: &[Uuid]) {
         for t in tenants {
             // Child rows key off the user, which keys off the tenant.
-            let _ = sqlx::query("DELETE FROM email_verification_tokens WHERE user_id IN (SELECT id FROM users WHERE tenant_id = $1)").bind(t).execute(db).await;
-            let _ = sqlx::query("DELETE FROM identities WHERE user_id IN (SELECT id FROM users WHERE tenant_id = $1)").bind(t).execute(db).await;
-            let _ = sqlx::query("DELETE FROM tenant_members WHERE tenant_id = $1")
-                .bind(t)
-                .execute(db)
+            let _ = db.exec("DELETE FROM email_verification_tokens WHERE user_id IN (SELECT id FROM users WHERE tenant_id = $1)", params![t]).await;
+            let _ = db.exec("DELETE FROM identities WHERE user_id IN (SELECT id FROM users WHERE tenant_id = $1)", params![t]).await;
+            let _ = db
+                .exec(
+                    "DELETE FROM tenant_members WHERE tenant_id = $1",
+                    params![t],
+                )
                 .await;
-            let _ = sqlx::query("DELETE FROM users WHERE tenant_id = $1")
-                .bind(t)
-                .execute(db)
+            let _ = db
+                .exec("DELETE FROM users WHERE tenant_id = $1", params![t])
                 .await;
-            let _ = sqlx::query("DELETE FROM tenants WHERE id = $1")
-                .bind(t)
-                .execute(db)
+            let _ = db
+                .exec("DELETE FROM tenants WHERE id = $1", params![t])
                 .await;
         }
     }
@@ -322,13 +332,13 @@ mod tests {
         assert!(r.sent, "the send is accepted (enqueued)");
         // MAIN-149: the send is now enqueued, not sent inline — an `email.send`
         // job for this tenant lands in the queue for the worker to deliver.
-        let queued: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM work_queue WHERE work_type = 'email.send' AND tenant_id = $1",
-        )
-        .bind(t)
-        .fetch_one(&db)
-        .await
-        .unwrap();
+        let queued: i64 = db
+            .query_scalar(
+                "SELECT count(*) FROM work_queue WHERE work_type = 'email.send' AND tenant_id = $1",
+                params![t],
+            )
+            .await
+            .unwrap();
         assert_eq!(queued, 1, "one email.send job enqueued for this tenant");
         let tokens = live_tokens(&db, uid).await;
         assert_eq!(tokens.len(), 1, "one live token");
@@ -370,15 +380,14 @@ mod tests {
 
         // A live token inserted directly with a known plaintext.
         let token = "evr_known_token_value_0000000000";
-        sqlx::query(&format!(
-            "INSERT INTO email_verification_tokens (id, user_id, email, token_hash, expires_at)
+        db.exec(
+            &format!(
+                "INSERT INTO email_verification_tokens (id, user_id, email, token_hash, expires_at)
              VALUES ($1, $2, 'c@vr.test', $3, {expiry})",
-            expiry = Postgres.now_plus("1 hour")
-        ))
-        .bind(Uuid::now_v7())
-        .bind(uid)
-        .bind(hash_token(token))
-        .execute(&db)
+                expiry = Postgres.now_plus("1 hour")
+            ),
+            params![Uuid::now_v7(), uid, hash_token(token)],
+        )
         .await
         .unwrap();
 
@@ -402,15 +411,14 @@ mod tests {
 
         // An expired token is refused (AC-2).
         let expired_plain = "evr_expired_000000000000000000000";
-        sqlx::query(&format!(
-            "INSERT INTO email_verification_tokens (id, user_id, email, token_hash, expires_at)
+        db.exec(
+            &format!(
+                "INSERT INTO email_verification_tokens (id, user_id, email, token_hash, expires_at)
              VALUES ($1, $2, 'c@vr.test', $3, {expiry})",
-            expiry = Postgres.now_minus("1 hour")
-        ))
-        .bind(Uuid::now_v7())
-        .bind(uid)
-        .bind(hash_token(expired_plain))
-        .execute(&db)
+                expiry = Postgres.now_minus("1 hour")
+            ),
+            params![Uuid::now_v7(), uid, hash_token(expired_plain)],
+        )
         .await
         .unwrap();
         let exp = confirm_core(&db, expired_plain).await.unwrap();
