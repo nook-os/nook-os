@@ -11,6 +11,54 @@ use crate::events::{self, EventDraft};
 use crate::services::{core, identity::slugify};
 use crate::state::AppState;
 
+/// The **present** checkout a working-directory path resolves to on a node
+/// (MAIN-225) — the `node_workspaces` row a task's `checkout_id` binds to. `None`
+/// until discovery has scanned a freshly-created worktree (never guessed), or for
+/// an ad-hoc path with no checkout row. Mirrors `create_session_at`'s session
+/// binding so a task and its session agree on which checkout they run in.
+pub async fn present_checkout_at(
+    db: &nook_db::DbPool,
+    node_id: NodeId,
+    path: &str,
+) -> ApiResult<Option<NodeWorkspaceId>> {
+    Ok(db
+        .query_scalar_opt(
+            "SELECT id FROM node_workspaces
+             WHERE node_id = $1 AND path = $2 AND missing_at IS NULL",
+            params![node_id, path],
+        )
+        .await?)
+}
+
+/// The `(path, node)` of the worktree `prune_worktree` should remove (MAIN-225
+/// AC-4): the checkout `tasks.checkout_id` names among present rows when the task
+/// has one, else the legacy `worktree_path`/`worktree_node_id` string pair. `None`
+/// when the task has neither — the "no worktree to prune" case.
+pub async fn prune_target(
+    state: &AppState,
+    task: &TaskItem,
+) -> ApiResult<Option<(String, NodeId)>> {
+    if let Some(checkout) = task.checkout_id {
+        let row: Option<(String, NodeId)> = state
+            .db
+            .query_opt(
+                "SELECT path, node_id FROM node_workspaces
+                 WHERE id = $1 AND missing_at IS NULL",
+                params![checkout],
+            )
+            .await?;
+        if let Some(pair) = row {
+            return Ok(Some(pair));
+        }
+        // The id points at a checkout that has since gone missing — fall through
+        // to the legacy strings, which item 7 has not yet retired.
+    }
+    Ok(match (task.worktree_path.clone(), task.worktree_node_id) {
+        (Some(p), Some(n)) => Some((p, n)),
+        _ => None,
+    })
+}
+
 async fn load_task(state: &AppState, tenant: TenantId, id: TaskId) -> ApiResult<TaskItem> {
     state
         .db
@@ -243,6 +291,13 @@ pub async fn start_work(
     )
     .await?;
 
+    // The checkout this task's working directory now IS (MAIN-225 AC-3): resolved
+    // from the worktree path the same present-rows way `create_session_at` binds a
+    // session's checkout. NULL when discovery has not yet scanned the just-created
+    // worktree — never guessed. The legacy strings are still written in the same
+    // UPDATE, so no existing reader regresses (NG-1).
+    let checkout_id = present_checkout_at(&state.db, node_id, &worktree_path).await?;
+
     let in_progress = column_id(state, task.board_id, "In Progress", 2).await?;
     let updated: TaskItem = state
         .db
@@ -250,7 +305,7 @@ pub async fn start_work(
             &format!(
                 "UPDATE tasks SET workspace_id = $2, assigned_node_id = $3, branch = $4,
                 worktree_path = $5, worktree_node_id = $3, session_id = $6,
-                column_id = $7, updated_at = {}
+                column_id = $7, checkout_id = $8, updated_at = {}
          WHERE id = $1 RETURNING *",
                 Postgres.now()
             ),
@@ -261,7 +316,8 @@ pub async fn start_work(
                 &branch,
                 &worktree_path,
                 session.id,
-                in_progress
+                in_progress,
+                checkout_id.map(|c| c.0)
             ],
         )
         .await?;
@@ -343,7 +399,10 @@ pub async fn prune_worktree(
     task_id: TaskId,
 ) -> ApiResult<TaskItem> {
     let task = load_task(state, tenant, task_id).await?;
-    let (Some(path), Some(node_id)) = (task.worktree_path.clone(), task.worktree_node_id) else {
+    // Address the worktree by ID when the task has one — the path is an attribute
+    // of that checkout row (MAIN-225 AC-4) — falling back to the legacy strings
+    // otherwise.
+    let Some((path, node_id)) = prune_target(state, &task).await? else {
         return Err(ApiError::BadRequest("task has no worktree to prune".into()));
     };
 
@@ -369,7 +428,8 @@ pub async fn prune_worktree(
         .db
         .query_one(
             &format!(
-                "UPDATE tasks SET worktree_path = NULL, worktree_node_id = NULL, updated_at = {}
+                "UPDATE tasks SET checkout_id = NULL, worktree_path = NULL,
+                worktree_node_id = NULL, updated_at = {}
          WHERE id = $1 RETURNING *",
                 Postgres.now()
             ),

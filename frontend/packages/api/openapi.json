@@ -11985,6 +11985,17 @@
               "null"
             ]
           },
+          "checkout_id": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/NodeWorkspaceId",
+                "description": "The checkout this task's working directory **is** (MAIN-225) — id is\nidentity, path is an attribute. Set to the worktree's `node_workspaces`\nrow once discovery has scanned it; `NULL` until then, or with no worktree.\nWritten alongside the legacy `worktree_path`/`worktree_node_id`, which\nitem 7 will retire."
+              }
+            ]
+          },
           "column_id": {
             "$ref": "#/components/schemas/ColumnId"
           },
