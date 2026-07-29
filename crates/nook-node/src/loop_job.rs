@@ -43,6 +43,8 @@ pub struct LoopJob {
     pub target_task_key: String,
     pub repo_url: String,
     pub branch: String,
+    /// The human's opening brief (MAIN-231), if the job was seeded with one.
+    pub seed: Option<String>,
 }
 
 /// Worktree directory names of jobs running on this node right now, so
@@ -206,6 +208,31 @@ pub fn reconcile(cfg: &NodeConfig) {
     }
 }
 
+/// Flatten text to one tmux-typeable line. `send_keys -l` sends the string
+/// literally, so an embedded newline would submit half a message; collapsing
+/// every run of whitespace to a single space keeps a multi-line brief intact as
+/// one prompt.
+fn one_line(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Deliver a human's steering message into a running job's session (MAIN-231):
+/// type it at the live agent, exactly as the skill command was typed. The tmux
+/// name is derived from the job id, so no cross-thread bookkeeping is needed —
+/// if the session is gone the message has nowhere to land and that is reported,
+/// never silently swallowed.
+pub fn deliver_message(job_id: &str, body: &str) -> Result<(), String> {
+    let line = one_line(body);
+    if line.is_empty() {
+        return Err("empty message".into());
+    }
+    let tmux_name = job_tmux_name(job_id);
+    if !crate::tmux::session_exists(&tmux_name) {
+        return Err("no live session for this job on this node".into());
+    }
+    crate::tmux::send_keys(&tmux_name, &line).map_err(|e| e.to_string())
+}
+
 /// Run one loop job to completion. Blocking; call under `spawn_blocking`.
 pub fn run(cfg: NodeConfig, out: Sender<NodeToControl>, job: LoopJob) {
     let LoopJob {
@@ -214,6 +241,7 @@ pub fn run(cfg: NodeConfig, out: Sender<NodeToControl>, job: LoopJob) {
         target_task_key,
         repo_url,
         branch,
+        seed,
     } = job;
     let dirname = job_dirname(&job_id);
     if let Ok(mut s) = running_jobs().lock() {
@@ -268,6 +296,7 @@ pub fn run(cfg: NodeConfig, out: Sender<NodeToControl>, job: LoopJob) {
         &worktree,
         skill,
         &target_task_key,
+        seed.as_deref(),
     );
 
     if let Err(e) = remove_job_worktree(&cache, &worktree) {
@@ -293,6 +322,7 @@ fn drive_session(
     worktree: &Path,
     skill: &str,
     target: &str,
+    seed: Option<&str>,
 ) -> (bool, String) {
     let cwd = worktree.to_string_lossy().to_string();
     // Where the launched shell records the runtime's exit code (AC-4). A sibling
@@ -311,6 +341,7 @@ fn drive_session(
         job_id,
         job_id,
         &status_path,
+        seed,
     ) {
         return (false, format!("could not launch session: {e}"));
     }
@@ -394,8 +425,15 @@ fn drive_session(
     };
 
     // Let the runtime come up, then drive the skill by typing its slash command.
+    // A seeded job (MAIN-231) puts the human's brief on that same line, so the
+    // skill receives it as its argument — the session env carries the verbatim
+    // text for anything that wants the original line breaks.
     std::thread::sleep(SKILL_STARTUP_DELAY);
-    let line = format!("/{skill} {target}");
+    let mut line = format!("/{skill} {target}");
+    if let Some(seed) = seed.map(one_line).filter(|s| !s.is_empty()) {
+        line.push(' ');
+        line.push_str(&seed);
+    }
     if let Err(e) = crate::tmux::send_keys(tmux_name, &line) {
         note(out, job_id, format!("could not send skill command: {e}"));
     }

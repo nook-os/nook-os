@@ -73,6 +73,25 @@ pub async fn cancel(
     ))
 }
 
+#[utoipa::path(post, path = "/api/v1/jobs/{id}/messages",
+    operation_id = "job_message",
+    params(("id" = String, Path,)),
+    request_body = CreateJobMessageRequest,
+    responses((status = 200, body = LoopJobTranscriptEntry)))]
+pub async fn message(
+    State(state): State<AppState>,
+    auth: AuthCtx,
+    Path(id): Path<JobId>,
+    Json(req): Json<CreateJobMessageRequest>,
+) -> ApiResult<Json<LoopJobTranscriptEntry>> {
+    // Steering a run is a person's action: the transcript line is attributed to
+    // a human, and a node has no business volunteering one.
+    auth.require_user()?;
+    Ok(Json(
+        jobs::post_message(&state, auth.tenant_id, auth.user_id, id, &req.body).await?,
+    ))
+}
+
 #[utoipa::path(post, path = "/api/v1/jobs/{id}/rerun",
     operation_id = "job_rerun",
     params(("id" = String, Path,)),

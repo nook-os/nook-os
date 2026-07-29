@@ -343,6 +343,8 @@ pub fn build_router(state: AppState) -> Router {
         .route("/jobs/{id}", get(jobs::get))
         .route("/jobs/{id}/cancel", post(jobs::cancel))
         .route("/jobs/{id}/rerun", post(jobs::rerun))
+        // MAIN-231: unsolicited human → agent steering on a live run.
+        .route("/jobs/{id}/messages", post(jobs::message))
         .route("/tasks/{task_id}/jobs", get(jobs::list_for_task))
         .route(
             "/interactions",

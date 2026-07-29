@@ -308,12 +308,20 @@ pub fn new_job_session(
     session_id: &str,
     job_id: &str,
     status_file: &str,
+    seed: Option<&str>,
 ) -> Result<()> {
     if !std::path::Path::new(cwd).is_dir() {
         anyhow::bail!("checkout {cwd} does not exist on this node");
     }
     if !runtime_available(runtime) {
         anyhow::bail!("runtime '{runtime}' is not installed on this node");
+    }
+    // The human's opening brief (MAIN-231) rides the environment verbatim —
+    // line breaks and all — so anything in the session can read the original,
+    // not just the flattened line typed at the runtime.
+    let mut env: Vec<(&str, &str)> = vec![("NOOK_JOB_ID", job_id)];
+    if let Some(seed) = seed.filter(|s| !s.trim().is_empty()) {
+        env.push(("NOOK_JOB_SEED", seed));
     }
     spawn(
         name,
@@ -322,7 +330,7 @@ pub fn new_job_session(
         rows,
         &job_launch_command(runtime, status_file),
         session_id,
-        &[("NOOK_JOB_ID", job_id)],
+        &env,
     )
 }
 
