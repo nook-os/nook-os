@@ -673,6 +673,7 @@ async fn main() -> Result<()> {
             version: version.unwrap_or_else(|| format!("v{}", env!("CARGO_PKG_VERSION"))),
             dry_run,
         }),
+        Command::Server(ServerCommand::PurgeTestTenants) => server_purge_test_tenants().await,
         Command::K8s(K8sCommand::Init {
             release,
             namespace,
@@ -1088,6 +1089,11 @@ enum ServerCommand {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Delete the legacy `test-<uuid>` tenants left behind by the old shared-DB
+    /// test path (MAIN-221). Dev-only: the control plane refuses it in
+    /// production or when dev mode is off. Cascades, and is idempotent — a
+    /// second run deletes nothing.
+    PurgeTestTenants,
 }
 
 #[derive(clap::Subcommand)]
@@ -1260,6 +1266,34 @@ enum K8sCommand {
 ///
 /// Written to a temp file and renamed into place, never overwritten: the
 /// running binary is this file, and writing over it fails with ETXTBSY.
+/// `nook server purge-test-tenants` (MAIN-221 AC-3): ask the control plane to
+/// drop the legacy `test-%` tenants. The endpoint is dev-gated server-side, so
+/// this carries no auth and simply surfaces the count — or the server's refusal
+/// message verbatim when it declines (production / dev mode off).
+async fn server_purge_test_tenants() -> Result<()> {
+    let cfg = NodeConfig::load()?;
+    let server = cfg.server.trim_end_matches('/');
+    let resp = reqwest::Client::new()
+        .post(format!("{server}/api/v1/auth/purge-test-tenants"))
+        .send()
+        .await
+        .context("reaching the control plane")?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        // The server hands back {"error": "<why>"}; show the reason, not a bare code.
+        let reason = serde_json::from_str::<serde_json::Value>(&body)
+            .ok()
+            .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(String::from))
+            .unwrap_or_else(|| body.trim().to_string());
+        anyhow::bail!("purge refused ({status}): {reason}");
+    }
+    let out: serde_json::Value = resp.json().await.context("decoding the response")?;
+    let deleted = out.get("deleted").and_then(|d| d.as_i64()).unwrap_or(0);
+    println!("Deleted {deleted} test tenant(s).");
+    Ok(())
+}
+
 pub(crate) async fn update_binary() -> Result<()> {
     let cfg = NodeConfig::load()?;
     let server = cfg.server.trim_end_matches('/');

@@ -18,16 +18,27 @@
         "summary": "GET /api/v1/auth/dev-accounts — who you can sign in as, in dev mode.",
         "description": "Dev only, and unauthenticated by necessity: it is what the login screen\nreads before anybody is signed in. It returns emails and display names of\naccounts that already exist — no credentials, no tokens — and it is refused\noutright unless `AUTH_DEV_MODE` is on and this is not production, which is\nthe same gate `dev_login` itself uses.\n\nIt exists because testing authorization requires BEING different people, and\na model you cannot switch between users to exercise is a model nobody\nexercises.",
         "operationId": "dev_accounts",
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "description": "Optional case-insensitive substring over email / display name / tenant\nslug. Absent or blank returns the newest accounts up to the cap.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "",
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "array",
-                  "items": {
-                    "$ref": "#/components/schemas/DevAccount"
-                  }
+                  "$ref": "#/components/schemas/DevAccountsResponse"
                 }
               }
             }
@@ -278,6 +289,30 @@
                 }
               }
             }
+          }
+        }
+      }
+    },
+    "/api/v1/auth/purge-test-tenants": {
+      "post": {
+        "tags": [
+          "crate::routes::auth"
+        ],
+        "summary": "POST /api/v1/auth/purge-test-tenants — dev-only cleanup of the legacy\npre-testkit pollution: tenants named/slugged `test-<uuid>` from the old\nshared-DB `test_config` path (MAIN-221 AC-3). Cascades (every `tenant_id` FK\nis `ON DELETE CASCADE`), is idempotent (a second run deletes 0), and is\nrefused unless dev mode is on and this is not production — the same gate the\nrest of the dev hatch uses. Keyed strictly to the `test-%` marker (NG-3).",
+        "operationId": "purge_test_tenants",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PurgeTestTenantsResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": ""
           }
         }
       }
@@ -8666,6 +8701,27 @@
           }
         }
       },
+      "DevAccountsResponse": {
+        "type": "object",
+        "description": "The dev account picker's response: a capped page plus the full match count,\nso the UI can show a \"N more — refine\" hint when the list is truncated\n(MAIN-221 AC-4).",
+        "required": [
+          "accounts",
+          "total"
+        ],
+        "properties": {
+          "accounts": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DevAccount"
+            }
+          },
+          "total": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Total accounts matching the (optional) search — may exceed\n`accounts.len()` when the page was capped."
+          }
+        }
+      },
       "DevLoginRequest": {
         "type": "object",
         "properties": {
@@ -10891,6 +10947,20 @@
               "null"
             ],
             "format": "uuid"
+          }
+        }
+      },
+      "PurgeTestTenantsResponse": {
+        "type": "object",
+        "description": "Result of the dev-only `purge-test-tenants` sweep (MAIN-221 AC-3).",
+        "required": [
+          "deleted"
+        ],
+        "properties": {
+          "deleted": {
+            "type": "integer",
+            "format": "int64",
+            "description": "How many `test-%` tenants were deleted (0 on a second, idempotent run)."
           }
         }
       },

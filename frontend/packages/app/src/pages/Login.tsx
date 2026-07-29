@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "@nookos/api";
 
@@ -60,14 +60,35 @@ export function Login() {
   // the email you type. Testing an authorization model requires being
   // different people, and a model you cannot switch between users to exercise
   // is a model nobody exercises.
-  const { data: devAccounts } = useQuery({
-    queryKey: ["auth", "dev-accounts"],
-    queryFn: async () => (await api.GET("/api/v1/auth/dev-accounts")).data ?? [],
+  //
+  // The list is server-searched and server-capped (MAIN-221 AC-4): `search` is
+  // what the input holds, `devQuery` is its debounced echo so we refetch a few
+  // hundred ms after typing stops rather than on every keystroke.
+  const [devSearch, setDevSearch] = useState("");
+  const [devQuery, setDevQuery] = useState("");
+  useEffect(() => {
+    const t = setTimeout(() => setDevQuery(devSearch.trim()), 250);
+    return () => clearTimeout(t);
+  }, [devSearch]);
+
+  const { data: devData } = useQuery({
+    queryKey: ["auth", "dev-accounts", devQuery],
+    queryFn: async () =>
+      (
+        await api.GET("/api/v1/auth/dev-accounts", {
+          params: { query: devQuery ? { q: devQuery } : {} },
+        })
+      ).data,
     enabled: providers?.dev_login === true,
     // Refused outright when dev mode is off; that is an answer, not a problem
     // to keep retrying.
     retry: false,
   });
+  const devAccounts = devData?.accounts ?? [];
+  // The server caps the page at 50; `total` is the full match count, so the gap
+  // is how many accounts the current search would have to be narrowed to reach.
+  const devTotal = devData?.total ?? devAccounts.length;
+  const devHidden = Math.max(0, devTotal - devAccounts.length);
   const [devEmail, setDevEmail] = useState("");
   // The account list is a STEP, not the front page. "Sign in with Dev" sits
   // beside the other providers as one option among several; who you sign in as
@@ -242,28 +263,48 @@ export function Login() {
               </button>
             </div>
 
+            {/* Search narrows a list the server caps at 50: with more accounts
+                than that, most are otherwise unreachable (AC-4b). */}
+            <input
+              className="dev-search"
+              value={devSearch}
+              onChange={(e) => setDevSearch(e.target.value)}
+              placeholder="search accounts — email, name, tenant"
+              autoComplete="off"
+            />
+
             {/* Existing accounts first: switching between people you already
                 made is the common case, and retyping an address to do it is
-                the friction that stops anybody testing roles at all. */}
-            {(devAccounts ?? []).map((a) => (
-              <button
-                key={a.email}
-                className="btn dev-account"
-                onClick={() => devLogin(a.email)}
-                title={`sign in as ${a.email}`}
-              >
-                <span className="bright">{a.display_name || a.email}</span>
-                <span className="faint small mono">{a.email}</span>
-                <span className="dev-account-tags">
-                  <span className="faint small">{a.tenant_slug}</span>
-                  {(a.deployment_roles ?? []).map((r) => (
-                    <span key={r} className="dev-role">
-                      {r}
-                    </span>
-                  ))}
-                </span>
-              </button>
-            ))}
+                the friction that stops anybody testing roles at all. The list
+                scrolls inside a bounded box so a long roster never renders
+                clipped past the edge of the card (AC-4a). */}
+            <div className="dev-account-list">
+              {devAccounts.map((a) => (
+                <button
+                  key={a.email}
+                  className="btn dev-account"
+                  onClick={() => devLogin(a.email)}
+                  title={`sign in as ${a.email}`}
+                >
+                  <span className="bright">{a.display_name || a.email}</span>
+                  <span className="faint small mono">{a.email}</span>
+                  <span className="dev-account-tags">
+                    <span className="faint small">{a.tenant_slug}</span>
+                    {(a.deployment_roles ?? []).map((r) => (
+                      <span key={r} className="dev-role">
+                        {r}
+                      </span>
+                    ))}
+                  </span>
+                </button>
+              ))}
+            </div>
+
+            {devHidden > 0 && (
+              <div className="faint small dev-more">
+                {devHidden} more — refine your search
+              </div>
+            )}
 
             <form
               className="dev-new"

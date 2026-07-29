@@ -10,8 +10,10 @@ use openidconnect::{
 use serde::Deserialize;
 use utoipa::ToSchema;
 
-use nook_db::{params, Db};
-use nook_types::{DevAccount, MeResponse, TenantId, UserId};
+use nook_db::{params, CiMatch, Db, Postgres};
+use nook_types::{
+    DevAccount, DevAccountsResponse, MeResponse, PurgeTestTenantsResponse, TenantId, UserId,
+};
 
 use crate::auth::{
     create_auth_session, removal_cookie, session_cookie, AuthCtx, FlowState, FLOW_COOKIE,
@@ -21,7 +23,7 @@ use crate::error::{ApiError, ApiResult};
 use crate::events::{self, EventDraft};
 use crate::services::identity::{
     cached_memberships_for, invalidate_person_tenants, login_identity, member_user_in_tenant,
-    memberships_for, IdentityClaims,
+    memberships_for, IdentityClaims, DEV_ISSUER,
 };
 use crate::state::AppState;
 
@@ -329,11 +331,29 @@ pub async fn dev_login(
         .await?;
 
     if let Some((user_id, tenant_id)) = existing {
-        let session_id = create_auth_session(&state, user_id, tenant_id).await?;
         let user: nook_types::User = state
             .db
             .query_one("SELECT * FROM users WHERE id = $1", params![user_id])
             .await?;
+
+        // Land an ACTUALLY-usable session. `resolve_session` 403s a session whose
+        // user has no `tenant_members` grant on its tenant (a memberless session,
+        // MAIN-98) — and legacy accounts seeded before the membership model, or by
+        // the old shared-DB test path, have none. Without this, "click a name"
+        // sets a cookie and then bounces off /auth/me with 403 instead of signing
+        // you in (MAIN-221 AC-1). Dev-only (this whole handler is gated) and
+        // idempotent; it grants the user's own role, never elevating.
+        state
+            .db
+            .exec(
+                "INSERT INTO tenant_members (id, tenant_id, principal_type, principal_id, role)
+                 VALUES ($1, $2, 'user', $3, $4)
+                 ON CONFLICT (tenant_id, principal_type, principal_id) DO NOTHING",
+                params![uuid::Uuid::now_v7(), tenant_id, user_id, &user.role],
+            )
+            .await?;
+
+        let session_id = create_auth_session(&state, user_id, tenant_id).await?;
         let tenant: nook_types::Tenant = state
             .db
             .query_one("SELECT * FROM tenants WHERE id = $1", params![tenant_id])
@@ -359,7 +379,7 @@ pub async fn dev_login(
     }
 
     let identity = IdentityClaims {
-        issuer: "nookos-dev".into(),
+        issuer: DEV_ISSUER.into(),
         subject: email.clone(),
         email: Some(email.clone()),
         // The dev login is not a real IdP asserting anything — never verified.
@@ -631,6 +651,17 @@ async fn capability_of(state: &AppState, auth: &AuthCtx) -> nook_types::Capabili
     }
 }
 
+/// The account count returned before a search must be applied — beyond this the
+/// picker shows a "N more — refine" hint rather than an unbounded, stuck list.
+const DEV_ACCOUNTS_CAP: i64 = 50;
+
+#[derive(Deserialize, utoipa::IntoParams)]
+pub struct DevAccountsQuery {
+    /// Optional case-insensitive substring over email / display name / tenant
+    /// slug. Absent or blank returns the newest accounts up to the cap.
+    pub q: Option<String>,
+}
+
 /// GET /api/v1/auth/dev-accounts — who you can sign in as, in dev mode.
 ///
 /// Dev only, and unauthenticated by necessity: it is what the login screen
@@ -644,27 +675,91 @@ async fn capability_of(state: &AppState, auth: &AuthCtx) -> nook_types::Capabili
 /// exercises.
 #[utoipa::path(get, path = "/api/v1/auth/dev-accounts",
     operation_id = "dev_accounts",
-    responses((status = 200, body = [DevAccount]), (status = 403)))]
-pub async fn dev_accounts(State(state): State<AppState>) -> ApiResult<Json<Vec<DevAccount>>> {
+    params(DevAccountsQuery),
+    responses((status = 200, body = DevAccountsResponse), (status = 403)))]
+pub async fn dev_accounts(
+    State(state): State<AppState>,
+    Query(query): Query<DevAccountsQuery>,
+) -> ApiResult<Json<DevAccountsResponse>> {
     if !state.cfg.auth_dev_mode || state.cfg.is_production() {
         return Err(ApiError::Forbidden);
     }
-    let rows: Vec<DevAccount> = state
+
+    // A blank search is no search — bind SQL NULL so the filter short-circuits
+    // to "match everything" and the same query serves both cases.
+    let pattern: Option<String> = query
+        .q
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| format!("%{s}%"));
+
+    // `$1` matches any of the three columns; a NULL `$1` matches all rows.
+    let filter = format!(
+        "($1::text IS NULL OR {} OR {} OR {})",
+        Postgres.ci_match("u.email", "$1"),
+        Postgres.ci_match("u.display_name", "$1"),
+        Postgres.ci_match("t.slug", "$1"),
+    );
+
+    let total: i64 = state
+        .db
+        .query_scalar(
+            &format!(
+                "SELECT count(*) FROM users u JOIN tenants t ON t.id = u.tenant_id WHERE {filter}"
+            ),
+            params![pattern.clone()],
+        )
+        .await?;
+
+    let accounts: Vec<DevAccount> = state
         .db
         .query_all(
-            "SELECT u.email, u.display_name, t.slug AS tenant_slug,
-                COALESCE(
-                    (SELECT array_agg(b.role_key ORDER BY b.role_key)
-                     FROM role_bindings b
-                     WHERE b.subject_id = u.id AND b.scope_type = 'deployment'),
-                    '{}'
-                ) AS deployment_roles
-         FROM users u JOIN tenants t ON t.id = u.tenant_id
-         ORDER BY u.created_at",
+            &format!(
+                "SELECT u.email, u.display_name, t.slug AS tenant_slug,
+                    COALESCE(
+                        (SELECT array_agg(b.role_key ORDER BY b.role_key)
+                         FROM role_bindings b
+                         WHERE b.subject_id = u.id AND b.scope_type = 'deployment'),
+                        '{{}}'
+                    ) AS deployment_roles
+             FROM users u JOIN tenants t ON t.id = u.tenant_id
+             WHERE {filter}
+             ORDER BY u.created_at
+             LIMIT $2"
+            ),
+            params![pattern, DEV_ACCOUNTS_CAP],
+        )
+        .await?;
+
+    Ok(Json(DevAccountsResponse { accounts, total }))
+}
+
+/// POST /api/v1/auth/purge-test-tenants — dev-only cleanup of the legacy
+/// pre-testkit pollution: tenants named/slugged `test-<uuid>` from the old
+/// shared-DB `test_config` path (MAIN-221 AC-3). Cascades (every `tenant_id` FK
+/// is `ON DELETE CASCADE`), is idempotent (a second run deletes 0), and is
+/// refused unless dev mode is on and this is not production — the same gate the
+/// rest of the dev hatch uses. Keyed strictly to the `test-%` marker (NG-3).
+#[utoipa::path(post, path = "/api/v1/auth/purge-test-tenants",
+    operation_id = "purge_test_tenants",
+    responses((status = 200, body = PurgeTestTenantsResponse), (status = 403)))]
+pub async fn purge_test_tenants(
+    State(state): State<AppState>,
+) -> ApiResult<Json<PurgeTestTenantsResponse>> {
+    if !state.cfg.auth_dev_mode || state.cfg.is_production() {
+        return Err(ApiError::Forbidden);
+    }
+    let deleted = state
+        .db
+        .exec(
+            "DELETE FROM tenants WHERE name LIKE 'test-%' OR slug LIKE 'test-%'",
             params![],
         )
         .await?;
-    Ok(Json(rows))
+    Ok(Json(PurgeTestTenantsResponse {
+        deleted: deleted as i64,
+    }))
 }
 
 /// POST /api/v1/auth/logout
