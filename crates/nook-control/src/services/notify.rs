@@ -22,7 +22,7 @@
 
 use async_trait::async_trait;
 use hmac::{Hmac, Mac};
-use nook_db::{DbPool, Postgres, TypeMapping};
+use nook_db::{params, Db, DbPool, Postgres, TypeMapping};
 use nook_types::*;
 use serde_json::Value;
 use sha2::Sha256;
@@ -622,27 +622,30 @@ pub async fn raise(state: &AppState, tenant: TenantId, draft: Draft) {
         _ => "info".to_string(),
     };
 
-    let row: Result<Notification, _> = sqlx::query_as(
-        "INSERT INTO notifications (id, tenant_id, user_id, level, title, body, kind, link, payload)
+    let row: Result<Notification, _> = state
+        .db
+        .query_one(
+            "INSERT INTO notifications (id, tenant_id, user_id, level, title, body, kind, link, payload)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
          RETURNING id, tenant_id, user_id, level, title, body, kind, link, payload,
                    read_at, created_at",
-    )
-    .bind(uuid::Uuid::now_v7())
-    .bind(tenant)
-    .bind(draft.user_id)
-    .bind(&level)
-    .bind(&draft.title)
-    .bind(&draft.body)
-    .bind(&draft.kind)
-    .bind(&draft.link)
-    .bind(if draft.payload.is_null() {
-        serde_json::json!({})
-    } else {
-        draft.payload.clone()
-    })
-    .fetch_one(&state.db)
-    .await;
+            params![
+                uuid::Uuid::now_v7(),
+                tenant,
+                draft.user_id,
+                &level,
+                &draft.title,
+                &draft.body,
+                &draft.kind,
+                draft.link.clone(),
+                if draft.payload.is_null() {
+                    serde_json::json!({})
+                } else {
+                    draft.payload.clone()
+                }
+            ],
+        )
+        .await;
 
     let notification = match row {
         Ok(n) => n,
@@ -670,7 +673,11 @@ pub async fn raise(state: &AppState, tenant: TenantId, draft: Draft) {
 
 /// A channel as the dispatcher needs it — including `config`, which is why
 /// this never leaves this module.
-#[derive(sqlx::FromRow)]
+///
+/// FromRow is hand-written (MAIN-205): `levels`/`kinds` are Postgres text[]
+/// arrays with no SQLite `Decode`, so the derive can't satisfy the SqliteRow arm
+/// the dispatch pool bounds on. The PgRow impl reproduces the derive; the
+/// SqliteRow impl defers to MAIN-196.
 struct ChannelRow {
     id: uuid::Uuid,
     kind: String,
@@ -678,6 +685,27 @@ struct ChannelRow {
     levels: Vec<String>,
     kinds: Vec<String>,
     secret: Option<String>,
+}
+
+impl<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> for ChannelRow {
+    fn from_row(row: &'r sqlx::postgres::PgRow) -> sqlx::Result<Self> {
+        use sqlx::Row;
+        Ok(Self {
+            id: row.try_get("id")?,
+            kind: row.try_get("kind")?,
+            config: row.try_get("config")?,
+            levels: row.try_get("levels")?,
+            kinds: row.try_get("kinds")?,
+            secret: row.try_get("secret")?,
+        })
+    }
+}
+impl<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> for ChannelRow {
+    fn from_row(_row: &'r sqlx::sqlite::SqliteRow) -> sqlx::Result<Self> {
+        Err(sqlx::Error::Decode(
+            "SQLite row mapping for array-column type `ChannelRow` lands in MAIN-196".into(),
+        ))
+    }
 }
 
 impl ChannelRow {
@@ -693,13 +721,14 @@ impl ChannelRow {
 }
 
 async fn fan_out(state: &AppState, tenant: TenantId, n: &Notification) {
-    let rows: Vec<ChannelRow> = match sqlx::query_as(
-        "SELECT id, kind, config, levels, kinds, secret FROM notification_channels
+    let rows: Vec<ChannelRow> = match state
+        .db
+        .query_all(
+            "SELECT id, kind, config, levels, kinds, secret FROM notification_channels
          WHERE tenant_id = $1 AND enabled",
-    )
-    .bind(tenant)
-    .fetch_all(&state.db)
-    .await
+            params![tenant],
+        )
+        .await
     {
         Ok(r) => r,
         Err(e) => {
@@ -747,19 +776,19 @@ async fn record_outcome(db: &DbPool, channel: uuid::Uuid, result: anyhow::Result
             )
         }
     };
-    let _ = sqlx::query(&format!(
-        "UPDATE notification_channels
+    let _ = db
+        .exec(
+            &format!(
+                "UPDATE notification_channels
          SET last_ok_at = CASE WHEN $2 THEN {now} ELSE last_ok_at END,
              last_error = $3,
              updated_at = {now}
          WHERE id = $1",
-        now = Postgres.now()
-    ))
-    .bind(channel)
-    .bind(ok)
-    .bind(err)
-    .execute(db)
-    .await;
+                now = Postgres.now()
+            ),
+            params![channel, ok, err],
+        )
+        .await;
 }
 
 /// Deliver to exactly one channel, for the "test" button.
@@ -771,14 +800,14 @@ pub async fn test_channel(
     tenant: TenantId,
     id: uuid::Uuid,
 ) -> anyhow::Result<()> {
-    let row: Option<ChannelRow> = sqlx::query_as(
-        "SELECT id, kind, config, levels, kinds, secret FROM notification_channels
+    let row: Option<ChannelRow> = state
+        .db
+        .query_opt(
+            "SELECT id, kind, config, levels, kinds, secret FROM notification_channels
          WHERE id = $1 AND tenant_id = $2",
-    )
-    .bind(id)
-    .bind(tenant)
-    .fetch_optional(&state.db)
-    .await?;
+            params![id, tenant],
+        )
+        .await?;
     let row = row.ok_or_else(|| anyhow::anyhow!("no such channel"))?;
     let (kind, config) = (row.kind.clone(), row.config_with_secret());
     let provider = channels()
