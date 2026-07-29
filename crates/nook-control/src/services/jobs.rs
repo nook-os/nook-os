@@ -6,7 +6,7 @@
 //!
 //! Shared by the REST handlers (and, later, MCP) so the surfaces never drift.
 
-use nook_db::{Json, Postgres, TimeMath, TypeMapping};
+use nook_db::{params, Db, Json, Postgres, TimeMath, TypeMapping};
 use nook_types::*;
 use serde_json::json;
 use uuid::Uuid;
@@ -71,20 +71,24 @@ fn legal_transition(from: &str, to: &str) -> bool {
 }
 
 async fn load(state: &AppState, tenant: TenantId, id: JobId) -> ApiResult<LoopJob> {
-    sqlx::query_as("SELECT * FROM loop_jobs WHERE id = $1 AND tenant_id = $2")
-        .bind(id)
-        .bind(tenant)
-        .fetch_optional(&state.db)
+    state
+        .db
+        .query_opt(
+            "SELECT * FROM loop_jobs WHERE id = $1 AND tenant_id = $2",
+            params![id, tenant],
+        )
         .await?
         .ok_or(ApiError::NotFound)
 }
 
 /// The job's target card. `NotFound` if it is gone or not this tenant's.
 async fn load_target(state: &AppState, tenant: TenantId, task_id: TaskId) -> ApiResult<TaskItem> {
-    sqlx::query_as("SELECT * FROM tasks WHERE id = $1 AND tenant_id = $2")
-        .bind(task_id)
-        .bind(tenant)
-        .fetch_optional(&state.db)
+    state
+        .db
+        .query_opt(
+            "SELECT * FROM tasks WHERE id = $1 AND tenant_id = $2",
+            params![task_id, tenant],
+        )
         .await?
         .ok_or(ApiError::NotFound)
 }
@@ -109,12 +113,13 @@ async fn load_visible(
 }
 
 async fn transcript(state: &AppState, id: JobId) -> ApiResult<Vec<LoopJobTranscriptEntry>> {
-    Ok(
-        sqlx::query_as("SELECT * FROM loop_job_transcript WHERE job_id = $1 ORDER BY id")
-            .bind(id)
-            .fetch_all(&state.db)
-            .await?,
-    )
+    Ok(state
+        .db
+        .query_all(
+            "SELECT * FROM loop_job_transcript WHERE job_id = $1 ORDER BY id",
+            params![id],
+        )
+        .await?)
 }
 
 async fn detail(state: &AppState, job: LoopJob) -> ApiResult<LoopJobDetail> {
@@ -156,20 +161,23 @@ pub async fn create(
     }
 
     let id = JobId::new();
-    let job: LoopJob = sqlx::query_as(
-        "INSERT INTO loop_jobs
+    let job: LoopJob = state
+        .db
+        .query_one(
+            "INSERT INTO loop_jobs
             (id, tenant_id, kind, target_task_id, workspace_id, requested_by, state)
          VALUES ($1, $2, $3, $4, $5, $6, 'queued')
          RETURNING *",
-    )
-    .bind(id)
-    .bind(tenant)
-    .bind(&req.kind)
-    .bind(target_id)
-    .bind(target.workspace_id)
-    .bind(requested_by)
-    .fetch_one(&state.db)
-    .await?;
+            params![
+                id,
+                tenant,
+                &req.kind,
+                target_id,
+                target.workspace_id.map(|w| w.0),
+                requested_by
+            ],
+        )
+        .await?;
 
     // Ride the generic queue (AC-2). Payload is the job id as JSON — the
     // consumer re-fetches the row rather than trusting anything else on the
@@ -217,13 +225,13 @@ pub async fn list_for_task(
     if !crate::services::tasks::visible_to(&target, viewer) {
         return Err(ApiError::NotFound);
     }
-    Ok(sqlx::query_as(
-        "SELECT * FROM loop_jobs WHERE tenant_id = $1 AND target_task_id = $2 ORDER BY id DESC",
-    )
-    .bind(tenant)
-    .bind(task_id)
-    .fetch_all(&state.db)
-    .await?)
+    Ok(state
+        .db
+        .query_all(
+            "SELECT * FROM loop_jobs WHERE tenant_id = $1 AND target_task_id = $2 ORDER BY id DESC",
+            params![tenant, task_id],
+        )
+        .await?)
 }
 
 /// Move a job to `to`, refusing illegal transitions (AC-6). Records a
@@ -246,15 +254,17 @@ pub async fn transition(
             job.state
         )));
     }
-    let updated: LoopJob = sqlx::query_as(&format!(
-        "UPDATE loop_jobs SET state = $2, updated_at = {}
+    let updated: LoopJob = state
+        .db
+        .query_one(
+            &format!(
+                "UPDATE loop_jobs SET state = $2, updated_at = {}
          WHERE id = $1 RETURNING *",
-        Postgres.now()
-    ))
-    .bind(id)
-    .bind(to)
-    .fetch_one(&state.db)
-    .await?;
+                Postgres.now()
+            ),
+            params![id, to],
+        )
+        .await?;
 
     // Privacy of the target card gates the notification (not the activity
     // event) — a private card's state changes must not ring the tenant-wide
@@ -336,22 +346,25 @@ pub async fn rerun(
     }
 
     let new_id = JobId::new();
-    let job: LoopJob = sqlx::query_as(
-        "INSERT INTO loop_jobs
+    let job: LoopJob = state
+        .db
+        .query_one(
+            "INSERT INTO loop_jobs
             (id, tenant_id, kind, target_task_id, workspace_id, requested_by,
              state, predecessor_job_id)
          VALUES ($1, $2, $3, $4, $5, $6, 'queued', $7)
          RETURNING *",
-    )
-    .bind(new_id)
-    .bind(tenant)
-    .bind(&prev.kind)
-    .bind(prev.target_task_id)
-    .bind(prev.workspace_id)
-    .bind(requested_by)
-    .bind(prev.id)
-    .fetch_one(&state.db)
-    .await?;
+            params![
+                new_id,
+                tenant,
+                &prev.kind,
+                prev.target_task_id,
+                prev.workspace_id.map(|w| w.0),
+                requested_by,
+                prev.id
+            ],
+        )
+        .await?;
 
     state
         .queue
@@ -375,26 +388,25 @@ pub async fn append_transcript(
     source: &str,
     content: &str,
 ) -> ApiResult<LoopJobTranscriptEntry> {
-    let entry: LoopJobTranscriptEntry = sqlx::query_as(
-        "INSERT INTO loop_job_transcript (id, job_id, source, content)
+    let entry: LoopJobTranscriptEntry = state
+        .db
+        .query_one(
+            "INSERT INTO loop_job_transcript (id, job_id, source, content)
          VALUES ($1, $2, $3, $4) RETURNING *",
-    )
-    .bind(JobTranscriptId::new())
-    .bind(id)
-    .bind(source)
-    .bind(content)
-    .fetch_one(&state.db)
-    .await?;
+            params![JobTranscriptId::new(), id, source, content],
+        )
+        .await?;
 
     // Nudge the ticket's live Loop panel that a new transcript line landed
     // (MAIN-128 AC-2 — the run "streams" as narration arrives). Best-effort: a
     // missing job row just means no live nudge, never a failed append.
-    if let Ok(Some((tenant, task_id))) = sqlx::query_as::<_, (TenantId, TaskId)>(
-        "SELECT tenant_id, target_task_id FROM loop_jobs WHERE id = $1",
-    )
-    .bind(id)
-    .fetch_optional(&state.db)
-    .await
+    if let Ok(Some((tenant, task_id))) = state
+        .db
+        .query_opt::<(TenantId, TaskId)>(
+            "SELECT tenant_id, target_task_id FROM loop_jobs WHERE id = $1",
+            params![id],
+        )
+        .await
     {
         state
             .registry
@@ -465,9 +477,12 @@ pub async fn select_executor(
 
     // The person the requester is — a node's ownership keys on the person, not
     // the per-tenant user (MAIN-130).
-    let person: Option<Uuid> = sqlx::query_scalar("SELECT person_id FROM users WHERE id = $1")
-        .bind(job.requested_by)
-        .fetch_optional(&state.db)
+    let person: Option<Uuid> = state
+        .db
+        .query_scalar_opt(
+            "SELECT person_id FROM users WHERE id = $1",
+            params![job.requested_by],
+        )
         .await?;
     let Some(person) = person else {
         return set_queued_reason(state, job_id, "the requester has no person identity").await;
@@ -500,11 +515,9 @@ pub async fn select_executor(
         runtime = Postgres.get_text("e", "runtime"),
         state = Postgres.get_text("e", "state"),
     );
-    let node: Option<NodeId> = sqlx::query_scalar(&node_sql)
-        .bind(tenant)
-        .bind(person)
-        .bind(LOOP_RUNTIME)
-        .fetch_optional(&state.db)
+    let node: Option<NodeId> = state
+        .db
+        .query_scalar_opt(&node_sql, params![tenant, person, LOOP_RUNTIME])
         .await?;
 
     let Some(node) = node else {
@@ -513,17 +526,19 @@ pub async fn select_executor(
     };
 
     // Atomic claim: only the caller that flips `queued` -> `claimed` wins.
-    let claimed: Option<LoopJob> = sqlx::query_as(&format!(
-        "UPDATE loop_jobs
+    let claimed: Option<LoopJob> = state
+        .db
+        .query_opt(
+            &format!(
+                "UPDATE loop_jobs
             SET executor_node_id = $2, state = 'claimed', queued_reason = NULL, updated_at = {}
           WHERE id = $1 AND state = 'queued'
           RETURNING *",
-        Postgres.now()
-    ))
-    .bind(job_id)
-    .bind(node)
-    .fetch_optional(&state.db)
-    .await?;
+                Postgres.now()
+            ),
+            params![job_id, node],
+        )
+        .await?;
 
     match claimed {
         Some(job) => {
@@ -543,23 +558,23 @@ pub async fn select_executor(
 /// node of yours is online" from "your online nodes aren't authorized" from "no
 /// operator available", so the UI can tell the PM what to do.
 async fn no_executor_reason(state: &AppState, tenant: TenantId, person: Uuid) -> ApiResult<String> {
-    let owned_online: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM nodes
+    let owned_online: i64 = state
+        .db
+        .query_scalar(
+            "SELECT count(*) FROM nodes
          WHERE tenant_id = $1 AND owner_person_id = $2 AND status = 'online'",
-    )
-    .bind(tenant)
-    .bind(person)
-    .fetch_one(&state.db)
-    .await?;
+            params![tenant, person],
+        )
+        .await?;
     let operator_sql = format!(
         "SELECT count(*) FROM nodes
          WHERE tenant_id = $1 AND status = 'online'
            AND {}",
         shared_operator_clause()
     );
-    let operator_online: i64 = sqlx::query_scalar(&operator_sql)
-        .bind(tenant)
-        .fetch_one(&state.db)
+    let operator_online: i64 = state
+        .db
+        .query_scalar(&operator_sql, params![tenant])
         .await?;
 
     Ok(match (owned_online, operator_online) {
@@ -580,15 +595,17 @@ async fn no_executor_reason(state: &AppState, tenant: TenantId, person: Uuid) ->
 /// `state = 'queued'` so a concurrent claim is never clobbered by a stale
 /// reason write.
 async fn set_queued_reason(state: &AppState, job_id: JobId, reason: &str) -> ApiResult<LoopJob> {
-    sqlx::query(&format!("UPDATE loop_jobs SET queued_reason = $2, updated_at = {} WHERE id = $1 AND state = 'queued'", Postgres.now()))
-        .bind(job_id)
-        .bind(reason)
-        .execute(&state.db)
+    state
+        .db
+        .exec(
+            &format!("UPDATE loop_jobs SET queued_reason = $2, updated_at = {} WHERE id = $1 AND state = 'queued'", Postgres.now()),
+            params![job_id, reason],
+        )
         .await?;
     // Return the current row (its state is still queued unless a claim raced in).
-    sqlx::query_as("SELECT * FROM loop_jobs WHERE id = $1")
-        .bind(job_id)
-        .fetch_one(&state.db)
+    state
+        .db
+        .query_one("SELECT * FROM loop_jobs WHERE id = $1", params![job_id])
         .await
         .map_err(Into::into)
 }
@@ -607,15 +624,15 @@ pub fn skill_for_kind(kind: &str) -> &'static str {
 /// The target ticket's board key (e.g. `MAIN-42`) — what the skill is pointed
 /// at. Empty string if the row has vanished (the caller fails the job).
 async fn task_key(state: &AppState, tenant: TenantId, task_id: TaskId) -> ApiResult<String> {
-    let key: Option<String> = sqlx::query_scalar(
-        "SELECT b.key || '-' || t.number
+    let key: Option<String> = state
+        .db
+        .query_scalar_opt(
+            "SELECT b.key || '-' || t.number
          FROM tasks t JOIN boards b ON b.id = t.board_id
          WHERE t.id = $1 AND t.tenant_id = $2",
-    )
-    .bind(task_id)
-    .bind(tenant)
-    .fetch_optional(&state.db)
-    .await?;
+            params![task_id, tenant],
+        )
+        .await?;
     Ok(key.unwrap_or_default())
 }
 
@@ -628,26 +645,27 @@ pub async fn resolve_repo(
     workspace_id: WorkspaceId,
     node: NodeId,
 ) -> ApiResult<Option<(String, String)>> {
-    let row: Option<(Option<String>, Option<String>)> = sqlx::query_as(
-        "SELECT git_remote_url, git_branch FROM node_workspaces
+    let row: Option<(Option<String>, Option<String>)> = state
+        .db
+        .query_opt(
+            "SELECT git_remote_url, git_branch FROM node_workspaces
          WHERE workspace_id = $1 AND node_id = $2",
-    )
-    .bind(workspace_id)
-    .bind(node)
-    .fetch_optional(&state.db)
-    .await?;
+            params![workspace_id, node],
+        )
+        .await?;
     let row = match row {
         Some(r @ (Some(_), _)) => Some(r),
         // The executor has no usable row — take any node's remote for the ws.
         _ => {
-            sqlx::query_as(
-                "SELECT git_remote_url, git_branch FROM node_workspaces
+            state
+                .db
+                .query_opt::<(Option<String>, Option<String>)>(
+                    "SELECT git_remote_url, git_branch FROM node_workspaces
              WHERE workspace_id = $1 AND git_remote_url IS NOT NULL
              LIMIT 1",
-            )
-            .bind(workspace_id)
-            .fetch_optional(&state.db)
-            .await?
+                    params![workspace_id],
+                )
+                .await?
         }
     };
     Ok(
@@ -731,13 +749,14 @@ pub async fn fail_stranded_for_node(
     tenant: TenantId,
     node: NodeId,
 ) -> ApiResult<()> {
-    let stranded: Vec<JobId> = sqlx::query_scalar(
-        "SELECT id FROM loop_jobs
+    let stranded: Vec<JobId> = state
+        .db
+        .query_scalar_all(
+            "SELECT id FROM loop_jobs
          WHERE executor_node_id = $1 AND state IN ('claimed', 'running')",
-    )
-    .bind(node)
-    .fetch_all(&state.db)
-    .await?;
+            params![node],
+        )
+        .await?;
     for id in stranded {
         append_transcript(
             state,
@@ -779,9 +798,11 @@ async fn fail_with(state: &AppState, tenant: TenantId, id: JobId, reason: &str) 
 /// double-fail a job, and a job that resumed or completed between scan and update
 /// falls out of the guard untouched. Returns how many jobs were reaped.
 pub async fn reap_stale_executors(state: &AppState, grace_secs: u64) -> ApiResult<u64> {
-    let reaped: Vec<(JobId, TenantId, TaskId, chrono::DateTime<chrono::Utc>)> =
-        sqlx::query_as(&format!(
-            "UPDATE loop_jobs j
+    let reaped: Vec<(JobId, TenantId, TaskId, chrono::DateTime<chrono::Utc>)> = state
+        .db
+        .query_all(
+            &format!(
+                "UPDATE loop_jobs j
             SET state = 'failed', updated_at = {now}
            FROM nodes n
           WHERE j.executor_node_id = n.id
@@ -789,11 +810,11 @@ pub async fn reap_stale_executors(state: &AppState, grace_secs: u64) -> ApiResul
             AND n.last_seen_at IS NOT NULL
             AND n.last_seen_at < {cutoff}
         RETURNING j.id, j.tenant_id, j.target_task_id, n.last_seen_at",
-            now = Postgres.now(),
-            cutoff = Postgres.now_minus_scaled("$1::bigint", "1 second")
-        ))
-        .bind(grace_secs as i64)
-        .fetch_all(&state.db)
+                now = Postgres.now(),
+                cutoff = Postgres.now_minus_scaled("$1::bigint", "1 second")
+            ),
+            params![grace_secs as i64],
+        )
         .await?;
 
     for (id, tenant, target, last_seen) in &reaped {
@@ -833,13 +854,13 @@ async fn is_executor(
     id: JobId,
     node: NodeId,
 ) -> ApiResult<bool> {
-    let exec: Option<Option<NodeId>> = sqlx::query_scalar(
-        "SELECT executor_node_id FROM loop_jobs WHERE id = $1 AND tenant_id = $2",
-    )
-    .bind(id)
-    .bind(tenant)
-    .fetch_optional(&state.db)
-    .await?;
+    let exec: Option<Option<NodeId>> = state
+        .db
+        .query_scalar_opt(
+            "SELECT executor_node_id FROM loop_jobs WHERE id = $1 AND tenant_id = $2",
+            params![id, tenant],
+        )
+        .await?;
     Ok(matches!(exec, Some(Some(n)) if n == node))
 }
 
