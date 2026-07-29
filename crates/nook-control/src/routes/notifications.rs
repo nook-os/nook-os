@@ -7,7 +7,7 @@
 
 use axum::extract::{Path, Query, State};
 use axum::Json;
-use nook_db::{Postgres, TypeMapping};
+use nook_db::{params, Db, Postgres, TypeMapping};
 use nook_types::*;
 use serde::Deserialize;
 
@@ -33,8 +33,11 @@ pub async fn list(
     Query(q): Query<InboxQuery>,
 ) -> ApiResult<Json<NotificationPage>> {
     let limit = q.limit.unwrap_or(50).clamp(1, 200);
-    let rows: Vec<Notification> = sqlx::query_as(&format!(
-        "SELECT id, tenant_id, user_id, level, title, body, kind, link, payload,
+    let rows: Vec<Notification> = state
+        .db
+        .query_all(
+            &format!(
+                "SELECT id, tenant_id, user_id, level, title, body, kind, link, payload,
                 read_at, created_at
          FROM notifications
          WHERE tenant_id = $1
@@ -44,23 +47,25 @@ pub async fn list(
            AND (NOT {} OR read_at IS NULL)
          ORDER BY created_at DESC
          LIMIT $4",
-        Postgres.cast("$3", "bool")
-    ))
-    .bind(auth.tenant_id)
-    .bind(auth.user_id.0)
-    .bind(q.unread.unwrap_or(false))
-    .bind(limit)
-    .fetch_all(&state.db)
-    .await?;
+                Postgres.cast("$3", "bool")
+            ),
+            params![
+                auth.tenant_id,
+                auth.user_id.0,
+                q.unread.unwrap_or(false),
+                limit
+            ],
+        )
+        .await?;
 
-    let (unread,): (i64,) = sqlx::query_as(
-        "SELECT count(*) FROM notifications
+    let unread = state
+        .db
+        .query_scalar::<i64>(
+            "SELECT count(*) FROM notifications
          WHERE tenant_id = $1 AND (user_id IS NULL OR user_id = $2) AND read_at IS NULL",
-    )
-    .bind(auth.tenant_id)
-    .bind(auth.user_id.0)
-    .fetch_one(&state.db)
-    .await?;
+            params![auth.tenant_id, auth.user_id.0],
+        )
+        .await?;
 
     Ok(Json(NotificationPage {
         notifications: rows,
@@ -83,26 +88,30 @@ pub async fn mark_read(
             let uuid: uuid::Uuid = id
                 .parse()
                 .map_err(|_| ApiError::BadRequest("that is not a notification id".into()))?;
-            sqlx::query(&format!(
-                "UPDATE notifications SET read_at = {}
+            state
+                .db
+                .exec(
+                    &format!(
+                        "UPDATE notifications SET read_at = {}
                  WHERE id = $1 AND tenant_id = $2 AND read_at IS NULL",
-                Postgres.now()
-            ))
-            .bind(uuid)
-            .bind(auth.tenant_id)
-            .execute(&state.db)
-            .await?;
+                        Postgres.now()
+                    ),
+                    params![uuid, auth.tenant_id],
+                )
+                .await?;
         }
         None => {
-            sqlx::query(&format!(
-                "UPDATE notifications SET read_at = {}
+            state
+                .db
+                .exec(
+                    &format!(
+                        "UPDATE notifications SET read_at = {}
                  WHERE tenant_id = $1 AND (user_id IS NULL OR user_id = $2) AND read_at IS NULL",
-                Postgres.now()
-            ))
-            .bind(auth.tenant_id)
-            .bind(auth.user_id.0)
-            .execute(&state.db)
-            .await?;
+                        Postgres.now()
+                    ),
+                    params![auth.tenant_id, auth.user_id.0],
+                )
+                .await?;
         }
     }
     list(State(state), auth, Query(InboxQuery::default())).await
@@ -114,13 +123,13 @@ pub async fn clear(
     State(state): State<AppState>,
     auth: AuthCtx,
 ) -> ApiResult<axum::http::StatusCode> {
-    sqlx::query(
-        "DELETE FROM notifications WHERE tenant_id = $1 AND (user_id IS NULL OR user_id = $2)",
-    )
-    .bind(auth.tenant_id)
-    .bind(auth.user_id.0)
-    .execute(&state.db)
-    .await?;
+    state
+        .db
+        .exec(
+            "DELETE FROM notifications WHERE tenant_id = $1 AND (user_id IS NULL OR user_id = $2)",
+            params![auth.tenant_id, auth.user_id.0],
+        )
+        .await?;
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
 
@@ -213,14 +222,15 @@ pub async fn list_channels(
 ) -> ApiResult<Json<Vec<NotificationChannel>>> {
     // `config` is never selected — it holds bot tokens and webhook URLs, and
     // this list is fetched often and logged freely.
-    let rows: Vec<NotificationChannel> = sqlx::query_as(
-        "SELECT id, tenant_id, kind, name, enabled, levels, kinds,
+    let rows: Vec<NotificationChannel> = state
+        .db
+        .query_all(
+            "SELECT id, tenant_id, kind, name, enabled, levels, kinds,
                 last_ok_at, last_error, created_at, updated_at
          FROM notification_channels WHERE tenant_id = $1 ORDER BY name",
-    )
-    .bind(auth.tenant_id)
-    .fetch_all(&state.db)
-    .await?;
+            params![auth.tenant_id],
+        )
+        .await?;
     Ok(Json(rows))
 }
 
@@ -247,22 +257,25 @@ pub async fn create_channel(
     // A signing secret per channel, generated here and never shown again. The
     // receiver is told it once, when they can write it down.
     let secret = crate::routes::join::random_token("", 32);
-    let row: NotificationChannel = sqlx::query_as(
-        "INSERT INTO notification_channels (id, tenant_id, kind, name, config, levels, kinds, secret)
+    let row: NotificationChannel = state
+        .db
+        .query_one(
+            "INSERT INTO notification_channels (id, tenant_id, kind, name, config, levels, kinds, secret)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
          RETURNING id, tenant_id, kind, name, enabled, levels, kinds,
                    last_ok_at, last_error, created_at, updated_at",
-    )
-    .bind(uuid::Uuid::now_v7())
-    .bind(auth.tenant_id)
-    .bind(&req.kind)
-    .bind(req.name.trim())
-    .bind(&req.config)
-    .bind(&req.levels)
-    .bind(&req.kinds)
-    .bind(&secret)
-    .fetch_one(&state.db)
-    .await?;
+            params![
+                uuid::Uuid::now_v7(),
+                auth.tenant_id,
+                &req.kind,
+                req.name.trim(),
+                &req.config,
+                req.levels.clone(),
+                req.kinds.clone(),
+                &secret
+            ],
+        )
+        .await?;
     Ok(Json(row))
 }
 
@@ -296,8 +309,11 @@ pub async fn update_channel(
     // COALESCE on config means omitting it keeps the stored secrets. A UI that
     // cannot read them back must be able to save a name change without
     // blanking the token it never saw.
-    let row: Option<NotificationChannel> = sqlx::query_as(&format!(
-        "UPDATE notification_channels SET
+    let row: Option<NotificationChannel> = state
+        .db
+        .query_opt(
+            &format!(
+                "UPDATE notification_channels SET
             name = COALESCE($3, name),
             config = COALESCE($4, config),
             enabled = COALESCE($5, enabled),
@@ -307,17 +323,19 @@ pub async fn update_channel(
          WHERE id = $1 AND tenant_id = $2
          RETURNING id, tenant_id, kind, name, enabled, levels, kinds,
                    last_ok_at, last_error, created_at, updated_at",
-        Postgres.now()
-    ))
-    .bind(id)
-    .bind(auth.tenant_id)
-    .bind(req.name.as_deref())
-    .bind(req.config.as_ref())
-    .bind(req.enabled)
-    .bind(req.levels.as_ref())
-    .bind(req.kinds.as_ref())
-    .fetch_optional(&state.db)
-    .await?;
+                Postgres.now()
+            ),
+            params![
+                id,
+                auth.tenant_id,
+                req.name.as_deref(),
+                req.config.clone(),
+                req.enabled,
+                req.levels.clone(),
+                req.kinds.clone()
+            ],
+        )
+        .await?;
     row.map(Json).ok_or(ApiError::NotFound)
 }
 
@@ -330,12 +348,14 @@ pub async fn delete_channel(
     Path(id): Path<uuid::Uuid>,
 ) -> ApiResult<axum::http::StatusCode> {
     auth.require_user()?;
-    let res = sqlx::query("DELETE FROM notification_channels WHERE id = $1 AND tenant_id = $2")
-        .bind(id)
-        .bind(auth.tenant_id)
-        .execute(&state.db)
+    let res = state
+        .db
+        .exec(
+            "DELETE FROM notification_channels WHERE id = $1 AND tenant_id = $2",
+            params![id, auth.tenant_id],
+        )
         .await?;
-    if res.rows_affected() == 0 {
+    if res == 0 {
         return Err(ApiError::NotFound);
     }
     Ok(axum::http::StatusCode::NO_CONTENT)
