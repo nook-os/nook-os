@@ -1,6 +1,6 @@
 use axum::extract::{Path, State};
 use axum::Json;
-use nook_db::{Postgres, TypeMapping};
+use nook_db::{params, Db, Postgres, TypeMapping};
 use nook_types::*;
 
 use crate::auth::AuthCtx;
@@ -53,15 +53,14 @@ pub async fn git_status(
     Path(id): Path<WorkspaceId>,
     axum::extract::Query(q): axum::extract::Query<GitQuery>,
 ) -> ApiResult<Json<GitStatusResponse>> {
-    let path: Option<(String,)> = sqlx::query_as(
-        "SELECT path FROM node_workspaces
+    let path: Option<(String,)> = state
+        .db
+        .query_opt(
+            "SELECT path FROM node_workspaces
          WHERE tenant_id = $1 AND workspace_id = $2 AND node_id = $3",
-    )
-    .bind(auth.tenant_id)
-    .bind(id)
-    .bind(q.node_id)
-    .fetch_optional(&state.db)
-    .await?;
+            params![auth.tenant_id, id, q.node_id],
+        )
+        .await?;
     let Some((path,)) = path else {
         return Err(ApiError::NotFound);
     };
@@ -93,23 +92,26 @@ pub async fn create(
     auth: AuthCtx,
     Json(req): Json<CreateWorkspaceRequest>,
 ) -> ApiResult<Json<Workspace>> {
-    let workspace: Workspace = sqlx::query_as(
-        "INSERT INTO workspaces (id, tenant_id, name, slug, description)
+    let workspace: Workspace = state
+        .db
+        .query_one(
+            "INSERT INTO workspaces (id, tenant_id, name, slug, description)
          VALUES ($1, $2, $3, $4, $5) RETURNING *",
-    )
-    .bind(WorkspaceId::new())
-    .bind(auth.tenant_id)
-    .bind(&req.name)
-    .bind(slugify(&req.name))
-    .bind(&req.description)
-    .fetch_one(&state.db)
-    .await
-    .map_err(|e| match &e {
-        sqlx::Error::Database(d) if d.is_unique_violation() => {
-            ApiError::Conflict("a workspace with that name already exists".into())
-        }
-        _ => e.into(),
-    })?;
+            params![
+                WorkspaceId::new(),
+                auth.tenant_id,
+                &req.name,
+                slugify(&req.name),
+                req.description.clone()
+            ],
+        )
+        .await
+        .map_err(|e| match &e {
+            sqlx::Error::Database(d) if d.is_unique_violation() => {
+                ApiError::Conflict("a workspace with that name already exists".into())
+            }
+            _ => e.into(),
+        })?;
     Ok(Json(workspace))
 }
 
@@ -141,24 +143,26 @@ pub async fn rename(
         ));
     }
 
-    let previous: Option<(String,)> =
-        sqlx::query_as("SELECT name FROM workspaces WHERE id = $1 AND tenant_id = $2")
-            .bind(id)
-            .bind(auth.tenant_id)
-            .fetch_optional(&state.db)
-            .await?;
+    let previous: Option<(String,)> = state
+        .db
+        .query_opt(
+            "SELECT name FROM workspaces WHERE id = $1 AND tenant_id = $2",
+            params![id, auth.tenant_id],
+        )
+        .await?;
     let (previous,) = previous.ok_or(ApiError::NotFound)?;
 
-    let workspace: Workspace = sqlx::query_as(&format!(
-        "UPDATE workspaces SET name = $3, updated_at = {}
+    let workspace: Workspace = state
+        .db
+        .query_one(
+            &format!(
+                "UPDATE workspaces SET name = $3, updated_at = {}
          WHERE id = $1 AND tenant_id = $2 RETURNING *",
-        Postgres.now()
-    ))
-    .bind(id)
-    .bind(auth.tenant_id)
-    .bind(name)
-    .fetch_one(&state.db)
-    .await?;
+                Postgres.now()
+            ),
+            params![id, auth.tenant_id, name],
+        )
+        .await?;
 
     // A `workspace.*` event is what makes every other open tab redraw the new
     // name without a refresh.
@@ -191,34 +195,38 @@ pub async fn delete(
 ) -> ApiResult<Json<DeleteWorkspaceResponse>> {
     let Json(req) = body.unwrap_or_default();
 
-    let workspace: Option<Workspace> =
-        sqlx::query_as("SELECT * FROM workspaces WHERE id = $1 AND tenant_id = $2")
-            .bind(id)
-            .bind(auth.tenant_id)
-            .fetch_optional(&state.db)
-            .await?;
+    let workspace: Option<Workspace> = state
+        .db
+        .query_opt(
+            "SELECT * FROM workspaces WHERE id = $1 AND tenant_id = $2",
+            params![id, auth.tenant_id],
+        )
+        .await?;
     let workspace = workspace.ok_or(ApiError::NotFound)?;
 
     // Live sessions would be killed by the cascade with their tmux left
     // orphaned on the node — make the caller deal with them first.
-    let (live,): (i64,) = sqlx::query_as(
-        "SELECT count(*) FROM sessions
+    let live = state
+        .db
+        .query_scalar::<i64>(
+            "SELECT count(*) FROM sessions
          WHERE workspace_id = $1 AND status IN ('starting', 'running', 'detached')",
-    )
-    .bind(id)
-    .fetch_one(&state.db)
-    .await?;
+            params![id],
+        )
+        .await?;
     if live > 0 {
         return Err(ApiError::Conflict(format!(
             "{live} live session(s) — kill them first"
         )));
     }
 
-    let checkouts: Vec<(NodeId, String)> =
-        sqlx::query_as("SELECT node_id, path FROM node_workspaces WHERE workspace_id = $1")
-            .bind(id)
-            .fetch_all(&state.db)
-            .await?;
+    let checkouts: Vec<(NodeId, String)> = state
+        .db
+        .query_all(
+            "SELECT node_id, path FROM node_workspaces WHERE workspace_id = $1",
+            params![id],
+        )
+        .await?;
     let total = checkouts.len();
     let mut removed = 0usize;
 
@@ -253,10 +261,12 @@ pub async fn delete(
 
     // Cascades node_workspaces, sessions, notes and secrets; tasks and events
     // keep their history with a null workspace.
-    sqlx::query("DELETE FROM workspaces WHERE id = $1 AND tenant_id = $2")
-        .bind(id)
-        .bind(auth.tenant_id)
-        .execute(&state.db)
+    state
+        .db
+        .exec(
+            "DELETE FROM workspaces WHERE id = $1 AND tenant_id = $2",
+            params![id, auth.tenant_id],
+        )
         .await?;
 
     events::record(

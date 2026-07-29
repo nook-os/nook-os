@@ -50,6 +50,9 @@ pub enum DbValue {
     UuidList(Vec<uuid::Uuid>),
     /// A `bigint[]` array parameter (Postgres `= ANY($n)`).
     I64List(Vec<i64>),
+    /// A nullable `text[]` COLUMN value (e.g. inserting `choices text[]`) — a
+    /// single array bind, NOT an `= ANY` operand, so it is not list-expanded.
+    OptTextArray(Option<Vec<String>>),
 }
 
 impl DbValue {
@@ -117,6 +120,7 @@ into_db_value! {
     &[String] => |v| DbValue::TextList(v.to_vec()),
     &[uuid::Uuid] => |v| DbValue::UuidList(v.to_vec()),
     &[i64] => |v| DbValue::I64List(v.to_vec()),
+    Option<Vec<String>> => |v| DbValue::OptTextArray(v),
 }
 
 // Lifetime-carrying reference conversions the `$t:ty` macro can't express.
@@ -162,6 +166,7 @@ fn pg_args(params: Vec<DbValue>) -> Result<PgArguments, sqlx::Error> {
             DbValue::TextList(x) => a.add(x).map_err(add_err)?,
             DbValue::UuidList(x) => a.add(x).map_err(add_err)?,
             DbValue::I64List(x) => a.add(x).map_err(add_err)?,
+            DbValue::OptTextArray(x) => a.add(x).map_err(add_err)?,
         }
     }
     Ok(a)
@@ -195,6 +200,13 @@ fn sqlite_args(
             DbValue::Json(x) => a.add(x).map_err(add_err)?,
             DbValue::TextList(_) | DbValue::UuidList(_) | DbValue::I64List(_) => {
                 unreachable!("expand_lists flattens every list parameter")
+            }
+            // A `text[]` column value has no SQLite array encoding; MAIN-196
+            // decides its storage shape. Never runs under the Postgres proof.
+            DbValue::OptTextArray(_) => {
+                return Err(sqlx::Error::Encode(
+                    "text[] column parameters on SQLite land in MAIN-196".into(),
+                ))
             }
         }
     }
