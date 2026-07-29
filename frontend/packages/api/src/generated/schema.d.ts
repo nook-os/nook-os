@@ -5100,6 +5100,7 @@ export interface components {
             assignee_user_id?: null | components["schemas"]["UserId"];
             board_id: components["schemas"]["BoardId"];
             branch?: string | null;
+            checkout_id?: null | components["schemas"]["NodeWorkspaceId"];
             column_id: components["schemas"]["ColumnId"];
             /** Format: date-time */
             created_at: string;

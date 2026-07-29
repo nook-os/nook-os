@@ -285,23 +285,52 @@ pub fn add_worktree(repo_path: &str, branch: &str) -> OpOutcome {
 
     // Existing branch first; fall back to creating it.
     let dest_str = dest.to_string_lossy().to_string();
-    let existing = run_git(&["worktree", "add", &dest_str, branch], Some(repo), None);
-    let result = match existing {
-        Ok(out) => Ok(out),
-        Err(_) => run_git(
+    if let Err(attach_err) = run_git(&["worktree", "add", &dest_str, branch], Some(repo), None) {
+        if let Err(create_err) = run_git(
             &["worktree", "add", "-b", branch, &dest_str],
             Some(repo),
             None,
-        ),
-    };
-    match result {
-        Ok(_) => OpOutcome {
-            ok: true,
-            path: Some(dest_str.clone()),
-            message: format!("worktree for '{branch}' at {dest_str}"),
-        },
-        Err(e) => fail(format!("worktree add failed: {e}")),
+        ) {
+            // Both failed. When the reason is that the branch is already checked
+            // out in ANOTHER worktree (attach can't move it, `-b` can't recreate
+            // it), neither can win — check out its tip DETACHED at the new path
+            // instead (MAIN-225 AC-5). A genuinely unrelated failure (dest exists,
+            // not a git repo, disk error) is NOT a collision and still fails as
+            // before; the dest/repo cases were already rejected above.
+            if is_branch_collision(&attach_err) {
+                return match run_git(
+                    &["worktree", "add", "--detach", &dest_str, branch],
+                    Some(repo),
+                    None,
+                ) {
+                    Ok(_) => OpOutcome {
+                        ok: true,
+                        path: Some(dest_str.clone()),
+                        message: format!(
+                            "worktree at {dest_str}, detached at '{branch}' \
+                             (that branch is checked out in another worktree)"
+                        ),
+                    },
+                    Err(e) => fail(format!("worktree add failed: {e}")),
+                };
+            }
+            return fail(format!("worktree add failed: {create_err}"));
+        }
     }
+    OpOutcome {
+        ok: true,
+        path: Some(dest_str.clone()),
+        message: format!("worktree for '{branch}' at {dest_str}"),
+    }
+}
+
+/// Git refuses `worktree add <dest> <branch>` when `<branch>` is already checked
+/// out in another worktree, with a message naming that state. Detecting it lets
+/// [`add_worktree`] fall back to a detached checkout (MAIN-225 AC-5) rather than
+/// surfacing a bare "worktree add failed".
+fn is_branch_collision(git_stderr: &str) -> bool {
+    let s = git_stderr.to_lowercase();
+    s.contains("already checked out") || s.contains("already used by worktree")
 }
 
 /// `git worktree repair` from a primary checkout, to fix the `.git` links after
@@ -512,7 +541,103 @@ pub fn read_workspace_file(checkout_path: &str, name: &str) -> Result<Vec<u8>, S
 
 #[cfg(test)]
 mod tests {
-    use super::repo_path_from_url;
+    use super::{add_worktree, repo_path_from_url};
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    static SEQ: AtomicU32 = AtomicU32::new(0);
+
+    /// A unique scratch dir (no `tempfile` dependency). Best-effort cleanup via
+    /// `Scratch`'s Drop; a leak lands in the system temp dir, reclaimed by the OS.
+    struct Scratch(PathBuf);
+    impl Scratch {
+        fn new() -> Scratch {
+            let p = std::env::temp_dir().join(format!(
+                "nook-wt-{}-{}",
+                std::process::id(),
+                SEQ.fetch_add(1, Ordering::SeqCst)
+            ));
+            std::fs::create_dir_all(&p).unwrap();
+            Scratch(p)
+        }
+    }
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn git(dir: &Path, args: &[&str]) {
+        let ok = Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .status()
+            .expect("git runs")
+            .success();
+        assert!(ok, "git {args:?} failed in {}", dir.display());
+    }
+
+    /// A repo at `<base>/repo` with one commit on the default branch.
+    fn init_repo(base: &Path) -> PathBuf {
+        let repo = base.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "-q"]);
+        git(&repo, &["config", "user.email", "t@example.test"]);
+        git(&repo, &["config", "user.name", "t"]);
+        std::fs::write(repo.join("f"), "x").unwrap();
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-qm", "c"]);
+        repo
+    }
+
+    #[test]
+    fn add_worktree_detaches_when_branch_is_checked_out_elsewhere() {
+        let base = Scratch::new();
+        let repo = init_repo(&base.0);
+        // `feature` exists AND is checked out in another worktree, so neither the
+        // attach nor the `-b` create can use it (MAIN-225 AC-5).
+        git(&repo, &["branch", "feature"]);
+        let other = base.0.join("other-checkout");
+        git(
+            &repo,
+            &["worktree", "add", other.to_str().unwrap(), "feature"],
+        );
+
+        let out = add_worktree(repo.to_str().unwrap(), "feature");
+        assert!(out.ok, "expected a detached success, got: {}", out.message);
+        assert!(
+            out.message.contains("detached"),
+            "message names the detached fallback: {}",
+            out.message
+        );
+        let made = out.path.expect("a worktree path");
+        assert!(Path::new(&made).exists(), "the detached worktree exists");
+    }
+
+    #[test]
+    fn add_worktree_fails_on_a_non_git_path() {
+        let base = Scratch::new();
+        let plain = base.0.join("plain");
+        std::fs::create_dir_all(&plain).unwrap();
+        let out = add_worktree(plain.to_str().unwrap(), "feature");
+        assert!(!out.ok, "a non-git path is not a checkout");
+    }
+
+    #[test]
+    fn add_worktree_fails_when_the_destination_already_exists() {
+        let base = Scratch::new();
+        let repo = init_repo(&base.0);
+        // add_worktree derives dest = <repo.parent>/<repo_name>__<branch>.
+        let dest = base.0.join("repo__feature");
+        std::fs::create_dir_all(&dest).unwrap();
+        let out = add_worktree(repo.to_str().unwrap(), "feature");
+        assert!(
+            !out.ok,
+            "an existing destination is refused before any git op"
+        );
+        assert!(out.message.contains("already exists"), "{}", out.message);
+    }
 
     #[test]
     fn derives_owner_and_repo_across_url_shapes() {

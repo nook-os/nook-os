@@ -33,5 +33,6 @@ pub use state::AppState;
 // 0016_node_owner, 0017_node_shared, 0018_work_queue, 0019_notebook_seal,
 // 0020_loop_jobs, 0021_loop_job_queued_reason, 0022_backfill_auth_mode,
 // 0023_interactions, 0024_node_workspace_missing_at,
-// 0025_checkout_kind_and_session_checkout, 0026_workspace_git_remote_url.
+// 0025_checkout_kind_and_session_checkout, 0026_workspace_git_remote_url,
+// 0027_task_checkout_id.
 pub static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");

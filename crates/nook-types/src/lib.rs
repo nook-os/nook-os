@@ -795,6 +795,12 @@ pub struct TaskItem {
     pub branch: Option<String>,
     pub worktree_path: Option<String>,
     pub worktree_node_id: Option<NodeId>,
+    /// The checkout this task's working directory **is** (MAIN-225) — id is
+    /// identity, path is an attribute. Set to the worktree's `node_workspaces`
+    /// row once discovery has scanned it; `NULL` until then, or with no worktree.
+    /// Written alongside the legacy `worktree_path`/`worktree_node_id`, which
+    /// item 7 will retire.
+    pub checkout_id: Option<NodeWorkspaceId>,
     pub session_id: Option<SessionId>,
     pub pr_url: Option<String>,
     /// `0` none, `1` urgent, `2` high, `3` medium, `4` low — Linear's
