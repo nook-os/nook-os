@@ -11,6 +11,7 @@
 
 use axum::extract::{Path, State};
 use axum::Json;
+use nook_db::{params, Db};
 use nook_types::*;
 
 use crate::auth::AuthCtx;
@@ -35,13 +36,14 @@ pub(crate) fn validate(name: &str) -> Result<String, ApiError> {
 #[utoipa::path(get, path = "/api/v1/labels",
     operation_id = "list_labels", responses((status = 200, body = [Label])))]
 pub async fn list(State(state): State<AppState>, auth: AuthCtx) -> ApiResult<Json<Vec<Label>>> {
-    let rows: Vec<Label> = sqlx::query_as(
-        "SELECT id, tenant_id, name, color, created_at FROM labels
+    let rows: Vec<Label> = state
+        .db
+        .query_all(
+            "SELECT id, tenant_id, name, color, created_at FROM labels
          WHERE tenant_id = $1 ORDER BY name",
-    )
-    .bind(auth.tenant_id)
-    .fetch_all(&state.db)
-    .await?;
+            params![auth.tenant_id],
+        )
+        .await?;
     Ok(Json(rows))
 }
 
@@ -59,17 +61,15 @@ pub async fn create(
 ) -> ApiResult<Json<Label>> {
     let name = validate(&req.name)?;
     let color = req.color.unwrap_or_else(|| "#f0a000".into());
-    let row: Label = sqlx::query_as(
-        "INSERT INTO labels (id, tenant_id, name, color) VALUES ($1, $2, $3, $4)
+    let row: Label = state
+        .db
+        .query_one(
+            "INSERT INTO labels (id, tenant_id, name, color) VALUES ($1, $2, $3, $4)
          ON CONFLICT (tenant_id, name) DO UPDATE SET name = EXCLUDED.name
          RETURNING id, tenant_id, name, color, created_at",
-    )
-    .bind(uuid::Uuid::now_v7())
-    .bind(auth.tenant_id)
-    .bind(&name)
-    .bind(&color)
-    .fetch_one(&state.db)
-    .await?;
+            params![uuid::Uuid::now_v7(), auth.tenant_id, &name, &color],
+        )
+        .await?;
     Ok(Json(row))
 }
 
@@ -83,12 +83,14 @@ pub async fn delete(
 ) -> ApiResult<axum::http::StatusCode> {
     // task_labels cascades, so the tasks themselves are untouched — removing a
     // label from the vocabulary must not delete anybody's work.
-    let res = sqlx::query("DELETE FROM labels WHERE id = $1 AND tenant_id = $2")
-        .bind(id)
-        .bind(auth.tenant_id)
-        .execute(&state.db)
+    let res = state
+        .db
+        .exec(
+            "DELETE FROM labels WHERE id = $1 AND tenant_id = $2",
+            params![id, auth.tenant_id],
+        )
         .await?;
-    if res.rows_affected() == 0 {
+    if res == 0 {
         return Err(ApiError::NotFound);
     }
     Ok(axum::http::StatusCode::NO_CONTENT)
@@ -107,19 +109,19 @@ pub async fn add(
     let task = tasks::resolve_id(&state.db, auth.tenant_id, &ident).await?;
     let label_id = resolve_label(&state, auth.tenant_id, &label).await?;
 
-    let res = sqlx::query(
-        "INSERT INTO task_labels (task_id, label_id) VALUES ($1, $2)
+    let res = state
+        .db
+        .exec(
+            "INSERT INTO task_labels (task_id, label_id) VALUES ($1, $2)
          ON CONFLICT DO NOTHING",
-    )
-    .bind(task)
-    .bind(label_id)
-    .execute(&state.db)
-    .await?;
+            params![task, label_id],
+        )
+        .await?;
 
     // Only record an event when something actually changed. An agent that
     // re-applies a label on every poll would otherwise flood the timeline the
     // human reads to see what happened.
-    if res.rows_affected() > 0 {
+    if res > 0 {
         record(&state, &auth, task, &label, "task.label.added").await;
     }
     labels_of(&state, task).await.map(Json)
@@ -137,12 +139,14 @@ pub async fn remove(
 ) -> ApiResult<Json<Vec<Label>>> {
     let task = tasks::resolve_id(&state.db, auth.tenant_id, &ident).await?;
     let label_id = resolve_label(&state, auth.tenant_id, &label).await?;
-    let res = sqlx::query("DELETE FROM task_labels WHERE task_id = $1 AND label_id = $2")
-        .bind(task)
-        .bind(label_id)
-        .execute(&state.db)
+    let res = state
+        .db
+        .exec(
+            "DELETE FROM task_labels WHERE task_id = $1 AND label_id = $2",
+            params![task, label_id],
+        )
         .await?;
-    if res.rows_affected() > 0 {
+    if res > 0 {
         record(&state, &auth, task, &label, "task.label.removed").await;
     }
     labels_of(&state, task).await.map(Json)
@@ -152,33 +156,36 @@ pub async fn remove(
 /// not its uuid.
 async fn resolve_label(state: &AppState, tenant: TenantId, ident: &str) -> ApiResult<uuid::Uuid> {
     if let Ok(id) = ident.parse::<uuid::Uuid>() {
-        let found: Option<(uuid::Uuid,)> =
-            sqlx::query_as("SELECT id FROM labels WHERE id = $1 AND tenant_id = $2")
-                .bind(id)
-                .bind(tenant)
-                .fetch_optional(&state.db)
-                .await?;
+        let found: Option<(uuid::Uuid,)> = state
+            .db
+            .query_opt(
+                "SELECT id FROM labels WHERE id = $1 AND tenant_id = $2",
+                params![id, tenant],
+            )
+            .await?;
         return found.map(|r| r.0).ok_or(ApiError::NotFound);
     }
     let name = validate(ident)?;
-    let found: Option<(uuid::Uuid,)> =
-        sqlx::query_as("SELECT id FROM labels WHERE tenant_id = $1 AND name = $2")
-            .bind(tenant)
-            .bind(&name)
-            .fetch_optional(&state.db)
-            .await?;
+    let found: Option<(uuid::Uuid,)> = state
+        .db
+        .query_opt(
+            "SELECT id FROM labels WHERE tenant_id = $1 AND name = $2",
+            params![tenant, &name],
+        )
+        .await?;
     found.map(|r| r.0).ok_or_else(|| ApiError::NotFound)
 }
 
 pub async fn labels_of(state: &AppState, task: TaskId) -> ApiResult<Vec<Label>> {
-    let rows: Vec<Label> = sqlx::query_as(
-        "SELECT l.id, l.tenant_id, l.name, l.color, l.created_at
+    let rows: Vec<Label> = state
+        .db
+        .query_all(
+            "SELECT l.id, l.tenant_id, l.name, l.color, l.created_at
          FROM task_labels tl JOIN labels l ON l.id = tl.label_id
          WHERE tl.task_id = $1 ORDER BY l.name",
-    )
-    .bind(task)
-    .fetch_all(&state.db)
-    .await?;
+            params![task],
+        )
+        .await?;
     Ok(rows)
 }
 
@@ -186,16 +193,17 @@ async fn record(state: &AppState, auth: &AuthCtx, task: TaskId, label: &str, kin
     // Title feeds the activity timeline (unchanged); the human key lets the
     // escalation-label notification name the task WITHOUT its title, so an
     // escalation on a private card leaks nothing new (MAIN-91 AC-2, NG-4).
-    let meta: Option<(String, Option<i32>, Option<String>)> = sqlx::query_as(
-        "SELECT t.title, t.number, b.key FROM tasks t
+    let meta: Option<(String, Option<i32>, Option<String>)> = state
+        .db
+        .query_opt(
+            "SELECT t.title, t.number, b.key FROM tasks t
          JOIN boards b ON b.id = t.board_id
          WHERE t.id = $1",
-    )
-    .bind(task)
-    .fetch_optional(&state.db)
-    .await
-    .ok()
-    .flatten();
+            params![task],
+        )
+        .await
+        .ok()
+        .flatten();
     let (title, key) = match meta {
         Some((title, Some(n), Some(k))) => (title, format!("{k}-{n}")),
         Some((title, _, _)) => (title, String::new()),
