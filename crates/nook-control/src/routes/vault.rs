@@ -9,7 +9,7 @@
 
 use axum::extract::State;
 use axum::Json;
-use nook_db::{Postgres, TypeMapping};
+use nook_db::{params, Db, Postgres, TypeMapping};
 use nook_types::*;
 
 use crate::auth::AuthCtx;
@@ -23,16 +23,20 @@ use crate::state::AppState;
 pub async fn status(State(state): State<AppState>, auth: AuthCtx) -> ApiResult<Json<VaultStatus>> {
     // A node cannot enumerate the vault.
     auth.require_user()?;
-    let row: Option<(chrono::DateTime<chrono::Utc>,)> =
-        sqlx::query_as("SELECT created_at FROM user_vaults WHERE user_id = $1")
-            .bind(auth.user_id)
-            .fetch_optional(&state.db)
-            .await?;
-    let (passkeys,): (i64,) =
-        sqlx::query_as("SELECT count(*) FROM user_passkeys WHERE user_id = $1")
-            .bind(auth.user_id)
-            .fetch_one(&state.db)
-            .await?;
+    let row: Option<(chrono::DateTime<chrono::Utc>,)> = state
+        .db
+        .query_opt(
+            "SELECT created_at FROM user_vaults WHERE user_id = $1",
+            params![auth.user_id],
+        )
+        .await?;
+    let passkeys = state
+        .db
+        .query_scalar::<i64>(
+            "SELECT count(*) FROM user_passkeys WHERE user_id = $1",
+            params![auth.user_id],
+        )
+        .await?;
     Ok(Json(VaultStatus {
         configured: row.is_some(),
         created_at: row.map(|(t,)| t),
@@ -59,11 +63,13 @@ pub async fn set_passphrase(
             "app password must be at least 8 characters".into(),
         ));
     }
-    let existing: Option<(uuid::Uuid,)> =
-        sqlx::query_as("SELECT user_id FROM user_vaults WHERE user_id = $1")
-            .bind(auth.user_id)
-            .fetch_optional(&state.db)
-            .await?;
+    let existing: Option<(uuid::Uuid,)> = state
+        .db
+        .query_opt(
+            "SELECT user_id FROM user_vaults WHERE user_id = $1",
+            params![auth.user_id],
+        )
+        .await?;
     if existing.is_some() {
         return Err(ApiError::Conflict(
             "an app password is already set and cannot be changed".into(),
@@ -71,16 +77,14 @@ pub async fn set_passphrase(
     }
 
     let (salt, verifier) = crate::crypto::passphrase_verifier(&req.passphrase);
-    sqlx::query(
-        "INSERT INTO user_vaults (user_id, tenant_id, kdf_salt, verifier)
+    state
+        .db
+        .exec(
+            "INSERT INTO user_vaults (user_id, tenant_id, kdf_salt, verifier)
          VALUES ($1, $2, $3, $4)",
-    )
-    .bind(auth.user_id)
-    .bind(auth.tenant_id)
-    .bind(&salt)
-    .bind(&verifier)
-    .execute(&state.db)
-    .await?;
+            params![auth.user_id, auth.tenant_id, salt, verifier],
+        )
+        .await?;
 
     crate::events::record(
         &state,
@@ -110,11 +114,13 @@ pub async fn verify(
     // Refused for nodes: otherwise a machine with a stolen token gets an
     // unlimited offline-speed oracle for guessing the app password.
     auth.require_user()?;
-    let row: Option<(Vec<u8>, Vec<u8>)> =
-        sqlx::query_as("SELECT kdf_salt, verifier FROM user_vaults WHERE user_id = $1")
-            .bind(auth.user_id)
-            .fetch_optional(&state.db)
-            .await?;
+    let row: Option<(Vec<u8>, Vec<u8>)> = state
+        .db
+        .query_opt(
+            "SELECT kdf_salt, verifier FROM user_vaults WHERE user_id = $1",
+            params![auth.user_id],
+        )
+        .await?;
     let (salt, verifier) = row.ok_or(ApiError::NotFound)?;
     if crate::crypto::verify_passphrase(&req.passphrase, &salt, &verifier) {
         Ok(axum::http::StatusCode::NO_CONTENT)
@@ -151,13 +157,14 @@ pub async fn list_passkeys(
         chrono::DateTime<chrono::Utc>,
         Option<chrono::DateTime<chrono::Utc>>,
     );
-    let rows: Vec<Row> = sqlx::query_as(
-        "SELECT id, credential_id, label, wrapped_secret, created_at, last_used_at
+    let rows: Vec<Row> = state
+        .db
+        .query_all(
+            "SELECT id, credential_id, label, wrapped_secret, created_at, last_used_at
          FROM user_passkeys WHERE user_id = $1 ORDER BY created_at",
-    )
-    .bind(auth.user_id)
-    .fetch_all(&state.db)
-    .await?;
+            params![auth.user_id],
+        )
+        .await?;
     Ok(Json(
         rows.into_iter()
             .map(
@@ -198,11 +205,13 @@ pub async fn add_passkey(
         return Err(ApiError::BadRequest("incomplete passkey".into()));
     }
     // No vault, nothing to unlock.
-    let vault: Option<(uuid::Uuid,)> =
-        sqlx::query_as("SELECT user_id FROM user_vaults WHERE user_id = $1")
-            .bind(auth.user_id)
-            .fetch_optional(&state.db)
-            .await?;
+    let vault: Option<(uuid::Uuid,)> = state
+        .db
+        .query_opt(
+            "SELECT user_id FROM user_vaults WHERE user_id = $1",
+            params![auth.user_id],
+        )
+        .await?;
     if vault.is_none() {
         return Err(ApiError::SetupRequired(
             "set an app password before enrolling a passkey".into(),
@@ -218,23 +227,26 @@ pub async fn add_passkey(
     } else {
         req.label.trim().to_string()
     };
-    let created_at: (chrono::DateTime<chrono::Utc>,) = sqlx::query_as(
-        "INSERT INTO user_passkeys
+    let created_at: (chrono::DateTime<chrono::Utc>,) = state
+        .db
+        .query_one(
+            "INSERT INTO user_passkeys
             (id, user_id, tenant_id, credential_id, label, wrapped_secret)
          VALUES ($1, $2, $3, $4, $5, $6)
          ON CONFLICT (user_id, credential_id)
          DO UPDATE SET wrapped_secret = EXCLUDED.wrapped_secret,
                        label = EXCLUDED.label
          RETURNING created_at",
-    )
-    .bind(id)
-    .bind(auth.user_id)
-    .bind(auth.tenant_id)
-    .bind(&req.credential_id)
-    .bind(&label)
-    .bind(&wrapped)
-    .fetch_one(&state.db)
-    .await?;
+            params![
+                id,
+                auth.user_id,
+                auth.tenant_id,
+                &req.credential_id,
+                &label,
+                wrapped
+            ],
+        )
+        .await?;
 
     crate::events::record(
         &state,
@@ -267,12 +279,14 @@ pub async fn delete_passkey(
 ) -> ApiResult<axum::http::StatusCode> {
     // Removing someone's passkey is a lockout, not a node's job.
     auth.require_user()?;
-    let done = sqlx::query("DELETE FROM user_passkeys WHERE id = $1 AND user_id = $2")
-        .bind(id)
-        .bind(auth.user_id)
-        .execute(&state.db)
+    let done = state
+        .db
+        .exec(
+            "DELETE FROM user_passkeys WHERE id = $1 AND user_id = $2",
+            params![id, auth.user_id],
+        )
         .await?;
-    if done.rows_affected() == 0 {
+    if done == 0 {
         return Err(ApiError::NotFound);
     }
     Ok(axum::http::StatusCode::NO_CONTENT)
@@ -290,13 +304,15 @@ pub async fn touch_passkey(
 ) -> ApiResult<axum::http::StatusCode> {
     // Bookkeeping for a human's device.
     auth.require_user()?;
-    sqlx::query(&format!(
-        "UPDATE user_passkeys SET last_used_at = {} WHERE id = $1 AND user_id = $2",
-        Postgres.now()
-    ))
-    .bind(id)
-    .bind(auth.user_id)
-    .execute(&state.db)
-    .await?;
+    state
+        .db
+        .exec(
+            &format!(
+                "UPDATE user_passkeys SET last_used_at = {} WHERE id = $1 AND user_id = $2",
+                Postgres.now()
+            ),
+            params![id, auth.user_id],
+        )
+        .await?;
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
