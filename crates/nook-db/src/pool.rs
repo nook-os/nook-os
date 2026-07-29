@@ -328,6 +328,28 @@ pub trait Db {
         T: Send + Unpin,
         for<'r> T: sqlx::Decode<'r, sqlx::Postgres> + sqlx::Type<sqlx::Postgres>,
         for<'r> T: sqlx::Decode<'r, sqlx::Sqlite> + sqlx::Type<sqlx::Sqlite>;
+
+    /// Fetch a single scalar column from at most one row.
+    async fn query_scalar_opt<T>(
+        &self,
+        sql: &str,
+        params: Vec<DbValue>,
+    ) -> Result<Option<T>, sqlx::Error>
+    where
+        T: Send + Unpin,
+        for<'r> T: sqlx::Decode<'r, sqlx::Postgres> + sqlx::Type<sqlx::Postgres>,
+        for<'r> T: sqlx::Decode<'r, sqlx::Sqlite> + sqlx::Type<sqlx::Sqlite>;
+
+    /// Fetch a single scalar column from every row (`SELECT id FROM …`).
+    async fn query_scalar_all<T>(
+        &self,
+        sql: &str,
+        params: Vec<DbValue>,
+    ) -> Result<Vec<T>, sqlx::Error>
+    where
+        T: Send + Unpin,
+        for<'r> T: sqlx::Decode<'r, sqlx::Postgres> + sqlx::Type<sqlx::Postgres>,
+        for<'r> T: sqlx::Decode<'r, sqlx::Sqlite> + sqlx::Type<sqlx::Sqlite>;
 }
 
 impl Db for PgPool {
@@ -382,6 +404,36 @@ impl Db for PgPool {
             .fetch_one(self)
             .await
     }
+    async fn query_scalar_opt<T>(
+        &self,
+        sql: &str,
+        params: Vec<DbValue>,
+    ) -> Result<Option<T>, sqlx::Error>
+    where
+        T: Send + Unpin,
+        for<'r> T: sqlx::Decode<'r, sqlx::Postgres> + sqlx::Type<sqlx::Postgres>,
+        for<'r> T: sqlx::Decode<'r, sqlx::Sqlite> + sqlx::Type<sqlx::Sqlite>,
+    {
+        let args = pg_args(params)?;
+        sqlx::query_scalar_with::<sqlx::Postgres, T, _>(sql, args)
+            .fetch_optional(self)
+            .await
+    }
+    async fn query_scalar_all<T>(
+        &self,
+        sql: &str,
+        params: Vec<DbValue>,
+    ) -> Result<Vec<T>, sqlx::Error>
+    where
+        T: Send + Unpin,
+        for<'r> T: sqlx::Decode<'r, sqlx::Postgres> + sqlx::Type<sqlx::Postgres>,
+        for<'r> T: sqlx::Decode<'r, sqlx::Sqlite> + sqlx::Type<sqlx::Sqlite>,
+    {
+        let args = pg_args(params)?;
+        sqlx::query_scalar_with::<sqlx::Postgres, T, _>(sql, args)
+            .fetch_all(self)
+            .await
+    }
 }
 
 impl Db for SqlitePool {
@@ -434,6 +486,36 @@ impl Db for SqlitePool {
         let (sql, args) = sqlite_args(sql, params)?;
         sqlx::query_scalar_with::<sqlx::Sqlite, T, _>(&sql, args)
             .fetch_one(self)
+            .await
+    }
+    async fn query_scalar_opt<T>(
+        &self,
+        sql: &str,
+        params: Vec<DbValue>,
+    ) -> Result<Option<T>, sqlx::Error>
+    where
+        T: Send + Unpin,
+        for<'r> T: sqlx::Decode<'r, sqlx::Postgres> + sqlx::Type<sqlx::Postgres>,
+        for<'r> T: sqlx::Decode<'r, sqlx::Sqlite> + sqlx::Type<sqlx::Sqlite>,
+    {
+        let (sql, args) = sqlite_args(sql, params)?;
+        sqlx::query_scalar_with::<sqlx::Sqlite, T, _>(&sql, args)
+            .fetch_optional(self)
+            .await
+    }
+    async fn query_scalar_all<T>(
+        &self,
+        sql: &str,
+        params: Vec<DbValue>,
+    ) -> Result<Vec<T>, sqlx::Error>
+    where
+        T: Send + Unpin,
+        for<'r> T: sqlx::Decode<'r, sqlx::Postgres> + sqlx::Type<sqlx::Postgres>,
+        for<'r> T: sqlx::Decode<'r, sqlx::Sqlite> + sqlx::Type<sqlx::Sqlite>,
+    {
+        let (sql, args) = sqlite_args(sql, params)?;
+        sqlx::query_scalar_with::<sqlx::Sqlite, T, _>(&sql, args)
+            .fetch_all(self)
             .await
     }
 }
@@ -528,6 +610,36 @@ impl Db for EnginePool {
         match &self.0 {
             Arm::Pg(p) => p.query_scalar(sql, params).await,
             Arm::Sqlite(p) => p.query_scalar(sql, params).await,
+        }
+    }
+    async fn query_scalar_opt<T>(
+        &self,
+        sql: &str,
+        params: Vec<DbValue>,
+    ) -> Result<Option<T>, sqlx::Error>
+    where
+        T: Send + Unpin,
+        for<'r> T: sqlx::Decode<'r, sqlx::Postgres> + sqlx::Type<sqlx::Postgres>,
+        for<'r> T: sqlx::Decode<'r, sqlx::Sqlite> + sqlx::Type<sqlx::Sqlite>,
+    {
+        match &self.0 {
+            Arm::Pg(p) => p.query_scalar_opt(sql, params).await,
+            Arm::Sqlite(p) => p.query_scalar_opt(sql, params).await,
+        }
+    }
+    async fn query_scalar_all<T>(
+        &self,
+        sql: &str,
+        params: Vec<DbValue>,
+    ) -> Result<Vec<T>, sqlx::Error>
+    where
+        T: Send + Unpin,
+        for<'r> T: sqlx::Decode<'r, sqlx::Postgres> + sqlx::Type<sqlx::Postgres>,
+        for<'r> T: sqlx::Decode<'r, sqlx::Sqlite> + sqlx::Type<sqlx::Sqlite>,
+    {
+        match &self.0 {
+            Arm::Pg(p) => p.query_scalar_all(sql, params).await,
+            Arm::Sqlite(p) => p.query_scalar_all(sql, params).await,
         }
     }
 }
