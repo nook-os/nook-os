@@ -32,5 +32,5 @@ pub use state::AppState;
 // 0013_task_parent, 0014_managed_content, 0015_board_automation,
 // 0016_node_owner, 0017_node_shared, 0018_work_queue, 0019_notebook_seal,
 // 0020_loop_jobs, 0021_loop_job_queued_reason, 0022_backfill_auth_mode,
-// 0023_interactions.
+// 0023_interactions, 0024_node_workspace_missing_at.
 pub static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");

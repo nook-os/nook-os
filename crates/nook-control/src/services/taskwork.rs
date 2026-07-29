@@ -192,7 +192,7 @@ pub async fn start_work(
         .db
         .query_scalar_opt(
             "SELECT path FROM node_workspaces
-         WHERE tenant_id = $1 AND workspace_id = $2 AND node_id = $3
+         WHERE tenant_id = $1 AND workspace_id = $2 AND node_id = $3 AND missing_at IS NULL
          ORDER BY discovered_at LIMIT 1",
             params![tenant, workspace_id, node_id],
         )

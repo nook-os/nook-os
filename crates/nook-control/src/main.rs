@@ -128,6 +128,12 @@ async fn serve(db: nook_db::DbPool, cfg: Config) -> Result<()> {
     // conditional UPDATE keeps them from double-failing a job.
     nook_control::services::job_reaper::start(state.clone());
 
+    // Reclaim checkouts that have stayed tombstoned past the retention window
+    // (MAIN-220): reconcile now marks a vanished checkout missing instead of
+    // deleting it, so this is the only background path that hard-deletes the row
+    // — and it logs any task still pointing at the reclaimed path.
+    nook_control::services::workspace_reaper::start(state.clone());
+
     // One signal, every listener. A single task watches for SIGTERM/SIGINT and
     // flips a watch channel; the browser door, the agent door, and the grace
     // timer each hold a receiver, so a rolling update drains all of them at once

@@ -554,7 +554,8 @@ pub async fn create_session(
                 .db
                 .query_scalar_opt(
                     "SELECT path FROM node_workspaces
-             WHERE tenant_id = $1 AND node_id = $2 AND workspace_id = $3 AND path = $4",
+             WHERE tenant_id = $1 AND node_id = $2 AND workspace_id = $3 AND path = $4
+               AND missing_at IS NULL",
                     params![tenant, req.node_id, req.workspace_id, p],
                 )
                 .await?
@@ -564,7 +565,7 @@ pub async fn create_session(
                 .db
                 .query_scalar_opt(
                     "SELECT path FROM node_workspaces
-             WHERE tenant_id = $1 AND node_id = $2 AND workspace_id = $3
+             WHERE tenant_id = $1 AND node_id = $2 AND workspace_id = $3 AND missing_at IS NULL
              ORDER BY discovered_at LIMIT 1",
                     params![tenant, req.node_id, req.workspace_id],
                 )
