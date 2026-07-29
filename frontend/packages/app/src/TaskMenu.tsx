@@ -18,7 +18,7 @@ import { api, type TaskItem, type LoopJob } from "@nookos/api";
 import { VISIBILITY_META } from "@nookos/ui";
 import { askConfirm, notify } from "./dialogs";
 import type { ContextMenuItem } from "./contextMenu";
-import { createLoopJob, loopAction } from "./loop";
+import { loopAction } from "./loop";
 import { priorityMeta } from "./taskmeta";
 import { formatAll, formatBody, formatTitleBody } from "./taskMarkdown";
 
@@ -71,6 +71,9 @@ export interface TaskMenuContext {
    *  Read from the query cache at open time; undefined when not yet fetched. */
   jobs?: LoopJob[];
   onOpen: () => void;
+  /** Open the ticket's full Loop workspace (MAIN-233) — where a run is started
+   *  WITH an idea and steered while it goes, rather than fired blind. */
+  onOpenLoop: (task: TaskItem) => void;
   onStartWork: (task: TaskItem) => void;
   refresh: () => void;
 }
@@ -82,6 +85,7 @@ export function taskMenuItems({
   epics,
   jobs,
   onOpen,
+  onOpenLoop,
   onStartWork,
   refresh,
 }: TaskMenuContext): ContextMenuItem[] {
@@ -246,11 +250,15 @@ export function taskMenuItems({
   });
 
   items.push({ separator: true });
+  // MAIN-233: this opens the Loop workspace rather than firing a job blind —
+  // starting a run is where you say what you want out of it, so the affordance
+  // leads to the seed box. Never disabled: a ticket whose run is already going
+  // is exactly the one you want to open and steer, and the reason rides along
+  // as the hint.
   items.push({
     label: loop.label,
-    disabled: loop.disabled,
     hint: loop.disabled ? (loop.reason ?? undefined) : undefined,
-    onSelect: () => createLoopJob(loop.kind, task.id).then(refresh),
+    onSelect: () => onOpenLoop(task),
   });
 
   items.push({ separator: true });

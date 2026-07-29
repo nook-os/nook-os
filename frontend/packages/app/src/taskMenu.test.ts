@@ -22,6 +22,7 @@ const ctx = (task: TaskItem): TaskMenuContext => ({
   columns: [{ id: "col1", name: "Todo" }],
   epics: [],
   onOpen: () => {},
+  onOpenLoop: () => {},
   onStartWork: () => {},
   refresh: () => {},
 });

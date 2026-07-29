@@ -1,6 +1,6 @@
 import React, { useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Link, useSearchParams } from "react-router-dom";
+import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import {
   DndContext,
   DragEndEvent,
@@ -1096,6 +1096,7 @@ export function showsUnderArchive(
 
 export function BoardPage() {
   const queryClient = useQueryClient();
+  const navigate = useNavigate();
   const { openAt } = useContextMenuApi();
   const showNewWork = useNewWork((s) => s.show);
   // The open task lives in the URL, not in component state.
@@ -1453,6 +1454,9 @@ export function BoardPage() {
       epics,
       jobs: queryClient.getQueryData<LoopJob[]>(taskJobsKey(task.id)),
       onOpen: () => setOpenTask(task.key ?? task.id),
+      // MAIN-233: the spec/decompose affordance lands in the Loop workspace,
+      // where the run is started with an idea instead of blind.
+      onOpenLoop: (t) => navigate(`/loop/${t.key ?? t.id}`),
       onStartWork: (t) =>
         showNewWork({
           taskId: t.id,

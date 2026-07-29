@@ -76,11 +76,108 @@ export function loopAction(
 }
 
 /** Create a loop job on a ticket. The response is the fresh job's detail; the
- *  caller invalidates the ticket's job list so the panel shows it. */
-export async function createLoopJob(kind: "spec" | "decompose", targetTaskId: string) {
+ *  caller invalidates the ticket's job list so the panel shows it.
+ *
+ *  `seed` (MAIN-231) is the human's opening idea — what they actually want out
+ *  of this run. Blank is the same as absent: the field is omitted entirely so a
+ *  run started from the compact panel's plain button is byte-identical to what
+ *  it sent before the Loop workspace existed. */
+export async function createLoopJob(
+  kind: "spec" | "decompose",
+  targetTaskId: string,
+  seed?: string,
+) {
+  const trimmed = seed?.trim();
   return api.POST("/api/v1/jobs", {
-    body: { kind, target_task_id: targetTaskId },
+    body: {
+      kind,
+      target_task_id: targetTaskId,
+      ...(trimmed ? { seed: trimmed } : {}),
+    },
   });
+}
+
+/** Send an unsolicited steering message to a live job (MAIN-231). The server
+ *  appends it to the transcript, pushes it into the run's session, and resumes a
+ *  job paused on a human — so the caller only has to invalidate. */
+export async function postJobMessage(jobId: string, body: string) {
+  return api.POST("/api/v1/jobs/{id}/messages", {
+    params: { path: { id: jobId } },
+    body: { body: body.trim() },
+  });
+}
+
+/**
+ * What the workspace's bottom bar is FOR, given the job it is looking at. The
+ * three states are genuinely different jobs of work, so the composer is not one
+ * box that changes placeholder — it is this decision, made in one pure place:
+ *
+ * - `seed` — no job yet. The box is the opening idea (AC-2), not a bare Play
+ *   button: you are telling the agent what you want before it starts.
+ * - `steer` — a job is in flight or paused on a human. The box posts steering
+ *   messages (AC-3); a paused job resumes when one lands.
+ * - `readonly` — the job reached a terminal state. There is no session left to
+ *   talk to, and the server refuses messages, so the UI must not offer a box
+ *   that can only fail (AC-5).
+ */
+export type ComposerMode = "seed" | "steer" | "readonly";
+
+export function composerMode(job: LoopJob | null | undefined): ComposerMode {
+  if (!job) return "seed";
+  if (isActiveJob(job)) return "steer";
+  return "readonly";
+}
+
+/**
+ * Terminal escape sequences, stripped so a PTY chunk is readable prose.
+ *
+ * Agent transcript lines are recorded verbatim (MAIN-161 NG-2) — cursor moves,
+ * colours and all. That is right for the record and unreadable on a page, so
+ * the *view* strips them. The stored line is never touched.
+ */
+// eslint-disable-next-line no-control-regex
+const ANSI = /(?:\x1B\[[0-?]*[ -/]*[@-~])|(?:\x1B\][^\x07\x1B]*(?:\x07|\x1B\\))|[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g;
+
+export function stripAnsi(s: string): string {
+  return s.replace(ANSI, "");
+}
+
+/**
+ * Does this transcript entry look like a drafted issue rather than narration?
+ *
+ * The skills print their draft into the session before asking for a go-ahead,
+ * so it arrives as an ordinary transcript line. There is no marker on the wire
+ * saying "this is a draft" — the shape IS the marker: the issue template's own
+ * headings. Recognising them is what lets the page render a draft as markdown
+ * while leaving raw terminal noise as preformatted text (AC-4).
+ */
+export function looksLikeDraft(content: string): boolean {
+  const text = stripAnsi(content);
+  return (
+    /^\s*##\s+Acceptance Criteria\s*$/m.test(text) ||
+    (/^\s*##\s+Problem\s*$/m.test(text) && /^\s*##\s+Non-goals\s*$/m.test(text))
+  );
+}
+
+/** Board keys (`MAIN-42`) named anywhere in a job's transcript — what the run
+ *  filed, so the page can link back to it (AC-4). Deduped, in first-mention
+ *  order, with the job's own target excluded: a spec job always names the
+ *  ticket it is speccing, and offering that as "what it filed" would be a lie. */
+export function filedKeys(
+  transcript: { content: string }[] | null | undefined,
+  exclude?: string | null,
+): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const line of transcript ?? []) {
+    for (const m of stripAnsi(line.content).matchAll(/\b[A-Z][A-Z0-9]{1,9}-\d+\b/g)) {
+      const key = m[0];
+      if (key === exclude || seen.has(key)) continue;
+      seen.add(key);
+      out.push(key);
+    }
+  }
+  return out;
 }
 
 /** How a job's state reads in the panel: a human label and a colour tone. */
