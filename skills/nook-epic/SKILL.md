@@ -1,7 +1,7 @@
 ---
 name: nook-epic
 description: "Walk opted-in NookOS epics and draft the next sub-ticket, grounded in the epic's own (free-form) body plus the current code. Attended by default: asks the human when it needs discovery, and shows the finished draft for a go-ahead before filing. Unattended (files without a read, escalates via comments) only when /loop passes the `unattended` flag. One ticket per pass."
-version: 2.3.0
+version: 2.4.0
 author: NookOS
 license: MIT
 platforms: [linux, macos]
@@ -51,6 +51,37 @@ The opt-in is the `auto-spec` label. An epic without it is never touched.
   `waiting_on_human`, resumes it when the answer lands, and prints the answer to
   stdout. Everything else — the discovery logic (§2), the confidence test, and the
   file/escalate gates — is **byte-identical**; only the ask primitive changes.
+
+  A detached job is **attended, asynchronously** — not unattended. Take §2a's
+  path, not §2b's: confirm and ask rather than requiring determinism, and honour
+  the draft-then-file gate (§3a) through the durable channel. Unattended's
+  comment-and-escalate route (§5b) is for a `/loop` pass with nobody reachable,
+  which is not this.
+
+### Job mode also has an INPUT channel — the seed and steering messages
+
+Asking is only half of it. In a job a human can also speak **without being
+asked**, and both halves of that channel are yours to read:
+
+- **The seed** is the human's opening brief for this pass — direction they wanted
+  you to have before you started. `$NOOK_JOB_SEED` holds it verbatim, line breaks
+  intact; your own arguments may carry a flattened copy (the node types
+  `/nook-epic MAIN-7 <the brief>`). Prefer the env var when both are present. It
+  is the human speaking, so it ranks with the epic body, not above the board: use
+  it to settle which unit is next when §2 leaves that to judgment, to bound scope,
+  or to steer the draft. It never overrides what the board says is already filed
+  or landed (§2), and it never licenses specing against unmerged work. A job with
+  no seed (`$NOOK_JOB_SEED` unset or empty) reads the epic alone, exactly as
+  before.
+- **Steering messages** arrive as an ordinary turn in your session, unprompted —
+  nobody asked a question and none is outstanding. Fold each into the pass as
+  authoritative product input, re-apply the confidence test (§3), and continue.
+- **A steering message is not an answer to an outstanding ask.** If you are
+  blocked on `nook interactions ask --wait`, its answer arrives on that command's
+  stdout and nowhere else. A message that lands while you wait is extra context,
+  not the reply.
+
+One pass still produces at most one ticket, however much the human says.
 
 Everything below is shared; the two places the mode matters are §2 (how much you
 may infer) and §5 (ask inline · ask durably · comment).
@@ -202,9 +233,29 @@ filing until they approve. If they decline, don't file; end the pass.
 (Unattended has no one to approve, so it skips this gate and files directly —
 its safety is the determinism requirement in §2b, not a human read.)
 
+### 3b. Job mode — the same gate, over the durable channel
+
+A detached job has no chat, but it has a transcript and a message channel, so the
+gate holds rather than degrading to unattended's auto-file:
+
+1. **Print the complete draft first** — every section, verbatim, as it will be
+   filed, plus the one-line header naming the epic, the unit, workspace and
+   priority. Your session output is streamed to the job transcript, so printing
+   it is how the human reads it. Print it BEFORE you block on anything; a draft
+   stacked behind a blocking ask is a draft nobody has seen yet.
+2. **Then wait for a go-ahead** on either channel: an answer to
+   `nook interactions ask --wait "File this sub-ticket as drafted above?" --choice
+   file --choice revise`, or an unsolicited steering message saying to go ahead
+   ("file", "file it", "yes", "go").
+3. **Revise and re-show on anything else** — fold the changes in, print the whole
+   draft again, ask again. Never file a version the human has not seen, and never
+   file on silence: a job that times out or is canceled without a go-ahead files
+   nothing.
+
 ## 4. File it
 
-Once approved (§3a) — or, unattended, once §2b is satisfied — file under the
+Once approved (§3a in a terminal, §3b in a job) — or, unattended, once §2b is
+satisfied — file under the
 epic, into the backlog, inheriting the epic's workspace and priority (the backlog
 is the default column — do not pass `--column-type`):
 
@@ -304,5 +355,6 @@ Removing `auto-spec` takes the epic out of §1's scan for good. End the pass.
 - **Attended asks; unattended comments.** Default to attended. Only go silent and
   escalate-by-comment when `/loop` told you `unattended`.
 - **Attended never auto-files.** Show the full draft and wait for an explicit
-  go-ahead before writing to the board (§3a). Only unattended files without a
-  human read, and only when §2b's determinism holds.
+  go-ahead before writing to the board (§3a in a terminal, §3b in a detached job).
+  Only unattended files without a human read, and only when §2b's determinism
+  holds.

@@ -1,7 +1,7 @@
 ---
 name: nook-spec
 description: "Interview the user about a raw idea until confident, then file a build-ready issue on the NookOS board. Use when asked to run the loop's spec interview, draft a queue-ready issue, or plan a feature. A human answers — live at the terminal, or asynchronously when run as a detached loop job; never fully unattended."
-version: 1.1.0
+version: 1.2.0
 author: NookOS
 license: MIT
 platforms: [linux, macos]
@@ -58,6 +58,34 @@ three; only the ask *primitive* changes:
 - **Unattended, no job** (no terminal and no `NOOK_JOB_ID`): there is no one to
   ask and nothing to pause on. Do not guess a product decision — file nothing,
   report that the spec needs a human, and end.
+
+### Job mode also has an INPUT channel — the seed and steering messages
+
+Asking is only half of it. In job mode a human can also speak **without being
+asked**, and both halves of that channel are yours to read:
+
+- **The seed** is the opening idea — the human's first message, exactly as if
+  they had typed it at the terminal. `$NOOK_JOB_SEED` holds it verbatim, line
+  breaks intact; your own arguments may carry a flattened copy of the same text
+  (the node types `/nook-spec MAIN-42 <the brief>`). Prefer the env var when both
+  are present. **Start the interview from the seed**: research against it (§1),
+  and let it narrow the first round of questions the way a human's opening
+  paragraph does. A job with no seed (`$NOOK_JOB_SEED` unset or empty) starts
+  from the ticket alone, exactly as before.
+- **Steering messages** arrive as an ordinary turn in your session, unprompted —
+  nobody asked a question and none is outstanding. Treat each as new product
+  input from the human: fold it into what you have, re-apply the confidence test
+  (§2), and continue. It may add scope, cut scope, correct an assumption, or
+  answer something you were about to ask; take it as authoritative, the same as
+  an interview answer.
+- **A steering message is not an answer to an outstanding ask.** If you are
+  blocked on `nook interactions ask --wait`, its answer arrives on that command's
+  stdout and nowhere else. A message that lands while you wait is extra context,
+  not the reply — keep waiting for the real one rather than assuming the question
+  was addressed.
+
+Everything else — the research pass, the rounds, the confidence test, the draft
+shape, the filing rules — is unchanged by the presence of a seed or a message.
 
 ## 1. Research before asking
 
@@ -133,6 +161,25 @@ Rules for the draft:
 ## 4. Confirm and file
 
 Show the full draft in chat and get the user's go-ahead. Then file it.
+
+**In job mode the gate is the same gate, over the durable channel.** You have no
+chat, but you do have a transcript and a message channel, so nothing about
+draft-then-file changes:
+
+1. **Print the complete draft first** — every section, verbatim, as it will be
+   filed — plus the one-line header (`Workspace:` / `Type:` / priority). Your
+   session output is streamed to the job transcript, so printing it is how the
+   human reads it. Print it BEFORE you block on anything; a draft stacked behind
+   a blocking ask is a draft nobody has seen yet.
+2. **Then wait for a go-ahead.** Either channel counts: an answer to
+   `nook interactions ask --wait "File this spec as drafted above?" --choice file
+   --choice revise` (which pauses the job until it lands), or an unsolicited
+   steering message saying to go ahead. A go-ahead is an explicit yes — "file",
+   "file it", "yes", "go".
+3. **Revise and re-show on anything else.** Changes requested → fold them in,
+   print the whole draft again, and ask again. Never file a draft the human has
+   only seen an earlier version of, and never file on silence — a job that times
+   out or is canceled with no go-ahead files nothing.
 
 **Scope the ticket to a workspace.** A confined `/nook-build` agent only claims
 tasks in its own workspace, so a ticket with no workspace is one no loop will
