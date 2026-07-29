@@ -1579,6 +1579,56 @@ pub struct WorkspaceDetail {
     pub locations: Vec<WorkspaceLocation>,
 }
 
+// ── Mission Control overview (MAIN-226) ──────────────────────────────────────
+
+/// The whole fleet in one payload: every workspace the caller can see anything
+/// of, its checkouts on visible nodes, and the active sessions bound to each —
+/// the hierarchy repo → node → checkout → sessions. Visibility composes the
+/// existing node (own+shared) and session (MAIN-133) rules exactly; it grants no
+/// new powers, and a workspace with nothing visible is simply absent.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct Overview {
+    pub workspaces: Vec<OverviewWorkspace>,
+    /// Ad-hoc `$HOME` terminals with no workspace — surfaced so no running
+    /// session is invisible on the fleet view.
+    pub loose_sessions: Vec<Session>,
+}
+
+/// One repository on the overview: its identity plus every visible checkout and
+/// the sessions that could not be pinned under a visible checkout.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct OverviewWorkspace {
+    pub id: WorkspaceId,
+    pub name: String,
+    pub slug: String,
+    pub git_remote_url: Option<String>,
+    pub git_remote_normalized: Option<String>,
+    pub checkouts: Vec<OverviewCheckout>,
+    /// Sessions in this workspace not bound to a listed checkout (its checkout
+    /// was pruned, or sits on a node the caller cannot see) — kept so work is
+    /// never lost from the view.
+    pub unbound_sessions: Vec<Session>,
+}
+
+/// A single checkout on a node, with the sessions running in it.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct OverviewCheckout {
+    pub id: NodeWorkspaceId,
+    pub node_id: NodeId,
+    pub node_name: String,
+    pub node_status: String,
+    pub path: String,
+    pub branch: Option<String>,
+    /// `clone` | `worktree` | `mirror` — drives the kind badge and gates the
+    /// "+ worktree" action (clone-only).
+    pub kind: String,
+    pub dirty: bool,
+    /// When set, this checkout has vanished from disk (MAIN-220 tombstone). The
+    /// UI ghosts it rather than hiding it.
+    pub missing_at: Option<DateTime<Utc>>,
+    pub sessions: Vec<Session>,
+}
+
 #[derive(Debug, Clone, Deserialize, ToSchema)]
 pub struct CreateWorkspaceRequest {
     pub name: String,

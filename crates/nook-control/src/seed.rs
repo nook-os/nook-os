@@ -2,7 +2,7 @@
 //! brings the same predictable environment back on every reboot.
 
 use anyhow::Result;
-use nook_db::{params, Db, DbPool, Postgres, TimeMath};
+use nook_db::{params, Db, DbPool, Postgres, TimeMath, TypeMapping};
 use nook_types::*;
 
 use crate::config::Config;
@@ -431,6 +431,102 @@ pub async fn run(db: &DbPool, cfg: &Config) -> Result<()> {
             )
             .await?;
         }
+    }
+
+    // A populated Mission Control on a fresh stack (MAIN-226): a demo repo on a
+    // demo node with a clone + a worktree, a session bound to the clone, a loose
+    // $HOME terminal, and a tombstoned checkout so the ghosting is visible.
+    // Dev-only, idempotent (keyed on the demo workspace slug), and clearly
+    // synthetic — the fake remote never matches the real compose node's
+    // discovered repos, and the demo node never reports, so reconcile never
+    // touches these rows.
+    let demo_slug = "mission-demo";
+    let demo_exists: Option<WorkspaceId> = db
+        .query_scalar_opt(
+            "SELECT id FROM workspaces WHERE tenant_id = $1 AND slug = $2",
+            params![tenant.id, demo_slug],
+        )
+        .await?;
+    if demo_exists.is_none() {
+        let node_id = NodeId::new();
+        db.exec(
+            "INSERT INTO nodes (id, tenant_id, name, node_token_hash, status)
+             VALUES ($1, $2, 'demo-box', $3, 'online')",
+            params![node_id, tenant.id, format!("demo-{}", node_id.0.simple())],
+        )
+        .await?;
+
+        let ws_id = WorkspaceId::new();
+        db.exec(
+            "INSERT INTO workspaces (id, tenant_id, name, slug, git_remote_url, git_remote_normalized)
+             VALUES ($1, $2, 'example/widgets', $3,
+                     'git@github.com:example/widgets.git', 'github.com/example/widgets')",
+            params![ws_id, tenant.id, demo_slug],
+        )
+        .await?;
+
+        // A primary clone (clean) and a worktree (dirty) of the same repo.
+        let clone_id = NodeWorkspaceId::new();
+        db.exec(
+            "INSERT INTO node_workspaces
+                 (id, tenant_id, node_id, workspace_id, path, git_remote_url,
+                  git_remote_normalized, git_branch, git_status, kind)
+             VALUES ($1, $2, $3, $4, '/srv/example/widgets',
+                     'git@github.com:example/widgets.git', 'github.com/example/widgets',
+                     'main', $5, 'clone')",
+            params![
+                clone_id,
+                tenant.id,
+                node_id,
+                ws_id,
+                serde_json::json!({ "dirty": false })
+            ],
+        )
+        .await?;
+        db.exec(
+            "INSERT INTO node_workspaces
+                 (id, tenant_id, node_id, workspace_id, path, git_branch, git_status, kind)
+             VALUES ($1, $2, $3, $4, '/srv/example/widgets__login', 'feature/login', $5, 'worktree')",
+            params![
+                NodeWorkspaceId::new(),
+                tenant.id,
+                node_id,
+                ws_id,
+                serde_json::json!({ "dirty": true })
+            ],
+        )
+        .await?;
+        // A tombstoned checkout — shown ghosted, not hidden (MAIN-220).
+        db.exec(
+            &format!(
+                "INSERT INTO node_workspaces
+                     (id, tenant_id, node_id, workspace_id, path, git_branch, git_status, kind, missing_at)
+                 VALUES ($1, $2, $3, $4, '/srv/example/widgets__old', 'old', $5, 'worktree', {})",
+                Postgres.now()
+            ),
+            params![
+                NodeWorkspaceId::new(),
+                tenant.id,
+                node_id,
+                ws_id,
+                serde_json::json!({ "dirty": false })
+            ],
+        )
+        .await?;
+
+        // A session bound to the clone, and a loose $HOME terminal (no workspace).
+        db.exec(
+            "INSERT INTO sessions (id, tenant_id, workspace_id, node_id, name, runtime, status, checkout_id)
+             VALUES ($1, $2, $3, $4, 'widgets · claude', 'claude', 'running', $5)",
+            params![SessionId::new(), tenant.id, ws_id, node_id, clone_id],
+        )
+        .await?;
+        db.exec(
+            "INSERT INTO sessions (id, tenant_id, node_id, name, runtime, status)
+             VALUES ($1, $2, $3, 'demo-box · shell', 'bash', 'running')",
+            params![SessionId::new(), tenant.id, node_id],
+        )
+        .await?;
     }
 
     // A few historical events so the timeline isn't empty on first login.

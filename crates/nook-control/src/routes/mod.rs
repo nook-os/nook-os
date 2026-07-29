@@ -20,6 +20,7 @@ pub mod notes;
 pub mod notifications;
 pub mod oidc_exchange;
 pub mod operator;
+pub mod overview;
 pub mod schedule;
 pub mod sessions;
 pub mod settings;
@@ -139,6 +140,7 @@ pub fn build_router(state: AppState) -> Router {
                 .patch(workspaces::rename)
                 .delete(workspaces::delete),
         )
+        .route("/overview", get(overview::overview))
         .route("/workspaces/{id}/git", get(workspaces::git_status))
         .route("/workspaces/{id}/clone", post(workspaces::clone_to_node))
         .route("/workspaces/{id}/worktrees", post(gitops::add_worktree))

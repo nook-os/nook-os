@@ -4741,3 +4741,310 @@ a.toast-main:hover .toast-title { text-decoration: underline; }
   flex: none;
   padding: 0;
 }
+
+/* ── Mission Control (MAIN-226) ──────────────────────────────────────────────
+   An annunciator deck over a repo-first tree. Badges are exceptions-only: the
+   routine (clean, present, online, running) renders quiet; pills mean trouble.
+   The lamps are the signature: dark cockpit until something needs you. */
+
+/* Breathing room for the whole panel: deck, tree and empty states alike. */
+.m-panel > .nook-panel-body { padding: 8px 10px; }
+
+.m-deck {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  padding: 7px 10px;
+  margin: 0 0 8px;
+  border: 1px solid var(--nook-border);
+  border-radius: var(--nook-radius);
+  background: var(--nook-bg-raised);
+}
+.m-deck-stats {
+  font-family: var(--nook-font-mono);
+  font-size: 11px;
+  color: var(--nook-fg-dim);
+  white-space: nowrap;
+}
+.m-deck-agents { display: inline-flex; flex-wrap: wrap; gap: 4px; }
+.m-agent {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 1px 9px 1px 7px;
+  border: 1px solid var(--nook-border-bright);
+  border-radius: 999px;
+  background: var(--nook-bg-panel);
+  color: var(--nook-fg);
+  font-family: var(--nook-font-mono);
+  font-size: 11px;
+  cursor: pointer;
+}
+.m-agent:hover { border-color: var(--nook-accent); color: var(--nook-fg-bright); }
+.m-agent.running svg { color: var(--nook-accent); }
+.m-agent.waiting { border-color: var(--nook-warn); }
+.m-agent.waiting svg { color: var(--nook-warn); }
+.m-deck-lamps { display: inline-flex; gap: 5px; margin-left: auto; }
+.m-lamp {
+  padding: 2px 9px;
+  border-radius: 3px;
+  font-family: var(--nook-font-mono);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  background: transparent;
+  cursor: pointer;
+}
+.m-lamp.warn { color: var(--nook-warn); border: 1px solid var(--nook-warn); }
+.m-lamp.err { color: var(--nook-err); border: 1px solid var(--nook-err); }
+.m-lamp:hover, .m-lamp.active { box-shadow: var(--nook-glow); }
+.m-lamp.active { background: var(--nook-selection); color: var(--nook-fg-bright); }
+
+.m-tree { display: flex; flex-direction: column; gap: 8px; overflow: auto; }
+.m-repo {
+  border: 1px solid var(--nook-border);
+  border-radius: var(--nook-radius);
+  background: var(--nook-bg-panel);
+  overflow: hidden;
+}
+.m-repo-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 10px;
+  background: var(--nook-bg-raised);
+  cursor: pointer;
+  user-select: none;
+}
+.m-repo-head.static { cursor: default; }
+.m-repo-head:focus-visible {
+  outline: 1px solid var(--nook-accent);
+  outline-offset: -1px;
+}
+.m-repo-icon { flex: none; color: var(--nook-fg-dim); }
+.m-repo-name { font-family: var(--nook-font-mono); font-size: 12px; }
+.m-repo-remote {
+  font-family: var(--nook-font-mono);
+  font-size: 11px;
+  color: var(--nook-fg-faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+.m-repo-roll {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+  flex: none;
+  font-family: var(--nook-font-mono);
+  font-size: 11px;
+}
+.m-roll-live { color: var(--nook-ok); }
+.m-roll-dim { color: var(--nook-fg-faint); }
+
+/* Indent guides: each level hangs off a thin rule, like `tree` output. */
+.m-node { margin: 4px 0 6px 14px; border-left: 1px solid var(--nook-border); padding-left: 10px; }
+.m-node-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 0;
+  font-family: var(--nook-font-mono);
+  font-size: 11px;
+  color: var(--nook-fg-dim);
+}
+.m-node-name { color: var(--nook-fg); }
+.m-node-name.muted { color: var(--nook-fg-dim); }
+
+.m-co { margin: 1px 0 3px; }
+.m-co-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 6px 2px 2px;
+  border-radius: 3px;
+  min-height: 24px;
+}
+.m-co-row:hover { background: var(--nook-bg-raised); }
+.m-co-row.ghost { opacity: 0.45; }
+.m-co-kind { flex: none; color: var(--nook-fg-faint); display: inline-flex; }
+.m-co-branch {
+  font-family: var(--nook-font-mono);
+  font-size: 12px;
+  color: var(--nook-fg-bright);
+  flex: none;
+}
+.m-co-path {
+  font-family: var(--nook-font-mono);
+  font-size: 11px;
+  color: var(--nook-fg-faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+.m-co-actions {
+  display: inline-flex;
+  gap: 4px;
+  margin-left: auto;
+  flex: none;
+}
+
+.m-sess {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: 20px;
+  padding: 2px 6px;
+  border-radius: 3px;
+  font-size: 12px;
+}
+.m-sess:hover { background: var(--nook-bg-raised); }
+.m-sess-mark { flex: none; }
+.m-sess-mark.running { color: var(--nook-accent); }
+.m-sess-mark.waiting { color: var(--nook-warn); }
+.m-sess-mark.idle { color: var(--nook-fg-faint); }
+.m-sess-owner {
+  margin-left: auto;
+  flex: none;
+  font-family: var(--nook-font-mono);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--nook-fg-faint);
+  border: 1px solid var(--nook-border);
+  border-radius: 3px;
+  padding: 0 5px;
+}
+
+.m-ghost-hint {
+  display: block;
+  margin: 0 10px 6px 24px;
+  padding: 1px 0;
+  background: none;
+  border: none;
+  color: var(--nook-fg-faint);
+  font-family: var(--nook-font-mono);
+  font-size: 11px;
+  cursor: pointer;
+  text-align: left;
+}
+.m-ghost-hint:hover { color: var(--nook-fg-dim); text-decoration: underline; }
+
+/* View switcher: a quiet segmented control — the flavors of the same fleet. */
+.m-views {
+  display: inline-flex;
+  border: 1px solid var(--nook-border);
+  border-radius: 3px;
+  overflow: hidden;
+}
+.m-view-btn {
+  padding: 2px 8px;
+  background: transparent;
+  border: none;
+  border-right: 1px solid var(--nook-border);
+  color: var(--nook-fg-dim);
+  font-family: var(--nook-font-mono);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  cursor: pointer;
+}
+.m-view-btn:last-child { border-right: none; }
+.m-view-btn:hover { color: var(--nook-fg); }
+.m-view-btn.active {
+  background: var(--nook-selection);
+  color: var(--nook-fg-bright);
+}
+
+/* Grid + machines flavors: cards in a responsive grid. */
+.m-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
+  gap: 8px;
+  align-items: start;
+  overflow: auto;
+}
+.m-card-body { padding: 4px 8px 6px; }
+.m-co-node {
+  font-family: var(--nook-font-mono);
+  font-size: 11px;
+  color: var(--nook-fg-faint);
+  flex: none;
+}
+.m-co-repo { font-family: var(--nook-font-mono); font-size: 12px; flex: none; }
+
+/* Matrix flavor: repos × machines; a chip per checkout, click = actions menu. */
+.m-matrix-wrap { overflow: auto; display: flex; flex-direction: column; gap: 8px; }
+.m-matrix th { white-space: nowrap; }
+.m-matrix-node { display: inline-flex; align-items: center; gap: 5px; }
+.m-matrix td { vertical-align: top; }
+.m-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin: 1px 3px 1px 0;
+  padding: 1px 7px;
+  border: 1px solid var(--nook-border-bright);
+  border-radius: 999px;
+  background: var(--nook-bg-raised);
+  color: var(--nook-fg);
+  font-family: var(--nook-font-mono);
+  font-size: 11px;
+  cursor: pointer;
+}
+.m-chip:hover { border-color: var(--nook-accent); color: var(--nook-fg-bright); }
+.m-chip.warn { border-color: var(--nook-warn); color: var(--nook-warn); }
+.m-chip.ghost { opacity: 0.45; }
+.m-chip-live { color: var(--nook-ok); font-size: 10px; }
+
+/* The ⋯ row menu trigger stays quiet until the row is alive under the pointer. */
+.m-row-menu { color: var(--nook-fg-dim); }
+.m-row-menu:hover { color: var(--nook-fg-bright); }
+
+/* Context bits: zebra bands tie a checkout to its sessions and alternate for
+   scan rhythm; sticky repo headers keep orientation on long lists; the tint
+   edge/dot is a repo's stable identity color across every view. */
+.m-co.alt { background: color-mix(in srgb, var(--nook-fg) 4%, transparent); border-radius: 3px; }
+.m-repo { overflow: visible; }
+.m-repo-head {
+  position: sticky;
+  top: -8px; /* cancels the panel-body inset so headers pin flush */
+  z-index: 2;
+  border-radius: var(--nook-radius) var(--nook-radius) 0 0;
+}
+.m-repo-head.static { position: static; }
+.m-sess-age {
+  font-family: var(--nook-font-mono);
+  font-size: 10px;
+  color: var(--nook-fg-faint);
+  flex: none;
+}
+.m-tint-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  margin-right: 5px;
+  vertical-align: middle;
+}
+
+/* Canvas flavor: machines as draggable cards on a dotted plot — arrange the
+   fleet the way it lives in your head; the geometry persists. */
+.m-canvas-wrap { display: flex; flex-direction: column; gap: 8px; overflow: auto; }
+.m-canvas {
+  position: relative;
+  min-height: 560px;
+  border: 1px solid var(--nook-border);
+  border-radius: var(--nook-radius);
+  background-image: radial-gradient(var(--nook-border) 1px, transparent 1px);
+  background-size: 22px 22px;
+  /* Cards dragged past the edge scroll into reach instead of clipping. */
+  overflow: auto;
+}
+.m-canvas-card { position: absolute; width: 360px; box-shadow: 0 2px 10px rgba(0, 0, 0, 0.35); }
+.m-canvas-handle { cursor: grab; touch-action: none; }
+.m-canvas-handle:active { cursor: grabbing; }

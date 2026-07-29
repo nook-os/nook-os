@@ -1758,6 +1758,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/overview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["get_overview"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/relations/{id}": {
         parameters: {
             query?: never;
@@ -4680,6 +4696,61 @@ export interface components {
             id: string;
             name: string;
             slug: string;
+        };
+        /**
+         * @description The whole fleet in one payload: every workspace the caller can see anything
+         *     of, its checkouts on visible nodes, and the active sessions bound to each —
+         *     the hierarchy repo → node → checkout → sessions. Visibility composes the
+         *     existing node (own+shared) and session (MAIN-133) rules exactly; it grants no
+         *     new powers, and a workspace with nothing visible is simply absent.
+         */
+        Overview: {
+            /**
+             * @description Ad-hoc `$HOME` terminals with no workspace — surfaced so no running
+             *     session is invisible on the fleet view.
+             */
+            loose_sessions: components["schemas"]["Session"][];
+            workspaces: components["schemas"]["OverviewWorkspace"][];
+        };
+        /** @description A single checkout on a node, with the sessions running in it. */
+        OverviewCheckout: {
+            branch?: string | null;
+            dirty: boolean;
+            id: components["schemas"]["NodeWorkspaceId"];
+            /**
+             * @description `clone` | `worktree` | `mirror` — drives the kind badge and gates the
+             *     "+ worktree" action (clone-only).
+             */
+            kind: string;
+            /**
+             * Format: date-time
+             * @description When set, this checkout has vanished from disk (MAIN-220 tombstone). The
+             *     UI ghosts it rather than hiding it.
+             */
+            missing_at?: string | null;
+            node_id: components["schemas"]["NodeId"];
+            node_name: string;
+            node_status: string;
+            path: string;
+            sessions: components["schemas"]["Session"][];
+        };
+        /**
+         * @description One repository on the overview: its identity plus every visible checkout and
+         *     the sessions that could not be pinned under a visible checkout.
+         */
+        OverviewWorkspace: {
+            checkouts: components["schemas"]["OverviewCheckout"][];
+            git_remote_normalized?: string | null;
+            git_remote_url?: string | null;
+            id: components["schemas"]["WorkspaceId"];
+            name: string;
+            slug: string;
+            /**
+             * @description Sessions in this workspace not bound to a listed checkout (its checkout
+             *     was pruned, or sits on a node the caller cannot see) — kept so work is
+             *     never lost from the view.
+             */
+            unbound_sessions: components["schemas"]["Session"][];
         };
         /**
          * @description A person the caller may address in a DM (MAIN-113 AC-4): the stable
@@ -8778,6 +8849,25 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+        };
+    };
+    get_overview: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Overview"];
+                };
             };
         };
     };
