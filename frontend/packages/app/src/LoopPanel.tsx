@@ -8,8 +8,9 @@
 // one stays readable. Everything refetches on the live `job_changed` event, so
 // the panel fills in without a reload.
 import React, { useState } from "react";
+import { Link } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Play, RotateCcw, Ban, ChevronRight, ChevronDown } from "lucide-react";
+import { Play, RotateCcw, Ban, ChevronRight, ChevronDown, Maximize2 } from "lucide-react";
 import { api, type LoopJobTranscriptEntry } from "@nookos/api";
 import {
   createLoopJob,
@@ -234,6 +235,16 @@ export function LoopPanel({
     <div className="task-section loop-panel">
       <div className="task-section-h loop-panel-h">
         <span>loop</span>
+        {/* The panel stays the compact status light it has always been; the
+            room to actually drive a run — seed box, composer, readable drafts —
+            is one click away (MAIN-233 AC-4). */}
+        <Link
+          className="btn small"
+          to={`/loop/${taskId}`}
+          title="open the full Loop workspace"
+        >
+          <Maximize2 size={11} /> Open in Loop
+        </Link>
         {!latest && !isLoading && <LoopActionButton taskType={taskType} taskId={taskId} />}
       </div>
       {isLoading ? (

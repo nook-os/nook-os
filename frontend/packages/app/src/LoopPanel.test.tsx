@@ -9,6 +9,7 @@ import React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { MemoryRouter } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
 const TASK = "task-1";
@@ -66,10 +67,14 @@ function line(over: Record<string, unknown> = {}) {
 
 function renderPanel(taskType = "task") {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  // The panel now carries an "Open in Loop" link (MAIN-233), so it needs a
+  // router in scope like every other linking component.
   return render(
-    <QueryClientProvider client={qc}>
-      <LoopPanel taskId={TASK} taskType={taskType} />
-    </QueryClientProvider>,
+    <MemoryRouter>
+      <QueryClientProvider client={qc}>
+        <LoopPanel taskId={TASK} taskType={taskType} />
+      </QueryClientProvider>
+    </MemoryRouter>,
   );
 }
 

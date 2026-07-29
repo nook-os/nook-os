@@ -31,6 +31,7 @@ import { TeamPage } from "./pages/Team";
 import { VerifyEmailPage } from "./pages/VerifyEmail";
 import { WorkspaceDetail, WorkspacesPage } from "./pages/Workspaces";
 import { MissionPage } from "./pages/Mission";
+import { LoopPage } from "./pages/Loop";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -157,6 +158,8 @@ function AuthGate() {
         <Route path="sessions" element={<SessionsPage />} />
         <Route path="sessions/:id" element={<SessionPage />} />
         <Route path="board" element={<BoardPage />} />
+        {/* The Loop workspace (MAIN-233): one ticket's run, full screen. */}
+        <Route path="loop/:taskId" element={<LoopPage />} />
         <Route path="chat" element={<ChatPage />} />
         <Route path="accept" element={<AcceptInvitePage />} />
         <Route path="operator" element={<OperatorPage />} />
