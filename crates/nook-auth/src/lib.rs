@@ -13,7 +13,7 @@
 //! node-cert path) stays in each service; this is only the database check that
 //! must be identical.
 
-use nook_db::DbPool;
+use nook_db::{params, Db, DbPool};
 use uuid::Uuid;
 
 /// The browser session cookie. Its value IS the raw session id (server-side
@@ -96,18 +96,18 @@ pub async fn resolve_session_identity(
     pool: &DbPool,
     session_id: Uuid,
 ) -> Result<(Resolved, bool), AuthError> {
-    let row: Option<(Uuid, Uuid, bool)> = sqlx::query_as(
-        "SELECT sa.user_id, sa.tenant_id,
+    let row: Option<(Uuid, Uuid, bool)> = pool
+        .query_opt(
+            "SELECT sa.user_id, sa.tenant_id,
                 EXISTS(SELECT 1 FROM tenant_members m
                        WHERE m.tenant_id = sa.tenant_id
                          AND m.principal_type = 'user'
                          AND m.principal_id = sa.user_id) AS is_member
          FROM sessions_auth sa
          WHERE sa.id = $1 AND sa.expires_at > now()",
-    )
-    .bind(session_id)
-    .fetch_optional(pool)
-    .await?;
+            params![session_id],
+        )
+        .await?;
 
     let (user_id, tenant_id, is_member) = row.ok_or(AuthError::Unauthorized)?;
     Ok((
@@ -124,19 +124,21 @@ pub async fn resolve_session_identity(
 /// Resolve a `nook_user_` bearer token, refreshing its last-used timestamp.
 pub async fn resolve_bearer(pool: &DbPool, token: &str) -> Result<Resolved, AuthError> {
     let hash = hash_token(token);
-    let row: Option<(Uuid, Uuid, Uuid)> = sqlx::query_as(
-        "SELECT id, user_id, tenant_id FROM user_tokens
+    let row: Option<(Uuid, Uuid, Uuid)> = pool
+        .query_opt(
+            "SELECT id, user_id, tenant_id FROM user_tokens
          WHERE token_hash = $1 AND (expires_at IS NULL OR expires_at > now())",
-    )
-    .bind(&hash)
-    .fetch_optional(pool)
-    .await?;
+            params![hash],
+        )
+        .await?;
 
     let (token_id, user_id, tenant_id) = row.ok_or(AuthError::Unauthorized)?;
     // Best-effort touch — a failed update must not fail the request.
-    let _ = sqlx::query("UPDATE user_tokens SET last_used_at = now() WHERE id = $1")
-        .bind(token_id)
-        .execute(pool)
+    let _ = pool
+        .exec(
+            "UPDATE user_tokens SET last_used_at = now() WHERE id = $1",
+            params![token_id],
+        )
         .await;
     Ok(Resolved {
         session_id: token_id,

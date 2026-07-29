@@ -8,7 +8,7 @@ pub mod session_guard;
 
 use std::sync::Arc;
 
-use nook_db::{Postgres, TypeMapping};
+use nook_db::{params, Db, Postgres, TypeMapping};
 
 use axum::extract::FromRequestParts;
 use axum::http::request::Parts;
@@ -260,17 +260,18 @@ impl AuthCtx {
         // A node acts as the tenant's owner for attribution, exactly as the
         // node-token path does — it is a machine credential, not a person, and
         // `require_user` is what keeps it from becoming one.
-        let owner: Option<(Uuid,)> = sqlx::query_as(
-            "SELECT id FROM users WHERE tenant_id = $1
+        let owner: Option<Uuid> = state
+            .db
+            .query_scalar_opt(
+                "SELECT id FROM users WHERE tenant_id = $1
              ORDER BY (role = 'owner') DESC, created_at LIMIT 1",
-        )
-        .bind(id.tenant_id)
-        .fetch_optional(&state.db)
-        .await?;
+                params![id.tenant_id],
+            )
+            .await?;
 
         Ok(AuthCtx {
             session_id: AuthSessionId(id.node_id),
-            user_id: UserId(owner.map(|(u,)| u).unwrap_or(id.node_id)),
+            user_id: UserId(owner.unwrap_or(id.node_id)),
             tenant_id: TenantId(id.tenant_id),
             principal: Principal::Node(nook_types::NodeId(id.node_id)),
             cookie_session: false,
@@ -383,16 +384,13 @@ impl AuthCtx {
         if !matches!(self.principal, Principal::User) {
             return Ok(false);
         }
-        let role: Option<(String,)> =
-            sqlx::query_as("SELECT role FROM users WHERE id = $1 AND tenant_id = $2")
-                .bind(self.user_id)
-                .bind(self.tenant_id)
-                .fetch_optional(db)
-                .await?;
-        Ok(matches!(
-            role.as_ref().map(|(r,)| r.as_str()),
-            Some("owner") | Some("admin")
-        ))
+        let role: Option<String> = db
+            .query_scalar_opt(
+                "SELECT role FROM users WHERE id = $1 AND tenant_id = $2",
+                params![self.user_id, self.tenant_id],
+            )
+            .await?;
+        Ok(matches!(role.as_deref(), Some("owner") | Some("admin")))
     }
 
     /// Refuse machine credentials.
@@ -415,11 +413,14 @@ impl AuthCtx {
 /// single tenant membership. Promoted here from the notebook (MAIN-130) so the
 /// notebook and the node-ownership check resolve the person exactly one way.
 pub async fn person_id_of(state: &AppState, user_id: UserId) -> Result<Uuid, ApiError> {
-    let row: Option<(Uuid,)> = sqlx::query_as("SELECT person_id FROM users WHERE id = $1")
-        .bind(user_id)
-        .fetch_optional(&state.db)
+    let row: Option<Uuid> = state
+        .db
+        .query_scalar_opt(
+            "SELECT person_id FROM users WHERE id = $1",
+            params![user_id],
+        )
         .await?;
-    row.map(|(p,)| p).ok_or(ApiError::NotFound)
+    row.ok_or(ApiError::NotFound)
 }
 
 /// Spawn authorization: a session starts on a machine only for the PERSON who
@@ -447,13 +448,14 @@ pub async fn require_person_owns_node(
                 .into(),
         ));
     };
-    let owner: Option<(Option<Uuid>,)> =
-        sqlx::query_as("SELECT owner_person_id FROM nodes WHERE id = $1 AND tenant_id = $2")
-            .bind(node_id)
-            .bind(tenant)
-            .fetch_optional(&state.db)
-            .await?;
-    let Some((owner,)) = owner else {
+    let owner: Option<Option<Uuid>> = state
+        .db
+        .query_scalar_opt(
+            "SELECT owner_person_id FROM nodes WHERE id = $1 AND tenant_id = $2",
+            params![node_id, tenant],
+        )
+        .await?;
+    let Some(owner) = owner else {
         return Err(ApiError::NotFound);
     };
     let person = person_id_of(state, actor).await?;
@@ -494,13 +496,13 @@ pub async fn require_person_may_use_node(
                 .into(),
         ));
     };
-    let row: Option<(Option<Uuid>, bool)> = sqlx::query_as(
-        "SELECT owner_person_id, shared FROM nodes WHERE id = $1 AND tenant_id = $2",
-    )
-    .bind(node_id)
-    .bind(tenant)
-    .fetch_optional(&state.db)
-    .await?;
+    let row: Option<(Option<Uuid>, bool)> = state
+        .db
+        .query_opt(
+            "SELECT owner_person_id, shared FROM nodes WHERE id = $1 AND tenant_id = $2",
+            params![node_id, tenant],
+        )
+        .await?;
     let Some((owner, shared)) = row else {
         return Err(ApiError::NotFound);
     };
@@ -729,22 +731,25 @@ async fn user_token_ctx(state: &AppState, token: &str) -> Result<AuthCtx, ApiErr
 /// becoming a way to take the account over.
 async fn node_token_ctx(state: &AppState, token: &str) -> Result<AuthCtx, ApiError> {
     let hash = crate::seed::hash_token(token);
-    let node: Option<(Uuid, Uuid)> =
-        sqlx::query_as("SELECT id, tenant_id FROM nodes WHERE node_token_hash = $1")
-            .bind(&hash)
-            .fetch_optional(&state.db)
-            .await?;
+    let node: Option<(Uuid, Uuid)> = state
+        .db
+        .query_opt(
+            "SELECT id, tenant_id FROM nodes WHERE node_token_hash = $1",
+            params![&hash],
+        )
+        .await?;
     let (node_id, tenant_id) = node.ok_or(ApiError::Unauthorized)?;
-    let owner: Option<(Uuid,)> = sqlx::query_as(
-        "SELECT id FROM users WHERE tenant_id = $1
+    let owner: Option<Uuid> = state
+        .db
+        .query_scalar_opt(
+            "SELECT id FROM users WHERE tenant_id = $1
          ORDER BY (role = 'owner') DESC, created_at LIMIT 1",
-    )
-    .bind(tenant_id)
-    .fetch_optional(&state.db)
-    .await?;
+            params![tenant_id],
+        )
+        .await?;
     Ok(AuthCtx {
         session_id: AuthSessionId(Uuid::nil()),
-        user_id: UserId(owner.map(|(id,)| id).unwrap_or_else(Uuid::nil)),
+        user_id: UserId(owner.unwrap_or_else(Uuid::nil)),
         tenant_id: TenantId(tenant_id),
         principal: Principal::Node(nook_types::NodeId(node_id)),
         cookie_session: false,
@@ -775,17 +780,17 @@ pub async fn create_auth_session(
     tenant_id: TenantId,
 ) -> Result<AuthSessionId, ApiError> {
     let id = AuthSessionId::new();
-    sqlx::query(&format!(
-        "INSERT INTO sessions_auth (id, user_id, tenant_id, expires_at)
+    state
+        .db
+        .exec(
+            &format!(
+                "INSERT INTO sessions_auth (id, user_id, tenant_id, expires_at)
          VALUES ($1, $2, $3, {now} + make_interval(hours => $4))",
-        now = Postgres.now()
-    ))
-    .bind(id)
-    .bind(user_id)
-    .bind(tenant_id)
-    .bind(state.cfg.session_ttl_hours as i32)
-    .execute(&state.db)
-    .await?;
+                now = Postgres.now()
+            ),
+            params![id, user_id, tenant_id, state.cfg.session_ttl_hours as i32],
+        )
+        .await?;
     Ok(id)
 }
 

@@ -20,7 +20,7 @@
 
 use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Duration, Utc};
-use nook_db::{DbPool, Postgres, TypeMapping};
+use nook_db::{params, Db, DbPool, Postgres, TypeMapping};
 use nook_types::TenantId;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
@@ -109,20 +109,22 @@ pub async fn generate(
         .map_err(|e| anyhow::anyhow!("sealing the CA key failed: {e}"))?;
 
     let state = if make_active { "active" } else { "staged" };
-    let row: TenantCa = sqlx::query_as(
-        "INSERT INTO tenant_cas (id, tenant_id, state, cert_pem, key_enc, fingerprint, not_after)
+    let row: TenantCa = db
+        .query_one(
+            "INSERT INTO tenant_cas (id, tenant_id, state, cert_pem, key_enc, fingerprint, not_after)
          VALUES ($1, $2, $3, $4, $5, $6, $7)
          RETURNING id, tenant_id, state, cert_pem, fingerprint, not_after, created_at",
-    )
-    .bind(Uuid::now_v7())
-    .bind(tenant)
-    .bind(state)
-    .bind(&cert_pem)
-    .bind(&key_enc)
-    .bind(&fingerprint)
-    .bind(not_after)
-    .fetch_one(db)
-    .await?;
+            params![
+                Uuid::now_v7(),
+                tenant,
+                state,
+                &cert_pem,
+                key_enc,
+                &fingerprint,
+                not_after
+            ],
+        )
+        .await?;
     Ok(row)
 }
 
@@ -133,13 +135,13 @@ pub async fn generate(
 /// set. That is what makes rotation a background process rather than a
 /// fleet-wide outage.
 pub async fn trust_bundle(db: &DbPool, tenant: TenantId) -> Result<Vec<TenantCa>> {
-    let rows: Vec<TenantCa> = sqlx::query_as(
-        "SELECT id, tenant_id, state, cert_pem, fingerprint, not_after, created_at
+    let rows: Vec<TenantCa> = db
+        .query_all(
+            "SELECT id, tenant_id, state, cert_pem, fingerprint, not_after, created_at
            FROM tenant_cas WHERE tenant_id = $1 ORDER BY created_at",
-    )
-    .bind(tenant)
-    .fetch_all(db)
-    .await?;
+            params![tenant],
+        )
+        .await?;
     Ok(rows)
 }
 
@@ -169,29 +171,29 @@ pub async fn load_signer(
     vault: &crate::crypto::Vault,
     tenant: TenantId,
 ) -> Result<(TenantCa, String)> {
-    let row: Option<(TenantCa, Vec<u8>)> = sqlx::query_as(
-        "SELECT id, tenant_id, state, cert_pem, fingerprint, not_after, created_at, key_enc
+    let row: Option<(TenantCa, Vec<u8>)> = db
+        .query_opt::<CaRow>(
+            "SELECT id, tenant_id, state, cert_pem, fingerprint, not_after, created_at, key_enc
            FROM tenant_cas WHERE tenant_id = $1 AND state = 'active'",
-    )
-    .bind(tenant)
-    .fetch_optional(db)
-    .await
-    .map(|o| {
-        o.map(|r: CaRow| {
-            (
-                TenantCa {
-                    id: r.0,
-                    tenant_id: r.1,
-                    state: r.2,
-                    cert_pem: r.3,
-                    fingerprint: r.4,
-                    not_after: r.5,
-                    created_at: r.6,
-                },
-                r.7,
-            )
-        })
-    })?;
+            params![tenant],
+        )
+        .await
+        .map(|o| {
+            o.map(|r: CaRow| {
+                (
+                    TenantCa {
+                        id: r.0,
+                        tenant_id: r.1,
+                        state: r.2,
+                        cert_pem: r.3,
+                        fingerprint: r.4,
+                        not_after: r.5,
+                        created_at: r.6,
+                    },
+                    r.7,
+                )
+            })
+        })?;
 
     let Some((ca, key_enc)) = row else {
         bail!("tenant {tenant} has no active CA");
@@ -335,22 +337,20 @@ pub async fn promote(db: &DbPool, tenant: TenantId, ca_id: Uuid) -> Result<()> {
     let mut tx = db.begin().await?;
     // Demote first: the partial unique index allows only one active row, so
     // the order matters.
-    sqlx::query(
+    tx.exec(
         "UPDATE tenant_cas SET state = 'retiring'
           WHERE tenant_id = $1 AND state = 'active'",
+        params![tenant],
     )
-    .bind(tenant)
-    .execute(&mut *tx)
     .await?;
-    let done = sqlx::query(
-        "UPDATE tenant_cas SET state = 'active'
+    let done = tx
+        .exec(
+            "UPDATE tenant_cas SET state = 'active'
           WHERE id = $1 AND tenant_id = $2 AND state = 'staged'",
-    )
-    .bind(ca_id)
-    .bind(tenant)
-    .execute(&mut *tx)
-    .await?;
-    if done.rows_affected() == 0 {
+            params![ca_id, tenant],
+        )
+        .await?;
+    if done == 0 {
         tx.rollback().await?;
         bail!("no staged CA {ca_id} for this tenant to promote");
     }
@@ -362,17 +362,18 @@ pub async fn promote(db: &DbPool, tenant: TenantId, ca_id: Uuid) -> Result<()> {
 ///
 /// The retirement guard, and the number an admin watches during a rotation.
 pub async fn live_leaves(db: &DbPool, tenant: TenantId, ca_id: Uuid) -> Result<i64> {
-    let (n,): (i64,) = sqlx::query_as(&format!(
-        "SELECT count(*) FROM nodes
+    let n: i64 = db
+        .query_scalar(
+            &format!(
+                "SELECT count(*) FROM nodes
           WHERE tenant_id = $1 AND ca_id = $2
             AND revoked_at IS NULL
             AND cert_not_after IS NOT NULL AND cert_not_after > {now}",
-        now = Postgres.now()
-    ))
-    .bind(tenant)
-    .bind(ca_id)
-    .fetch_one(db)
-    .await?;
+                now = Postgres.now()
+            ),
+            params![tenant, ca_id],
+        )
+        .await?;
     Ok(n)
 }
 
@@ -391,14 +392,13 @@ pub async fn retire(db: &DbPool, tenant: TenantId, ca_id: Uuid) -> Result<()> {
              retire this one once that count reaches zero."
         );
     }
-    let done = sqlx::query(
-        "DELETE FROM tenant_cas WHERE id = $1 AND tenant_id = $2 AND state <> 'active'",
-    )
-    .bind(ca_id)
-    .bind(tenant)
-    .execute(db)
-    .await?;
-    if done.rows_affected() == 0 {
+    let done = db
+        .exec(
+            "DELETE FROM tenant_cas WHERE id = $1 AND tenant_id = $2 AND state <> 'active'",
+            params![ca_id, tenant],
+        )
+        .await?;
+    if done == 0 {
         bail!("no retirable CA {ca_id} for this tenant (the active signer cannot be retired)");
     }
     Ok(())
@@ -456,11 +456,12 @@ pub async fn verify_node_cert(db: &DbPool, cert_der: &[u8]) -> Result<NodeIdenti
     // The node record is the authority on which tenant a machine belongs to.
     // Comparing it against the certificate is what stops a valid certificate
     // from one tenant being used to act in another.
-    let row: Option<(Uuid, Option<DateTime<Utc>>)> =
-        sqlx::query_as("SELECT tenant_id, revoked_at FROM nodes WHERE id = $1")
-            .bind(node_id)
-            .fetch_optional(db)
-            .await?;
+    let row: Option<(Uuid, Option<DateTime<Utc>>)> = db
+        .query_opt(
+            "SELECT tenant_id, revoked_at FROM nodes WHERE id = $1",
+            params![node_id],
+        )
+        .await?;
     let Some((actual_tenant, revoked_at)) = row else {
         bail!("certificate names node {node_id}, which does not exist");
     };

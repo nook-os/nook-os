@@ -8,7 +8,7 @@
 
 use std::sync::Arc;
 
-use nook_db::{DbPool, Postgres, TimeMath};
+use nook_db::{params, Db, DbPool, Postgres, TimeMath};
 use nook_proto::{AttachServerMessage, ControlToNode, UiEvent};
 use nook_types::{NodeId, SessionId, TenantId};
 use serde::{Deserialize, Serialize};
@@ -135,11 +135,12 @@ pub(crate) fn start(
             } else {
                 // Oversized: park the full envelope in the outbox and notify
                 // with just the row id.
-                let row: Result<i64, _> =
-                    sqlx::query_scalar("INSERT INTO bus_outbox (payload) VALUES ($1) RETURNING id")
-                        .bind(&inline)
-                        .fetch_one(&pump_pool)
-                        .await;
+                let row: Result<i64, _> = pump_pool
+                    .query_scalar(
+                        "INSERT INTO bus_outbox (payload) VALUES ($1) RETURNING id",
+                        params![&inline],
+                    )
+                    .await;
                 match row {
                     Ok(id) => match serde_json::to_string(&Wire::Outbox(id)) {
                         Ok(s) => s,
@@ -151,10 +152,8 @@ pub(crate) fn start(
                     }
                 }
             };
-            if let Err(e) = sqlx::query("SELECT pg_notify($1, $2)")
-                .bind(&channel)
-                .bind(&payload)
-                .execute(&pump_pool)
+            if let Err(e) = pump_pool
+                .exec("SELECT pg_notify($1, $2)", params![&channel, &payload])
                 .await
             {
                 tracing::warn!(error = %e, "bus notify failed");
@@ -167,7 +166,7 @@ pub(crate) fn start(
     let listen_registry = registry.clone();
     tokio::spawn(async move {
         loop {
-            let mut listener = match PgListener::connect_with(&listen_pool).await {
+            let mut listener = match PgListener::connect_with(listen_pool.pg()).await {
                 Ok(l) => l,
                 Err(e) => {
                     tracing::warn!(error = %e, "bus listener connect failed");
@@ -221,24 +220,28 @@ pub(crate) fn start(
         loop {
             tick.tick().await;
             registry.refresh_lease_cache(&pool).await;
-            let _ = sqlx::query(&format!(
-                "DELETE FROM bus_outbox WHERE created_at < {cutoff}",
-                cutoff = Postgres.now_minus("60 seconds")
-            ))
-            .execute(&pool)
-            .await;
+            let _ = pool
+                .exec(
+                    &format!(
+                        "DELETE FROM bus_outbox WHERE created_at < {cutoff}",
+                        cutoff = Postgres.now_minus("60 seconds")
+                    ),
+                    params![],
+                )
+                .await;
         }
     });
 }
 
 async fn fetch_outbox(pool: &DbPool, id: i64) -> Option<BusMessage> {
-    let payload: Option<String> =
-        sqlx::query_scalar("DELETE FROM bus_outbox WHERE id = $1 RETURNING payload")
-            .bind(id)
-            .fetch_optional(pool)
-            .await
-            .ok()
-            .flatten();
+    let payload: Option<String> = pool
+        .query_scalar_opt(
+            "DELETE FROM bus_outbox WHERE id = $1 RETURNING payload",
+            params![id],
+        )
+        .await
+        .ok()
+        .flatten();
     match serde_json::from_str::<Wire>(&payload?) {
         Ok(Wire::Inline(msg)) => Some(*msg),
         _ => None,

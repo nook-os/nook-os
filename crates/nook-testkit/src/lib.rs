@@ -29,10 +29,10 @@
 
 use anyhow::{Context, Result};
 use nook_control::state::AppState;
-use nook_db::DbPool;
+use nook_db::EnginePool;
 use nook_infra::Config;
 use nook_types::{NodeId, TenantId, UserId, WorkspaceId};
-use sqlx::{Connection, PgConnection};
+use sqlx::{Connection, PgConnection, PgPool};
 use tokio::sync::OnceCell;
 use uuid::Uuid;
 
@@ -61,14 +61,16 @@ async fn template_db(base_url: &str) -> &'static str {
                 .expect("create the template database");
             admin.close().await.ok();
 
-            let pool = DbPool::connect(&swap_db(base_url, &name))
+            let pool = PgPool::connect(&swap_db(base_url, &name))
                 .await
                 .expect("connect to the template database");
             nook_control::MIGRATOR
                 .run(&pool)
                 .await
                 .expect("migrate the template database");
-            nook_control::seed::run(&pool, &Config::for_test())
+            // `seed::run` takes the workspace pool type (`EnginePool`); wrap the
+            // raw pool just for the seed. Fixtures + the field stay raw Postgres.
+            nook_control::seed::run(&EnginePool::from_pg(pool.clone()), &Config::for_test())
                 .await
                 .expect("seed the template database");
             // Release every connection so the template can be cloned.
@@ -81,8 +83,10 @@ async fn template_db(base_url: &str) -> &'static str {
 /// A prepared, **private** test world: a freshly created, migrated, and seeded
 /// database plus opt-in setup surfaces, dropped whole at teardown.
 pub struct TestBed {
-    /// The pool for this test's private database.
-    pub pool: DbPool,
+    /// The raw Postgres pool for this test's private database. Fixture SQL and
+    /// the entity helpers run on it directly; `db()` / `app_state()` wrap it in
+    /// the workspace `EnginePool` for calls into the production API.
+    pub pool: PgPool,
     /// `DATABASE_URL` — the server + base database, used for the admin
     /// `CREATE`/`DROP DATABASE` statements (which cannot run against the target).
     base_url: String,
@@ -126,7 +130,7 @@ impl TestBed {
         .expect("create the test database from the template");
         admin.close().await.ok();
 
-        let pool = DbPool::connect(&swap_db(&base_url, &db_name))
+        let pool = PgPool::connect(&swap_db(&base_url, &db_name))
             .await
             .expect("connect to the fresh test database");
 
@@ -147,7 +151,14 @@ impl TestBed {
 
     /// A fresh `AppState` on this bed's database with the canonical config.
     pub async fn app_state(&self) -> AppState {
-        AppState::new(self.pool.clone(), self.config(), None).await
+        AppState::new(self.db(), self.config(), None).await
+    }
+
+    /// The workspace pool type ([`EnginePool`]) over this bed's raw pool — for
+    /// passing into production functions that take `&nook_db::DbPool`. Cheap: an
+    /// `EnginePool` is a clone of the underlying pool handle.
+    pub fn db(&self) -> EnginePool {
+        EnginePool::from_pg(self.pool.clone())
     }
 
     /// Create a tenant (name = slug = `test-<hint>-<uuid>`). No tracking needed —

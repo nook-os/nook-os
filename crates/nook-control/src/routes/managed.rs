@@ -15,7 +15,7 @@
 
 use axum::extract::State;
 use axum::Json;
-use nook_db::{Postgres, TypeMapping};
+use nook_db::{params, Db, Postgres, TypeMapping};
 use nook_types::*;
 use sha2::{Digest, Sha256};
 
@@ -73,47 +73,38 @@ pub async fn upsert_default(
     content: &str,
 ) -> Result<(), sqlx::Error> {
     let default_sha = digest(content);
-    let existing: Option<(i64, String)> = sqlx::query_as(
-        "SELECT version, default_sha256 FROM managed_content WHERE kind = $1 AND name = $2",
-    )
-    .bind(kind)
-    .bind(name)
-    .fetch_optional(db)
-    .await?;
+    let existing: Option<(i64, String)> = db
+        .query_opt(
+            "SELECT version, default_sha256 FROM managed_content WHERE kind = $1 AND name = $2",
+            params![kind, name],
+        )
+        .await?;
 
     match existing {
         // Fresh: install at version 1, content == default.
         None => {
-            sqlx::query(
+            db.exec(
                 "INSERT INTO managed_content
                    (id, kind, name, content, sha256, version, default_sha256)
                  VALUES ($1, $2, $3, $4, $5, 1, $5)
                  ON CONFLICT (kind, name) DO NOTHING",
+                params![uuid::Uuid::now_v7(), kind, name, content, &default_sha],
             )
-            .bind(uuid::Uuid::now_v7())
-            .bind(kind)
-            .bind(name)
-            .bind(content)
-            .bind(&default_sha)
-            .execute(db)
             .await?;
         }
         // The shipped default advanced: refresh the row to it and bump version.
         // This is the one case that overwrites — a newer default is meant to win.
         Some((version, stored_default)) if stored_default != default_sha => {
-            sqlx::query(&format!(
-                "UPDATE managed_content
+            db.exec(
+                &format!(
+                    "UPDATE managed_content
                     SET content = $3, sha256 = $4, version = $5,
                         default_sha256 = $4, updated_at = {}
                   WHERE kind = $1 AND name = $2",
-                Postgres.now()
-            ))
-            .bind(kind)
-            .bind(name)
-            .bind(content)
-            .bind(&default_sha)
-            .bind(version + 1)
-            .execute(db)
+                    Postgres.now()
+                ),
+                params![kind, name, content, &default_sha, version + 1],
+            )
             .await?;
         }
         // Unchanged default: leave the row exactly as it is (an operator edit
@@ -141,12 +132,14 @@ pub async fn list_skills(
     auth: AuthCtx,
 ) -> ApiResult<Json<Vec<ManagedContent>>> {
     require_node_manage(&state, &auth).await?;
-    let rows: Vec<ManagedContent> = sqlx::query_as(
-        "SELECT id, kind, name, content, sha256, version, updated_at
+    let rows: Vec<ManagedContent> = state
+        .db
+        .query_all(
+            "SELECT id, kind, name, content, sha256, version, updated_at
          FROM managed_content WHERE kind = 'skill' ORDER BY name",
-    )
-    .fetch_all(&state.db)
-    .await?;
+            params![],
+        )
+        .await?;
     Ok(Json(rows))
 }
 
@@ -158,13 +151,14 @@ pub async fn get_hooks(
     auth: AuthCtx,
 ) -> ApiResult<Json<ManagedContent>> {
     require_node_manage(&state, &auth).await?;
-    let row: Option<ManagedContent> = sqlx::query_as(
-        "SELECT id, kind, name, content, sha256, version, updated_at
+    let row: Option<ManagedContent> = state
+        .db
+        .query_opt(
+            "SELECT id, kind, name, content, sha256, version, updated_at
          FROM managed_content WHERE kind = 'hooks' AND name = $1",
-    )
-    .bind(HOOKS_NAME)
-    .fetch_optional(&state.db)
-    .await?;
+            params![HOOKS_NAME],
+        )
+        .await?;
     row.map(Json).ok_or(ApiError::NotFound)
 }
 
@@ -176,11 +170,12 @@ pub async fn get_hooks(
 pub async fn managed_skills_as_install(
     db: &nook_db::DbPool,
 ) -> Result<Vec<nook_proto::ControlToNode>, sqlx::Error> {
-    let rows: Vec<(String, String, String)> = sqlx::query_as(
-        "SELECT name, content, sha256 FROM managed_content WHERE kind = 'skill' ORDER BY name",
-    )
-    .fetch_all(db)
-    .await?;
+    let rows: Vec<(String, String, String)> = db
+        .query_all(
+            "SELECT name, content, sha256 FROM managed_content WHERE kind = 'skill' ORDER BY name",
+            params![],
+        )
+        .await?;
     Ok(rows
         .into_iter()
         .map(
@@ -199,12 +194,12 @@ pub async fn managed_skills_as_install(
 pub async fn managed_hooks_as_install(
     db: &nook_db::DbPool,
 ) -> Result<Option<nook_proto::ControlToNode>, sqlx::Error> {
-    let row: Option<(String, String)> = sqlx::query_as(
-        "SELECT content, sha256 FROM managed_content WHERE kind = 'hooks' AND name = $1",
-    )
-    .bind(HOOKS_NAME)
-    .fetch_optional(db)
-    .await?;
+    let row: Option<(String, String)> = db
+        .query_opt(
+            "SELECT content, sha256 FROM managed_content WHERE kind = 'hooks' AND name = $1",
+            params![HOOKS_NAME],
+        )
+        .await?;
     Ok(row.map(|(content, sha256)| nook_proto::ControlToNode::InstallHooks { content, sha256 }))
 }
 

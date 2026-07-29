@@ -9,6 +9,9 @@ repository.workspace = true
 sqlx = { workspace = true }
 async-trait = { workspace = true }
 futures-util = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+serde_json = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }

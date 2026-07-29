@@ -14,7 +14,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::Json;
 use chrono::{DateTime, Utc};
-use nook_db::{Postgres, TypeMapping};
+use nook_db::{params, Db, Postgres, TypeMapping};
 use nook_types::{ChatChannel, ChatChannelPlacement, CreateChatChannel, UpdateChatChannel};
 use uuid::Uuid;
 
@@ -100,12 +100,13 @@ pub async fn access(
     channel_id: Uuid,
     caller: &Caller,
 ) -> Result<Access, ChatError> {
-    let row: Option<(String, Uuid, Option<DateTime<Utc>>)> =
-        sqlx::query_as("SELECT owner_type, owner_id, archived_at FROM chat_channels WHERE id = $1")
-            .bind(channel_id)
-            .fetch_optional(db)
-            .await
-            .map_err(|_| ChatError::Internal)?;
+    let row: Option<(String, Uuid, Option<DateTime<Utc>>)> = db
+        .query_opt(
+            "SELECT owner_type, owner_id, archived_at FROM chat_channels WHERE id = $1",
+            params![channel_id],
+        )
+        .await
+        .map_err(|_| ChatError::Internal)?;
 
     let Some((owner_type, owner_id, archived_at)) = row else {
         return Err(ChatError::NotFound);
@@ -133,19 +134,18 @@ pub async fn access(
 /// (AC-1). Reaches `public.users`/`public.tenants` via the `chat,public`
 /// search_path, like the existing `tenant_role` lookup.
 async fn person_in_org(db: &nook_db::DbPool, user_id: Uuid, org: Uuid) -> Result<bool, ChatError> {
-    let (ok,): (bool,) = sqlx::query_as(
-        "SELECT EXISTS(
+    let ok = db
+        .query_scalar::<bool>(
+            "SELECT EXISTS(
              SELECT 1 FROM public.users u
              JOIN public.tenants t ON t.id = u.tenant_id
              WHERE t.org_id = $2
                AND u.person_id = (SELECT person_id FROM public.users WHERE id = $1)
          )",
-    )
-    .bind(user_id)
-    .bind(org)
-    .fetch_one(db)
-    .await
-    .map_err(|_| ChatError::Internal)?;
+            params![user_id, org],
+        )
+        .await
+        .map_err(|_| ChatError::Internal)?;
     Ok(ok)
 }
 
@@ -157,26 +157,27 @@ async fn person_is_participant(
     user_id: Uuid,
     channel_id: Uuid,
 ) -> Result<bool, ChatError> {
-    let (ok,): (bool,) = sqlx::query_as(
-        "SELECT EXISTS(
+    let ok = db
+        .query_scalar::<bool>(
+            "SELECT EXISTS(
              SELECT 1 FROM chat_channel_participants
              WHERE channel_id = $1
                AND person_id = (SELECT person_id FROM public.users WHERE id = $2)
          )",
-    )
-    .bind(channel_id)
-    .bind(user_id)
-    .fetch_one(db)
-    .await
-    .map_err(|_| ChatError::Internal)?;
+            params![channel_id, user_id],
+        )
+        .await
+        .map_err(|_| ChatError::Internal)?;
     Ok(ok)
 }
 
 /// The org a tenant belongs to (`tenants.org_id`).
 async fn org_of(db: &nook_db::DbPool, tenant: Uuid) -> Result<Uuid, ChatError> {
-    let (org,): (Uuid,) = sqlx::query_as("SELECT org_id FROM public.tenants WHERE id = $1")
-        .bind(tenant)
-        .fetch_one(db)
+    let org = db
+        .query_scalar::<Uuid>(
+            "SELECT org_id FROM public.tenants WHERE id = $1",
+            params![tenant],
+        )
         .await
         .map_err(|_| ChatError::Internal)?;
     Ok(org)
@@ -207,25 +208,24 @@ pub async fn create(
             )))
         }
     };
-    let row = sqlx::query_as::<_, ChannelRow>(&format!(
-        "INSERT INTO chat_channels (id, owner_type, owner_id, name, slug)
+    let row = state
+        .db
+        .query_one::<ChannelRow>(
+            &format!(
+                "INSERT INTO chat_channels (id, owner_type, owner_id, name, slug)
          VALUES ($1, $2, $3, $4, $5)
          RETURNING {CHANNEL_COLS}"
-    ))
-    .bind(Uuid::now_v7())
-    .bind(owner_type)
-    .bind(owner_id)
-    .bind(name)
-    .bind(&slug)
-    .fetch_one(&state.db)
-    .await
-    .map_err(|e| {
-        if is_unique_violation(&e) {
-            ChatError::Conflict("a channel with that name already exists".into())
-        } else {
-            ChatError::Internal
-        }
-    })?;
+            ),
+            params![Uuid::now_v7(), owner_type, owner_id, name, &slug],
+        )
+        .await
+        .map_err(|e| {
+            if is_unique_violation(&e) {
+                ChatError::Conflict("a channel with that name already exists".into())
+            } else {
+                ChatError::Internal
+            }
+        })?;
     Ok((StatusCode::CREATED, Json(row.into())))
 }
 
@@ -248,8 +248,11 @@ pub async fn list(
     // The caller's own tenant channels, plus the channels of the org their
     // tenant belongs to — one org per session, so an org channel appears once
     // (AC-1, AC-2). Cross-org isolation holds: only this tenant's org matches.
-    let rows = sqlx::query_as::<_, ChannelRow>(&format!(
-        "SELECT {CHANNEL_COLS}, {unread} AS unread_count
+    let rows = state
+        .db
+        .query_all::<ChannelRow>(
+            &format!(
+                "SELECT {CHANNEL_COLS}, {unread} AS unread_count
            FROM chat_channels c
           WHERE (
                   (c.owner_type = 'tenant' AND c.owner_id = $1)
@@ -257,14 +260,12 @@ pub async fn list(
                 )
             AND ($2 OR c.archived_at IS NULL)
           ORDER BY c.created_at",
-        unread = unread_subquery("c.id", "$3"),
-    ))
-    .bind(caller.tenant_id)
-    .bind(q.include_archived)
-    .bind(caller.user_id)
-    .fetch_all(&state.db)
-    .await
-    .map_err(|_| ChatError::Internal)?;
+                unread = unread_subquery("c.id", "$3"),
+            ),
+            params![caller.tenant_id, q.include_archived, caller.user_id],
+        )
+        .await
+        .map_err(|_| ChatError::Internal)?;
     Ok(Json(rows.into_iter().map(Into::into).collect()))
 }
 
@@ -293,8 +294,11 @@ pub async fn update(
     // `$3` says "archived was supplied"; when it was, `$4` sets archived_at to
     // now (archive) or NULL (restore). name is COALESCEd so an absent name is
     // left untouched. `access` already scoped the row, so the id alone is safe.
-    let row = sqlx::query_as::<_, ChannelRow>(&format!(
-        "UPDATE chat_channels
+    let row = state
+        .db
+        .query_opt::<ChannelRow>(
+            &format!(
+                "UPDATE chat_channels
          SET name = COALESCE($2, name),
              archived_at = CASE
                  WHEN $3 THEN (CASE WHEN $4 THEN {now} ELSE NULL END)
@@ -302,16 +306,18 @@ pub async fn update(
              END
          WHERE id = $1
          RETURNING {CHANNEL_COLS}",
-        now = Postgres.now(),
-    ))
-    .bind(id)
-    .bind(req.name.as_deref().map(str::trim))
-    .bind(req.archived.is_some())
-    .bind(req.archived.unwrap_or(false))
-    .fetch_optional(&state.db)
-    .await
-    .map_err(|_| ChatError::Internal)?
-    .ok_or(ChatError::NotFound)?;
+                now = Postgres.now(),
+            ),
+            params![
+                id,
+                req.name.as_deref().map(|s| s.trim().to_owned()),
+                req.archived.is_some(),
+                req.archived.unwrap_or(false)
+            ],
+        )
+        .await
+        .map_err(|_| ChatError::Internal)?
+        .ok_or(ChatError::NotFound)?;
     Ok(Json(row.into()))
 }
 
@@ -330,16 +336,16 @@ pub async fn place(
     access(&state.db, id, &caller).await?;
 
     if let Some(cat) = req.category_id {
-        let same_owner: Option<(bool,)> = sqlx::query_as(
-            "SELECT (c.owner_type = ch.owner_type AND c.owner_id = ch.owner_id)
+        let same_owner: Option<(bool,)> = state
+            .db
+            .query_opt(
+                "SELECT (c.owner_type = ch.owner_type AND c.owner_id = ch.owner_id)
                FROM chat_channel_categories c, chat_channels ch
               WHERE c.id = $1 AND ch.id = $2",
-        )
-        .bind(cat)
-        .bind(id)
-        .fetch_optional(&state.db)
-        .await
-        .map_err(|_| ChatError::Internal)?;
+                params![cat, id],
+            )
+            .await
+            .map_err(|_| ChatError::Internal)?;
         if !matches!(same_owner, Some((true,))) {
             return Err(ChatError::BadRequest(
                 "that category is not in this channel's scope".into(),
@@ -347,17 +353,18 @@ pub async fn place(
         }
     }
 
-    let row = sqlx::query_as::<_, ChannelRow>(&format!(
-        "UPDATE chat_channels SET category_id = $2, position = $3
+    let row = state
+        .db
+        .query_opt::<ChannelRow>(
+            &format!(
+                "UPDATE chat_channels SET category_id = $2, position = $3
          WHERE id = $1 RETURNING {CHANNEL_COLS}"
-    ))
-    .bind(id)
-    .bind(req.category_id)
-    .bind(req.position)
-    .fetch_optional(&state.db)
-    .await
-    .map_err(|_| ChatError::Internal)?
-    .ok_or(ChatError::NotFound)?;
+            ),
+            params![id, req.category_id, req.position],
+        )
+        .await
+        .map_err(|_| ChatError::Internal)?
+        .ok_or(ChatError::NotFound)?;
     Ok(Json(row.into()))
 }
 
@@ -372,18 +379,20 @@ pub async fn mark_read(
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode, ChatError> {
     access(&state.db, id, &caller).await?;
-    sqlx::query(&format!(
-        "INSERT INTO chat_read_cursors (channel_id, user_id, last_read_at)
+    state
+        .db
+        .exec(
+            &format!(
+                "INSERT INTO chat_read_cursors (channel_id, user_id, last_read_at)
          VALUES ($1, $2, {})
          ON CONFLICT (channel_id, user_id)
          DO UPDATE SET last_read_at = GREATEST(chat_read_cursors.last_read_at, EXCLUDED.last_read_at)",
-        Postgres.now()
-    ))
-    .bind(id)
-    .bind(caller.user_id)
-    .execute(&state.db)
-    .await
-    .map_err(|_| ChatError::Internal)?;
+                Postgres.now()
+            ),
+            params![id, caller.user_id],
+        )
+        .await
+        .map_err(|_| ChatError::Internal)?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -428,7 +437,7 @@ mod tests {
     use axum::extract::{Path, Query, State};
     use axum::Json;
     use chrono::{DateTime, Utc};
-    use nook_db::DbPool;
+    use nook_db::{params, Db, DbPool};
     use nook_db::{Postgres, TimeMath};
     use nook_types::{
         ChatChannelPlacement, CreateChatCategory, CreateChatChannel, ReorderChatCategories,
@@ -458,11 +467,13 @@ mod tests {
         let opts = PgConnectOptions::from_str(url)
             .unwrap()
             .options([("search_path", search_path)]);
-        PgPoolOptions::new()
-            .max_connections(2)
-            .connect_with(opts)
-            .await
-            .unwrap()
+        nook_db::EnginePool::from_pg(
+            PgPoolOptions::new()
+                .max_connections(2)
+                .connect_with(opts)
+                .await
+                .unwrap(),
+        )
     }
 
     /// The service's pool, with the `public` auth/user tables and the `chat`
@@ -476,9 +487,9 @@ mod tests {
         let url = std::env::var("DATABASE_URL").ok()?;
         let bootstrap = pool(&url, "public").await;
         crate::ensure_chat_schema(&bootstrap).await.unwrap();
-        nook_control::MIGRATOR.run(&bootstrap).await.unwrap();
+        nook_control::MIGRATOR.run(bootstrap.pg()).await.unwrap();
         let db = pool(&url, "chat,public").await;
-        crate::MIGRATOR.run(&db).await.unwrap();
+        crate::MIGRATOR.run(db.pg()).await.unwrap();
         Some(AppState {
             db,
             registry: Arc::new(crate::registry::Registry::new()),
@@ -487,26 +498,22 @@ mod tests {
 
     async fn new_tenant(db: &DbPool) -> Uuid {
         let id = Uuid::now_v7();
-        sqlx::query("INSERT INTO public.tenants (id, name, slug) VALUES ($1, $2, $2)")
-            .bind(id)
-            .bind(format!("t-{}", id.simple()))
-            .execute(db)
-            .await
-            .unwrap();
+        db.exec(
+            "INSERT INTO public.tenants (id, name, slug) VALUES ($1, $2, $2)",
+            params![id, format!("t-{}", id.simple())],
+        )
+        .await
+        .unwrap();
         id
     }
 
     async fn add_user(db: &DbPool, tenant: Uuid, role: &str) -> Uuid {
         let id = Uuid::now_v7();
-        sqlx::query(
+        db.exec(
             "INSERT INTO public.users (id, tenant_id, person_id, display_name, email, role)
              VALUES ($1, $2, gen_random_uuid(), 'U', $3, $4)",
+            params![id, tenant, format!("u-{}@example.test", id.simple()), role],
         )
-        .bind(id)
-        .bind(tenant)
-        .bind(format!("u-{}@example.test", id.simple()))
-        .bind(role)
-        .execute(db)
         .await
         .unwrap();
         id
@@ -525,17 +532,20 @@ mod tests {
     }
 
     async fn cleanup(db: &DbPool, tenant: Uuid) {
-        let _ = sqlx::query("DELETE FROM chat_channels WHERE owner_id = $1")
-            .bind(tenant)
-            .execute(db)
+        let _ = db
+            .exec(
+                "DELETE FROM chat_channels WHERE owner_id = $1",
+                params![tenant],
+            )
             .await;
-        let _ = sqlx::query("DELETE FROM chat_channel_categories WHERE owner_id = $1")
-            .bind(tenant)
-            .execute(db)
+        let _ = db
+            .exec(
+                "DELETE FROM chat_channel_categories WHERE owner_id = $1",
+                params![tenant],
+            )
             .await;
-        let _ = sqlx::query("DELETE FROM public.tenants WHERE id = $1")
-            .bind(tenant)
-            .execute(db)
+        let _ = db
+            .exec("DELETE FROM public.tenants WHERE id = $1", params![tenant])
             .await;
     }
 
@@ -543,24 +553,23 @@ mod tests {
 
     async fn new_org(db: &DbPool) -> Uuid {
         let id = Uuid::now_v7();
-        sqlx::query("INSERT INTO public.orgs (id, name, slug) VALUES ($1, $2, $2)")
-            .bind(id)
-            .bind(format!("o-{}", id.simple()))
-            .execute(db)
-            .await
-            .unwrap();
+        db.exec(
+            "INSERT INTO public.orgs (id, name, slug) VALUES ($1, $2, $2)",
+            params![id, format!("o-{}", id.simple())],
+        )
+        .await
+        .unwrap();
         id
     }
 
     async fn new_tenant_in_org(db: &DbPool, org: Uuid) -> Uuid {
         let id = Uuid::now_v7();
-        sqlx::query("INSERT INTO public.tenants (id, name, slug, org_id) VALUES ($1, $2, $2, $3)")
-            .bind(id)
-            .bind(format!("t-{}", id.simple()))
-            .bind(org)
-            .execute(db)
-            .await
-            .unwrap();
+        db.exec(
+            "INSERT INTO public.tenants (id, name, slug, org_id) VALUES ($1, $2, $2, $3)",
+            params![id, format!("t-{}", id.simple()), org],
+        )
+        .await
+        .unwrap();
         id
     }
 
@@ -568,16 +577,17 @@ mod tests {
     /// org tenants (the AC-2 dedupe case).
     async fn add_user_person(db: &DbPool, tenant: Uuid, person: Uuid, role: &str) -> Uuid {
         let id = Uuid::now_v7();
-        sqlx::query(
+        db.exec(
             "INSERT INTO public.users (id, tenant_id, person_id, display_name, email, role)
              VALUES ($1, $2, $3, 'U', $4, $5)",
+            params![
+                id,
+                tenant,
+                person,
+                format!("u-{}@example.test", id.simple()),
+                role
+            ],
         )
-        .bind(id)
-        .bind(tenant)
-        .bind(person)
-        .bind(format!("u-{}@example.test", id.simple()))
-        .bind(role)
-        .execute(db)
         .await
         .unwrap();
         id
@@ -694,25 +704,28 @@ mod tests {
 
         // Cleanup: channels owned by either org, then users, tenants, orgs.
         for owner in [org, other_org] {
-            let _ = sqlx::query("DELETE FROM chat_channels WHERE owner_id = $1")
-                .bind(owner)
-                .execute(&state.db)
+            let _ = state
+                .db
+                .exec(
+                    "DELETE FROM chat_channels WHERE owner_id = $1",
+                    params![owner],
+                )
                 .await;
         }
         for t in [ta, tb, tc] {
-            let _ = sqlx::query("DELETE FROM public.users WHERE tenant_id = $1")
-                .bind(t)
-                .execute(&state.db)
+            let _ = state
+                .db
+                .exec("DELETE FROM public.users WHERE tenant_id = $1", params![t])
                 .await;
-            let _ = sqlx::query("DELETE FROM public.tenants WHERE id = $1")
-                .bind(t)
-                .execute(&state.db)
+            let _ = state
+                .db
+                .exec("DELETE FROM public.tenants WHERE id = $1", params![t])
                 .await;
         }
         for o in [org, other_org] {
-            let _ = sqlx::query("DELETE FROM public.orgs WHERE id = $1")
-                .bind(o)
-                .execute(&state.db)
+            let _ = state
+                .db
+                .exec("DELETE FROM public.orgs WHERE id = $1", params![o])
                 .await;
         }
     }
@@ -1110,32 +1123,26 @@ mod tests {
     /// Insert a message into a channel, returning its `created_at` so a test can
     /// pin a cursor exactly at or around it.
     async fn post_msg(db: &DbPool, channel: Uuid, author: Uuid, tenant: Uuid) -> DateTime<Utc> {
-        let (ts,): (DateTime<Utc>,) = sqlx::query_as(
-            "INSERT INTO chat_messages (id, channel_id, author_id, tenant_id, body)
+        let ts = db
+            .query_scalar::<DateTime<Utc>>(
+                "INSERT INTO chat_messages (id, channel_id, author_id, tenant_id, body)
              VALUES ($1, $2, $3, $4, 'hi') RETURNING created_at",
-        )
-        .bind(Uuid::now_v7())
-        .bind(channel)
-        .bind(author)
-        .bind(tenant)
-        .fetch_one(db)
-        .await
-        .unwrap();
+                params![Uuid::now_v7(), channel, author, tenant],
+            )
+            .await
+            .unwrap();
         ts
     }
 
     /// Force a read cursor to an exact instant — used to test the strict-`>`
     /// boundary and the monotonic (`GREATEST`) guard directly.
     async fn set_cursor(db: &DbPool, channel: Uuid, user: Uuid, at: DateTime<Utc>) {
-        sqlx::query(
+        db.exec(
             "INSERT INTO chat_read_cursors (channel_id, user_id, last_read_at)
              VALUES ($1, $2, $3)
              ON CONFLICT (channel_id, user_id) DO UPDATE SET last_read_at = EXCLUDED.last_read_at",
+            params![channel, user, at],
         )
-        .bind(channel)
-        .bind(user)
-        .bind(at)
-        .execute(db)
         .await
         .unwrap();
     }
@@ -1258,11 +1265,14 @@ mod tests {
          .0;
 
         // Pin A's cursor an hour ahead.
-        let (future,): (DateTime<Utc>,) =
-            sqlx::query_as(&format!("SELECT {}", Postgres.now_plus("1 hour")))
-                .fetch_one(&state.db)
-                .await
-                .unwrap();
+        let future = state
+            .db
+            .query_scalar::<DateTime<Utc>>(
+                &format!("SELECT {}", Postgres.now_plus("1 hour")),
+                params![],
+            )
+            .await
+            .unwrap();
         set_cursor(&state.db, ch.id, a, future).await;
 
         // A message now (before the future cursor) is read.
@@ -1317,24 +1327,23 @@ mod tests {
 
         // A DM created by person_a; person_c is NOT a participant yet.
         let dm = Uuid::now_v7();
-        sqlx::query(
-            "INSERT INTO chat_channels (id, owner_type, owner_id, name, slug)
+        state
+            .db
+            .exec(
+                "INSERT INTO chat_channels (id, owner_type, owner_id, name, slug)
              VALUES ($1, 'dm', $2, '', $3)",
-        )
-        .bind(dm)
-        .bind(person_a)
-        .bind(format!("dm-{}", dm.simple()))
-        .execute(&state.db)
-        .await
-        .unwrap();
-        sqlx::query(
-            "INSERT INTO chat_channel_participants (channel_id, person_id) VALUES ($1, $2)",
-        )
-        .bind(dm)
-        .bind(person_a)
-        .execute(&state.db)
-        .await
-        .unwrap();
+                params![dm, person_a, format!("dm-{}", dm.simple())],
+            )
+            .await
+            .unwrap();
+        state
+            .db
+            .exec(
+                "INSERT INTO chat_channel_participants (channel_id, person_id) VALUES ($1, $2)",
+                params![dm, person_a],
+            )
+            .await
+            .unwrap();
 
         // Isolation: the tenant-B intruder is refused A's tenant channel and DM,
         // so an event on either is never forwarded to them.
@@ -1352,36 +1361,36 @@ mod tests {
             is_forbidden(&access(&state.db, dm, &caller(c, t_a)).await),
             "C is refused before being added"
         );
-        sqlx::query(
-            "INSERT INTO chat_channel_participants (channel_id, person_id) VALUES ($1, $2)",
-        )
-        .bind(dm)
-        .bind(person_c)
-        .execute(&state.db)
-        .await
-        .unwrap();
+        state
+            .db
+            .exec(
+                "INSERT INTO chat_channel_participants (channel_id, person_id) VALUES ($1, $2)",
+                params![dm, person_c],
+            )
+            .await
+            .unwrap();
         assert!(
             access(&state.db, dm, &caller(c, t_a)).await.is_ok(),
             "a participant added mid-session begins receiving"
         );
 
         // REMOVE: drop C again → refused immediately.
-        sqlx::query(
-            "DELETE FROM chat_channel_participants WHERE channel_id = $1 AND person_id = $2",
-        )
-        .bind(dm)
-        .bind(person_c)
-        .execute(&state.db)
-        .await
-        .unwrap();
+        state
+            .db
+            .exec(
+                "DELETE FROM chat_channel_participants WHERE channel_id = $1 AND person_id = $2",
+                params![dm, person_c],
+            )
+            .await
+            .unwrap();
         assert!(
             is_forbidden(&access(&state.db, dm, &caller(c, t_a)).await),
             "a removed participant stops receiving"
         );
 
-        let _ = sqlx::query("DELETE FROM chat_channels WHERE id = $1")
-            .bind(dm)
-            .execute(&state.db)
+        let _ = state
+            .db
+            .exec("DELETE FROM chat_channels WHERE id = $1", params![dm])
             .await;
         cleanup(&state.db, t_a).await;
         cleanup(&state.db, t_b).await;

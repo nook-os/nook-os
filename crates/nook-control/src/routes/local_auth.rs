@@ -9,6 +9,7 @@ use axum::extract::State;
 use axum::response::IntoResponse;
 use axum::Json;
 use axum_extra::extract::CookieJar;
+use nook_db::{params, Db};
 use nook_types::*;
 
 use crate::auth::{create_auth_session, session_cookie, AuthCtx};
@@ -20,8 +21,9 @@ use crate::state::AppState;
 
 /// Is this instance unclaimed? Used to decide whether `/bootstrap` is open.
 async fn user_count(state: &AppState) -> Result<i64, sqlx::Error> {
-    let (n,): (i64,) = sqlx::query_as("SELECT count(*) FROM users")
-        .fetch_one(&state.db)
+    let n = state
+        .db
+        .query_scalar::<i64>("SELECT count(*) FROM users", params![])
         .await?;
     Ok(n)
 }
@@ -33,21 +35,20 @@ async fn user_count(state: &AppState) -> Result<i64, sqlx::Error> {
 /// the login form, which is a different product decision.
 async fn default_tenant(state: &AppState) -> ApiResult<Tenant> {
     let slug = slugify(&state.cfg.default_tenant_name);
-    let existing: Option<Tenant> = sqlx::query_as("SELECT * FROM tenants WHERE slug = $1")
-        .bind(&slug)
-        .fetch_optional(&state.db)
+    let existing: Option<Tenant> = state
+        .db
+        .query_opt("SELECT * FROM tenants WHERE slug = $1", params![&slug])
         .await?;
     if let Some(t) = existing {
         return Ok(t);
     }
-    Ok(
-        sqlx::query_as("INSERT INTO tenants (id, name, slug) VALUES ($1, $2, $3) RETURNING *")
-            .bind(TenantId::new())
-            .bind(&state.cfg.default_tenant_name)
-            .bind(&slug)
-            .fetch_one(&state.db)
-            .await?,
-    )
+    Ok(state
+        .db
+        .query_one(
+            "INSERT INTO tenants (id, name, slug) VALUES ($1, $2, $3) RETURNING *",
+            params![TenantId::new(), &state.cfg.default_tenant_name, &slug],
+        )
+        .await?)
 }
 
 /// POST /api/v1/auth/local/bootstrap — claim an unclaimed instance.
@@ -224,12 +225,13 @@ pub async fn status(State(state): State<AppState>) -> ApiResult<Json<LocalAuthSt
     // Break-glass signal (MAIN-169 AC-5): does this tenant have any existing
     // local credential that could sign in during an OIDC outage? Scoped to the
     // local sign-in tenant — the one the password form authenticates against.
-    let (local_creds,): (i64,) = sqlx::query_as(
-        "SELECT count(*) FROM users WHERE tenant_id = $1 AND password_hash IS NOT NULL",
-    )
-    .bind(tenant.id)
-    .fetch_one(&state.db)
-    .await?;
+    let local_creds = state
+        .db
+        .query_scalar::<i64>(
+            "SELECT count(*) FROM users WHERE tenant_id = $1 AND password_hash IS NOT NULL",
+            params![tenant.id],
+        )
+        .await?;
     Ok(Json(LocalAuthStatus {
         // Undecided, or already committed to local.
         available: !matches!(mode, Some(AuthMode::Oidc)),

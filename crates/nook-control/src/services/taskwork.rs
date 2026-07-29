@@ -2,7 +2,7 @@
 //! submit-PR, prune. Shared by REST handlers and MCP tools so an AI can drive
 //! the same lifecycle a human can.
 
-use nook_db::{Postgres, TypeMapping};
+use nook_db::{params, Db, Postgres, TypeMapping};
 use nook_proto::ControlToNode;
 use nook_types::*;
 
@@ -12,10 +12,12 @@ use crate::services::{core, identity::slugify};
 use crate::state::AppState;
 
 async fn load_task(state: &AppState, tenant: TenantId, id: TaskId) -> ApiResult<TaskItem> {
-    sqlx::query_as("SELECT * FROM tasks WHERE id = $1 AND tenant_id = $2")
-        .bind(id)
-        .bind(tenant)
-        .fetch_optional(&state.db)
+    state
+        .db
+        .query_opt(
+            "SELECT * FROM tasks WHERE id = $1 AND tenant_id = $2",
+            params![id, tenant],
+        )
         .await?
         .ok_or(ApiError::NotFound)
 }
@@ -42,37 +44,36 @@ async fn column_id(
         _ => None,
     };
     if let Some(t) = wanted_type {
-        if let Some((id,)) = sqlx::query_as::<_, (ColumnId,)>(
-            "SELECT id FROM board_columns WHERE board_id = $1 AND type = $2
+        if let Some(id) = state
+            .db
+            .query_scalar_opt::<ColumnId>(
+                "SELECT id FROM board_columns WHERE board_id = $1 AND type = $2
              ORDER BY position LIMIT 1",
-        )
-        .bind(board_id)
-        .bind(t)
-        .fetch_optional(&state.db)
-        .await?
+                params![board_id, t],
+            )
+            .await?
         {
             return Ok(id);
         }
     }
-    if let Some((id,)) = sqlx::query_as::<_, (ColumnId,)>(
-        "SELECT id FROM board_columns WHERE board_id = $1 AND lower(name) = lower($2)",
-    )
-    .bind(board_id)
-    .bind(name)
-    .fetch_optional(&state.db)
-    .await?
+    if let Some(id) = state
+        .db
+        .query_scalar_opt::<ColumnId>(
+            "SELECT id FROM board_columns WHERE board_id = $1 AND lower(name) = lower($2)",
+            params![board_id, name],
+        )
+        .await?
     {
         return Ok(id);
     }
-    sqlx::query_as::<_, (ColumnId,)>(
-        "SELECT id FROM board_columns WHERE board_id = $1 ORDER BY position OFFSET $2 LIMIT 1",
-    )
-    .bind(board_id)
-    .bind(fallback_pos.max(0) as i64)
-    .fetch_optional(&state.db)
-    .await?
-    .map(|(id,)| id)
-    .ok_or_else(|| ApiError::BadRequest("board has no columns".into()))
+    state
+        .db
+        .query_scalar_opt::<ColumnId>(
+            "SELECT id FROM board_columns WHERE board_id = $1 ORDER BY position OFFSET $2 LIMIT 1",
+            params![board_id, fallback_pos.max(0) as i64],
+        )
+        .await?
+        .ok_or_else(|| ApiError::BadRequest("board has no columns".into()))
 }
 
 /// Triage → Todo: the scheduler picks the best online node by resources
@@ -96,16 +97,17 @@ pub async fn dispatch(
     let node = crate::services::schedule::pick(state, tenant, user, task.workspace_id).await?;
     let todo = column_id(state, task.board_id, "Todo", 1).await?;
 
-    let updated: TaskItem = sqlx::query_as(&format!(
-        "UPDATE tasks SET assigned_node_id = $2, column_id = $3, updated_at = {}
+    let updated: TaskItem = state
+        .db
+        .query_one(
+            &format!(
+                "UPDATE tasks SET assigned_node_id = $2, column_id = $3, updated_at = {}
          WHERE id = $1 RETURNING *",
-        Postgres.now()
-    ))
-    .bind(task_id)
-    .bind(node)
-    .bind(todo)
-    .fetch_one(&state.db)
-    .await?;
+                Postgres.now()
+            ),
+            params![task_id, node, todo],
+        )
+        .await?;
 
     events::record(
         state,
@@ -186,17 +188,16 @@ pub async fn start_work(
         .unwrap_or_else(|| slugify(&task.title));
 
     // A checkout of this workspace must exist on the node to worktree from.
-    let repo_path: Option<(String,)> = sqlx::query_as(
-        "SELECT path FROM node_workspaces
+    let repo_path: Option<String> = state
+        .db
+        .query_scalar_opt(
+            "SELECT path FROM node_workspaces
          WHERE tenant_id = $1 AND workspace_id = $2 AND node_id = $3
          ORDER BY discovered_at LIMIT 1",
-    )
-    .bind(tenant)
-    .bind(workspace_id)
-    .bind(node_id)
-    .fetch_optional(&state.db)
-    .await?;
-    let Some((repo_path,)) = repo_path else {
+            params![tenant, workspace_id, node_id],
+        )
+        .await?;
+    let Some(repo_path) = repo_path else {
         return Err(ApiError::BadRequest(
             "that workspace has no checkout on that node — clone it there first".into(),
         ));
@@ -239,22 +240,27 @@ pub async fn start_work(
     .await?;
 
     let in_progress = column_id(state, task.board_id, "In Progress", 2).await?;
-    let updated: TaskItem = sqlx::query_as(&format!(
-        "UPDATE tasks SET workspace_id = $2, assigned_node_id = $3, branch = $4,
+    let updated: TaskItem = state
+        .db
+        .query_one(
+            &format!(
+                "UPDATE tasks SET workspace_id = $2, assigned_node_id = $3, branch = $4,
                 worktree_path = $5, worktree_node_id = $3, session_id = $6,
                 column_id = $7, updated_at = {}
          WHERE id = $1 RETURNING *",
-        Postgres.now()
-    ))
-    .bind(task_id)
-    .bind(workspace_id)
-    .bind(node_id)
-    .bind(&branch)
-    .bind(&worktree_path)
-    .bind(session.id)
-    .bind(in_progress)
-    .fetch_one(&state.db)
-    .await?;
+                Postgres.now()
+            ),
+            params![
+                task_id,
+                workspace_id,
+                node_id,
+                &branch,
+                &worktree_path,
+                session.id,
+                in_progress
+            ],
+        )
+        .await?;
 
     events::record(
         state,
@@ -303,16 +309,17 @@ pub async fn submit_pr(
             crate::services::tasks::column_of_type(&state.db, task.board_id, "completed").await?
         }
     };
-    let updated: TaskItem = sqlx::query_as(&format!(
-        "UPDATE tasks SET pr_url = $2, column_id = $3, updated_at = {}
+    let updated: TaskItem = state
+        .db
+        .query_one(
+            &format!(
+                "UPDATE tasks SET pr_url = $2, column_id = $3, updated_at = {}
          WHERE id = $1 RETURNING *",
-        Postgres.now()
-    ))
-    .bind(task_id)
-    .bind(&url)
-    .bind(target)
-    .fetch_one(&state.db)
-    .await?;
+                Postgres.now()
+            ),
+            params![task_id, &url, target],
+        )
+        .await?;
 
     events::record(
         state,
@@ -354,14 +361,17 @@ pub async fn prune_worktree(
         )));
     }
 
-    let updated: TaskItem = sqlx::query_as(&format!(
-        "UPDATE tasks SET worktree_path = NULL, worktree_node_id = NULL, updated_at = {}
+    let updated: TaskItem = state
+        .db
+        .query_one(
+            &format!(
+                "UPDATE tasks SET worktree_path = NULL, worktree_node_id = NULL, updated_at = {}
          WHERE id = $1 RETURNING *",
-        Postgres.now()
-    ))
-    .bind(task_id)
-    .fetch_one(&state.db)
-    .await?;
+                Postgres.now()
+            ),
+            params![task_id],
+        )
+        .await?;
 
     events::record(
         state,
@@ -382,30 +392,31 @@ pub async fn move_task(
 ) -> ApiResult<TaskItem> {
     let task = load_task(state, tenant, task_id).await?;
     let col = column_id(state, task.board_id, column, 0).await?;
-    let updated: TaskItem = sqlx::query_as(&format!(
-        "UPDATE tasks SET column_id = $2, updated_at = {} WHERE id = $1 RETURNING *",
-        Postgres.now()
-    ))
-    .bind(task_id)
-    .bind(col)
-    .fetch_one(&state.db)
-    .await?;
+    let updated: TaskItem = state
+        .db
+        .query_one(
+            &format!(
+                "UPDATE tasks SET column_id = $2, updated_at = {} WHERE id = $1 RETURNING *",
+                Postgres.now()
+            ),
+            params![task_id, col],
+        )
+        .await?;
     fire_automation(state, tenant, &task, &updated).await;
     Ok(updated)
 }
 
 /// Best-effort compare/MR URL from the worktree's git remote.
 async fn derive_pr_url(state: &AppState, task: &TaskItem, branch: &str) -> Option<String> {
-    let remote: (String,) = sqlx::query_as(
-        "SELECT git_remote_url FROM node_workspaces
+    let raw: String = state
+        .db
+        .query_scalar_opt(
+            "SELECT git_remote_url FROM node_workspaces
          WHERE tenant_id = $1 AND workspace_id = $2 AND git_remote_url IS NOT NULL LIMIT 1",
-    )
-    .bind(task.tenant_id)
-    .bind(task.workspace_id?)
-    .fetch_optional(&state.db)
-    .await
-    .ok()??;
-    let raw = remote.0;
+            params![task.tenant_id, task.workspace_id?],
+        )
+        .await
+        .ok()??;
     // Normalize to https host/path (reuse the discovery normalizer).
     let norm = crate::services::discovery::normalize_remote(&raw); // e.g. github.com/org/repo
     let https = format!("https://{norm}");

@@ -1,5 +1,6 @@
 use axum::extract::{Query, State};
 use axum::Json;
+use nook_db::{params, Db};
 use nook_types::*;
 use serde::Deserialize;
 
@@ -28,9 +29,9 @@ pub async fn node(
     // (MAIN-131), matching where a session may actually start.
     let node_id =
         schedule::pick(&state, auth.tenant_id, Some(auth.user_id), q.workspace_id).await?;
-    let (node_name,): (String,) = sqlx::query_as("SELECT name FROM nodes WHERE id = $1")
-        .bind(node_id)
-        .fetch_one(&state.db)
+    let node_name = state
+        .db
+        .query_scalar::<String>("SELECT name FROM nodes WHERE id = $1", params![node_id])
         .await?;
     Ok(Json(ScheduledNode { node_id, node_name }))
 }

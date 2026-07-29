@@ -1,7 +1,7 @@
 //! Shared queries used by both REST handlers and MCP tools.
 
 use chrono::{DateTime, Utc};
-use nook_db::{CiMatch, DbPool, Postgres, TypeMapping};
+use nook_db::{params, CiMatch, Db, DbPool, Postgres, TypeMapping};
 use nook_types::*;
 use uuid::Uuid;
 
@@ -19,17 +19,16 @@ pub async fn workspace_locations(
         String,
         Option<String>,
         serde_json::Value,
-    )> = sqlx::query_as(
-        "SELECT n.id, n.name, n.status, nw.path, nw.git_branch, nw.git_status
+    )> = db
+        .query_all(
+            "SELECT n.id, n.name, n.status, nw.path, nw.git_branch, nw.git_status
              FROM node_workspaces nw
              JOIN nodes n ON n.id = nw.node_id
              WHERE nw.tenant_id = $1 AND nw.workspace_id = $2
              ORDER BY n.name",
-    )
-    .bind(tenant)
-    .bind(workspace)
-    .fetch_all(db)
-    .await?;
+            params![tenant, workspace],
+        )
+        .await?;
     Ok(rows
         .into_iter()
         .map(
@@ -53,11 +52,12 @@ pub async fn workspace_locations(
 }
 
 pub async fn list_workspaces(db: &DbPool, tenant: TenantId) -> ApiResult<Vec<WorkspaceDetail>> {
-    let workspaces: Vec<Workspace> =
-        sqlx::query_as("SELECT * FROM workspaces WHERE tenant_id = $1 ORDER BY name")
-            .bind(tenant)
-            .fetch_all(db)
-            .await?;
+    let workspaces: Vec<Workspace> = db
+        .query_all(
+            "SELECT * FROM workspaces WHERE tenant_id = $1 ORDER BY name",
+            params![tenant],
+        )
+        .await?;
     let mut out = Vec::with_capacity(workspaces.len());
     for workspace in workspaces {
         let locations = workspace_locations(db, tenant, workspace.id).await?;
@@ -74,12 +74,12 @@ pub async fn get_workspace(
     tenant: TenantId,
     id: WorkspaceId,
 ) -> ApiResult<Option<WorkspaceDetail>> {
-    let workspace: Option<Workspace> =
-        sqlx::query_as("SELECT * FROM workspaces WHERE tenant_id = $1 AND id = $2")
-            .bind(tenant)
-            .bind(id)
-            .fetch_optional(db)
-            .await?;
+    let workspace: Option<Workspace> = db
+        .query_opt(
+            "SELECT * FROM workspaces WHERE tenant_id = $1 AND id = $2",
+            params![tenant, id],
+        )
+        .await?;
     match workspace {
         None => Ok(None),
         Some(workspace) => {
@@ -102,18 +102,19 @@ pub async fn list_nodes(
     tenant: TenantId,
     owner: Option<uuid::Uuid>,
 ) -> ApiResult<Vec<Node>> {
-    Ok(sqlx::query_as(&format!(
-        "SELECT id, tenant_id, name, hostname, platform, capabilities, resources, status,
+    Ok(db
+        .query_all(
+            &format!(
+                "SELECT id, tenant_id, name, hostname, platform, capabilities, resources, status,
                 last_seen_at, owner_person_id, shared, created_at, updated_at
          FROM nodes
          WHERE tenant_id = $1 AND ({owner} IS NULL OR owner_person_id = $2 OR shared)
          ORDER BY name",
-        owner = Postgres.cast("$2", "uuid")
-    ))
-    .bind(tenant)
-    .bind(owner)
-    .fetch_all(db)
-    .await?)
+                owner = Postgres.cast("$2", "uuid")
+            ),
+            params![tenant, owner],
+        )
+        .await?)
 }
 
 /// List a tenant's sessions, optionally scoped to a single creator (MAIN-133).
@@ -144,14 +145,14 @@ pub async fn list_sessions(
     }
     sql.push_str(" ORDER BY created_at DESC");
     // Binds follow the same order the placeholders were numbered above.
-    let mut q = sqlx::query_as(&sql).bind(tenant);
+    let mut binds = params![tenant];
     if let Some(w) = workspace {
-        q = q.bind(w);
+        binds.extend(params![w]);
     }
     if let Some(c) = creator {
-        q = q.bind(c);
+        binds.extend(params![c]);
     }
-    Ok(q.fetch_all(db).await?)
+    Ok(db.query_all::<Session>(&sql, binds).await?)
 }
 
 /// Who may see which activity events (MAIN-134). A tenant owner/admin — and a
@@ -199,28 +200,27 @@ impl ActivityScope {
         }
         // A member: their person's user ids, the nodes that person owns, and the
         // sessions those user ids created.
-        let person: Uuid = sqlx::query_scalar("SELECT person_id FROM users WHERE id = $1")
-            .bind(auth.user_id)
-            .fetch_one(db)
+        let person: Uuid = db
+            .query_scalar(
+                "SELECT person_id FROM users WHERE id = $1",
+                params![auth.user_id],
+            )
             .await?;
-        let user_ids: Vec<Uuid> = sqlx::query_scalar("SELECT id FROM users WHERE person_id = $1")
-            .bind(person)
-            .fetch_all(db)
+        let user_ids: Vec<Uuid> = db
+            .query_scalar_all("SELECT id FROM users WHERE person_id = $1", params![person])
             .await?;
-        let node_ids: Vec<Uuid> = sqlx::query_scalar(
-            "SELECT id FROM nodes WHERE tenant_id = $1 AND owner_person_id = $2",
-        )
-        .bind(tenant)
-        .bind(person)
-        .fetch_all(db)
-        .await?;
-        let session_ids: Vec<Uuid> = sqlx::query_scalar(
-            "SELECT id FROM sessions WHERE tenant_id = $1 AND created_by = ANY($2)",
-        )
-        .bind(tenant)
-        .bind(&user_ids)
-        .fetch_all(db)
-        .await?;
+        let node_ids: Vec<Uuid> = db
+            .query_scalar_all(
+                "SELECT id FROM nodes WHERE tenant_id = $1 AND owner_person_id = $2",
+                params![tenant, person],
+            )
+            .await?;
+        let session_ids: Vec<Uuid> = db
+            .query_scalar_all(
+                "SELECT id FROM sessions WHERE tenant_id = $1 AND created_by = ANY($2)",
+                params![tenant, &user_ids[..]],
+            )
+            .await?;
         Ok(Self::Member {
             user_ids,
             node_ids,
@@ -273,21 +273,16 @@ pub async fn events_page(
         sql.push_str(" AND (actor_id = ANY($6) OR node_id = ANY($7) OR session_id = ANY($8))");
     }
     sql.push_str(" ORDER BY occurred_at DESC, id DESC LIMIT $5");
-    let mut q = sqlx::query_as(&sql)
-        .bind(tenant)
-        .bind(workspace)
-        .bind(kind_prefix)
-        .bind(before)
-        .bind(limit);
+    let mut binds = params![tenant, workspace.map(|w| w.0), kind_prefix, before, limit];
     if let ActivityScope::Member {
         user_ids,
         node_ids,
         session_ids,
     } = scope
     {
-        q = q.bind(user_ids).bind(node_ids).bind(session_ids);
+        binds.extend(params![&user_ids[..], &node_ids[..], &session_ids[..]]);
     }
-    let events: Vec<Event> = q.fetch_all(db).await?;
+    let events: Vec<Event> = db.query_all(&sql, binds).await?;
     let next_cursor = if events.len() as i64 == limit {
         events.last().map(|e| e.occurred_at)
     } else {
@@ -327,8 +322,10 @@ pub async fn operator_audit_page(
     // string" — the search box clears to that and must show the whole log.
     let q = q.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
     let term = Postgres.cast("$2", "text");
-    let rows: Vec<OperatorAuditEntry> = sqlx::query_as(&format!(
-        "SELECT e.id, e.kind, e.actor_type, e.actor_id, e.tenant_id,
+    let rows: Vec<OperatorAuditEntry> = db
+        .query_all(
+            &format!(
+                "SELECT e.id, e.kind, e.actor_type, e.actor_id, e.tenant_id,
                 t.slug AS tenant_slug, e.occurred_at
          FROM events e JOIN tenants t ON t.id = e.tenant_id
          WHERE (e.kind LIKE 'operator.%' OR e.kind LIKE 'rbac.%'
@@ -341,17 +338,15 @@ pub async fn operator_audit_page(
            AND ({cursor} IS NULL OR e.id < $3)
          ORDER BY e.id DESC
          LIMIT $1",
-        cursor = Postgres.cast("$3", "uuid"),
-        m_kind = Postgres.ci_match("e.kind", "'%' || $2 || '%'"),
-        m_slug = Postgres.ci_match("t.slug", "'%' || $2 || '%'"),
-        m_atype = Postgres.ci_match("e.actor_type", "'%' || $2 || '%'"),
-        m_aid = Postgres.ci_match(&Postgres.cast("e.actor_id", "text"), "'%' || $2 || '%'")
-    ))
-    .bind(limit)
-    .bind(q)
-    .bind(after)
-    .fetch_all(db)
-    .await?;
+                cursor = Postgres.cast("$3", "uuid"),
+                m_kind = Postgres.ci_match("e.kind", "'%' || $2 || '%'"),
+                m_slug = Postgres.ci_match("t.slug", "'%' || $2 || '%'"),
+                m_atype = Postgres.ci_match("e.actor_type", "'%' || $2 || '%'"),
+                m_aid = Postgres.ci_match(&Postgres.cast("e.actor_id", "text"), "'%' || $2 || '%'")
+            ),
+            params![limit, q, after.map(|e| e.0)],
+        )
+        .await?;
     let next_cursor = if rows.len() as i64 == limit {
         rows.last().map(|r| r.id)
     } else {
@@ -378,8 +373,10 @@ pub async fn operator_tenants_page(
     let limit = limit.clamp(1, 200);
     let q = search_filter(q);
     let term = Postgres.cast("$2", "text");
-    let rows: Vec<OperatorTenant> = sqlx::query_as(&format!(
-        "SELECT t.id, t.slug, t.org_id, t.created_at,
+    let rows: Vec<OperatorTenant> = db
+        .query_all(
+            &format!(
+                "SELECT t.id, t.slug, t.org_id, t.created_at,
                 (SELECT count(*) FROM users u WHERE u.tenant_id = t.id)    AS members,
                 (SELECT count(*) FROM nodes n WHERE n.tenant_id = t.id)    AS nodes,
                 (SELECT count(*) FROM sessions s
@@ -391,15 +388,13 @@ pub async fn operator_tenants_page(
            AND ({cursor} IS NULL OR t.id < $3)
          ORDER BY t.id DESC
          LIMIT $1",
-        cursor = Postgres.cast("$3", "uuid"),
-        m_slug = Postgres.ci_match("t.slug", "'%' || $2 || '%'"),
-        m_name = Postgres.ci_match("t.name", "'%' || $2 || '%'")
-    ))
-    .bind(limit)
-    .bind(q)
-    .bind(after)
-    .fetch_all(db)
-    .await?;
+                cursor = Postgres.cast("$3", "uuid"),
+                m_slug = Postgres.ci_match("t.slug", "'%' || $2 || '%'"),
+                m_name = Postgres.ci_match("t.name", "'%' || $2 || '%'")
+            ),
+            params![limit, q, after.map(|t| t.0)],
+        )
+        .await?;
     let next_cursor = if rows.len() as i64 == limit {
         rows.last().map(|r| r.id)
     } else {
@@ -418,8 +413,10 @@ pub async fn operator_nodes_page(
     let limit = limit.clamp(1, 200);
     let q = search_filter(q);
     let term = Postgres.cast("$2", "text");
-    let rows: Vec<OperatorNode> = sqlx::query_as(&format!(
-        "SELECT n.id, n.name, n.platform, n.status, n.last_seen_at, n.resources,
+    let rows: Vec<OperatorNode> = db
+        .query_all(
+            &format!(
+                "SELECT n.id, n.name, n.platform, n.status, n.last_seen_at, n.resources,
                 n.tenant_id, t.slug AS tenant_slug,
                 (SELECT count(*) FROM sessions s
                   WHERE s.node_id = n.id
@@ -433,17 +430,15 @@ pub async fn operator_nodes_page(
            AND ({cursor} IS NULL OR n.id < $3)
          ORDER BY n.id DESC
          LIMIT $1",
-        cursor = Postgres.cast("$3", "uuid"),
-        m_name = Postgres.ci_match("n.name", "'%' || $2 || '%'"),
-        m_slug = Postgres.ci_match("t.slug", "'%' || $2 || '%'"),
-        m_platform = Postgres.ci_match("n.platform", "'%' || $2 || '%'"),
-        m_status = Postgres.ci_match("n.status", "'%' || $2 || '%'")
-    ))
-    .bind(limit)
-    .bind(q)
-    .bind(after)
-    .fetch_all(db)
-    .await?;
+                cursor = Postgres.cast("$3", "uuid"),
+                m_name = Postgres.ci_match("n.name", "'%' || $2 || '%'"),
+                m_slug = Postgres.ci_match("t.slug", "'%' || $2 || '%'"),
+                m_platform = Postgres.ci_match("n.platform", "'%' || $2 || '%'"),
+                m_status = Postgres.ci_match("n.status", "'%' || $2 || '%'")
+            ),
+            params![limit, q, after.map(|n| n.0)],
+        )
+        .await?;
     let next_cursor = if rows.len() as i64 == limit {
         rows.last().map(|r| r.id)
     } else {
@@ -462,8 +457,10 @@ pub async fn operator_bindings_page(
     let limit = limit.clamp(1, 200);
     let q = search_filter(q);
     let term = Postgres.cast("$2", "text");
-    let rows: Vec<BindingRow> = sqlx::query_as(&format!(
-        "SELECT b.id, u.email, u.display_name, b.role_key, b.scope_type, b.scope_id,
+    let rows: Vec<BindingRow> = db
+        .query_all(
+            &format!(
+                "SELECT b.id, u.email, u.display_name, b.role_key, b.scope_type, b.scope_id,
                 COALESCE(o.slug, t.slug) AS scope_label, b.created_at
          FROM role_bindings b
          JOIN users u ON u.id = b.subject_id
@@ -477,17 +474,15 @@ pub async fn operator_bindings_page(
            AND ({cursor} IS NULL OR b.id < $3)
          ORDER BY b.id DESC
          LIMIT $1",
-        cursor = Postgres.cast("$3", "uuid"),
-        m_email = Postgres.ci_match("u.email", "'%' || $2 || '%'"),
-        m_role = Postgres.ci_match("b.role_key", "'%' || $2 || '%'"),
-        m_scope = Postgres.ci_match("b.scope_type", "'%' || $2 || '%'"),
-        m_label = Postgres.ci_match("COALESCE(o.slug, t.slug)", "'%' || $2 || '%'")
-    ))
-    .bind(limit)
-    .bind(q)
-    .bind(after)
-    .fetch_all(db)
-    .await?;
+                cursor = Postgres.cast("$3", "uuid"),
+                m_email = Postgres.ci_match("u.email", "'%' || $2 || '%'"),
+                m_role = Postgres.ci_match("b.role_key", "'%' || $2 || '%'"),
+                m_scope = Postgres.ci_match("b.scope_type", "'%' || $2 || '%'"),
+                m_label = Postgres.ci_match("COALESCE(o.slug, t.slug)", "'%' || $2 || '%'")
+            ),
+            params![limit, q, after],
+        )
+        .await?;
     let next_cursor = if rows.len() as i64 == limit {
         rows.last().map(|r| r.id)
     } else {
@@ -509,8 +504,10 @@ pub async fn tenant_members_page(
     let limit = limit.clamp(1, 200);
     let q = search_filter(q);
     let term = Postgres.cast("$3", "text");
-    let rows: Vec<TenantMemberItem> = sqlx::query_as(&format!(
-        "SELECT m.principal_id, u.email, u.display_name, m.role, m.created_at AS joined_at
+    let rows: Vec<TenantMemberItem> = db
+        .query_all(
+            &format!(
+                "SELECT m.principal_id, u.email, u.display_name, m.role, m.created_at AS joined_at
          FROM tenant_members m
          JOIN users u ON u.id = m.principal_id
          WHERE m.tenant_id = $1 AND m.principal_type = 'user'
@@ -521,17 +518,14 @@ pub async fn tenant_members_page(
            AND ({cursor} IS NULL OR m.principal_id < $4)
          ORDER BY m.principal_id DESC
          LIMIT $2",
-        cursor = Postgres.cast("$4", "uuid"),
-        m_email = Postgres.ci_match("u.email", "'%' || $3 || '%'"),
-        m_name = Postgres.ci_match("u.display_name", "'%' || $3 || '%'"),
-        m_role = Postgres.ci_match("m.role", "'%' || $3 || '%'")
-    ))
-    .bind(tenant)
-    .bind(limit)
-    .bind(q)
-    .bind(after)
-    .fetch_all(db)
-    .await?;
+                cursor = Postgres.cast("$4", "uuid"),
+                m_email = Postgres.ci_match("u.email", "'%' || $3 || '%'"),
+                m_name = Postgres.ci_match("u.display_name", "'%' || $3 || '%'"),
+                m_role = Postgres.ci_match("m.role", "'%' || $3 || '%'")
+            ),
+            params![tenant, limit, q, after],
+        )
+        .await?;
     let next_cursor = if rows.len() as i64 == limit {
         rows.last().map(|r| r.principal_id)
     } else {
@@ -554,33 +548,30 @@ pub async fn create_session(
     // Pin to an explicit checkout (e.g. a worktree) when given, validating it
     // belongs to this workspace on this node. Otherwise use the first checkout.
     // LIMIT 1: a workspace can have several checkouts on one node (worktrees).
-    let path: Option<(String,)> = match &req.path {
+    let path: Option<String> = match &req.path {
         Some(p) => {
-            sqlx::query_as(
-                "SELECT path FROM node_workspaces
+            state
+                .db
+                .query_scalar_opt(
+                    "SELECT path FROM node_workspaces
              WHERE tenant_id = $1 AND node_id = $2 AND workspace_id = $3 AND path = $4",
-            )
-            .bind(tenant)
-            .bind(req.node_id)
-            .bind(req.workspace_id)
-            .bind(p)
-            .fetch_optional(&state.db)
-            .await?
+                    params![tenant, req.node_id, req.workspace_id, p],
+                )
+                .await?
         }
         None => {
-            sqlx::query_as(
-                "SELECT path FROM node_workspaces
+            state
+                .db
+                .query_scalar_opt(
+                    "SELECT path FROM node_workspaces
              WHERE tenant_id = $1 AND node_id = $2 AND workspace_id = $3
              ORDER BY discovered_at LIMIT 1",
-            )
-            .bind(tenant)
-            .bind(req.node_id)
-            .bind(req.workspace_id)
-            .fetch_optional(&state.db)
-            .await?
+                    params![tenant, req.node_id, req.workspace_id],
+                )
+                .await?
         }
     };
-    let Some((workspace_path,)) = path else {
+    let Some(workspace_path) = path else {
         return Err(ApiError::BadRequest(
             "that workspace has no checkout on that node".into(),
         ));
@@ -617,19 +608,22 @@ pub async fn create_session_at(
         return Err(ApiError::BadRequest("node is offline".into()));
     }
     let name = name.unwrap_or_else(|| format!("{runtime} session"));
-    let session: Session = sqlx::query_as(
-        "INSERT INTO sessions (id, tenant_id, workspace_id, node_id, name, runtime, status, created_by)
+    let session: Session = state
+        .db
+        .query_one(
+            "INSERT INTO sessions (id, tenant_id, workspace_id, node_id, name, runtime, status, created_by)
          VALUES ($1, $2, $3, $4, $5, $6, 'starting', $7) RETURNING *",
-    )
-    .bind(SessionId::new())
-    .bind(tenant)
-    .bind(workspace_id)
-    .bind(node_id)
-    .bind(&name)
-    .bind(runtime)
-    .bind(created_by)
-    .fetch_one(&state.db)
-    .await?;
+            params![
+                SessionId::new(),
+                tenant,
+                workspace_id,
+                node_id,
+                &name,
+                runtime,
+                created_by.map(|u| u.0)
+            ],
+        )
+        .await?;
 
     let sent = state.registry.send_to_node(
         node_id,
@@ -642,13 +636,16 @@ pub async fn create_session_at(
         },
     );
     if !sent {
-        sqlx::query(&format!(
-            "UPDATE sessions SET status = 'error', updated_at = {} WHERE id = $1",
-            Postgres.now()
-        ))
-        .bind(session.id)
-        .execute(&state.db)
-        .await?;
+        state
+            .db
+            .exec(
+                &format!(
+                    "UPDATE sessions SET status = 'error', updated_at = {} WHERE id = $1",
+                    Postgres.now()
+                ),
+                params![session.id],
+            )
+            .await?;
         return Err(ApiError::BadRequest("node went offline".into()));
     }
 
@@ -683,18 +680,21 @@ pub async fn create_ad_hoc_session(
         return Err(ApiError::BadRequest("node is offline".into()));
     }
     let name = name.unwrap_or_else(|| format!("{runtime} · terminal"));
-    let session: Session = sqlx::query_as(
-        "INSERT INTO sessions (id, tenant_id, workspace_id, node_id, name, runtime, status, created_by)
+    let session: Session = state
+        .db
+        .query_one(
+            "INSERT INTO sessions (id, tenant_id, workspace_id, node_id, name, runtime, status, created_by)
          VALUES ($1, $2, NULL, $3, $4, $5, 'starting', $6) RETURNING *",
-    )
-    .bind(SessionId::new())
-    .bind(tenant)
-    .bind(node_id)
-    .bind(&name)
-    .bind(runtime)
-    .bind(created_by)
-    .fetch_one(&state.db)
-    .await?;
+            params![
+                SessionId::new(),
+                tenant,
+                node_id,
+                &name,
+                runtime,
+                created_by.map(|u| u.0)
+            ],
+        )
+        .await?;
 
     let sent = state.registry.send_to_node(
         node_id,
@@ -708,13 +708,16 @@ pub async fn create_ad_hoc_session(
         },
     );
     if !sent {
-        sqlx::query(&format!(
-            "UPDATE sessions SET status = 'error', updated_at = {} WHERE id = $1",
-            Postgres.now()
-        ))
-        .bind(session.id)
-        .execute(&state.db)
-        .await?;
+        state
+            .db
+            .exec(
+                &format!(
+                    "UPDATE sessions SET status = 'error', updated_at = {} WHERE id = $1",
+                    Postgres.now()
+                ),
+                params![session.id],
+            )
+            .await?;
         return Err(ApiError::BadRequest("node went offline".into()));
     }
 
@@ -751,18 +754,21 @@ pub async fn create_auth_session(
         return Err(ApiError::BadRequest("node is offline".into()));
     }
     let name = format!("authorize {runtime}");
-    let session: Session = sqlx::query_as(
-        "INSERT INTO sessions (id, tenant_id, workspace_id, node_id, name, runtime, status, created_by)
+    let session: Session = state
+        .db
+        .query_one(
+            "INSERT INTO sessions (id, tenant_id, workspace_id, node_id, name, runtime, status, created_by)
          VALUES ($1, $2, NULL, $3, $4, $5, 'starting', $6) RETURNING *",
-    )
-    .bind(SessionId::new())
-    .bind(tenant)
-    .bind(node_id)
-    .bind(&name)
-    .bind(runtime)
-    .bind(created_by)
-    .fetch_one(&state.db)
-    .await?;
+            params![
+                SessionId::new(),
+                tenant,
+                node_id,
+                &name,
+                runtime,
+                created_by.map(|u| u.0)
+            ],
+        )
+        .await?;
 
     let sent = state.registry.send_to_node(
         node_id,
@@ -774,13 +780,16 @@ pub async fn create_auth_session(
         },
     );
     if !sent {
-        sqlx::query(&format!(
-            "UPDATE sessions SET status = 'error', updated_at = {} WHERE id = $1",
-            Postgres.now()
-        ))
-        .bind(session.id)
-        .execute(&state.db)
-        .await?;
+        state
+            .db
+            .exec(
+                &format!(
+                    "UPDATE sessions SET status = 'error', updated_at = {} WHERE id = $1",
+                    Postgres.now()
+                ),
+                params![session.id],
+            )
+            .await?;
         return Err(ApiError::BadRequest("node went offline".into()));
     }
 
@@ -802,13 +811,12 @@ pub async fn list_notes(
     tenant: TenantId,
     workspace: WorkspaceId,
 ) -> ApiResult<Vec<Note>> {
-    Ok(sqlx::query_as(
-        "SELECT * FROM notes WHERE tenant_id = $1 AND workspace_id = $2 ORDER BY updated_at DESC",
-    )
-    .bind(tenant)
-    .bind(workspace)
-    .fetch_all(db)
-    .await?)
+    Ok(db
+        .query_all(
+            "SELECT * FROM notes WHERE tenant_id = $1 AND workspace_id = $2 ORDER BY updated_at DESC",
+            params![tenant, workspace],
+        )
+        .await?)
 }
 
 pub async fn create_note(
@@ -817,18 +825,20 @@ pub async fn create_note(
     workspace: WorkspaceId,
     req: CreateNoteRequest,
 ) -> ApiResult<Note> {
-    Ok(sqlx::query_as(
-        "INSERT INTO notes (id, tenant_id, workspace_id, title, content_md, kind)
+    Ok(db
+        .query_one(
+            "INSERT INTO notes (id, tenant_id, workspace_id, title, content_md, kind)
          VALUES ($1, $2, $3, $4, $5, $6) RETURNING *",
-    )
-    .bind(NoteId::new())
-    .bind(tenant)
-    .bind(workspace)
-    .bind(req.title.unwrap_or_else(|| "Rolling notes".into()))
-    .bind(&req.content_md)
-    .bind(req.kind.unwrap_or_else(|| "rolling".into()))
-    .fetch_one(db)
-    .await?)
+            params![
+                NoteId::new(),
+                tenant,
+                workspace,
+                req.title.unwrap_or_else(|| "Rolling notes".into()),
+                &req.content_md,
+                req.kind.unwrap_or_else(|| "rolling".into())
+            ],
+        )
+        .await?)
 }
 
 /// DB-backed tests for the audit paging/search query. They self-provision the
@@ -839,7 +849,7 @@ mod db_tests {
         operator_audit_page, operator_bindings_page, operator_nodes_page, operator_tenants_page,
         tenant_members_page,
     };
-    use nook_db::DbPool;
+    use nook_db::{params, Db, DbPool};
     use nook_types::{EventId, NodeId, TenantId};
     use sqlx::postgres::PgPoolOptions;
     use uuid::Uuid;
@@ -855,36 +865,30 @@ mod db_tests {
             .await
             .ok()?;
         crate::MIGRATOR.run(&db).await.ok()?;
-        Some(db)
+        Some(nook_db::EnginePool::from_pg(db))
     }
 
     async fn tenant(db: &DbPool, slug: &str) -> TenantId {
         // v7 (creation-ordered), matching production `TenantId::new()`, so the
         // keyset `ORDER BY id DESC` walks newest-first as the real endpoints do.
         let id = Uuid::now_v7();
-        sqlx::query("INSERT INTO tenants (id, name, slug) VALUES ($1, $2, $3)")
-            .bind(id)
-            .bind(slug)
-            .bind(format!("{slug}-{id}"))
-            .execute(db)
-            .await
-            .unwrap();
+        db.exec(
+            "INSERT INTO tenants (id, name, slug) VALUES ($1, $2, $3)",
+            params![id, slug, format!("{slug}-{id}")],
+        )
+        .await
+        .unwrap();
         TenantId(id)
     }
 
     async fn node(db: &DbPool, tenant: TenantId, name: &str, status: &str) -> Uuid {
         let id = Uuid::now_v7();
-        sqlx::query(
+        db.exec(
             "INSERT INTO nodes (id, tenant_id, name, node_token_hash, platform, status)
              VALUES ($1, $2, $3, $4, 'linux', $5)",
+            // Token hash unique per node — node_token_hash is unique instance-wide.
+            params![id, tenant.0, name, id.to_string(), status],
         )
-        .bind(id)
-        .bind(tenant.0)
-        .bind(name)
-        // Unique per node — node_token_hash is unique instance-wide.
-        .bind(id.to_string())
-        .bind(status)
-        .execute(db)
         .await
         .unwrap();
         id
@@ -892,14 +896,11 @@ mod db_tests {
 
     async fn user(db: &DbPool, tenant: TenantId, email: &str) -> Uuid {
         let id = Uuid::now_v7();
-        sqlx::query(
+        db.exec(
             "INSERT INTO users (id, tenant_id, display_name, email, role)
              VALUES ($1, $2, 'U', $3, 'member')",
+            params![id, tenant.0, email],
         )
-        .bind(id)
-        .bind(tenant.0)
-        .bind(email)
-        .execute(db)
         .await
         .unwrap();
         id
@@ -907,14 +908,11 @@ mod db_tests {
 
     async fn binding(db: &DbPool, subject: Uuid, role_key: &str) -> Uuid {
         let id = Uuid::now_v7();
-        sqlx::query(
+        db.exec(
             "INSERT INTO role_bindings (id, subject_id, role_key, scope_type)
              VALUES ($1, $2, $3, 'deployment')",
+            params![id, subject, role_key],
         )
-        .bind(id)
-        .bind(subject)
-        .bind(role_key)
-        .execute(db)
         .await
         .unwrap();
         id
@@ -923,16 +921,11 @@ mod db_tests {
     /// Insert one audit-visible event and return its (v7, creation-ordered) id.
     async fn event(db: &DbPool, tenant: TenantId, kind: &str, actor_type: &str) -> EventId {
         let id = EventId::new();
-        sqlx::query(
+        db.exec(
             "INSERT INTO events (id, tenant_id, kind, actor_type, actor_id)
              VALUES ($1, $2, $3, $4, $5)",
+            params![id, tenant.0, kind, actor_type, Uuid::new_v4()],
         )
-        .bind(id)
-        .bind(tenant.0)
-        .bind(kind)
-        .bind(actor_type)
-        .bind(Uuid::new_v4())
-        .execute(db)
         .await
         .unwrap();
         id
@@ -941,48 +934,40 @@ mod db_tests {
     async fn cleanup(db: &DbPool, t: TenantId) {
         // role_bindings have no tenant_id column, so delete them via their
         // subjects first (both role_bindings and tenant_members reference users).
-        let _ = sqlx::query(
-            "DELETE FROM role_bindings WHERE subject_id IN (SELECT id FROM users WHERE tenant_id = $1)",
-        )
-        .bind(t.0)
-        .execute(db)
-        .await;
+        let _ = db
+            .exec(
+                "DELETE FROM role_bindings WHERE subject_id IN (SELECT id FROM users WHERE tenant_id = $1)",
+                params![t.0],
+            )
+            .await;
         for tbl in ["events", "nodes", "tenant_members", "users"] {
-            let _ = sqlx::query(&format!("DELETE FROM {tbl} WHERE tenant_id = $1"))
-                .bind(t.0)
-                .execute(db)
+            let _ = db
+                .exec(
+                    &format!("DELETE FROM {tbl} WHERE tenant_id = $1"),
+                    params![t.0],
+                )
                 .await;
         }
-        let _ = sqlx::query("DELETE FROM tenants WHERE id = $1")
-            .bind(t.0)
-            .execute(db)
+        let _ = db
+            .exec("DELETE FROM tenants WHERE id = $1", params![t.0])
             .await;
     }
 
     /// A member: a v7 `users` row (the keyset id) + its `tenant_members` grant.
     async fn member(db: &DbPool, tenant: TenantId, email: &str, name: &str, role: &str) -> Uuid {
         let uid = Uuid::now_v7();
-        sqlx::query(
+        db.exec(
             "INSERT INTO users (id, tenant_id, display_name, email, role)
              VALUES ($1, $2, $3, $4, $5)",
+            params![uid, tenant.0, name, email, role],
         )
-        .bind(uid)
-        .bind(tenant.0)
-        .bind(name)
-        .bind(email)
-        .bind(role)
-        .execute(db)
         .await
         .unwrap();
-        sqlx::query(
+        db.exec(
             "INSERT INTO tenant_members (id, tenant_id, principal_type, principal_id, role)
              VALUES ($1, $2, 'user', $3, $4)",
+            params![Uuid::new_v4(), tenant.0, uid, role],
         )
-        .bind(Uuid::new_v4())
-        .bind(tenant.0)
-        .bind(uid)
-        .bind(role)
-        .execute(db)
         .await
         .unwrap();
         uid

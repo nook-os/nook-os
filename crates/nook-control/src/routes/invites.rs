@@ -7,7 +7,7 @@
 use axum::extract::{ConnectInfo, Path, Query, State};
 use axum::http::HeaderMap;
 use axum::Json;
-use nook_db::{Postgres, TimeMath, TypeMapping};
+use nook_db::{params, Db, Postgres, TimeMath, TypeMapping};
 use nook_types::*;
 use serde::Deserialize;
 use std::net::SocketAddr;
@@ -126,9 +126,9 @@ async fn send_invite_email(
 
 /// The tenant's display name for the email, with a neutral fallback.
 async fn tenant_display_name(state: &AppState, tenant: TenantId) -> String {
-    sqlx::query_scalar::<_, String>("SELECT name FROM tenants WHERE id = $1")
-        .bind(tenant)
-        .fetch_optional(&state.db)
+    state
+        .db
+        .query_scalar_opt::<String>("SELECT name FROM tenants WHERE id = $1", params![tenant])
         .await
         .ok()
         .flatten()
@@ -137,9 +137,12 @@ async fn tenant_display_name(state: &AppState, tenant: TenantId) -> String {
 
 /// The inviter's display name for the email, with a neutral fallback.
 async fn inviter_display_name(state: &AppState, user_id: uuid::Uuid) -> String {
-    sqlx::query_scalar::<_, String>("SELECT display_name FROM users WHERE id = $1")
-        .bind(user_id)
-        .fetch_optional(&state.db)
+    state
+        .db
+        .query_scalar_opt::<String>(
+            "SELECT display_name FROM users WHERE id = $1",
+            params![user_id],
+        )
         .await
         .ok()
         .flatten()
@@ -179,31 +182,36 @@ pub async fn create(
 
     // Replace any existing pending invite for this email so re-inviting does not
     // stack (AC-2); the partial unique index also enforces one pending.
-    sqlx::query(
-        "DELETE FROM invites
+    state
+        .db
+        .exec(
+            "DELETE FROM invites
          WHERE tenant_id = $1 AND status = 'pending' AND lower(email) = lower($2)",
-    )
-    .bind(tenant)
-    .bind(email)
-    .execute(&state.db)
-    .await?;
+            params![tenant, email],
+        )
+        .await?;
 
     // Only the hash is stored; the plaintext rides in the accept link (AC-9).
     let token = new_token();
-    let mut invite: Invite = sqlx::query_as(&format!(
-        "INSERT INTO invites (id, tenant_id, email, role, token_hash, status, invited_by, expires_at)
+    let mut invite: Invite = state
+        .db
+        .query_one(
+            &format!(
+                "INSERT INTO invites (id, tenant_id, email, role, token_hash, status, invited_by, expires_at)
          VALUES ($1, $2, $3, $4, $5, 'pending', $6, {expiry})
          RETURNING id, email, role, status, created_at, expires_at",
-        expiry = Postgres.now_plus("14 days")
-    ))
-    .bind(uuid::Uuid::now_v7())
-    .bind(tenant)
-    .bind(email)
-    .bind(role)
-    .bind(hash_token(&token))
-    .bind(auth.user_id.0)
-    .fetch_one(&state.db)
-    .await?;
+                expiry = Postgres.now_plus("14 days")
+            ),
+            params![
+                uuid::Uuid::now_v7(),
+                tenant,
+                email,
+                role,
+                hash_token(&token),
+                auth.user_id.0
+            ],
+        )
+        .await?;
 
     // The accept link points at the web app, which drives sign-in then calls the
     // accept endpoint (MAIN-7 will also email this).
@@ -241,14 +249,15 @@ pub async fn list(
     Path(tenant): Path<TenantId>,
 ) -> ApiResult<Json<Vec<Invite>>> {
     require_admin_of(&state, &auth, tenant).await?;
-    let rows: Vec<Invite> = sqlx::query_as(
-        "SELECT id, email, role, status, created_at, expires_at
+    let rows: Vec<Invite> = state
+        .db
+        .query_all(
+            "SELECT id, email, role, status, created_at, expires_at
          FROM invites WHERE tenant_id = $1 AND status = 'pending'
          ORDER BY created_at DESC",
-    )
-    .bind(tenant)
-    .fetch_all(&state.db)
-    .await?;
+            params![tenant],
+        )
+        .await?;
     Ok(Json(rows))
 }
 
@@ -264,15 +273,15 @@ pub async fn revoke(
     Path((tenant, invite)): Path<(TenantId, uuid::Uuid)>,
 ) -> ApiResult<axum::http::StatusCode> {
     require_admin_of(&state, &auth, tenant).await?;
-    let res = sqlx::query(
-        "UPDATE invites SET status = 'revoked'
+    let res = state
+        .db
+        .exec(
+            "UPDATE invites SET status = 'revoked'
          WHERE id = $1 AND tenant_id = $2 AND status = 'pending'",
-    )
-    .bind(invite)
-    .bind(tenant)
-    .execute(&state.db)
-    .await?;
-    if res.rows_affected() == 0 {
+            params![invite, tenant],
+        )
+        .await?;
+    if res == 0 {
         return Err(ApiError::NotFound);
     }
     Ok(axum::http::StatusCode::NO_CONTENT)
@@ -295,19 +304,20 @@ pub async fn resend(
     // plaintext is unrecoverable — a resend issues a FRESH token, invalidating
     // the old link, and re-stamps the expiry before emailing the new link.
     let token = new_token();
-    let mut invite: Invite = sqlx::query_as(&format!(
-        "UPDATE invites
+    let mut invite: Invite = state
+        .db
+        .query_opt(
+            &format!(
+                "UPDATE invites
             SET token_hash = $1, expires_at = {expiry}
           WHERE id = $2 AND tenant_id = $3 AND status = 'pending'
       RETURNING id, email, role, status, created_at, expires_at",
-        expiry = Postgres.now_plus("14 days")
-    ))
-    .bind(hash_token(&token))
-    .bind(invite_id)
-    .bind(tenant)
-    .fetch_optional(&state.db)
-    .await?
-    .ok_or(ApiError::NotFound)?;
+                expiry = Postgres.now_plus("14 days")
+            ),
+            params![hash_token(&token), invite_id, tenant],
+        )
+        .await?
+        .ok_or(ApiError::NotFound)?;
 
     invite.accept_url = Some(format!(
         "{}/accept?token={token}",
@@ -354,10 +364,12 @@ pub async fn accept(
     // member-scoped. Scoped to the memberless case, so an ordinary member
     // accepting from their own tenant (the OIDC flow) keeps its session.
     if result.accepted && id.cookie_session && !id.is_member {
-        let _ = sqlx::query("UPDATE sessions_auth SET tenant_id = $2 WHERE id = $1")
-            .bind(id.session_id.0)
-            .bind(result.tenant_id)
-            .execute(&state.db)
+        let _ = state
+            .db
+            .exec(
+                "UPDATE sessions_auth SET tenant_id = $2 WHERE id = $1",
+                params![id.session_id.0, result.tenant_id],
+            )
             .await;
     }
     Ok(Json(result))
@@ -381,19 +393,20 @@ pub async fn accept_core(
     };
 
     // Who is accepting — email, name, and the cross-tenant person key.
-    let (my_email, my_name, my_person): (String, String, uuid::Uuid) =
-        sqlx::query_as("SELECT email, display_name, person_id FROM users WHERE id = $1")
-            .bind(user_id)
-            .fetch_one(db)
-            .await?;
+    let (my_email, my_name, my_person): (String, String, uuid::Uuid) = db
+        .query_one(
+            "SELECT email, display_name, person_id FROM users WHERE id = $1",
+            params![user_id],
+        )
+        .await?;
 
     // Look up by the token's hash — the plaintext is never at rest (AC-9).
-    let invite: Option<(uuid::Uuid, TenantId, String, String, String)> = sqlx::query_as(
-        "SELECT id, tenant_id, email, role, status FROM invites WHERE token_hash = $1",
-    )
-    .bind(hash_token(token))
-    .fetch_optional(db)
-    .await?;
+    let invite: Option<(uuid::Uuid, TenantId, String, String, String)> = db
+        .query_opt(
+            "SELECT id, tenant_id, email, role, status FROM invites WHERE token_hash = $1",
+            params![hash_token(token)],
+        )
+        .await?;
     let Some((invite_id, tenant, invite_email, role, status)) = invite else {
         return decline("this invite link is not valid");
     };
@@ -404,22 +417,23 @@ pub async fn accept_core(
     // invite only when it was addressed to THIS person's email (AC-10) —
     // otherwise the invite belongs to someone else and must stay pending rather
     // than be burned by whoever happens to click the link.
-    let existing_member: Option<(UserId,)> = sqlx::query_as(
-        "SELECT u.id FROM users u
+    let existing_member: Option<UserId> = db
+        .query_scalar_opt(
+            "SELECT u.id FROM users u
          JOIN tenant_members m
            ON m.tenant_id = u.tenant_id AND m.principal_type = 'user' AND m.principal_id = u.id
          WHERE u.tenant_id = $1 AND u.person_id = $2
          LIMIT 1",
-    )
-    .bind(tenant)
-    .bind(my_person)
-    .fetch_optional(db)
-    .await?;
+            params![tenant, my_person],
+        )
+        .await?;
     if existing_member.is_some() {
         if status == "pending" && email_matches {
-            let _ = sqlx::query("UPDATE invites SET status = 'accepted' WHERE id = $1")
-                .bind(invite_id)
-                .execute(db)
+            let _ = db
+                .exec(
+                    "UPDATE invites SET status = 'accepted' WHERE id = $1",
+                    params![invite_id],
+                )
                 .await;
         }
         return Ok(AcceptInviteResult {
@@ -433,13 +447,15 @@ pub async fn accept_core(
     if status != "pending" {
         return decline("this invite has already been used or revoked");
     }
-    let (fresh,): (bool,) = sqlx::query_as(&format!(
-        "SELECT expires_at > {} FROM invites WHERE id = $1",
-        Postgres.now()
-    ))
-    .bind(invite_id)
-    .fetch_one(db)
-    .await?;
+    let fresh: bool = db
+        .query_scalar(
+            &format!(
+                "SELECT expires_at > {} FROM invites WHERE id = $1",
+                Postgres.now()
+            ),
+            params![invite_id],
+        )
+        .await?;
     if !fresh {
         return decline("this invite has expired");
     }
@@ -456,46 +472,42 @@ pub async fn accept_core(
 
     // Add the per-tenant user row carrying this person_id (or reuse one that
     // exists by email), then the membership grant, then consume the invite.
-    let user_id: uuid::Uuid = match sqlx::query_as::<_, (uuid::Uuid,)>(
-        "SELECT id FROM users WHERE tenant_id = $1 AND lower(email) = lower($2) LIMIT 1",
-    )
-    .bind(tenant)
-    .bind(&invite_email)
-    .fetch_optional(db)
-    .await?
+    let user_id: uuid::Uuid = match db
+        .query_scalar_opt::<uuid::Uuid>(
+            "SELECT id FROM users WHERE tenant_id = $1 AND lower(email) = lower($2) LIMIT 1",
+            params![tenant, &invite_email],
+        )
+        .await?
     {
-        Some((id,)) => id,
+        Some(id) => id,
         None => {
-            let (id,): (uuid::Uuid,) = sqlx::query_as(
+            db.query_scalar::<uuid::Uuid>(
                 "INSERT INTO users (id, tenant_id, display_name, email, role, person_id)
                  VALUES ($1, $2, $3, $4, $5, $6) RETURNING id",
+                params![
+                    uuid::Uuid::now_v7(),
+                    tenant,
+                    &my_name,
+                    &invite_email,
+                    &role,
+                    my_person
+                ],
             )
-            .bind(uuid::Uuid::now_v7())
-            .bind(tenant)
-            .bind(&my_name)
-            .bind(&invite_email)
-            .bind(&role)
-            .bind(my_person)
-            .fetch_one(db)
-            .await?;
-            id
+            .await?
         }
     };
-    sqlx::query(
+    db.exec(
         "INSERT INTO tenant_members (id, tenant_id, principal_type, principal_id, role)
          VALUES ($1, $2, 'user', $3, $4)
          ON CONFLICT (tenant_id, principal_type, principal_id) DO NOTHING",
+        params![uuid::Uuid::now_v7(), tenant, user_id, &role],
     )
-    .bind(uuid::Uuid::now_v7())
-    .bind(tenant)
-    .bind(user_id)
-    .bind(&role)
-    .execute(db)
     .await?;
-    sqlx::query("UPDATE invites SET status = 'accepted' WHERE id = $1")
-        .bind(invite_id)
-        .execute(db)
-        .await?;
+    db.exec(
+        "UPDATE invites SET status = 'accepted' WHERE id = $1",
+        params![invite_id],
+    )
+    .await?;
 
     Ok(AcceptInviteResult {
         accepted: true,
@@ -549,14 +561,17 @@ pub async fn preview(
 
     // One lookup by token hash. `invited_by` is nullable, and validity is
     // computed in SQL so the row is the same shape whatever the status.
-    let row: Option<(TenantId, String, Option<uuid::Uuid>, bool)> = sqlx::query_as(&format!(
-        "SELECT tenant_id, email, invited_by, (status = 'pending' AND expires_at > {})
+    let row: Option<(TenantId, String, Option<uuid::Uuid>, bool)> = state
+        .db
+        .query_opt(
+            &format!(
+                "SELECT tenant_id, email, invited_by, (status = 'pending' AND expires_at > {})
          FROM invites WHERE token_hash = $1",
-        Postgres.now()
-    ))
-    .bind(hash_token(&params.token))
-    .fetch_optional(&state.db)
-    .await?;
+                Postgres.now()
+            ),
+            params![hash_token(&params.token)],
+        )
+        .await?;
 
     // Do the SAME follow-up work regardless of whether the token was found or
     // usable, so a missing/expired/revoked/accepted token cannot be told apart
@@ -621,14 +636,17 @@ pub async fn register(
 
     // The invite: tenant, the email the account MUST use, the role acceptance
     // will apply, and whether it is pending + unexpired.
-    let invite: Option<(TenantId, String, String, bool)> = sqlx::query_as(&format!(
-        "SELECT tenant_id, email, role, (status = 'pending' AND expires_at > {})
+    let invite: Option<(TenantId, String, String, bool)> = state
+        .db
+        .query_opt(
+            &format!(
+                "SELECT tenant_id, email, role, (status = 'pending' AND expires_at > {})
          FROM invites WHERE token_hash = $1",
-        Postgres.now()
-    ))
-    .bind(hash_token(&req.token))
-    .fetch_optional(&state.db)
-    .await?;
+                Postgres.now()
+            ),
+            params![hash_token(&req.token)],
+        )
+        .await?;
     let Some((tenant, email, role, true)) = invite else {
         return Err(ApiError::BadRequest(
             "this invite link is not valid or has expired".into(),
@@ -651,13 +669,13 @@ pub async fn register(
     // Anti-enumeration: if an account already exists for the invite's email, do
     // not create or touch anything and return the SAME generic result a fresh
     // registration returns (AC-3). Hash the password anyway so timing matches.
-    let exists: Option<(uuid::Uuid,)> = sqlx::query_as(
-        "SELECT id FROM users WHERE tenant_id = $1 AND lower(email) = lower($2) LIMIT 1",
-    )
-    .bind(tenant)
-    .bind(&email)
-    .fetch_optional(&state.db)
-    .await?;
+    let exists: Option<uuid::Uuid> = state
+        .db
+        .query_scalar_opt(
+            "SELECT id FROM users WHERE tenant_id = $1 AND lower(email) = lower($2) LIMIT 1",
+            params![tenant, &email],
+        )
+        .await?;
     if exists.is_some() {
         let _ = crate::auth::password::hash(&req.password);
         return generic();
@@ -755,7 +773,7 @@ mod tests {
 mod db_tests {
     use super::accept_core;
     use crate::seed::hash_token;
-    use nook_db::{DbPool, Json};
+    use nook_db::{params, Db, DbPool, Json};
     use nook_db::{Postgres, TypeMapping};
     use nook_types::TenantId;
     use sqlx::postgres::PgPoolOptions;
@@ -771,41 +789,43 @@ mod db_tests {
             .await
             .ok()?;
         crate::MIGRATOR.run(&db).await.ok()?;
-        Some(db)
+        Some(nook_db::EnginePool::from_pg(db))
     }
     async fn tenant(db: &DbPool, name: &str) -> Uuid {
         let id = Uuid::new_v4();
-        sqlx::query("INSERT INTO tenants (id, name, slug) VALUES ($1,$2,$3)")
-            .bind(id)
-            .bind(name)
-            .bind(format!("{name}-{id}"))
-            .execute(db)
-            .await
-            .unwrap();
+        db.exec(
+            "INSERT INTO tenants (id, name, slug) VALUES ($1,$2,$3)",
+            params![id, name, format!("{name}-{id}")],
+        )
+        .await
+        .unwrap();
         id
     }
     /// A users row (a person, by person_id) in a tenant.
     async fn user(db: &DbPool, tenant: Uuid, email: &str, person: Uuid) -> Uuid {
         let id = Uuid::new_v4();
-        sqlx::query("INSERT INTO users (id,tenant_id,display_name,email,role,person_id) VALUES ($1,$2,'P',$3,'owner',$4)")
-            .bind(id).bind(tenant).bind(email).bind(person).execute(db).await.unwrap();
+        db.exec("INSERT INTO users (id,tenant_id,display_name,email,role,person_id) VALUES ($1,$2,'P',$3,'owner',$4)",
+            params![id, tenant, email, person]).await.unwrap();
         id
     }
     async fn invite(db: &DbPool, tenant: Uuid, email: &str, days: i64) -> String {
         let token = format!("inv_{}", Uuid::new_v4().simple());
         // Stored hashed at rest (AC-9); the helper hands back the plaintext.
-        sqlx::query(&format!(
-            "INSERT INTO invites (id,tenant_id,email,role,token_hash,status,expires_at)
+        db.exec(
+            &format!(
+                "INSERT INTO invites (id,tenant_id,email,role,token_hash,status,expires_at)
              VALUES ($1,$2,$3,'member',$4,'pending', {now} + make_interval(days => {days}))",
-            now = Postgres.now(),
-            days = Postgres.cast("$5", "int")
-        ))
-        .bind(Uuid::new_v4())
-        .bind(tenant)
-        .bind(email)
-        .bind(hash_token(&token))
-        .bind(days as i32)
-        .execute(db)
+                now = Postgres.now(),
+                days = Postgres.cast("$5", "int")
+            ),
+            params![
+                Uuid::new_v4(),
+                tenant,
+                email,
+                hash_token(&token),
+                days as i32
+            ],
+        )
         .await
         .unwrap();
         token
@@ -820,40 +840,33 @@ mod db_tests {
             nook_db::Postgres.literal("{}"),
             now = Postgres.now()
         );
-        sqlx::query(&sql)
-            .bind(Uuid::now_v7())
-            .bind(user_id)
-            .bind(user_id.to_string())
-            .bind(email)
-            .execute(db)
-            .await
-            .unwrap();
-    }
-    async fn is_member(db: &DbPool, tenant: Uuid, person: Uuid) -> bool {
-        let (n,): (i64,) = sqlx::query_as(
-            "SELECT count(*) FROM users u JOIN tenant_members m
-               ON m.tenant_id=u.tenant_id AND m.principal_type='user' AND m.principal_id=u.id
-             WHERE u.tenant_id=$1 AND u.person_id=$2",
+        db.exec(
+            &sql,
+            params![Uuid::now_v7(), user_id, user_id.to_string(), email],
         )
-        .bind(tenant)
-        .bind(person)
-        .fetch_one(db)
         .await
         .unwrap();
+    }
+    async fn is_member(db: &DbPool, tenant: Uuid, person: Uuid) -> bool {
+        let n: i64 = db
+            .query_scalar(
+                "SELECT count(*) FROM users u JOIN tenant_members m
+               ON m.tenant_id=u.tenant_id AND m.principal_type='user' AND m.principal_id=u.id
+             WHERE u.tenant_id=$1 AND u.person_id=$2",
+                params![tenant, person],
+            )
+            .await
+            .unwrap();
         n > 0
     }
     async fn cleanup(db: &DbPool, tenants: &[Uuid]) {
         for t in tenants {
             for tbl in ["invites", "tenant_members", "users"] {
-                let _ = sqlx::query(&format!("DELETE FROM {tbl} WHERE tenant_id=$1"))
-                    .bind(t)
-                    .execute(db)
+                let _ = db
+                    .exec(&format!("DELETE FROM {tbl} WHERE tenant_id=$1"), params![t])
                     .await;
             }
-            let _ = sqlx::query("DELETE FROM tenants WHERE id=$1")
-                .bind(t)
-                .execute(db)
-                .await;
+            let _ = db.exec("DELETE FROM tenants WHERE id=$1", params![t]).await;
         }
     }
 
@@ -890,14 +903,13 @@ mod db_tests {
         let r_unverified = accept_core(&db, me, TenantId(home), &good).await.unwrap();
         let member_after_unverified = is_member(&db, shared, person).await;
         // The token is stored hashed, never in plaintext (AC-9).
-        let (stored_hash,): (String,) = sqlx::query_as(
-            "SELECT token_hash FROM invites WHERE tenant_id=$1 AND status='pending' AND lower(email)=lower($2)",
-        )
-        .bind(shared)
-        .bind("invitee@i6.test")
-        .fetch_one(&db)
-        .await
-        .unwrap();
+        let stored_hash: String = db
+            .query_scalar(
+                "SELECT token_hash FROM invites WHERE tenant_id=$1 AND status='pending' AND lower(email)=lower($2)",
+                params![shared, "invitee@i6.test"],
+            )
+            .await
+            .unwrap();
 
         // Verify the address; the same link now works (AC-8).
         verify(&db, me, "invitee@i6.test").await;
@@ -905,15 +917,14 @@ mod db_tests {
         let member_after = is_member(&db, shared, person).await;
         // Idempotent: second accept is a no-op success; token can't be reused for a NEW membership.
         let r_again = accept_core(&db, me, TenantId(home), &good).await.unwrap();
-        let (member_rows,): (i64,) = sqlx::query_as(
-            "SELECT count(*) FROM tenant_members m JOIN users u ON u.id=m.principal_id
+        let member_rows: i64 = db
+            .query_scalar(
+                "SELECT count(*) FROM tenant_members m JOIN users u ON u.id=m.principal_id
              WHERE u.tenant_id=$1 AND u.person_id=$2",
-        )
-        .bind(shared)
-        .bind(person)
-        .fetch_one(&db)
-        .await
-        .unwrap();
+                params![shared, person],
+            )
+            .await
+            .unwrap();
 
         cleanup(&db, &[shared, home, stale]).await;
 
@@ -965,14 +976,11 @@ mod db_tests {
         // `me` is already a member of `shared` (a users row + grant there).
         let me = user(&db, home, "me@i10.test", person).await;
         let mine_in_shared = user(&db, shared, "me@i10.test", person).await;
-        sqlx::query(
+        db.exec(
             "INSERT INTO tenant_members (id,tenant_id,principal_type,principal_id,role)
              VALUES ($1,$2,'user',$3,'member')",
+            params![Uuid::new_v4(), shared, mine_in_shared],
         )
-        .bind(Uuid::new_v4())
-        .bind(shared)
-        .bind(mine_in_shared)
-        .execute(&db)
         .await
         .unwrap();
 
@@ -980,14 +988,13 @@ mod db_tests {
         let others = invite(&db, shared, "colleague@i10.test", 7).await;
         let r = accept_core(&db, me, TenantId(home), &others).await.unwrap();
 
-        let (still_pending,): (i64,) = sqlx::query_as(
-            "SELECT count(*) FROM invites WHERE tenant_id=$1 AND status='pending' AND lower(email)=lower($2)",
-        )
-        .bind(shared)
-        .bind("colleague@i10.test")
-        .fetch_one(&db)
-        .await
-        .unwrap();
+        let still_pending: i64 = db
+            .query_scalar(
+                "SELECT count(*) FROM invites WHERE tenant_id=$1 AND status='pending' AND lower(email)=lower($2)",
+                params![shared, "colleague@i10.test"],
+            )
+            .await
+            .unwrap();
 
         cleanup(&db, &[shared, home]).await;
 
@@ -1022,14 +1029,13 @@ mod db_tests {
         // Unverified accept → declined, and nothing joins.
         let declined = accept_core(&db, me, TenantId(home), &token).await.unwrap();
         let member_after_decline = is_member(&db, shared, person).await;
-        let (still_pending,): (i64,) = sqlx::query_as(
-            "SELECT count(*) FROM invites WHERE tenant_id=$1 AND status='pending' AND lower(email)=lower($2)",
-        )
-        .bind(shared)
-        .bind("invitee@i8.test")
-        .fetch_one(&db)
-        .await
-        .unwrap();
+        let still_pending: i64 = db
+            .query_scalar(
+                "SELECT count(*) FROM invites WHERE tenant_id=$1 AND status='pending' AND lower(email)=lower($2)",
+                params![shared, "invitee@i8.test"],
+            )
+            .await
+            .unwrap();
 
         // Verifying the address is the ONLY thing that was missing: the SAME
         // token now accepts — proving the decline was the AC-8 gate, not a

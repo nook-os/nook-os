@@ -14,7 +14,7 @@
 //! (`waiting_on_human → running`). A job that fails or is canceled cancels its
 //! pending ask (see [`cancel_for_job`]).
 
-use nook_db::{Postgres, TypeMapping};
+use nook_db::{params, Db, Postgres, TypeMapping};
 use nook_types::*;
 use serde_json::json;
 use uuid::Uuid;
@@ -26,28 +26,34 @@ use crate::services::jobs;
 use crate::state::AppState;
 
 async fn load(state: &AppState, tenant: TenantId, id: InteractionId) -> ApiResult<Interaction> {
-    sqlx::query_as("SELECT * FROM interactions WHERE id = $1 AND tenant_id = $2")
-        .bind(id)
-        .bind(tenant)
-        .fetch_optional(&state.db)
+    state
+        .db
+        .query_opt::<Interaction>(
+            "SELECT * FROM interactions WHERE id = $1 AND tenant_id = $2",
+            params![id, tenant],
+        )
         .await?
         .ok_or(ApiError::NotFound)
 }
 
 async fn load_task(state: &AppState, tenant: TenantId, task_id: TaskId) -> ApiResult<TaskItem> {
-    sqlx::query_as("SELECT * FROM tasks WHERE id = $1 AND tenant_id = $2")
-        .bind(task_id)
-        .bind(tenant)
-        .fetch_optional(&state.db)
+    state
+        .db
+        .query_opt::<TaskItem>(
+            "SELECT * FROM tasks WHERE id = $1 AND tenant_id = $2",
+            params![task_id, tenant],
+        )
         .await?
         .ok_or(ApiError::NotFound)
 }
 
 async fn load_job(state: &AppState, tenant: TenantId, job_id: JobId) -> ApiResult<LoopJob> {
-    sqlx::query_as("SELECT * FROM loop_jobs WHERE id = $1 AND tenant_id = $2")
-        .bind(job_id)
-        .bind(tenant)
-        .fetch_optional(&state.db)
+    state
+        .db
+        .query_opt::<LoopJob>(
+            "SELECT * FROM loop_jobs WHERE id = $1 AND tenant_id = $2",
+            params![job_id, tenant],
+        )
         .await?
         .ok_or(ApiError::NotFound)
 }
@@ -140,23 +146,26 @@ pub async fn create(
     };
 
     let id = InteractionId::new();
-    let interaction: Interaction = sqlx::query_as(
-        "INSERT INTO interactions
+    let interaction: Interaction = state
+        .db
+        .query_one(
+            "INSERT INTO interactions
             (id, tenant_id, job_id, task_id, prompt, choices,
              requested_by_node_id, requested_by_session_id)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
          RETURNING *",
-    )
-    .bind(id)
-    .bind(tenant)
-    .bind(job_id)
-    .bind(task_id)
-    .bind(prompt)
-    .bind(req.choices.as_deref())
-    .bind(node_id)
-    .bind(req.session_id)
-    .fetch_one(&state.db)
-    .await?;
+            params![
+                id,
+                tenant,
+                job_id.map(|x| x.0),
+                task_id.map(|x| x.0),
+                prompt,
+                req.choices.clone(),
+                node_id.map(|x| x.0),
+                req.session_id.map(|x| x.0)
+            ],
+        )
+        .await?;
 
     // MAIN-162 bridging: a job-scoped ask pauses its run. Record the question on
     // the job transcript, then move a RUNNING job to `waiting_on_human` (persisted,
@@ -228,14 +237,15 @@ pub async fn list_pending(
     tenant: TenantId,
     viewer: UserId,
 ) -> ApiResult<Vec<Interaction>> {
-    let rows: Vec<Interaction> = sqlx::query_as(
-        "SELECT * FROM interactions
+    let rows: Vec<Interaction> = state
+        .db
+        .query_all(
+            "SELECT * FROM interactions
          WHERE tenant_id = $1 AND state = 'pending'
          ORDER BY created_at",
-    )
-    .bind(tenant)
-    .fetch_all(&state.db)
-    .await?;
+            params![tenant],
+        )
+        .await?;
 
     let mut out = Vec::with_capacity(rows.len());
     for i in rows {
@@ -268,19 +278,20 @@ pub async fn answer(
         return Err(ApiError::NotFound);
     }
 
-    let updated: Option<Interaction> = sqlx::query_as(&format!(
-        "UPDATE interactions
+    let updated: Option<Interaction> = state
+        .db
+        .query_opt(
+            &format!(
+                "UPDATE interactions
             SET state = 'answered', answered_by = $2, response = $3,
                 answered_at = {now}, updated_at = {now}
           WHERE id = $1 AND state = 'pending'
           RETURNING *",
-        now = Postgres.now()
-    ))
-    .bind(id)
-    .bind(viewer)
-    .bind(&response)
-    .fetch_optional(&state.db)
-    .await?;
+                now = Postgres.now()
+            ),
+            params![id, viewer, &response],
+        )
+        .await?;
 
     let Some(interaction) = updated else {
         // No longer pending. Distinguish a canceled ask (its job ended — MAIN-162
@@ -373,16 +384,19 @@ pub async fn cancel(
     if !subject_visible(state, tenant, viewer, existing.task_id).await? {
         return Err(ApiError::NotFound);
     }
-    let updated: Option<Interaction> = sqlx::query_as(&format!(
-        "UPDATE interactions
+    let updated: Option<Interaction> = state
+        .db
+        .query_opt(
+            &format!(
+                "UPDATE interactions
             SET state = 'canceled', updated_at = {}
           WHERE id = $1 AND state = 'pending'
           RETURNING *",
-        Postgres.now()
-    ))
-    .bind(id)
-    .fetch_optional(&state.db)
-    .await?;
+                Postgres.now()
+            ),
+            params![id],
+        )
+        .await?;
     let Some(interaction) = updated else {
         return Err(ApiError::Conflict(
             "this interaction is no longer pending".into(),
@@ -409,17 +423,19 @@ pub async fn cancel(
 /// not fail the job transition that triggered it. Each cancel records its
 /// activity event and fans the live `InteractionChanged` signal, like `cancel`.
 pub async fn cancel_for_job(state: &AppState, tenant: TenantId, job_id: JobId) {
-    let canceled: Vec<Interaction> = match sqlx::query_as(&format!(
-        "UPDATE interactions
+    let canceled: Vec<Interaction> = match state
+        .db
+        .query_all::<Interaction>(
+            &format!(
+                "UPDATE interactions
             SET state = 'canceled', updated_at = {}
           WHERE job_id = $1 AND tenant_id = $2 AND state = 'pending'
           RETURNING *",
-        Postgres.now()
-    ))
-    .bind(job_id)
-    .bind(tenant)
-    .fetch_all(&state.db)
-    .await
+                Postgres.now()
+            ),
+            params![job_id, tenant],
+        )
+        .await
     {
         Ok(rows) => rows,
         Err(e) => {

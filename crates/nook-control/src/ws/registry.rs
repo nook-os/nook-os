@@ -14,7 +14,7 @@ use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
-use nook_db::{DbPool, Postgres, TypeMapping};
+use nook_db::{params, Db, DbPool, Postgres, TypeMapping};
 use nook_proto::{AttachServerMessage, ControlToNode, UiEvent};
 use nook_types::{GitFileStatus, NodeId, SessionId, TenantId};
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
@@ -730,15 +730,18 @@ impl Registry {
             &format!("EXTRACT(EPOCH FROM lease_expires_at - {now})"),
             "float8",
         );
-        let rows: Vec<(Uuid, Uuid, f64)> = sqlx::query_as(&format!(
-            "SELECT id, owning_instance_id,
+        let rows: Vec<(Uuid, Uuid, f64)> = pool
+            .query_all(
+                &format!(
+                    "SELECT id, owning_instance_id,
                     {epoch}
              FROM nodes
              WHERE owning_instance_id IS NOT NULL AND lease_expires_at > {now}",
-        ))
-        .fetch_all(pool)
-        .await
-        .unwrap_or_default();
+                ),
+                params![],
+            )
+            .await
+            .unwrap_or_default();
         self.lease_cache.clear();
         let now = Instant::now();
         for (node, owner, ttl) in rows {

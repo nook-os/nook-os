@@ -6,7 +6,7 @@
 //! directory-name slug. Never auto-merge two workspaces with different
 //! remotes. Git worktrees are out of scope for M1.
 
-use nook_db::{Postgres, TypeMapping};
+use nook_db::{params, Db, Postgres, TypeMapping};
 use nook_proto::{DiscoveredWorkspace, UiEvent};
 use nook_types::*;
 use rand::distr::Alphanumeric;
@@ -55,34 +55,36 @@ pub async fn reconcile(
             // The remote on the workspace itself is authoritative; the
             // node_workspaces lookup is the fallback for rows written before
             // the identity was recorded there.
-            Some(norm) => match sqlx::query_as::<_, (WorkspaceId,)>(
-                "SELECT id FROM workspaces
+            Some(norm) => match state
+                .db
+                .query_scalar_opt::<WorkspaceId>(
+                    "SELECT id FROM workspaces
                      WHERE tenant_id = $1 AND git_remote_normalized = $2 LIMIT 1",
-            )
-            .bind(tenant)
-            .bind(norm)
-            .fetch_optional(&state.db)
-            .await?
-            {
-                Some((id,)) => Some(id),
-                None => sqlx::query_as::<_, (WorkspaceId,)>(
-                    "SELECT workspace_id FROM node_workspaces
-                         WHERE tenant_id = $1 AND git_remote_normalized = $2 LIMIT 1",
+                    params![tenant, norm],
                 )
-                .bind(tenant)
-                .bind(norm)
-                .fetch_optional(&state.db)
                 .await?
-                .map(|(id,)| id),
+            {
+                Some(id) => Some(id),
+                None => {
+                    state
+                        .db
+                        .query_scalar_opt::<WorkspaceId>(
+                            "SELECT workspace_id FROM node_workspaces
+                         WHERE tenant_id = $1 AND git_remote_normalized = $2 LIMIT 1",
+                            params![tenant, norm],
+                        )
+                        .await?
+                }
             },
-            None => sqlx::query_as::<_, (WorkspaceId,)>(
-                "SELECT id FROM workspaces WHERE tenant_id = $1 AND slug = $2",
-            )
-            .bind(tenant)
-            .bind(slugify(&d.name))
-            .fetch_optional(&state.db)
-            .await?
-            .map(|(id,)| id),
+            None => {
+                state
+                    .db
+                    .query_scalar_opt::<WorkspaceId>(
+                        "SELECT id FROM workspaces WHERE tenant_id = $1 AND slug = $2",
+                        params![tenant, slugify(&d.name)],
+                    )
+                    .await?
+            }
         };
 
         let workspace_id = match workspace_id {
@@ -92,27 +94,27 @@ pub async fn reconcile(
                 // when the discovered name is the same repo with an owner
                 // prefix, so a hand-picked name is never clobbered.
                 if let Some(norm) = &normalized {
-                    sqlx::query(
-                        "UPDATE workspaces SET git_remote_normalized = $2
+                    state
+                        .db
+                        .exec(
+                            "UPDATE workspaces SET git_remote_normalized = $2
                          WHERE id = $1 AND git_remote_normalized IS DISTINCT FROM $2",
-                    )
-                    .bind(id)
-                    .bind(norm)
-                    .execute(&state.db)
-                    .await?;
+                            params![id, norm],
+                        )
+                        .await?;
                 }
                 if let Some((_, repo)) = d.name.split_once('/') {
-                    sqlx::query(&format!(
-                        "UPDATE workspaces SET name = $2, slug = $3, updated_at = {}
+                    state
+                        .db
+                        .exec(
+                            &format!(
+                                "UPDATE workspaces SET name = $2, slug = $3, updated_at = {}
                          WHERE id = $1 AND name = $4",
-                        Postgres.now()
-                    ))
-                    .bind(id)
-                    .bind(&d.name)
-                    .bind(slugify(&d.name))
-                    .bind(repo)
-                    .execute(&state.db)
-                    .await?;
+                                Postgres.now()
+                            ),
+                            params![id, &d.name, slugify(&d.name), repo],
+                        )
+                        .await?;
                 }
                 id
             }
@@ -138,16 +140,20 @@ pub async fn reconcile(
             }
         };
 
-        let known: Option<(NodeWorkspaceId,)> =
-            sqlx::query_as("SELECT id FROM node_workspaces WHERE node_id = $1 AND path = $2")
-                .bind(node_id)
-                .bind(&d.path)
-                .fetch_optional(&state.db)
-                .await?;
+        let known: Option<NodeWorkspaceId> = state
+            .db
+            .query_scalar_opt(
+                "SELECT id FROM node_workspaces WHERE node_id = $1 AND path = $2",
+                params![node_id, &d.path],
+            )
+            .await?;
         let is_new_checkout = known.is_none();
 
-        sqlx::query(&format!(
-            "INSERT INTO node_workspaces
+        state
+            .db
+            .exec(
+                &format!(
+                    "INSERT INTO node_workspaces
                (id, tenant_id, node_id, workspace_id, path, git_remote_url,
                 git_remote_normalized, git_branch, git_status)
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
@@ -158,19 +164,21 @@ pub async fn reconcile(
                git_branch = EXCLUDED.git_branch,
                git_status = EXCLUDED.git_status,
                last_scanned_at = {}",
-            Postgres.now()
-        ))
-        .bind(NodeWorkspaceId::new())
-        .bind(tenant)
-        .bind(node_id)
-        .bind(workspace_id)
-        .bind(&d.path)
-        .bind(&d.git_remote_url)
-        .bind(&normalized)
-        .bind(&d.branch)
-        .bind(serde_json::json!({ "dirty": d.dirty, "worktree": d.worktree }))
-        .execute(&state.db)
-        .await?;
+                    Postgres.now()
+                ),
+                params![
+                    NodeWorkspaceId::new(),
+                    tenant,
+                    node_id,
+                    workspace_id,
+                    &d.path,
+                    d.git_remote_url.clone(),
+                    normalized.clone(),
+                    d.branch.clone(),
+                    serde_json::json!({ "dirty": d.dirty, "worktree": d.worktree })
+                ],
+            )
+            .await?;
 
         // A new checkout wants the workspace's .env, but the control plane
         // cannot read a sealed secret on its own — that's the whole point. So
@@ -189,10 +197,12 @@ pub async fn reconcile(
     }
 
     // Checkouts that disappeared from this node.
-    sqlx::query("DELETE FROM node_workspaces WHERE node_id = $1 AND path != ALL($2)")
-        .bind(node_id)
-        .bind(&reported_paths)
-        .execute(&state.db)
+    state
+        .db
+        .exec(
+            "DELETE FROM node_workspaces WHERE node_id = $1 AND path != ALL($2)",
+            params![node_id, reported_paths],
+        )
         .await?;
 
     state.registry.publish(
@@ -235,13 +245,13 @@ pub async fn migrate_paths(
 
     // Belonging check, before any write.
     let olds: Vec<String> = pairs.iter().map(|p| p.old.clone()).collect();
-    let mine: Vec<(String,)> =
-        sqlx::query_as("SELECT path FROM node_workspaces WHERE node_id = $1 AND path = ANY($2)")
-            .bind(node_id)
-            .bind(&olds)
-            .fetch_all(db)
-            .await?;
-    let mine: std::collections::HashSet<String> = mine.into_iter().map(|(p,)| p).collect();
+    let mine: Vec<String> = db
+        .query_scalar_all(
+            "SELECT path FROM node_workspaces WHERE node_id = $1 AND path = ANY($2)",
+            params![node_id, &olds[..]],
+        )
+        .await?;
+    let mine: std::collections::HashSet<String> = mine.into_iter().collect();
     if let Some(stray) = olds.iter().find(|p| !mine.contains(*p)) {
         return Err(crate::error::ApiError::BadRequest(format!(
             "{stray} is not a checkout of this node — refusing to rewrite paths \
@@ -256,31 +266,31 @@ pub async fn migrate_paths(
     let mut node_workspaces_updated: u32 = 0;
     let mut tasks_updated: u32 = 0;
     for pair in pairs {
-        let nw = sqlx::query(&format!(
-            "UPDATE node_workspaces SET path = $3, last_scanned_at = {}
+        let nw = tx
+            .exec(
+                &format!(
+                    "UPDATE node_workspaces SET path = $3, last_scanned_at = {}
              WHERE node_id = $1 AND path = $2",
-            Postgres.now()
-        ))
-        .bind(node_id)
-        .bind(&pair.old)
-        .bind(&pair.new)
-        .execute(&mut *tx)
-        .await?;
-        node_workspaces_updated += nw.rows_affected() as u32;
+                    Postgres.now()
+                ),
+                params![node_id, &pair.old, &pair.new],
+            )
+            .await?;
+        node_workspaces_updated += nw as u32;
 
         // A task's worktree lives on a specific node; scope the rewrite to this
         // one so an identical relative path on another machine is never touched.
-        let t = sqlx::query(&format!(
-            "UPDATE tasks SET worktree_path = $3, updated_at = {}
+        let t = tx
+            .exec(
+                &format!(
+                    "UPDATE tasks SET worktree_path = $3, updated_at = {}
              WHERE worktree_node_id = $1 AND worktree_path = $2",
-            Postgres.now()
-        ))
-        .bind(node_id)
-        .bind(&pair.old)
-        .bind(&pair.new)
-        .execute(&mut *tx)
-        .await?;
-        tasks_updated += t.rows_affected() as u32;
+                    Postgres.now()
+                ),
+                params![node_id, &pair.old, &pair.new],
+            )
+            .await?;
+        tasks_updated += t as u32;
     }
     tx.commit().await?;
 
@@ -308,19 +318,22 @@ async fn create_workspace_for(
                 .collect();
             format!("{base_slug}-{}", suffix.to_lowercase())
         };
-        let res: Result<(WorkspaceId,), sqlx::Error> = sqlx::query_as(
-            "INSERT INTO workspaces (id, tenant_id, name, slug, git_remote_normalized)
+        let res: Result<WorkspaceId, sqlx::Error> = state
+            .db
+            .query_scalar(
+                "INSERT INTO workspaces (id, tenant_id, name, slug, git_remote_normalized)
              VALUES ($1, $2, $3, $4, $5) RETURNING id",
-        )
-        .bind(WorkspaceId::new())
-        .bind(tenant)
-        .bind(name)
-        .bind(&slug)
-        .bind(git_remote_normalized)
-        .fetch_one(&state.db)
-        .await;
+                params![
+                    WorkspaceId::new(),
+                    tenant,
+                    name,
+                    &slug,
+                    git_remote_normalized
+                ],
+            )
+            .await;
         match res {
-            Ok((id,)) => return Ok(id),
+            Ok(id) => return Ok(id),
             Err(sqlx::Error::Database(d)) if d.is_unique_violation() => continue,
             Err(e) => return Err(e.into()),
         }

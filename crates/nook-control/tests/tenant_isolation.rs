@@ -311,8 +311,8 @@ async fn oidc_email_verified_claim_sets_the_timestamp_and_predicate() {
             .unwrap();
 
     // …and so does the predicate.
-    let v_pred = email_is_verified(&bed.pool, v_user.id).await.unwrap();
-    let u_pred = email_is_verified(&bed.pool, u_user.id).await.unwrap();
+    let v_pred = email_is_verified(&bed.db(), v_user.id).await.unwrap();
+    let u_pred = email_is_verified(&bed.db(), u_user.id).await.unwrap();
 
     bed.teardown().await;
 
@@ -343,7 +343,7 @@ async fn returning_login_records_a_newly_verified_email() {
         .await
         .expect("first sign-in, unverified");
     assert!(
-        !email_is_verified(&bed.pool, user.id).await.unwrap(),
+        !email_is_verified(&bed.db(), user.id).await.unwrap(),
         "starts unverified"
     );
 
@@ -351,7 +351,7 @@ async fn returning_login_records_a_newly_verified_email() {
     login_identity(&state, claims_verified(&sub, "Lee", true))
         .await
         .expect("second sign-in, now verified");
-    let verified = email_is_verified(&bed.pool, user.id).await.unwrap();
+    let verified = email_is_verified(&bed.db(), user.id).await.unwrap();
 
     bed.teardown().await;
     assert!(verified, "a later verified login records the verification");

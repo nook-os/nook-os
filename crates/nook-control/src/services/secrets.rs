@@ -3,6 +3,7 @@
 //! new machine brings its secrets along automatically.
 
 use base64::Engine;
+use nook_db::{params, Db};
 use nook_proto::ControlToNode;
 use nook_types::{NodeId, SessionId, TenantId, WorkspaceId};
 
@@ -26,15 +27,15 @@ pub async fn announce_new_checkout(
     node_id: NodeId,
     checkout_path: &str,
 ) {
-    let has_secrets: Option<(i64,)> = sqlx::query_as(
-        "SELECT count(*) FROM workspace_secrets WHERE tenant_id = $1 AND workspace_id = $2",
-    )
-    .bind(tenant)
-    .bind(workspace)
-    .fetch_optional(&state.db)
-    .await
-    .ok()
-    .flatten();
+    let has_secrets: Option<(i64,)> = state
+        .db
+        .query_opt(
+            "SELECT count(*) FROM workspace_secrets WHERE tenant_id = $1 AND workspace_id = $2",
+            params![tenant, workspace],
+        )
+        .await
+        .ok()
+        .flatten();
     if has_secrets.is_none_or(|(n,)| n == 0) {
         return;
     }
@@ -57,50 +58,53 @@ pub async fn announce_new_checkout(
 /// vault and comes back on the next sync. Other live sessions in the same
 /// checkout keep their files.
 pub async fn wipe_ephemeral_for_session(state: &AppState, tenant: TenantId, session_id: SessionId) {
-    let Ok(Some((workspace_id, node_id))) = sqlx::query_as::<_, (WorkspaceId, NodeId)>(
-        "SELECT workspace_id, node_id FROM sessions WHERE id = $1 AND tenant_id = $2",
-    )
-    .bind(session_id)
-    .bind(tenant)
-    .fetch_optional(&state.db)
-    .await
+    let Ok(Some((workspace_id, node_id))) = state
+        .db
+        .query_opt::<(WorkspaceId, NodeId)>(
+            "SELECT workspace_id, node_id FROM sessions WHERE id = $1 AND tenant_id = $2",
+            params![session_id, tenant],
+        )
+        .await
     else {
         return;
     };
 
     // Another live session still needs the files.
-    let still_live: Option<(i64,)> = sqlx::query_as(
-        "SELECT count(*) FROM sessions
+    let still_live: Option<(i64,)> = state
+        .db
+        .query_opt(
+            "SELECT count(*) FROM sessions
          WHERE workspace_id = $1 AND id <> $2
            AND status IN ('starting', 'running', 'detached')",
-    )
-    .bind(workspace_id)
-    .bind(session_id)
-    .fetch_optional(&state.db)
-    .await
-    .ok()
-    .flatten();
+            params![workspace_id, session_id],
+        )
+        .await
+        .ok()
+        .flatten();
     if still_live.is_some_and(|(n,)| n > 0) {
         return;
     }
 
-    let names: Vec<(String,)> =
-        sqlx::query_as("SELECT name FROM workspace_secrets WHERE workspace_id = $1 AND ephemeral")
-            .bind(workspace_id)
-            .fetch_all(&state.db)
-            .await
-            .unwrap_or_default();
+    let names: Vec<(String,)> = state
+        .db
+        .query_all(
+            "SELECT name FROM workspace_secrets WHERE workspace_id = $1 AND ephemeral",
+            params![workspace_id],
+        )
+        .await
+        .unwrap_or_default();
     if names.is_empty() {
         return;
     }
 
-    let paths: Vec<(String,)> =
-        sqlx::query_as("SELECT path FROM node_workspaces WHERE workspace_id = $1 AND node_id = $2")
-            .bind(workspace_id)
-            .bind(node_id)
-            .fetch_all(&state.db)
-            .await
-            .unwrap_or_default();
+    let paths: Vec<(String,)> = state
+        .db
+        .query_all(
+            "SELECT path FROM node_workspaces WHERE workspace_id = $1 AND node_id = $2",
+            params![workspace_id, node_id],
+        )
+        .await
+        .unwrap_or_default();
 
     for (path,) in &paths {
         for (name,) in &names {
@@ -128,14 +132,14 @@ pub async fn push_one(
     name: &str,
     content: &[u8],
 ) -> usize {
-    let locations: Vec<(NodeId, String)> = sqlx::query_as(
-        "SELECT node_id, path FROM node_workspaces WHERE tenant_id = $1 AND workspace_id = $2",
-    )
-    .bind(tenant)
-    .bind(workspace)
-    .fetch_all(&state.db)
-    .await
-    .unwrap_or_default();
+    let locations: Vec<(NodeId, String)> = state
+        .db
+        .query_all(
+            "SELECT node_id, path FROM node_workspaces WHERE tenant_id = $1 AND workspace_id = $2",
+            params![tenant, workspace],
+        )
+        .await
+        .unwrap_or_default();
 
     let mut pushed = 0;
     for (node_id, path) in locations {

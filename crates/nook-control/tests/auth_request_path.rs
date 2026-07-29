@@ -374,7 +374,7 @@ async fn nook_auth_resolves_session_and_bearer() {
     let sid = seed_session(&bed.pool, me, t).await;
 
     // Session cookie → the right user + tenant, marked cookie_session.
-    let s = nook_auth::resolve_session(&bed.pool, sid)
+    let s = nook_auth::resolve_session(&bed.db(), sid)
         .await
         .expect("valid session resolves");
     assert_eq!(s.user_id, me.0);
@@ -394,7 +394,7 @@ async fn nook_auth_resolves_session_and_bearer() {
     .execute(&bed.pool)
     .await
     .unwrap();
-    let b = nook_auth::resolve_bearer(&bed.pool, token)
+    let b = nook_auth::resolve_bearer(&bed.db(), token)
         .await
         .expect("valid token resolves");
     assert_eq!(b.user_id, me.0);
@@ -403,11 +403,11 @@ async fn nook_auth_resolves_session_and_bearer() {
 
     // Unknown credentials are refused.
     assert!(matches!(
-        nook_auth::resolve_session(&bed.pool, Uuid::new_v4()).await,
+        nook_auth::resolve_session(&bed.db(), Uuid::new_v4()).await,
         Err(nook_auth::AuthError::Unauthorized)
     ));
     assert!(matches!(
-        nook_auth::resolve_bearer(&bed.pool, "nook_user_nope").await,
+        nook_auth::resolve_bearer(&bed.db(), "nook_user_nope").await,
         Err(nook_auth::AuthError::Unauthorized)
     ));
 

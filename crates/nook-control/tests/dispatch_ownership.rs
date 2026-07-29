@@ -34,7 +34,7 @@ async fn online_node(state: &AppState, tenant: TenantId, owner: Uuid, free_mem_g
     .bind(format!("h-{}", id.0.simple()))
     .bind(owner)
     .bind(resources)
-    .execute(&state.db)
+    .execute(state.db.pg())
     .await
     .expect("node");
     let (tx, _rx) = tokio::sync::mpsc::channel::<ControlToNode>(4);

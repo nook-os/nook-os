@@ -67,15 +67,15 @@ async fn lease_takeover_flips_ownership() {
 
     // Instance A owns the node.
     claim_lease(&bed.pool, node, a.instance_id()).await;
-    a.refresh_lease_cache(&bed.pool).await;
-    b.refresh_lease_cache(&bed.pool).await;
+    a.refresh_lease_cache(&bed.db()).await;
+    b.refresh_lease_cache(&bed.db()).await;
     assert!(a.node_online(node), "owner sees node online");
     assert!(b.node_online(node), "peer sees node online via lease");
 
     // Takeover: the node reconnects to B (last writer wins).
     claim_lease(&bed.pool, node, b.instance_id()).await;
-    a.refresh_lease_cache(&bed.pool).await;
-    b.refresh_lease_cache(&bed.pool).await;
+    a.refresh_lease_cache(&bed.db()).await;
+    b.refresh_lease_cache(&bed.db()).await;
     assert!(a.node_online(node), "peer A sees node online via B's lease");
 
     // Expired lease means offline everywhere.
@@ -84,8 +84,8 @@ async fn lease_takeover_flips_ownership() {
         .execute(&bed.pool)
         .await
         .unwrap();
-    a.refresh_lease_cache(&bed.pool).await;
-    b.refresh_lease_cache(&bed.pool).await;
+    a.refresh_lease_cache(&bed.db()).await;
+    b.refresh_lease_cache(&bed.db()).await;
     assert!(!a.node_online(node), "expired lease reads offline");
     assert!(!b.node_online(node), "expired lease reads offline");
 
@@ -104,8 +104,8 @@ async fn send_to_node_routes_across_instances() {
 
     let a = Arc::new(Registry::new());
     let b = Arc::new(Registry::new());
-    a.start_bus(bed.pool.clone());
-    b.start_bus(bed.pool.clone());
+    a.start_bus(bed.db());
+    b.start_bus(bed.db());
     // Wait until both listeners are actually LISTENing. A NOTIFY sent before
     // that is silently dropped by Postgres — the flake this test used to hit.
     assert!(a.bus_ready().await, "instance A never started listening");
@@ -121,7 +121,7 @@ async fn send_to_node_routes_across_instances() {
         },
     );
     claim_lease(&bed.pool, node, b.instance_id()).await;
-    a.refresh_lease_cache(&bed.pool).await;
+    a.refresh_lease_cache(&bed.db()).await;
 
     // A sends; the frame must arrive on B's channel via NOTIFY.
     assert!(a.send_to_node(node, ControlToNode::RescanWorkspaces));
@@ -146,8 +146,8 @@ async fn op_reply_routes_back_to_requester() {
 
     let a = Arc::new(Registry::new());
     let b = Arc::new(Registry::new());
-    a.start_bus(bed.pool.clone());
-    b.start_bus(bed.pool.clone());
+    a.start_bus(bed.db());
+    b.start_bus(bed.db());
     // Wait until both listeners are actually LISTENing. A NOTIFY sent before
     // that is silently dropped by Postgres — the flake this test used to hit.
     assert!(a.bus_ready().await, "instance A never started listening");
@@ -162,7 +162,7 @@ async fn op_reply_routes_back_to_requester() {
         },
     );
     claim_lease(&bed.pool, node, b.instance_id()).await;
-    a.refresh_lease_cache(&bed.pool).await;
+    a.refresh_lease_cache(&bed.db()).await;
 
     // A asks for a clone on B's node.
     let rx = a

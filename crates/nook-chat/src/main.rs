@@ -27,7 +27,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, patch, post, put};
 use axum::{Json, Router};
 use axum_extra::extract::CookieJar;
-use nook_db::DbPool;
+use nook_db::{params, Db, DbPool};
 use serde_json::{json, Value};
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use uuid::Uuid;
@@ -74,13 +74,18 @@ async fn main() -> anyhow::Result<()> {
     // shares a name with a public one, so `chat` winning first is safe.
     let opts =
         PgConnectOptions::from_str(&cfg.database_url)?.options([("search_path", "chat,public")]);
-    let db = PgPoolOptions::new()
-        .max_connections(10)
-        .connect_with(opts)
-        .await?;
+    // Chat sets a custom `search_path`, so it builds its raw pool here rather than
+    // through `nook_db::connect`, then wraps it in the workspace `EnginePool`
+    // (MAIN-205). Schema creation + migrations run on the Postgres arm.
+    let db = nook_db::EnginePool::from_pg(
+        PgPoolOptions::new()
+            .max_connections(10)
+            .connect_with(opts)
+            .await?,
+    );
     // The schema must exist before the migrator creates chat._sqlx_migrations.
     ensure_chat_schema(&db).await?;
-    MIGRATOR.run(&db).await?;
+    MIGRATOR.run(db.pg()).await?;
 
     // Live fan-out: a local per-channel broadcast registry, plus a cross-instance
     // bus (nook-db's event-bus seam — Postgres LISTEN/NOTIFY under the hood) so a
@@ -159,8 +164,8 @@ async fn main() -> anyhow::Result<()> {
 /// (unique_violation) even though `IF NOT EXISTS` was asked for. The schema
 /// exists either way, so a duplicate is success, not an error.
 pub(crate) async fn ensure_chat_schema(pool: &nook_db::DbPool) -> Result<(), sqlx::Error> {
-    match sqlx::query("CREATE SCHEMA IF NOT EXISTS chat")
-        .execute(pool)
+    match pool
+        .exec("CREATE SCHEMA IF NOT EXISTS chat", params![])
         .await
     {
         Ok(_) => Ok(()),
@@ -173,8 +178,9 @@ pub(crate) async fn ensure_chat_schema(pool: &nook_db::DbPool) -> Result<(), sql
 
 /// Readiness: the DB is reachable. Mirrors the control plane's `/healthz`.
 async fn healthz(State(state): State<AppState>) -> Result<Json<Value>, ChatError> {
-    sqlx::query("SELECT 1")
-        .execute(&state.db)
+    state
+        .db
+        .exec("SELECT 1", params![])
         .await
         .map_err(|_| ChatError::Internal)?;
     Ok(Json(json!({ "status": "ok" })))
@@ -192,12 +198,15 @@ async fn me(State(state): State<AppState>, caller: Caller) -> Result<Json<Value>
     // The caller's PERSON (cross-tenant identity), so the DM UI can name a
     // conversation by its *other* participants (MAIN-113 AC-5). `null` if the
     // user row has no person (pre-MAIN-130 rows).
-    let person_id: Option<Uuid> = sqlx::query_scalar("SELECT person_id FROM users WHERE id = $1")
-        .bind(caller.user_id)
-        .fetch_optional(&state.db)
+    let person_id: Option<Uuid> = state
+        .db
+        .query_opt::<(Option<Uuid>,)>(
+            "SELECT person_id FROM users WHERE id = $1",
+            params![caller.user_id],
+        )
         .await
         .map_err(|_| ChatError::Internal)?
-        .flatten();
+        .and_then(|(p,)| p);
     Ok(Json(json!({
         "user_id": caller.user_id,
         "tenant_id": caller.tenant_id,
@@ -216,13 +225,13 @@ pub(crate) async fn tenant_role(
     user: Uuid,
     tenant: Uuid,
 ) -> Result<Option<String>, ChatError> {
-    let row: Option<(String,)> =
-        sqlx::query_as("SELECT role FROM users WHERE id = $1 AND tenant_id = $2")
-            .bind(user)
-            .bind(tenant)
-            .fetch_optional(db)
-            .await
-            .map_err(|_| ChatError::Internal)?;
+    let row: Option<(String,)> = db
+        .query_opt(
+            "SELECT role FROM users WHERE id = $1 AND tenant_id = $2",
+            params![user, tenant],
+        )
+        .await
+        .map_err(|_| ChatError::Internal)?;
     Ok(row.map(|(r,)| r))
 }
 

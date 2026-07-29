@@ -3,7 +3,7 @@
 use axum::extract::State;
 use axum::Json;
 use chrono::{Duration, Utc};
-use nook_db::{Postgres, TypeMapping};
+use nook_db::{params, Db, Postgres, TypeMapping};
 use nook_types::*;
 use rand::distr::Alphanumeric;
 use rand::Rng;
@@ -34,25 +34,24 @@ async fn owner_person(
     minter: Option<uuid::Uuid>,
 ) -> Option<uuid::Uuid> {
     if let Some(user) = minter {
-        let person: Option<(uuid::Uuid,)> =
-            sqlx::query_as("SELECT person_id FROM users WHERE id = $1 AND tenant_id = $2")
-                .bind(user)
-                .bind(tenant)
-                .fetch_optional(db)
-                .await
-                .ok()
-                .flatten();
+        let person: Option<(uuid::Uuid,)> = db
+            .query_opt(
+                "SELECT person_id FROM users WHERE id = $1 AND tenant_id = $2",
+                params![user, tenant],
+            )
+            .await
+            .ok()
+            .flatten();
         if let Some((p,)) = person {
             return Some(p);
         }
     }
     // Fallback: the tenant owner's person.
-    sqlx::query_as::<_, (uuid::Uuid,)>(
+    db.query_opt::<(uuid::Uuid,)>(
         "SELECT person_id FROM users WHERE tenant_id = $1 AND role = 'owner'
          ORDER BY created_at LIMIT 1",
+        params![tenant],
     )
-    .bind(tenant)
-    .fetch_optional(db)
     .await
     .ok()
     .flatten()
@@ -71,17 +70,20 @@ pub async fn create_join_token(
     auth.require_user()?;
     let token = random_token("nook_join_", 32);
     let expires_at = Utc::now() + Duration::hours(24);
-    sqlx::query(
-        "INSERT INTO join_tokens (id, tenant_id, token_hash, name, created_by, expires_at)
+    state
+        .db
+        .exec(
+            "INSERT INTO join_tokens (id, tenant_id, token_hash, name, created_by, expires_at)
          VALUES ($1, $2, $3, '', $4, $5)",
-    )
-    .bind(JoinTokenId::new())
-    .bind(auth.tenant_id)
-    .bind(hash_token(&token))
-    .bind(auth.user_id)
-    .bind(expires_at)
-    .execute(&state.db)
-    .await?;
+            params![
+                JoinTokenId::new(),
+                auth.tenant_id,
+                hash_token(&token),
+                auth.user_id,
+                expires_at
+            ],
+        )
+        .await?;
     // Read the serving certificate fresh rather than caching: an operator who
     // renews it should not have to restart the control plane for join tokens
     // to start naming the new one.
@@ -116,15 +118,18 @@ pub async fn join(
     State(state): State<AppState>,
     Json(req): Json<JoinRequest>,
 ) -> ApiResult<Json<JoinResponse>> {
-    let row: Option<(JoinTokenId, TenantId, Option<uuid::Uuid>)> = sqlx::query_as(&format!(
-        "UPDATE join_tokens SET used_at = {now}
+    let row: Option<(JoinTokenId, TenantId, Option<uuid::Uuid>)> = state
+        .db
+        .query_opt(
+            &format!(
+                "UPDATE join_tokens SET used_at = {now}
          WHERE token_hash = $1 AND expires_at > {now}
          RETURNING id, tenant_id, created_by",
-        now = Postgres.now()
-    ))
-    .bind(hash_token(&req.token))
-    .fetch_optional(&state.db)
-    .await?;
+                now = Postgres.now()
+            ),
+            params![hash_token(&req.token)],
+        )
+        .await?;
     let Some((_, tenant_id, created_by)) = row else {
         return Err(ApiError::Unauthorized);
     };
@@ -141,8 +146,10 @@ pub async fn join(
     };
     let node_token = random_token("nook_node_", 40);
 
-    let (node_id,): (NodeId,) = sqlx::query_as(
-        &format!("INSERT INTO nodes (id, tenant_id, name, hostname, platform, node_token_hash, status, owner_person_id)
+    let (node_id,): (NodeId,) = state
+        .db
+        .query_one(
+            &format!("INSERT INTO nodes (id, tenant_id, name, hostname, platform, node_token_hash, status, owner_person_id)
          VALUES ($1, $2, $3, $4, $5, $6, 'offline', $7)
          ON CONFLICT (tenant_id, name) DO UPDATE SET
             hostname = EXCLUDED.hostname,
@@ -151,17 +158,18 @@ pub async fn join(
             owner_person_id = COALESCE(nodes.owner_person_id, EXCLUDED.owner_person_id),
             updated_at = {}
          RETURNING id",
-        Postgres.now())
-    )
-    .bind(NodeId::new())
-    .bind(tenant_id)
-    .bind(&name)
-    .bind(&req.hostname)
-    .bind(&req.platform)
-    .bind(hash_token(&node_token))
-    .bind(owner)
-    .fetch_one(&state.db)
-    .await?;
+                Postgres.now()),
+            params![
+                NodeId::new(),
+                tenant_id,
+                &name,
+                &req.hostname,
+                &req.platform,
+                hash_token(&node_token),
+                owner
+            ],
+        )
+        .await?;
 
     events::record(
         &state,
@@ -199,15 +207,18 @@ pub async fn enroll(
 ) -> ApiResult<Json<EnrollResponse>> {
     // Spend the token first: a CSR that fails to sign must not leave a token
     // usable for a second attempt by someone else.
-    let row: Option<(uuid::Uuid, uuid::Uuid, Option<uuid::Uuid>)> = sqlx::query_as(&format!(
-        "UPDATE join_tokens SET used_at = {now}
+    let row: Option<(uuid::Uuid, uuid::Uuid, Option<uuid::Uuid>)> = state
+        .db
+        .query_opt(
+            &format!(
+                "UPDATE join_tokens SET used_at = {now}
          WHERE token_hash = $1 AND expires_at > {now}
          RETURNING id, tenant_id, created_by",
-        now = Postgres.now()
-    ))
-    .bind(hash_token(&req.token))
-    .fetch_optional(&state.db)
-    .await?;
+                now = Postgres.now()
+            ),
+            params![hash_token(&req.token)],
+        )
+        .await?;
     let Some((_, tenant_uuid, created_by)) = row else {
         return Err(ApiError::Unauthorized);
     };
@@ -225,24 +236,29 @@ pub async fn enroll(
 
     let name = req.name.unwrap_or_else(|| "node".to_string());
     let node_id = uuid::Uuid::now_v7();
-    let node_id: uuid::Uuid = sqlx::query_scalar(&format!(
-        "INSERT INTO nodes (id, tenant_id, name, node_token_hash, status, owner_person_id)
+    let node_id: uuid::Uuid = state
+        .db
+        .query_scalar(
+            &format!(
+                "INSERT INTO nodes (id, tenant_id, name, node_token_hash, status, owner_person_id)
          VALUES ($1, $2, $3, $4, 'offline', $5)
          ON CONFLICT (tenant_id, name) DO UPDATE SET
             owner_person_id = COALESCE(nodes.owner_person_id, EXCLUDED.owner_person_id),
             updated_at = {}
          RETURNING id",
-        Postgres.now()
-    ))
-    .bind(node_id)
-    .bind(tenant)
-    .bind(&name)
-    // The node token stays for now as the transitional credential; the
-    // certificate supersedes it once the handshake is wired.
-    .bind(crate::seed::hash_token(&format!("enroll-{node_id}")))
-    .bind(owner)
-    .fetch_one(&state.db)
-    .await?;
+                Postgres.now()
+            ),
+            // The node token stays for now as the transitional credential; the
+            // certificate supersedes it once the handshake is wired.
+            params![
+                node_id,
+                tenant,
+                &name,
+                crate::seed::hash_token(&format!("enroll-{node_id}")),
+                owner
+            ],
+        )
+        .await?;
 
     issue(&state, tenant, node_id, &req.csr_pem).await
 }
@@ -264,9 +280,12 @@ pub async fn renew(
         uuid::Uuid,
         Option<String>,
         Option<chrono::DateTime<chrono::Utc>>,
-    )> = sqlx::query_as("SELECT tenant_id, public_key_pem, revoked_at FROM nodes WHERE id = $1")
-        .bind(req.node_id)
-        .fetch_optional(&state.db)
+    )> = state
+        .db
+        .query_opt(
+            "SELECT tenant_id, public_key_pem, revoked_at FROM nodes WHERE id = $1",
+            params![req.node_id],
+        )
         .await?;
     let Some((tenant_uuid, known_key, revoked_at)) = row else {
         return Err(ApiError::NotFound);
@@ -313,19 +332,24 @@ async fn issue(
 
     // Recording which CA signed it is what lets the retirement guard answer
     // "does this CA still have live leaves?".
-    sqlx::query(&format!(
-        "UPDATE nodes SET ca_id = $2, cert_not_after = $3, cert_pem = $4,
+    state
+        .db
+        .exec(
+            &format!(
+                "UPDATE nodes SET ca_id = $2, cert_not_after = $3, cert_pem = $4,
                 public_key_pem = $5, updated_at = {}
           WHERE id = $1",
-        Postgres.now()
-    ))
-    .bind(node_id)
-    .bind(leaf.ca_id)
-    .bind(leaf.not_after)
-    .bind(&leaf.cert_pem)
-    .bind(&leaf.public_key_pem)
-    .execute(&state.db)
-    .await?;
+                Postgres.now()
+            ),
+            params![
+                node_id,
+                leaf.ca_id,
+                leaf.not_after,
+                &leaf.cert_pem,
+                &leaf.public_key_pem
+            ],
+        )
+        .await?;
 
     let ca_bundle = crate::ca::trust_bundle(&state.db, tenant)
         .await?

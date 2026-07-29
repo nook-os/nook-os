@@ -188,7 +188,7 @@ async fn rewrites_both_tables_and_preserves_row_ids() {
         },
     ];
 
-    let resp = migrate_paths(&bed.pool, f.node, &pairs)
+    let resp = migrate_paths(&bed.db(), f.node, &pairs)
         .await
         .expect("migrate");
     assert_eq!(resp.node_workspaces_updated, 2, "both checkouts rewritten");
@@ -234,7 +234,7 @@ async fn refuses_a_path_that_does_not_belong_to_the_node() {
         },
     ];
 
-    let err = migrate_paths(&bed.pool, f.node, &pairs)
+    let err = migrate_paths(&bed.db(), f.node, &pairs)
         .await
         .expect_err("a stray path is refused");
     assert!(
@@ -272,7 +272,7 @@ async fn a_followup_discovery_of_the_new_paths_churns_nothing() {
             new: format!("{slug}/acme/repo__feature"),
         },
     ];
-    migrate_paths(&bed.pool, f.node, &pairs)
+    migrate_paths(&bed.db(), f.node, &pairs)
         .await
         .expect("migrate");
 

@@ -21,10 +21,12 @@ async fn main() -> Result<()> {
     // the rest so a misconfiguration fails the same way here as there.
     let cfg = Config::from_env()?;
 
-    let db = PgPoolOptions::new()
-        .max_connections(5)
-        .connect(&cfg.database_url)
-        .await?;
+    let db = nook_db::EnginePool::from_pg(
+        PgPoolOptions::new()
+            .max_connections(5)
+            .connect(&cfg.database_url)
+            .await?,
+    );
 
     // The worker does NOT run migrations — the control plane owns them
     // (MAIN-146 NG-2). It just connects to the schema they produced.

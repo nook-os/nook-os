@@ -13,7 +13,7 @@
 
 use axum::extract::{Path, RawQuery, State};
 use axum::Json;
-use nook_db::{CiMatch, Postgres, TypeMapping};
+use nook_db::{params, CiMatch, Db, Postgres, TypeMapping};
 use nook_types::*;
 use serde::Deserialize;
 
@@ -263,8 +263,10 @@ pub async fn query_rows(
         .collect();
     let types: Vec<String> = f.type_.iter().map(|t| t.trim().to_lowercase()).collect();
 
-    let rows: Vec<TaskItem> = sqlx::query_as(&format!(
-        r#"
+    let rows: Vec<TaskItem> = db
+        .query_all(
+            &format!(
+                r#"
         SELECT t.* FROM tasks t
         JOIN boards b ON b.id = t.board_id
         JOIN board_columns c ON c.id = t.column_id
@@ -334,56 +336,58 @@ pub async fn query_rows(
         ORDER BY CASE WHEN t.priority = 0 THEN 5 ELSE t.priority END, t.created_at
         LIMIT $12
         "#,
-        ws = Postgres.cast("$3", "uuid"),
-        assignee = Postgres.cast("$7", "uuid"),
-        created = Postgres.cast("$11", "timestamptz"),
-        parent = Postgres.cast("$17", "uuid"),
-        b_text = Postgres.cast("$2", "text"),
-        bid_text = Postgres.cast("b.id", "text"),
-        col_text = Postgres.cast("$4", "text"),
-        prio_int = Postgres.cast("$5", "int"),
-        unassigned_bool = Postgres.cast("$6", "bool"),
-        blocked_bool = Postgres.cast("$10", "bool"),
-        archived_bool = Postgres.cast("$13", "bool"),
-        q_text = Postgres.cast("$14", "text"),
-        title_match = Postgres.ci_match("t.title", "$14"),
-        desc_match = Postgres.ci_match("t.description", "$14"),
-        key_match = Postgres.ci_match(
-            &format!("(b.key || '-' || {})", Postgres.cast("t.number", "text")),
-            "$14"
-        ),
-        backlog_bool = Postgres.cast("$18", "bool"),
-        labels_arr = Postgres.cast("$8", "text[]"),
-        not_labels_arr = Postgres.cast("$9", "text[]"),
-        types_arr = Postgres.cast("$15", "text[]"),
-        vis_arr = Postgres.cast("$19", "text[]"),
-    ))
-    .bind(tenant)
-    .bind(f.board.as_deref())
-    .bind(f.workspace)
-    .bind(f.column_type.as_deref())
-    .bind(f.priority)
-    .bind(unassigned_only)
-    .bind(assignee_id)
-    .bind(&labels)
-    .bind(&not_labels)
-    .bind(f.is_blocked)
-    .bind(f.cursor)
-    .bind(limit)
-    .bind(f.archived.unwrap_or(false))
-    // `%term%` for a substring match; None disables the clause via the IS NULL guard.
-    .bind(f.q.as_ref().map(|s| format!("%{s}%")))
-    .bind(&types)
-    // $16: the viewer, for the visibility predicate above.
-    .bind(viewer)
-    // $17: the epic-children filter (None disables it via the IS NULL guard).
-    .bind(parent_id)
-    // $18: include backlog-column tasks (default false, MAIN-80).
-    .bind(f.backlog.unwrap_or(false))
-    // $19: explicit visibility filter (empty = no filter, MAIN-103).
-    .bind(&f.visibility)
-    .fetch_all(db)
-    .await?;
+                ws = Postgres.cast("$3", "uuid"),
+                assignee = Postgres.cast("$7", "uuid"),
+                created = Postgres.cast("$11", "timestamptz"),
+                parent = Postgres.cast("$17", "uuid"),
+                b_text = Postgres.cast("$2", "text"),
+                bid_text = Postgres.cast("b.id", "text"),
+                col_text = Postgres.cast("$4", "text"),
+                prio_int = Postgres.cast("$5", "int"),
+                unassigned_bool = Postgres.cast("$6", "bool"),
+                blocked_bool = Postgres.cast("$10", "bool"),
+                archived_bool = Postgres.cast("$13", "bool"),
+                q_text = Postgres.cast("$14", "text"),
+                title_match = Postgres.ci_match("t.title", "$14"),
+                desc_match = Postgres.ci_match("t.description", "$14"),
+                key_match = Postgres.ci_match(
+                    &format!("(b.key || '-' || {})", Postgres.cast("t.number", "text")),
+                    "$14"
+                ),
+                backlog_bool = Postgres.cast("$18", "bool"),
+                labels_arr = Postgres.cast("$8", "text[]"),
+                not_labels_arr = Postgres.cast("$9", "text[]"),
+                types_arr = Postgres.cast("$15", "text[]"),
+                vis_arr = Postgres.cast("$19", "text[]"),
+            ),
+            params![
+                tenant,
+                f.board.as_deref(),
+                f.workspace,
+                f.column_type.as_deref(),
+                f.priority,
+                unassigned_only,
+                assignee_id,
+                labels,
+                not_labels,
+                f.is_blocked,
+                f.cursor,
+                limit,
+                f.archived.unwrap_or(false),
+                // `%term%` for a substring match; None disables the clause via the IS NULL guard.
+                f.q.as_ref().map(|s| format!("%{s}%")),
+                types,
+                // $16: the viewer, for the visibility predicate above.
+                viewer,
+                // $17: the epic-children filter (None disables it via the IS NULL guard).
+                parent_id,
+                // $18: include backlog-column tasks (default false, MAIN-80).
+                f.backlog.unwrap_or(false),
+                // $19: explicit visibility filter (empty = no filter, MAIN-103).
+                &f.visibility[..]
+            ],
+        )
+        .await?;
 
     Ok(rows)
 }
@@ -425,10 +429,12 @@ pub async fn claim_inner(
     // read filter, and so a non-owner agent cannot claim it even by id. Checked
     // first so a non-owner cannot even distinguish a backlog/epic refusal from
     // "does not exist".
-    let existing: TaskItem = sqlx::query_as("SELECT * FROM tasks WHERE id = $1 AND tenant_id = $2")
-        .bind(id)
-        .bind(tenant)
-        .fetch_optional(&state.db)
+    let existing: TaskItem = state
+        .db
+        .query_opt(
+            "SELECT * FROM tasks WHERE id = $1 AND tenant_id = $2",
+            params![id, tenant],
+        )
         .await?
         .ok_or(ApiError::NotFound)?;
     if !tasks::visible_to(&existing, claimant) {
@@ -441,12 +447,14 @@ pub async fn claim_inner(
     // refinement space; an epic is a container, not a unit of work. The task
     // row is already loaded above for the visibility guard (its `type_` is the
     // epic test); only the column's type needs a lookup.
-    let column_kind: Option<(String,)> =
-        sqlx::query_as("SELECT c.type FROM board_columns c WHERE c.id = $1")
-            .bind(existing.column_id)
-            .fetch_optional(&state.db)
-            .await?;
-    if column_kind.as_ref().is_some_and(|(k,)| k == "backlog") {
+    let column_kind: Option<String> = state
+        .db
+        .query_scalar_opt(
+            "SELECT c.type FROM board_columns c WHERE c.id = $1",
+            params![existing.column_id],
+        )
+        .await?;
+    if column_kind.as_deref() == Some("backlog") {
         return Err(ApiError::BadRequest(
             "task is in the backlog — send it to the board first".into(),
         ));
@@ -462,42 +470,43 @@ pub async fn claim_inner(
     // the caller gets a 409 naming the type before anything is written.
     let target = match column_type.as_deref() {
         Some(ct) => {
-            let board: (BoardId,) = sqlx::query_as("SELECT board_id FROM tasks WHERE id = $1")
-                .bind(id)
-                .fetch_one(&state.db)
+            let board: BoardId = state
+                .db
+                .query_scalar("SELECT board_id FROM tasks WHERE id = $1", params![id])
                 .await?;
-            Some(tasks::column_of_type(&state.db, board.0, ct).await?)
+            Some(tasks::column_of_type(&state.db, board, ct).await?)
         }
         None => None,
     };
 
-    let updated: Option<TaskItem> = sqlx::query_as(&format!(
-        "UPDATE tasks SET
+    let updated: Option<TaskItem> = state
+        .db
+        .query_opt(
+            &format!(
+                "UPDATE tasks SET
              assignee_user_id = $1,
              column_id = coalesce($2, column_id),
              updated_at = {}
          WHERE id = $3 AND tenant_id = $4 AND assignee_user_id IS NULL
          RETURNING *",
-        Postgres.now()
-    ))
-    .bind(claimant)
-    .bind(target)
-    .bind(id)
-    .bind(tenant)
-    .fetch_optional(&state.db)
-    .await?;
+                Postgres.now()
+            ),
+            params![claimant, target.map(|c| c.0), id, tenant],
+        )
+        .await?;
 
     let Some(task) = updated else {
         // Losing a race is the expected outcome for all but one caller, so the
         // message says what to do rather than merely that something failed.
-        let current: Option<(Option<UserId>,)> =
-            sqlx::query_as("SELECT assignee_user_id FROM tasks WHERE id = $1 AND tenant_id = $2")
-                .bind(id)
-                .bind(tenant)
-                .fetch_optional(&state.db)
-                .await?;
+        let current: Option<Option<UserId>> = state
+            .db
+            .query_scalar_opt(
+                "SELECT assignee_user_id FROM tasks WHERE id = $1 AND tenant_id = $2",
+                params![id, tenant],
+            )
+            .await?;
         return match current {
-            Some((Some(_),)) => Err(ApiError::Conflict(
+            Some(Some(_)) => Err(ApiError::Conflict(
                 "somebody else claimed this first — pick another task".into(),
             )),
             _ => Err(ApiError::NotFound),
@@ -548,16 +557,18 @@ pub async fn release(
     Path(ident): Path<String>,
 ) -> ApiResult<Json<TaskItem>> {
     let id = tasks::resolve_id(&state.db, auth.tenant_id, &ident).await?;
-    let task: TaskItem = sqlx::query_as(&format!(
-        "UPDATE tasks SET assignee_user_id = NULL, updated_at = {}
+    let task: TaskItem = state
+        .db
+        .query_opt(
+            &format!(
+                "UPDATE tasks SET assignee_user_id = NULL, updated_at = {}
          WHERE id = $1 AND tenant_id = $2 RETURNING *",
-        Postgres.now()
-    ))
-    .bind(id)
-    .bind(auth.tenant_id)
-    .fetch_optional(&state.db)
-    .await?
-    .ok_or(ApiError::NotFound)?;
+                Postgres.now()
+            ),
+            params![id, auth.tenant_id],
+        )
+        .await?
+        .ok_or(ApiError::NotFound)?;
     state.registry.publish(
         auth.tenant_id,
         nook_proto::UiEvent::TaskChanged { task_id: id },
@@ -689,7 +700,7 @@ mod tests {
 #[cfg(test)]
 mod db_tests {
     use super::{query_rows, TaskFilter};
-    use nook_db::{DbPool, Postgres, TypeMapping};
+    use nook_db::{params, Db, DbPool, Postgres, TypeMapping};
     use nook_types::{TaskId, TenantId};
     use sqlx::postgres::PgPoolOptions;
     use uuid::Uuid;
@@ -705,23 +716,20 @@ mod db_tests {
             .await
             .ok()?;
         crate::MIGRATOR.run(&db).await.ok()?;
-        Some(db)
+        Some(nook_db::EnginePool::from_pg(db))
     }
 
     /// Insert a board + one column + a task (archived or not), returning the id.
     async fn task(db: &DbPool, tenant: Uuid, board: Uuid, col: Uuid, archived: bool) -> TaskId {
         let id = Uuid::new_v4();
-        sqlx::query(&format!(
-            "INSERT INTO tasks (id, tenant_id, board_id, column_id, title, archived_at)
+        db.exec(
+            &format!(
+                "INSERT INTO tasks (id, tenant_id, board_id, column_id, title, archived_at)
              VALUES ($1, $2, $3, $4, 't', CASE WHEN $5 THEN {} ELSE NULL END)",
-            Postgres.now()
-        ))
-        .bind(id)
-        .bind(tenant)
-        .bind(board)
-        .bind(col)
-        .bind(archived)
-        .execute(db)
+                Postgres.now()
+            ),
+            params![id, tenant, board, col, archived],
+        )
         .await
         .unwrap();
         TaskId(id)
@@ -738,18 +746,11 @@ mod db_tests {
         description: &str,
     ) -> TaskId {
         let id = Uuid::new_v4();
-        sqlx::query(
+        db.exec(
             "INSERT INTO tasks (id, tenant_id, board_id, column_id, title, description, number)
              VALUES ($1, $2, $3, $4, $5, $6, $7)",
+            params![id, tenant, board, col, title, description, number],
         )
-        .bind(id)
-        .bind(tenant)
-        .bind(board)
-        .bind(col)
-        .bind(title)
-        .bind(description)
-        .bind(number)
-        .execute(db)
         .await
         .unwrap();
         TaskId(id)
@@ -766,31 +767,31 @@ mod db_tests {
         let tenant = Uuid::new_v4();
         let board = Uuid::new_v4();
         let col = Uuid::new_v4();
-        sqlx::query("INSERT INTO tenants (id, name, slug) VALUES ($1, 'S54', $2)")
-            .bind(tenant)
-            .bind(format!("s54-{tenant}"))
-            .execute(&db)
+        db.exec(
+            "INSERT INTO tenants (id, name, slug) VALUES ($1, 'S54', $2)",
+            params![tenant, format!("s54-{tenant}")],
+        )
+        .await
+        .unwrap();
+        db.exec(
+            "INSERT INTO boards (id, tenant_id, name, key) VALUES ($1, $2, 'B', $3)",
+            params![
+                board,
+                tenant,
+                format!("SR{}", &board.simple().to_string()[..6]).to_uppercase()
+            ],
+        )
+        .await
+        .unwrap();
+        let board_key: String = db
+            .query_scalar("SELECT key FROM boards WHERE id = $1", params![board])
             .await
             .unwrap();
-        sqlx::query("INSERT INTO boards (id, tenant_id, name, key) VALUES ($1, $2, 'B', $3)")
-            .bind(board)
-            .bind(tenant)
-            .bind(format!("SR{}", &board.simple().to_string()[..6]).to_uppercase())
-            .execute(&db)
-            .await
-            .unwrap();
-        let board_key: (String,) = sqlx::query_as("SELECT key FROM boards WHERE id = $1")
-            .bind(board)
-            .fetch_one(&db)
-            .await
-            .unwrap();
-        sqlx::query(
+        db.exec(
             "INSERT INTO board_columns (id, board_id, name, type, position)
              VALUES ($1, $2, 'Todo', 'unstarted', 0)",
+            params![col, board],
         )
-        .bind(col)
-        .bind(board)
-        .execute(&db)
         .await
         .unwrap();
 
@@ -832,7 +833,7 @@ mod db_tests {
         assert_eq!(search("POSTMARK").await, hits, "search is case-insensitive");
 
         // By display key: full key, and bare number both find task #42.
-        let full_key = format!("{}-42", board_key.0);
+        let full_key = format!("{}-42", board_key);
         assert!(
             search(&full_key).await.contains(&by_desc),
             "found by full key"
@@ -848,21 +849,20 @@ mod db_tests {
             "no matches is empty"
         );
 
-        let _ = sqlx::query("DELETE FROM tasks WHERE board_id = $1")
-            .bind(board)
-            .execute(&db)
+        let _ = db
+            .exec("DELETE FROM tasks WHERE board_id = $1", params![board])
             .await;
-        let _ = sqlx::query("DELETE FROM board_columns WHERE board_id = $1")
-            .bind(board)
-            .execute(&db)
+        let _ = db
+            .exec(
+                "DELETE FROM board_columns WHERE board_id = $1",
+                params![board],
+            )
             .await;
-        let _ = sqlx::query("DELETE FROM boards WHERE id = $1")
-            .bind(board)
-            .execute(&db)
+        let _ = db
+            .exec("DELETE FROM boards WHERE id = $1", params![board])
             .await;
-        let _ = sqlx::query("DELETE FROM tenants WHERE id = $1")
-            .bind(tenant)
-            .execute(&db)
+        let _ = db
+            .exec("DELETE FROM tenants WHERE id = $1", params![tenant])
             .await;
     }
 
@@ -875,26 +875,27 @@ mod db_tests {
         let tenant = Uuid::new_v4();
         let board = Uuid::new_v4();
         let col = Uuid::new_v4();
-        sqlx::query("INSERT INTO tenants (id, name, slug) VALUES ($1, 'A15', $2)")
-            .bind(tenant)
-            .bind(format!("a15-{tenant}"))
-            .execute(&db)
-            .await
-            .unwrap();
-        sqlx::query("INSERT INTO boards (id, tenant_id, name, key) VALUES ($1, $2, 'B', $3)")
-            .bind(board)
-            .bind(tenant)
-            .bind(format!("B{}", &board.simple().to_string()[..6]))
-            .execute(&db)
-            .await
-            .unwrap();
-        sqlx::query(
+        db.exec(
+            "INSERT INTO tenants (id, name, slug) VALUES ($1, 'A15', $2)",
+            params![tenant, format!("a15-{tenant}")],
+        )
+        .await
+        .unwrap();
+        db.exec(
+            "INSERT INTO boards (id, tenant_id, name, key) VALUES ($1, $2, 'B', $3)",
+            params![
+                board,
+                tenant,
+                format!("B{}", &board.simple().to_string()[..6])
+            ],
+        )
+        .await
+        .unwrap();
+        db.exec(
             "INSERT INTO board_columns (id, board_id, name, type, position)
              VALUES ($1, $2, 'Done', 'completed', 0)",
+            params![col, board],
         )
-        .bind(col)
-        .bind(board)
-        .execute(&db)
         .await
         .unwrap();
 
@@ -930,28 +931,29 @@ mod db_tests {
         .collect();
 
         // A direct id fetch still resolves the archived task (AC-6 / by-key).
-        let (by_id,): (i64,) = sqlx::query_as("SELECT count(*) FROM tasks WHERE id = $1")
-            .bind(archived.0)
-            .fetch_one(&db)
+        let by_id: i64 = db
+            .query_scalar(
+                "SELECT count(*) FROM tasks WHERE id = $1",
+                params![archived.0],
+            )
             .await
             .unwrap();
 
         // cleanup
-        let _ = sqlx::query("DELETE FROM tasks WHERE board_id = $1")
-            .bind(board)
-            .execute(&db)
+        let _ = db
+            .exec("DELETE FROM tasks WHERE board_id = $1", params![board])
             .await;
-        let _ = sqlx::query("DELETE FROM board_columns WHERE board_id = $1")
-            .bind(board)
-            .execute(&db)
+        let _ = db
+            .exec(
+                "DELETE FROM board_columns WHERE board_id = $1",
+                params![board],
+            )
             .await;
-        let _ = sqlx::query("DELETE FROM boards WHERE id = $1")
-            .bind(board)
-            .execute(&db)
+        let _ = db
+            .exec("DELETE FROM boards WHERE id = $1", params![board])
             .await;
-        let _ = sqlx::query("DELETE FROM tenants WHERE id = $1")
-            .bind(tenant)
-            .execute(&db)
+        let _ = db
+            .exec("DELETE FROM tenants WHERE id = $1", params![tenant])
             .await;
 
         assert!(default_ids.contains(&live), "live task is picked");
@@ -992,18 +994,11 @@ mod db_tests {
         created_by: Uuid,
     ) -> TaskId {
         let id = Uuid::new_v4();
-        sqlx::query(
+        db.exec(
             "INSERT INTO tasks (id, tenant_id, board_id, column_id, title, number, visibility, created_by)
              VALUES ($1, $2, $3, $4, 't', $5, $6, $7)",
+            params![id, tenant, board, col, number, visibility, created_by],
         )
-        .bind(id)
-        .bind(tenant)
-        .bind(board)
-        .bind(col)
-        .bind(number)
-        .bind(visibility)
-        .bind(created_by)
-        .execute(db)
         .await
         .unwrap();
         TaskId(id)
@@ -1023,26 +1018,27 @@ mod db_tests {
         let col = Uuid::new_v4();
         let me = Uuid::new_v4();
         let other = Uuid::new_v4();
-        sqlx::query("INSERT INTO tenants (id, name, slug) VALUES ($1, 'V103', $2)")
-            .bind(tenant)
-            .bind(format!("v103-{tenant}"))
-            .execute(&db)
-            .await
-            .unwrap();
-        sqlx::query("INSERT INTO boards (id, tenant_id, name, key) VALUES ($1, $2, 'B', $3)")
-            .bind(board)
-            .bind(tenant)
-            .bind(format!("V{}", &board.simple().to_string()[..6]).to_uppercase())
-            .execute(&db)
-            .await
-            .unwrap();
-        sqlx::query(
+        db.exec(
+            "INSERT INTO tenants (id, name, slug) VALUES ($1, 'V103', $2)",
+            params![tenant, format!("v103-{tenant}")],
+        )
+        .await
+        .unwrap();
+        db.exec(
+            "INSERT INTO boards (id, tenant_id, name, key) VALUES ($1, $2, 'B', $3)",
+            params![
+                board,
+                tenant,
+                format!("V{}", &board.simple().to_string()[..6]).to_uppercase()
+            ],
+        )
+        .await
+        .unwrap();
+        db.exec(
             "INSERT INTO board_columns (id, board_id, name, type, position)
              VALUES ($1, $2, 'Todo', 'unstarted', 0)",
+            params![col, board],
         )
-        .bind(col)
-        .bind(board)
-        .execute(&db)
         .await
         .unwrap();
 

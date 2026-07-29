@@ -8,7 +8,7 @@
 use axum::extract::{Path, State};
 use axum::Json;
 use base64::Engine;
-use nook_db::{CiMatch, Postgres, TypeMapping};
+use nook_db::{params, CiMatch, Db, Postgres, TypeMapping};
 use nook_proto::ControlToNode;
 use nook_types::*;
 
@@ -36,12 +36,13 @@ pub async fn list(
     State(state): State<AppState>,
     auth: AuthCtx,
 ) -> ApiResult<Json<Vec<FeedbackItem>>> {
-    let rows: Vec<FeedbackItem> = sqlx::query_as(
-        "SELECT * FROM feedback WHERE tenant_id = $1 ORDER BY created_at DESC LIMIT 200",
-    )
-    .bind(auth.tenant_id)
-    .fetch_all(&state.db)
-    .await?;
+    let rows: Vec<FeedbackItem> = state
+        .db
+        .query_all(
+            "SELECT * FROM feedback WHERE tenant_id = $1 ORDER BY created_at DESC LIMIT 200",
+            params![auth.tenant_id],
+        )
+        .await?;
     Ok(Json(rows))
 }
 
@@ -58,14 +59,14 @@ pub async fn target(
         resolved_instructions(&state, &auth, workspace_id).await?;
     let (name, remote) = match workspace_id {
         Some(id) => {
-            let row: Option<(String, Option<String>)> = sqlx::query_as(
-                "SELECT w.name, w.git_remote_normalized FROM workspaces w
+            let row: Option<(String, Option<String>)> = state
+                .db
+                .query_opt(
+                    "SELECT w.name, w.git_remote_normalized FROM workspaces w
                  WHERE w.id = $1 AND w.tenant_id = $2",
-            )
-            .bind(id)
-            .bind(auth.tenant_id)
-            .fetch_optional(&state.db)
-            .await?;
+                    params![id, auth.tenant_id],
+                )
+                .await?;
             match row {
                 Some((n, r)) => (Some(n), r),
                 None => (None, None),
@@ -134,12 +135,13 @@ pub async fn set_target(
 ) -> ApiResult<Json<FeedbackTarget>> {
     // Repointing feedback aims that typing at a different repo.
     auth.require_user()?;
-    let owned: Option<(WorkspaceId,)> =
-        sqlx::query_as("SELECT id FROM workspaces WHERE id = $1 AND tenant_id = $2")
-            .bind(req.workspace_id)
-            .bind(auth.tenant_id)
-            .fetch_optional(&state.db)
-            .await?;
+    let owned: Option<(WorkspaceId,)> = state
+        .db
+        .query_opt(
+            "SELECT id FROM workspaces WHERE id = $1 AND tenant_id = $2",
+            params![req.workspace_id, auth.tenant_id],
+        )
+        .await?;
     if owned.is_none() {
         return Err(ApiError::NotFound);
     }
@@ -185,17 +187,16 @@ pub async fn set_target(
 
 /// Read a per-user setting, falling back to the tenant-wide one.
 async fn setting(state: &AppState, auth: &AuthCtx, key: &str) -> ApiResult<Option<String>> {
-    let row: Option<(serde_json::Value,)> = sqlx::query_as(
-        "SELECT value FROM settings
+    let row: Option<(serde_json::Value,)> = state
+        .db
+        .query_opt(
+            "SELECT value FROM settings
          WHERE tenant_id = $1 AND key = $2
            AND (user_id = $3 OR user_id IS NULL)
          ORDER BY (user_id = $3) DESC LIMIT 1",
-    )
-    .bind(auth.tenant_id)
-    .bind(key)
-    .bind(auth.user_id)
-    .fetch_optional(&state.db)
-    .await?;
+            params![auth.tenant_id, key, auth.user_id],
+        )
+        .await?;
     Ok(row.and_then(|(v,)| v.as_str().map(str::to_string)))
 }
 
@@ -205,19 +206,16 @@ async fn put_setting(
     key: &str,
     value: serde_json::Value,
 ) -> ApiResult<()> {
-    sqlx::query(
-        "INSERT INTO settings (id, tenant_id, scope, user_id, key, value)
+    state
+        .db
+        .exec(
+            "INSERT INTO settings (id, tenant_id, scope, user_id, key, value)
          VALUES ($1, $2, 'user', $3, $4, $5)
          ON CONFLICT (tenant_id, scope, user_id, key)
          DO UPDATE SET value = EXCLUDED.value",
-    )
-    .bind(SettingId::new().0)
-    .bind(auth.tenant_id)
-    .bind(auth.user_id)
-    .bind(key)
-    .bind(value)
-    .execute(&state.db)
-    .await?;
+            params![SettingId::new().0, auth.tenant_id, auth.user_id, key, value],
+        )
+        .await?;
     Ok(())
 }
 
@@ -271,29 +269,31 @@ pub async fn submit(
     // who opens a session and calls it "Nook@OS: Feedback Session" has told us
     // plainly where feedback should go, and spawning a second agent beside it
     // — which is what an exact match did — is both wasteful and invisible.
-    let existing: Option<(SessionId, NodeId)> = sqlx::query_as(&format!(
-        "SELECT id, node_id FROM sessions
+    let existing: Option<(SessionId, NodeId)> = state
+        .db
+        .query_opt(
+            &format!(
+                "SELECT id, node_id FROM sessions
          WHERE tenant_id = $1 AND workspace_id = $2
            AND (name = $3 OR {})
            AND status IN ('starting', 'running', 'detached')
          ORDER BY (name = $3) DESC, created_at DESC LIMIT 1",
-        Postgres.ci_match("name", "'%feedback%'")
-    ))
-    .bind(auth.tenant_id)
-    .bind(workspace_id)
-    .bind(SESSION_NAME)
-    .fetch_optional(&state.db)
-    .await?;
+                Postgres.ci_match("name", "'%feedback%'")
+            ),
+            params![auth.tenant_id, workspace_id, SESSION_NAME],
+        )
+        .await?;
 
     let (session_id, node_id, freshly_started) = match existing {
         Some((s, n)) => (s, n, false),
         None => {
-            let node: Option<(NodeId,)> = sqlx::query_as(
-                "SELECT node_id FROM node_workspaces WHERE workspace_id = $1 LIMIT 1",
-            )
-            .bind(workspace_id)
-            .fetch_optional(&state.db)
-            .await?;
+            let node: Option<(NodeId,)> = state
+                .db
+                .query_opt(
+                    "SELECT node_id FROM node_workspaces WHERE workspace_id = $1 LIMIT 1",
+                    params![workspace_id],
+                )
+                .await?;
             let (node_id,) = node.ok_or_else(|| {
                 ApiError::BadRequest("that workspace has no checkout on any node".into())
             })?;
@@ -321,11 +321,13 @@ pub async fn submit(
     if freshly_started {
         for _ in 0..40 {
             tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-            let ready: Option<(Option<String>,)> =
-                sqlx::query_as("SELECT tmux_session FROM sessions WHERE id = $1")
-                    .bind(session_id)
-                    .fetch_optional(&state.db)
-                    .await?;
+            let ready: Option<(Option<String>,)> = state
+                .db
+                .query_opt(
+                    "SELECT tmux_session FROM sessions WHERE id = $1",
+                    params![session_id],
+                )
+                .await?;
             if ready.and_then(|(t,)| t).is_some() {
                 // The runtime still needs a moment to start reading stdin —
                 // an agent draws its UI first.
@@ -335,18 +337,21 @@ pub async fn submit(
         }
     }
 
-    let item: FeedbackItem = sqlx::query_as(
-        "INSERT INTO feedback (id, tenant_id, workspace_id, session_id, body, status, created_by)
+    let item: FeedbackItem = state
+        .db
+        .query_one(
+            "INSERT INTO feedback (id, tenant_id, workspace_id, session_id, body, status, created_by)
          VALUES ($1, $2, $3, $4, $5, 'queued', $6) RETURNING *",
-    )
-    .bind(uuid::Uuid::now_v7())
-    .bind(auth.tenant_id)
-    .bind(workspace_id)
-    .bind(session_id)
-    .bind(&body)
-    .bind(auth.user_id)
-    .fetch_one(&state.db)
-    .await?;
+            params![
+                uuid::Uuid::now_v7(),
+                auth.tenant_id,
+                workspace_id,
+                session_id,
+                &body,
+                auth.user_id
+            ],
+        )
+        .await?;
 
     // Type it in, then press Enter as a separate keystroke.
     //
@@ -376,16 +381,18 @@ pub async fn submit(
         tokio::time::sleep(std::time::Duration::from_millis(400)).await;
         type_into_session("\r");
     }
-    let item: FeedbackItem = sqlx::query_as(&format!(
-        "UPDATE feedback SET status = $2, updated_at = {} WHERE id = $1 RETURNING *",
-        Postgres.now()
-    ))
-    .bind(item.id)
-    // 'queued' is not a holding pattern — nothing retries it. Record what
-    // actually happened so the log doesn't imply work is under way.
-    .bind(if delivered { "delivered" } else { "dropped" })
-    .fetch_one(&state.db)
-    .await?;
+    let item: FeedbackItem = state
+        .db
+        .query_one(
+            &format!(
+                "UPDATE feedback SET status = $2, updated_at = {} WHERE id = $1 RETURNING *",
+                Postgres.now()
+            ),
+            // 'queued' is not a holding pattern — nothing retries it. Record what
+            // actually happened so the log doesn't imply work is under way.
+            params![item.id, if delivered { "delivered" } else { "dropped" }],
+        )
+        .await?;
 
     events::record(
         &state,
@@ -442,19 +449,19 @@ pub async fn update(
     Path(id): Path<uuid::Uuid>,
     Json(req): Json<UpdateFeedbackRequest>,
 ) -> ApiResult<Json<FeedbackItem>> {
-    let item: Option<FeedbackItem> = sqlx::query_as(&format!(
-        "UPDATE feedback SET
+    let item: Option<FeedbackItem> = state
+        .db
+        .query_opt(
+            &format!(
+                "UPDATE feedback SET
             status = COALESCE($3, status),
             pr_url = COALESCE($4, pr_url),
             updated_at = {}
          WHERE id = $1 AND tenant_id = $2 RETURNING *",
-        Postgres.now()
-    ))
-    .bind(id)
-    .bind(auth.tenant_id)
-    .bind(&req.status)
-    .bind(&req.pr_url)
-    .fetch_optional(&state.db)
-    .await?;
+                Postgres.now()
+            ),
+            params![id, auth.tenant_id, req.status.clone(), req.pr_url.clone()],
+        )
+        .await?;
     item.map(Json).ok_or(ApiError::NotFound)
 }

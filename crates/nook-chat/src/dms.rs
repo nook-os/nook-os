@@ -11,7 +11,7 @@
 
 use axum::extract::{Json, State};
 use axum::http::StatusCode;
-use nook_db::{Postgres, TypeMapping};
+use nook_db::{params, Db, Postgres, TypeMapping};
 use nook_types::{DmSummary, OpenDmRequest, PersonRef};
 use uuid::Uuid;
 
@@ -23,9 +23,11 @@ const MAX_PARTICIPANTS: usize = 8;
 
 /// The caller's person — the identity a DM keys on (MAIN-130).
 async fn person_of(db: &nook_db::DbPool, user_id: Uuid) -> Result<Uuid, ChatError> {
-    let (p,): (Uuid,) = sqlx::query_as("SELECT person_id FROM public.users WHERE id = $1")
-        .bind(user_id)
-        .fetch_optional(db)
+    let p = db
+        .query_scalar_opt::<Uuid>(
+            "SELECT person_id FROM public.users WHERE id = $1",
+            params![user_id],
+        )
         .await
         .map_err(|_| ChatError::Internal)?
         .ok_or(ChatError::Forbidden)?;
@@ -36,8 +38,9 @@ async fn person_of(db: &nook_db::DbPool, user_id: Uuid) -> Result<Uuid, ChatErro
 /// `me`'s orgs — the same org boundary org channels use (AC-4). This both scopes
 /// the picker and gates `open`, so a DM can never be opened cross-org.
 async fn dmable(db: &nook_db::DbPool, me: Uuid, other: Uuid) -> Result<bool, ChatError> {
-    let (ok,): (bool,) = sqlx::query_as(
-        "SELECT EXISTS(
+    let ok = db
+        .query_scalar::<bool>(
+            "SELECT EXISTS(
              SELECT 1 FROM public.users u
              JOIN public.tenants t ON t.id = u.tenant_id
              WHERE u.person_id = $2
@@ -47,12 +50,10 @@ async fn dmable(db: &nook_db::DbPool, me: Uuid, other: Uuid) -> Result<bool, Cha
                    WHERE u2.person_id = $1
                )
          )",
-    )
-    .bind(me)
-    .bind(other)
-    .fetch_one(db)
-    .await
-    .map_err(|_| ChatError::Internal)?;
+            params![me, other],
+        )
+        .await
+        .map_err(|_| ChatError::Internal)?;
     Ok(ok)
 }
 
@@ -64,8 +65,10 @@ pub async fn people(
     caller: Caller,
 ) -> Result<Json<Vec<PersonRef>>, ChatError> {
     let me = person_of(&state.db, caller.user_id).await?;
-    let rows: Vec<(Uuid, String)> = sqlx::query_as(
-        "SELECT DISTINCT ON (u.person_id) u.person_id, u.display_name
+    let rows: Vec<(Uuid, String)> = state
+        .db
+        .query_all(
+            "SELECT DISTINCT ON (u.person_id) u.person_id, u.display_name
          FROM public.users u
          JOIN public.tenants t ON t.id = u.tenant_id
          WHERE u.person_id <> $1
@@ -75,11 +78,10 @@ pub async fn people(
                WHERE u2.person_id = $1
            )
          ORDER BY u.person_id, u.display_name",
-    )
-    .bind(me)
-    .fetch_all(&state.db)
-    .await
-    .map_err(|_| ChatError::Internal)?;
+            params![me],
+        )
+        .await
+        .map_err(|_| ChatError::Internal)?;
     Ok(Json(
         rows.into_iter()
             .map(|(person_id, display_name)| PersonRef {
@@ -97,16 +99,17 @@ pub async fn list(
     caller: Caller,
 ) -> Result<Json<Vec<DmSummary>>, ChatError> {
     let me = person_of(&state.db, caller.user_id).await?;
-    let ids: Vec<Uuid> = sqlx::query_scalar(
-        "SELECT c.id FROM chat_channels c
+    let ids: Vec<Uuid> = state
+        .db
+        .query_scalar_all(
+            "SELECT c.id FROM chat_channels c
          JOIN chat_channel_participants p ON p.channel_id = c.id
          WHERE c.owner_type = 'dm' AND p.person_id = $1
          ORDER BY c.created_at DESC",
-    )
-    .bind(me)
-    .fetch_all(&state.db)
-    .await
-    .map_err(|_| ChatError::Internal)?;
+            params![me],
+        )
+        .await
+        .map_err(|_| ChatError::Internal)?;
 
     let mut out = Vec::with_capacity(ids.len());
     for id in ids {
@@ -159,23 +162,18 @@ pub async fn open(
     // owner_id = the creating person; name is empty (the UI names a DM by its
     // counterparts). The generated slug keeps the (owner_type, owner_id, slug)
     // uniqueness constraint satisfied without any human-facing slug.
-    sqlx::query(
+    tx.exec(
         "INSERT INTO chat_channels (id, owner_type, owner_id, name, slug)
          VALUES ($1, 'dm', $2, '', $3)",
+        params![id, me, &slug],
     )
-    .bind(id)
-    .bind(me)
-    .bind(&slug)
-    .execute(&mut *tx)
     .await
     .map_err(|_| ChatError::Internal)?;
     for &p in &persons {
-        sqlx::query(
+        tx.exec(
             "INSERT INTO chat_channel_participants (channel_id, person_id) VALUES ($1, $2)",
+            params![id, p],
         )
-        .bind(id)
-        .bind(p)
-        .execute(&mut *tx)
         .await
         .map_err(|_| ChatError::Internal)?;
     }
@@ -192,47 +190,49 @@ pub async fn open(
 /// deduped: |members| = N and members ⊆ set with |set| = N ⇒ members = set.
 async fn find_exact(db: &nook_db::DbPool, persons: &[Uuid]) -> Result<Option<Uuid>, ChatError> {
     let n = persons.len() as i64;
-    let id: Option<Uuid> = sqlx::query_scalar(
-        "SELECT c.id FROM chat_channels c
+    let id: Option<Uuid> = db
+        .query_scalar_opt(
+            "SELECT c.id FROM chat_channels c
          JOIN chat_channel_participants p ON p.channel_id = c.id
          WHERE c.owner_type = 'dm'
          GROUP BY c.id
          HAVING count(*) = $2
             AND count(*) FILTER (WHERE p.person_id = ANY($1)) = $2
          LIMIT 1",
-    )
-    .bind(persons)
-    .bind(n)
-    .fetch_optional(db)
-    .await
-    .map_err(|_| ChatError::Internal)?;
+            params![persons, n],
+        )
+        .await
+        .map_err(|_| ChatError::Internal)?;
     Ok(id)
 }
 
 /// A DM's summary: its id, creation time, and participants with display names.
 async fn summary(db: &nook_db::DbPool, id: Uuid, reader: Uuid) -> Result<DmSummary, ChatError> {
-    let (created_at,): (chrono::DateTime<chrono::Utc>,) =
-        sqlx::query_as("SELECT created_at FROM chat_channels WHERE id = $1")
-            .bind(id)
-            .fetch_one(db)
-            .await
-            .map_err(|_| ChatError::Internal)?;
-    let rows: Vec<(Uuid, Option<String>)> = sqlx::query_as(
-        "SELECT DISTINCT ON (pp.person_id) pp.person_id, u.display_name
+    let created_at = db
+        .query_scalar::<chrono::DateTime<chrono::Utc>>(
+            "SELECT created_at FROM chat_channels WHERE id = $1",
+            params![id],
+        )
+        .await
+        .map_err(|_| ChatError::Internal)?;
+    let rows: Vec<(Uuid, Option<String>)> = db
+        .query_all(
+            "SELECT DISTINCT ON (pp.person_id) pp.person_id, u.display_name
          FROM chat_channel_participants pp
          LEFT JOIN public.users u ON u.person_id = pp.person_id
          WHERE pp.channel_id = $1
          ORDER BY pp.person_id, u.display_name",
-    )
-    .bind(id)
-    .fetch_all(db)
-    .await
-    .map_err(|_| ChatError::Internal)?;
+            params![id],
+        )
+        .await
+        .map_err(|_| ChatError::Internal)?;
     // Unread from the other participant(s) since the reader's cursor (MAIN-117),
     // same semantics as a channel: the reader's own messages and deleted ones
     // don't count, and no cursor row means everything counts.
-    let (unread_count,): (i64,) = sqlx::query_as(&format!(
-        "SELECT count(*) FROM chat_messages m
+    let unread_count = db
+        .query_scalar::<i64>(
+            &format!(
+                "SELECT count(*) FROM chat_messages m
           WHERE m.channel_id = $1
             AND m.author_id <> $2
             AND m.deleted_at IS NULL
@@ -240,13 +240,12 @@ async fn summary(db: &nook_db::DbPool, id: Uuid, reader: Uuid) -> Result<DmSumma
                 (SELECT r.last_read_at FROM chat_read_cursors r
                    WHERE r.channel_id = $1 AND r.user_id = $2),
                 {})",
-        Postgres.cast("'-infinity'", "timestamptz")
-    ))
-    .bind(id)
-    .bind(reader)
-    .fetch_one(db)
-    .await
-    .map_err(|_| ChatError::Internal)?;
+                Postgres.cast("'-infinity'", "timestamptz")
+            ),
+            params![id, reader],
+        )
+        .await
+        .map_err(|_| ChatError::Internal)?;
     Ok(DmSummary {
         id,
         created_at,
@@ -266,7 +265,7 @@ mod tests {
     use super::{list, open, people};
     use crate::{channels, AppState, Caller, ChatError};
     use axum::extract::{Json, State};
-    use nook_db::DbPool;
+    use nook_db::{params, Db, DbPool};
     use nook_types::OpenDmRequest;
     use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
     use std::str::FromStr;
@@ -277,11 +276,13 @@ mod tests {
         let opts = PgConnectOptions::from_str(url)
             .unwrap()
             .options([("search_path", search_path)]);
-        PgPoolOptions::new()
-            .max_connections(4)
-            .connect_with(opts)
-            .await
-            .unwrap()
+        nook_db::EnginePool::from_pg(
+            PgPoolOptions::new()
+                .max_connections(4)
+                .connect_with(opts)
+                .await
+                .unwrap(),
+        )
     }
 
     // DB-backed; a no-op without NOOK_REQUIRE_DB=1, matching the suite convention.
@@ -293,9 +294,9 @@ mod tests {
         let url = std::env::var("DATABASE_URL").ok()?;
         let bootstrap = pool(&url, "public").await;
         crate::ensure_chat_schema(&bootstrap).await.unwrap();
-        nook_control::MIGRATOR.run(&bootstrap).await.unwrap();
+        nook_control::MIGRATOR.run(bootstrap.pg()).await.unwrap();
         let db = pool(&url, "chat,public").await;
-        crate::MIGRATOR.run(&db).await.unwrap();
+        crate::MIGRATOR.run(db.pg()).await.unwrap();
         Some(AppState {
             db,
             registry: Arc::new(crate::registry::Registry::new()),
@@ -312,40 +313,40 @@ mod tests {
 
     async fn new_org(db: &DbPool) -> Uuid {
         let id = Uuid::now_v7();
-        sqlx::query("INSERT INTO public.orgs (id, name, slug) VALUES ($1, $2, $2)")
-            .bind(id)
-            .bind(format!("o-{}", id.simple()))
-            .execute(db)
-            .await
-            .unwrap();
+        db.exec(
+            "INSERT INTO public.orgs (id, name, slug) VALUES ($1, $2, $2)",
+            params![id, format!("o-{}", id.simple())],
+        )
+        .await
+        .unwrap();
         id
     }
 
     async fn tenant_in_org(db: &DbPool, org: Uuid) -> Uuid {
         let id = Uuid::now_v7();
-        sqlx::query("INSERT INTO public.tenants (id, name, slug, org_id) VALUES ($1, $2, $2, $3)")
-            .bind(id)
-            .bind(format!("t-{}", id.simple()))
-            .bind(org)
-            .execute(db)
-            .await
-            .unwrap();
+        db.exec(
+            "INSERT INTO public.tenants (id, name, slug, org_id) VALUES ($1, $2, $2, $3)",
+            params![id, format!("t-{}", id.simple()), org],
+        )
+        .await
+        .unwrap();
         id
     }
 
     /// A user for `person` in `tenant`. Returns the user id.
     async fn user(db: &DbPool, tenant: Uuid, person: Uuid, name: &str) -> Uuid {
         let id = Uuid::now_v7();
-        sqlx::query(
+        db.exec(
             "INSERT INTO public.users (id, tenant_id, person_id, display_name, email, role)
              VALUES ($1, $2, $3, $4, $5, 'member')",
+            params![
+                id,
+                tenant,
+                person,
+                name,
+                format!("u-{}@example.test", id.simple())
+            ],
         )
-        .bind(id)
-        .bind(tenant)
-        .bind(person)
-        .bind(name)
-        .bind(format!("u-{}@example.test", id.simple()))
-        .execute(db)
         .await
         .unwrap();
         id
@@ -397,17 +398,15 @@ mod tests {
         user(&state.db, t, pb, "Bo").await;
         // C is an OWNER of the tenant but not a participant — must still be refused.
         let uc = Uuid::now_v7();
-        sqlx::query(
-            "INSERT INTO public.users (id, tenant_id, person_id, display_name, email, role)
+        state
+            .db
+            .exec(
+                "INSERT INTO public.users (id, tenant_id, person_id, display_name, email, role)
              VALUES ($1, $2, $3, 'Cy', $4, 'owner')",
-        )
-        .bind(uc)
-        .bind(t)
-        .bind(pc)
-        .bind(format!("u-{}@example.test", uc.simple()))
-        .execute(&state.db)
-        .await
-        .unwrap();
+                params![uc, t, pc, format!("u-{}@example.test", uc.simple())],
+            )
+            .await
+            .unwrap();
 
         let (_, dm) = open(
             State(state.clone()),

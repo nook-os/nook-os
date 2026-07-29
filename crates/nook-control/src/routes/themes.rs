@@ -1,5 +1,6 @@
 use axum::extract::{Path, State};
 use axum::Json;
+use nook_db::{params, Db};
 use nook_types::*;
 
 use crate::auth::AuthCtx;
@@ -10,12 +11,13 @@ use crate::state::AppState;
     operation_id = "list_themes", responses((status = 200, body = [Theme])))]
 pub async fn list(State(state): State<AppState>, auth: AuthCtx) -> ApiResult<Json<Vec<Theme>>> {
     // Built-ins (tenant NULL) plus the tenant's own themes.
-    let themes: Vec<Theme> = sqlx::query_as(
-        "SELECT * FROM themes WHERE tenant_id IS NULL OR tenant_id = $1 ORDER BY name",
-    )
-    .bind(auth.tenant_id)
-    .fetch_all(&state.db)
-    .await?;
+    let themes: Vec<Theme> = state
+        .db
+        .query_all(
+            "SELECT * FROM themes WHERE tenant_id IS NULL OR tenant_id = $1 ORDER BY name",
+            params![auth.tenant_id],
+        )
+        .await?;
     Ok(Json(themes))
 }
 
@@ -28,12 +30,12 @@ pub async fn get_one(
     auth: AuthCtx,
     Path(slug): Path<String>,
 ) -> ApiResult<Json<Theme>> {
-    let theme: Option<Theme> = sqlx::query_as(
-        "SELECT * FROM themes WHERE slug = $1 AND (tenant_id IS NULL OR tenant_id = $2)",
-    )
-    .bind(&slug)
-    .bind(auth.tenant_id)
-    .fetch_optional(&state.db)
-    .await?;
+    let theme: Option<Theme> = state
+        .db
+        .query_opt(
+            "SELECT * FROM themes WHERE slug = $1 AND (tenant_id IS NULL OR tenant_id = $2)",
+            params![&slug, auth.tenant_id],
+        )
+        .await?;
     theme.map(Json).ok_or(ApiError::NotFound)
 }

@@ -249,13 +249,13 @@ impl EventBus for PgEventBus {
         sqlx::query("SELECT pg_notify($1, $2)")
             .bind(channel)
             .bind(payload)
-            .execute(&self.pool)
+            .execute(self.pool.pg())
             .await?;
         Ok(())
     }
 
     async fn subscribe(&self, channel: &str) -> Result<BoxStream<'static, String>, sqlx::Error> {
-        let mut listener = sqlx::postgres::PgListener::connect_with(&self.pool).await?;
+        let mut listener = sqlx::postgres::PgListener::connect_with(self.pool.pg()).await?;
         listener.listen(channel).await?;
         Ok(listener
             .into_stream()
@@ -363,7 +363,7 @@ mod tests {
         // The json get_text fragment runs and yields the field value.
         let expr = pg.get_text(&pg.literal("{\"a\":\"x\"}"), "a");
         let got: String = sqlx::query_scalar(&format!("SELECT {expr}"))
-            .fetch_one(&pool)
+            .fetch_one(pool.pg())
             .await
             .expect("json ->> executes");
         assert_eq!(got, "x");
@@ -371,7 +371,7 @@ mod tests {
         let uuid = "00000000-0000-0000-0000-000000000001";
         let cast = pg.cast(&format!("'{uuid}'"), "uuid");
         let back: String = sqlx::query_scalar(&format!("SELECT ({cast})::text"))
-            .fetch_one(&pool)
+            .fetch_one(pool.pg())
             .await
             .expect("::uuid cast executes");
         assert_eq!(back, uuid);
@@ -381,7 +381,7 @@ mod tests {
         let sql = format!("SELECT '{{\"a\":1,\"b\":2}}'::jsonb @> {rhs}");
         let hit: bool = sqlx::query_scalar(&sql)
             .bind("{\"a\":1}")
-            .fetch_one(&pool)
+            .fetch_one(pool.pg())
             .await
             .expect("@> $1::jsonb executes with a bound payload");
         assert!(hit);
@@ -389,7 +389,7 @@ mod tests {
         let set = pg.set(&pg.literal("{\"a\":1}"), "{b}", &pg.cast("$1", "jsonb"));
         let merged: String = sqlx::query_scalar(&format!("SELECT ({set})::text"))
             .bind("2")
-            .fetch_one(&pool)
+            .fetch_one(pool.pg())
             .await
             .expect("jsonb_set executes with a bound value");
         assert_eq!(merged, "{\"a\": 1, \"b\": 2}");
@@ -405,7 +405,7 @@ mod tests {
             plus = pg.now_plus("1 hour"),
             minus = pg.now_minus("1 hour"),
         ))
-        .fetch_one(&pool)
+        .fetch_one(pool.pg())
         .await
         .expect("now() ± interval executes");
         assert!(future_ok && past_ok);
@@ -416,7 +416,7 @@ mod tests {
             cutoff = pg.now_minus_scaled("$1::bigint", "1 second"),
         ))
         .bind(3600_i64)
-        .fetch_one(&pool)
+        .fetch_one(pool.pg())
         .await
         .expect("now() - ($1 * interval) executes with a bound multiplier");
         assert!(scaled_ok);
@@ -430,7 +430,7 @@ mod tests {
         let expr = Postgres.ci_match("'Work'", "'%' || $1 || '%'");
         let hit: bool = sqlx::query_scalar(&format!("SELECT {expr}"))
             .bind("work")
-            .fetch_one(&pool)
+            .fetch_one(pool.pg())
             .await
             .expect("ci_match executes");
         assert!(hit, "ILIKE matches across case");
@@ -439,7 +439,7 @@ mod tests {
     #[tokio::test]
     async fn pg_claim_clause_claims_a_row() {
         let Some(pool) = pool().await else { return };
-        let mut tx = pool.begin().await.unwrap();
+        let mut tx = pool.pg().begin().await.unwrap();
         sqlx::query("CREATE TEMP TABLE claim_probe (id int) ON COMMIT DROP")
             .execute(&mut *tx)
             .await

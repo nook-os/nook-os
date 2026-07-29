@@ -3,7 +3,7 @@
 
 use axum::extract::{Path, State};
 use axum::Json;
-use nook_db::{Postgres, TypeMapping};
+use nook_db::{params, Db, Postgres, TypeMapping};
 use nook_proto::ControlToNode;
 use nook_types::*;
 
@@ -39,13 +39,14 @@ pub async fn list_credentials(
     State(state): State<AppState>,
     auth: AuthCtx,
 ) -> ApiResult<Json<Vec<GitCredential>>> {
-    let creds: Vec<GitCredential> = sqlx::query_as(
-        "SELECT id, tenant_id, name, kind, public_key, created_at
+    let creds: Vec<GitCredential> = state
+        .db
+        .query_all(
+            "SELECT id, tenant_id, name, kind, public_key, created_at
          FROM git_credentials WHERE tenant_id = $1 ORDER BY name",
-    )
-    .bind(auth.tenant_id)
-    .fetch_all(&state.db)
-    .await?;
+            params![auth.tenant_id],
+        )
+        .await?;
     Ok(Json(creds))
 }
 
@@ -78,20 +79,23 @@ pub async fn create_credential(
         .encrypt(private_key.as_bytes())
         .map_err(ApiError::Internal)?;
 
-    let cred: GitCredential = sqlx::query_as(
-        "INSERT INTO git_credentials (id, tenant_id, name, kind, public_key, secret_enc, created_by)
+    let cred: GitCredential = state
+        .db
+        .query_one(
+            "INSERT INTO git_credentials (id, tenant_id, name, kind, public_key, secret_enc, created_by)
          VALUES ($1, $2, $3, 'ssh_key', $4, $5, $6)
          RETURNING id, tenant_id, name, kind, public_key, created_at",
-    )
-    .bind(GitCredentialId::new())
-    .bind(auth.tenant_id)
-    .bind(&req.name)
-    .bind(&public_key)
-    .bind(&enc)
-    .bind(auth.user_id)
-    .fetch_one(&state.db)
-    .await
-    .map_err(|e| match &e {
+            params![
+                GitCredentialId::new(),
+                auth.tenant_id,
+                &req.name,
+                &public_key,
+                enc,
+                auth.user_id
+            ],
+        )
+        .await
+        .map_err(|e| match &e {
         sqlx::Error::Database(d) if d.is_unique_violation() => {
             ApiError::Conflict("a credential with that name already exists".into())
         }
@@ -118,12 +122,14 @@ pub async fn delete_credential(
     auth: AuthCtx,
     Path(id): Path<GitCredentialId>,
 ) -> ApiResult<axum::http::StatusCode> {
-    let res = sqlx::query("DELETE FROM git_credentials WHERE id = $1 AND tenant_id = $2")
-        .bind(id)
-        .bind(auth.tenant_id)
-        .execute(&state.db)
+    let res = state
+        .db
+        .exec(
+            "DELETE FROM git_credentials WHERE id = $1 AND tenant_id = $2",
+            params![id, auth.tenant_id],
+        )
         .await?;
-    if res.rows_affected() == 0 {
+    if res == 0 {
         return Err(ApiError::NotFound);
     }
     Ok(axum::http::StatusCode::NO_CONTENT)
@@ -201,12 +207,13 @@ pub async fn clone_repo(
     // Cloning runs git on that machine, with its credentials.
     auth.require_node_self(node_id)?;
     // Tenant must own the node.
-    let owned: Option<(NodeId,)> =
-        sqlx::query_as("SELECT id FROM nodes WHERE id = $1 AND tenant_id = $2")
-            .bind(node_id)
-            .bind(auth.tenant_id)
-            .fetch_optional(&state.db)
-            .await?;
+    let owned: Option<NodeId> = state
+        .db
+        .query_scalar_opt(
+            "SELECT id FROM nodes WHERE id = $1 AND tenant_id = $2",
+            params![node_id, auth.tenant_id],
+        )
+        .await?;
     if owned.is_none() {
         return Err(ApiError::NotFound);
     }
@@ -215,14 +222,14 @@ pub async fn clone_repo(
     let ssh_key = match req.credential_id {
         None => None,
         Some(cred_id) => {
-            let row: Option<(Vec<u8>,)> = sqlx::query_as(
-                "SELECT secret_enc FROM git_credentials WHERE id = $1 AND tenant_id = $2",
-            )
-            .bind(cred_id)
-            .bind(auth.tenant_id)
-            .fetch_optional(&state.db)
-            .await?;
-            let (enc,) = row.ok_or(ApiError::NotFound)?;
+            let enc: Option<Vec<u8>> = state
+                .db
+                .query_scalar_opt(
+                    "SELECT secret_enc FROM git_credentials WHERE id = $1 AND tenant_id = $2",
+                    params![cred_id, auth.tenant_id],
+                )
+                .await?;
+            let enc = enc.ok_or(ApiError::NotFound)?;
             Some(
                 state
                     .vault
@@ -339,16 +346,15 @@ pub async fn add_worktree(
 ) -> ApiResult<Json<OpResponse>> {
     // The worktree is created on the node named in the request.
     auth.require_node_self(req.node_id)?;
-    let row: Option<(String,)> = sqlx::query_as(
-        "SELECT path FROM node_workspaces
+    let row: Option<String> = state
+        .db
+        .query_scalar_opt(
+            "SELECT path FROM node_workspaces
          WHERE tenant_id = $1 AND workspace_id = $2 AND node_id = $3",
-    )
-    .bind(auth.tenant_id)
-    .bind(workspace_id)
-    .bind(req.node_id)
-    .fetch_optional(&state.db)
-    .await?;
-    let Some((repo_path,)) = row else {
+            params![auth.tenant_id, workspace_id, req.node_id],
+        )
+        .await?;
+    let Some(repo_path) = row else {
         return Err(ApiError::NotFound);
     };
 
@@ -393,16 +399,15 @@ async fn checkout_path(
     workspace_id: WorkspaceId,
     node_id: NodeId,
 ) -> ApiResult<String> {
-    let row: Option<(String,)> = sqlx::query_as(
-        "SELECT path FROM node_workspaces
+    let row: Option<String> = state
+        .db
+        .query_scalar_opt(
+            "SELECT path FROM node_workspaces
          WHERE tenant_id = $1 AND workspace_id = $2 AND node_id = $3",
-    )
-    .bind(auth.tenant_id)
-    .bind(workspace_id)
-    .bind(node_id)
-    .fetch_optional(&state.db)
-    .await?;
-    row.map(|(p,)| p).ok_or(ApiError::NotFound)
+            params![auth.tenant_id, workspace_id, node_id],
+        )
+        .await?;
+    row.ok_or(ApiError::NotFound)
 }
 
 /// Stage everything and commit, on the machine that holds the checkout.
@@ -484,14 +489,14 @@ pub async fn git_push(
     let ssh_key = match req.credential_id {
         None => None,
         Some(cred_id) => {
-            let row: Option<(Vec<u8>,)> = sqlx::query_as(
-                "SELECT secret_enc FROM git_credentials WHERE id = $1 AND tenant_id = $2",
-            )
-            .bind(cred_id)
-            .bind(auth.tenant_id)
-            .fetch_optional(&state.db)
-            .await?;
-            let (enc,) = row.ok_or(ApiError::NotFound)?;
+            let enc: Option<Vec<u8>> = state
+                .db
+                .query_scalar_opt(
+                    "SELECT secret_enc FROM git_credentials WHERE id = $1 AND tenant_id = $2",
+                    params![cred_id, auth.tenant_id],
+                )
+                .await?;
+            let enc = enc.ok_or(ApiError::NotFound)?;
             Some(
                 state
                     .vault
@@ -546,16 +551,14 @@ pub async fn remove_worktree(
     // Removing a checkout deletes files on that machine.
     auth.require_node_self(req.node_id)?;
     // The path must be a known checkout of this workspace on that node.
-    let owned: Option<(String,)> = sqlx::query_as(
-        "SELECT path FROM node_workspaces
+    let owned: Option<String> = state
+        .db
+        .query_scalar_opt(
+            "SELECT path FROM node_workspaces
          WHERE tenant_id = $1 AND workspace_id = $2 AND node_id = $3 AND path = $4",
-    )
-    .bind(auth.tenant_id)
-    .bind(workspace_id)
-    .bind(req.node_id)
-    .bind(&req.path)
-    .fetch_optional(&state.db)
-    .await?;
+            params![auth.tenant_id, workspace_id, req.node_id, &req.path],
+        )
+        .await?;
     if owned.is_none() {
         return Err(ApiError::NotFound);
     }
@@ -606,12 +609,13 @@ pub async fn init_project(
 ) -> ApiResult<Json<OpResponse>> {
     // Same: this writes to a workspace root on that machine.
     auth.require_node_self(node_id)?;
-    let owned: Option<(NodeId,)> =
-        sqlx::query_as("SELECT id FROM nodes WHERE id = $1 AND tenant_id = $2")
-            .bind(node_id)
-            .bind(auth.tenant_id)
-            .fetch_optional(&state.db)
-            .await?;
+    let owned: Option<NodeId> = state
+        .db
+        .query_scalar_opt(
+            "SELECT id FROM nodes WHERE id = $1 AND tenant_id = $2",
+            params![node_id, auth.tenant_id],
+        )
+        .await?;
     if owned.is_none() {
         return Err(ApiError::NotFound);
     }
@@ -661,11 +665,13 @@ async fn require_app_password(state: &AppState, auth: &AuthCtx, passphrase: &str
             "a .env has to be sealed with your app password".into(),
         ));
     }
-    let row: Option<(Vec<u8>, Vec<u8>)> =
-        sqlx::query_as("SELECT kdf_salt, verifier FROM user_vaults WHERE user_id = $1")
-            .bind(auth.user_id)
-            .fetch_optional(&state.db)
-            .await?;
+    let row: Option<(Vec<u8>, Vec<u8>)> = state
+        .db
+        .query_opt(
+            "SELECT kdf_salt, verifier FROM user_vaults WHERE user_id = $1",
+            params![auth.user_id],
+        )
+        .await?;
     let Some((salt, verifier)) = row else {
         return Err(ApiError::SetupRequired(
             "set an app password before storing secrets".into(),
@@ -696,8 +702,11 @@ async fn store_sealed(
         .vault
         .encrypt(&sealed.ciphertext)
         .map_err(ApiError::Internal)?;
-    sqlx::query(&format!(
-        "INSERT INTO workspace_secrets
+    state
+        .db
+        .exec(
+            &format!(
+                "INSERT INTO workspace_secrets
             (id, tenant_id, workspace_id, name, content_enc, kdf_salt, verifier, ephemeral)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
          ON CONFLICT (workspace_id, name)
@@ -706,18 +715,20 @@ async fn store_sealed(
                        verifier = EXCLUDED.verifier,
                        ephemeral = EXCLUDED.ephemeral,
                        updated_at = {}",
-        Postgres.now()
-    ))
-    .bind(nook_types::SettingId::new().0)
-    .bind(auth.tenant_id)
-    .bind(workspace_id)
-    .bind(name)
-    .bind(&enc)
-    .bind(&sealed.salt)
-    .bind(&sealed.verifier)
-    .bind(ephemeral)
-    .execute(&state.db)
-    .await?;
+                Postgres.now()
+            ),
+            params![
+                nook_types::SettingId::new().0,
+                auth.tenant_id,
+                workspace_id,
+                name,
+                enc,
+                sealed.salt,
+                sealed.verifier,
+                ephemeral
+            ],
+        )
+        .await?;
     Ok(())
 }
 
@@ -730,14 +741,14 @@ pub async fn list_secrets(
     auth: AuthCtx,
     Path(workspace_id): Path<WorkspaceId>,
 ) -> ApiResult<Json<Vec<WorkspaceSecret>>> {
-    let rows: Vec<SecretMetaRow> = sqlx::query_as(
-        "SELECT name, updated_at, kdf_salt, ephemeral FROM workspace_secrets
+    let rows: Vec<SecretMetaRow> = state
+        .db
+        .query_all(
+            "SELECT name, updated_at, kdf_salt, ephemeral FROM workspace_secrets
          WHERE tenant_id = $1 AND workspace_id = $2 ORDER BY name",
-    )
-    .bind(auth.tenant_id)
-    .bind(workspace_id)
-    .fetch_all(&state.db)
-    .await?;
+            params![auth.tenant_id, workspace_id],
+        )
+        .await?;
     Ok(Json(
         rows.into_iter()
             .map(|(name, updated_at, salt, ephemeral)| WorkspaceSecret {
@@ -760,15 +771,14 @@ pub async fn get_secret(
     auth: AuthCtx,
     Path((workspace_id, name)): Path<(WorkspaceId, String)>,
 ) -> ApiResult<Json<WorkspaceSecret>> {
-    let row: Option<SecretRow> = sqlx::query_as(
-        "SELECT content_enc, updated_at, kdf_salt, ephemeral FROM workspace_secrets
+    let row: Option<SecretRow> = state
+        .db
+        .query_opt(
+            "SELECT content_enc, updated_at, kdf_salt, ephemeral FROM workspace_secrets
              WHERE tenant_id = $1 AND workspace_id = $2 AND name = $3",
-    )
-    .bind(auth.tenant_id)
-    .bind(workspace_id)
-    .bind(&name)
-    .fetch_optional(&state.db)
-    .await?;
+            params![auth.tenant_id, workspace_id, &name],
+        )
+        .await?;
     let (_enc, updated_at, salt, ephemeral) = row.ok_or(ApiError::NotFound)?;
 
     // A GET never returns secret content, sealed or not. The password arrives
@@ -796,16 +806,15 @@ pub async fn open_secret(
     Path((workspace_id, name)): Path<(WorkspaceId, String)>,
     Json(req): Json<OpenSecretRequest>,
 ) -> ApiResult<Json<WorkspaceSecret>> {
-    let row: Option<SealedSecretRow> = sqlx::query_as(
-        "SELECT content_enc, updated_at, kdf_salt, verifier, ephemeral
+    let row: Option<SealedSecretRow> = state
+        .db
+        .query_opt(
+            "SELECT content_enc, updated_at, kdf_salt, verifier, ephemeral
              FROM workspace_secrets
              WHERE tenant_id = $1 AND workspace_id = $2 AND name = $3",
-    )
-    .bind(auth.tenant_id)
-    .bind(workspace_id)
-    .bind(&name)
-    .fetch_optional(&state.db)
-    .await?;
+            params![auth.tenant_id, workspace_id, &name],
+        )
+        .await?;
     let (enc, updated_at, salt, verifier, ephemeral) = row.ok_or(ApiError::NotFound)?;
     let stored = state.vault.decrypt(&enc).map_err(ApiError::Internal)?;
 
@@ -914,15 +923,14 @@ pub async fn secret_on_disk(
     auth: AuthCtx,
     Path((workspace_id, name)): Path<(WorkspaceId, String)>,
 ) -> ApiResult<Json<SecretOnDisk>> {
-    let vaulted: Option<(String,)> = sqlx::query_as(
-        "SELECT name FROM workspace_secrets
+    let vaulted: Option<String> = state
+        .db
+        .query_scalar_opt(
+            "SELECT name FROM workspace_secrets
          WHERE tenant_id = $1 AND workspace_id = $2 AND name = $3",
-    )
-    .bind(auth.tenant_id)
-    .bind(workspace_id)
-    .bind(&name)
-    .fetch_optional(&state.db)
-    .await?;
+            params![auth.tenant_id, workspace_id, &name],
+        )
+        .await?;
 
     let found = read_from_any_checkout(&state, auth.tenant_id, workspace_id, &name)
         .await
@@ -943,14 +951,14 @@ pub(crate) async fn read_from_any_checkout(
 ) -> Option<(String, Vec<u8>)> {
     use base64::Engine;
 
-    let locations: Vec<(NodeId, String)> = sqlx::query_as(
-        "SELECT node_id, path FROM node_workspaces WHERE tenant_id = $1 AND workspace_id = $2",
-    )
-    .bind(tenant)
-    .bind(workspace)
-    .fetch_all(&state.db)
-    .await
-    .ok()?;
+    let locations: Vec<(NodeId, String)> = state
+        .db
+        .query_all(
+            "SELECT node_id, path FROM node_workspaces WHERE tenant_id = $1 AND workspace_id = $2",
+            params![tenant, workspace],
+        )
+        .await
+        .ok()?;
 
     for (node_id, path) in locations {
         if !state.registry.node_online(node_id) {

@@ -276,7 +276,7 @@ pub async fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nook_db::{Postgres, TypeMapping};
+    use nook_db::{params, Db, Postgres, TypeMapping};
     use nook_infra::queue::NewWork;
     use nook_testkit::TestBed;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -287,8 +287,7 @@ mod tests {
     async fn setup() -> Option<(TestBed, Arc<dyn Queue>)> {
         let bed = TestBed::new().await?;
         let cfg = nook_infra::Config::for_test();
-        let q: Arc<dyn Queue> =
-            Arc::from(nook_infra::queue::from_config(&cfg, bed.pool.clone()).await);
+        let q: Arc<dyn Queue> = Arc::from(nook_infra::queue::from_config(&cfg, bed.db()).await);
         Some((bed, q))
     }
 
@@ -328,14 +327,12 @@ mod tests {
     }
 
     async fn count_in(pool: &nook_db::DbPool, table: &str, ty: &str) -> i64 {
-        sqlx::query_as::<_, (i64,)>(&format!(
-            "SELECT count(*) FROM {table} WHERE work_type = $1"
-        ))
-        .bind(ty)
-        .fetch_one(pool)
+        pool.query_scalar::<i64>(
+            &format!("SELECT count(*) FROM {table} WHERE work_type = $1"),
+            params![ty],
+        )
         .await
         .unwrap()
-        .0
     }
 
     #[test]
@@ -441,12 +438,12 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(
-                count_in(&bed.pool, "work_queue_dead", &ty).await,
+                count_in(&bed.db(), "work_queue_dead", &ty).await,
                 0,
                 "not dead on the first pass"
             );
             assert_eq!(
-                count_in(&bed.pool, "work_queue", &ty).await,
+                count_in(&bed.db(), "work_queue", &ty).await,
                 1,
                 "back in the queue"
             );
@@ -456,23 +453,23 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(
-                count_in(&bed.pool, "work_queue", &ty).await,
+                count_in(&bed.db(), "work_queue", &ty).await,
                 0,
                 "left the live queue"
             );
             assert_eq!(
-                count_in(&bed.pool, "work_queue_dead", &ty).await,
+                count_in(&bed.db(), "work_queue_dead", &ty).await,
                 1,
                 "dead-lettered"
             );
-            let reason: String = sqlx::query_as::<_, (String,)>(
-                "SELECT reason FROM work_queue_dead WHERE work_type = $1",
-            )
-            .bind(&ty)
-            .fetch_one(&bed.pool)
-            .await
-            .unwrap()
-            .0;
+            let reason: String = bed
+                .pool
+                .query_scalar(
+                    "SELECT reason FROM work_queue_dead WHERE work_type = $1",
+                    params![&ty],
+                )
+                .await
+                .unwrap();
             assert!(
                 reason.contains("no handler"),
                 "reason names the cause: {reason}"
@@ -500,24 +497,26 @@ mod tests {
 
             // Not acked, not dead — still present, and invisible into the future.
             assert_eq!(
-                count_in(&bed.pool, "work_queue", &ty).await,
+                count_in(&bed.db(), "work_queue", &ty).await,
                 1,
                 "still queued"
             );
             assert_eq!(
-                count_in(&bed.pool, "work_queue_dead", &ty).await,
+                count_in(&bed.db(), "work_queue_dead", &ty).await,
                 0,
                 "not dead after one failure"
             );
-            let locked_future: bool = sqlx::query_as::<_, (bool,)>(&format!(
-                "SELECT locked_until > {} FROM work_queue WHERE id = $1",
-                Postgres.now()
-            ))
-            .bind(id)
-            .fetch_one(&bed.pool)
-            .await
-            .unwrap()
-            .0;
+            let locked_future: bool = bed
+                .pool
+                .query_scalar(
+                    &format!(
+                        "SELECT locked_until > {} FROM work_queue WHERE id = $1",
+                        Postgres.now()
+                    ),
+                    params![id],
+                )
+                .await
+                .unwrap();
             assert!(locked_future, "the item is held invisible by the backoff");
         })
         .await;
@@ -541,7 +540,7 @@ mod tests {
             assert_eq!(n, 1);
             // Treated as a failure: backed off, still present, not dead.
             assert_eq!(
-                count_in(&bed.pool, "work_queue", &ty).await,
+                count_in(&bed.db(), "work_queue", &ty).await,
                 1,
                 "a panic is a failure, not a loss"
             );
@@ -569,7 +568,7 @@ mod tests {
 
             // Wait until the three items are drained, then signal shutdown.
             for _ in 0..50 {
-                if count_in(&bed.pool, "work_queue", &ty).await == 0 {
+                if count_in(&bed.db(), "work_queue", &ty).await == 0 {
                     break;
                 }
                 tokio::time::sleep(Duration::from_millis(50)).await;
@@ -657,18 +656,18 @@ mod tests {
                 .unwrap();
 
             assert_eq!(
-                count_in(&bed.pool, "work_queue", &ty).await,
+                count_in(&bed.db(), "work_queue", &ty).await,
                 0,
                 "left the live queue"
             );
-            let reason: String = sqlx::query_as::<_, (String,)>(
-                "SELECT reason FROM work_queue_dead WHERE work_type = $1",
-            )
-            .bind(&ty)
-            .fetch_one(&bed.pool)
-            .await
-            .unwrap()
-            .0;
+            let reason: String = bed
+                .pool
+                .query_scalar(
+                    "SELECT reason FROM work_queue_dead WHERE work_type = $1",
+                    params![&ty],
+                )
+                .await
+                .unwrap();
             assert!(
                 reason.contains("handler always fails"),
                 "the dead-letter reason is the handler's error, not a generic one: {reason}"

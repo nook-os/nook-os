@@ -8,6 +8,7 @@
 //! 403 at start-work. The ownership filter here is the up-front half of that
 //! rule; the spawn guard is the enforcing half.
 
+use nook_db::{params, Db};
 use nook_types::{NodeId, NodeResources, TenantId, UserId, WorkspaceId};
 use uuid::Uuid;
 
@@ -18,9 +19,9 @@ use crate::state::AppState;
 /// on. Resolved locally so scheduling carries no dependency on other modules'
 /// identity plumbing.
 async fn person_of(state: &AppState, user: UserId) -> ApiResult<Option<Uuid>> {
-    let row: Option<(Uuid,)> = sqlx::query_as("SELECT person_id FROM users WHERE id = $1")
-        .bind(user)
-        .fetch_optional(&state.db)
+    let row: Option<(Uuid,)> = state
+        .db
+        .query_opt("SELECT person_id FROM users WHERE id = $1", params![user])
         .await?;
     Ok(row.map(|(p,)| p))
 }
@@ -33,13 +34,13 @@ async fn owned_online_nodes(
     tenant: TenantId,
     person: Uuid,
 ) -> ApiResult<Vec<(NodeId, NodeResources)>> {
-    let rows: Vec<(NodeId, serde_json::Value)> = sqlx::query_as(
-        "SELECT id, resources FROM nodes WHERE tenant_id = $1 AND owner_person_id = $2",
-    )
-    .bind(tenant)
-    .bind(person)
-    .fetch_all(&state.db)
-    .await?;
+    let rows: Vec<(NodeId, serde_json::Value)> = state
+        .db
+        .query_all(
+            "SELECT id, resources FROM nodes WHERE tenant_id = $1 AND owner_person_id = $2",
+            params![tenant, person],
+        )
+        .await?;
     Ok(rows
         .into_iter()
         .filter(|(id, _)| state.registry.node_online(*id))
@@ -86,13 +87,13 @@ pub async fn pick(
     // and the final ranking both draw only from `all`, which is already
     // ownership-filtered (AC-3).
     if let Some(ws) = workspace {
-        let hosts: Vec<(NodeId,)> = sqlx::query_as(
-            "SELECT DISTINCT node_id FROM node_workspaces WHERE tenant_id = $1 AND workspace_id = $2",
-        )
-        .bind(tenant)
-        .bind(ws)
-        .fetch_all(&state.db)
-        .await?;
+        let hosts: Vec<(NodeId,)> = state
+            .db
+            .query_all(
+                "SELECT DISTINCT node_id FROM node_workspaces WHERE tenant_id = $1 AND workspace_id = $2",
+                params![tenant, ws],
+            )
+            .await?;
         let host_set: std::collections::HashSet<NodeId> =
             hosts.into_iter().map(|(id,)| id).collect();
         let among: Vec<(NodeId, NodeResources)> = all

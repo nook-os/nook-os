@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use nook_db::{Postgres, TypeMapping};
+use nook_db::{params, Db, Postgres, TypeMapping};
 use tracing_subscriber::EnvFilter;
 
 use nook_control::{routes, AppState, Config, MIGRATOR};
@@ -36,7 +36,9 @@ async fn main() -> Result<()> {
     let db = nook_db::connect(&cfg.database_url, 10)
         .await
         .context("opening the database")?;
-    MIGRATOR.run(&db).await?;
+    // Migrations embed Postgres DDL (`sqlx::migrate!`); the SQLite track is
+    // MAIN-196. Run them against the pool's Postgres arm.
+    MIGRATOR.run(db.pg()).await?;
 
     match cli.command.unwrap_or(Command::Serve) {
         Command::Serve => {
@@ -210,15 +212,17 @@ async fn serve(db: nook_db::DbPool, cfg: Config) -> Result<()> {
         tracing::info!("shutting down — releasing node leases");
         // Nodes we own reconnect elsewhere and re-lease; mark them offline
         // until they do so schedulers don't route to dead sockets.
-        let _ = sqlx::query(&format!(
-            "UPDATE nodes SET status = 'offline', updated_at = {now},
+        let _ = shutdown_db
+            .exec(
+                &format!(
+                    "UPDATE nodes SET status = 'offline', updated_at = {now},
                 owning_instance_id = NULL, lease_expires_at = NULL
              WHERE owning_instance_id = $1",
-            now = Postgres.now()
-        ))
-        .bind(instance)
-        .execute(&shutdown_db)
-        .await;
+                    now = Postgres.now()
+                ),
+                params![instance],
+            )
+            .await;
     });
 
     // Bound the drain. `with_graceful_shutdown` waits for every in-flight

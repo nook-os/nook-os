@@ -60,9 +60,15 @@ async fn issue_client_cert(
     params.distinguished_name = dn;
     let csr = params.serialize_request(&key).unwrap().pem().unwrap();
 
-    let leaf = ca::sign_node_csr(pool, &vault(), tenant, node, &csr)
-        .await
-        .unwrap();
+    let leaf = ca::sign_node_csr(
+        &nook_db::EnginePool::from_pg(pool.clone()),
+        &vault(),
+        tenant,
+        node,
+        &csr,
+    )
+    .await
+    .unwrap();
     (leaf.cert_pem, key)
 }
 
@@ -90,7 +96,7 @@ async fn a_client_certificate_survives_the_handshake_and_identifies_the_node() {
     let _ = rustls::crypto::ring::default_provider().install_default();
 
     let tenant = seed_tenant(&bed.pool).await;
-    ca::generate(&bed.pool, &vault(), tenant, true)
+    ca::generate(&bed.db(), &vault(), tenant, true)
         .await
         .unwrap();
     let node = seed_node(&bed.pool, tenant).await;
@@ -154,7 +160,7 @@ async fn a_client_certificate_survives_the_handshake_and_identifies_the_node() {
     let presented = server.await.unwrap().expect("server saw a client cert");
 
     // And that certificate resolves to the node we issued it to.
-    let id = ca::verify_node_cert(&bed.pool, &presented).await.unwrap();
+    let id = ca::verify_node_cert(&bed.db(), &presented).await.unwrap();
     assert_eq!(id.node_id, node);
     assert_eq!(id.tenant_id, tenant.0);
 

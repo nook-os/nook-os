@@ -1,5 +1,6 @@
 use axum::extract::{Path, State};
 use axum::Json;
+use nook_db::{params, Db};
 use nook_types::*;
 
 use crate::auth::AuthCtx;
@@ -10,15 +11,15 @@ use crate::state::AppState;
     operation_id = "list_settings", responses((status = 200, body = [Setting])))]
 pub async fn list(State(state): State<AppState>, auth: AuthCtx) -> ApiResult<Json<Vec<Setting>>> {
     // Tenant-scoped settings plus the caller's user-scoped ones.
-    let settings: Vec<Setting> = sqlx::query_as(
-        "SELECT * FROM settings
+    let settings: Vec<Setting> = state
+        .db
+        .query_all(
+            "SELECT * FROM settings
          WHERE tenant_id = $1 AND (scope = 'tenant' OR (scope = 'user' AND user_id = $2))
          ORDER BY key",
-    )
-    .bind(auth.tenant_id)
-    .bind(auth.user_id)
-    .fetch_all(&state.db)
-    .await?;
+            params![auth.tenant_id, auth.user_id],
+        )
+        .await?;
     Ok(Json(settings))
 }
 
@@ -40,20 +41,23 @@ pub async fn put(
         ));
     }
     let user_id = (scope == "user").then_some(auth.user_id);
-    let setting: Setting = sqlx::query_as(
-        "INSERT INTO settings (id, tenant_id, scope, user_id, key, value)
+    let setting: Setting = state
+        .db
+        .query_one(
+            "INSERT INTO settings (id, tenant_id, scope, user_id, key, value)
          VALUES ($1, $2, $3, $4, $5, $6)
          ON CONFLICT (tenant_id, scope, user_id, key)
          DO UPDATE SET value = EXCLUDED.value
          RETURNING *",
-    )
-    .bind(SettingId::new())
-    .bind(auth.tenant_id)
-    .bind(&scope)
-    .bind(user_id)
-    .bind(&key)
-    .bind(&req.value)
-    .fetch_one(&state.db)
-    .await?;
+            params![
+                SettingId::new(),
+                auth.tenant_id,
+                &scope,
+                user_id.map(|x| x.0),
+                &key,
+                &req.value
+            ],
+        )
+        .await?;
     Ok(Json(setting))
 }

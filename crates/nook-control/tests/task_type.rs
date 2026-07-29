@@ -82,9 +82,7 @@ async fn create_persists_type_and_defaults_to_task() {
         return;
     };
     let (tenant, board) = fixture(&bed.pool).await;
-    let provider = LocalBoardProvider {
-        db: bed.pool.clone(),
-    };
+    let provider = LocalBoardProvider { db: bed.db() };
 
     // Explicit type is stored.
     let bug = provider
@@ -109,9 +107,7 @@ async fn an_invalid_type_is_rejected_not_coerced() {
         return;
     };
     let (tenant, board) = fixture(&bed.pool).await;
-    let provider = LocalBoardProvider {
-        db: bed.pool.clone(),
-    };
+    let provider = LocalBoardProvider { db: bed.db() };
 
     let err = provider
         .create_task(tenant, board, None, create("nope", Some("frobnicate")))
@@ -134,9 +130,7 @@ async fn patch_changes_the_type() {
         return;
     };
     let (tenant, board) = fixture(&bed.pool).await;
-    let provider = LocalBoardProvider {
-        db: bed.pool.clone(),
-    };
+    let provider = LocalBoardProvider { db: bed.db() };
 
     let task = provider
         .create_task(tenant, board, None, create("t", None))
@@ -159,9 +153,7 @@ async fn the_list_filter_ors_within_types_and_is_off_by_default() {
         return;
     };
     let (tenant, board) = fixture(&bed.pool).await;
-    let provider = LocalBoardProvider {
-        db: bed.pool.clone(),
-    };
+    let provider = LocalBoardProvider { db: bed.db() };
 
     for (title, ty) in [("e", "epic"), ("b", "bug"), ("c", "chore"), ("t", "task")] {
         provider
@@ -175,7 +167,7 @@ async fn the_list_filter_ors_within_types_and_is_off_by_default() {
             type_: types.into_iter().map(str::to_string).collect(),
             ..Default::default()
         };
-        let db = bed.pool.clone();
+        let db = bed.db();
         async move {
             query_rows(&db, tenant, nook_types::UserId::new(), &f)
                 .await

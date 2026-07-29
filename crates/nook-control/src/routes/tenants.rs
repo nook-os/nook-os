@@ -7,7 +7,7 @@
 
 use axum::extract::{Path, Query, State};
 use axum::Json;
-use nook_db::{Postgres, TypeMapping};
+use nook_db::{params, Db, Postgres, TypeMapping};
 use nook_types::*;
 use serde::Deserialize;
 
@@ -30,16 +30,14 @@ pub struct MemberListQuery {
 /// of truth (not `users.role`), so authorization is against the membership that
 /// actually grants access (AC-7).
 async fn role_in(db: &nook_db::DbPool, user_id: uuid::Uuid, tenant: TenantId) -> ApiResult<String> {
-    let row: Option<(String,)> = sqlx::query_as(
-        "SELECT role FROM tenant_members
+    let row: Option<String> = db
+        .query_scalar_opt(
+            "SELECT role FROM tenant_members
          WHERE tenant_id = $1 AND principal_type = 'user' AND principal_id = $2",
-    )
-    .bind(tenant)
-    .bind(user_id)
-    .fetch_optional(db)
-    .await?;
-    row.map(|(r,)| r)
-        .ok_or_else(|| ApiError::ForbiddenMsg("you are not a member of this tenant".into()))
+            params![tenant, user_id],
+        )
+        .await?;
+    row.ok_or_else(|| ApiError::ForbiddenMsg("you are not a member of this tenant".into()))
 }
 
 /// Every management action targets the caller's ACTIVE tenant only. Managing a
@@ -74,13 +72,13 @@ fn may_modify_target(caller: &str, target: &str) -> bool {
 /// How many owners a tenant has — the guard that keeps a tenant from being left
 /// ownerless (AC-5).
 async fn owner_count(db: &nook_db::DbPool, tenant: TenantId) -> ApiResult<i64> {
-    let (n,): (i64,) = sqlx::query_as(
-        "SELECT count(*) FROM tenant_members
+    let n: i64 = db
+        .query_scalar(
+            "SELECT count(*) FROM tenant_members
          WHERE tenant_id = $1 AND principal_type = 'user' AND role = 'owner'",
-    )
-    .bind(tenant)
-    .fetch_one(db)
-    .await?;
+            params![tenant],
+        )
+        .await?;
     Ok(n)
 }
 
@@ -101,16 +99,17 @@ pub async fn list(
         String,
         String,
         chrono::DateTime<chrono::Utc>,
-    )> = sqlx::query_as(
-        "SELECT t.id, t.name, t.slug, m.role, t.created_at
+    )> = state
+        .db
+        .query_all(
+            "SELECT t.id, t.name, t.slug, m.role, t.created_at
              FROM tenant_members m
              JOIN tenants t ON t.id = m.tenant_id
              WHERE m.principal_type = 'user' AND m.principal_id = $1
              ORDER BY t.created_at",
-    )
-    .bind(auth.user_id.0)
-    .fetch_all(&state.db)
-    .await?;
+            params![auth.user_id.0],
+        )
+        .await?;
 
     Ok(Json(
         rows.into_iter()
@@ -203,39 +202,39 @@ pub async fn change_member_role(
 
     // Keep users.role in step with tenant_members.role so the two never
     // disagree (see the identity module's invariant).
-    sqlx::query(
-        "UPDATE tenant_members SET role = $3
+    state
+        .db
+        .exec(
+            "UPDATE tenant_members SET role = $3
          WHERE tenant_id = $1 AND principal_type = 'user' AND principal_id = $2",
-    )
-    .bind(tenant)
-    .bind(pid)
-    .bind(new_role)
-    .execute(&state.db)
-    .await?;
-    sqlx::query(&format!(
-        "UPDATE users SET role = $3, updated_at = {} WHERE id = $2 AND tenant_id = $1",
-        Postgres.now()
-    ))
-    .bind(tenant)
-    .bind(pid)
-    .bind(new_role)
-    .execute(&state.db)
-    .await?;
+            params![tenant, pid, new_role],
+        )
+        .await?;
+    state
+        .db
+        .exec(
+            &format!(
+                "UPDATE users SET role = $3, updated_at = {} WHERE id = $2 AND tenant_id = $1",
+                Postgres.now()
+            ),
+            params![tenant, pid, new_role],
+        )
+        .await?;
 
     // The role is part of the cached tenants list, so a change makes that
     // person's cached entry stale — drop it across their sessions (MAIN-27 AC-4).
     crate::services::identity::invalidate_person_tenants(&*state.cache, &state.db, UserId(pid))
         .await;
 
-    let member: TenantMemberItem = sqlx::query_as(
-        "SELECT m.principal_id, u.email, u.display_name, m.role, m.created_at AS joined_at
+    let member: TenantMemberItem = state
+        .db
+        .query_one(
+            "SELECT m.principal_id, u.email, u.display_name, m.role, m.created_at AS joined_at
          FROM tenant_members m JOIN users u ON u.id = m.principal_id
          WHERE m.tenant_id = $1 AND m.principal_id = $2",
-    )
-    .bind(tenant)
-    .bind(pid)
-    .fetch_one(&state.db)
-    .await?;
+            params![tenant, pid],
+        )
+        .await?;
     Ok(Json(member))
 }
 
@@ -271,15 +270,15 @@ pub async fn remove_member(
             "this is the last owner — a tenant cannot be left ownerless".into(),
         ));
     }
-    let res = sqlx::query(
-        "DELETE FROM tenant_members
+    let res = state
+        .db
+        .exec(
+            "DELETE FROM tenant_members
          WHERE tenant_id = $1 AND principal_type = 'user' AND principal_id = $2",
-    )
-    .bind(tenant)
-    .bind(pid)
-    .execute(&state.db)
-    .await?;
-    if res.rows_affected() == 0 {
+            params![tenant, pid],
+        )
+        .await?;
+    if res == 0 {
         return Err(ApiError::NotFound);
     }
     // The grant is gone: drop the tenant from that person's cached list now, so
@@ -309,14 +308,14 @@ pub async fn leave_tenant(
             "you are the last owner — promote someone else before leaving".into(),
         ));
     }
-    sqlx::query(
-        "DELETE FROM tenant_members
+    state
+        .db
+        .exec(
+            "DELETE FROM tenant_members
          WHERE tenant_id = $1 AND principal_type = 'user' AND principal_id = $2",
-    )
-    .bind(tenant)
-    .bind(auth.user_id.0)
-    .execute(&state.db)
-    .await?;
+            params![tenant, auth.user_id.0],
+        )
+        .await?;
     // You just left: drop the tenant from your own cached list immediately (AC-4).
     crate::services::identity::invalidate_person_tenants(&*state.cache, &state.db, auth.user_id)
         .await;
@@ -414,7 +413,7 @@ mod tests {
 #[cfg(test)]
 mod db_tests {
     use super::{owner_count, role_in};
-    use nook_db::DbPool;
+    use nook_db::{params, Db, DbPool};
     use nook_types::TenantId;
     use sqlx::postgres::PgPoolOptions;
     use uuid::Uuid;
@@ -430,31 +429,23 @@ mod db_tests {
             .await
             .ok()?;
         crate::MIGRATOR.run(&db).await.ok()?;
-        Some(db)
+        Some(nook_db::EnginePool::from_pg(db))
     }
 
     async fn member(db: &DbPool, tenant: Uuid, role: &str) -> Uuid {
         let uid = Uuid::new_v4();
-        sqlx::query(
+        db.exec(
             "INSERT INTO users (id, tenant_id, display_name, email, role, person_id)
              VALUES ($1, $2, 'M', $3, $4, gen_random_uuid())",
+            params![uid, tenant, format!("{uid}@m5.test"), role],
         )
-        .bind(uid)
-        .bind(tenant)
-        .bind(format!("{uid}@m5.test"))
-        .bind(role)
-        .execute(db)
         .await
         .unwrap();
-        sqlx::query(
+        db.exec(
             "INSERT INTO tenant_members (id, tenant_id, principal_type, principal_id, role)
              VALUES ($1, $2, 'user', $3, $4)",
+            params![Uuid::new_v4(), tenant, uid, role],
         )
-        .bind(Uuid::new_v4())
-        .bind(tenant)
-        .bind(uid)
-        .bind(role)
-        .execute(db)
         .await
         .unwrap();
         uid
@@ -464,12 +455,12 @@ mod db_tests {
     async fn owner_count_and_role_reflect_tenant_members() {
         let Some(db) = pool().await else { return };
         let t = Uuid::new_v4();
-        sqlx::query("INSERT INTO tenants (id, name, slug) VALUES ($1, 'M5', $2)")
-            .bind(t)
-            .bind(format!("m5-{t}"))
-            .execute(&db)
-            .await
-            .unwrap();
+        db.exec(
+            "INSERT INTO tenants (id, name, slug) VALUES ($1, 'M5', $2)",
+            params![t, format!("m5-{t}")],
+        )
+        .await
+        .unwrap();
         let owner = member(&db, t, "owner").await;
         let plain = member(&db, t, "member").await;
 
@@ -477,38 +468,31 @@ mod db_tests {
         let r_owner = role_in(&db, owner, TenantId(t)).await.unwrap();
         let r_plain = role_in(&db, plain, TenantId(t)).await.unwrap();
         // Promote the member to owner → two owners.
-        sqlx::query(
+        db.exec(
             "UPDATE tenant_members SET role='owner' WHERE tenant_id=$1 AND principal_id=$2",
+            params![t, plain],
         )
-        .bind(t)
-        .bind(plain)
-        .execute(&db)
         .await
         .unwrap();
         let oc2 = owner_count(&db, TenantId(t)).await.unwrap();
 
         // A revoked membership resolves to an error (not a member).
-        sqlx::query("DELETE FROM tenant_members WHERE tenant_id=$1 AND principal_id=$2")
-            .bind(t)
-            .bind(plain)
-            .execute(&db)
-            .await
-            .unwrap();
+        db.exec(
+            "DELETE FROM tenant_members WHERE tenant_id=$1 AND principal_id=$2",
+            params![t, plain],
+        )
+        .await
+        .unwrap();
         let gone = role_in(&db, plain, TenantId(t)).await.is_err();
 
         // cleanup
-        let _ = sqlx::query("DELETE FROM tenant_members WHERE tenant_id=$1")
-            .bind(t)
-            .execute(&db)
+        let _ = db
+            .exec("DELETE FROM tenant_members WHERE tenant_id=$1", params![t])
             .await;
-        let _ = sqlx::query("DELETE FROM users WHERE tenant_id=$1")
-            .bind(t)
-            .execute(&db)
+        let _ = db
+            .exec("DELETE FROM users WHERE tenant_id=$1", params![t])
             .await;
-        let _ = sqlx::query("DELETE FROM tenants WHERE id=$1")
-            .bind(t)
-            .execute(&db)
-            .await;
+        let _ = db.exec("DELETE FROM tenants WHERE id=$1", params![t]).await;
 
         assert_eq!(oc1, 1, "one owner");
         assert_eq!(r_owner, "owner");

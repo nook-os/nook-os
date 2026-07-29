@@ -17,7 +17,7 @@
 
 use axum::extract::{Path, State};
 use axum::Json;
-use nook_db::{Postgres, TypeMapping};
+use nook_db::{params, Db, Postgres, TypeMapping};
 use nook_types::*;
 
 use crate::auth::AuthCtx;
@@ -181,12 +181,11 @@ pub(crate) async fn announce_trust(state: &AppState, tenant: nook_types::TenantI
     if fingerprints.is_empty() {
         return;
     }
-    let nodes: Vec<(nook_types::NodeId,)> =
-        sqlx::query_as("SELECT id FROM nodes WHERE tenant_id = $1")
-            .bind(tenant)
-            .fetch_all(&state.db)
-            .await
-            .unwrap_or_default();
+    let nodes: Vec<(nook_types::NodeId,)> = state
+        .db
+        .query_all("SELECT id FROM nodes WHERE tenant_id = $1", params![tenant])
+        .await
+        .unwrap_or_default();
     for (id,) in nodes {
         state.registry.send_to_node(
             id,
@@ -288,16 +287,18 @@ pub async fn revoke_node(
 
     // Scoped to the caller's tenant: an admin cannot reach another tenant's
     // machines even by guessing an id.
-    let done = sqlx::query(&format!(
-        "UPDATE nodes SET revoked_at = {now}, updated_at = {now}
+    let done = state
+        .db
+        .exec(
+            &format!(
+                "UPDATE nodes SET revoked_at = {now}, updated_at = {now}
           WHERE id = $1 AND tenant_id = $2",
-        now = Postgres.now()
-    ))
-    .bind(id)
-    .bind(auth.tenant_id)
-    .execute(&state.db)
-    .await?;
-    if done.rows_affected() == 0 {
+                now = Postgres.now()
+            ),
+            params![id, auth.tenant_id],
+        )
+        .await?;
+    if done == 0 {
         return Err(ApiError::NotFound);
     }
 

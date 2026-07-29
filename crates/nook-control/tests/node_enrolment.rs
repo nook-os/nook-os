@@ -62,12 +62,12 @@ async fn signs_a_csr_with_server_chosen_identity() {
     };
     let v = vault();
     let tenant = seed_tenant(&bed.pool).await;
-    ca::generate(&bed.pool, &v, tenant, true).await.unwrap();
+    ca::generate(&bed.db(), &v, tenant, true).await.unwrap();
     let node = seed_node(&bed.pool, tenant).await;
 
     // The CSR lies about who it is; the issued cert must not repeat the lie.
     let (_key, csr) = node_csr("i-am-somebody-else");
-    let leaf = ca::sign_node_csr(&bed.pool, &v, tenant, node, &csr)
+    let leaf = ca::sign_node_csr(&bed.db(), &v, tenant, node, &csr)
         .await
         .unwrap();
 
@@ -128,12 +128,12 @@ async fn renews_after_expiry_and_across_a_rotation() {
     };
     let v = vault();
     let tenant = seed_tenant(&bed.pool).await;
-    let old_ca = ca::generate(&bed.pool, &v, tenant, true).await.unwrap();
+    let old_ca = ca::generate(&bed.db(), &v, tenant, true).await.unwrap();
     let node = seed_node(&bed.pool, tenant).await;
 
     // Enrol.
     let (key, csr) = node_csr("first");
-    let first = ca::sign_node_csr(&bed.pool, &v, tenant, node, &csr)
+    let first = ca::sign_node_csr(&bed.db(), &v, tenant, node, &csr)
         .await
         .unwrap();
     sqlx::query(
@@ -154,8 +154,8 @@ async fn renews_after_expiry_and_across_a_rotation() {
         .execute(&bed.pool)
         .await
         .unwrap();
-    let new_ca = ca::generate(&bed.pool, &v, tenant, false).await.unwrap();
-    ca::promote(&bed.pool, tenant, new_ca.id).await.unwrap();
+    let new_ca = ca::generate(&bed.db(), &v, tenant, false).await.unwrap();
+    ca::promote(&bed.db(), tenant, new_ca.id).await.unwrap();
 
     // It comes back and renews on the SAME key — no join token anywhere.
     let (_, csr2) = {
@@ -173,7 +173,7 @@ async fn renews_after_expiry_and_across_a_rotation() {
         "renewal must be recognisable as the same machine"
     );
 
-    let renewed = ca::sign_node_csr(&bed.pool, &v, tenant, node, &csr2)
+    let renewed = ca::sign_node_csr(&bed.db(), &v, tenant, node, &csr2)
         .await
         .unwrap();
     assert_eq!(
@@ -185,7 +185,7 @@ async fn renews_after_expiry_and_across_a_rotation() {
 
     // And the bundle it gets back still trusts the old CA, so it can talk to
     // instances that have not rotated yet.
-    let bundle = ca::trust_bundle(&bed.pool, tenant).await.unwrap();
+    let bundle = ca::trust_bundle(&bed.db(), tenant).await.unwrap();
     assert_eq!(bundle.len(), 2);
 
     bed.teardown().await;
@@ -203,7 +203,7 @@ async fn refuses_to_sign_without_an_active_ca() {
     let node = seed_node(&bed.pool, tenant).await;
     let (_k, csr) = node_csr("x");
 
-    let err = ca::sign_node_csr(&bed.pool, &v, tenant, node, &csr)
+    let err = ca::sign_node_csr(&bed.db(), &v, tenant, node, &csr)
         .await
         .unwrap_err();
     assert!(err.to_string().contains("no active CA"), "got: {err}");
@@ -233,15 +233,15 @@ async fn a_valid_certificate_identifies_its_node() {
     };
     let v = vault();
     let tenant = seed_tenant(&bed.pool).await;
-    ca::generate(&bed.pool, &v, tenant, true).await.unwrap();
+    ca::generate(&bed.db(), &v, tenant, true).await.unwrap();
     let node = seed_node(&bed.pool, tenant).await;
 
     let (_k, csr) = node_csr("n");
-    let leaf = ca::sign_node_csr(&bed.pool, &v, tenant, node, &csr)
+    let leaf = ca::sign_node_csr(&bed.db(), &v, tenant, node, &csr)
         .await
         .unwrap();
 
-    let id = ca::verify_node_cert(&bed.pool, &der_of(&leaf.cert_pem))
+    let id = ca::verify_node_cert(&bed.db(), &der_of(&leaf.cert_pem))
         .await
         .unwrap();
     assert_eq!(id.node_id, node);
@@ -260,18 +260,18 @@ async fn a_certificate_from_another_tenant_is_rejected() {
     };
     let v = vault();
     let (a, b) = (seed_tenant(&bed.pool).await, seed_tenant(&bed.pool).await);
-    ca::generate(&bed.pool, &v, a, true).await.unwrap();
-    ca::generate(&bed.pool, &v, b, true).await.unwrap();
+    ca::generate(&bed.db(), &v, a, true).await.unwrap();
+    ca::generate(&bed.db(), &v, b, true).await.unwrap();
 
     // A node that really belongs to tenant B...
     let node_b = seed_node(&bed.pool, b).await;
     // ...but tenant A's CA signs a certificate naming it.
     let (_k, csr) = node_csr("n");
-    let forged = ca::sign_node_csr(&bed.pool, &v, a, node_b, &csr)
+    let forged = ca::sign_node_csr(&bed.db(), &v, a, node_b, &csr)
         .await
         .unwrap();
 
-    let err = ca::verify_node_cert(&bed.pool, &der_of(&forged.cert_pem))
+    let err = ca::verify_node_cert(&bed.db(), &der_of(&forged.cert_pem))
         .await
         .unwrap_err();
     assert!(
@@ -290,7 +290,7 @@ async fn a_self_signed_certificate_is_rejected() {
     };
     let v = vault();
     let tenant = seed_tenant(&bed.pool).await;
-    ca::generate(&bed.pool, &v, tenant, true).await.unwrap();
+    ca::generate(&bed.db(), &v, tenant, true).await.unwrap();
     let node = seed_node(&bed.pool, tenant).await;
 
     // Forge one with the right names but our own key.
@@ -303,7 +303,7 @@ async fn a_self_signed_certificate_is_rejected() {
     params.distinguished_name = dn;
     let forged = params.self_signed(&key).unwrap();
 
-    let err = ca::verify_node_cert(&bed.pool, forged.der())
+    let err = ca::verify_node_cert(&bed.db(), forged.der())
         .await
         .unwrap_err();
     assert!(
@@ -322,10 +322,10 @@ async fn a_revoked_node_is_refused() {
     };
     let v = vault();
     let tenant = seed_tenant(&bed.pool).await;
-    ca::generate(&bed.pool, &v, tenant, true).await.unwrap();
+    ca::generate(&bed.db(), &v, tenant, true).await.unwrap();
     let node = seed_node(&bed.pool, tenant).await;
     let (_k, csr) = node_csr("n");
-    let leaf = ca::sign_node_csr(&bed.pool, &v, tenant, node, &csr)
+    let leaf = ca::sign_node_csr(&bed.db(), &v, tenant, node, &csr)
         .await
         .unwrap();
 
@@ -335,7 +335,7 @@ async fn a_revoked_node_is_refused() {
         .await
         .unwrap();
 
-    let err = ca::verify_node_cert(&bed.pool, &der_of(&leaf.cert_pem))
+    let err = ca::verify_node_cert(&bed.db(), &der_of(&leaf.cert_pem))
         .await
         .unwrap_err();
     assert!(err.to_string().contains("revoked"), "got: {err}");
@@ -352,21 +352,21 @@ async fn a_leaf_from_a_retiring_ca_still_authenticates() {
     };
     let v = vault();
     let tenant = seed_tenant(&bed.pool).await;
-    let old = ca::generate(&bed.pool, &v, tenant, true).await.unwrap();
+    let old = ca::generate(&bed.db(), &v, tenant, true).await.unwrap();
     let node = seed_node(&bed.pool, tenant).await;
 
     let (_k, csr) = node_csr("n");
-    let leaf = ca::sign_node_csr(&bed.pool, &v, tenant, node, &csr)
+    let leaf = ca::sign_node_csr(&bed.db(), &v, tenant, node, &csr)
         .await
         .unwrap();
     assert_eq!(leaf.ca_id, old.id);
 
     // Rotate underneath it.
-    let new = ca::generate(&bed.pool, &v, tenant, false).await.unwrap();
-    ca::promote(&bed.pool, tenant, new.id).await.unwrap();
+    let new = ca::generate(&bed.db(), &v, tenant, false).await.unwrap();
+    ca::promote(&bed.db(), tenant, new.id).await.unwrap();
 
     // The old leaf keeps working: the old CA is retiring, not gone.
-    let id = ca::verify_node_cert(&bed.pool, &der_of(&leaf.cert_pem))
+    let id = ca::verify_node_cert(&bed.db(), &der_of(&leaf.cert_pem))
         .await
         .unwrap();
     assert_eq!(id.node_id, node);

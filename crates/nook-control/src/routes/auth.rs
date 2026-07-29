@@ -10,6 +10,7 @@ use openidconnect::{
 use serde::Deserialize;
 use utoipa::ToSchema;
 
+use nook_db::{params, Db};
 use nook_types::{DevAccount, MeResponse, TenantId, UserId};
 
 use crate::auth::{
@@ -319,21 +320,23 @@ pub async fn dev_login(
     // Dev-only, behind the same gate as the rest of this handler: matching by
     // email in production would let anybody who can reach an IdP become anybody
     // who shares their address.
-    let existing: Option<(UserId, TenantId)> =
-        sqlx::query_as("SELECT id, tenant_id FROM users WHERE lower(email) = lower($1) LIMIT 1")
-            .bind(&email)
-            .fetch_optional(&state.db)
-            .await?;
+    let existing: Option<(UserId, TenantId)> = state
+        .db
+        .query_opt(
+            "SELECT id, tenant_id FROM users WHERE lower(email) = lower($1) LIMIT 1",
+            params![&email],
+        )
+        .await?;
 
     if let Some((user_id, tenant_id)) = existing {
         let session_id = create_auth_session(&state, user_id, tenant_id).await?;
-        let user: nook_types::User = sqlx::query_as("SELECT * FROM users WHERE id = $1")
-            .bind(user_id)
-            .fetch_one(&state.db)
+        let user: nook_types::User = state
+            .db
+            .query_one("SELECT * FROM users WHERE id = $1", params![user_id])
             .await?;
-        let tenant: nook_types::Tenant = sqlx::query_as("SELECT * FROM tenants WHERE id = $1")
-            .bind(tenant_id)
-            .fetch_one(&state.db)
+        let tenant: nook_types::Tenant = state
+            .db
+            .query_one("SELECT * FROM tenants WHERE id = $1", params![tenant_id])
             .await?;
         events::record(
             &state,
@@ -421,13 +424,16 @@ pub async fn providers(State(state): State<AppState>) -> Json<nook_types::AuthPr
     responses((status = 200, body = MeResponse), (status = 401, description = "not signed in"))
 )]
 pub async fn me(State(state): State<AppState>, auth: AuthCtx) -> ApiResult<Json<MeResponse>> {
-    let user: nook_types::User = sqlx::query_as("SELECT * FROM users WHERE id = $1")
-        .bind(auth.user_id)
-        .fetch_one(&state.db)
+    let user: nook_types::User = state
+        .db
+        .query_one("SELECT * FROM users WHERE id = $1", params![auth.user_id])
         .await?;
-    let tenant: nook_types::Tenant = sqlx::query_as("SELECT * FROM tenants WHERE id = $1")
-        .bind(auth.tenant_id)
-        .fetch_one(&state.db)
+    let tenant: nook_types::Tenant = state
+        .db
+        .query_one(
+            "SELECT * FROM tenants WHERE id = $1",
+            params![auth.tenant_id],
+        )
         .await?;
     Ok(Json(MeResponse {
         capability: capability_of(&state, &auth).await,
@@ -500,13 +506,14 @@ pub async fn switch_tenant(
         .await?
         .ok_or_else(|| ApiError::ForbiddenMsg("you are not a member of that tenant".into()))?;
 
-    let res = sqlx::query("UPDATE sessions_auth SET user_id = $1, tenant_id = $2 WHERE id = $3")
-        .bind(target_user)
-        .bind(req.tenant_id)
-        .bind(auth.session_id)
-        .execute(&state.db)
+    let res = state
+        .db
+        .exec(
+            "UPDATE sessions_auth SET user_id = $1, tenant_id = $2 WHERE id = $3",
+            params![target_user, req.tenant_id, auth.session_id],
+        )
         .await?;
-    if res.rows_affected() == 0 {
+    if res == 0 {
         // The caller IS a cookie session (checked above), so a zero-row update
         // means its `sessions_auth` row is gone — a concurrent logout or expiry
         // between authentication and here. The session is gone, not a token (AC-3).
@@ -561,13 +568,19 @@ pub async fn switch_tenant(
         tenant_id: req.tenant_id,
         ..auth
     };
-    let user: nook_types::User = sqlx::query_as("SELECT * FROM users WHERE id = $1")
-        .bind(switched.user_id)
-        .fetch_one(&state.db)
+    let user: nook_types::User = state
+        .db
+        .query_one(
+            "SELECT * FROM users WHERE id = $1",
+            params![switched.user_id],
+        )
         .await?;
-    let tenant: nook_types::Tenant = sqlx::query_as("SELECT * FROM tenants WHERE id = $1")
-        .bind(switched.tenant_id)
-        .fetch_one(&state.db)
+    let tenant: nook_types::Tenant = state
+        .db
+        .query_one(
+            "SELECT * FROM tenants WHERE id = $1",
+            params![switched.tenant_id],
+        )
         .await?;
     Ok(Json(MeResponse {
         capability: capability_of(&state, &switched).await,
@@ -598,14 +611,16 @@ async fn capability_of(state: &AppState, auth: &AuthCtx) -> nook_types::Capabili
             held.push(p.key().to_string());
         }
     }
-    let org_id: Option<uuid::Uuid> =
-        sqlx::query_as::<_, (Option<uuid::Uuid>,)>("SELECT org_id FROM tenants WHERE id = $1")
-            .bind(auth.tenant_id)
-            .fetch_optional(&state.db)
-            .await
-            .ok()
-            .flatten()
-            .and_then(|(o,)| o);
+    let org_id: Option<uuid::Uuid> = state
+        .db
+        .query_opt::<(Option<uuid::Uuid>,)>(
+            "SELECT org_id FROM tenants WHERE id = $1",
+            params![auth.tenant_id],
+        )
+        .await
+        .ok()
+        .flatten()
+        .and_then(|(o,)| o);
 
     nook_types::Capability {
         // "Operator" means holding anything at the deployment scope. Derived
@@ -634,8 +649,10 @@ pub async fn dev_accounts(State(state): State<AppState>) -> ApiResult<Json<Vec<D
     if !state.cfg.auth_dev_mode || state.cfg.is_production() {
         return Err(ApiError::Forbidden);
     }
-    let rows: Vec<DevAccount> = sqlx::query_as(
-        "SELECT u.email, u.display_name, t.slug AS tenant_slug,
+    let rows: Vec<DevAccount> = state
+        .db
+        .query_all(
+            "SELECT u.email, u.display_name, t.slug AS tenant_slug,
                 COALESCE(
                     (SELECT array_agg(b.role_key ORDER BY b.role_key)
                      FROM role_bindings b
@@ -644,9 +661,9 @@ pub async fn dev_accounts(State(state): State<AppState>) -> ApiResult<Json<Vec<D
                 ) AS deployment_roles
          FROM users u JOIN tenants t ON t.id = u.tenant_id
          ORDER BY u.created_at",
-    )
-    .fetch_all(&state.db)
-    .await?;
+            params![],
+        )
+        .await?;
     Ok(Json(rows))
 }
 
@@ -657,9 +674,9 @@ pub async fn logout(State(state): State<AppState>, jar: CookieJar) -> ApiResult<
         .get(SESSION_COOKIE)
         .and_then(|c| c.value().parse::<uuid::Uuid>().ok())
     {
-        sqlx::query("DELETE FROM sessions_auth WHERE id = $1")
-            .bind(sid)
-            .execute(&state.db)
+        state
+            .db
+            .exec("DELETE FROM sessions_auth WHERE id = $1", params![sid])
             .await?;
     }
     Ok((
@@ -747,8 +764,12 @@ mod tests {
             body.contains("UPDATE sessions_auth"),
             "switching is a move of the browser session's active tenant"
         );
+        // The guard is on the affected-row count of the UPDATE: `exec` returns
+        // rows-affected (MAIN-205's dispatch API), so a zero-row update — a
+        // credential with no `sessions_auth` row (a user token) — is caught by
+        // `res == 0` rather than being a silent no-op.
         assert!(
-            body.contains("rows_affected() == 0"),
+            body.contains("res == 0"),
             "a credential with no sessions_auth row (a user token) must be told \
              switching is browser-only, not silently no-op"
         );

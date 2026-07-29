@@ -7,7 +7,7 @@
 //! the cost of that is two extra queries for a whole board rather than two per
 //! task.
 
-use nook_db::DbPool;
+use nook_db::{params, Db, DbPool};
 use nook_types::*;
 use std::collections::HashMap;
 
@@ -92,12 +92,11 @@ pub async fn enrich(
         v.dedup();
         v
     };
-    let keys: HashMap<uuid::Uuid, Option<String>> =
-        sqlx::query_as::<_, (uuid::Uuid, Option<String>)>(
+    let keys: HashMap<uuid::Uuid, Option<String>> = db
+        .query_all::<(uuid::Uuid, Option<String>)>(
             "SELECT id, key FROM boards WHERE id = ANY($1)",
+            params![&board_ids[..]],
         )
-        .bind(&board_ids)
-        .fetch_all(db)
         .await?
         .into_iter()
         .collect();
@@ -109,16 +108,16 @@ pub async fn enrich(
         String,
         String,
         chrono::DateTime<chrono::Utc>,
-    )> = sqlx::query_as(
-        "SELECT tl.task_id, l.id, l.tenant_id, l.name, l.color, l.created_at
+    )> = db
+        .query_all(
+            "SELECT tl.task_id, l.id, l.tenant_id, l.name, l.color, l.created_at
              FROM task_labels tl
              JOIN labels l ON l.id = tl.label_id
              WHERE tl.task_id = ANY($1)
              ORDER BY l.name",
-    )
-    .bind(&ids)
-    .fetch_all(db)
-    .await?;
+            params![&ids[..]],
+        )
+        .await?;
 
     let mut by_task: HashMap<uuid::Uuid, Vec<Label>> = HashMap::new();
     for (task_id, id, tenant_id, name, color, created_at) in label_rows {
@@ -152,21 +151,17 @@ pub async fn enrich(
     let parents: HashMap<uuid::Uuid, ParentInfo> = if parent_ids.is_empty() {
         HashMap::new()
     } else {
-        sqlx::query_as::<
-            _,
-            (
-                uuid::Uuid,
-                Option<i32>,
-                String,
-                Option<UserId>,
-                Option<UserId>,
-            ),
-        >(
+        db.query_all::<(
+            uuid::Uuid,
+            Option<i32>,
+            String,
+            Option<UserId>,
+            Option<UserId>,
+        )>(
             "SELECT id, number, visibility, created_by, assignee_user_id
              FROM tasks WHERE id = ANY($1)",
+            params![&parent_ids[..]],
         )
-        .bind(&parent_ids)
-        .fetch_all(db)
         .await?
         .into_iter()
         .map(|(id, number, visibility, created_by, assignee)| {
@@ -229,13 +224,13 @@ pub async fn enrich_one(
 /// either way: a uuid is not an authorisation.
 pub async fn resolve_id(db: &DbPool, tenant: TenantId, ident: &str) -> ApiResult<TaskId> {
     if let Ok(uuid) = ident.parse::<uuid::Uuid>() {
-        let found: Option<(TaskId,)> =
-            sqlx::query_as("SELECT id FROM tasks WHERE id = $1 AND tenant_id = $2")
-                .bind(uuid)
-                .bind(tenant)
-                .fetch_optional(db)
-                .await?;
-        return found.map(|r| r.0).ok_or(ApiError::NotFound);
+        let found: Option<TaskId> = db
+            .query_scalar_opt(
+                "SELECT id FROM tasks WHERE id = $1 AND tenant_id = $2",
+                params![uuid, tenant],
+            )
+            .await?;
+        return found.ok_or(ApiError::NotFound);
     }
 
     let (key, number) = split_key(ident).ok_or_else(|| {
@@ -243,17 +238,15 @@ pub async fn resolve_id(db: &DbPool, tenant: TenantId, ident: &str) -> ApiResult
             "{ident:?} is neither a task id nor a key like NOOK-42"
         ))
     })?;
-    let found: Option<(TaskId,)> = sqlx::query_as(
-        "SELECT t.id FROM tasks t
+    let found: Option<TaskId> = db
+        .query_scalar_opt(
+            "SELECT t.id FROM tasks t
          JOIN boards b ON b.id = t.board_id
          WHERE t.tenant_id = $1 AND upper(b.key) = upper($2) AND t.number = $3",
-    )
-    .bind(tenant)
-    .bind(&key)
-    .bind(number)
-    .fetch_optional(db)
-    .await?;
-    found.map(|r| r.0).ok_or(ApiError::NotFound)
+            params![tenant, &key, number],
+        )
+        .await?;
+    found.ok_or(ApiError::NotFound)
 }
 
 /// `NOOK-42` → `("ENG", 42)`.
@@ -290,19 +283,18 @@ pub async fn column_of_type(db: &DbPool, board: BoardId, column_type: &str) -> A
             TYPES.join(", ")
         )));
     }
-    let found: Option<(ColumnId,)> = sqlx::query_as(
-        "SELECT id FROM board_columns WHERE board_id = $1 AND type = $2
+    let found: Option<ColumnId> = db
+        .query_scalar_opt(
+            "SELECT id FROM board_columns WHERE board_id = $1 AND type = $2
          ORDER BY position LIMIT 1",
-    )
-    .bind(board)
-    .bind(column_type)
-    .fetch_optional(db)
-    .await?;
+            params![board, column_type],
+        )
+        .await?;
 
     // 409, not 500 and not 404: the request was well formed and the board is
     // real, but this board has no column meaning that. Naming the missing type
     // is the difference between a fixable message and a mystery.
-    found.map(|r| r.0).ok_or_else(|| {
+    found.ok_or_else(|| {
         ApiError::Conflict(format!(
             "this board has no {column_type:?} column — add one, or give an explicit column_id"
         ))

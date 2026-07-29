@@ -18,7 +18,7 @@
 
 use axum::extract::{Path, Query, State};
 use axum::Json;
-use nook_db::{CiMatch, Postgres, TypeMapping};
+use nook_db::{params, CiMatch, Db, Postgres, TypeMapping};
 use nook_types::*;
 use serde::Deserialize;
 use uuid::Uuid;
@@ -75,8 +75,10 @@ async fn would_cycle(
     folder: UserNoteFolderId,
     new_parent: UserNoteFolderId,
 ) -> ApiResult<bool> {
-    let (cycles,): (bool,) = sqlx::query_as(
-        "WITH RECURSIVE ancestors AS (
+    let cycles: bool = state
+        .db
+        .query_scalar(
+            "WITH RECURSIVE ancestors AS (
              SELECT id, parent_id FROM user_note_folders
              WHERE id = $1 AND person_id = $2
              UNION ALL
@@ -84,12 +86,9 @@ async fn would_cycle(
              JOIN ancestors a ON f.id = a.parent_id AND f.person_id = $2
          )
          SELECT EXISTS(SELECT 1 FROM ancestors WHERE id = $3)",
-    )
-    .bind(new_parent)
-    .bind(person)
-    .bind(folder)
-    .fetch_one(&state.db)
-    .await?;
+            params![new_parent, person, folder],
+        )
+        .await?;
     Ok(cycles)
 }
 
@@ -175,11 +174,13 @@ async fn require_person_app_password(
     person: Uuid,
     passphrase: &str,
 ) -> ApiResult<()> {
-    let row: Option<(Vec<u8>, Vec<u8>)> =
-        sqlx::query_as("SELECT kdf_salt, verifier FROM person_vaults WHERE person_id = $1")
-            .bind(person)
-            .fetch_optional(&state.db)
-            .await?;
+    let row: Option<(Vec<u8>, Vec<u8>)> = state
+        .db
+        .query_opt(
+            "SELECT kdf_salt, verifier FROM person_vaults WHERE person_id = $1",
+            params![person],
+        )
+        .await?;
     let Some((salt, verifier)) = row else {
         return Err(ApiError::SetupRequired(
             "set a notebook app password before sealing notes".into(),
@@ -199,13 +200,14 @@ async fn owned_folder(
     person: Uuid,
     folder: UserNoteFolderId,
 ) -> ApiResult<UserNoteFolderId> {
-    let found: Option<(UserNoteFolderId,)> =
-        sqlx::query_as("SELECT id FROM user_note_folders WHERE id = $1 AND person_id = $2")
-            .bind(folder)
-            .bind(person)
-            .fetch_optional(&state.db)
-            .await?;
-    found.map(|(id,)| id).ok_or(ApiError::NotFound)
+    let found: Option<UserNoteFolderId> = state
+        .db
+        .query_scalar_opt(
+            "SELECT id FROM user_note_folders WHERE id = $1 AND person_id = $2",
+            params![folder, person],
+        )
+        .await?;
+    found.ok_or(ApiError::NotFound)
 }
 
 // ── Notes ────────────────────────────────────────────────────────────────────
@@ -251,8 +253,11 @@ pub(crate) async fn list_notes_for(
     // Case-insensitive search routed through the ci_match seam (MAIN-203
     // exemplar): the Postgres arm emits the same `ILIKE '%' || $2 || '%'` as
     // before; the bound term stays in $2. Behavior is bit-identical.
-    let rows: Vec<UserNoteSummary> = sqlx::query_as(&format!(
-        r#"
+    let rows: Vec<UserNoteSummary> = state
+        .db
+        .query_all(
+            &format!(
+                r#"
         WITH RECURSIVE folder_path AS (
             SELECT id, {name_cast} AS path, parent_id
             FROM user_note_folders
@@ -274,14 +279,13 @@ pub(crate) async fn list_notes_for(
                OR {path_match})
         ORDER BY n.updated_at DESC
         "#,
-        name_cast = Postgres.cast("name", "text"),
-        title_match = Postgres.ci_match("n.title", "'%' || $2 || '%'"),
-        path_match = Postgres.ci_match("COALESCE(fp.path, '')", "'%' || $2 || '%'"),
-    ))
-    .bind(person)
-    .bind(q)
-    .fetch_all(&state.db)
-    .await?;
+                name_cast = Postgres.cast("name", "text"),
+                title_match = Postgres.ci_match("n.title", "'%' || $2 || '%'"),
+                path_match = Postgres.ci_match("COALESCE(fp.path, '')", "'%' || $2 || '%'"),
+            ),
+            params![person, q],
+        )
+        .await?;
     Ok(rows)
 }
 
@@ -305,12 +309,13 @@ pub(crate) async fn get_note_for(
     person: Uuid,
     id: UserNoteId,
 ) -> ApiResult<UserNote> {
-    let row: Option<NoteRow> =
-        sqlx::query_as("SELECT * FROM user_notes WHERE id = $1 AND person_id = $2")
-            .bind(id)
-            .bind(person)
-            .fetch_optional(&state.db)
-            .await?;
+    let row: Option<NoteRow> = state
+        .db
+        .query_opt(
+            "SELECT * FROM user_notes WHERE id = $1 AND person_id = $2",
+            params![id, person],
+        )
+        .await?;
     row.ok_or(ApiError::NotFound)?.into_note(&state.vault)
 }
 
@@ -342,17 +347,20 @@ pub(crate) async fn create_note_for(
         .vault
         .encrypt(req.content_md.as_bytes())
         .map_err(ApiError::Internal)?;
-    let row: NoteRow = sqlx::query_as(
-        "INSERT INTO user_notes (id, person_id, folder_id, title, content_enc)
+    let row: NoteRow = state
+        .db
+        .query_one(
+            "INSERT INTO user_notes (id, person_id, folder_id, title, content_enc)
          VALUES ($1, $2, $3, $4, $5) RETURNING *",
-    )
-    .bind(UserNoteId::new())
-    .bind(person)
-    .bind(req.folder_id)
-    .bind(&req.title)
-    .bind(&enc)
-    .fetch_one(&state.db)
-    .await?;
+            params![
+                UserNoteId::new(),
+                person,
+                req.folder_id.map(|f| f.0),
+                &req.title,
+                enc
+            ],
+        )
+        .await?;
     row.into_note(&state.vault)
 }
 
@@ -392,14 +400,14 @@ pub(crate) async fn update_note_for(
     // body PATCH would overwrite the client's sealed blob with server-encrypted
     // plaintext, silently breaking the seal. Title/move-only edits still pass.
     if req.content_md.is_some() {
-        let sealed: Option<(bool,)> = sqlx::query_as(
-            "SELECT sealed_salt IS NOT NULL FROM user_notes WHERE id = $1 AND person_id = $2",
-        )
-        .bind(id)
-        .bind(person)
-        .fetch_optional(&state.db)
-        .await?;
-        if matches!(sealed, Some((true,))) {
+        let sealed: Option<bool> = state
+            .db
+            .query_scalar_opt(
+                "SELECT sealed_salt IS NOT NULL FROM user_notes WHERE id = $1 AND person_id = $2",
+                params![id, person],
+            )
+            .await?;
+        if sealed == Some(true) {
             return Err(ApiError::Conflict(
                 "this note is sealed — change its body through seal/unseal, not a plain update"
                     .into(),
@@ -422,23 +430,28 @@ pub(crate) async fn update_note_for(
         None => (false, None),
         Some(v) => (true, v),
     };
-    let row: Option<NoteRow> = sqlx::query_as(&format!(
-        "UPDATE user_notes SET
+    let row: Option<NoteRow> = state
+        .db
+        .query_opt(
+            &format!(
+                "UPDATE user_notes SET
             title = COALESCE($3, title),
             content_enc = COALESCE($4, content_enc),
             folder_id = CASE WHEN $5 THEN $6 ELSE folder_id END,
             updated_at = {}
          WHERE id = $1 AND person_id = $2 RETURNING *",
-        Postgres.now()
-    ))
-    .bind(id)
-    .bind(person)
-    .bind(&req.title)
-    .bind(enc)
-    .bind(set_folder)
-    .bind(folder_val)
-    .fetch_optional(&state.db)
-    .await?;
+                Postgres.now()
+            ),
+            params![
+                id,
+                person,
+                req.title,
+                enc,
+                set_folder,
+                folder_val.map(|f| f.0)
+            ],
+        )
+        .await?;
     row.ok_or(ApiError::NotFound)?.into_note(&state.vault)
 }
 
@@ -462,12 +475,14 @@ pub(crate) async fn delete_note_for(
     person: Uuid,
     id: UserNoteId,
 ) -> ApiResult<()> {
-    let done = sqlx::query("DELETE FROM user_notes WHERE id = $1 AND person_id = $2")
-        .bind(id)
-        .bind(person)
-        .execute(&state.db)
+    let done = state
+        .db
+        .exec(
+            "DELETE FROM user_notes WHERE id = $1 AND person_id = $2",
+            params![id, person],
+        )
         .await?;
-    if done.rows_affected() == 0 {
+    if done == 0 {
         return Err(ApiError::NotFound);
     }
     Ok(())
@@ -491,11 +506,13 @@ pub(crate) async fn list_folders_for(
     state: &AppState,
     person: Uuid,
 ) -> ApiResult<Vec<UserNoteFolder>> {
-    let folders: Vec<UserNoteFolder> =
-        sqlx::query_as("SELECT * FROM user_note_folders WHERE person_id = $1 ORDER BY name")
-            .bind(person)
-            .fetch_all(&state.db)
-            .await?;
+    let folders: Vec<UserNoteFolder> = state
+        .db
+        .query_all(
+            "SELECT * FROM user_note_folders WHERE person_id = $1 ORDER BY name",
+            params![person],
+        )
+        .await?;
     Ok(folders)
 }
 
@@ -513,16 +530,19 @@ pub async fn create_folder(
     if let Some(parent) = req.parent_id {
         owned_folder(&state, person, parent).await?;
     }
-    let folder: UserNoteFolder = sqlx::query_as(
-        "INSERT INTO user_note_folders (id, person_id, parent_id, name)
+    let folder: UserNoteFolder = state
+        .db
+        .query_one(
+            "INSERT INTO user_note_folders (id, person_id, parent_id, name)
          VALUES ($1, $2, $3, $4) RETURNING *",
-    )
-    .bind(UserNoteFolderId::new())
-    .bind(person)
-    .bind(req.parent_id)
-    .bind(&req.name)
-    .fetch_one(&state.db)
-    .await?;
+            params![
+                UserNoteFolderId::new(),
+                person,
+                req.parent_id.map(|p| p.0),
+                &req.name
+            ],
+        )
+        .await?;
     Ok(Json(folder))
 }
 
@@ -557,21 +577,20 @@ pub async fn update_folder(
         None => (false, None),
         Some(v) => (true, v),
     };
-    let folder: Option<UserNoteFolder> = sqlx::query_as(&format!(
-        "UPDATE user_note_folders SET
+    let folder: Option<UserNoteFolder> = state
+        .db
+        .query_opt(
+            &format!(
+                "UPDATE user_note_folders SET
             name = COALESCE($3, name),
             parent_id = CASE WHEN $4 THEN $5 ELSE parent_id END,
             updated_at = {}
          WHERE id = $1 AND person_id = $2 RETURNING *",
-        Postgres.now()
-    ))
-    .bind(id)
-    .bind(person)
-    .bind(&req.name)
-    .bind(set_parent)
-    .bind(parent_val)
-    .fetch_optional(&state.db)
-    .await?;
+                Postgres.now()
+            ),
+            params![id, person, req.name, set_parent, parent_val.map(|p| p.0)],
+        )
+        .await?;
     folder.map(Json).ok_or(ApiError::NotFound)
 }
 
@@ -590,34 +609,30 @@ pub async fn delete_folder(
     // rise one level, then the folder itself goes. All in one transaction so a
     // partial failure cannot orphan anything.
     let mut tx = state.db.begin().await?;
-    let parent: Option<(Option<UserNoteFolderId>,)> =
-        sqlx::query_as("SELECT parent_id FROM user_note_folders WHERE id = $1 AND person_id = $2")
-            .bind(id)
-            .bind(person)
-            .fetch_optional(&mut *tx)
-            .await?;
+    let parent: Option<(Option<UserNoteFolderId>,)> = tx
+        .query_opt(
+            "SELECT parent_id FROM user_note_folders WHERE id = $1 AND person_id = $2",
+            params![id, person],
+        )
+        .await?;
     let Some((parent_id,)) = parent else {
         return Err(ApiError::NotFound);
     };
-    sqlx::query("UPDATE user_notes SET folder_id = $3 WHERE folder_id = $1 AND person_id = $2")
-        .bind(id)
-        .bind(person)
-        .bind(parent_id)
-        .execute(&mut *tx)
-        .await?;
-    sqlx::query(
-        "UPDATE user_note_folders SET parent_id = $3 WHERE parent_id = $1 AND person_id = $2",
+    tx.exec(
+        "UPDATE user_notes SET folder_id = $3 WHERE folder_id = $1 AND person_id = $2",
+        params![id, person, parent_id.map(|f| f.0)],
     )
-    .bind(id)
-    .bind(person)
-    .bind(parent_id)
-    .execute(&mut *tx)
     .await?;
-    sqlx::query("DELETE FROM user_note_folders WHERE id = $1 AND person_id = $2")
-        .bind(id)
-        .bind(person)
-        .execute(&mut *tx)
-        .await?;
+    tx.exec(
+        "UPDATE user_note_folders SET parent_id = $3 WHERE parent_id = $1 AND person_id = $2",
+        params![id, person, parent_id.map(|f| f.0)],
+    )
+    .await?;
+    tx.exec(
+        "DELETE FROM user_note_folders WHERE id = $1 AND person_id = $2",
+        params![id, person],
+    )
+    .await?;
     tx.commit().await?;
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
@@ -641,14 +656,16 @@ pub async fn vault_status(
 ) -> ApiResult<Json<NotebookVaultStatus>> {
     auth.require_user()?;
     let person = person_id_for(&state, &auth).await?;
-    let row: Option<(chrono::DateTime<chrono::Utc>,)> =
-        sqlx::query_as("SELECT created_at FROM person_vaults WHERE person_id = $1")
-            .bind(person)
-            .fetch_optional(&state.db)
-            .await?;
+    let row: Option<chrono::DateTime<chrono::Utc>> = state
+        .db
+        .query_scalar_opt(
+            "SELECT created_at FROM person_vaults WHERE person_id = $1",
+            params![person],
+        )
+        .await?;
     Ok(Json(NotebookVaultStatus {
         configured: row.is_some(),
-        created_at: row.map(|(t,)| t),
+        created_at: row,
     }))
 }
 
@@ -670,22 +687,25 @@ pub async fn set_vault_passphrase(
             "app password must be at least 8 characters".into(),
         ));
     }
-    let existing: Option<(Uuid,)> =
-        sqlx::query_as("SELECT person_id FROM person_vaults WHERE person_id = $1")
-            .bind(person)
-            .fetch_optional(&state.db)
-            .await?;
+    let existing: Option<Uuid> = state
+        .db
+        .query_scalar_opt(
+            "SELECT person_id FROM person_vaults WHERE person_id = $1",
+            params![person],
+        )
+        .await?;
     if existing.is_some() {
         return Err(ApiError::Conflict(
             "an app password is already set and cannot be changed".into(),
         ));
     }
     let (salt, verifier) = crate::crypto::passphrase_verifier(&req.passphrase);
-    sqlx::query("INSERT INTO person_vaults (person_id, kdf_salt, verifier) VALUES ($1, $2, $3)")
-        .bind(person)
-        .bind(&salt)
-        .bind(&verifier)
-        .execute(&state.db)
+    state
+        .db
+        .exec(
+            "INSERT INTO person_vaults (person_id, kdf_salt, verifier) VALUES ($1, $2, $3)",
+            params![person, salt, verifier],
+        )
         .await?;
     Ok(Json(NotebookVaultStatus {
         configured: true,
@@ -706,11 +726,13 @@ pub async fn verify_vault_passphrase(
 ) -> ApiResult<axum::http::StatusCode> {
     auth.require_user()?;
     let person = person_id_for(&state, &auth).await?;
-    let row: Option<(Vec<u8>, Vec<u8>)> =
-        sqlx::query_as("SELECT kdf_salt, verifier FROM person_vaults WHERE person_id = $1")
-            .bind(person)
-            .fetch_optional(&state.db)
-            .await?;
+    let row: Option<(Vec<u8>, Vec<u8>)> = state
+        .db
+        .query_opt(
+            "SELECT kdf_salt, verifier FROM person_vaults WHERE person_id = $1",
+            params![person],
+        )
+        .await?;
     let (salt, verifier) = row.ok_or(ApiError::NotFound)?;
     if crate::crypto::verify_passphrase(&req.passphrase, &salt, &verifier) {
         Ok(axum::http::StatusCode::NO_CONTENT)
@@ -752,19 +774,18 @@ pub async fn seal_note(
         .vault
         .encrypt(&ciphertext)
         .map_err(ApiError::Internal)?;
-    let row: Option<NoteRow> = sqlx::query_as(&format!(
-        "UPDATE user_notes
+    let row: Option<NoteRow> = state
+        .db
+        .query_opt(
+            &format!(
+                "UPDATE user_notes
          SET content_enc = $3, sealed_salt = $4, sealed_verifier = $5, updated_at = {}
          WHERE id = $1 AND person_id = $2 RETURNING *",
-        Postgres.now()
-    ))
-    .bind(id)
-    .bind(person)
-    .bind(&enc)
-    .bind(&salt)
-    .bind(&verifier)
-    .fetch_optional(&state.db)
-    .await?;
+                Postgres.now()
+            ),
+            params![id, person, enc, salt, verifier],
+        )
+        .await?;
     row.ok_or(ApiError::NotFound)?
         .into_note(&state.vault)
         .map(Json)
@@ -790,17 +811,18 @@ pub async fn unseal_note(
         .vault
         .encrypt(req.content_md.as_bytes())
         .map_err(ApiError::Internal)?;
-    let row: Option<NoteRow> = sqlx::query_as(&format!(
-        "UPDATE user_notes
+    let row: Option<NoteRow> = state
+        .db
+        .query_opt(
+            &format!(
+                "UPDATE user_notes
          SET content_enc = $3, sealed_salt = NULL, sealed_verifier = NULL, updated_at = {}
          WHERE id = $1 AND person_id = $2 AND sealed_salt IS NOT NULL RETURNING *",
-        Postgres.now()
-    ))
-    .bind(id)
-    .bind(person)
-    .bind(&enc)
-    .fetch_optional(&state.db)
-    .await?;
+                Postgres.now()
+            ),
+            params![id, person, enc],
+        )
+        .await?;
     row.ok_or(ApiError::NotFound)?
         .into_note(&state.vault)
         .map(Json)

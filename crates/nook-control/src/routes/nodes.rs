@@ -1,6 +1,6 @@
 use axum::extract::{Path, State};
 use axum::Json;
-use nook_db::{Postgres, TypeMapping};
+use nook_db::{params, Db, Postgres, TypeMapping};
 use nook_types::*;
 
 use crate::auth::AuthCtx;
@@ -14,11 +14,10 @@ use crate::state::AppState;
 /// not the caller's — otherwise an operator could only ever act on machines in
 /// their own tenant, which is the opposite of the job.
 pub(crate) async fn node_tenant(state: &AppState, id: NodeId) -> ApiResult<nook_types::TenantId> {
-    let row: Option<(nook_types::TenantId,)> =
-        sqlx::query_as("SELECT tenant_id FROM nodes WHERE id = $1")
-            .bind(id)
-            .fetch_optional(&state.db)
-            .await?;
+    let row: Option<(nook_types::TenantId,)> = state
+        .db
+        .query_opt("SELECT tenant_id FROM nodes WHERE id = $1", params![id])
+        .await?;
     row.map(|(t,)| t).ok_or(ApiError::NotFound)
 }
 
@@ -59,15 +58,15 @@ pub async fn get_one(
     auth: AuthCtx,
     Path(id): Path<NodeId>,
 ) -> ApiResult<Json<Node>> {
-    let node: Option<Node> = sqlx::query_as(
-        "SELECT id, tenant_id, name, hostname, platform, capabilities, resources, status,
+    let node: Option<Node> = state
+        .db
+        .query_opt(
+            "SELECT id, tenant_id, name, hostname, platform, capabilities, resources, status,
                 last_seen_at, owner_person_id, shared, created_at, updated_at
          FROM nodes WHERE tenant_id = $1 AND id = $2",
-    )
-    .bind(auth.tenant_id)
-    .bind(id)
-    .fetch_optional(&state.db)
-    .await?;
+            params![auth.tenant_id, id],
+        )
+        .await?;
     let node = node.ok_or(ApiError::NotFound)?;
     // A member sees a node they own OR one the team has been given (`shared`,
     // MAIN-135); anything else is a 404, not a 403, so it is indistinguishable
@@ -106,13 +105,13 @@ pub async fn set_shared(
     // A person designates a machine; a node credential is not a person.
     auth.require_user()?;
 
-    let row: Option<(Option<uuid::Uuid>, bool)> = sqlx::query_as(
-        "SELECT owner_person_id, shared FROM nodes WHERE id = $1 AND tenant_id = $2",
-    )
-    .bind(id)
-    .bind(auth.tenant_id)
-    .fetch_optional(&state.db)
-    .await?;
+    let row: Option<(Option<uuid::Uuid>, bool)> = state
+        .db
+        .query_opt(
+            "SELECT owner_person_id, shared FROM nodes WHERE id = $1 AND tenant_id = $2",
+            params![id, auth.tenant_id],
+        )
+        .await?;
     let Some((owner_person, is_shared)) = row else {
         return Err(ApiError::NotFound);
     };
@@ -144,17 +143,18 @@ pub async fn set_shared(
         Some(_) => {}
     }
 
-    let node: Node = sqlx::query_as(&format!(
-        "UPDATE nodes SET shared = $3, updated_at = {} WHERE id = $1 AND tenant_id = $2
+    let node: Node = state
+        .db
+        .query_one(
+            &format!(
+                "UPDATE nodes SET shared = $3, updated_at = {} WHERE id = $1 AND tenant_id = $2
          RETURNING id, tenant_id, name, hostname, platform, capabilities, resources, status,
                    last_seen_at, owner_person_id, shared, created_at, updated_at",
-        Postgres.now()
-    ))
-    .bind(id)
-    .bind(auth.tenant_id)
-    .bind(req.shared)
-    .fetch_one(&state.db)
-    .await?;
+                Postgres.now()
+            ),
+            params![id, auth.tenant_id, req.shared],
+        )
+        .await?;
     Ok(Json(node))
 }
 
@@ -179,13 +179,13 @@ pub async fn authorize(
 ) -> ApiResult<Json<Session>> {
     use crate::auth::perm::{Permission, Scope};
 
-    let row: Option<(Option<uuid::Uuid>, bool, serde_json::Value)> = sqlx::query_as(
-        "SELECT owner_person_id, shared, capabilities FROM nodes WHERE id = $1 AND tenant_id = $2",
-    )
-    .bind(id)
-    .bind(auth.tenant_id)
-    .fetch_optional(&state.db)
-    .await?;
+    let row: Option<(Option<uuid::Uuid>, bool, serde_json::Value)> = state
+        .db
+        .query_opt(
+            "SELECT owner_person_id, shared, capabilities FROM nodes WHERE id = $1 AND tenant_id = $2",
+            params![id, auth.tenant_id],
+        )
+        .await?;
     // Unknown/invisible node is a 404, not a 403 — no existence oracle.
     let Some((_owner, shared, caps)) = row else {
         return Err(ApiError::NotFound);
@@ -236,12 +236,14 @@ pub async fn delete(
         crate::auth::perm::Scope::Tenant(tenant),
     )
     .await?;
-    let res = sqlx::query("DELETE FROM nodes WHERE tenant_id = $1 AND id = $2")
-        .bind(tenant)
-        .bind(id)
-        .execute(&state.db)
+    let res = state
+        .db
+        .exec(
+            "DELETE FROM nodes WHERE tenant_id = $1 AND id = $2",
+            params![tenant, id],
+        )
         .await?;
-    if res.rows_affected() == 0 {
+    if res == 0 {
         return Err(ApiError::NotFound);
     }
     Ok(axum::http::StatusCode::NO_CONTENT)
@@ -260,12 +262,13 @@ pub async fn rescan(
 ) -> ApiResult<axum::http::StatusCode> {
     // A node rescans itself; asking another to is an instruction, not a report.
     auth.require_node_self(id)?;
-    let owned: Option<(NodeId,)> =
-        sqlx::query_as("SELECT id FROM nodes WHERE id = $1 AND tenant_id = $2")
-            .bind(id)
-            .bind(auth.tenant_id)
-            .fetch_optional(&state.db)
-            .await?;
+    let owned: Option<(NodeId,)> = state
+        .db
+        .query_opt(
+            "SELECT id FROM nodes WHERE id = $1 AND tenant_id = $2",
+            params![id, auth.tenant_id],
+        )
+        .await?;
     if owned.is_none() {
         return Err(ApiError::NotFound);
     }
@@ -313,12 +316,13 @@ pub async fn migrate_paths(
     // only for a node in their tenant — exactly the `rescan` authorization. A
     // node token that named a peer would be rewriting another machine's rows.
     auth.require_node_self(id)?;
-    let owned: Option<(NodeId,)> =
-        sqlx::query_as("SELECT id FROM nodes WHERE id = $1 AND tenant_id = $2")
-            .bind(id)
-            .bind(auth.tenant_id)
-            .fetch_optional(&state.db)
-            .await?;
+    let owned: Option<(NodeId,)> = state
+        .db
+        .query_opt(
+            "SELECT id FROM nodes WHERE id = $1 AND tenant_id = $2",
+            params![id, auth.tenant_id],
+        )
+        .await?;
     if owned.is_none() {
         return Err(ApiError::NotFound);
     }
@@ -381,12 +385,13 @@ pub async fn update(
         crate::auth::perm::Scope::Tenant(tenant),
     )
     .await?;
-    let owned: Option<(NodeId,)> =
-        sqlx::query_as("SELECT id FROM nodes WHERE id = $1 AND tenant_id = $2")
-            .bind(id)
-            .bind(tenant)
-            .fetch_optional(&state.db)
-            .await?;
+    let owned: Option<(NodeId,)> = state
+        .db
+        .query_opt(
+            "SELECT id FROM nodes WHERE id = $1 AND tenant_id = $2",
+            params![id, tenant],
+        )
+        .await?;
     if owned.is_none() {
         return Err(ApiError::NotFound);
     }

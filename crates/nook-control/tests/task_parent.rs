@@ -87,7 +87,7 @@ async fn epic_parent_create_patch_validate_filter_and_orphan() {
         .expect("epic");
     // create_task returns the raw row; the human key is computed by enrich.
     let epic =
-        nook_control::services::tasks::enrich_one(&bed.pool, "http://x", UserId::new(), epic)
+        nook_control::services::tasks::enrich_one(&bed.db(), "http://x", UserId::new(), epic)
             .await
             .expect("enrich epic");
     let epic_key = epic.key.clone().expect("epic key"); // e.g. B123-1
@@ -124,7 +124,7 @@ async fn epic_parent_create_patch_validate_filter_and_orphan() {
         limit: Some(200),
         ..Default::default()
     };
-    let mut ids: Vec<TaskId> = query_rows(&bed.pool, tenant, nook_types::UserId::new(), &f)
+    let mut ids: Vec<TaskId> = query_rows(&bed.db(), tenant, nook_types::UserId::new(), &f)
         .await
         .expect("children")
         .into_iter()
@@ -275,7 +275,7 @@ async fn private_child_does_not_leak_through_epic() {
         .await
         .expect("epic");
     let epic =
-        nook_control::services::tasks::enrich_one(&bed.pool, "http://x", UserId::new(), epic)
+        nook_control::services::tasks::enrich_one(&bed.db(), "http://x", UserId::new(), epic)
             .await
             .expect("enrich");
     let epic_key = epic.key.clone().expect("key");
@@ -324,7 +324,7 @@ async fn private_child_does_not_leak_through_epic() {
         limit: Some(200),
         ..Default::default()
     };
-    let b_ids: Vec<TaskId> = query_rows(&bed.pool, tenant, b, &f)
+    let b_ids: Vec<TaskId> = query_rows(&bed.db(), tenant, b, &f)
         .await
         .expect("B parent list")
         .into_iter()
@@ -335,7 +335,7 @@ async fn private_child_does_not_leak_through_epic() {
         !b_ids.contains(&secret_child.id),
         "the parent filter never leaks the private child to a non-owner"
     );
-    let a_ids: Vec<TaskId> = query_rows(&bed.pool, tenant, a, &f)
+    let a_ids: Vec<TaskId> = query_rows(&bed.db(), tenant, a, &f)
         .await
         .expect("A parent list")
         .into_iter()

@@ -18,9 +18,13 @@
 //! `PgConnection` — are deliberately left alone here; they are the engine
 //! mechanism PR-B replaces, not this seam.
 
-/// The workspace-wide database pool type. See the crate docs: this is the single
-/// pivot the engine-by-URL abstraction (MAIN-195) will redefine.
-pub type DbPool = sqlx::PgPool;
+/// The workspace-wide database pool type (MAIN-205): the engine-dispatching
+/// [`EnginePool`], which carries the [`Db`] query surface and hides whether it is
+/// backed by Postgres or SQLite. This is the pivot the whole workspace routes
+/// through — the ~656 executor sites call `db.query_*`/`exec`/`begin`, never a
+/// concrete `PgPool`. Boot construction runs through [`connect`]; migrations and
+/// the few raw-pool boot paths reach the Postgres arm via [`EnginePool::pg`].
+pub type DbPool = pool::EnginePool;
 
 /// The engine seams (MAIN-198): atomic-claim / json / type-mapping / event-bus
 /// traits + the Postgres arm, for the coming dialect sweep to dispatch on.
@@ -28,6 +32,11 @@ pub mod dialect;
 pub use dialect::{
     AtomicClaim, CiMatch, EventBus, Json, PgEventBus, Postgres, Sqlite, TimeMath, TypeMapping,
 };
+
+/// The engine-dispatching pool + parameter model (MAIN-205). Introduced
+/// alongside the `DbPool` alias; it becomes the pool type at the call-site flip.
+pub mod pool;
+pub use pool::{Db, DbTx, DbValue, EnginePool, IntoDbValue};
 
 use std::fmt;
 
@@ -118,11 +127,14 @@ pub fn engine_from_url(url: &str) -> Result<Engine, DbError> {
 /// engine that requires it, not here).
 pub async fn connect(url: &str, max_connections: u32) -> Result<DbPool, DbError> {
     match engine_from_url(url)? {
-        Engine::Postgres => sqlx::postgres::PgPoolOptions::new()
-            .max_connections(max_connections)
-            .connect(url)
-            .await
-            .map_err(DbError::Connect),
+        Engine::Postgres => {
+            let pg = sqlx::postgres::PgPoolOptions::new()
+                .max_connections(max_connections)
+                .connect(url)
+                .await
+                .map_err(DbError::Connect)?;
+            Ok(EnginePool::from_pg(pg))
+        }
         Engine::Sqlite => Err(DbError::NotYetSupported(Engine::Sqlite)),
     }
 }
