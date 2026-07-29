@@ -152,7 +152,28 @@ pub async fn list_sessions(
     if let Some(c) = creator {
         binds.extend(params![c]);
     }
-    Ok(db.query_all::<Session>(&sql, binds).await?)
+    let mut sessions = db.query_all::<Session>(&sql, binds).await?;
+    hydrate_checkouts(db, &mut sessions).await?;
+    Ok(sessions)
+}
+
+/// Fill each session's `checkout` summary from its `checkout_id` (MAIN-222 AC-5)
+/// — id, path, branch, kind, and the node it lives on. A small N+1 over a short
+/// page of sessions; sessions with no binding (ad-hoc terminals, pruned
+/// checkouts) are left `None`.
+pub async fn hydrate_checkouts(db: &DbPool, sessions: &mut [Session]) -> ApiResult<()> {
+    for s in sessions.iter_mut() {
+        let Some(cid) = s.checkout_id else { continue };
+        s.checkout = db
+            .query_opt::<nook_types::CheckoutSummary>(
+                "SELECT nw.id, nw.path, nw.git_branch AS branch, nw.kind, n.name AS node_name
+                 FROM node_workspaces nw JOIN nodes n ON n.id = nw.node_id
+                 WHERE nw.id = $1",
+                params![cid],
+            )
+            .await?;
+    }
+    Ok(())
 }
 
 /// Who may see which activity events (MAIN-134). A tenant owner/admin — and a
@@ -564,8 +585,12 @@ pub async fn create_session(
             state
                 .db
                 .query_scalar_opt(
+                    // MAIN-222 AC-3: the default "the checkout" is the CLONE,
+                    // deterministically — never a worktree a delete/reinsert
+                    // happened to order first.
                     "SELECT path FROM node_workspaces
-             WHERE tenant_id = $1 AND node_id = $2 AND workspace_id = $3 AND missing_at IS NULL
+             WHERE tenant_id = $1 AND node_id = $2 AND workspace_id = $3
+               AND kind = 'clone' AND missing_at IS NULL
              ORDER BY discovered_at LIMIT 1",
                     params![tenant, req.node_id, req.workspace_id],
                 )
@@ -609,11 +634,30 @@ pub async fn create_session_at(
         return Err(ApiError::BadRequest("node is offline".into()));
     }
     let name = name.unwrap_or_else(|| format!("{runtime} session"));
+
+    // MAIN-222 AC-2: bind the session to the exact checkout row its working
+    // directory is, so restart can return to it and the UI can show where it
+    // runs. Resolved from the path (present rows only) — whatever picked the
+    // path, primary clone or a freshly-created worktree; NULL if no row yet
+    // (discovery may not have scanned a just-made worktree) or an ad-hoc $HOME.
+    let checkout_id: Option<NodeWorkspaceId> = if workspace_path.is_empty() {
+        None
+    } else {
+        state
+            .db
+            .query_scalar_opt(
+                "SELECT id FROM node_workspaces
+                 WHERE node_id = $1 AND path = $2 AND missing_at IS NULL",
+                params![node_id, workspace_path],
+            )
+            .await?
+    };
+
     let session: Session = state
         .db
         .query_one(
-            "INSERT INTO sessions (id, tenant_id, workspace_id, node_id, name, runtime, status, created_by)
-         VALUES ($1, $2, $3, $4, $5, $6, 'starting', $7) RETURNING *",
+            "INSERT INTO sessions (id, tenant_id, workspace_id, node_id, name, runtime, status, created_by, checkout_id)
+         VALUES ($1, $2, $3, $4, $5, $6, 'starting', $7, $8) RETURNING *",
             params![
                 SessionId::new(),
                 tenant,
@@ -621,7 +665,8 @@ pub async fn create_session_at(
                 node_id,
                 &name,
                 runtime,
-                created_by.map(|u| u.0)
+                created_by.map(|u| u.0),
+                checkout_id.map(|c| c.0)
             ],
         )
         .await?;

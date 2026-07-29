@@ -670,6 +670,27 @@ pub struct Session {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub ended_at: Option<DateTime<Utc>>,
+    /// The checkout row this session runs in (MAIN-222). NULL for an ad-hoc
+    /// `$HOME` terminal, or once the checkout it started in has been pruned.
+    pub checkout_id: Option<NodeWorkspaceId>,
+    /// Denormalised summary of `checkout_id` for the UI — filled by the session
+    /// endpoints, not a stored column, so it is absent from a raw `FROM sessions`
+    /// row (hence `sqlx(default)`).
+    #[serde(default)]
+    #[sqlx(skip)]
+    pub checkout: Option<CheckoutSummary>,
+}
+
+/// Where a session runs, in the shape the UI needs to show it (MAIN-222 AC-5):
+/// the checkout's id, path, branch, kind, and the node it lives on.
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
+pub struct CheckoutSummary {
+    pub id: NodeWorkspaceId,
+    pub path: String,
+    pub branch: Option<String>,
+    /// `clone` | `worktree` | `mirror`.
+    pub kind: String,
+    pub node_name: String,
 }
 
 // ── Kanban ───────────────────────────────────────────────────────────────────

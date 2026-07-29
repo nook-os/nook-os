@@ -3516,6 +3516,18 @@ export interface components {
             parent: components["schemas"]["ChatMessage"];
             replies: components["schemas"]["ChatMessage"][];
         };
+        /**
+         * @description Where a session runs, in the shape the UI needs to show it (MAIN-222 AC-5):
+         *     the checkout's id, path, branch, kind, and the node it lives on.
+         */
+        CheckoutSummary: {
+            branch?: string | null;
+            id: components["schemas"]["NodeWorkspaceId"];
+            /** @description `clone` | `worktree` | `mirror`. */
+            kind: string;
+            node_name: string;
+            path: string;
+        };
         /** @description `POST /tasks/{id}/claim` — take the work without racing another agent. */
         ClaimTaskRequest: {
             assignee_user_id?: null | components["schemas"]["UserId"];
@@ -4832,6 +4844,8 @@ export interface components {
          *     Runtime is an open string: "claude", "hermes", "codex", "bash", "zsh", ...
          */
         Session: {
+            checkout?: null | components["schemas"]["CheckoutSummary"];
+            checkout_id?: null | components["schemas"]["NodeWorkspaceId"];
             /** Format: date-time */
             created_at: string;
             created_by?: null | components["schemas"]["UserId"];

@@ -263,6 +263,35 @@ function isLive(status: string): boolean {
   return status === "starting" || status === "running" || status === "detached";
 }
 
+/**
+ * Where a session actually runs: the node holding the checkout and the branch
+ * it sits on. Ad-hoc `$HOME` terminals have no checkout, so callers only render
+ * this when `session.checkout` is present. A linked git worktree is flagged so
+ * a session on a throwaway branch reads differently from one on the primary
+ * clone. Reuses the same amber pills as the rest of the header — no new widget.
+ */
+function CheckoutChip({
+  checkout,
+}: {
+  checkout: NonNullable<Session["checkout"]>;
+}) {
+  const worktree = checkout.kind === "worktree";
+  return (
+    <span className="checkout-chip">
+      <Pill title={`node: ${checkout.node_name}`}>{checkout.node_name}</Pill>
+      {checkout.branch && (
+        <Pill
+          title={`branch: ${checkout.branch}${worktree ? " (worktree)" : ""}`}
+        >
+          <GitBranch size={11} style={{ verticalAlign: "-1px" }} />
+          {checkout.branch}
+          {worktree && <span className="faint">·wt</span>}
+        </Pill>
+      )}
+    </span>
+  );
+}
+
 // The session terminal's right-click menu (AC-4): copy the terminal's own
 // selection, or paste clipboard text down the session's existing send path
 // (term.paste → onData → transport.sendInput). Registered as a context-menu
@@ -462,6 +491,7 @@ export function SessionPage() {
             {!dead && <SessionWindows sessionId={session.id} />}
             <Pill tone="accent">{session.runtime}</Pill>
             <Pill tone={statusTone(status)}>{status}</Pill>
+            {session.checkout && <CheckoutChip checkout={session.checkout} />}
             {dead ? (
               <button className="btn small" onClick={restart} title="restart session">
                 <RotateCw size={12} /> restart
@@ -718,6 +748,7 @@ export function SessionsPage() {
                       <Link className="bright" to={`/sessions/${s.id}`}>
                         {s.name}
                       </Link>
+                      {s.checkout && <CheckoutChip checkout={s.checkout} />}
                     </td>
                     <td>
                       <Pill tone="accent">{s.runtime}</Pill>

@@ -315,6 +315,7 @@ use utoipa::OpenApi;
         nook_types::NodeWorkspace,
         nook_types::WorkspaceLocation,
         nook_types::Session,
+        nook_types::CheckoutSummary,
         nook_types::ReportAgentStateRequest,
         nook_types::AgentStateItem,
         nook_types::Board,

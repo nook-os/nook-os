@@ -191,8 +191,12 @@ pub async fn start_work(
     let repo_path: Option<String> = state
         .db
         .query_scalar_opt(
+            // MAIN-222 AC-3: worktree from the CLONE, never from a worktree — a
+            // deterministic, clone-only pick (kind + missing_at), not bare
+            // discovered_at order that a delete/reinsert could reshuffle.
             "SELECT path FROM node_workspaces
-         WHERE tenant_id = $1 AND workspace_id = $2 AND node_id = $3 AND missing_at IS NULL
+         WHERE tenant_id = $1 AND workspace_id = $2 AND node_id = $3
+           AND kind = 'clone' AND missing_at IS NULL
          ORDER BY discovered_at LIMIT 1",
             params![tenant, workspace_id, node_id],
         )
