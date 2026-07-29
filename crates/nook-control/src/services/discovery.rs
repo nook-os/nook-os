@@ -160,14 +160,15 @@ pub async fn reconcile(
                 &format!(
                     "INSERT INTO node_workspaces
                (id, tenant_id, node_id, workspace_id, path, git_remote_url,
-                git_remote_normalized, git_branch, git_status)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                git_remote_normalized, git_branch, git_status, kind)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
              ON CONFLICT (node_id, path) DO UPDATE SET
                workspace_id = EXCLUDED.workspace_id,
                git_remote_url = EXCLUDED.git_remote_url,
                git_remote_normalized = EXCLUDED.git_remote_normalized,
                git_branch = EXCLUDED.git_branch,
                git_status = EXCLUDED.git_status,
+               kind = EXCLUDED.kind,
                missing_at = NULL,
                last_scanned_at = {}",
                     Postgres.now()
@@ -181,7 +182,10 @@ pub async fn reconcile(
                     d.git_remote_url.clone(),
                     normalized.clone(),
                     d.branch.clone(),
-                    serde_json::json!({ "dirty": d.dirty, "worktree": d.worktree })
+                    serde_json::json!({ "dirty": d.dirty, "worktree": d.worktree }),
+                    // MAIN-222 AC-1: the node's report drives `kind` directly. The
+                    // jsonb flag stays for compat but nothing new reads it.
+                    if d.worktree { "worktree" } else { "clone" }
                 ],
             )
             .await?;

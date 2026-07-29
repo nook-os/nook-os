@@ -818,6 +818,16 @@ code,
 .pill.info { color: var(--nook-info); border-color: var(--nook-info); }
 .pill.accent { color: var(--nook-accent); border-color: var(--nook-accent); }
 
+/* Groups the node + branch pills that say where a session runs. Inline so it
+   sits beside the existing header pills; wraps to the name in the dense list. */
+.checkout-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  vertical-align: middle;
+}
+.nook-table .checkout-chip { margin-left: 6px; }
+
 .dot {
   display: inline-block;
   width: 7px;

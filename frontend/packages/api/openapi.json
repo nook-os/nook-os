@@ -7932,6 +7932,37 @@
           }
         }
       },
+      "CheckoutSummary": {
+        "type": "object",
+        "description": "Where a session runs, in the shape the UI needs to show it (MAIN-222 AC-5):\nthe checkout's id, path, branch, kind, and the node it lives on.",
+        "required": [
+          "id",
+          "path",
+          "kind",
+          "node_name"
+        ],
+        "properties": {
+          "branch": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "$ref": "#/components/schemas/NodeWorkspaceId"
+          },
+          "kind": {
+            "type": "string",
+            "description": "`clone` | `worktree` | `mirror`."
+          },
+          "node_name": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          }
+        }
+      },
       "ClaimTaskRequest": {
         "type": "object",
         "description": "`POST /tasks/{id}/claim` — take the work without racing another agent.",
@@ -11201,6 +11232,28 @@
           "updated_at"
         ],
         "properties": {
+          "checkout": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/CheckoutSummary",
+                "description": "Denormalised summary of `checkout_id` for the UI — filled by the session\nendpoints, not a stored column, so it is absent from a raw `FROM sessions`\nrow (hence `sqlx(default)`)."
+              }
+            ]
+          },
+          "checkout_id": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/NodeWorkspaceId",
+                "description": "The checkout row this session runs in (MAIN-222). NULL for an ad-hoc\n`$HOME` terminal, or once the checkout it started in has been pruned."
+              }
+            ]
+          },
           "created_at": {
             "type": "string",
             "format": "date-time"

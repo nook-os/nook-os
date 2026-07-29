@@ -83,7 +83,8 @@ pub async fn get_one(
     auth: AuthCtx,
     Path(id): Path<SessionId>,
 ) -> ApiResult<Json<Session>> {
-    let session = session_for_content(&state, &auth, id).await?;
+    let mut session = session_for_content(&state, &auth, id).await?;
+    core::hydrate_checkouts(&state.db, std::slice::from_mut(&mut session)).await?;
     Ok(Json(session))
 }
 
@@ -100,7 +101,8 @@ pub async fn create(
     // own, OR one its owner has shared with the team (MAIN-136, relaxing the
     // MAIN-130 owner-only rule). Management of the node stays owner-gated.
     auth.require_node_may_use(&state, req.node_id).await?;
-    let session = core::create_session(&state, auth.tenant_id, Some(auth.user_id), req).await?;
+    let mut session = core::create_session(&state, auth.tenant_id, Some(auth.user_id), req).await?;
+    core::hydrate_checkouts(&state.db, std::slice::from_mut(&mut session)).await?;
     Ok(Json(session))
 }
 
@@ -405,24 +407,49 @@ pub async fn restart(
     let workspace_path = match session.workspace_id {
         None => String::new(),
         Some(workspace_id) => {
-            // Reuse the checkout the session was started in; fall back to any
-            // checkout of its workspace on that node (the original may have
-            // been pruned).
-            let path: Option<(String,)> = state
-                .db
-                .query_opt(
-                    "SELECT path FROM node_workspaces
-                 WHERE workspace_id = $1 AND node_id = $2 AND missing_at IS NULL
-                 ORDER BY discovered_at LIMIT 1",
-                    params![workspace_id, session.node_id],
-                )
-                .await?;
-            match path {
+            // MAIN-222 AC-4: reuse the EXACT checkout the session started in when
+            // it is still present. The stored binding is what makes "restart
+            // lands in the same worktree" true instead of aspirational.
+            let bound: Option<(String,)> = if let Some(cid) = session.checkout_id {
+                state
+                    .db
+                    .query_opt(
+                        "SELECT path FROM node_workspaces WHERE id = $1 AND missing_at IS NULL",
+                        params![cid],
+                    )
+                    .await?
+            } else {
+                None
+            };
+            match bound {
                 Some((p,)) => p,
+                // NULL binding, or the bound checkout is gone: fall back to the
+                // deterministic clone-only pick (AC-3), and say so.
                 None => {
-                    return Err(ApiError::BadRequest(
-                        "that workspace has no checkout on this node any more".into(),
-                    ))
+                    let fallback: Option<(String,)> = state
+                        .db
+                        .query_opt(
+                            "SELECT path FROM node_workspaces
+                         WHERE workspace_id = $1 AND node_id = $2
+                           AND kind = 'clone' AND missing_at IS NULL
+                         ORDER BY discovered_at LIMIT 1",
+                            params![workspace_id, session.node_id],
+                        )
+                        .await?;
+                    match fallback {
+                        Some((p,)) => {
+                            tracing::info!(
+                                session_id = %id,
+                                "restart: bound checkout absent — falling back to the primary clone"
+                            );
+                            p
+                        }
+                        None => {
+                            return Err(ApiError::BadRequest(
+                                "that workspace has no checkout on this node any more".into(),
+                            ))
+                        }
+                    }
                 }
             }
         }
@@ -442,7 +469,7 @@ pub async fn restart(
         return Err(ApiError::BadRequest("node went offline".into()));
     }
 
-    let session: Session = state
+    let mut session: Session = state
         .db
         .query_one(
             &format!(
@@ -454,6 +481,7 @@ pub async fn restart(
             params![id],
         )
         .await?;
+    core::hydrate_checkouts(&state.db, std::slice::from_mut(&mut session)).await?;
     state.registry.publish(
         auth.tenant_id,
         UiEvent::SessionStatus {
