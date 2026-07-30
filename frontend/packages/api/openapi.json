@@ -3816,6 +3816,47 @@
         }
       }
     },
+    "/api/v1/runtime-auth": {
+      "post": {
+        "tags": [
+          "crate::routes::runtime_auth"
+        ],
+        "summary": "Start a sessionless authorization.",
+        "description": "Authorization to *run* this is the same rule the session-based endpoint\nuses, applied to every named node: a personal machine is its owner's alone,\na shared or operator machine needs `node.manage`. Delivering a credential to\na shared machine makes that runtime available to every workload already\npermitted to run there, which is not one person's call.",
+        "operationId": "start_runtime_auth",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RuntimeAuthRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RuntimeAuthAccepted"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": ""
+          },
+          "403": {
+            "description": ""
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      }
+    },
     "/api/v1/schedule/node": {
       "get": {
         "tags": [
@@ -11489,6 +11530,43 @@
           }
         }
       },
+      "RuntimeAuthAccepted": {
+        "type": "object",
+        "required": [
+          "flow_id",
+          "runtime"
+        ],
+        "properties": {
+          "flow_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Correlates every `UiEvent` this flow emits. The caller watches the\nsocket it already has."
+          },
+          "runtime": {
+            "type": "string"
+          }
+        }
+      },
+      "RuntimeAuthRequest": {
+        "type": "object",
+        "required": [
+          "runtime",
+          "node_ids"
+        ],
+        "properties": {
+          "node_ids": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/NodeId"
+            },
+            "description": "Every machine that should end up with the credential. One approval\ncovers all of them."
+          },
+          "runtime": {
+            "type": "string",
+            "description": "The runtime to authorize — `claude` today."
+          }
+        }
+      },
       "ScheduledNode": {
         "type": "object",
         "description": "The node the resource-aware scheduler chose for \"Auto\" placement.",
@@ -12725,6 +12803,139 @@
       },
       "UiEvent": {
         "oneOf": [
+          {
+            "type": "object",
+            "description": "A device flow has started and is waiting for a human (MAIN-290).\n\nCarries the only two things a person needs — the code to type and where\nto type it — so the UI can put them on screen while the control plane is\nstill polling the provider. The device code itself is NOT here: it is\nthe secret half of the exchange and never leaves the control plane.",
+            "required": [
+              "data",
+              "type"
+            ],
+            "properties": {
+              "data": {
+                "type": "object",
+                "description": "A device flow has started and is waiting for a human (MAIN-290).\n\nCarries the only two things a person needs — the code to type and where\nto type it — so the UI can put them on screen while the control plane is\nstill polling the provider. The device code itself is NOT here: it is\nthe secret half of the exchange and never leaves the control plane.",
+                "required": [
+                  "flow_id",
+                  "runtime",
+                  "user_code",
+                  "verification_uri",
+                  "expires_in_secs"
+                ],
+                "properties": {
+                  "expires_in_secs": {
+                    "type": "integer",
+                    "format": "int64",
+                    "description": "Seconds until the code stops working, so the UI can count down\nrather than leave a dead code on screen.",
+                    "minimum": 0
+                  },
+                  "flow_id": {
+                    "type": "string",
+                    "format": "uuid"
+                  },
+                  "runtime": {
+                    "type": "string"
+                  },
+                  "user_code": {
+                    "type": "string"
+                  },
+                  "verification_uri": {
+                    "type": "string",
+                    "description": "The pre-filled link when the provider offers one, else the plain\nverification URI."
+                  }
+                }
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "runtime_auth_prompt"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "One node's outcome for a delivery (MAIN-290).\n\nEmitted per node, not once per flow: authorize-once/deliver-to-N means\nsome machines can succeed while others fail, and a single aggregate\nresult would hide that. `error` present means this node did not get it.",
+            "required": [
+              "data",
+              "type"
+            ],
+            "properties": {
+              "data": {
+                "type": "object",
+                "description": "One node's outcome for a delivery (MAIN-290).\n\nEmitted per node, not once per flow: authorize-once/deliver-to-N means\nsome machines can succeed while others fail, and a single aggregate\nresult would hide that. `error` present means this node did not get it.",
+                "required": [
+                  "flow_id",
+                  "node_id",
+                  "runtime"
+                ],
+                "properties": {
+                  "error": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "flow_id": {
+                    "type": "string",
+                    "format": "uuid"
+                  },
+                  "node_id": {
+                    "$ref": "#/components/schemas/NodeId"
+                  },
+                  "runtime": {
+                    "type": "string"
+                  }
+                }
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "runtime_auth_delivered"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "The flow ended without a credential (MAIN-290).\n\n`kind` is the machine-readable class — `expired`, `denied`, `provider`,\n`transport` — so the UI can offer \"start again\" for an expired code and\nsomething different for a refusal, rather than one dead end for all of\nthem.",
+            "required": [
+              "data",
+              "type"
+            ],
+            "properties": {
+              "data": {
+                "type": "object",
+                "description": "The flow ended without a credential (MAIN-290).\n\n`kind` is the machine-readable class — `expired`, `denied`, `provider`,\n`transport` — so the UI can offer \"start again\" for an expired code and\nsomething different for a refusal, rather than one dead end for all of\nthem.",
+                "required": [
+                  "flow_id",
+                  "runtime",
+                  "kind",
+                  "message"
+                ],
+                "properties": {
+                  "flow_id": {
+                    "type": "string",
+                    "format": "uuid"
+                  },
+                  "kind": {
+                    "type": "string"
+                  },
+                  "message": {
+                    "type": "string"
+                  },
+                  "runtime": {
+                    "type": "string"
+                  }
+                }
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "runtime_auth_failed"
+                ]
+              }
+            }
+          },
           {
             "type": "object",
             "required": [

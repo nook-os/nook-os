@@ -1806,6 +1806,30 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/runtime-auth": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Start a sessionless authorization.
+         * @description Authorization to *run* this is the same rule the session-based endpoint
+         *     uses, applied to every named node: a personal machine is its owner's alone,
+         *     a shared or operator machine needs `node.manage`. Delivering a credential to
+         *     a shared machine makes that runtime available to every workload already
+         *     permitted to run there, which is not one person's call.
+         */
+        post: operations["start_runtime_auth"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/schedule/node": {
         parameters: {
             query?: never;
@@ -4943,6 +4967,24 @@ export interface components {
             message: string;
             sent: boolean;
         };
+        RuntimeAuthAccepted: {
+            /**
+             * Format: uuid
+             * @description Correlates every `UiEvent` this flow emits. The caller watches the
+             *     socket it already has.
+             */
+            flow_id: string;
+            runtime: string;
+        };
+        RuntimeAuthRequest: {
+            /**
+             * @description Every machine that should end up with the credential. One approval
+             *     covers all of them.
+             */
+            node_ids: components["schemas"]["NodeId"][];
+            /** @description The runtime to authorize — `claude` today. */
+            runtime: string;
+        };
         /** @description The node the resource-aware scheduler chose for "Auto" placement. */
         ScheduledNode: {
             node_id: components["schemas"]["NodeId"];
@@ -5443,6 +5485,69 @@ export interface components {
         };
         /** @description Live events pushed to browsers over `/api/v1/ws/ui`. */
         UiEvent: {
+            /**
+             * @description A device flow has started and is waiting for a human (MAIN-290).
+             *
+             *     Carries the only two things a person needs — the code to type and where
+             *     to type it — so the UI can put them on screen while the control plane is
+             *     still polling the provider. The device code itself is NOT here: it is
+             *     the secret half of the exchange and never leaves the control plane.
+             */
+            data: {
+                /**
+                 * Format: int64
+                 * @description Seconds until the code stops working, so the UI can count down
+                 *     rather than leave a dead code on screen.
+                 */
+                expires_in_secs: number;
+                /** Format: uuid */
+                flow_id: string;
+                runtime: string;
+                user_code: string;
+                /**
+                 * @description The pre-filled link when the provider offers one, else the plain
+                 *     verification URI.
+                 */
+                verification_uri: string;
+            };
+            /** @enum {string} */
+            type: "runtime_auth_prompt";
+        } | {
+            /**
+             * @description One node's outcome for a delivery (MAIN-290).
+             *
+             *     Emitted per node, not once per flow: authorize-once/deliver-to-N means
+             *     some machines can succeed while others fail, and a single aggregate
+             *     result would hide that. `error` present means this node did not get it.
+             */
+            data: {
+                error?: string | null;
+                /** Format: uuid */
+                flow_id: string;
+                node_id: components["schemas"]["NodeId"];
+                runtime: string;
+            };
+            /** @enum {string} */
+            type: "runtime_auth_delivered";
+        } | {
+            /**
+             * @description The flow ended without a credential (MAIN-290).
+             *
+             *     `kind` is the machine-readable class — `expired`, `denied`, `provider`,
+             *     `transport` — so the UI can offer "start again" for an expired code and
+             *     something different for a refusal, rather than one dead end for all of
+             *     them.
+             */
+            data: {
+                /** Format: uuid */
+                flow_id: string;
+                kind: string;
+                message: string;
+                runtime: string;
+            };
+            /** @enum {string} */
+            type: "runtime_auth_failed";
+        } | {
             data: {
                 name: string;
                 node_id: components["schemas"]["NodeId"];
@@ -8981,6 +9086,47 @@ export interface operations {
         requestBody?: never;
         responses: {
             204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    start_runtime_auth: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RuntimeAuthRequest"];
+            };
+        };
+        responses: {
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RuntimeAuthAccepted"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            403: {
                 headers: {
                     [name: string]: unknown;
                 };
