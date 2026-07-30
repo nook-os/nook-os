@@ -8,25 +8,18 @@
 use axum::extract::{Path, State};
 use axum::Json;
 use base64::Engine;
-use nook_db::{params, CiMatch, Db, Postgres, TypeMapping};
 use nook_proto::ControlToNode;
 use nook_types::*;
 
 use crate::auth::AuthCtx;
 use crate::error::{ApiError, ApiResult};
 use crate::events::{self, EventDraft};
+use crate::repo::notifications::FeedbackSetting;
 use crate::state::AppState;
 
 /// The session all feedback for a workspace is delivered into.
 const SESSION_NAME: &str = "Feedback";
 /// Setting that remembers which workspace feedback goes to.
-const WORKSPACE_SETTING: &str = "feedback_workspace_id";
-/// Setting that remembers the branch improvements should land on.
-const BRANCH_SETTING: &str = "feedback_branch";
-/// Setting that remembers what to do with a change once it works.
-const INSTRUCTIONS_SETTING: &str = "feedback_instructions";
-/// Repo-local fallback for those instructions, so they can live with the code
-/// they describe. A flat name: the node only reads files at a checkout root.
 const INSTRUCTIONS_FILE: &str = ".nook-feedback.md";
 
 #[utoipa::path(get, path = "/api/v1/feedback",
@@ -36,13 +29,7 @@ pub async fn list(
     State(state): State<AppState>,
     auth: AuthCtx,
 ) -> ApiResult<Json<Vec<FeedbackItem>>> {
-    let rows: Vec<FeedbackItem> = state
-        .db
-        .query_all(
-            "SELECT * FROM feedback WHERE tenant_id = $1 ORDER BY created_at DESC LIMIT 200",
-            params![auth.tenant_id],
-        )
-        .await?;
+    let rows: Vec<FeedbackItem> = state.feedback.list(auth.tenant_id).await?;
     Ok(Json(rows))
 }
 
@@ -59,14 +46,7 @@ pub async fn target(
         resolved_instructions(&state, &auth, workspace_id).await?;
     let (name, remote) = match workspace_id {
         Some(id) => {
-            let row: Option<(String, Option<String>)> = state
-                .db
-                .query_opt(
-                    "SELECT w.name, w.git_remote_normalized FROM workspaces w
-                 WHERE w.id = $1 AND w.tenant_id = $2",
-                    params![id, auth.tenant_id],
-                )
-                .await?;
+            let row = state.workspaces.name_and_remote(id, auth.tenant_id).await?;
             match row {
                 Some((n, r)) => (Some(n), r),
                 None => (None, None),
@@ -81,7 +61,7 @@ pub async fn target(
         workspace_name: name,
         git_remote: remote,
         session_name: SESSION_NAME.to_string(),
-        branch: setting(&state, &auth, BRANCH_SETTING).await?,
+        branch: setting(&state, &auth, FeedbackSetting::Branch).await?,
         instructions,
         instructions_from_repo,
     }))
@@ -99,7 +79,7 @@ async fn resolved_instructions(
     auth: &AuthCtx,
     workspace_id: Option<WorkspaceId>,
 ) -> ApiResult<(Option<String>, bool)> {
-    if let Some(text) = setting(state, auth, INSTRUCTIONS_SETTING).await? {
+    if let Some(text) = setting(state, auth, FeedbackSetting::Instructions).await? {
         if !text.trim().is_empty() {
             return Ok((Some(text), false));
         }
@@ -135,12 +115,9 @@ pub async fn set_target(
 ) -> ApiResult<Json<FeedbackTarget>> {
     // Repointing feedback aims that typing at a different repo.
     auth.require_user()?;
-    let owned: Option<(WorkspaceId,)> = state
-        .db
-        .query_opt(
-            "SELECT id FROM workspaces WHERE id = $1 AND tenant_id = $2",
-            params![req.workspace_id, auth.tenant_id],
-        )
+    let owned = state
+        .workspaces
+        .get(auth.tenant_id, req.workspace_id)
         .await?;
     if owned.is_none() {
         return Err(ApiError::NotFound);
@@ -149,7 +126,7 @@ pub async fn set_target(
     put_setting(
         &state,
         &auth,
-        WORKSPACE_SETTING,
+        FeedbackSetting::Workspace,
         serde_json::Value::String(req.workspace_id.to_string()),
     )
     .await?;
@@ -160,7 +137,7 @@ pub async fn set_target(
     put_setting(
         &state,
         &auth,
-        BRANCH_SETTING,
+        FeedbackSetting::Branch,
         match &branch {
             Some(b) => serde_json::Value::String(b.clone()),
             None => serde_json::Value::Null,
@@ -174,7 +151,7 @@ pub async fn set_target(
     put_setting(
         &state,
         &auth,
-        INSTRUCTIONS_SETTING,
+        FeedbackSetting::Instructions,
         match &instructions {
             Some(i) => serde_json::Value::String(i.clone()),
             None => serde_json::Value::Null,
@@ -186,41 +163,31 @@ pub async fn set_target(
 }
 
 /// Read a per-user setting, falling back to the tenant-wide one.
-async fn setting(state: &AppState, auth: &AuthCtx, key: &str) -> ApiResult<Option<String>> {
-    let row: Option<(serde_json::Value,)> = state
-        .db
-        .query_opt(
-            "SELECT value FROM settings
-         WHERE tenant_id = $1 AND key = $2
-           AND (user_id = $3 OR user_id IS NULL)
-         ORDER BY (user_id = $3) DESC LIMIT 1",
-            params![auth.tenant_id, key, auth.user_id],
-        )
-        .await?;
-    Ok(row.and_then(|(v,)| v.as_str().map(str::to_string)))
+async fn setting(
+    state: &AppState,
+    auth: &AuthCtx,
+    which: FeedbackSetting,
+) -> ApiResult<Option<String>> {
+    state
+        .feedback
+        .setting(auth.tenant_id, auth.user_id, which)
+        .await
 }
 
 async fn put_setting(
     state: &AppState,
     auth: &AuthCtx,
-    key: &str,
+    which: FeedbackSetting,
     value: serde_json::Value,
 ) -> ApiResult<()> {
     state
-        .db
-        .exec(
-            "INSERT INTO settings (id, tenant_id, scope, user_id, key, value)
-         VALUES ($1, $2, 'user', $3, $4, $5)
-         ON CONFLICT (tenant_id, scope, user_id, key)
-         DO UPDATE SET value = EXCLUDED.value",
-            params![SettingId::new().0, auth.tenant_id, auth.user_id, key, value],
-        )
-        .await?;
-    Ok(())
+        .feedback
+        .set_setting(auth.tenant_id, auth.user_id, which, value)
+        .await
 }
 
 async fn configured_workspace(state: &AppState, auth: &AuthCtx) -> ApiResult<Option<WorkspaceId>> {
-    Ok(setting(state, auth, WORKSPACE_SETTING)
+    Ok(setting(state, auth, FeedbackSetting::Workspace)
         .await?
         .and_then(|s| s.parse::<uuid::Uuid>().ok())
         .map(WorkspaceId))
@@ -251,7 +218,7 @@ pub async fn submit(
             put_setting(
                 &state,
                 &auth,
-                WORKSPACE_SETTING,
+                FeedbackSetting::Workspace,
                 serde_json::Value::String(id.to_string()),
             )
             .await?;
@@ -269,32 +236,16 @@ pub async fn submit(
     // who opens a session and calls it "Nook@OS: Feedback Session" has told us
     // plainly where feedback should go, and spawning a second agent beside it
     // — which is what an exact match did — is both wasteful and invisible.
-    let existing: Option<(SessionId, NodeId)> = state
-        .db
-        .query_opt(
-            &format!(
-                "SELECT id, node_id FROM sessions
-         WHERE tenant_id = $1 AND workspace_id = $2
-           AND (name = $3 OR {})
-           AND status IN ('starting', 'running', 'detached')
-         ORDER BY (name = $3) DESC, created_at DESC LIMIT 1",
-                Postgres.ci_match("name", "'%feedback%'")
-            ),
-            params![auth.tenant_id, workspace_id, SESSION_NAME],
-        )
+    let existing = state
+        .sessions
+        .feedback_session(auth.tenant_id, workspace_id, SESSION_NAME)
         .await?;
 
     let (session_id, node_id, freshly_started) = match existing {
         Some((s, n)) => (s, n, false),
         None => {
-            let node: Option<(NodeId,)> = state
-                .db
-                .query_opt(
-                    "SELECT node_id FROM node_workspaces WHERE workspace_id = $1 LIMIT 1",
-                    params![workspace_id],
-                )
-                .await?;
-            let (node_id,) = node.ok_or_else(|| {
+            let node = state.workspaces.any_checkout_node(workspace_id).await?;
+            let node_id = node.ok_or_else(|| {
                 ApiError::BadRequest("that workspace has no checkout on any node".into())
             })?;
             let runtime = req.runtime.unwrap_or_else(|| "claude".to_string());
@@ -321,14 +272,8 @@ pub async fn submit(
     if freshly_started {
         for _ in 0..40 {
             tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-            let ready: Option<(Option<String>,)> = state
-                .db
-                .query_opt(
-                    "SELECT tmux_session FROM sessions WHERE id = $1",
-                    params![session_id],
-                )
-                .await?;
-            if ready.and_then(|(t,)| t).is_some() {
+            let ready = state.sessions.tmux_of(session_id).await?;
+            if ready.is_some() {
                 // The runtime still needs a moment to start reading stdin —
                 // an agent draws its UI first.
                 tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
@@ -338,18 +283,13 @@ pub async fn submit(
     }
 
     let item: FeedbackItem = state
-        .db
-        .query_one(
-            "INSERT INTO feedback (id, tenant_id, workspace_id, session_id, body, status, created_by)
-         VALUES ($1, $2, $3, $4, $5, 'queued', $6) RETURNING *",
-            params![
-                uuid::Uuid::now_v7(),
-                auth.tenant_id,
-                workspace_id,
-                session_id,
-                &body,
-                auth.user_id
-            ],
+        .feedback
+        .submit(
+            auth.tenant_id,
+            Some(workspace_id),
+            Some(session_id),
+            &body,
+            auth.user_id,
         )
         .await?;
 
@@ -361,7 +301,7 @@ pub async fn submit(
     // and never was. And an agent TUI reads the burst and the key as one
     // paste when they arrive together, so the CR has to land after the
     // composer has settled.
-    let branch = setting(&state, &auth, BRANCH_SETTING).await?;
+    let branch = setting(&state, &auth, FeedbackSetting::Branch).await?;
     let (instructions, _) = resolved_instructions(&state, &auth, Some(workspace_id)).await?;
     let type_into_session = |text: &str| {
         state.registry.send_to_node(
@@ -382,17 +322,12 @@ pub async fn submit(
         type_into_session("\r");
     }
     let item: FeedbackItem = state
-        .db
-        .query_one(
-            &format!(
-                "UPDATE feedback SET status = $2, updated_at = {} WHERE id = $1 RETURNING *",
-                Postgres.now()
-            ),
-            // 'queued' is not a holding pattern — nothing retries it. Record what
-            // actually happened so the log doesn't imply work is under way.
-            params![item.id, if delivered { "delivered" } else { "dropped" }],
-        )
-        .await?;
+        .feedback
+        // 'queued' is not a holding pattern — nothing retries it. Record what
+        // actually happened so the log doesn't imply work is under way.
+        .set_status(item.id, if delivered { "delivered" } else { "dropped" })
+        .await?
+        .ok_or(ApiError::NotFound)?;
 
     events::record(
         &state,
@@ -450,18 +385,8 @@ pub async fn update(
     Json(req): Json<UpdateFeedbackRequest>,
 ) -> ApiResult<Json<FeedbackItem>> {
     let item: Option<FeedbackItem> = state
-        .db
-        .query_opt(
-            &format!(
-                "UPDATE feedback SET
-            status = COALESCE($3, status),
-            pr_url = COALESCE($4, pr_url),
-            updated_at = {}
-         WHERE id = $1 AND tenant_id = $2 RETURNING *",
-                Postgres.now()
-            ),
-            params![id, auth.tenant_id, req.status.clone(), req.pr_url.clone()],
-        )
+        .feedback
+        .update(id, auth.tenant_id, req.status.clone(), req.pr_url.clone())
         .await?;
     item.map(Json).ok_or(ApiError::NotFound)
 }

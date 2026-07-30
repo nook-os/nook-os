@@ -14,12 +14,6 @@
 
 
 
-# ── MAIN-256 · NotificationRepository ───────────────────────────────────────
-crates/nook-control/src/routes/notifications.rs  # inbox + channels
-crates/nook-control/src/routes/feedback.rs       # feedback capture
-crates/nook-control/src/services/notify.rs       # delivery + dedupe
-crates/nook-control/src/services/triggers.rs     # board automation firing
-
 # ── MAIN-258 · Operator/admin repositories ──────────────────────────────────
 crates/nook-control/src/routes/operator.rs       # operator console actions
 crates/nook-control/src/routes/managed.rs        # managed skill/hook content

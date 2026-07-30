@@ -18,7 +18,7 @@
 //! signature, and row mapping lives inside the impl (AC-2).
 
 use async_trait::async_trait;
-use nook_db::{params, Db, DbPool, Postgres, TypeMapping};
+use nook_db::{params, CiMatch, Db, DbPool, Postgres, TypeMapping};
 use nook_types::*;
 
 use crate::error::ApiResult;
@@ -87,6 +87,21 @@ pub trait SessionRepository: Send + Sync {
     async fn bind_checkout(&self, id: SessionId, checkout: NodeWorkspaceId) -> ApiResult<u64>;
 
     async fn status_of(&self, id: SessionId) -> ApiResult<Option<String>>;
+
+    /// The standing feedback session for a workspace: the one named exactly
+    /// `name`, else any live session whose name merely mentions feedback.
+    /// Someone who calls a session "…Feedback…" has said plainly where
+    /// feedback should go, and starting a second agent beside it is both
+    /// wasteful and invisible (MAIN-256).
+    async fn feedback_session(
+        &self,
+        tenant: TenantId,
+        workspace: WorkspaceId,
+        name: &str,
+    ) -> ApiResult<Option<(SessionId, NodeId)>>;
+
+    /// A session's tmux name, or `None` while the node has yet to report it.
+    async fn tmux_of(&self, id: SessionId) -> ApiResult<Option<String>>;
 
     /// Set a status, but only from a live one. The guard is what stops a late
     /// socket event resurrecting a session that already exited or errored.
@@ -232,6 +247,39 @@ impl SessionRepository for DbSessionRepository {
                 params![id, checkout],
             )
             .await?)
+    }
+
+    async fn feedback_session(
+        &self,
+        tenant: TenantId,
+        workspace: WorkspaceId,
+        name: &str,
+    ) -> ApiResult<Option<(SessionId, NodeId)>> {
+        Ok(self
+            .db
+            .query_opt(
+                &format!(
+                    "SELECT id, node_id FROM sessions
+                     WHERE tenant_id = $1 AND workspace_id = $2
+                       AND (name = $3 OR {})
+                       AND status IN ('starting', 'running', 'detached')
+                     ORDER BY (name = $3) DESC, created_at DESC LIMIT 1",
+                    Postgres.ci_match("name", "'%feedback%'")
+                ),
+                params![tenant, workspace, name],
+            )
+            .await?)
+    }
+
+    async fn tmux_of(&self, id: SessionId) -> ApiResult<Option<String>> {
+        let row: Option<(Option<String>,)> = self
+            .db
+            .query_opt(
+                "SELECT tmux_session FROM sessions WHERE id = $1",
+                params![id],
+            )
+            .await?;
+        Ok(row.and_then(|(t,)| t))
     }
 
     async fn status_of(&self, id: SessionId) -> ApiResult<Option<String>> {
@@ -426,6 +474,38 @@ impl SessionRepository for FakeSessionRepository {
             }
             None => 0,
         })
+    }
+
+    async fn feedback_session(
+        &self,
+        tenant: TenantId,
+        workspace: WorkspaceId,
+        name: &str,
+    ) -> ApiResult<Option<(SessionId, NodeId)>> {
+        let s = self.inner.lock().unwrap();
+        let mut live: Vec<&Session> = s
+            .iter()
+            .filter(|x| {
+                x.tenant_id == tenant
+                    && x.workspace_id == Some(workspace)
+                    && matches!(x.status.as_str(), "starting" | "running" | "detached")
+                    && (x.name == name || x.name.to_lowercase().contains("feedback"))
+            })
+            .collect();
+        // `ORDER BY (name = $3) DESC, created_at DESC`: the exact name wins,
+        // then the newest.
+        live.sort_by_key(|x| (x.name != name, std::cmp::Reverse(x.created_at)));
+        Ok(live.first().map(|x| (x.id, x.node_id)))
+    }
+
+    async fn tmux_of(&self, id: SessionId) -> ApiResult<Option<String>> {
+        Ok(self
+            .inner
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|x| x.id == id)
+            .and_then(|x| x.tmux_session.clone()))
     }
 
     async fn status_of(&self, id: SessionId) -> ApiResult<Option<String>> {

@@ -12,7 +12,6 @@
 //! A failed action records a `task.automation_failed` event (which notifies at
 //! error level) and a system-authored comment naming the action and error.
 
-use nook_db::{params, Db};
 use nook_types::*;
 use serde::Deserialize;
 use serde_json::Value;
@@ -124,25 +123,13 @@ async fn run(
     task_id: TaskId,
     board_id: BoardId,
     new_col: ColumnId,
-) -> Result<(), sqlx::Error> {
-    let col_type: Option<String> = state
-        .db
-        .query_scalar_opt(
-            "SELECT type FROM board_columns WHERE id = $1",
-            params![new_col],
-        )
-        .await?;
+) -> crate::error::ApiResult<()> {
+    let col_type: Option<String> = state.tasks.column_type_of(new_col).await?;
     let Some(col_type) = col_type else {
         return Ok(());
     };
 
-    let automation: Option<Value> = state
-        .db
-        .query_scalar_opt(
-            "SELECT automation FROM boards WHERE id = $1 AND tenant_id = $2",
-            params![board_id, tenant],
-        )
-        .await?;
+    let automation: Option<Value> = state.tasks.board_automation(board_id, tenant).await?;
     let Some(automation) = automation else {
         return Ok(());
     };
@@ -192,22 +179,16 @@ async fn attach_label(
     label: &str,
 ) -> Result<(), String> {
     let name = crate::routes::labels::validate(label).map_err(|e| e.to_string())?;
-    let label_id: uuid::Uuid = state
-        .db
-        .query_scalar(
-            "INSERT INTO labels (id, tenant_id, name, color) VALUES ($1, $2, $3, '#f0a000')
-         ON CONFLICT (tenant_id, name) DO UPDATE SET name = EXCLUDED.name
-         RETURNING id",
-            params![uuid::Uuid::now_v7(), tenant, &name],
-        )
+    // `upsert_label` carries the automation colour explicitly; the generic
+    // `attach_label` would default it, which would be a behaviour change.
+    let label = state
+        .tasks
+        .upsert_label(tenant, &name, "#f0a000")
         .await
         .map_err(|e| e.to_string())?;
     state
-        .db
-        .exec(
-            "INSERT INTO task_labels (task_id, label_id) VALUES ($1, $2) ON CONFLICT DO NOTHING",
-            params![task_id, label_id],
-        )
+        .tasks
+        .attach_label_id(task_id, label.id)
         .await
         .map_err(|e| e.to_string())?;
     state
@@ -224,21 +205,15 @@ async fn detach_label(
     label: &str,
 ) -> Result<(), String> {
     let name = crate::routes::labels::validate(label).map_err(|e| e.to_string())?;
-    let label_id: Option<uuid::Uuid> = state
-        .db
-        .query_scalar_opt(
-            "SELECT id FROM labels WHERE tenant_id = $1 AND name = $2",
-            params![tenant, &name],
-        )
+    let label_id = state
+        .tasks
+        .label_id_by_name(tenant, &name)
         .await
         .map_err(|e| e.to_string())?;
     if let Some(label_id) = label_id {
         state
-            .db
-            .exec(
-                "DELETE FROM task_labels WHERE task_id = $1 AND label_id = $2",
-                params![task_id, label_id],
-            )
+            .tasks
+            .detach_label_id(task_id, label_id)
             .await
             .map_err(|e| e.to_string())?;
         state
@@ -263,14 +238,12 @@ async fn notify_action(
     // as `task.created` does for a private card, the whole notification is
     // skipped rather than risk the leak. Label actions are unaffected: they only
     // touch the card's own labels and broadcast nothing.
-    let visibility: String = state
-        .db
-        .query_scalar(
-            "SELECT visibility FROM tasks WHERE id = $1",
-            params![task_id],
-        )
+    let visibility = state
+        .tasks
+        .visibility_of(task_id)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| e.to_string())?
+        .unwrap_or_default();
     if visibility == "private" {
         return Ok(());
     }
@@ -298,15 +271,12 @@ async fn notify_action(
 async fn task_ref(
     state: &AppState,
     task_id: TaskId,
-) -> Result<(String, String, String), sqlx::Error> {
-    let (key, number, title): (Option<String>, i32, String) = state
-        .db
-        .query_one(
-            "SELECT b.key, t.number, t.title
-         FROM tasks t JOIN boards b ON b.id = t.board_id WHERE t.id = $1",
-            params![task_id],
-        )
-        .await?;
+) -> crate::error::ApiResult<(String, String, String)> {
+    let (key, number, title) = state
+        .tasks
+        .task_ref(task_id)
+        .await?
+        .ok_or(crate::error::ApiError::NotFound)?;
     let key = match key {
         Some(k) => format!("{k}-{number}"),
         None => format!("#{number}"),
@@ -341,17 +311,15 @@ async fn record_failure(
     // the activity feed. Authored by the machine (no user), mirroring how a node
     // comment is stored.
     let _ = state
-        .db
-        .exec(
-            "INSERT INTO task_comments (id, tenant_id, task_id, author_type, author_id, author_name, body_md)
-         VALUES ($1, $2, $3, 'system', NULL, 'Automation', $4)",
-            params![
-                uuid::Uuid::now_v7(),
-                tenant,
-                task_id,
-                format!("⚠ Automation action `{action_kind}` failed on this move: {error}")
-            ],
-        )
+        .tasks
+        .create_comment(crate::repo::tasks::NewComment {
+            tenant,
+            task: task_id,
+            author_type: "system".into(),
+            author_id: None,
+            author_name: "Automation".into(),
+            body_md: format!("⚠ Automation action `{action_kind}` failed on this move: {error}"),
+        })
         .await;
     state
         .registry
