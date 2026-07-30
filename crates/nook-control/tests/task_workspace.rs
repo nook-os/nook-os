@@ -13,9 +13,9 @@
 //! Needs a running Postgres (the dev stack's works): set `DATABASE_URL`.
 
 use nook_control::services::kanban::{KanbanProvider, LocalBoardProvider};
+use nook_db::{params, Db, DbPool};
 use nook_testkit::TestBed;
 use nook_types::{BoardId, CreateTaskRequest, TenantId, UpdateTaskRequest, WorkspaceId};
-use sqlx::PgPool;
 use uuid::Uuid;
 
 /// An update that touches nothing, so each test states only what it changes.
@@ -37,27 +37,33 @@ fn no_change() -> UpdateTaskRequest {
 }
 
 /// A tenant, a workspace and a board to hang tasks on.
-async fn fixture(db: &PgPool) -> (TenantId, BoardId, WorkspaceId, WorkspaceId) {
+async fn fixture(db: &DbPool) -> (TenantId, BoardId, WorkspaceId, WorkspaceId) {
     let tenant = TenantId(Uuid::now_v7());
-    sqlx::query("INSERT INTO tenants (id, name, slug) VALUES ($1, $2, $3)")
-        .bind(tenant)
-        .bind(format!("t-{}", tenant.0.simple()))
-        .bind(format!("t-{}", tenant.0.simple()))
-        .execute(db)
-        .await
-        .expect("tenant");
+    db.exec(
+        "INSERT INTO tenants (id, name, slug) VALUES ($1, $2, $3)",
+        params![
+            tenant,
+            format!("t-{}", tenant.0.simple()),
+            format!("t-{}", tenant.0.simple())
+        ],
+    )
+    .await
+    .expect("tenant");
 
     let mut ws = Vec::new();
     for n in 0..2 {
         let id = WorkspaceId(Uuid::now_v7());
-        sqlx::query("INSERT INTO workspaces (id, tenant_id, name, slug) VALUES ($1, $2, $3, $4)")
-            .bind(id)
-            .bind(tenant)
-            .bind(format!("ws-{n}-{}", id.0.simple()))
-            .bind(format!("ws-{n}-{}", id.0.simple()))
-            .execute(db)
-            .await
-            .expect("workspace");
+        db.exec(
+            "INSERT INTO workspaces (id, tenant_id, name, slug) VALUES ($1, $2, $3, $4)",
+            params![
+                id,
+                tenant,
+                format!("ws-{n}-{}", id.0.simple()),
+                format!("ws-{n}-{}", id.0.simple())
+            ],
+        )
+        .await
+        .expect("workspace");
         ws.push(id);
     }
 
@@ -65,23 +71,22 @@ async fn fixture(db: &PgPool) -> (TenantId, BoardId, WorkspaceId, WorkspaceId) {
     // this test is about the provider. A board needs at least one column or
     // `create_task` has nowhere to put a card.
     let board = BoardId(Uuid::now_v7());
-    sqlx::query(
+    db.exec(
         "INSERT INTO boards (id, tenant_id, name, key, provider) VALUES ($1,$2,$3,$4,'local')",
+        params![
+            board,
+            tenant,
+            "b",
+            format!("B{}", &board.0.simple().to_string()[..6]).to_uppercase()
+        ],
     )
-    .bind(board)
-    .bind(tenant)
-    .bind("b")
-    .bind(format!("B{}", &board.0.simple().to_string()[..6]).to_uppercase())
-    .execute(db)
     .await
     .expect("board");
-    sqlx::query(
+    db.exec(
         "INSERT INTO board_columns (id, board_id, name, position, type)
          VALUES ($1, $2, 'Triage', 0, 'unstarted')",
+        params![Uuid::now_v7(), board],
     )
-    .bind(Uuid::now_v7())
-    .bind(board)
-    .execute(db)
     .await
     .expect("column");
 
@@ -121,7 +126,7 @@ async fn workspace_can_be_set_changed_and_cleared() {
     let Some(mut bed) = TestBed::new().await else {
         return;
     };
-    let (tenant, board, ws_a, ws_b) = fixture(&bed.pool).await;
+    let (tenant, board, ws_a, ws_b) = fixture(&bed.db()).await;
     let provider = LocalBoardProvider {
         repo: std::sync::Arc::new(nook_control::repo::tasks::DbTaskRepository::new(bed.db())),
     };
@@ -184,7 +189,7 @@ async fn an_absent_workspace_leaves_the_existing_one_alone() {
     let Some(mut bed) = TestBed::new().await else {
         return;
     };
-    let (tenant, board, ws_a, _) = fixture(&bed.pool).await;
+    let (tenant, board, ws_a, _) = fixture(&bed.db()).await;
     let provider = LocalBoardProvider {
         repo: std::sync::Arc::new(nook_control::repo::tasks::DbTaskRepository::new(bed.db())),
     };
@@ -242,7 +247,7 @@ async fn expected_updated_at_guards_the_body() {
     let Some(mut bed) = TestBed::new().await else {
         return;
     };
-    let (tenant, board, _a, _b) = fixture(&bed.pool).await;
+    let (tenant, board, _a, _b) = fixture(&bed.db()).await;
     let provider = LocalBoardProvider {
         repo: std::sync::Arc::new(nook_control::repo::tasks::DbTaskRepository::new(bed.db())),
     };
@@ -345,7 +350,7 @@ async fn two_edits_from_one_base_version_the_second_conflicts() {
     let Some(mut bed) = TestBed::new().await else {
         return;
     };
-    let (tenant, board, _a, _b) = fixture(&bed.pool).await;
+    let (tenant, board, _a, _b) = fixture(&bed.db()).await;
     let provider = LocalBoardProvider {
         repo: std::sync::Arc::new(nook_control::repo::tasks::DbTaskRepository::new(bed.db())),
     };

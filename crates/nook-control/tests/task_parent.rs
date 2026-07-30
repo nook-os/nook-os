@@ -5,33 +5,32 @@
 
 use nook_control::routes::task_detail::detail;
 use nook_control::routes::task_query::{query_rows, TaskFilter};
+use nook_db::{params, Db, DbPool};
 use nook_testkit::TestBed;
 use nook_types::*;
-use sqlx::PgPool;
 use uuid::Uuid;
 
 /// A board with one column to hang cards on.
-async fn make_board(db: &PgPool, tenant: TenantId) -> BoardId {
+async fn make_board(db: &DbPool, tenant: TenantId) -> BoardId {
     let board = BoardId(Uuid::now_v7());
-    sqlx::query(
+    db.exec(
         "INSERT INTO boards (id, tenant_id, name, key, provider) VALUES ($1,$2,'b',$3,'local')",
+        params![
+            board,
+            tenant,
+            // The RANDOM tail of the uuid, not the leading timestamp — two v7
+            // ids made milliseconds apart share their prefix and would collide
+            // on (tenant, key).
+            format!("B{}", &board.0.simple().to_string()[26..]).to_uppercase()
+        ],
     )
-    .bind(board)
-    .bind(tenant)
-    // The RANDOM tail of the uuid, not the leading timestamp — two v7 ids made
-    // milliseconds apart share their prefix and would collide on (tenant, key).
-    .bind(format!("B{}", &board.0.simple().to_string()[26..]).to_uppercase())
-    .execute(db)
     .await
     .expect("board");
-    sqlx::query(
+    db.exec(
         "INSERT INTO board_columns (id, board_id, name, position, type)
          VALUES ($1, $2, 'Backlog', 0, 'backlog'), ($3, $2, 'Todo', 1, 'unstarted')",
+        params![Uuid::now_v7(), board, Uuid::now_v7()],
     )
-    .bind(Uuid::now_v7())
-    .bind(board)
-    .bind(Uuid::now_v7())
-    .execute(db)
     .await
     .expect("columns");
     board
@@ -77,7 +76,7 @@ async fn epic_parent_create_patch_validate_filter_and_orphan() {
     };
     let state = bed.app_state().await;
     let tenant = bed.tenant("tp").await;
-    let board = make_board(&bed.pool, tenant).await;
+    let board = make_board(&bed.db(), tenant).await;
     let provider = state.kanban.get("local").expect("local provider");
 
     // An epic, and a plain task to be the "not an epic" parent later.
@@ -171,7 +170,7 @@ async fn epic_parent_create_patch_validate_filter_and_orphan() {
         .await
         .is_err());
     // parent on another board
-    let board2 = make_board(&bed.pool, tenant).await;
+    let board2 = make_board(&bed.db(), tenant).await;
     let epic2 = provider
         .create_task(tenant, board2, None, req("Epic B", Some("epic"), None))
         .await
@@ -214,17 +213,18 @@ async fn epic_parent_create_patch_validate_filter_and_orphan() {
     );
 
     // ── Delete the epic → children ORPHAN, not deleted (AC-1) ───────────────
-    sqlx::query("DELETE FROM tasks WHERE id = $1")
-        .bind(epic.id)
-        .execute(&bed.pool)
+    bed.db()
+        .exec("DELETE FROM tasks WHERE id = $1", params![epic.id])
         .await
         .expect("delete epic");
-    let (survivor_parent,): (Option<Uuid>,) =
-        sqlx::query_as("SELECT parent_task_id FROM tasks WHERE id = $1")
-            .bind(child2.id)
-            .fetch_one(&bed.pool)
-            .await
-            .expect("child survives");
+    let (survivor_parent,): (Option<Uuid>,) = bed
+        .db()
+        .query_one(
+            "SELECT parent_task_id FROM tasks WHERE id = $1",
+            params![child2.id],
+        )
+        .await
+        .expect("child survives");
     assert_eq!(
         survivor_parent, None,
         "the child outlived its epic, parent nulled"
@@ -232,7 +232,7 @@ async fn epic_parent_create_patch_validate_filter_and_orphan() {
 
     // ── Tenant isolation on parent resolution (AC-2) ────────────────────────
     let other = bed.tenant("tp").await;
-    let other_board = make_board(&bed.pool, other).await;
+    let other_board = make_board(&bed.db(), other).await;
     let other_epic = provider
         .create_task(
             other,
@@ -271,7 +271,7 @@ async fn private_child_does_not_leak_through_epic() {
     };
     let state = bed.app_state().await;
     let tenant = bed.tenant("tp").await;
-    let board = make_board(&bed.pool, tenant).await;
+    let board = make_board(&bed.db(), tenant).await;
     let provider = state.kanban.get("local").expect("local provider");
 
     // Owner A and an unrelated member B.
@@ -386,7 +386,7 @@ async fn mcp_task_mutations_resolve_the_boards_provider() {
     };
     let state = bed.app_state().await;
     let tenant = bed.tenant("tp").await;
-    let board = make_board(&bed.pool, tenant).await;
+    let board = make_board(&bed.db(), tenant).await;
     let provider = state.kanban.get("local").expect("local provider");
     let task = provider
         .create_task(tenant, board, None, req("a task", None, None))
@@ -395,16 +395,16 @@ async fn mcp_task_mutations_resolve_the_boards_provider() {
 
     // The exact resolution `McpBackend::provider_for_task` performs: a task's
     // board carries the provider string that decides which provider mutates it.
-    let (resolved,): (String,) = sqlx::query_as(
-        "SELECT b.provider FROM boards b
+    let (resolved,): (String,) = bed
+        .db()
+        .query_one(
+            "SELECT b.provider FROM boards b
          JOIN tasks t ON t.board_id = b.id
          WHERE t.id = $1 AND t.tenant_id = $2",
-    )
-    .bind(task.id)
-    .bind(tenant)
-    .fetch_one(&bed.pool)
-    .await
-    .expect("resolve provider");
+            params![task.id, tenant],
+        )
+        .await
+        .expect("resolve provider");
     assert_eq!(
         resolved, "local",
         "a local board's task resolves to the local provider"

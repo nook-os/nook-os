@@ -10,29 +10,33 @@ use axum::extract::{Path, State};
 use axum::Json;
 use nook_control::auth::{AuthCtx, Principal};
 use nook_control::routes::skills;
+use nook_db::{params, Db, DbPool};
 use nook_testkit::TestBed;
 use nook_types::*;
-use sqlx::PgPool;
 use uuid::Uuid;
 
 /// A fresh tenant and a plain signed-in user (no role grant).
-async fn tenant_user(pool: &PgPool) -> (TenantId, UserId, AuthCtx) {
+async fn tenant_user(db: &DbPool) -> (TenantId, UserId, AuthCtx) {
     let tenant = TenantId(Uuid::now_v7());
-    sqlx::query("INSERT INTO tenants (id, name, slug) VALUES ($1, $2, $2)")
-        .bind(tenant)
-        .bind(format!("t-{}", tenant.0.simple()))
-        .execute(pool)
-        .await
-        .unwrap();
-    let user = UserId::new();
-    sqlx::query(
-        "INSERT INTO users (id, tenant_id, person_id, display_name, email)
-         VALUES ($1, $2, gen_random_uuid(), 'Op', $3)",
+    db.exec(
+        "INSERT INTO tenants (id, name, slug) VALUES ($1, $2, $2)",
+        params![tenant, format!("t-{}", tenant.0.simple())],
     )
-    .bind(user)
-    .bind(tenant)
-    .bind(format!("op-{}@example.test", user.0.simple()))
-    .execute(pool)
+    .await
+    .unwrap();
+    let user = UserId::new();
+    // The person id is generated HERE rather than by `gen_random_uuid()`: that
+    // function is Postgres-only, and the value is not the thing under test.
+    db.exec(
+        "INSERT INTO users (id, tenant_id, person_id, display_name, email)
+         VALUES ($1, $2, $3, 'Op', $4)",
+        params![
+            user,
+            tenant,
+            Uuid::now_v7(),
+            format!("op-{}@example.test", user.0.simple())
+        ],
+    )
     .await
     .unwrap();
     let ctx = AuthCtx {
@@ -47,13 +51,12 @@ async fn tenant_user(pool: &PgPool) -> (TenantId, UserId, AuthCtx) {
 
 /// Grant the caller `operator` at deployment scope — the seed role that carries
 /// `node.manage`, exactly as `read_endpoints_require_node_manage` does.
-async fn grant_operator(pool: &PgPool, user: UserId) {
-    sqlx::query(
+async fn grant_operator(db: &DbPool, user: UserId) {
+    db.exec(
         "INSERT INTO role_bindings (id, subject_type, subject_id, role_key, scope_type, scope_id)
-         VALUES (gen_random_uuid(), 'user', $1, 'operator', 'deployment', NULL)",
+         VALUES ($1, 'user', $2, 'operator', 'deployment', NULL)",
+        params![Uuid::now_v7(), user.0],
     )
-    .bind(user.0)
-    .execute(pool)
     .await
     .unwrap();
 }
@@ -67,7 +70,7 @@ async fn teach_and_unteach_require_node_manage_reads_stay_open() {
         return;
     };
     let state = bed.app_state().await;
-    let (tenant, user, ctx) = tenant_user(&bed.pool).await;
+    let (tenant, user, ctx) = tenant_user(&bed.db()).await;
 
     // Reads are open to any signed-in user, grant or not (AC-4).
     assert!(
@@ -89,17 +92,18 @@ async fn teach_and_unteach_require_node_manage_reads_stay_open() {
             .is_err(),
         "a plain user must not be able to teach the fleet"
     );
-    let count: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM skills WHERE tenant_id = $1 AND name = $2")
-            .bind(tenant)
-            .bind("main106-probe")
-            .fetch_one(&bed.pool)
-            .await
-            .unwrap();
+    let count: i64 = bed
+        .db()
+        .query_scalar(
+            "SELECT count(*) FROM skills WHERE tenant_id = $1 AND name = $2",
+            params![tenant, "main106-probe"],
+        )
+        .await
+        .unwrap();
     assert_eq!(count, 0, "the refused teach must not have written a row");
 
     // With the grant: teaching succeeds and the row exists.
-    grant_operator(&bed.pool, user).await;
+    grant_operator(&bed.db(), user).await;
     let taught = skills::teach(State(state.clone()), ctx, req()).await;
     assert!(taught.is_ok(), "an operator may teach: {taught:?}");
     assert_eq!(taught.unwrap().0.skill.name, "main106-probe");
@@ -117,16 +121,19 @@ async fn teach_and_unteach_require_node_manage_reads_stay_open() {
     let (_t2, _u2, ctx2) = {
         // A distinct user in the SAME tenant, without a grant.
         let u = UserId::new();
-        sqlx::query(
-            "INSERT INTO users (id, tenant_id, person_id, display_name, email)
-             VALUES ($1, $2, gen_random_uuid(), 'M', $3)",
-        )
-        .bind(u)
-        .bind(tenant)
-        .bind(format!("m-{}@example.test", u.0.simple()))
-        .execute(&bed.pool)
-        .await
-        .unwrap();
+        bed.db()
+            .exec(
+                "INSERT INTO users (id, tenant_id, person_id, display_name, email)
+             VALUES ($1, $2, $3, 'M', $4)",
+                params![
+                    u,
+                    tenant,
+                    Uuid::now_v7(),
+                    format!("m-{}@example.test", u.0.simple())
+                ],
+            )
+            .await
+            .unwrap();
         (
             tenant,
             u,
