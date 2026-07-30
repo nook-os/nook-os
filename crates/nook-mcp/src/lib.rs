@@ -18,6 +18,7 @@ use rmcp::{tool, tool_handler, tool_router, ErrorData as McpError, ServerHandler
 use serde::Deserialize;
 use uuid::Uuid;
 
+use nook_errors::ApiError;
 use nook_types::{
     CreateUserNote, Event, Node, Note, Session, TaskItem, TenantId, UpdateUserNote, UserId,
     UserNote, UserNoteFolder, UserNoteFolderId, UserNoteId, UserNoteSummary, WorkspaceDetail,
@@ -403,14 +404,70 @@ pub struct NookMcp {
 }
 
 fn to_result<T: serde::Serialize>(value: &T) -> Result<CallToolResult, McpError> {
-    let json = serde_json::to_string_pretty(value)
-        .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+    let json = serde_json::to_string_pretty(value).map_err(|e| {
+        // Serializing OUR OWN response failed — a server bug, and the caller
+        // learns the same nothing they learn about any other one (AC-2). The
+        // serde message is diagnostic and goes to the log.
+        tracing::error!(error = %e, "cannot serialize an mcp tool result");
+        McpError::internal_error(GENERIC, None)
+    })?;
     Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
 }
 
+/// A backend failure as the MCP error a caller can act on (MAIN-275).
+///
+/// Every tool used to flatten to `internal_error(e.to_string())`, which got two
+/// things wrong at once. An agent could not tell "you may not do that" from
+/// "that does not exist" — both arrived as a generic internal error — and the
+/// `to_string()` handed the caller whatever the failure happened to say, which
+/// is the leak REST deliberately never allows.
+///
+/// The backend returns `anyhow::Result`, but the services under it return
+/// `ApiResult`, so `?` leaves the `ApiError` inside the chain. Downcasting
+/// recovers the semantics without changing a single tool signature (NG-1).
+///
+/// The rule is REST's, applied here: a 4xx tells the caller what they did, a
+/// 5xx tells them nothing and the detail goes to the log.
 fn backend_err(e: anyhow::Error) -> McpError {
-    McpError::internal_error(e.to_string(), None)
+    let Some(api) = e.downcast_ref::<ApiError>() else {
+        // Not an ApiError at all — a plumbing failure with no HTTP meaning.
+        // Generic to the caller, logged here, same as `ApiError::Internal`.
+        tracing::error!(error = %e, "mcp tool failed");
+        return McpError::internal_error(GENERIC, None);
+    };
+    match api {
+        // What the caller may do. `invalid_request` rather than
+        // `invalid_params`: the parameters were fine, the caller is not.
+        ApiError::Unauthorized | ApiError::Forbidden => {
+            McpError::invalid_request(api.to_string(), None)
+        }
+        ApiError::ForbiddenMsg(m) => McpError::invalid_request(m.clone(), None),
+        // What the caller asked for. `resource_not_found` is the kind that
+        // exists for exactly this, and is what lets an agent retry with a
+        // different name instead of giving up.
+        ApiError::NotFound => McpError::resource_not_found(api.to_string(), None),
+        // What the caller sent. A conflict is the caller's to resolve too —
+        // re-sending the same thing will fail the same way.
+        ApiError::BadRequest(m) | ApiError::Conflict(m) => {
+            McpError::invalid_params(m.clone(), None)
+        }
+        ApiError::TooManyRequests(m) | ApiError::SetupRequired(m) => {
+            McpError::invalid_request(m.clone(), None)
+        }
+        ApiError::ServiceUnavailable(m) => McpError::internal_error(m.clone(), None),
+        // Ours, not theirs. The message is fixed and the cause is logged —
+        // never `e.to_string()`, which is what leaked before.
+        ApiError::Db(_) | ApiError::Internal(_) => {
+            tracing::error!(error = %api, "mcp tool failed");
+            McpError::internal_error(GENERIC, None)
+        }
+    }
 }
+
+/// The one thing an MCP caller is ever told about a server-side failure. Matches
+/// REST's body exactly, so the two surfaces cannot drift into disagreeing about
+/// how much a client learns.
+const GENERIC: &str = "internal error";
 
 /// The notebook caller's person, or the explicit not-authenticated error every
 /// notebook tool returns for the static `MCP_TOKEN` path (which carries no
@@ -1160,5 +1217,120 @@ mod tests {
             "pointed not-a-user error: {}",
             err.message
         );
+    }
+}
+
+/// The backend-error mapping (MAIN-275).
+///
+/// These are about what an MCP CALLER is told. The old behaviour flattened
+/// everything to `internal_error(e.to_string())`, so an agent could not tell a
+/// refusal from a missing row, and every internal failure handed over whatever
+/// text it happened to carry.
+#[cfg(test)]
+mod backend_err_tests {
+    use super::*;
+
+    /// The backend returns `anyhow::Result`; services under it return
+    /// `ApiResult`. This is that shape — an `ApiError` reached by `?`, so it
+    /// sits inside the anyhow chain rather than being the top-level error.
+    fn through_backend(e: ApiError) -> McpError {
+        fn inner(e: ApiError) -> anyhow::Result<()> {
+            Err(e)?;
+            Ok(())
+        }
+        backend_err(inner(e).unwrap_err())
+    }
+
+    /// AC-1: a refusal is a refusal, not a generic internal error. This is the
+    /// distinction an agent needs to stop retrying.
+    #[test]
+    fn a_refusal_is_an_invalid_request_not_an_internal_error() {
+        for e in [
+            ApiError::Unauthorized,
+            ApiError::Forbidden,
+            ApiError::ForbiddenMsg("a node token cannot do this".into()),
+        ] {
+            let m = through_backend(e);
+            assert_eq!(m.code, McpError::invalid_request("", None).code, "{m:?}");
+            assert_ne!(
+                m.code,
+                McpError::internal_error("", None).code,
+                "a refusal must not arrive as an internal error"
+            );
+        }
+    }
+
+    /// AC-1: "that does not exist" has its own kind, so an agent can retry with
+    /// a different name instead of giving up.
+    #[test]
+    fn a_missing_row_is_resource_not_found() {
+        let m = through_backend(ApiError::NotFound);
+        assert_eq!(m.code, McpError::resource_not_found("", None).code, "{m:?}");
+    }
+
+    /// AC-1: what the caller sent is the caller's to fix.
+    #[test]
+    fn bad_input_and_conflicts_are_invalid_params() {
+        for e in [
+            ApiError::BadRequest("a task needs a title".into()),
+            ApiError::Conflict("that name is taken".into()),
+        ] {
+            let m = through_backend(e);
+            assert_eq!(m.code, McpError::invalid_params("", None).code, "{m:?}");
+        }
+    }
+
+    /// AC-1: a 4xx keeps its message — that is the whole point of not
+    /// flattening. An agent acts on "a task needs a title".
+    #[test]
+    fn a_client_error_keeps_its_message() {
+        let m = through_backend(ApiError::BadRequest("a task needs a title".into()));
+        assert_eq!(m.message, "a task needs a title");
+        let m = through_backend(ApiError::ForbiddenMsg("a node token cannot do this".into()));
+        assert_eq!(m.message, "a node token cannot do this");
+    }
+
+    /// AC-2: the leak. `Internal` and `Db` must say nothing — asserted against
+    /// the secret itself, so a future change that "helpfully" includes the
+    /// cause fails here.
+    #[test]
+    fn an_internal_error_leaks_nothing_to_the_caller() {
+        let secret = "connection refused to 10.0.0.7:5432 as user nook_admin";
+        let m = through_backend(ApiError::Internal(anyhow::anyhow!("{secret}")));
+        assert_eq!(m.code, McpError::internal_error("", None).code);
+        assert_eq!(m.message, GENERIC);
+        assert!(
+            !m.message.contains("10.0.0.7"),
+            "leaked a host: {}",
+            m.message
+        );
+        assert!(
+            !m.message.contains("nook_admin"),
+            "leaked a user: {}",
+            m.message
+        );
+        assert!(
+            !m.message.contains("connection refused"),
+            "leaked the cause: {}",
+            m.message
+        );
+    }
+
+    /// AC-2: and the same for a failure that is not an `ApiError` at all — a
+    /// plumbing error with no HTTP meaning still must not hand its text over.
+    #[test]
+    fn a_non_api_failure_also_leaks_nothing() {
+        let m = backend_err(anyhow::anyhow!("password=hunter2 in the connection string"));
+        assert_eq!(m.code, McpError::internal_error("", None).code);
+        assert_eq!(m.message, GENERIC);
+        assert!(!m.message.contains("hunter2"), "leaked: {}", m.message);
+    }
+
+    /// The generic message is REST's, byte for byte. Two surfaces agreeing by
+    /// accident is two surfaces that will disagree later.
+    #[test]
+    fn the_generic_message_matches_rest() {
+        // What `ApiError::Internal` renders in the REST body.
+        assert_eq!(GENERIC, "internal error");
     }
 }
