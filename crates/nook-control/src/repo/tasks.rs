@@ -486,6 +486,40 @@ pub trait TaskRepository: Send + Sync {
     async fn epic_children(&self, parent: TaskId, viewer: UserId) -> ApiResult<Vec<EpicChild>>;
 
     async fn related_tasks(&self, task: TaskId, viewer: UserId) -> ApiResult<Vec<RelatedTask>>;
+
+    // ---- board and column administration (MAIN-249) ------------------------
+
+    async fn delete_board(&self, id: BoardId, tenant: TenantId) -> ApiResult<u64>;
+
+    /// Does this tenant own the board? The ownership gate every column write
+    /// runs first.
+    async fn board_in_tenant(&self, id: BoardId, tenant: TenantId) -> ApiResult<bool>;
+
+    async fn max_column_position(&self, board: BoardId) -> ApiResult<Option<i32>>;
+
+    /// Add a column at an explicit position, letting the column type default —
+    /// distinct from [`TaskRepository::create_column`], which the board
+    /// bootstrap uses to set the type as well.
+    async fn append_column(
+        &self,
+        board: BoardId,
+        name: &str,
+        position: i32,
+    ) -> ApiResult<BoardColumn>;
+
+    /// Rename/reposition a column, scoped through its board's tenant because
+    /// `board_columns` has no `tenant_id` of its own.
+    async fn update_column(
+        &self,
+        id: ColumnId,
+        tenant: TenantId,
+        name: Option<String>,
+        position: Option<i32>,
+    ) -> ApiResult<Option<BoardColumn>>;
+
+    async fn delete_column(&self, id: ColumnId, tenant: TenantId) -> ApiResult<u64>;
+
+    async fn board_provider(&self, id: BoardId, tenant: TenantId) -> ApiResult<Option<String>>;
 }
 
 /// The real implementation, over the engine-agnostic pool.
@@ -1719,6 +1753,94 @@ impl TaskRepository for DbTaskRepository {
            AND (t.visibility <> 'private' OR t.created_by = $2 OR t.assignee_user_id = $2)
          ORDER BY t.number",
                 params![task, viewer],
+            )
+            .await?)
+    }
+
+    async fn delete_board(&self, id: BoardId, tenant: TenantId) -> ApiResult<u64> {
+        Ok(self
+            .db
+            .exec(
+                "DELETE FROM boards WHERE id = $1 AND tenant_id = $2",
+                params![id, tenant],
+            )
+            .await?)
+    }
+
+    async fn board_in_tenant(&self, id: BoardId, tenant: TenantId) -> ApiResult<bool> {
+        let owned: Option<BoardId> = self
+            .db
+            .query_scalar_opt(
+                "SELECT id FROM boards WHERE id = $1 AND tenant_id = $2",
+                params![id, tenant],
+            )
+            .await?;
+        Ok(owned.is_some())
+    }
+
+    async fn max_column_position(&self, board: BoardId) -> ApiResult<Option<i32>> {
+        Ok(self
+            .db
+            .query_scalar(
+                "SELECT max(position) FROM board_columns WHERE board_id = $1",
+                params![board],
+            )
+            .await?)
+    }
+
+    async fn append_column(
+        &self,
+        board: BoardId,
+        name: &str,
+        position: i32,
+    ) -> ApiResult<BoardColumn> {
+        Ok(self
+            .db
+            .query_one(
+                "INSERT INTO board_columns (id, board_id, name, position)
+         VALUES ($1, $2, $3, $4) RETURNING *",
+                params![ColumnId::new(), board, name, position],
+            )
+            .await?)
+    }
+
+    async fn update_column(
+        &self,
+        id: ColumnId,
+        tenant: TenantId,
+        name: Option<String>,
+        position: Option<i32>,
+    ) -> ApiResult<Option<BoardColumn>> {
+        Ok(self
+            .db
+            .query_opt(
+                "UPDATE board_columns SET
+            name = COALESCE($2, name),
+            position = COALESCE($3, position)
+         WHERE id = $1 AND board_id IN (SELECT id FROM boards WHERE tenant_id = $4)
+         RETURNING *",
+                params![id, name, position, tenant],
+            )
+            .await?)
+    }
+
+    async fn delete_column(&self, id: ColumnId, tenant: TenantId) -> ApiResult<u64> {
+        Ok(self
+            .db
+            .exec(
+                "DELETE FROM board_columns
+         WHERE id = $1 AND board_id IN (SELECT id FROM boards WHERE tenant_id = $2)",
+                params![id, tenant],
+            )
+            .await?)
+    }
+
+    async fn board_provider(&self, id: BoardId, tenant: TenantId) -> ApiResult<Option<String>> {
+        Ok(self
+            .db
+            .query_scalar_opt(
+                "SELECT provider FROM boards WHERE id = $1 AND tenant_id = $2",
+                params![id, tenant],
             )
             .await?)
     }
@@ -3057,5 +3179,109 @@ impl TaskRepository for FakeTaskRepository {
             .collect();
         out.sort_by_key(|r| r.key.clone());
         Ok(out)
+    }
+
+    async fn delete_board(&self, id: BoardId, tenant: TenantId) -> ApiResult<u64> {
+        let mut st = self.inner.lock().unwrap();
+        let before = st.boards.len();
+        st.boards.retain(|b| !(b.id == id && b.tenant_id == tenant));
+        Ok((before - st.boards.len()) as u64)
+    }
+
+    async fn board_in_tenant(&self, id: BoardId, tenant: TenantId) -> ApiResult<bool> {
+        let st = self.inner.lock().unwrap();
+        Ok(st
+            .boards
+            .iter()
+            .any(|b| b.id == id && b.tenant_id == tenant))
+    }
+
+    async fn max_column_position(&self, board: BoardId) -> ApiResult<Option<i32>> {
+        let st = self.inner.lock().unwrap();
+        Ok(st
+            .columns
+            .iter()
+            .filter(|c| c.board_id == board)
+            .map(|c| c.position)
+            .max())
+    }
+
+    async fn append_column(
+        &self,
+        board: BoardId,
+        name: &str,
+        position: i32,
+    ) -> ApiResult<BoardColumn> {
+        let mut st = self.inner.lock().unwrap();
+        let c = BoardColumn {
+            id: ColumnId::new(),
+            board_id: board,
+            name: name.into(),
+            position,
+            // The column DEFAULT the INSERT relies on by omitting the field.
+            r#type: "unstarted".into(),
+        };
+        st.columns.push(c.clone());
+        Ok(c)
+    }
+
+    async fn update_column(
+        &self,
+        id: ColumnId,
+        tenant: TenantId,
+        name: Option<String>,
+        position: Option<i32>,
+    ) -> ApiResult<Option<BoardColumn>> {
+        let mut st = self.inner.lock().unwrap();
+        let owned: Vec<BoardId> = st
+            .boards
+            .iter()
+            .filter(|b| b.tenant_id == tenant)
+            .map(|b| b.id)
+            .collect();
+        let Some(c) = st
+            .columns
+            .iter_mut()
+            .find(|c| c.id == id && owned.contains(&c.board_id))
+        else {
+            return Ok(None);
+        };
+        // COALESCE: absent leaves the field alone.
+        if let Some(n) = name {
+            c.name = n;
+        }
+        if let Some(p) = position {
+            c.position = p;
+        }
+        Ok(Some(c.clone()))
+    }
+
+    async fn delete_column(&self, id: ColumnId, tenant: TenantId) -> ApiResult<u64> {
+        let mut st = self.inner.lock().unwrap();
+        let owned: Vec<BoardId> = st
+            .boards
+            .iter()
+            .filter(|b| b.tenant_id == tenant)
+            .map(|b| b.id)
+            .collect();
+        let doomed: Vec<ColumnId> = st
+            .columns
+            .iter()
+            .filter(|c| c.id == id && owned.contains(&c.board_id))
+            .map(|c| c.id)
+            .collect();
+        st.columns.retain(|c| !doomed.contains(&c.id));
+        // Deleting a column cascades its tasks (schema ON DELETE CASCADE).
+        st.tasks.retain(|t| !doomed.contains(&t.column_id));
+        Ok(doomed.len() as u64)
+    }
+
+    async fn board_provider(&self, id: BoardId, tenant: TenantId) -> ApiResult<Option<String>> {
+        let st = self.inner.lock().unwrap();
+        Ok(st
+            .boards
+            .iter()
+            .find(|b| b.id == id && b.tenant_id == tenant)
+            .map(|b| b.provider.clone()))
     }
 }

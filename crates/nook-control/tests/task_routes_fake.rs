@@ -528,3 +528,112 @@ async fn a_comments_author_is_reported_for_the_ownership_check() {
     f.repo.delete_comment(c.id, f.tenant).await.unwrap();
     assert!(f.repo.comments_of(id).await.unwrap().is_empty());
 }
+
+/// Column administration is scoped through the board's tenant, because
+/// `board_columns` has no `tenant_id` of its own. A caller in another tenant
+/// must not be able to rename or delete somebody's column by id.
+#[tokio::test]
+async fn column_administration_is_scoped_through_the_board() {
+    let f = fx();
+    let other = TenantId::new();
+
+    assert!(f.repo.board_in_tenant(f.board, f.tenant).await.unwrap());
+    assert!(
+        !f.repo.board_in_tenant(f.board, other).await.unwrap(),
+        "another tenant does not own this board"
+    );
+
+    // A cross-tenant rename matches nothing rather than succeeding.
+    assert!(f
+        .repo
+        .update_column(f.todo, other, Some("Renamed".into()), None)
+        .await
+        .unwrap()
+        .is_none());
+    assert_eq!(
+        f.repo.board_columns(f.board).await.unwrap()[1].name,
+        "Todo",
+        "and the column is untouched"
+    );
+
+    // The owner's rename lands, and COALESCE leaves the unmentioned field alone.
+    let renamed = f
+        .repo
+        .update_column(f.todo, f.tenant, Some("Doing".into()), None)
+        .await
+        .unwrap()
+        .expect("owner may rename");
+    assert_eq!((renamed.name.as_str(), renamed.position), ("Doing", 1));
+
+    // …and a cross-tenant delete removes nothing.
+    assert_eq!(f.repo.delete_column(f.todo, other).await.unwrap(), 0);
+    assert_eq!(f.repo.delete_column(f.todo, f.tenant).await.unwrap(), 1);
+}
+
+/// Deleting a column cascades its tasks (the schema's ON DELETE CASCADE), so a
+/// caller cannot be left with rows pointing at a column that is gone.
+#[tokio::test]
+async fn deleting_a_column_takes_its_tasks_with_it() {
+    let f = fx();
+    let doomed = f
+        .task("in the doomed column", f.todo, "task", "team", None, &[])
+        .await;
+    let kept = f
+        .task("elsewhere", f.triage, "task", "team", None, &[])
+        .await;
+
+    assert_eq!(f.repo.delete_column(f.todo, f.tenant).await.unwrap(), 1);
+    assert!(f.repo.get_row(f.tenant, doomed).await.unwrap().is_none());
+    assert!(
+        f.repo.get_row(f.tenant, kept).await.unwrap().is_some(),
+        "a task in another column is untouched"
+    );
+}
+
+/// A new column appends after the last one; the first on an empty board lands
+/// at 0 (`max(position)` is NULL, and `-1 + 1` is the caller's arithmetic).
+#[tokio::test]
+async fn columns_append_after_the_last_position() {
+    let f = fx();
+    let bare = f.repo.with_board(f.tenant, "Bare", "BARE").id;
+
+    assert_eq!(f.repo.max_column_position(bare).await.unwrap(), None);
+    let first = f.repo.append_column(bare, "Todo", 0).await.unwrap();
+    assert_eq!(first.position, 0);
+
+    let max = f.repo.max_column_position(bare).await.unwrap();
+    assert_eq!(max, Some(0));
+    let second = f
+        .repo
+        .append_column(bare, "Doing", max.unwrap_or(-1) + 1)
+        .await
+        .unwrap();
+    assert_eq!(second.position, 1);
+}
+
+/// Deleting a board and reading its provider are both tenant-scoped.
+#[tokio::test]
+async fn boards_are_deleted_and_read_within_their_tenant() {
+    let f = fx();
+    let other = TenantId::new();
+
+    assert_eq!(
+        f.repo
+            .board_provider(f.board, f.tenant)
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("local")
+    );
+    assert!(
+        f.repo
+            .board_provider(f.board, other)
+            .await
+            .unwrap()
+            .is_none(),
+        "another tenant cannot read the provider — the route turns this into 404"
+    );
+
+    assert_eq!(f.repo.delete_board(f.board, other).await.unwrap(), 0);
+    assert_eq!(f.repo.delete_board(f.board, f.tenant).await.unwrap(), 1);
+}

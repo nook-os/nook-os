@@ -1,6 +1,5 @@
 use axum::extract::{Path, State};
 use axum::Json;
-use nook_db::{params, Db};
 use nook_types::*;
 
 use crate::auth::AuthCtx;
@@ -597,13 +596,7 @@ pub async fn delete_board(
     auth: AuthCtx,
     Path(id): Path<BoardId>,
 ) -> ApiResult<axum::http::StatusCode> {
-    let res = state
-        .db
-        .exec(
-            "DELETE FROM boards WHERE id = $1 AND tenant_id = $2",
-            params![id, auth.tenant_id],
-        )
-        .await?;
+    let res = state.tasks.delete_board(id, auth.tenant_id).await?;
     if res == 0 {
         return Err(ApiError::NotFound);
     }
@@ -622,35 +615,17 @@ pub async fn add_column(
     Json(req): Json<CreateColumnRequest>,
 ) -> ApiResult<Json<BoardColumn>> {
     // Tenant must own the board.
-    let owned: Option<BoardId> = state
-        .db
-        .query_scalar_opt(
-            "SELECT id FROM boards WHERE id = $1 AND tenant_id = $2",
-            params![board_id, auth.tenant_id],
-        )
-        .await?;
-    if owned.is_none() {
+    if !state
+        .tasks
+        .board_in_tenant(board_id, auth.tenant_id)
+        .await?
+    {
         return Err(ApiError::NotFound);
     }
-    let max_pos: Option<i32> = state
-        .db
-        .query_scalar(
-            "SELECT max(position) FROM board_columns WHERE board_id = $1",
-            params![board_id],
-        )
-        .await?;
-    let col: BoardColumn = state
-        .db
-        .query_one(
-            "INSERT INTO board_columns (id, board_id, name, position)
-         VALUES ($1, $2, $3, $4) RETURNING *",
-            params![
-                ColumnId::new(),
-                board_id,
-                &req.name,
-                max_pos.unwrap_or(-1) + 1
-            ],
-        )
+    let max_pos = state.tasks.max_column_position(board_id).await?;
+    let col = state
+        .tasks
+        .append_column(board_id, &req.name, max_pos.unwrap_or(-1) + 1)
         .await?;
     Ok(Json(col))
 }
@@ -667,16 +642,9 @@ pub async fn update_column(
     Json(req): Json<UpdateColumnRequest>,
 ) -> ApiResult<Json<BoardColumn>> {
     // Column must belong to a board the tenant owns.
-    let col: Option<BoardColumn> = state
-        .db
-        .query_opt(
-            "UPDATE board_columns SET
-            name = COALESCE($2, name),
-            position = COALESCE($3, position)
-         WHERE id = $1 AND board_id IN (SELECT id FROM boards WHERE tenant_id = $4)
-         RETURNING *",
-            params![id, req.name, req.position, auth.tenant_id],
-        )
+    let col = state
+        .tasks
+        .update_column(id, auth.tenant_id, req.name.clone(), req.position)
         .await?;
     col.map(Json).ok_or(ApiError::NotFound)
 }
@@ -691,14 +659,7 @@ pub async fn delete_column(
     Path(id): Path<ColumnId>,
 ) -> ApiResult<axum::http::StatusCode> {
     // Deleting a column cascades its tasks (schema ON DELETE CASCADE).
-    let res = state
-        .db
-        .exec(
-            "DELETE FROM board_columns
-         WHERE id = $1 AND board_id IN (SELECT id FROM boards WHERE tenant_id = $2)",
-            params![id, auth.tenant_id],
-        )
-        .await?;
+    let res = state.tasks.delete_column(id, auth.tenant_id).await?;
     if res == 0 {
         return Err(ApiError::NotFound);
     }
@@ -710,13 +671,9 @@ pub(crate) async fn provider_for_board(
     tenant: TenantId,
     board: BoardId,
 ) -> ApiResult<String> {
-    let provider: String = state
-        .db
-        .query_scalar_opt(
-            "SELECT provider FROM boards WHERE id = $1 AND tenant_id = $2",
-            params![board, tenant],
-        )
+    state
+        .tasks
+        .board_provider(board, tenant)
         .await?
-        .ok_or(ApiError::NotFound)?;
-    Ok(provider)
+        .ok_or(ApiError::NotFound)
 }
