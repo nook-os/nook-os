@@ -35,8 +35,9 @@ vi.mock("@nookos/api", () => ({
   },
 }));
 
-import { LoopPanel, LoopActionButton } from "./LoopPanel";
+import { LoopPanel, LoopActionButton, agentActivityLabel } from "./LoopPanel";
 import { loopAction } from "./loop";
+import { useLive } from "./live";
 
 function job(over: Record<string, unknown> = {}) {
   return {
@@ -92,6 +93,10 @@ beforeEach(() => {
   state.detail = null;
   state.pending = [];
   post.mockClear();
+  // The turn map is module state shared across tests; a leftover mark from one
+  // test would silence the indicator in the next and read as a passing
+  // assertion about the wrong thing.
+  useLive.setState({ jobTurn: {} });
 });
 afterEach(() => cleanup());
 
@@ -278,6 +283,38 @@ describe("shared chat surface (MAIN-237)", () => {
     expect(screen.queryByText("the operator agent is working…")).toBeNull();
   });
 
+  it("believes the real turn signal over the state inference", async () => {
+    // A `running` job whose adapter says the agent is BETWEEN turns. State
+    // inference has always called this "working" and been wrong about it; that
+    // wrongness is the whole reason MAIN-240 exists, so the panel must go quiet.
+    state.jobs = [job({ state: "running" })];
+    state.detail = job({ state: "running", transcript: [] });
+    useLive.setState({ jobTurn: { "job-1": { active: false, at: Date.now() } } });
+    const idle = renderPanel();
+    // Wait for the panel body, so "no indicator" is a real absence rather than
+    // an assertion made before the job detail ever loaded — the way this test
+    // would pass while proving nothing.
+    await waitFor(() => expect(screen.getByText("running")).toBeTruthy());
+    expect(screen.queryByText("the operator agent is working…")).toBeNull();
+    idle.unmount();
+
+    // …and the same job with a turn in flight does show it.
+    useLive.setState({ jobTurn: { "job-1": { active: true, at: Date.now() } } });
+    renderPanel();
+    expect(await screen.findByText("the operator agent is working…")).toBeTruthy();
+  });
+
+  it("keeps the inferred indicator for a job no adapter reports on (tmux, NG-1)", async () => {
+    // The fallback path never sends `job_turn`. Removing the inference along
+    // with the guesswork would leave those jobs with no liveness cue at all,
+    // which is a regression dressed up as a fix.
+    state.jobs = [job({ state: "running" })];
+    state.detail = job({ state: "running", transcript: [] });
+    useLive.setState({ jobTurn: {} });
+    renderPanel();
+    expect(await screen.findByText("the operator agent is working…")).toBeTruthy();
+  });
+
   it("answers the pending ask through the shared composer", async () => {
     state.jobs = [job({ state: "waiting_on_human" })];
     state.detail = job({ state: "waiting_on_human", transcript: [] });
@@ -313,5 +350,35 @@ describe("shared chat surface (MAIN-237)", () => {
     const box = (await screen.findByLabelText("Message")) as HTMLTextAreaElement;
     expect(box.disabled).toBe(true);
     expect(box.placeholder).toBe("Nothing to answer right now");
+  });
+});
+
+// The label's own truth table (MAIN-240 AC-2). Rendering covers the two cases
+// an operator actually sees; this covers the edges cheaply, including the ones
+// a render cannot reach — a turn mark left over on a job that has since failed
+// is a real state (the node died mid-turn, the reaper failed the job) and the
+// indicator must not survive it.
+describe("agentActivityLabel", () => {
+  const working = "the operator agent is working…";
+
+  it("gates only `running` on the turn signal", () => {
+    expect(agentActivityLabel("running")).toBe(working);
+    expect(agentActivityLabel("running", { active: true })).toBe(working);
+    expect(agentActivityLabel("running", { active: false })).toBeNull();
+  });
+
+  it("ignores the turn signal for states that describe the executor, not the agent", () => {
+    // No process exists yet, so no turn can be in flight; a stray `false` here
+    // must not blank a label that is reporting something else entirely.
+    expect(agentActivityLabel("queued", { active: false })).toBe("waiting for an executor…");
+    expect(agentActivityLabel("claimed", { active: false })).toBe(
+      "the operator agent is starting…",
+    );
+  });
+
+  it("never resurrects an indicator for a job that is not running", () => {
+    for (const state of ["waiting_on_human", "completed", "failed", "canceled"]) {
+      expect(agentActivityLabel(state, { active: true })).toBeNull();
+    }
   });
 });
