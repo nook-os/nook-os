@@ -2,7 +2,7 @@
 //! brings the same predictable environment back on every reboot.
 
 use anyhow::Result;
-use nook_db::{params, Db, DbPool};
+use nook_db::{params, Db, DbPool, Postgres, TimeMath, TypeMapping};
 use nook_types::*;
 
 use crate::config::Config;
@@ -320,8 +320,7 @@ pub async fn run(db: &DbPool, cfg: &Config) -> Result<()> {
                 "INSERT INTO join_tokens (id, tenant_id, token_hash, name, expires_at)
              VALUES ($1, $2, $3, 'dev auto-join', {expiry})
              ON CONFLICT (token_hash) DO NOTHING",
-                // Engine-selected (MAIN-196): SQLite has no `now() + interval`.
-                expiry = nook_db::dialect::time_math(db.engine()).now_plus("10 years")
+                expiry = Postgres.now_plus("10 years")
             ),
             params![JoinTokenId::new(), tenant.id, hash_token(token)],
         )
@@ -503,7 +502,7 @@ pub async fn run(db: &DbPool, cfg: &Config) -> Result<()> {
                 "INSERT INTO node_workspaces
                      (id, tenant_id, node_id, workspace_id, path, git_branch, git_status, kind, missing_at)
                  VALUES ($1, $2, $3, $4, '/srv/example/widgets__old', 'old', $5, 'worktree', {})",
-                nook_db::dialect::type_mapping(db.engine()).now()
+                Postgres.now()
             ),
             params![
                 NodeWorkspaceId::new(),

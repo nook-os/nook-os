@@ -136,8 +136,6 @@ pub fn engine_from_url(url: &str) -> Result<Engine, DbError> {
 /// needs (that work is inseparable from the query surface, so it lives with the
 /// engine that requires it, not here).
 pub async fn connect(url: &str, max_connections: u32) -> Result<DbPool, DbError> {
-    use std::str::FromStr;
-
     match engine_from_url(url)? {
         Engine::Postgres => {
             let pg = sqlx::postgres::PgPoolOptions::new()
@@ -147,27 +145,7 @@ pub async fn connect(url: &str, max_connections: u32) -> Result<DbPool, DbError>
                 .map_err(DbError::Connect)?;
             Ok(EnginePool::from_pg(pg))
         }
-        Engine::Sqlite => {
-            // `create_if_missing` is what makes "point it at an empty file and
-            // boot" true (MAIN-196): without it sqlx refuses a path that does
-            // not exist yet, which is exactly the zero-infrastructure case.
-            //
-            // One connection, deliberately. SQLite serialises writers anyway,
-            // and a pool of them turns a serialised write into a `database is
-            // locked` error instead of a wait. The single-instance file lock is
-            // its own card (MAIN-195 AC-5); this is just not pretending.
-            let opts = sqlx::sqlite::SqliteConnectOptions::from_str(url)
-                .map_err(DbError::Connect)?
-                .create_if_missing(true)
-                .foreign_keys(true)
-                .busy_timeout(std::time::Duration::from_secs(10));
-            let sqlite = sqlx::sqlite::SqlitePoolOptions::new()
-                .max_connections(1)
-                .connect_with(opts)
-                .await
-                .map_err(DbError::Connect)?;
-            Ok(EnginePool::from_sqlite(sqlite))
-        }
+        Engine::Sqlite => Err(DbError::NotYetSupported(Engine::Sqlite)),
     }
 }
 
@@ -218,24 +196,11 @@ mod tests {
         ));
     }
 
-    /// MAIN-196 is what this test used to wait for: `connect` now OPENS a
-    /// SQLite pool instead of refusing one. Creating the file when it is
-    /// missing is the point — "point it at a path and boot" is the whole
-    /// zero-infrastructure promise.
     #[tokio::test]
-    async fn connect_opens_sqlite_and_creates_the_file() {
-        let path =
-            std::env::temp_dir().join(format!("nook-connect-{}.db", uuid::Uuid::now_v7().simple()));
-        let _ = std::fs::remove_file(&path);
-
-        let pool = connect(&format!("sqlite://{}", path.display()), 1)
-            .await
-            .expect("an absent sqlite path is created, not refused");
-        assert_eq!(pool.engine(), Engine::Sqlite);
-        assert!(path.exists(), "the file was created");
-
-        drop(pool);
-        let _ = std::fs::remove_file(&path);
+    async fn connect_refuses_sqlite_until_main_196() {
+        let err = connect("sqlite:///tmp/x.db", 1).await.unwrap_err();
+        assert!(matches!(err, DbError::NotYetSupported(Engine::Sqlite)));
+        assert!(err.to_string().contains("MAIN-196"));
     }
 
     #[tokio::test]

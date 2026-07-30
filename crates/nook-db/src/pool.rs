@@ -626,16 +626,6 @@ impl EnginePool {
         EnginePool(Arm::Sqlite(pool))
     }
 
-    /// The underlying SQLite pool, for the same narrow reason [`pg`] exists:
-    /// migrations take a concrete sqlx pool, not the dispatch surface. Panics on
-    /// a Postgres pool — callers branch on [`engine`] first.
-    pub fn sqlite(&self) -> &SqlitePool {
-        match &self.0 {
-            Arm::Sqlite(p) => p,
-            Arm::Pg(_) => panic!("EnginePool::sqlite() on a Postgres pool"),
-        }
-    }
-
     /// Which engine this pool dispatches to.
     pub fn engine(&self) -> Engine {
         match self.0 {
