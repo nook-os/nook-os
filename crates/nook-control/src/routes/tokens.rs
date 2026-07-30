@@ -12,7 +12,6 @@
 use axum::extract::{Path, State};
 use axum::Json;
 use chrono::{Duration, Utc};
-use nook_db::{params, Db, Postgres, TypeMapping};
 use nook_types::*;
 use rand::distr::Alphanumeric;
 use rand::Rng;
@@ -58,19 +57,15 @@ pub async fn create(
 
     let id = uuid::Uuid::now_v7();
     state
-        .db
-        .exec(
-            "INSERT INTO user_tokens (id, tenant_id, user_id, token_hash, name, expires_at)
-         VALUES ($1, $2, $3, $4, $5, $6)",
-            params![
-                id,
-                auth.tenant_id,
-                auth.user_id,
-                hash_token(&token),
-                name,
-                expires_at
-            ],
-        )
+        .identity
+        .create_user_token(crate::repo::identity::NewUserToken {
+            id,
+            tenant: auth.tenant_id,
+            user_id: auth.user_id,
+            token_hash: hash_token(&token),
+            name: name.to_string(),
+            expires_at,
+        })
         .await?;
 
     events::record(
@@ -98,18 +93,7 @@ pub async fn create(
     responses((status = 200, body = [UserToken])))]
 pub async fn list(State(state): State<AppState>, auth: AuthCtx) -> ApiResult<Json<Vec<UserToken>>> {
     auth.require_user()?;
-    let rows: Vec<UserToken> = state
-        .db
-        .query_all(
-            &format!(
-                "SELECT {}, name, last_used_at, expires_at, created_at
-         FROM user_tokens WHERE user_id = $1 ORDER BY created_at DESC",
-                Postgres.cast("id", "text")
-            ),
-            params![auth.user_id],
-        )
-        .await?;
-    Ok(Json(rows))
+    Ok(Json(state.identity.list_user_tokens(auth.user_id).await?))
 }
 
 /// Revoke one. Immediate: the next request carrying it is unauthorized.
@@ -129,13 +113,7 @@ pub async fn revoke(
 
     // Scoped to the caller: one user revoking another's credential is an
     // administrative act, not a self-service one.
-    let done = state
-        .db
-        .exec(
-            "DELETE FROM user_tokens WHERE id = $1 AND user_id = $2",
-            params![uuid, auth.user_id],
-        )
-        .await?;
+    let done = state.identity.revoke_user_token(uuid, auth.user_id).await?;
     if done == 0 {
         return Err(ApiError::NotFound);
     }

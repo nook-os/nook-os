@@ -7,7 +7,6 @@
 
 use axum::extract::{Path, Query, State};
 use axum::Json;
-use nook_db::{params, Db, Postgres, TypeMapping};
 use nook_types::*;
 use serde::Deserialize;
 
@@ -29,15 +28,14 @@ pub struct MemberListQuery {
 /// The caller's role in a tenant, read from `tenant_members` — the single source
 /// of truth (not `users.role`), so authorization is against the membership that
 /// actually grants access (AC-7).
-async fn role_in(db: &nook_db::DbPool, user_id: uuid::Uuid, tenant: TenantId) -> ApiResult<String> {
-    let row: Option<String> = db
-        .query_scalar_opt(
-            "SELECT role FROM tenant_members
-         WHERE tenant_id = $1 AND principal_type = 'user' AND principal_id = $2",
-            params![tenant, user_id],
-        )
-        .await?;
-    row.ok_or_else(|| ApiError::ForbiddenMsg("you are not a member of this tenant".into()))
+async fn role_in(
+    repo: &dyn crate::repo::identity::IdentityRepository,
+    user_id: uuid::Uuid,
+    tenant: TenantId,
+) -> ApiResult<String> {
+    repo.membership_role(tenant, user_id)
+        .await?
+        .ok_or_else(|| ApiError::ForbiddenMsg("you are not a member of this tenant".into()))
 }
 
 /// Every management action targets the caller's ACTIVE tenant only. Managing a
@@ -55,7 +53,7 @@ async fn require_active_tenant(
             "you can only manage members of the tenant you are switched into".into(),
         ));
     }
-    role_in(&state.db, auth.user_id.0, tenant).await
+    role_in(state.identity.as_ref(), auth.user_id.0, tenant).await
 }
 
 /// May `caller` (their role in the tenant) modify a member whose current role
@@ -71,15 +69,11 @@ fn may_modify_target(caller: &str, target: &str) -> bool {
 
 /// How many owners a tenant has — the guard that keeps a tenant from being left
 /// ownerless (AC-5).
-async fn owner_count(db: &nook_db::DbPool, tenant: TenantId) -> ApiResult<i64> {
-    let n: i64 = db
-        .query_scalar(
-            "SELECT count(*) FROM tenant_members
-         WHERE tenant_id = $1 AND principal_type = 'user' AND role = 'owner'",
-            params![tenant],
-        )
-        .await?;
-    Ok(n)
+async fn owner_count(
+    repo: &dyn crate::repo::identity::IdentityRepository,
+    tenant: TenantId,
+) -> ApiResult<i64> {
+    repo.owner_count(tenant).await
 }
 
 /// Every tenant this user is a member of, with the role they hold in each.
@@ -93,33 +87,17 @@ pub async fn list(
     // Read through the membership table rather than users.tenant_id: the
     // column is the *current* tenant, the table is everything reachable, and
     // conflating them is what makes adding teams a rewrite instead of a row.
-    let rows: Vec<(
-        TenantId,
-        String,
-        String,
-        String,
-        chrono::DateTime<chrono::Utc>,
-    )> = state
-        .db
-        .query_all(
-            "SELECT t.id, t.name, t.slug, m.role, t.created_at
-             FROM tenant_members m
-             JOIN tenants t ON t.id = m.tenant_id
-             WHERE m.principal_type = 'user' AND m.principal_id = $1
-             ORDER BY t.created_at",
-            params![auth.user_id.0],
-        )
-        .await?;
+    let rows = state.identity.tenant_grants_of(auth.user_id.0).await?;
 
     Ok(Json(
         rows.into_iter()
-            .map(|(id, name, slug, role, created_at)| TenantMembership {
-                current: id == auth.tenant_id,
-                id,
-                name,
-                slug,
-                role,
-                created_at,
+            .map(|r| TenantMembership {
+                current: r.tenant_id == auth.tenant_id,
+                id: r.tenant_id,
+                name: r.name,
+                slug: r.slug,
+                role: r.role,
+                created_at: r.created_at,
             })
             .collect(),
     ))
@@ -185,7 +163,7 @@ pub async fn change_member_role(
             "only an owner can grant ownership".into(),
         ));
     }
-    let current = role_in(&state.db, pid, tenant).await?;
+    let current = role_in(state.identity.as_ref(), pid, tenant).await?;
     // The owner tier is owners-only (AC-2): an admin may not demote or reassign
     // an existing owner.
     if !may_modify_target(&caller, &current) {
@@ -194,7 +172,10 @@ pub async fn change_member_role(
         ));
     }
     // Demoting/reassigning the last owner would orphan the tenant.
-    if current == "owner" && new_role != "owner" && owner_count(&state.db, tenant).await? <= 1 {
+    if current == "owner"
+        && new_role != "owner"
+        && owner_count(state.identity.as_ref(), tenant).await? <= 1
+    {
         return Err(ApiError::ForbiddenMsg(
             "this is the last owner — promote someone else to owner first".into(),
         ));
@@ -202,23 +183,11 @@ pub async fn change_member_role(
 
     // Keep users.role in step with tenant_members.role so the two never
     // disagree (see the identity module's invariant).
+    // One call: `tenant_members.role` and `users.role` moving together is the
+    // invariant, and two statements at a call site is how they come apart.
     state
-        .db
-        .exec(
-            "UPDATE tenant_members SET role = $3
-         WHERE tenant_id = $1 AND principal_type = 'user' AND principal_id = $2",
-            params![tenant, pid, new_role],
-        )
-        .await?;
-    state
-        .db
-        .exec(
-            &format!(
-                "UPDATE users SET role = $3, updated_at = {} WHERE id = $2 AND tenant_id = $1",
-                Postgres.now()
-            ),
-            params![tenant, pid, new_role],
-        )
+        .identity
+        .change_member_role(tenant, pid, new_role)
         .await?;
 
     // The role is part of the cached tenants list, so a change makes that
@@ -230,15 +199,11 @@ pub async fn change_member_role(
     )
     .await;
 
-    let member: TenantMemberItem = state
-        .db
-        .query_one(
-            "SELECT m.principal_id, u.email, u.display_name, m.role, m.created_at AS joined_at
-         FROM tenant_members m JOIN users u ON u.id = m.principal_id
-         WHERE m.tenant_id = $1 AND m.principal_id = $2",
-            params![tenant, pid],
-        )
-        .await?;
+    let member = state
+        .identity
+        .member_item(tenant, pid)
+        .await?
+        .ok_or(ApiError::NotFound)?;
     Ok(Json(member))
 }
 
@@ -261,7 +226,7 @@ pub async fn remove_member(
             "removing members needs owner or admin".into(),
         ));
     }
-    let target = role_in(&state.db, pid, tenant).await?;
+    let target = role_in(state.identity.as_ref(), pid, tenant).await?;
     // Only an owner may remove another owner — the owner tier is reserved to
     // owners (AC-2); an admin cannot eject one.
     if !may_modify_target(&caller, &target) {
@@ -269,19 +234,12 @@ pub async fn remove_member(
             "only an owner can remove another owner".into(),
         ));
     }
-    if target == "owner" && owner_count(&state.db, tenant).await? <= 1 {
+    if target == "owner" && owner_count(state.identity.as_ref(), tenant).await? <= 1 {
         return Err(ApiError::ForbiddenMsg(
             "this is the last owner — a tenant cannot be left ownerless".into(),
         ));
     }
-    let res = state
-        .db
-        .exec(
-            "DELETE FROM tenant_members
-         WHERE tenant_id = $1 AND principal_type = 'user' AND principal_id = $2",
-            params![tenant, pid],
-        )
-        .await?;
+    let res = state.identity.remove_membership(tenant, pid).await?;
     if res == 0 {
         return Err(ApiError::NotFound);
     }
@@ -311,18 +269,14 @@ pub async fn leave_tenant(
     Path(tenant): Path<TenantId>,
 ) -> ApiResult<axum::http::StatusCode> {
     let mine = require_active_tenant(&state, &auth, tenant).await?;
-    if mine == "owner" && owner_count(&state.db, tenant).await? <= 1 {
+    if mine == "owner" && owner_count(state.identity.as_ref(), tenant).await? <= 1 {
         return Err(ApiError::ForbiddenMsg(
             "you are the last owner — promote someone else before leaving".into(),
         ));
     }
     state
-        .db
-        .exec(
-            "DELETE FROM tenant_members
-         WHERE tenant_id = $1 AND principal_type = 'user' AND principal_id = $2",
-            params![tenant, auth.user_id.0],
-        )
+        .identity
+        .remove_membership(tenant, auth.user_id.0)
         .await?;
     // You just left: drop the tenant from your own cached list immediately (AC-4).
     crate::services::identity::invalidate_person_tenants(
@@ -398,12 +352,15 @@ mod tests {
             b.contains("owner_count") && b.contains("<= 1"),
             "last-owner removal guard"
         );
+        // These looked for the literal statements until MAIN-247 moved them
+        // behind `IdentityRepository`. The intent is unchanged and deliberately
+        // not weakened: the handler must remove the grant and nothing else.
         assert!(
-            b.contains("DELETE FROM tenant_members"),
+            b.contains("remove_membership"),
             "removes only the membership row"
         );
         assert!(
-            !b.contains("DELETE FROM users"),
+            !b.contains("DELETE FROM users") && !b.contains("delete_user"),
             "must NOT delete the user's row / work (NG-2)"
         );
     }
@@ -424,6 +381,11 @@ mod tests {
 
 #[cfg(test)]
 mod db_tests {
+
+    /// The real repository over this test's pool — these stay DB-backed (NG-4).
+    fn repo_of(db: &nook_db::DbPool) -> crate::repo::identity::DbIdentityRepository {
+        crate::repo::identity::DbIdentityRepository::new(db.clone())
+    }
     use super::{owner_count, role_in};
     use nook_db::{params, Db, DbPool};
     use nook_types::TenantId;
@@ -476,9 +438,9 @@ mod db_tests {
         let owner = member(&db, t, "owner").await;
         let plain = member(&db, t, "member").await;
 
-        let oc1 = owner_count(&db, TenantId(t)).await.unwrap();
-        let r_owner = role_in(&db, owner, TenantId(t)).await.unwrap();
-        let r_plain = role_in(&db, plain, TenantId(t)).await.unwrap();
+        let oc1 = owner_count(&repo_of(&db), TenantId(t)).await.unwrap();
+        let r_owner = role_in(&repo_of(&db), owner, TenantId(t)).await.unwrap();
+        let r_plain = role_in(&repo_of(&db), plain, TenantId(t)).await.unwrap();
         // Promote the member to owner → two owners.
         db.exec(
             "UPDATE tenant_members SET role='owner' WHERE tenant_id=$1 AND principal_id=$2",
@@ -486,7 +448,7 @@ mod db_tests {
         )
         .await
         .unwrap();
-        let oc2 = owner_count(&db, TenantId(t)).await.unwrap();
+        let oc2 = owner_count(&repo_of(&db), TenantId(t)).await.unwrap();
 
         // A revoked membership resolves to an error (not a member).
         db.exec(
@@ -495,7 +457,7 @@ mod db_tests {
         )
         .await
         .unwrap();
-        let gone = role_in(&db, plain, TenantId(t)).await.is_err();
+        let gone = role_in(&repo_of(&db), plain, TenantId(t)).await.is_err();
 
         // cleanup
         let _ = db

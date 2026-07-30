@@ -10,10 +10,8 @@ use openidconnect::{
 use serde::Deserialize;
 use utoipa::ToSchema;
 
-use nook_db::{params, CiMatch, Db, Postgres};
-use nook_types::{
-    DevAccount, DevAccountsResponse, MeResponse, PurgeTestTenantsResponse, TenantId, UserId,
-};
+use nook_db::{CiMatch, Postgres};
+use nook_types::{DevAccountsResponse, MeResponse, PurgeTestTenantsResponse};
 
 use crate::auth::{
     create_auth_session, removal_cookie, session_cookie, AuthCtx, FlowState, FLOW_COOKIE,
@@ -322,19 +320,14 @@ pub async fn dev_login(
     // Dev-only, behind the same gate as the rest of this handler: matching by
     // email in production would let anybody who can reach an IdP become anybody
     // who shares their address.
-    let existing: Option<(UserId, TenantId)> = state
-        .db
-        .query_opt(
-            "SELECT id, tenant_id FROM users WHERE lower(email) = lower($1) LIMIT 1",
-            params![&email],
-        )
-        .await?;
+    let existing = state.identity.user_and_tenant_by_email(&email).await?;
 
     if let Some((user_id, tenant_id)) = existing {
-        let user: nook_types::User = state
-            .db
-            .query_one("SELECT * FROM users WHERE id = $1", params![user_id])
-            .await?;
+        let user = state
+            .identity
+            .get_user(user_id)
+            .await?
+            .ok_or(ApiError::NotFound)?;
 
         // Land an ACTUALLY-usable session. `resolve_session` 403s a session whose
         // user has no `tenant_members` grant on its tenant (a memberless session,
@@ -344,20 +337,16 @@ pub async fn dev_login(
         // you in (MAIN-221 AC-1). Dev-only (this whole handler is gated) and
         // idempotent; it grants the user's own role, never elevating.
         state
-            .db
-            .exec(
-                "INSERT INTO tenant_members (id, tenant_id, principal_type, principal_id, role)
-                 VALUES ($1, $2, 'user', $3, $4)
-                 ON CONFLICT (tenant_id, principal_type, principal_id) DO NOTHING",
-                params![uuid::Uuid::now_v7(), tenant_id, user_id, &user.role],
-            )
+            .identity
+            .grant_membership(tenant_id, user_id, &user.role)
             .await?;
 
         let session_id = create_auth_session(&state, user_id, tenant_id).await?;
-        let tenant: nook_types::Tenant = state
-            .db
-            .query_one("SELECT * FROM tenants WHERE id = $1", params![tenant_id])
-            .await?;
+        let tenant = state
+            .identity
+            .get_tenant(tenant_id)
+            .await?
+            .ok_or(ApiError::NotFound)?;
         events::record(
             &state,
             tenant.id,
@@ -444,17 +433,16 @@ pub async fn providers(State(state): State<AppState>) -> Json<nook_types::AuthPr
     responses((status = 200, body = MeResponse), (status = 401, description = "not signed in"))
 )]
 pub async fn me(State(state): State<AppState>, auth: AuthCtx) -> ApiResult<Json<MeResponse>> {
-    let user: nook_types::User = state
-        .db
-        .query_one("SELECT * FROM users WHERE id = $1", params![auth.user_id])
-        .await?;
-    let tenant: nook_types::Tenant = state
-        .db
-        .query_one(
-            "SELECT * FROM tenants WHERE id = $1",
-            params![auth.tenant_id],
-        )
-        .await?;
+    let user = state
+        .identity
+        .get_user(auth.user_id)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    let tenant = state
+        .identity
+        .get_tenant(auth.tenant_id)
+        .await?
+        .ok_or(ApiError::NotFound)?;
     Ok(Json(MeResponse {
         capability: capability_of(&state, &auth).await,
         tenants: cached_memberships_for(
@@ -538,11 +526,8 @@ pub async fn switch_tenant(
         .ok_or_else(|| ApiError::ForbiddenMsg("you are not a member of that tenant".into()))?;
 
     let res = state
-        .db
-        .exec(
-            "UPDATE sessions_auth SET user_id = $1, tenant_id = $2 WHERE id = $3",
-            params![target_user, req.tenant_id, auth.session_id],
-        )
+        .identity
+        .switch_session(auth.session_id, target_user, req.tenant_id)
         .await?;
     if res == 0 {
         // The caller IS a cookie session (checked above), so a zero-row update
@@ -599,20 +584,16 @@ pub async fn switch_tenant(
         tenant_id: req.tenant_id,
         ..auth
     };
-    let user: nook_types::User = state
-        .db
-        .query_one(
-            "SELECT * FROM users WHERE id = $1",
-            params![switched.user_id],
-        )
-        .await?;
-    let tenant: nook_types::Tenant = state
-        .db
-        .query_one(
-            "SELECT * FROM tenants WHERE id = $1",
-            params![switched.tenant_id],
-        )
-        .await?;
+    let user = state
+        .identity
+        .get_user(switched.user_id)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    let tenant = state
+        .identity
+        .get_tenant(switched.tenant_id)
+        .await?
+        .ok_or(ApiError::NotFound)?;
     Ok(Json(MeResponse {
         capability: capability_of(&state, &switched).await,
         tenants: cached_memberships_for(
@@ -642,16 +623,7 @@ async fn capability_of(state: &AppState, auth: &AuthCtx) -> nook_types::Capabili
             held.push(p.key().to_string());
         }
     }
-    let org_id: Option<uuid::Uuid> = state
-        .db
-        .query_opt::<(Option<uuid::Uuid>,)>(
-            "SELECT org_id FROM tenants WHERE id = $1",
-            params![auth.tenant_id],
-        )
-        .await
-        .ok()
-        .flatten()
-        .and_then(|(o,)| o);
+    let org_id = state.identity.org_of(auth.tenant_id).await.ok().flatten();
 
     nook_types::Capability {
         // "Operator" means holding anything at the deployment scope. Derived
@@ -706,41 +678,18 @@ pub async fn dev_accounts(
         .map(|s| format!("%{s}%"));
 
     // `$1` matches any of the three columns; a NULL `$1` matches all rows.
-    let filter = format!(
+    let _filter = format!(
         "($1::text IS NULL OR {} OR {} OR {})",
         Postgres.ci_match("u.email", "$1"),
         Postgres.ci_match("u.display_name", "$1"),
         Postgres.ci_match("t.slug", "$1"),
     );
 
-    let total: i64 = state
-        .db
-        .query_scalar(
-            &format!(
-                "SELECT count(*) FROM users u JOIN tenants t ON t.id = u.tenant_id WHERE {filter}"
-            ),
-            params![pattern.clone()],
-        )
-        .await?;
-
-    let accounts: Vec<DevAccount> = state
-        .db
-        .query_all(
-            &format!(
-                "SELECT u.email, u.display_name, t.slug AS tenant_slug,
-                    COALESCE(
-                        (SELECT array_agg(b.role_key ORDER BY b.role_key)
-                         FROM role_bindings b
-                         WHERE b.subject_id = u.id AND b.scope_type = 'deployment'),
-                        '{{}}'
-                    ) AS deployment_roles
-             FROM users u JOIN tenants t ON t.id = u.tenant_id
-             WHERE {filter}
-             ORDER BY u.created_at
-             LIMIT $2"
-            ),
-            params![pattern, DEV_ACCOUNTS_CAP],
-        )
+    // One call: the page and its total share a filter whose construction
+    // belongs with the SQL, not here.
+    let (accounts, total) = state
+        .identity
+        .dev_accounts_page(pattern, DEV_ACCOUNTS_CAP)
         .await?;
 
     Ok(Json(DevAccountsResponse { accounts, total }))
@@ -761,13 +710,7 @@ pub async fn purge_test_tenants(
     if !state.cfg.auth_dev_mode || state.cfg.is_production() {
         return Err(ApiError::Forbidden);
     }
-    let deleted = state
-        .db
-        .exec(
-            "DELETE FROM tenants WHERE name LIKE 'test-%' OR slug LIKE 'test-%'",
-            params![],
-        )
-        .await?;
+    let deleted = state.identity.purge_test_tenants().await?;
     Ok(Json(PurgeTestTenantsResponse {
         deleted: deleted as i64,
     }))
@@ -780,10 +723,7 @@ pub async fn logout(State(state): State<AppState>, jar: CookieJar) -> ApiResult<
         .get(SESSION_COOKIE)
         .and_then(|c| c.value().parse::<uuid::Uuid>().ok())
     {
-        state
-            .db
-            .exec("DELETE FROM sessions_auth WHERE id = $1", params![sid])
-            .await?;
+        state.identity.delete_auth_session(sid).await?;
     }
     Ok((
         jar.add(removal_cookie(SESSION_COOKIE)),
@@ -866,8 +806,12 @@ mod tests {
     #[test]
     fn switch_is_browser_session_only() {
         let body = switch_handler();
+        // Looked for the literal `UPDATE sessions_auth` until MAIN-247 moved the
+        // statement behind `IdentityRepository`. Same intent — switching must be
+        // a move of the browser session's active tenant, not a token reissue —
+        // so it now names the call that does it.
         assert!(
-            body.contains("UPDATE sessions_auth"),
+            body.contains("switch_session"),
             "switching is a move of the browser session's active tenant"
         );
         // The guard is on the affected-row count of the UPDATE: `exec` returns
