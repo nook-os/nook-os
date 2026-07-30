@@ -11,7 +11,6 @@
 //! user's address) is the proof.
 
 use axum::extract::{Json, State};
-use nook_db::{params, Db, Postgres, TimeMath, TypeMapping};
 
 use crate::auth::AuthCtx;
 use crate::error::{ApiError, ApiResult};
@@ -27,14 +26,11 @@ use nook_types::{
 /// Load the signed-in user's email and whether they are a local account (a
 /// password hash → local; OIDC users have none).
 async fn user_email_and_local(state: &AppState, user_id: UserId) -> ApiResult<(String, bool)> {
-    let (email, password_hash): (String, Option<String>) = state
-        .db
-        .query_one(
-            "SELECT email, password_hash FROM users WHERE id = $1",
-            params![user_id],
-        )
-        .await?;
-    Ok((email, password_hash.is_some()))
+    state
+        .identity
+        .email_and_local_flag(user_id)
+        .await?
+        .ok_or(ApiError::NotFound)
 }
 
 /// `GET /api/v1/auth/verify-email/status` — is this user's email verified, and
@@ -89,26 +85,12 @@ pub async fn request_core(
         });
     }
 
-    // One live token per user: drop any outstanding one first (AC-3).
-    state
-        .db
-        .exec(
-            "DELETE FROM email_verification_tokens WHERE user_id = $1 AND consumed_at IS NULL",
-            params![user_id],
-        )
-        .await?;
-
+    // One live token per user: dropping any outstanding one and issuing the
+    // new one is a single repository call, so a user can never briefly hold two.
     let token = random_token("evr_", 32);
     state
-        .db
-        .exec(
-            &format!(
-                "INSERT INTO email_verification_tokens (id, user_id, email, token_hash, expires_at)
-         VALUES ($1, $2, $3, $4, {expiry})",
-                expiry = Postgres.now_plus("24 hours")
-            ),
-            params![uuid::Uuid::now_v7(), user_id, &email, hash_token(&token)],
-        )
+        .identity
+        .issue_verification_token(user_id, &email, &hash_token(&token))
         .await?;
 
     let link = format!(
@@ -129,13 +111,11 @@ pub async fn request_core(
         None,
         crate::mailer::Category::Transactional,
     );
-    let tenant: uuid::Uuid = state
-        .db
-        .query_scalar(
-            "SELECT tenant_id FROM users WHERE id = $1",
-            params![user_id],
-        )
-        .await?;
+    let tenant = state
+        .identity
+        .tenant_of_user(user_id)
+        .await?
+        .ok_or(ApiError::NotFound)?;
     match crate::services::queue::enqueue_email(state, tenant, &job).await {
         Ok(()) => Ok(RequestVerificationResult {
             sent: true,
@@ -172,7 +152,7 @@ pub async fn confirm(
 /// live token and verifies; refuses a consumed/expired/unknown token; treats a
 /// used link on an already-verified address as an idempotent success.
 pub async fn confirm_core(
-    db: &nook_db::DbPool,
+    _db: &nook_db::DbPool,
     repo: &dyn crate::repo::identity::IdentityRepository,
     token: &str,
 ) -> ApiResult<ConfirmVerificationResult> {
@@ -184,27 +164,13 @@ pub async fn confirm_core(
     };
 
     // (id, user_id, email, consumed_at, expired)
-    type TokenRow = (
-        uuid::Uuid,
-        UserId,
-        String,
-        Option<chrono::DateTime<chrono::Utc>>,
-        bool,
-    );
-    let row: Option<TokenRow> = db
-        .query_opt(
-            &format!(
-                "SELECT id, user_id, email, consumed_at, expires_at < {}
-             FROM email_verification_tokens WHERE token_hash = $1",
-                Postgres.now()
-            ),
-            params![hash_token(token)],
-        )
-        .await?;
+    let found = repo.verification_token(&hash_token(token)).await?;
 
-    let Some((id, user_id, email, consumed_at, expired)) = row else {
+    let Some(tok) = found else {
         return decline("this verification link is not valid");
     };
+    let (id, user_id, email, consumed_at, expired) =
+        (tok.id, tok.user_id, tok.email, tok.consumed_at, tok.expired);
 
     if consumed_at.is_some() {
         // Re-opening a used link after verifying is a no-op success (AC-5).
@@ -222,14 +188,7 @@ pub async fn confirm_core(
     }
 
     // Consume then verify, in that order — a replayed token finds it consumed.
-    db.exec(
-        &format!(
-            "UPDATE email_verification_tokens SET consumed_at = {} WHERE id = $1",
-            Postgres.now()
-        ),
-        params![id],
-    )
-    .await?;
+    repo.consume_verification_token(id).await?;
     mark_local_email_verified(repo, user_id, &email).await?;
 
     Ok(ConfirmVerificationResult {

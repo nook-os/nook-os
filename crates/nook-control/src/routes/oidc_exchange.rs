@@ -15,7 +15,6 @@
 
 use axum::extract::State;
 use axum::Json;
-use nook_db::{params, Db, Postgres, TimeMath};
 use nook_types::*;
 use openidconnect::core::{CoreClient, CoreIdToken};
 use openidconnect::{ClientId, IssuerUrl, Nonce};
@@ -107,20 +106,13 @@ pub async fn exchange(
 
     let token_value = crate::routes::join::random_token(crate::auth::USER_TOKEN_PREFIX, 32);
     state
-        .db
-        .exec(
-            &format!(
-                "INSERT INTO user_tokens (id, user_id, tenant_id, token_hash, name, expires_at)
-         VALUES ($1, $2, $3, $4, $5, {expiry})",
-                expiry = Postgres.now_plus("365 days")
-            ),
-            params![
-                uuid::Uuid::now_v7(),
-                user.id,
-                tenant.id,
-                hash_token(&token_value),
-                req.client_name.unwrap_or_else(|| "native client".into())
-            ],
+        .identity
+        .create_native_client_token(
+            uuid::Uuid::now_v7(),
+            user.id,
+            tenant.id,
+            &hash_token(&token_value),
+            &req.client_name.unwrap_or_else(|| "native client".into()),
         )
         .await?;
 
