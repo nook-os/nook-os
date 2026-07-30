@@ -9,9 +9,9 @@ use axum::extract::State;
 use axum::Json;
 use nook_control::auth::{AuthCtx, Principal};
 use nook_control::state::AppState;
+use nook_db::{params, Db, DbPool};
 use nook_testkit::TestBed;
 use nook_types::*;
-use sqlx::PgPool;
 use uuid::Uuid;
 
 fn auth(user: UserId, tenant: TenantId) -> AuthCtx {
@@ -33,39 +33,42 @@ async fn mint_token(state: &AppState, minter: UserId, tenant: TenantId) -> Strin
         .token
 }
 
-async fn owner_of(db: &PgPool, node: NodeId) -> Option<Uuid> {
-    sqlx::query_scalar("SELECT owner_person_id FROM nodes WHERE id = $1")
-        .bind(node)
-        .fetch_one(db)
-        .await
-        .expect("node owner")
+async fn owner_of(db: &DbPool, node: NodeId) -> Option<Uuid> {
+    db.query_scalar(
+        "SELECT owner_person_id FROM nodes WHERE id = $1",
+        params![node],
+    )
+    .await
+    .expect("node owner")
 }
 
 /// Set (or clear) a node's `shared` flag, scoped to the one row (MAIN-136).
-async fn set_shared_flag(db: &PgPool, node: NodeId, shared: bool) {
-    sqlx::query("UPDATE nodes SET shared = $2 WHERE id = $1")
-        .bind(node)
-        .bind(shared)
-        .execute(db)
-        .await
-        .expect("set shared");
+async fn set_shared_flag(db: &DbPool, node: NodeId, shared: bool) {
+    db.exec(
+        "UPDATE nodes SET shared = $2 WHERE id = $1",
+        params![node, shared],
+    )
+    .await
+    .expect("set shared");
 }
 
 /// A node with a chosen (or NULL) owner, so the spawn guard can be exercised
 /// directly without a join. `TestBed::node` always sets an owner; this keeps the
 /// ownerless (`None`) path the guard tests need.
-async fn insert_node(db: &PgPool, tenant: TenantId, owner: Option<Uuid>) -> NodeId {
+async fn insert_node(db: &DbPool, tenant: TenantId, owner: Option<Uuid>) -> NodeId {
     let id = NodeId::new();
-    sqlx::query(
+    db.exec(
         "INSERT INTO nodes (id, tenant_id, name, node_token_hash, status, owner_person_id)
          VALUES ($1, $2, $3, $4, 'offline', $5)",
+        params![
+            id,
+            tenant,
+            format!("n-{}", id.0.simple()),
+            // unique — node_token_hash is UNIQUE
+            format!("h-{}", id.0.simple()),
+            owner
+        ],
     )
-    .bind(id)
-    .bind(tenant)
-    .bind(format!("n-{}", id.0.simple()))
-    .bind(format!("h-{}", id.0.simple())) // unique — node_token_hash is UNIQUE
-    .bind(owner)
-    .execute(db)
     .await
     .expect("node");
     id
@@ -98,7 +101,7 @@ async fn join_sets_owner_to_the_minter_or_tenant_owner() {
     .expect("join")
     .0;
     assert_eq!(
-        owner_of(&bed.pool, joined.node_id).await,
+        owner_of(&bed.db(), joined.node_id).await,
         Some(member_person),
         "the token minter's person owns the node"
     );
@@ -107,13 +110,13 @@ async fn join_sets_owner_to_the_minter_or_tenant_owner() {
     let token = mint_token(&state, member, tenant).await;
     // Simulate a legacy token that recorded no minter. This tenant's only
     // still-unused token is the one just minted.
-    sqlx::query(
-        "UPDATE join_tokens SET created_by = NULL WHERE tenant_id = $1 AND used_at IS NULL",
-    )
-    .bind(tenant)
-    .execute(&bed.pool)
-    .await
-    .expect("null created_by");
+    bed.db()
+        .exec(
+            "UPDATE join_tokens SET created_by = NULL WHERE tenant_id = $1 AND used_at IS NULL",
+            params![tenant],
+        )
+        .await
+        .expect("null created_by");
     let joined = nook_control::routes::join::join(
         State(state.clone()),
         Json(JoinRequest {
@@ -127,7 +130,7 @@ async fn join_sets_owner_to_the_minter_or_tenant_owner() {
     .expect("legacy join")
     .0;
     assert_eq!(
-        owner_of(&bed.pool, joined.node_id).await,
+        owner_of(&bed.db(), joined.node_id).await,
         Some(owner_person),
         "a minterless token falls back to the tenant owner's person"
     );
@@ -165,11 +168,7 @@ async fn enroll_sets_owner_to_the_minter() {
     .await
     .expect("enroll");
 
-    let owner: Option<Uuid> = sqlx::query_scalar(
-        "SELECT owner_person_id FROM nodes WHERE tenant_id = $1 ORDER BY created_at DESC LIMIT 1",
-    )
-    .bind(tenant)
-    .fetch_one(&bed.pool)
+    let owner: Option<Uuid> = bed.db().query_scalar("SELECT owner_person_id FROM nodes WHERE tenant_id = $1 ORDER BY created_at DESC LIMIT 1", params![tenant])
     .await
     .expect("enrolled node");
     assert_eq!(
@@ -191,35 +190,37 @@ async fn backfill_fills_ownerless_nodes_with_the_tenant_owner() {
 
     // An owner-less node, as an existing row would be before the migration.
     let node = NodeId::new();
-    sqlx::query(
-        "INSERT INTO nodes (id, tenant_id, name, node_token_hash, status)
+    bed.db()
+        .exec(
+            "INSERT INTO nodes (id, tenant_id, name, node_token_hash, status)
          VALUES ($1, $2, $3, $4, 'offline')",
-    )
-    .bind(node)
-    .bind(tenant)
-    .bind(format!("legacy-{}", node.0.simple()))
-    .bind(format!("h-{}", node.0.simple()))
-    .execute(&bed.pool)
-    .await
-    .expect("ownerless node");
-    assert_eq!(owner_of(&bed.pool, node).await, None, "starts owner-less");
+            params![
+                node,
+                tenant,
+                format!("legacy-{}", node.0.simple()),
+                format!("h-{}", node.0.simple())
+            ],
+        )
+        .await
+        .expect("ownerless node");
+    assert_eq!(owner_of(&bed.db(), node).await, None, "starts owner-less");
 
     // The 0016 backfill statement (still scoped to this node): resolves the
     // tenant owner's person.
-    sqlx::query(
-        "UPDATE nodes n SET owner_person_id = (
+    bed.db()
+        .exec(
+            "UPDATE nodes n SET owner_person_id = (
              SELECT u.person_id FROM users u
              WHERE u.tenant_id = n.tenant_id AND u.role = 'owner'
              ORDER BY u.created_at LIMIT 1)
          WHERE n.owner_person_id IS NULL AND n.id = $1",
-    )
-    .bind(node)
-    .execute(&bed.pool)
-    .await
-    .expect("backfill");
+            params![node],
+        )
+        .await
+        .expect("backfill");
 
     assert_eq!(
-        owner_of(&bed.pool, node).await,
+        owner_of(&bed.db(), node).await,
         Some(owner_person),
         "backfill resolves the tenant owner's person"
     );
@@ -244,7 +245,7 @@ async fn spawn_guard_is_owner_only_with_no_role_bypass() {
     let (member, _) = bed.user(tenant, "member").await;
     let (admin, _) = bed.user(tenant, "admin").await;
 
-    let node = insert_node(&bed.pool, tenant, Some(owner_person)).await;
+    let node = insert_node(&bed.db(), tenant, Some(owner_person)).await;
 
     // The owner may spawn.
     assert!(
@@ -276,7 +277,7 @@ async fn spawn_guard_is_owner_only_with_no_role_bypass() {
     );
 
     // An ownerless node refuses everyone, including the tenant owner.
-    let orphan = insert_node(&bed.pool, tenant, None).await;
+    let orphan = insert_node(&bed.db(), tenant, None).await;
     assert!(
         nook_control::auth::require_person_owns_node(&state, tenant, Some(owner), orphan)
             .await
@@ -302,7 +303,7 @@ async fn session_routes_refuse_a_non_owner() {
     let tenant = bed.tenant("no").await;
     let (_owner, owner_person) = bed.user(tenant, "owner").await;
     let (member, _) = bed.user(tenant, "member").await;
-    let node = insert_node(&bed.pool, tenant, Some(owner_person)).await;
+    let node = insert_node(&bed.db(), tenant, Some(owner_person)).await;
 
     // POST /sessions as the member → refused before create_session.
     let created = nook_control::routes::sessions::create(
@@ -387,7 +388,7 @@ async fn shared_node_relaxes_use_but_not_management() {
     let tenant = bed.tenant("no").await;
     let (owner, owner_person) = bed.user(tenant, "owner").await;
     let (member, _) = bed.user(tenant, "member").await;
-    let node = insert_node(&bed.pool, tenant, Some(owner_person)).await;
+    let node = insert_node(&bed.db(), tenant, Some(owner_person)).await;
 
     // Unshared: only the owner may use it. The member is refused, and the
     // message now names shared machines as the exception (AC-1).
@@ -408,7 +409,7 @@ async fn shared_node_relaxes_use_but_not_management() {
 
     // Share it → the member may now use it, via the free helper AND the AuthCtx
     // method the session-start routes actually call.
-    set_shared_flag(&bed.pool, node, true).await;
+    set_shared_flag(&bed.db(), node, true).await;
     assert!(
         nook_control::auth::require_person_may_use_node(&state, tenant, Some(member), node)
             .await
@@ -449,15 +450,15 @@ async fn shared_node_relaxes_use_but_not_management() {
         toggled.is_err(),
         "a non-owner must not toggle sharing, even on a node shared with them (NG-1)"
     );
-    let still: bool = sqlx::query_scalar("SELECT shared FROM nodes WHERE id = $1")
-        .bind(node)
-        .fetch_one(&bed.pool)
+    let still: bool = bed
+        .db()
+        .query_scalar("SELECT shared FROM nodes WHERE id = $1", params![node])
         .await
         .expect("shared flag");
     assert!(still, "the refused toggle must not have unshared the node");
 
     // Unshare → the member's NEW starts are refused again (AC-2).
-    set_shared_flag(&bed.pool, node, false).await;
+    set_shared_flag(&bed.db(), node, false).await;
     assert!(
         nook_control::auth::require_person_may_use_node(&state, tenant, Some(member), node)
             .await
@@ -484,7 +485,7 @@ async fn authorize_is_owner_only_for_personal_and_manager_only_for_shared() {
     let tenant = bed.tenant("no").await;
     let (owner, owner_person) = bed.user(tenant, "owner").await;
     let (member, _) = bed.user(tenant, "member").await;
-    let node = insert_node(&bed.pool, tenant, Some(owner_person)).await;
+    let node = insert_node(&bed.db(), tenant, Some(owner_person)).await;
 
     let req = || {
         Json(AuthorizeRuntimeRequest {
@@ -525,7 +526,7 @@ async fn authorize_is_owner_only_for_personal_and_manager_only_for_shared() {
     );
 
     // Shared node: it now takes a node-manager, not the owner-as-person.
-    set_shared_flag(&bed.pool, node, true).await;
+    set_shared_flag(&bed.db(), node, true).await;
     let member_shared = nook_control::routes::nodes::authorize(
         State(state.clone()),
         auth(member, tenant),
@@ -538,14 +539,16 @@ async fn authorize_is_owner_only_for_personal_and_manager_only_for_shared() {
         "a member without node.manage must not authorize a shared node: {member_shared:?}"
     );
     // Grant node.manage (operator role) → passes the gate.
-    sqlx::query(
-        "INSERT INTO role_bindings (id, subject_type, subject_id, role_key, scope_type, scope_id)
-         VALUES (gen_random_uuid(), 'user', $1, 'operator', 'deployment', NULL)",
-    )
-    .bind(member.0)
-    .execute(&bed.pool)
-    .await
-    .unwrap();
+    bed.db()
+        .exec(
+            // Generated here rather than by `gen_random_uuid()`, which is
+            // Postgres-only and is not what this test is about.
+            "INSERT INTO role_bindings (id, subject_type, subject_id, role_key, scope_type, scope_id)
+         VALUES ($1, 'user', $2, 'operator', 'deployment', NULL)",
+            params![Uuid::now_v7(), member.0],
+        )
+        .await
+        .unwrap();
     let member_admin = nook_control::routes::nodes::authorize(
         State(state.clone()),
         auth(member, tenant),
@@ -603,7 +606,7 @@ async fn a_re_join_with_someone_elses_token_does_not_transfer_the_machine() {
 
     let first = join_as(alice, name.clone()).await;
     assert_eq!(
-        owner_of(&bed.pool, first.node_id).await,
+        owner_of(&bed.db(), first.node_id).await,
         Some(alice_person),
         "alice enrolled it, so alice owns it"
     );
@@ -615,7 +618,7 @@ async fn a_re_join_with_someone_elses_token_does_not_transfer_the_machine() {
         "same tenant + name is the same machine — ON CONFLICT heals the row"
     );
     assert_eq!(
-        owner_of(&bed.pool, second.node_id).await,
+        owner_of(&bed.db(), second.node_id).await,
         Some(alice_person),
         "a re-join must NOT hand alice's machine to bob"
     );

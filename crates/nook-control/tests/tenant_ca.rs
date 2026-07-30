@@ -8,23 +8,23 @@
 
 use nook_control::ca;
 use nook_control::crypto::Vault;
+use nook_db::{params, Db, DbPool};
 use nook_testkit::TestBed;
 use nook_types::TenantId;
-use sqlx::PgPool;
 use uuid::Uuid;
 
 fn vault() -> Vault {
     Vault::from_env("test-session-secret-that-is-long-enough-000000").expect("vault")
 }
 
-async fn seed_tenant(pool: &PgPool) -> TenantId {
+async fn seed_tenant(pool: &DbPool) -> TenantId {
     let id = TenantId::new();
-    sqlx::query("INSERT INTO tenants (id, slug, name) VALUES ($1, $2, $2)")
-        .bind(id)
-        .bind(format!("ca-{}", Uuid::now_v7().simple()))
-        .execute(pool)
-        .await
-        .expect("seed tenant");
+    pool.exec(
+        "INSERT INTO tenants (id, slug, name) VALUES ($1, $2, $2)",
+        params![id, format!("ca-{}", Uuid::now_v7().simple())],
+    )
+    .await
+    .expect("seed tenant");
     id
 }
 
@@ -36,7 +36,7 @@ async fn generates_and_loads_a_verified_signer() {
         return;
     };
     let v = vault();
-    let tenant = seed_tenant(&bed.pool).await;
+    let tenant = seed_tenant(&bed.db()).await;
 
     let ca = ca::generate(&cas(&bed), &v, tenant, true).await.unwrap();
     assert_eq!(ca.state, "active");
@@ -61,7 +61,7 @@ async fn tenants_do_not_share_a_ca() {
         return;
     };
     let v = vault();
-    let (a, b) = (seed_tenant(&bed.pool).await, seed_tenant(&bed.pool).await);
+    let (a, b) = (seed_tenant(&bed.db()).await, seed_tenant(&bed.db()).await);
 
     let ca_a = ca::generate(&cas(&bed), &v, a, true).await.unwrap();
     let ca_b = ca::generate(&cas(&bed), &v, b, true).await.unwrap();
@@ -87,17 +87,18 @@ async fn refuses_a_signer_whose_fingerprint_does_not_match() {
         return;
     };
     let v = vault();
-    let tenant = seed_tenant(&bed.pool).await;
+    let tenant = seed_tenant(&bed.db()).await;
     ca::generate(&cas(&bed), &v, tenant, true).await.unwrap();
 
     // Swap in a different (validly-formed) certificate behind the fingerprint.
-    let other = ca::generate(&cas(&bed), &v, seed_tenant(&bed.pool).await, false)
+    let other = ca::generate(&cas(&bed), &v, seed_tenant(&bed.db()).await, false)
         .await
         .unwrap();
-    sqlx::query("UPDATE tenant_cas SET cert_pem = $2 WHERE tenant_id = $1 AND state = 'active'")
-        .bind(tenant)
-        .bind(&other.cert_pem)
-        .execute(&bed.pool)
+    bed.db()
+        .exec(
+            "UPDATE tenant_cas SET cert_pem = $2 WHERE tenant_id = $1 AND state = 'active'",
+            params![tenant, &other.cert_pem],
+        )
         .await
         .unwrap();
 
@@ -118,21 +119,14 @@ async fn rotation_distributes_then_switches_then_retires() {
         return;
     };
     let v = vault();
-    let tenant = seed_tenant(&bed.pool).await;
+    let tenant = seed_tenant(&bed.db()).await;
 
     let old = ca::generate(&cas(&bed), &v, tenant, true).await.unwrap();
 
     // A node holding a live leaf signed by the old CA.
     let node = Uuid::now_v7();
-    sqlx::query(
-        "INSERT INTO nodes (id, tenant_id, name, node_token_hash, status, ca_id, cert_not_after)
-         VALUES ($1, $2, $3, $3, 'online', $4, now() + interval '30 days')",
-    )
-    .bind(node)
-    .bind(tenant)
-    .bind(format!("n-{}", Uuid::now_v7().simple()))
-    .bind(old.id)
-    .execute(&bed.pool)
+    bed.db().exec("INSERT INTO nodes (id, tenant_id, name, node_token_hash, status, ca_id, cert_not_after)
+         VALUES ($1, $2, $3, $3, 'online', $4, now() + interval '30 days')", params![node, tenant, format!("n-{}", Uuid::now_v7().simple()), old.id])
     .await
     .unwrap();
 
@@ -167,10 +161,11 @@ async fn rotation_distributes_then_switches_then_retires() {
 
     // ── drain, then retire ──────────────────────────────────────────────
     // The node renews onto the new CA (what enrolment will do for real).
-    sqlx::query("UPDATE nodes SET ca_id = $2 WHERE id = $1")
-        .bind(node)
-        .bind(new.id)
-        .execute(&bed.pool)
+    bed.db()
+        .exec(
+            "UPDATE nodes SET ca_id = $2 WHERE id = $1",
+            params![node, new.id],
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -196,7 +191,7 @@ async fn the_active_signer_cannot_be_retired() {
         return;
     };
     let v = vault();
-    let tenant = seed_tenant(&bed.pool).await;
+    let tenant = seed_tenant(&bed.db()).await;
     let ca_row = ca::generate(&cas(&bed), &v, tenant, true).await.unwrap();
 
     let err = ca::retire(&cas(&bed), &nodes(&bed), tenant, ca_row.id)
@@ -223,18 +218,19 @@ fn nodes(bed: &TestBed) -> nook_control::repo::nodes::DbNodeRepository {
     nook_control::repo::nodes::DbNodeRepository::new(bed.db())
 }
 
-async fn seed_user(pool: &PgPool, tenant: TenantId, role: &str) -> UserId {
+async fn seed_user(pool: &DbPool, tenant: TenantId, role: &str) -> UserId {
     let id = UserId::new();
-    sqlx::query(
+    pool.exec(
         "INSERT INTO users (id, tenant_id, display_name, email, role)
          VALUES ($1, $2, $3, $4, $5)",
+        params![
+            id,
+            tenant,
+            role,
+            format!("{}@example.test", Uuid::now_v7().simple()),
+            role
+        ],
     )
-    .bind(id)
-    .bind(tenant)
-    .bind(role)
-    .bind(format!("{}@example.test", Uuid::now_v7().simple()))
-    .bind(role)
-    .execute(pool)
     .await
     .expect("user");
     id
@@ -256,17 +252,17 @@ async fn ca_operations_need_owner_or_admin() {
     let Some(mut bed) = TestBed::new().await else {
         return;
     };
-    let tenant = seed_tenant(&bed.pool).await;
+    let tenant = seed_tenant(&bed.db()).await;
     let state = bed.app_state().await;
 
     for role in ["owner", "admin"] {
-        let u = seed_user(&bed.pool, tenant, role).await;
+        let u = seed_user(&bed.db(), tenant, role).await;
         assert!(
             ctx(u, tenant).require_tenant_admin(&state).await.is_ok(),
             "{role} must be allowed"
         );
     }
-    let member = seed_user(&bed.pool, tenant, "member").await;
+    let member = seed_user(&bed.db(), tenant, "member").await;
     assert!(
         ctx(member, tenant)
             .require_tenant_admin(&state)
@@ -285,10 +281,10 @@ async fn a_tenant_admin_cannot_reach_another_tenant() {
     let Some(mut bed) = TestBed::new().await else {
         return;
     };
-    let (a, b) = (seed_tenant(&bed.pool).await, seed_tenant(&bed.pool).await);
+    let (a, b) = (seed_tenant(&bed.db()).await, seed_tenant(&bed.db()).await);
     let state = bed.app_state().await;
 
-    let admin_a = seed_user(&bed.pool, a, "owner").await;
+    let admin_a = seed_user(&bed.db(), a, "owner").await;
     // Their own tenant: fine.
     assert!(ctx(admin_a, a).require_tenant_admin(&state).await.is_ok());
     // Someone else's: they hold no role there, so the lookup finds nothing.
@@ -307,9 +303,9 @@ async fn a_node_credential_cannot_run_ca_operations() {
     let Some(mut bed) = TestBed::new().await else {
         return;
     };
-    let tenant = seed_tenant(&bed.pool).await;
+    let tenant = seed_tenant(&bed.db()).await;
     let state = bed.app_state().await;
-    let owner = seed_user(&bed.pool, tenant, "owner").await;
+    let owner = seed_user(&bed.db(), tenant, "owner").await;
 
     let as_node = AuthCtx {
         principal: Principal::Node(nook_types::NodeId::new()),
