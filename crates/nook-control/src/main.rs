@@ -186,11 +186,25 @@ async fn serve(db: nook_db::DbPool, cfg: Config) -> Result<()> {
     let shutdown_db = state.db.clone();
     let router = routes::build_router(state.clone());
 
-    // The agent gets its own listener. Bound first so a port clash fails the
-    // boot loudly rather than leaving the fleet with nowhere to connect.
-    let agent_listener = tokio::net::TcpListener::bind(&agent_bind)
-        .await
-        .with_context(|| format!("cannot bind the agent port {agent_bind}"))?;
+    // BOTH doors are bound before EITHER is served, and the browser door goes
+    // first (MAIN-285).
+    //
+    // The agent door used to be bound *and served* before the browser port was
+    // even attempted. A boot that was going to fail on the browser port
+    // therefore still opened the agent door for the ~1s it took to get there —
+    // long enough for every node to complete a WebSocket handshake and be cut
+    // off when the process exited. Under a restart loop that is not a blip: it
+    // is a permanent connect/close flap in which no node ever holds a session
+    // long enough to finish a capability push, so the control plane serves
+    // stale capabilities (a runtime reported `not_authorized` long after it was
+    // authorized) and the node is undispatchable.
+    //
+    // Binding both first makes a doomed boot fail with the fleet's door still
+    // shut: nodes see a refused connection, back off, and reconnect once a boot
+    // actually succeeds. Binding the browser port first is what guarantees it
+    // for the case that actually happens — the browser port is the contended
+    // one, since it is the port everything else in a deployment also talks to.
+    let (listener, agent_listener) = bind_doors(&bind, &agent_bind).await?;
     let agent_router = routes::build_agent_router(state);
     match (
         agent_tls_cert.as_deref().filter(|s| !s.is_empty()),
@@ -241,7 +255,6 @@ async fn serve(db: nook_db::DbPool, cfg: Config) -> Result<()> {
         _ => anyhow::bail!("NOOK_AGENT_TLS_CERT and NOOK_AGENT_TLS_KEY must be set together"),
     }
 
-    let listener = tokio::net::TcpListener::bind(&bind).await?;
     tracing::info!(%bind, "control plane listening");
 
     let drain_rx = shutdown_rx.clone();
@@ -288,6 +301,32 @@ async fn serve(db: nook_db::DbPool, cfg: Config) -> Result<()> {
     Ok(())
 }
 
+/// Bind the browser door and the agent door, in that order, before either is
+/// served (MAIN-285).
+///
+/// Returning both listeners together is the point: a caller cannot serve one
+/// door and then discover the other is unavailable, which is the state that
+/// makes a fleet flap rather than back off. If the second bind fails, the first
+/// listener is dropped on the error path and its socket closes with it.
+///
+/// The browser door is first because it is the contended one — everything in a
+/// deployment talks to it, so it is the port a stray process is holding.
+async fn bind_doors(
+    bind: &str,
+    agent_bind: &str,
+) -> anyhow::Result<(tokio::net::TcpListener, tokio::net::TcpListener)> {
+    let listener = tokio::net::TcpListener::bind(bind)
+        .await
+        // Without this the failure reads only `Address already in use (os error
+        // 98)`: no port, no door, nothing an operator can act on. That is
+        // exactly how a week-long flap went undiagnosed.
+        .with_context(|| format!("cannot bind the control plane port {bind}"))?;
+    let agent_listener = tokio::net::TcpListener::bind(agent_bind)
+        .await
+        .with_context(|| format!("cannot bind the agent port {agent_bind}"))?;
+    Ok((listener, agent_listener))
+}
+
 /// Resolve on the first termination signal. Kubernetes sends **SIGTERM** on pod
 /// shutdown, so listening only for SIGINT (Ctrl-C) would leave a pod hanging
 /// until the kill-grace timeout turned into a SIGKILL mid-request. Both map to
@@ -320,8 +359,84 @@ async fn wait_for_shutdown(mut rx: tokio::sync::watch::Receiver<bool>) {
 
 #[cfg(test)]
 mod tests {
-    use super::wait_for_shutdown;
+    use super::{bind_doors, wait_for_shutdown};
     use std::time::Duration;
+
+    /// A free port, released before the call under test uses it. Racy in
+    /// principle, fine in practice and far better than a hard-coded port that
+    /// collides with whatever else the suite is running.
+    async fn free_port() -> String {
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        drop(l);
+        addr.to_string()
+    }
+
+    /// MAIN-285: the flap. When the control plane cannot take its browser port,
+    /// it must NOT have opened the agent door on the way there — a node that
+    /// completes a handshake against a process which is about to exit is a node
+    /// that reconnects a second later, forever, and never holds a session long
+    /// enough to push its capabilities.
+    #[tokio::test]
+    async fn a_boot_that_cannot_take_the_browser_port_never_opens_the_agent_door() {
+        // Something else already owns the browser port — a previous server that
+        // outlived its restart, which is exactly the dev-loop case.
+        let squatter = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let taken = squatter.local_addr().unwrap().to_string();
+        let agent = free_port().await;
+
+        let err = bind_doors(&taken, &agent)
+            .await
+            .expect_err("the browser port is taken, so the boot must fail");
+
+        // The failure names the port. `Address already in use (os error 98)`
+        // alone is what made this take a week to find.
+        let chain = err
+            .chain()
+            .map(|c| c.to_string())
+            .collect::<Vec<_>>()
+            .join(": ");
+        assert!(
+            chain.contains(&taken),
+            "the error must name the contended port, got: {chain}"
+        );
+
+        // The agent door is still shut: binding it now succeeds, which it could
+        // not do if the failed boot had left a listener on it.
+        tokio::net::TcpListener::bind(&agent)
+            .await
+            .expect("the agent door must be free — a doomed boot must not open it");
+    }
+
+    /// The other order still fails loudly, and leaves nothing behind.
+    #[tokio::test]
+    async fn a_contended_agent_port_fails_the_boot_and_releases_the_browser_port() {
+        let browser = free_port().await;
+        let squatter = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let taken_agent = squatter.local_addr().unwrap().to_string();
+
+        let err = bind_doors(&browser, &taken_agent)
+            .await
+            .expect_err("the agent port is taken, so the boot must fail");
+        assert!(err.to_string().contains(&taken_agent));
+
+        // The browser listener bound first must have been dropped with the
+        // error, not leaked.
+        tokio::net::TcpListener::bind(&browser)
+            .await
+            .expect("the browser port must be released when the agent bind fails");
+    }
+
+    /// The happy path hands back both doors, so the caller can serve them
+    /// together rather than one at a time.
+    #[tokio::test]
+    async fn both_doors_come_back_together() {
+        let browser = free_port().await;
+        let agent = free_port().await;
+        let (a, b) = bind_doors(&browser, &agent).await.expect("both bind");
+        assert_eq!(a.local_addr().unwrap().to_string(), browser);
+        assert_eq!(b.local_addr().unwrap().to_string(), agent);
+    }
 
     #[tokio::test]
     async fn wait_for_shutdown_resolves_when_the_flag_flips() {
