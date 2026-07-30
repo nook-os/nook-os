@@ -88,6 +88,7 @@ run_lint() {
     charts/nook-control/ci/validate.sh scripts/k8s-e2e.sh scripts/dev-db-heal.sh \
     scripts/check-release-version.sh scripts/check-release-version.test.sh \
     scripts/check-secrets-untracked.test.sh run.sh \
+    scripts/check-inline-sql.sh scripts/check-inline-sql.test.sh \
     scripts/squash-migrations.sh \
     || die "shellcheck"
   pass "shell scripts clean"
@@ -99,6 +100,14 @@ run_lint() {
   say "credentials untracked"
   ./scripts/check-secrets-untracked.test.sh || die "credentials untracked"
   pass "credentials untracked"
+
+  # MAIN-260: new SQL may not appear outside repo/. The allow-list names every
+  # aggregate still awaiting its card, so this is green today and shrinks as
+  # MAIN-250..258 land.
+  say "inline SQL"
+  ./scripts/check-inline-sql.sh || die "inline SQL"
+  ./scripts/check-inline-sql.test.sh || die "inline SQL guard self-test"
+  pass "inline SQL guarded"
 }
 
 run_rust() {
