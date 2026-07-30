@@ -10,12 +10,53 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # Two engines, one suite (MAIN-270, epic AC-6). "Works on SQLite" is a claim
+  # until CI runs it, so the suite runs twice — Postgres and SQLite — as matrix
+  # legs, in parallel: wall-clock is the slower leg, not the sum.
+  #
+  # POSTGRES IS THE DEFAULT ENGINE and runs the whole suite, exactly as before.
+  #
+  # THE SQLITE LEG IS REQUIRED, NOT ADVISORY, but it does not yet cover
+  # everything: 197 of 940 tests still fail on SQLite, every one owned by an
+  # upstream card (bed.pool → MAIN-268, dialect → MAIN-289, plus MAIN-293/294/295).
+  # Those binaries are named in scripts/sqlite-ci-allowlist.txt with the card
+  # each waits on, and scripts/check-sqlite-ci.sh enforces the boundary in BOTH
+  # directions: a covered binary that fails reddens the leg, and an EXCLUDED
+  # binary that starts passing also reddens it, so the list can only shrink.
+  # When the last line is deleted the SQLite leg covers the full suite and epic
+  # AC-6 is met in full — the list is the remaining work, in order.
+  #
+  # RUNNING EACH LOCALLY (the dev stack is docker-first — see CLAUDE.md):
+  #   Postgres (the default):  ./test.sh rust
+  #   SQLite:                  ./test.sh rust --sqlite
+  # `./test.sh rust --sqlite` runs the same suite on a SQLite bed and applies
+  # this same guard, so it gives the same verdict CI does.
   rust:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    strategy:
+      # Both legs always report. Cancelling the sibling on first failure would
+      # mean a Postgres failure hides whether SQLite also broke, which is the
+      # one comparison this matrix exists to provide.
+      fail-fast: false
+      matrix:
+        include:
+          - engine: postgres
+            database_url: postgres://nook:nook@localhost:5432/nook
+          # A file, not :memory: — that is the shape a real single-machine
+          # deployment has, and it is what the testkit's SQLite bed models.
+          - engine: sqlite
+            database_url: sqlite:///tmp/nook-ci.db
+    name: rust (${{ matrix.engine }})
     # Without a database the suite reports "ok" while executing almost nothing:
     # every test that needs Postgres returns early. NOOK_REQUIRE_DB turns that
     # silent skip into a failure, so a green tick means the tests actually ran.
+    #
+    # The services are declared for both legs. Postgres is unused by the SQLite
+    # leg (its beds are files), but `services` cannot be varied per matrix entry
+    # and a few seconds of container start is not worth a second job definition.
+    # Redis and ElasticMQ are wanted by BOTH legs: those contract tests are
+    # engine-independent and skip silently without their endpoints.
     services:
       postgres:
         image: postgres:16-alpine
@@ -43,7 +84,7 @@ jobs:
         image: softwaremill/elasticmq-native:1.6.11
         ports: ["9324:9324"]
     env:
-      DATABASE_URL: postgres://nook:nook@localhost:5432/nook
+      DATABASE_URL: ${{ matrix.database_url }}
       NOOK_REQUIRE_DB: "1"
       NOOK_TEST_REDIS_URL: redis://localhost:6379
       NOOK_TEST_SQS_ENDPOINT: http://localhost:9324
@@ -53,9 +94,12 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      # Engine-independent, so they run once rather than in both legs.
       - name: Format
+        if: matrix.engine == 'postgres'
         run: cargo fmt --all --check
       - name: Clippy
+        if: matrix.engine == 'postgres'
         run: cargo clippy --workspace --all-targets
       - name: Wait for ElasticMQ
         run: |
@@ -66,8 +110,24 @@ jobs:
             sleep 1
           done
           echo "ElasticMQ did not become ready" >&2; exit 1
-      - name: Test
+      - name: Test (postgres)
+        if: matrix.engine == 'postgres'
         run: cargo test --workspace
+      # cargo's exit code is deliberately ignored here and the verdict delegated
+      # to the guard: on SQLite the excluded binaries are EXPECTED to fail, so a
+      # non-zero cargo is the normal case and says nothing on its own. The guard
+      # answers the two questions that matter — did anything covered break, and
+      # has anything excluded started passing.
+      #
+      # --no-fail-fast so every binary reports; without it cargo stops at the
+      # first failing one and the allow-list could only ever describe a prefix
+      # of the suite.
+      - name: Test (sqlite)
+        if: matrix.engine == 'sqlite'
+        run: |
+          set -o pipefail
+          cargo test --workspace --no-fail-fast 2>&1 | tee sqlite-run.log || true
+          ./scripts/check-sqlite-ci.sh sqlite-run.log
 
   # A workflow with a bad expression does not fail a job — it fails to parse,
   # so nothing runs and the error only appears when someone pushes a tag and

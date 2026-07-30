@@ -2,8 +2,9 @@
 # Run the tests. No environment variables to remember.
 #
 #   ./test.sh              everything: fmt, clippy, tests, typecheck, linters
-#   ./test.sh rust         just the Rust tests
+#   ./test.sh rust         just the Rust tests (Postgres, the default engine)
 #   ./test.sh rust ca      Rust tests matching "ca"
+#   ./test.sh rust --sqlite  the SQLite leg — same verdict CI's sqlite job gives
 #   ./test.sh lint         fmt + clippy + actionlint + shellcheck
 #   ./test.sh web          tsc + vitest across the frontend
 #   ./test.sh desktop      fmt, clippy and tests for the Tauri shell
@@ -91,6 +92,7 @@ run_lint() {
     scripts/check-inline-sql.sh scripts/check-inline-sql.test.sh \
     scripts/check-sqlx-signatures.sh scripts/check-sqlx-signatures.test.sh \
     scripts/check-dialect-dispatch.sh scripts/check-dialect-dispatch.test.sh \
+    scripts/check-sqlite-ci.sh scripts/check-sqlite-ci.test.sh \
     scripts/squash-migrations.sh \
     || die "shellcheck"
   pass "shell scripts clean"
@@ -127,12 +129,46 @@ run_lint() {
   ./scripts/check-dialect-dispatch.sh || die "dialect dispatch"
   ./scripts/check-dialect-dispatch.test.sh || die "dialect dispatch guard self-test"
   pass "dialect dispatch guarded"
+
+  # MAIN-270 (epic AC-6): only the guard's SELF-TEST runs here. The guard itself
+  # needs a SQLite run to judge, which is `./test.sh rust --sqlite` (minutes),
+  # not something to fold into every lint pass.
+  say "sqlite leg guard"
+  ./scripts/check-sqlite-ci.test.sh || die "sqlite leg guard self-test"
+  pass "sqlite leg guard self-tested"
 }
 
 run_rust() {
   say "cargo test${1:+ (filter: $1)}"
   rust cargo test --workspace ${1:+"$1"} || die "tests"
   pass "tests passed"
+}
+
+# The SQLite leg, same verdict CI gives (MAIN-270).
+#
+# `cargo test` exits non-zero here BY DESIGN — the binaries named in
+# scripts/sqlite-ci-allowlist.txt are expected to fail until their upstream card
+# lands — so the exit code is ignored and the guard decides. It answers both
+# halves: did anything COVERED break, and has anything EXCLUDED started passing
+# (which means a line is now deletable).
+#
+# DATABASE_URL only has to name the engine: every bed creates its own private
+# file and drops it, so this path is never actually opened.
+run_rust_sqlite() {
+  local log
+  log="$(mktemp)"
+  say "cargo test on sqlite:// (non-zero exit is expected — the guard decides)"
+  if [ "$HOST" = "1" ]; then
+    DATABASE_URL="sqlite:///tmp/nook-local-ci.db" NOOK_REQUIRE_DB=1 \
+      cargo test --workspace --no-fail-fast 2>&1 | tee "$log" || true
+  else
+    container_ready || die "the dev stack is not running — 'docker compose up -d', or use ./test.sh --host"
+    docker compose exec -T -e NOOK_REQUIRE_DB=1 -e DATABASE_URL="sqlite:///tmp/nook-local-ci.db" \
+      control-plane cargo test --workspace --no-fail-fast 2>&1 | tee "$log" || true
+  fi
+  ./scripts/check-sqlite-ci.sh "$log" || { rm -f "$log"; die "sqlite leg"; }
+  rm -f "$log"
+  pass "sqlite leg passed"
 }
 
 run_web() {
@@ -191,7 +227,9 @@ run_k8s() {
 }
 
 case "${1:-all}" in
-  rust) run_rust "${2:-}" ;;
+  # `rust --sqlite` is the SQLite leg; `rust [filter]` stays the Postgres one.
+  rust)
+    if [ "${2:-}" = "--sqlite" ]; then run_rust_sqlite; else run_rust "${2:-}"; fi ;;
   lint) run_lint ;;
   web)  run_web ;;
   desktop) run_desktop ;;
