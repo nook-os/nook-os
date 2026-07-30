@@ -16,6 +16,11 @@ serde_json = { workspace = true }
 tracing = { workspace = true }
 # The squash re-stamp (MAIN-235) refuses an unrecognised ledger with a reason.
 thiserror = { workspace = true }
+# flock(2) for the SQLite single-instance lock (MAIN-197). The raw syscall
+# rather than a wrapper crate: it is one call, already in the dependency graph,
+# and the kernel is the part doing the work.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 tokio = { workspace = true }

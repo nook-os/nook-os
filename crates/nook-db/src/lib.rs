@@ -48,6 +48,12 @@ pub mod migrate;
 /// the documented prod near-miss cannot be gotten wrong by an operator.
 pub mod restamp;
 
+/// One control plane per SQLite database file (MAIN-197). SQLite is
+/// single-writer and the decided limit is one instance per file; this refuses a
+/// second one at boot instead of letting the two race. Postgres takes no lock.
+pub mod single_instance;
+pub use single_instance::{acquire_for_url as acquire_single_instance_lock, InstanceLock};
+
 use std::fmt;
 
 /// The database engine, selected from the `DATABASE_URL` scheme (MAIN-195). This
