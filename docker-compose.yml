@@ -4,6 +4,13 @@
 services:
   postgres:
     image: postgres:16-alpine
+    # Docker's default /dev/shm is 64 MB. Postgres puts parallel-query and
+    # parallel-worker segments there, and the test suite runs many private
+    # databases at once — on 2026-07-30 that combination exhausted it and
+    # crashed the server ("could not resize shared memory segment"), which then
+    # took three minutes to recover. MAIN-243 removed the accumulation that made
+    # it likely; this removes the cliff itself, cheaply.
+    shm_size: 512mb
     environment:
       POSTGRES_USER: nook
       POSTGRES_PASSWORD: nook

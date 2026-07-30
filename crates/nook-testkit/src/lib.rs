@@ -44,40 +44,176 @@ use uuid::Uuid;
 /// as tests run in parallel; the rest wait for it and then only clone.
 static TEMPLATE_DB: OnceCell<String> = OnceCell::const_new();
 
-/// Build (once) and name the template database. It is migrated and seeded, then
-/// its pool is closed — `CREATE DATABASE … TEMPLATE` refuses a template that has
-/// any live session. Leaks one `nook_tmpl_<uuid>` per process; the dev reset
-/// (`docker compose down -v`) and CI's ephemeral Postgres reclaim it.
+/// One global advisory lock for every template operation.
+///
+/// Building and reaping both mutate the shared set of templates, and two
+/// processes doing either at once is how a half-built template gets cloned or a
+/// live one gets dropped. Serialising them costs a moment at startup, once.
+const TEMPLATE_LOCK: i64 = 0x6E6F6F6B_74706C64u64 as i64; // "nook_tpld"
+
+/// How long a template of a DIFFERENT fingerprint may sit unused before it is
+/// reclaimed. Generous on purpose: a concurrently-running suite on another
+/// branch has its own fingerprint, and reaping it out from under that process
+/// would be worse than leaving a few hundred megabytes for an hour.
+const TEMPLATE_MAX_AGE_SECS: u64 = 60 * 60;
+
+/// A short, stable fingerprint of the schema a template would contain.
+///
+/// Derived from the migration set's versions and checksums, so any change to
+/// the schema yields a different template and no run can inherit a stale one.
+/// This is what makes templates REUSABLE across processes, which is the fix for
+/// the leak: the name is a pure function of the content, so the second process
+/// finds the first one's template instead of building another.
+fn template_fingerprint() -> String {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325; // FNV-1a
+    let mut eat = |bytes: &[u8]| {
+        for b in bytes {
+            h ^= *b as u64;
+            h = h.wrapping_mul(0x100_0000_01b3);
+        }
+    };
+    for m in nook_control::MIGRATOR.iter() {
+        eat(&m.version.to_le_bytes());
+        eat(&m.checksum);
+    }
+    format!("{h:016x}")
+}
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Find, or build, the template for this schema.
+///
+/// Named `nook_tmpl_<fingerprint>_<epoch>`: the fingerprint makes it findable by
+/// another process, and the epoch lets the reaper judge age from the catalogue
+/// without opening a connection (a connection would itself look like "in use").
+///
+/// It no longer leaks. The previous version created a uniquely-named template
+/// per PROCESS and documented the leak as acceptable because a dev reset would
+/// reclaim it — which held for CI and not for a long-lived dev database: a
+/// working session accumulated 1,589 of them (16 GB), exhausted the container's
+/// shared memory, and crashed Postgres into a three-minute recovery.
 async fn template_db(base_url: &str) -> &'static str {
     TEMPLATE_DB
         .get_or_init(|| async {
-            let name = format!("nook_tmpl_{}", Uuid::now_v7().simple());
+            let fp = template_fingerprint();
+            let prefix = format!("nook_tmpl_{fp}_");
+
             let mut admin = PgConnection::connect(base_url)
                 .await
-                .expect("connect to the base database to create the template");
-            sqlx::query(&format!("CREATE DATABASE \"{name}\""))
+                .expect("connect to the base database to manage templates");
+
+            // Everything below mutates the shared template set.
+            sqlx::query("SELECT pg_advisory_lock($1)")
+                .bind(TEMPLATE_LOCK)
                 .execute(&mut admin)
                 .await
-                .expect("create the template database");
-            admin.close().await.ok();
+                .expect("take the template lock");
 
-            let pool = PgPool::connect(&swap_db(base_url, &name))
+            let existing: Option<String> = sqlx::query_scalar(
+                "SELECT datname FROM pg_database
+                  WHERE datname LIKE $1 ORDER BY datname DESC LIMIT 1",
+            )
+            .bind(format!("{prefix}%"))
+            .fetch_optional(&mut admin)
+            .await
+            .expect("look for an existing template");
+
+            let name = match existing {
+                // Another process already built this exact schema — reuse it.
+                // This is the whole point: N test binaries, one template.
+                Some(found) => found,
+                None => {
+                    let name = format!("{prefix}{}", now_secs());
+                    sqlx::query(&format!("CREATE DATABASE \"{name}\""))
+                        .execute(&mut admin)
+                        .await
+                        .expect("create the template database");
+
+                    let pool = PgPool::connect(&swap_db(base_url, &name))
+                        .await
+                        .expect("connect to the template database");
+                    nook_control::MIGRATOR
+                        .run(&pool)
+                        .await
+                        .expect("migrate the template database");
+                    // `seed::run` takes the workspace pool type (`EnginePool`);
+                    // wrap the raw pool just for the seed. Fixtures + the field
+                    // stay raw Postgres.
+                    nook_control::seed::run(
+                        &EnginePool::from_pg(pool.clone()),
+                        &Config::for_test(),
+                    )
+                    .await
+                    .expect("seed the template database");
+                    // Release every connection so the template can be cloned.
+                    pool.close().await;
+                    name
+                }
+            };
+
+            reap_stale_templates(&mut admin, &name).await;
+
+            sqlx::query("SELECT pg_advisory_unlock($1)")
+                .bind(TEMPLATE_LOCK)
+                .execute(&mut admin)
                 .await
-                .expect("connect to the template database");
-            nook_control::MIGRATOR
-                .run(&pool)
-                .await
-                .expect("migrate the template database");
-            // `seed::run` takes the workspace pool type (`EnginePool`); wrap the
-            // raw pool just for the seed. Fixtures + the field stay raw Postgres.
-            nook_control::seed::run(&EnginePool::from_pg(pool.clone()), &Config::for_test())
-                .await
-                .expect("seed the template database");
-            // Release every connection so the template can be cloned.
-            pool.close().await;
+                .ok();
+            admin.close().await.ok();
             name
         })
         .await
+}
+
+/// Reclaim templates a crashed or killed process left behind.
+///
+/// Reuse alone is not enough: a process that dies mid-build, or a schema that
+/// has since changed, leaves a template nobody will ever ask for again. Three
+/// conditions, all required, because dropping a template another suite is
+/// cloning from would turn this cleanup into the failure:
+///
+/// 1. it is not the one we are about to use;
+/// 2. nothing is connected to it (the direct test for "in use");
+/// 3. its epoch is older than [`TEMPLATE_MAX_AGE_SECS`] (a concurrently running
+///    suite on another branch has a recent template of its own fingerprint).
+///
+/// Best-effort throughout — a failure to tidy up must never fail a test run.
+/// Callers hold [`TEMPLATE_LOCK`].
+async fn reap_stale_templates(admin: &mut PgConnection, keep: &str) {
+    let cutoff = now_secs().saturating_sub(TEMPLATE_MAX_AGE_SECS);
+    let Ok(names) = sqlx::query_scalar::<_, String>(
+        "SELECT d.datname FROM pg_database d
+          WHERE d.datname LIKE 'nook_tmpl_%'
+            AND d.datname <> $1
+            AND NOT EXISTS (
+                  SELECT 1 FROM pg_stat_activity a WHERE a.datname = d.datname)",
+    )
+    .bind(keep)
+    .fetch_all(&mut *admin)
+    .await
+    else {
+        return;
+    };
+
+    for name in names {
+        // The trailing epoch says when it was built. A name without one is from
+        // before this scheme (the leaked `nook_tmpl_<uuid>` generation) and is
+        // by definition stale, so it is reclaimed.
+        let stale = match name.rsplit('_').next().and_then(|t| t.parse::<u64>().ok()) {
+            Some(built) => built < cutoff,
+            None => true,
+        };
+        if !stale {
+            continue;
+        }
+        let _ = sqlx::query(&format!("DROP DATABASE IF EXISTS \"{name}\" WITH (FORCE)"))
+            .execute(&mut *admin)
+            .await;
+    }
 }
 
 /// A prepared, **private** test world: a freshly created, migrated, and seeded
@@ -359,5 +495,50 @@ mod tests {
             swap_db("postgres://u:p@h:5432/base?sslmode=disable", "t"),
             "postgres://u:p@h:5432/t?sslmode=disable"
         );
+    }
+}
+
+#[cfg(test)]
+mod template_tests {
+    use super::*;
+
+    /// The fingerprint is what makes a template findable by another process, so
+    /// it must be stable across calls — an unstable one would silently restore
+    /// the old one-template-per-process leak.
+    #[test]
+    fn the_fingerprint_is_stable_and_shaped_like_a_name() {
+        let a = template_fingerprint();
+        let b = template_fingerprint();
+        assert_eq!(a, b, "same migration set, same fingerprint");
+        assert_eq!(a.len(), 16, "fixed width keeps the datname predictable");
+        assert!(
+            a.chars().all(|c| c.is_ascii_hexdigit()),
+            "safe in a datname without quoting: {a}"
+        );
+    }
+
+    /// The staleness rule the reaper applies, exercised without a database.
+    /// Getting this wrong in either direction is costly: too eager drops a
+    /// template a concurrent suite is cloning from, too lax restores the leak.
+    #[test]
+    fn staleness_reads_the_epoch_suffix_and_treats_the_old_scheme_as_stale() {
+        fn stale(name: &str, cutoff: u64) -> bool {
+            match name.rsplit('_').next().and_then(|t| t.parse::<u64>().ok()) {
+                Some(built) => built < cutoff,
+                None => true,
+            }
+        }
+        let cutoff = 1_000_000u64;
+
+        // Built before the cutoff → reclaimable.
+        assert!(stale("nook_tmpl_abc123_999999", cutoff));
+        // Built after → left alone; this is the concurrent-suite case.
+        assert!(!stale("nook_tmpl_abc123_1000001", cutoff));
+        // Exactly at the cutoff is not yet stale (strictly older only).
+        assert!(!stale("nook_tmpl_abc123_1000000", cutoff));
+
+        // The pre-fix generation carries a uuid, not an epoch. Those are the
+        // 1,589 that crashed Postgres — always reclaimable.
+        assert!(stale("nook_tmpl_019fa5c7901e7dd183339585a6a16efb", cutoff));
     }
 }
