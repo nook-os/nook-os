@@ -23,6 +23,7 @@ import {
 } from "./loop";
 import { ChatView, type ChatViewMessage } from "@nookos/ui";
 import { answerInteraction, useTaskInteractions } from "./Interactions";
+import { useLive } from "./live";
 
 /** The job transcript as chat messages (MAIN-237). One shared component now
  *  renders this and team chat, so the loop cannot drift off-theme again — the
@@ -44,20 +45,42 @@ export function transcriptMessages(
 }
 
 /** What the activity indicator should say for a job in `state`, or null for no
- *  indicator (MAIN-237 AC-4).
+ *  indicator (MAIN-237 AC-4, MAIN-240 AC-2).
  *
  *  Only a job that could still be producing output gets one. A job paused on a
  *  human is NOT working — it is waiting on you, which the interaction surface
  *  says far better — and a finished job is finished. Showing "working…" in
  *  either case is the specific lie this is meant to prevent: it is the operator's
- *  only cue that the agent is alive. */
-export function agentActivityLabel(state: string): string | null {
+ *  only cue that the agent is alive.
+ *
+ *  `turn` is the real signal the streaming adapter reports (`job_turn`), and it
+ *  OUTRANKS the inference — that is the whole point of MAIN-240. State can only
+ *  ever say "this job is running", which stays true in the gap between turns
+ *  when the agent is sitting idle waiting to be steered; the adapter can say
+ *  which of those two it actually is.
+ *
+ *  It is deliberately allowed to silence the indicator and never to raise one:
+ *
+ *  - `undefined` — no adapter reported. The tmux fallback path (NG-1) never
+ *    will, so it keeps the inferred label exactly as before.
+ *  - `active: false` — a real "not working right now". Believed, so a job
+ *    between turns stops claiming to work.
+ *  - `active: true` — agrees with the inference; nothing to add.
+ *
+ *  `queued` and `claimed` ignore `turn` entirely: their labels describe the
+ *  executor, not the agent, and no turn can be in flight before a process
+ *  exists. Only `running` is turn-gated. */
+export function agentActivityLabel(
+  state: string,
+  turn?: { active: boolean },
+): string | null {
   switch (state) {
     case "queued":
       return "waiting for an executor…";
     case "claimed":
       return "the operator agent is starting…";
     case "running":
+      if (turn && !turn.active) return null;
       return "the operator agent is working…";
     default:
       return null;
@@ -120,6 +143,10 @@ function LoopJobView({
   const qc = useQueryClient();
   const [showAgent, setShowAgent] = useState(false);
   const asks = useTaskInteractions(taskId);
+  // The real turn signal for THIS job (MAIN-240 AC-2). Selected by id rather
+  // than pulling the whole map, so a turn starting on some other ticket's job
+  // does not re-render this panel.
+  const turn = useLive((s) => s.jobTurn[jobId]);
 
   const { data: detail } = useQuery({
     queryKey: jobKey(jobId),
@@ -208,7 +235,7 @@ function LoopJobView({
       <ChatView
         messages={transcriptMessages(shown)}
         emptyLabel="No transcript yet — it fills in as the agent works."
-        typing={agentActivityLabel(detail.state)}
+        typing={agentActivityLabel(detail.state, turn)}
         disabled={!ask}
         placeholder={ask ? "Answer the agent…" : "Nothing to answer right now"}
         onSend={(body) => {

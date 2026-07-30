@@ -46,6 +46,21 @@ export interface AgentState {
   at: number;
 }
 
+/** Whether a loop job's agent is mid-turn right now (MAIN-240 AC-2).
+ *
+ *  ABSENCE IS NOT `active: false` — it means no adapter ever reported, which is
+ *  the ordinary case for the tmux fallback path. The two have to stay
+ *  distinguishable, because a job with no real signal must keep the old
+ *  state-inferred indicator while a job with one must be believed over the
+ *  inference. Storing `false` explicitly is what makes "the agent finished its
+ *  turn and is idle" sayable at all. */
+export interface JobTurn {
+  active: boolean;
+  /** Client receipt time (ms). Not currently used to expire the mark — see the
+   *  note in the `job_turn` handler for why job state is the better backstop. */
+  at: number;
+}
+
 interface LiveState {
   connected: boolean;
   nodeStatus: Record<string, string>;
@@ -53,6 +68,8 @@ interface LiveState {
   sessionStatus: Record<string, string>;
   /** Live agent activity per session (running/waiting). Absence means idle. */
   agentState: Record<string, AgentState>;
+  /** Live turn state per loop job id. Absence means "no adapter reported". */
+  jobTurn: Record<string, JobTurn>;
   activity: EventItem[];
   seedActivity(events: EventItem[]): void;
   seedAgentStates(items: { session_id: string; window?: number | null; state: string }[]): void;
@@ -64,6 +81,7 @@ export const useLive = create<LiveState>(() => ({
   nodeResources: {},
   sessionStatus: {},
   agentState: {},
+  jobTurn: {},
   activity: [],
   seedActivity(events) {
     useLive.setState((s) => {
@@ -173,6 +191,28 @@ export function startLive(queryClient: QueryClient) {
       // covers whichever job the panel is currently showing without knowing its id.
       queryClient.invalidateQueries({ queryKey: ["task", event.data.task_id, "jobs"] });
       queryClient.invalidateQueries({ queryKey: ["job"] });
+    } else if (event.type === "job_turn") {
+      // A loop job's agent started or stopped a turn (MAIN-240 AC-2). Unlike
+      // every neighbour in this switch, this does NOT invalidate a query: a turn
+      // is live state with no row to go and read, so the event carries the fact
+      // itself and the store IS the source of truth for it. Refetching here
+      // would be pure cost for an answer the server does not have.
+      //
+      // Kept even when it says `false`, because absence has to keep meaning "no
+      // adapter reported" — that is what lets the tmux path fall back to the
+      // old inferred indicator while the streaming path is believed exactly.
+      //
+      // No staleness timer, unlike `agentState` above, and the difference is
+      // deliberate. A stream that dies mid-turn already reports `false` as its
+      // pump unwinds (`loop_job.rs`), and the case that cannot — the whole node
+      // dying — is covered better by job state than by a clock: the reaper
+      // fails the stranded job, and a job that is not running shows no working
+      // indicator whatever this map says. A timer would only add a second way
+      // to be wrong.
+      const { job_id, active } = event.data;
+      useLive.setState((s) => ({
+        jobTurn: { ...s.jobTurn, [job_id]: { active, at: Date.now() } },
+      }));
     } else if (event.type === "activity") {
       useLive.setState((s) => ({
         activity: [event.data.event, ...s.activity].slice(0, ACTIVITY_BUFFER),

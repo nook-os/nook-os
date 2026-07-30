@@ -12996,6 +12996,42 @@
                 ]
               }
             }
+          },
+          {
+            "type": "object",
+            "description": "A loop job's agent started or stopped a turn (MAIN-240). Distinct from\n`JobChanged`, whose contract is \"what you have is stale, refetch\": this\ncarries the fact itself, because a turn is live state with no row to go\nand read. Only the streaming adapter produces it.",
+            "required": [
+              "data",
+              "type"
+            ],
+            "properties": {
+              "data": {
+                "type": "object",
+                "description": "A loop job's agent started or stopped a turn (MAIN-240). Distinct from\n`JobChanged`, whose contract is \"what you have is stale, refetch\": this\ncarries the fact itself, because a turn is live state with no row to go\nand read. Only the streaming adapter produces it.",
+                "required": [
+                  "task_id",
+                  "job_id",
+                  "active"
+                ],
+                "properties": {
+                  "active": {
+                    "type": "boolean"
+                  },
+                  "job_id": {
+                    "$ref": "#/components/schemas/JobId"
+                  },
+                  "task_id": {
+                    "$ref": "#/components/schemas/TaskId"
+                  }
+                }
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "job_turn"
+                ]
+              }
+            }
           }
         ],
         "description": "Live events pushed to browsers over `/api/v1/ws/ui`."

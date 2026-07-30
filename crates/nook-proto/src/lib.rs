@@ -134,6 +134,15 @@ pub enum NodeToControl {
         source: String,
         content: String,
     },
+    /// A loop job's agent started or stopped working (MAIN-240). A REAL signal
+    /// off the runtime's own turn boundaries, not inferred from output timing —
+    /// which is what the "agent is working" indicator (MAIN-237) needs to stop
+    /// guessing. Only the streaming adapter emits it; a tmux job simply never
+    /// reports one, and the UI falls back to what it did before.
+    JobTurn {
+        job_id: String,
+        active: bool,
+    },
     /// A loop job's session ended (MAIN-161). `ok=false` means it failed —
     /// non-zero exit, a timeout, or a launch that never got going — and
     /// `message` carries the reason / transcript tail for crash honesty (AC-4).
@@ -478,6 +487,15 @@ pub enum UiEvent {
     /// Visibility is enforced on the refetch, so the nudge itself leaks nothing.
     JobChanged {
         task_id: nook_types::TaskId,
+    },
+    /// A loop job's agent started or stopped a turn (MAIN-240). Distinct from
+    /// `JobChanged`, whose contract is "what you have is stale, refetch": this
+    /// carries the fact itself, because a turn is live state with no row to go
+    /// and read. Only the streaming adapter produces it.
+    JobTurn {
+        task_id: nook_types::TaskId,
+        job_id: nook_types::JobId,
+        active: bool,
     },
 }
 

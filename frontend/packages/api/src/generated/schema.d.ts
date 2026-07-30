@@ -5544,6 +5544,20 @@ export interface components {
             };
             /** @enum {string} */
             type: "job_changed";
+        } | {
+            /**
+             * @description A loop job's agent started or stopped a turn (MAIN-240). Distinct from
+             *     `JobChanged`, whose contract is "what you have is stale, refetch": this
+             *     carries the fact itself, because a turn is live state with no row to go
+             *     and read. Only the streaming adapter produces it.
+             */
+            data: {
+                active: boolean;
+                job_id: components["schemas"]["JobId"];
+                task_id: components["schemas"]["TaskId"];
+            };
+            /** @enum {string} */
+            type: "job_turn";
         };
         /**
          * @description Unseal a note (MAIN-100): the client decrypted the sealed body locally and

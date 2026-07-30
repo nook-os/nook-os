@@ -977,6 +977,48 @@ pub async fn transcript_from_node(
     Ok(())
 }
 
+/// Record a turn boundary reported by the executor (MAIN-240).
+///
+/// The agent-working indicator used to be inferred from whether output was
+/// arriving; this is the runtime saying so itself. Nothing is persisted — a
+/// turn is a live fact, not history, and the transcript already carries what
+/// was said — so this only fans the UI signal out.
+///
+/// Same anti-spoof gate as the transcript: a node may only speak for a job it
+/// is actually executing.
+pub async fn turn_from_node(
+    state: &AppState,
+    tenant: TenantId,
+    node: NodeId,
+    id: JobId,
+    active: bool,
+) {
+    match is_executor(state, tenant, id, node).await {
+        Ok(true) => {}
+        _ => {
+            tracing::warn!(job = %id.0, node = %node.0, "node reported a turn for a job it does not execute — dropped");
+            return;
+        }
+    }
+    if let Ok(Some(task_id)) = state
+        .db
+        .query_scalar_opt::<TaskId>(
+            "SELECT target_task_id FROM loop_jobs WHERE id = $1",
+            params![id],
+        )
+        .await
+    {
+        state.registry.publish(
+            tenant,
+            nook_proto::UiEvent::JobTurn {
+                task_id,
+                job_id: id,
+                active,
+            },
+        );
+    }
+}
+
 /// Apply a node's `JobFinished` — ONLY for a job that node is actually
 /// executing, so a node token cannot complete or fail another executor's job
 /// (MAIN-161 security).
