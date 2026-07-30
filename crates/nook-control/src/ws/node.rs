@@ -385,6 +385,44 @@ async fn handle_message(
             )
             .await;
         }
+        NodeToControl::RuntimeCredentialInstalled {
+            runtime,
+            path,
+            error,
+        } => {
+            // Same contract as SkillInstalled/HooksInstalled: an occurrence, so
+            // it is an event rather than a table. The authorization STATE it
+            // produces arrives separately as `RuntimeAuthStatus` and lands on
+            // the node's capabilities — this record is the "did that delivery
+            // work, and where did it land" question.
+            //
+            // The payload is never in the event. A credential in the activity
+            // log is a credential in the database, which is the one thing this
+            // whole path exists to avoid (MAIN-283 AC-4).
+            if let Some(e) = &error {
+                tracing::warn!(
+                    node = %name, %runtime, error = %e,
+                    "node could not install a runtime credential"
+                );
+            }
+            events::record(
+                state,
+                tenant,
+                EventDraft::new(if error.is_some() {
+                    "runtime_credential.install_failed"
+                } else {
+                    "runtime_credential.installed"
+                })
+                .actor("node", node_id.0)
+                .node(node_id)
+                .payload(serde_json::json!({
+                    "runtime": runtime,
+                    "path": path,
+                    "error": error,
+                })),
+            )
+            .await;
+        }
         NodeToControl::HooksInstalled { path, error } => {
             // Same contract as SkillInstalled (MAIN-105 AC-5): a failure is a
             // recorded event that flows through notable→notification, a success

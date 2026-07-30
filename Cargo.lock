@@ -2762,6 +2762,7 @@ dependencies = [
 name = "nook-proto"
 version = "0.4.22"
 dependencies = [
+ "base64 0.22.1",
  "nook-types",
  "serde",
  "serde_json",
