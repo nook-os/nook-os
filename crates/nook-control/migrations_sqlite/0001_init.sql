@@ -822,14 +822,26 @@ CREATE INDEX work_queue_dead_type_idx ON work_queue_dead (work_type);
 CREATE UNIQUE INDEX workspaces_remote_idx ON workspaces (tenant_id, git_remote_normalized) WHERE (git_remote_normalized IS NOT NULL);
 
 -- Seed rows the Postgres migrations insert.
+-- Values taken column-by-column in ORDINAL order from the applied Postgres
+-- schema. The scaffold's first pass paired an ordinal column list with values
+-- from jsonb_each_text, whose key order is its own — so any table whose column
+-- names do not happen to sort into ordinal order came out shuffled. It hit
+-- roles: description and builtin were swapped on all four, which SQLite's type
+-- affinity accepted silently (a builtin = 1 filter would match nothing,
+-- in the authorization model's own seed data). tests/sqlite_scaffold.rs now
+-- asserts the values, not just the row count.
+--
+-- Timestamps are CURRENT_TIMESTAMP, not the wall clock of whoever generated
+-- this: Postgres fills them from the column default, so a fresh database should
+-- stamp its own creation time rather than claim one in the past.
+--
 -- Ordered parents-first: SQLite enforces foreign keys (sqlx opens pools with
 -- PRAGMA foreign_keys=ON), so role_permissions must follow roles and
--- permissions. The alphabetical order the scaffold emitted fails on a fresh
--- SQLite database — caught by tests/sqlite_scaffold.rs, not by reading.
-INSERT INTO roles (key, name, description, builtin) VALUES ('operator', 'Operator', 'true', 'Runs this deployment or org. Sees metadata, never session content.');
-INSERT INTO roles (key, name, description, builtin) VALUES ('org_admin', 'Org admin', 'true', 'Administers an org and the tenants under it.');
-INSERT INTO roles (key, name, description, builtin) VALUES ('tenant_admin', 'Tenant admin', 'true', 'Administers one tenant.');
-INSERT INTO roles (key, name, description, builtin) VALUES ('member', 'Member', 'true', 'Ordinary access to a tenant.');
+-- permissions.
+INSERT INTO roles (key, name, description, builtin) VALUES ('operator', 'Operator', 'Runs this deployment or org. Sees metadata, never session content.', 1);
+INSERT INTO roles (key, name, description, builtin) VALUES ('org_admin', 'Org admin', 'Administers an org and the tenants under it.', 1);
+INSERT INTO roles (key, name, description, builtin) VALUES ('tenant_admin', 'Tenant admin', 'Administers one tenant.', 1);
+INSERT INTO roles (key, name, description, builtin) VALUES ('member', 'Member', 'Ordinary access to a tenant.', 1);
 INSERT INTO permissions (key, description) VALUES ('org.view', 'See that an org and its tenants exist');
 INSERT INTO permissions (key, description) VALUES ('org.manage', 'Rename an org, move tenants between orgs');
 INSERT INTO permissions (key, description) VALUES ('tenant.view', 'See a tenant exists, and its membership counts');
@@ -841,7 +853,7 @@ INSERT INTO permissions (key, description) VALUES ('ca.rotate', 'Rotate a tenant
 INSERT INTO permissions (key, description) VALUES ('policy.view', 'Read an org visibility policy');
 INSERT INTO permissions (key, description) VALUES ('policy.manage', 'Change an org visibility policy');
 INSERT INTO permissions (key, description) VALUES ('rbac.grant', 'Grant or revoke a role binding');
-INSERT INTO orgs (id, name, slug, created_at, updated_at) VALUES ('00000000-0000-0000-0000-0000000000a1', 'Default', 'default', '2026-07-29T23:35:26.308379+00:00', '2026-07-29T23:35:26.308379+00:00');
+INSERT INTO orgs (id, name, slug, created_at, updated_at) VALUES ('00000000-0000-0000-0000-0000000000a1', 'Default', 'default', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
 INSERT INTO role_permissions (role_key, permission_key) VALUES ('operator', 'org.view');
 INSERT INTO role_permissions (role_key, permission_key) VALUES ('operator', 'tenant.view');
 INSERT INTO role_permissions (role_key, permission_key) VALUES ('operator', 'node.view');

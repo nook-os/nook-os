@@ -212,3 +212,99 @@ async fn the_scaffold_carries_the_seed_rows() {
         assert!(n >= least, "{table} came across empty");
     }
 }
+
+/// Seed VALUES land in the right COLUMNS — not merely the right number of rows.
+///
+/// Counting rows missed a real defect: the scaffold paired an ordinal column
+/// list with values ordered by `jsonb_each_text`, whose key order is its own, so
+/// `roles.description` and `roles.builtin` were swapped on all four rows.
+/// SQLite's type affinity swallowed prose into an INTEGER column without a
+/// murmur, which is exactly the silent divergence this whole ticket exists to
+/// prevent — and it landed in the authorization model's seed data.
+///
+/// So this asserts the values, and does it through a query that would have
+/// FAILED before: `builtin = 1` matched nothing when the column held prose.
+#[tokio::test]
+async fn seed_values_are_in_the_right_columns() {
+    let pool = apply(CONTROL).await;
+
+    // The predicate the swap broke.
+    let builtin: i64 = sqlx::query_scalar("SELECT count(*) FROM roles WHERE builtin = 1")
+        .fetch_one(&pool)
+        .await
+        .expect("count builtin roles");
+    assert_eq!(
+        builtin, 4,
+        "every seeded role is builtin; a swap makes this 0"
+    );
+
+    let (desc, flag): (String, i64) =
+        sqlx::query_as("SELECT description, builtin FROM roles WHERE key = 'operator'")
+            .fetch_one(&pool)
+            .await
+            .expect("the operator role");
+    assert_eq!(flag, 1);
+    assert_ne!(
+        desc, "true",
+        "description holds prose, not the builtin flag"
+    );
+    assert!(
+        desc.starts_with("Runs this deployment"),
+        "the operator description came across verbatim, got {desc:?}"
+    );
+
+    // Same class, other tables: a permission's key and description must not
+    // trade places either.
+    let (pkey, pdesc): (String, String) =
+        sqlx::query_as("SELECT key, description FROM permissions ORDER BY key LIMIT 1")
+            .fetch_one(&pool)
+            .await
+            .expect("a permission");
+    assert!(
+        pkey.contains('.'),
+        "permission keys look like `org.view`, got {pkey:?}"
+    );
+    assert!(
+        !pdesc.contains('.') || pdesc.len() > pkey.len(),
+        "description is prose, got {pdesc:?}"
+    );
+}
+
+/// A frozen migration must not carry the wall clock of the machine that
+/// generated it — every fresh database would claim the Default org was created
+/// at that instant. Postgres fills these from the column default; SQLite should
+/// too.
+#[tokio::test]
+async fn seed_timestamps_are_not_baked_in() {
+    assert!(
+        !regex_like_timestamp(CONTROL),
+        "a literal timestamp is baked into the control seeds; use CURRENT_TIMESTAMP"
+    );
+
+    // And it actually stamps something on insert.
+    let pool = apply(CONTROL).await;
+    let created: Option<String> =
+        sqlx::query_scalar("SELECT created_at FROM orgs WHERE slug = 'default'")
+            .fetch_one(&pool)
+            .await
+            .expect("the default org");
+    let created = created.expect("created_at is filled");
+    assert!(!created.is_empty(), "created_at was stamped on insert");
+}
+
+/// `YYYY-MM-DD HH:MM:SS`-shaped literal anywhere in the seed section. Hand-rolled
+/// rather than pulling in a regex dependency for one check.
+fn regex_like_timestamp(sql: &str) -> bool {
+    sql.lines()
+        .filter(|l| l.trim_start().starts_with("INSERT INTO "))
+        .any(|l| {
+            l.as_bytes().windows(11).any(|w| {
+                w[0] == b'\''
+                    && w[1..5].iter().all(u8::is_ascii_digit)
+                    && w[5] == b'-'
+                    && w[6..8].iter().all(u8::is_ascii_digit)
+                    && w[8] == b'-'
+                    && w[9..11].iter().all(u8::is_ascii_digit)
+            })
+        })
+}
