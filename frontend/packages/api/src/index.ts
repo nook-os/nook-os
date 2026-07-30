@@ -18,6 +18,7 @@ export type Session = Schemas["Session"];
 export type Overview = Schemas["Overview"];
 export type OverviewWorkspace = Schemas["OverviewWorkspace"];
 export type OverviewCheckout = Schemas["OverviewCheckout"];
+export type OverviewTask = Schemas["OverviewTask"];
 export type Board = Schemas["Board"];
 export type BoardColumn = Schemas["BoardColumn"];
 export type TaskItem = Schemas["TaskItem"];

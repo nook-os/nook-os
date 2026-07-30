@@ -191,6 +191,7 @@ pub async fn overview(
     tenant: TenantId,
     node_owner: Option<Uuid>,
     session_creator: Option<UserId>,
+    task_viewer: Option<UserId>,
 ) -> ApiResult<Overview> {
     use std::collections::HashMap;
 
@@ -237,6 +238,69 @@ pub async fn overview(
     // Active sessions, creator-scoped identically to `list_sessions`.
     let sessions = list_sessions(db, tenant, None, true, session_creator).await?;
 
+    // The ticket each checkout is working (MAIN-230), by the two joins that can
+    // know it:
+    //
+    //   tasks.checkout_id          the durable one (MAIN-225), but NULL until
+    //                              discovery scans the fresh worktree;
+    //   tasks.session_id → sessions.checkout_id
+    //                              the one that covers the gap, so work started
+    //                              seconds ago still names its ticket.
+    //
+    // `task_viewer` is the SAME predicate every other read of a card uses
+    // (`tasks::visible_by_cols`, mirrored here in SQL): `None` means the caller
+    // already sees the whole tenant. Without it this endpoint would be a
+    // side-channel around card visibility — a private ticket's key leaking onto
+    // a shared node's row is exactly the class of hole MAIN-226's tests exist to
+    // catch.
+    #[derive(sqlx::FromRow)]
+    struct TaskRow {
+        checkout_id: NodeWorkspaceId,
+        key: String,
+        title: String,
+        column_type: String,
+    }
+    let task_rows: Vec<TaskRow> = db
+        .query_all(
+            &format!(
+                "SELECT DISTINCT
+                        COALESCE(t.checkout_id, s.checkout_id) AS checkout_id,
+                        b.key || '-' || t.number AS key,
+                        t.title,
+                        c.type AS column_type
+                   FROM tasks t
+                   JOIN boards b ON b.id = t.board_id
+                   JOIN board_columns c ON c.id = t.column_id
+                   LEFT JOIN sessions s ON s.id = t.session_id
+                  WHERE t.tenant_id = $1
+                    AND t.archived_at IS NULL
+                    AND COALESCE(t.checkout_id, s.checkout_id) IS NOT NULL
+                    AND ({viewer} IS NULL
+                         OR t.visibility <> 'private'
+                         OR t.created_by = $2
+                         OR t.assignee_user_id = $2)
+                  ORDER BY key",
+                viewer = Postgres.cast("$2", "uuid")
+            ),
+            params![tenant, task_viewer.map(|u| u.0)],
+        )
+        .await?;
+
+    // Bucket by checkout, keeping only checkouts this caller can actually see —
+    // the node scope above is the authority on that, so a ticket cannot pull an
+    // invisible checkout into the payload.
+    let mut tasks_by_checkout: HashMap<NodeWorkspaceId, Vec<OverviewTask>> = HashMap::new();
+    for t in task_rows {
+        tasks_by_checkout
+            .entry(t.checkout_id)
+            .or_default()
+            .push(OverviewTask {
+                key: t.key,
+                title: t.title,
+                column_type: t.column_type,
+            });
+    }
+
     // A session binds under a checkout only when that checkout is itself visible;
     // otherwise it falls to its workspace's unbound bucket (or the loose bucket
     // when it has no workspace at all).
@@ -274,6 +338,7 @@ pub async fn overview(
                     .unwrap_or(false),
                 missing_at: r.missing_at,
                 sessions,
+                tasks: tasks_by_checkout.remove(&r.id).unwrap_or_default(),
             });
     }
 

@@ -25,6 +25,7 @@ const co = (over: Partial<OverviewCheckout>): OverviewCheckout => ({
   dirty: false,
   missing_at: null,
   sessions: [],
+  tasks: [],
   ...over,
 });
 
@@ -99,6 +100,22 @@ describe("mission derivations (MAIN-226)", () => {
     expect(matchesQuery(w, "feature/login")).toBe(true);
     expect(matchesQuery(w, "claude-work")).toBe(true);
     expect(matchesQuery(w, "nomatch")).toBe(false);
+  });
+
+  it("matches the ticket a checkout is working, by key and by title", () => {
+    const w = ws("acme-api", [
+      co({
+        id: "c1",
+        tasks: [
+          { key: "MAIN-42", title: "Seed and steer", column_type: "started" },
+        ],
+      }),
+    ]);
+    // "where is MAIN-42 running" is the question this page answers (MAIN-230).
+    expect(matchesQuery(w, "MAIN-42")).toBe(true);
+    expect(matchesQuery(w, "main-42")).toBe(true);
+    expect(matchesQuery(w, "seed and steer")).toBe(true);
+    expect(matchesQuery(w, "MAIN-43")).toBe(false);
   });
 });
 

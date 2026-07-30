@@ -4770,6 +4770,28 @@ export interface components {
             node_status: string;
             path: string;
             sessions: components["schemas"]["Session"][];
+            /**
+             * @description The ticket(s) this checkout is working (MAIN-230) — what turns "some
+             *     worktree on builder-1" into "MAIN-42 on builder-1". Empty for a checkout
+             *     no task points at. Visibility-filtered exactly like any other read of a
+             *     card, so a private ticket never surfaces here.
+             */
+            tasks?: components["schemas"]["OverviewTask"][];
+        };
+        /**
+         * @description A ticket as Mission Control needs it: enough to label a row, link to the
+         *     board card, and tell done from in-flight. Deliberately not the whole
+         *     `TaskItem` — this rides on every checkout in the fleet.
+         */
+        OverviewTask: {
+            /**
+             * @description The task's column TYPE (`started`, `review`, `completed`, …), not its
+             *     name: a board that renames "In Progress" must not restyle the chip.
+             */
+            column_type: string;
+            /** @description The board key (`MAIN-42`) — the label, and the `/board?task=` target. */
+            key: string;
+            title: string;
         };
         /**
          * @description One repository on the overview: its identity plus every visible checkout and

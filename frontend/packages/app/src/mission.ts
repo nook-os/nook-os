@@ -62,6 +62,9 @@ export function matchesQuery(w: OverviewWorkspace, q: string): boolean {
   for (const c of w.checkouts) {
     hay.push(c.node_name, c.path, c.branch ?? "", c.kind);
     for (const s of c.sessions) hay.push(s.name, s.runtime);
+    // The ticket is what people actually search for — "where is MAIN-42
+    // running" is the question this page exists to answer (MAIN-230 AC-4).
+    for (const t of c.tasks ?? []) hay.push(t.key, t.title);
   }
   for (const s of w.unbound_sessions) hay.push(s.name, s.runtime);
   return hay.join(" ").toLowerCase().includes(needle);
