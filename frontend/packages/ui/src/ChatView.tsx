@@ -94,6 +94,26 @@ export interface ChatViewProps {
   /** The viewer is a tenant owner/admin, so Delete is offered on ANY message,
    *  not only their own (MAIN-116 AC-4). Edit stays author-only regardless. */
   canDeleteAny?: boolean;
+  /** Someone (or something) is composing right now — the label to show under
+   *  the log, e.g. "the operator agent is working…" (MAIN-237 AC-1/AC-4).
+   *
+   *  A plain signal, not a presence model: the loop feeds it from its job state
+   *  today, and team-chat presence (MAIN-115) will feed the same prop later, so
+   *  the two surfaces show the same affordance without this component learning
+   *  what either of them means. Null/absent renders nothing at all.
+   *
+   *  It sits INSIDE the scroll log so the follow-the-bottom behaviour carries it
+   *  into view like a message would; a fixed banner would sit still while the
+   *  conversation moved. */
+  typing?: string | null;
+  /** Rendered between the log and the composer — where a caller puts controls
+   *  that belong to the reply rather than to the conversation (the loop's
+   *  interaction choice buttons). Team chat passes nothing and is unchanged. */
+  beforeComposer?: React.ReactNode;
+  /** Hide the composer entirely, for a surface that is read-only right now (a
+   *  finished loop job). Distinct from `disabled`, which shows the box greyed:
+   *  when there is nothing to say TO, an inert box is just clutter. */
+  hideComposer?: boolean;
 }
 
 const GROUP_GAP_MS = 5 * 60 * 1000;
@@ -133,6 +153,9 @@ export function ChatView({
   onEditMessage,
   onDeleteMessage,
   canDeleteAny = false,
+  typing,
+  beforeComposer,
+  hideComposer = false,
 }: ChatViewProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const [draft, setDraft] = useState("");
@@ -194,7 +217,7 @@ export function ChatView({
     } else if (nearBottomRef.current) {
       el.scrollTop = el.scrollHeight;
     }
-  }, [messages]);
+  }, [messages, typing]);
 
   const submit = useCallback(() => {
     const body = draft.trim();
@@ -392,7 +415,19 @@ export function ChatView({
             );
           })
         )}
+        {typing && (
+          <div className="chat-typing" role="status" aria-live="polite">
+            <span className="chat-typing-dots" aria-hidden="true">
+              <i />
+              <i />
+              <i />
+            </span>
+            {typing}
+          </div>
+        )}
       </div>
+      {beforeComposer}
+      {!hideComposer && (
       <div className="chat-composer">
         <textarea
           className="chat-input"
@@ -414,6 +449,7 @@ export function ChatView({
           Send
         </button>
       </div>
+      )}
     </div>
   );
 }

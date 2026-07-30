@@ -24,7 +24,7 @@ use std::time::Duration;
 use nook_types::{JobId, TenantId};
 
 use crate::queue::{Nack, NewWork};
-use crate::services::jobs;
+use crate::services::{jobs, loops};
 use crate::state::AppState;
 
 /// Items claimed per receive.
@@ -48,7 +48,17 @@ pub fn start(state: AppState) {
 
 async fn run(state: AppState) {
     let types = [jobs::WORK_TYPE.to_string()];
+    let mut switch = loops::SwitchLog::default();
     loop {
+        // The master switch (MAIN-239), re-read every tick so a flip takes
+        // effect within one poll interval without a restart. With every tenant
+        // off this is a single indexed lookup and we never touch the queue —
+        // which is what "off is genuinely quiet" means: no claiming, no
+        // dispatch, and queued jobs simply keep waiting.
+        if !switch.observe("job_dispatch", loops::any_enabled(&state.db).await) {
+            tokio::time::sleep(POLL_INTERVAL).await;
+            continue;
+        }
         match state.queue.receive(&types, BATCH, VISIBILITY).await {
             Ok(items) if items.is_empty() => tokio::time::sleep(POLL_INTERVAL).await,
             Ok(items) => {
@@ -75,6 +85,21 @@ async fn handle(state: &AppState, item: &crate::queue::WorkEnvelope) {
             .await;
         return;
     };
+
+    // Per-tenant gate. `any_enabled` above got us into this pass, but the item
+    // may belong to a tenant whose loops are off — so re-arm it exactly as an
+    // unplaceable job is re-armed and place nothing. The job keeps its queued
+    // state and runs when the switch flips (AC-3: off loses no work).
+    if !loops::enabled(&state.db, tenant).await {
+        let _ = state.queue.ack(item.id).await;
+        let _ = state
+            .queue
+            .enqueue(
+                NewWork::new(tenant.0, jobs::WORK_TYPE, item.payload.clone()).delay(RETRY_DELAY),
+            )
+            .await;
+        return;
+    }
 
     match jobs::select_executor(state, tenant, job_id).await {
         Ok(job) if job.state == "queued" => {

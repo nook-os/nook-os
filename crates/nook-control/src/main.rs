@@ -3,7 +3,7 @@ use clap::{Parser, Subcommand};
 use nook_db::{params, Db, Postgres, TypeMapping};
 use tracing_subscriber::EnvFilter;
 
-use nook_control::{routes, AppState, Config, MIGRATOR};
+use nook_control::{routes, AppState, Config, MIGRATOR, SQUASH_MANIFEST};
 
 #[derive(Parser)]
 #[command(name = "nook-control", about = "NookOS control plane")]
@@ -36,11 +36,20 @@ async fn main() -> Result<()> {
     let db = nook_db::connect(&cfg.database_url, 10)
         .await
         .context("opening the database")?;
-    // Migrations embed Postgres DDL (`sqlx::migrate!`); the SQLite track is
-    // MAIN-196. Run them against the pool's Postgres arm. Dev tolerates a ledger
-    // ahead of this checkout (warns + proceeds); production stays strictly fatal
-    // (MAIN-224).
-    nook_db::migrate::run_with_dev_tolerance(&MIGRATOR, db.pg(), cfg.is_production()).await?;
+    // The migration set follows the engine (MAIN-196): the Postgres track, or
+    // the SQLite one for a `sqlite://` URL. On Postgres a pre-squash ledger
+    // collapses to the canonical row first (MAIN-235) — the image that carries
+    // a squash carries its own re-stamp, never the two-step ordering that
+    // caused the documented prod near-miss — and dev tolerates a ledger ahead
+    // of this checkout while production stays strictly fatal (MAIN-224).
+    nook_db::migrate::run_boot_migrations_for(
+        &db,
+        cfg.is_production(),
+        &MIGRATOR,
+        &nook_control::MIGRATOR_SQLITE,
+        SQUASH_MANIFEST,
+    )
+    .await?;
 
     match cli.command.unwrap_or(Command::Serve) {
         Command::Serve => {
@@ -117,7 +126,20 @@ async fn serve(db: nook_db::DbPool, cfg: Config) -> Result<()> {
 
     // Join the cross-instance bus (LISTEN/NOTIFY): makes N control-plane
     // replicas cooperate. On a single instance it's a no-op fast path.
-    state.registry.start_bus(state.db.clone());
+    // Cross-instance fan-out is Postgres LISTEN/NOTIFY. A SQLite deployment is
+    // one process against one file — there is no second replica to coordinate
+    // with — so the bus is simply not started, which the registry already
+    // supports as its documented fast path ("without start_bus … identical to
+    // the original in-memory registry"). Starting a Postgres listener on a
+    // SQLite pool would panic, and faking a bus would be pretending to solve a
+    // problem that cannot arise (MAIN-196).
+    if state.db.engine() == nook_db::Engine::Postgres {
+        state.registry.start_bus(state.db.clone());
+    } else {
+        tracing::info!(
+            "single-instance engine — cross-instance event bus not started (in-memory fan-out only)"
+        );
+    }
     let instance = state.registry.instance_id();
     tracing::info!(%instance, "control plane instance");
 

@@ -701,6 +701,21 @@ export function SettingsPage() {
     (settings ?? []).find((s) => s.key === "theme")?.value ?? DEFAULT_THEME,
   );
 
+  // The loops master switch (MAIN-239). Tenant-scoped and default OFF, so an
+  // absent setting reads as off — which is also what a fresh deployment has.
+  const loopsOn =
+    (settings ?? []).find(
+      (s) => s.key === "loops.enabled" && s.scope === "tenant",
+    )?.value === true;
+
+  const setLoops = async (on: boolean) => {
+    await api.PUT("/api/v1/settings/{key}", {
+      params: { path: { key: "loops.enabled" } },
+      body: { value: on, scope: "tenant" },
+    });
+    queryClient.invalidateQueries({ queryKey: ["settings"] });
+  };
+
   const pickTheme = async (slug: string, tokens: unknown) => {
     applyTokens(tokens as ThemeTokens);
     await api.PUT("/api/v1/settings/{key}", {
@@ -740,6 +755,40 @@ export function SettingsPage() {
             </tbody>
           </table>
         )}
+      </Panel>
+
+      {/* MAIN-239: the one switch for the loop machinery. Deliberately says
+          what OFF means, because the confusing failure is a promoted ticket
+          that never moves and no visible reason why. */}
+      <Panel title="Loops">
+        <div className="loops-switch" data-testid="loops-switch">
+          <div>
+            <div className="bright">
+              Loop machinery is{" "}
+              {loopsOn ? (
+                <Pill tone="ok">on</Pill>
+              ) : (
+                <Pill>off</Pill>
+              )}
+            </div>
+            <div className="faint small">
+              {loopsOn
+                ? "Queued spec and decompose jobs are dispatched to eligible executors."
+                : "Off by default. Jobs you start are queued and wait here — nothing is lost, and nothing runs until you turn this on."}
+            </div>
+          </div>
+          <button
+            className={`btn small${loopsOn ? "" : " primary"}`}
+            onClick={() => void setLoops(!loopsOn)}
+            aria-pressed={loopsOn}
+          >
+            {loopsOn ? "Turn off" : "Turn on"}
+          </button>
+        </div>
+        <div className="faint small">
+          Also: <span className="mono">nook operator loops on|off|status</span>.
+          Takes effect within a poll interval; no restart.
+        </div>
       </Panel>
 
       <Panel title="Email">

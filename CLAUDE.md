@@ -6,6 +6,7 @@
 - Edit → save → the container rebuilds automatically. Poll `http://localhost:8080/healthz` to know the control plane is back.
 - `./scripts/dev-server.sh logs` tails the Rust services; `restart` force-restarts the control plane.
 - **Dev email goes to Mailpit.** The dev control plane is wired `MAIL_PROVIDER=smtp` → `mailpit:1025`, so verification and invite emails land in a live inbox — read them at `http://localhost:8025`. Prod is unaffected (shipped default is `MAIL_PROVIDER` unset → `capture`, which delivers nothing).
+- **The fleet's Claude login is a separate identity, mounted in (MAIN-238).** Loop jobs run `claude` on a node, and `nook-dispatcher` only places work on a node reporting the runtime **authorized** — so with no login a spec job sits queued forever with *"no eligible executor"*. The session lives in the gitignored `.nook-secrets/claude/`, mounted at `/nook-claude` with `CLAUDE_CONFIG_DIR` pointing at it (verified: `claude` 2.1.220 reads and writes its `.claude.json` there), on both the operator node and the dev node. `./run.sh` detects a missing session after the stack is healthy and offers the device login; `./run.sh --claude-login` runs it any time. **Subscription device-login only — never an API key.** Because the credentials are *only* in that mount, the fleet's account is separate from your own `~/.claude`: swap it with `rm -rf .nook-secrets/claude && ./run.sh --claude-login` (the files are written by the container as root, so that `rm` may need `sudo`) without touching your personal login. An empty or absent dir is fine — the stack boots and the runtime simply reports `not_authorized`. Check with `docker compose exec operator-node claude auth status`.
 - Host-side `cargo check` is fine for fast compile feedback; running the stack is not.
 - `nook join` from the host (against http://localhost:8080) is the "second node" demo path.
 
@@ -45,18 +46,52 @@ hygiene now, not a shared-DB workaround.)
 
 - **Migrations are append-only.** `0001_init.sql` is the whole schema and is frozen. Schema changes are NEW numbered files starting at `0002_…`.
 - **Never edit an applied migration and re-record its checksum.** The checksum is what proves the schema in front of you is the schema the repo describes; rewriting it makes that proof say "verified" without anything having been verified. If sqlx says *"migration N was previously applied but has been modified"*, the fix is to restore that file and add a new one — not to patch the ledger.
-- **The nineteen migrations were squashed into `0001_init.sql` on 2026-07-23.** That is the exception the rule above exists to prevent, taken once, deliberately, while the deployment had one operator and one production database. It was done from a `pg_dump` of a database built by applying all nineteen — so the file is what they produced, not what they were believed to produce — and verified three ways: schema diff against the nineteen (identical), seed-row counts (identical), and a virgin database booted through the real binary (identical). Do not do it again; the next change is `0002_…`.
-- **A ledger re-stamp must land with the image that carries the new migration set, not before it.** They are one deploy, not two steps. Prod was re-stamped to a single row while still running an image embedding all nineteen — with a 1-row ledger it would have tried to re-apply `0002`–`0019` against a schema that already had them, on its next restart. Caught and reverted; the lesson is the ordering.
+- **Squashing the set is a supported, mechanized operation — use `scripts/squash-migrations.sh` (MAIN-235).** It is still a deliberate exception to the append-only rule, never a licence to edit an applied file, but it is no longer a hand-run one-off. The script applies every current migration to a virgin database, `pg_dump`s what they actually produced as the new `0001`, and refuses to write anything unless three checks pass: schema diff against the pre-squash database is empty, seed-row counts match table by table, and the diff itself is proven able to detect an injected difference. Verification (c) is `./test.sh` after it writes. Run it in the compose Postgres container, which has `psql`/`pg_dump`:
+  ```
+  docker compose run --rm -v "$PWD:/repo" -w /repo --entrypoint bash postgres \
+    scripts/squash-migrations.sh --set control          # dry run: verify only
+  ...same with --apply                                   # then: touch crates/nook-control/src/lib.rs && ./test.sh
+  ```
+  `--set chat` does nook-chat's set the same way. **The first squash (19→1, 2026-07-23) was done by hand; this replaces that method, not the file.**
+- **The re-stamp ships INSIDE the image — that is the whole design, and it is why the squash is safe now.** A squash emits `migrations/squash-manifest.txt` naming the exact ledger it replaced (every old version *and* checksum). At boot, before the migrator runs, `nook_db::restamp` collapses a ledger matching that manifest to the single new row **in one transaction**, then proceeds. So the image carrying the squash carries its own re-stamp: there is no second step and no ordering for an operator to get wrong. Four outcomes, no fifth — virgin database (migrator applies `0001`), already-squashed (no-op, *including* once `0002…` land on top), exact match (collapsed), **anything else (left completely untouched with a loud error)**. That last one is fatal in production on purpose: a ledger we cannot account for is not one we rewrite on a guess. In dev it is a WARN and MAIN-224's tolerance carries the boot.
+- **The prod near-miss this replaces, kept because the lesson is the ordering.** Prod was re-stamped to a single row by hand while still running an image embedding all nineteen migrations — with a 1-row ledger it would have tried to re-apply `0002`–`0019` against a schema that already had them, on its next restart. Caught and reverted. Never re-stamp a ledger separately from the deploy that changes the migration set; the mechanic above exists so you never have to.
+- **A squash strands every unmerged branch against the shared dev DB.** Once the ledger holds the new `0001` checksum, any checkout still carrying the old set hits a *checksum mismatch*, which is fatal everywhere (not the tolerated missing-version case). Rebase open branches onto the squash, or `./run.sh` to rebuild the dev DB. Land a squash when the tree is quiet.
 - Write new migrations idempotently (`CREATE TABLE IF NOT EXISTS`) so a database that already got the change by other means converges instead of failing. Idempotency is also what makes re-apply-after-merge safe: once a branch's migration polluted the shared dev DB (below), the *merged* copy re-running against that same database must converge, not fail.
 - **`sqlx::migrate!` embeds migrations at compile time.** Adding a `.sql` file does not by itself trigger a rebuild — touch `crates/nook-control/src/lib.rs` (where `MIGRATOR` lives) or the container will keep running the old set and silently skip your migration.
 - **Ledger-ahead-of-tree is a dev hazard, tolerated in dev, fatal in prod (MAIN-224).** A branch carrying migration N runs against the shared dev DB — most often an inline `#[cfg(test)]` module in nook-control or nook-chat that connects straight to `DATABASE_URL` and runs `MIGRATOR.run`, so *any* `./test.sh` from a branch/worktree with a new migration records N — or a stack boot from that checkout. Afterwards every checkout *without* that `.sql` file used to fail boot with *"migration N was previously applied but is missing in the resolved migrations,"* and switching the bind-mounted tree to any branch behind the ledger bricked the control plane. Now the boot path (`nook_db::migrate::run_with_dev_tolerance`) runs both services' migrators with sqlx's `ignore_missing` **when `APP_ENV != production`**: it emits a loud WARN naming each unknown version and this failure class, then proceeds. Production keeps the strict fatal error, so real schema drift is never masked. This tolerates a *missing* version only — a *modified* migration (checksum mismatch) stays fatal everywhere.
 - **Heal the ledger with `scripts/dev-db-heal.sh`.** It lists ledger rows with no matching local migration file; `--fix` deletes exactly those (asks first; `--yes` skips the prompt; `--chat` targets `chat._sqlx_migrations`). It refuses when `APP_ENV=production` and refuses any `DATABASE_URL` whose host is not local or a compose service name — deliberately strict, better to refuse a legitimate dev URL than to touch prod.
+- **The SQLite track's `0001` is HAND-OWNED and frozen (MAIN-236).**
+  `crates/nook-control/migrations_sqlite/0001_init.sql` and nook-chat's twin were
+  scaffolded once from the schema the Postgres migrations actually produce, then
+  hand-corrected; the generator that made them was deleted in the same PR, on
+  purpose — nothing regenerates over these files. **Forward changes are
+  hand-authored SQLite deltas**: a Postgres `00NN_x.sql` gets a `migrations_sqlite/
+  00NN_x.sql` twin written by hand, in the same commit. The type map is
+  `docs/db-dialect-audit.md`'s (uuid/timestamptz/jsonb → `TEXT`, `now()` →
+  `CURRENT_TIMESTAMP`, `::` casts stripped, `= ANY (ARRAY[…])` → `IN (…)`), and
+  `crates/nook-control/tests/sqlite_scaffold.rs` proves an empty SQLite database
+  still builds from them. Boot wiring and the both-engines divergence guard are
+  MAIN-196's, not here.
 - The dev reboot loop still works on a *local* database: `docker compose down -v` destroys everything, `./run.sh` recreates it (migrations + seeds). It is not available for prod.
 
 ## Ports
 
 - Postgres: 5432. Control plane: 8080. Web (Vite): 5173, proxies `/api` to 8080.
 - Mailpit: SMTP 1025, web inbox `http://localhost:8025` (dev email).
+
+## Loops are OFF by default (MAIN-239)
+
+- The control plane's job machinery — `job_dispatch`, `job_reaper`,
+  `workspace_reaper` — is gated on one tenant-scoped setting, `loops.enabled`,
+  **default off**. A fresh boot therefore does no polling, no dispatch, and no
+  reaping; the operator node still starts, it just never claims loop work.
+- Turn it on with `nook operator loops on` (or Settings → Loops). It is read on
+  **every poll**, so the change lands within a poll interval with **no restart**;
+  the log says `loops enabled — resuming` / `loops disabled — idle` once per
+  transition, not once per tick.
+- **Off loses nothing.** A job created while loops are off stays `queued`,
+  unplaced, and is picked up when the switch flips. If a promoted ticket is not
+  moving, this switch is the first thing to check.
 
 ## Work model (Git-driven)
 

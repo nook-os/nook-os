@@ -15,7 +15,7 @@
 
 use axum::extract::State;
 use axum::Json;
-use nook_db::{params, Db, Postgres, TypeMapping};
+use nook_db::{params, Db};
 use nook_types::*;
 use sha2::{Digest, Sha256};
 
@@ -101,7 +101,13 @@ pub async fn upsert_default(
                     SET content = $3, sha256 = $4, version = $5,
                         default_sha256 = $4, updated_at = {}
                   WHERE kind = $1 AND name = $2",
-                    Postgres.now()
+                    // Engine-selected (MAIN-196). This branch only runs on an
+                    // UPGRADE — a shipped default whose sha moved — which is
+                    // why a fresh boot never reached it and the first pass
+                    // missed it. On SQLite `now()` is a syntax error, so the
+                    // second boot of a single-machine deployment after any
+                    // change to a managed skill would have died here.
+                    nook_db::dialect::type_mapping(db.engine()).now()
                 ),
                 params![kind, name, content, &default_sha, version + 1],
             )
