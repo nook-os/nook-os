@@ -369,7 +369,7 @@ pub async fn dev_login(
         return Ok((
             jar.add(session_cookie(&state, session_id)),
             Json(MeResponse {
-                tenants: memberships_for(&state.db, user.id, tenant.id).await?,
+                tenants: memberships_for(state.identity.as_ref(), user.id, tenant.id).await?,
                 person_id: crate::auth::person_id_of(&state, user.id).await?,
                 user,
                 tenant,
@@ -403,7 +403,7 @@ pub async fn dev_login(
     Ok((
         jar.add(session_cookie(&state, session_id)),
         Json(MeResponse {
-            tenants: memberships_for(&state.db, user.id, tenant.id).await?,
+            tenants: memberships_for(state.identity.as_ref(), user.id, tenant.id).await?,
             person_id: crate::auth::person_id_of(&state, user.id).await?,
             user,
             tenant,
@@ -457,8 +457,13 @@ pub async fn me(State(state): State<AppState>, auth: AuthCtx) -> ApiResult<Json<
         .await?;
     Ok(Json(MeResponse {
         capability: capability_of(&state, &auth).await,
-        tenants: cached_memberships_for(&*state.cache, &state.db, auth.user_id, auth.tenant_id)
-            .await?,
+        tenants: cached_memberships_for(
+            &*state.cache,
+            state.identity.as_ref(),
+            auth.user_id,
+            auth.tenant_id,
+        )
+        .await?,
         person_id: crate::auth::person_id_of(&state, auth.user_id).await?,
         user,
         tenant,
@@ -477,7 +482,13 @@ pub async fn my_tenants(
 ) -> ApiResult<Json<Vec<nook_types::TenantMembership>>> {
     auth.require_user()?;
     Ok(Json(
-        cached_memberships_for(&*state.cache, &state.db, auth.user_id, auth.tenant_id).await?,
+        cached_memberships_for(
+            &*state.cache,
+            state.identity.as_ref(),
+            auth.user_id,
+            auth.tenant_id,
+        )
+        .await?,
     ))
 }
 
@@ -522,7 +533,7 @@ pub async fn switch_tenant(
     // returned 200 even after your grant there was revoked — AC-7 requires the
     // switch endpoint to 403 for a membership that is gone, current tenant or
     // not. One lookup on the hot-but-rare switch path is a fine price.
-    let target_user = member_user_in_tenant(&state.db, auth.user_id, req.tenant_id)
+    let target_user = member_user_in_tenant(state.identity.as_ref(), auth.user_id, req.tenant_id)
         .await?
         .ok_or_else(|| ApiError::ForbiddenMsg("you are not a member of that tenant".into()))?;
 
@@ -543,7 +554,7 @@ pub async fn switch_tenant(
     // The active tenant just changed, so the `current` marker on this person's
     // cached list is now wrong for both the row they left and the one they
     // moved to — drop it so `/auth/me` reflects the switch immediately (AC-4).
-    invalidate_person_tenants(&*state.cache, &state.db, target_user).await;
+    invalidate_person_tenants(&*state.cache, state.identity.as_ref(), target_user).await;
 
     // Arrival, recorded in the destination tenant. The payload names BOTH
     // tenants and its direction, so a consumer reads the whole switch from this
@@ -606,7 +617,7 @@ pub async fn switch_tenant(
         capability: capability_of(&state, &switched).await,
         tenants: cached_memberships_for(
             &*state.cache,
-            &state.db,
+            state.identity.as_ref(),
             switched.user_id,
             switched.tenant_id,
         )

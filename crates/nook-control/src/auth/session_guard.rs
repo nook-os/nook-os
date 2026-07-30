@@ -23,7 +23,6 @@
 //! If you are here to add "…unless the caller is an operator", the answer is
 //! no. That is the feature this file exists to prevent.
 
-use nook_db::{params, Db};
 use nook_types::TenantId;
 
 use crate::auth::{AuthCtx, Principal};
@@ -58,17 +57,12 @@ impl AuthCtx {
 
         // Explicit membership. This query is the entire authorization surface
         // for session content — `role_bindings` is deliberately not joined.
-        let member: Option<(bool,)> = state
-            .db
-            .query_opt(
-                "SELECT true FROM tenant_members
-             WHERE tenant_id = $1 AND principal_type = 'user' AND principal_id = $2
-             LIMIT 1",
-                params![tenant, self.user_id.0],
-            )
+        let member = state
+            .identity
+            .has_active_membership(self.user_id, tenant)
             .await?;
 
-        if member.is_some() {
+        if member {
             Ok(())
         } else {
             Err(refusal())
@@ -124,9 +118,15 @@ mod tests {
         }
         // And it must still actually check membership, or the test above
         // passes trivially on an empty file.
+        //
+        // This looked for the literal `tenant_members` until MAIN-246 moved the
+        // query behind `IdentityRepository`. The intent is unchanged — the guard
+        // must consult membership and nothing else — so it now names the call
+        // that does it. Weakening this to "contains something" would give up the
+        // only thing standing between a refactor and a guard that checks nothing.
         assert!(
-            code.contains("tenant_members"),
-            "the guard must query membership"
+            code.contains("has_active_membership"),
+            "the guard must check membership"
         );
     }
 }

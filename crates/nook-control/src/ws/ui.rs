@@ -26,9 +26,13 @@ async fn handle(state: AppState, auth: AuthCtx, socket: WebSocket) {
     // that filters the REST list filters the live push here, so the Activity
     // page's live buffer can't leak what its fetch would hide. If it can't be
     // resolved (a DB blip), close rather than fall open — the UI reconnects.
-    let Ok(scope) =
-        crate::services::activity_queries::ActivityScope::load(&state.db, auth.tenant_id, &auth)
-            .await
+    let Ok(scope) = crate::services::activity_queries::ActivityScope::load(
+        &state.db,
+        auth.tenant_id,
+        &auth,
+        state.identity.as_ref(),
+    )
+    .await
     else {
         return;
     };

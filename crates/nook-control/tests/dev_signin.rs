@@ -37,9 +37,13 @@ async fn locked_local_tenant(bed: &TestBed) -> TenantId {
         .execute(&bed.pool)
         .await
         .expect("tenant");
-    local_auth::claim_mode(&bed.db(), id, AuthMode::Local)
-        .await
-        .expect("lock to local");
+    local_auth::claim_mode(
+        &nook_control::repo::identity::DbIdentityRepository::new(bed.db()),
+        id,
+        AuthMode::Local,
+    )
+    .await
+    .expect("lock to local");
     id
 }
 
@@ -102,7 +106,12 @@ async fn dev_issuer_signs_in_on_a_local_locked_tenant() {
     assert_eq!(tenant.id, t);
     // The dev issuer never claims the mode — the lock is left exactly as it was.
     assert_eq!(
-        local_auth::mode_of(&bed.db(), t).await.unwrap(),
+        local_auth::mode_of(
+            &nook_control::repo::identity::DbIdentityRepository::new(bed.db()),
+            t
+        )
+        .await
+        .unwrap(),
         Some(AuthMode::Local),
         "a dev sign-in must not relock or alter the tenant's mode"
     );
@@ -133,7 +142,12 @@ async fn dev_new_identity_signs_in_without_locking_the_mode() {
     // The proof of the second skip: the brand-new tenant is NOT locked to a mode.
     // Without the dev-issuer guard, claim_mode(Oidc) would have set NULL → oidc.
     assert_eq!(
-        local_auth::mode_of(&bed.db(), tenant.id).await.unwrap(),
+        local_auth::mode_of(
+            &nook_control::repo::identity::DbIdentityRepository::new(bed.db()),
+            tenant.id
+        )
+        .await
+        .unwrap(),
         None,
         "a dev sign-in must not claim/lock the new tenant's auth mode"
     );

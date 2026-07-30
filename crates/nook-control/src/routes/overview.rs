@@ -22,8 +22,8 @@ pub async fn overview(
     // credential and a tenant owner/admin get the unscoped fleet; a member is
     // scoped to their own + shared nodes and their own sessions. Computed once so
     // the node and session scopes can never diverge for the same caller.
-    let sees_all =
-        !matches!(auth.principal, Principal::User) || auth.is_tenant_admin(&state.db).await?;
+    let sees_all = !matches!(auth.principal, Principal::User)
+        || auth.is_tenant_admin(state.identity.as_ref()).await?;
     let node_owner = if sees_all {
         None
     } else {

@@ -73,14 +73,14 @@ pub async fn bootstrap(
     let tenant = default_tenant(&state).await?;
     // Claim the mode BEFORE creating anyone: if the tenant is already on OIDC,
     // this must fail without leaving a half-made local account behind.
-    local_auth::claim_mode(&state.db, tenant.id, AuthMode::Local).await?;
+    local_auth::claim_mode(state.identity.as_ref(), tenant.id, AuthMode::Local).await?;
 
     let email = req
         .email
         .unwrap_or_else(|| format!("{}@localhost", req.username));
     let display = req.display_name.unwrap_or_else(|| req.username.clone());
     let user = local_auth::create(
-        &state.db,
+        state.identity.as_ref(),
         tenant.id,
         &req.username,
         &email,
@@ -109,8 +109,12 @@ pub async fn bootstrap(
     Ok((
         jar.add(session_cookie(&state, session_id)),
         Json(MeResponse {
-            tenants: crate::services::identity::memberships_for(&state.db, user.id, tenant.id)
-                .await?,
+            tenants: crate::services::identity::memberships_for(
+                state.identity.as_ref(),
+                user.id,
+                tenant.id,
+            )
+            .await?,
             person_id: crate::auth::person_id_of(&state, user.id).await?,
             user,
             tenant,
@@ -129,8 +133,13 @@ pub async fn login(
     Json(req): Json<LocalLoginRequest>,
 ) -> ApiResult<impl IntoResponse> {
     let tenant = default_tenant(&state).await?;
-    let (user, tenant) =
-        local_auth::login(&state.db, tenant.id, &req.username, &req.password).await?;
+    let (user, tenant) = local_auth::login(
+        state.identity.as_ref(),
+        tenant.id,
+        &req.username,
+        &req.password,
+    )
+    .await?;
 
     let session_id = create_auth_session(&state, user.id, tenant.id).await?;
     events::record(
@@ -145,8 +154,12 @@ pub async fn login(
     Ok((
         jar.add(session_cookie(&state, session_id)),
         Json(MeResponse {
-            tenants: crate::services::identity::memberships_for(&state.db, user.id, tenant.id)
-                .await?,
+            tenants: crate::services::identity::memberships_for(
+                state.identity.as_ref(),
+                user.id,
+                tenant.id,
+            )
+            .await?,
             person_id: crate::auth::person_id_of(&state, user.id).await?,
             user,
             tenant,
@@ -165,14 +178,14 @@ pub async fn create_user(
     Json(req): Json<LocalRegisterRequest>,
 ) -> ApiResult<Json<User>> {
     auth.require_tenant_admin(&state).await?;
-    local_auth::claim_mode(&state.db, auth.tenant_id, AuthMode::Local).await?;
+    local_auth::claim_mode(state.identity.as_ref(), auth.tenant_id, AuthMode::Local).await?;
 
     let email = req
         .email
         .unwrap_or_else(|| format!("{}@localhost", req.username));
     let display = req.display_name.unwrap_or_else(|| req.username.clone());
     let user = local_auth::create(
-        &state.db,
+        state.identity.as_ref(),
         auth.tenant_id,
         &req.username,
         &email,
@@ -206,7 +219,13 @@ pub async fn change_password(
     // keeps a stolen session or user token from becoming permanent account
     // takeover — the thief has the credential but not the secret behind it.
     auth.require_user()?;
-    local_auth::change_password(&state.db, auth.user_id, &req.current, &req.next).await?;
+    local_auth::change_password(
+        state.identity.as_ref(),
+        auth.user_id,
+        &req.current,
+        &req.next,
+    )
+    .await?;
     events::record(
         &state,
         auth.tenant_id,
@@ -221,7 +240,7 @@ pub async fn change_password(
     responses((status = 200, body = LocalAuthStatus)))]
 pub async fn status(State(state): State<AppState>) -> ApiResult<Json<LocalAuthStatus>> {
     let tenant = default_tenant(&state).await?;
-    let mode = local_auth::mode_of(&state.db, tenant.id).await?;
+    let mode = local_auth::mode_of(state.identity.as_ref(), tenant.id).await?;
     // Break-glass signal (MAIN-169 AC-5): does this tenant have any existing
     // local credential that could sign in during an OIDC outage? Scoped to the
     // local sign-in tenant — the one the password form authenticates against.

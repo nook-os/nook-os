@@ -8,8 +8,6 @@ pub mod session_guard;
 
 use std::sync::Arc;
 
-use nook_db::{params, Db, Postgres, TypeMapping};
-
 use axum::extract::FromRequestParts;
 use axum::http::request::Parts;
 use axum_extra::extract::cookie::{Cookie, CookieJar, Key, SameSite};
@@ -260,14 +258,7 @@ impl AuthCtx {
         // A node acts as the tenant's owner for attribution, exactly as the
         // node-token path does — it is a machine credential, not a person, and
         // `require_user` is what keeps it from becoming one.
-        let owner: Option<Uuid> = state
-            .db
-            .query_scalar_opt(
-                "SELECT id FROM users WHERE tenant_id = $1
-             ORDER BY (role = 'owner') DESC, created_at LIMIT 1",
-                params![id.tenant_id],
-            )
-            .await?;
+        let owner = state.identity.tenant_owner_user_id(id.tenant_id).await?;
 
         Ok(AuthCtx {
             session_id: AuthSessionId(id.node_id),
@@ -367,7 +358,7 @@ impl AuthCtx {
         // "sign in as a user" message rather than the generic role refusal; the
         // role decision itself reuses the one `is_tenant_admin` query (MAIN-137).
         self.require_user()?;
-        if self.is_tenant_admin(&state.db).await? {
+        if self.is_tenant_admin(state.identity.as_ref()).await? {
             Ok(())
         } else {
             Err(ApiError::ForbiddenMsg(
@@ -380,16 +371,14 @@ impl AuthCtx {
     /// `require_tenant_admin`, for scoping a listing rather than gating an
     /// action (MAIN-132): a member sees only their own resources, an admin the
     /// whole tenant. A node credential is not a role-holder — `false`.
-    pub async fn is_tenant_admin(&self, db: &nook_db::DbPool) -> Result<bool, ApiError> {
+    pub async fn is_tenant_admin(
+        &self,
+        repo: &dyn crate::repo::identity::IdentityRepository,
+    ) -> Result<bool, ApiError> {
         if !matches!(self.principal, Principal::User) {
             return Ok(false);
         }
-        let role: Option<String> = db
-            .query_scalar_opt(
-                "SELECT role FROM users WHERE id = $1 AND tenant_id = $2",
-                params![self.user_id, self.tenant_id],
-            )
-            .await?;
+        let role = repo.role_in_tenant(self.user_id, self.tenant_id).await?;
         Ok(matches!(role.as_deref(), Some("owner") | Some("admin")))
     }
 
@@ -413,14 +402,11 @@ impl AuthCtx {
 /// single tenant membership. Promoted here from the notebook (MAIN-130) so the
 /// notebook and the node-ownership check resolve the person exactly one way.
 pub async fn person_id_of(state: &AppState, user_id: UserId) -> Result<Uuid, ApiError> {
-    let row: Option<Uuid> = state
-        .db
-        .query_scalar_opt(
-            "SELECT person_id FROM users WHERE id = $1",
-            params![user_id],
-        )
-        .await?;
-    row.ok_or(ApiError::NotFound)
+    state
+        .identity
+        .person_id_of(user_id)
+        .await?
+        .ok_or(ApiError::NotFound)
 }
 
 /// Spawn authorization: a session starts on a machine only for the PERSON who
@@ -448,13 +434,7 @@ pub async fn require_person_owns_node(
                 .into(),
         ));
     };
-    let owner: Option<Option<Uuid>> = state
-        .db
-        .query_scalar_opt(
-            "SELECT owner_person_id FROM nodes WHERE id = $1 AND tenant_id = $2",
-            params![node_id, tenant],
-        )
-        .await?;
+    let owner = state.identity.node_owner_person(node_id.0, tenant).await?;
     let Some(owner) = owner else {
         return Err(ApiError::NotFound);
     };
@@ -496,12 +476,9 @@ pub async fn require_person_may_use_node(
                 .into(),
         ));
     };
-    let row: Option<(Option<Uuid>, bool)> = state
-        .db
-        .query_opt(
-            "SELECT owner_person_id, shared FROM nodes WHERE id = $1 AND tenant_id = $2",
-            params![node_id, tenant],
-        )
+    let row = state
+        .identity
+        .node_owner_and_shared(node_id.0, tenant)
         .await?;
     let Some((owner, shared)) = row else {
         return Err(ApiError::NotFound);
@@ -731,22 +708,9 @@ async fn user_token_ctx(state: &AppState, token: &str) -> Result<AuthCtx, ApiErr
 /// becoming a way to take the account over.
 async fn node_token_ctx(state: &AppState, token: &str) -> Result<AuthCtx, ApiError> {
     let hash = crate::seed::hash_token(token);
-    let node: Option<(Uuid, Uuid)> = state
-        .db
-        .query_opt(
-            "SELECT id, tenant_id FROM nodes WHERE node_token_hash = $1",
-            params![&hash],
-        )
-        .await?;
+    let node = state.identity.node_by_token_hash(&hash).await?;
     let (node_id, tenant_id) = node.ok_or(ApiError::Unauthorized)?;
-    let owner: Option<Uuid> = state
-        .db
-        .query_scalar_opt(
-            "SELECT id FROM users WHERE tenant_id = $1
-         ORDER BY (role = 'owner') DESC, created_at LIMIT 1",
-            params![tenant_id],
-        )
-        .await?;
+    let owner = state.identity.tenant_owner_user_id(tenant_id).await?;
     Ok(AuthCtx {
         session_id: AuthSessionId(Uuid::nil()),
         user_id: UserId(owner.unwrap_or_else(Uuid::nil)),
@@ -781,15 +745,8 @@ pub async fn create_auth_session(
 ) -> Result<AuthSessionId, ApiError> {
     let id = AuthSessionId::new();
     state
-        .db
-        .exec(
-            &format!(
-                "INSERT INTO sessions_auth (id, user_id, tenant_id, expires_at)
-         VALUES ($1, $2, $3, {now} + make_interval(hours => $4))",
-                now = Postgres.now()
-            ),
-            params![id, user_id, tenant_id, state.cfg.session_ttl_hours as i32],
-        )
+        .identity
+        .create_auth_session(id, user_id, tenant_id, state.cfg.session_ttl_hours as i32)
         .await?;
     Ok(id)
 }

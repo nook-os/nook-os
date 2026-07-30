@@ -193,9 +193,14 @@ async fn events_list_scopes_members_to_their_own_activity() {
     let e_owner_node = add_event(&bed.pool, tenant, None, Some(owner_node), None).await;
 
     // Member: sees the three that are theirs, none of the teammate's.
-    let scope = ActivityScope::load(&bed.db(), tenant, &user_ctx(member, tenant))
-        .await
-        .expect("scope");
+    let scope = ActivityScope::load(
+        &bed.db(),
+        tenant,
+        &user_ctx(member, tenant),
+        &nook_control::repo::identity::DbIdentityRepository::new(bed.db()),
+    )
+    .await
+    .expect("scope");
     assert!(
         matches!(scope, ActivityScope::Member { .. }),
         "a member resolves to a scoped view"
@@ -218,9 +223,14 @@ async fn events_list_scopes_members_to_their_own_activity() {
     );
 
     // Owner: the full audit feed sees all five.
-    let admin_scope = ActivityScope::load(&bed.db(), tenant, &user_ctx(owner, tenant))
-        .await
-        .expect("scope");
+    let admin_scope = ActivityScope::load(
+        &bed.db(),
+        tenant,
+        &user_ctx(owner, tenant),
+        &nook_control::repo::identity::DbIdentityRepository::new(bed.db()),
+    )
+    .await
+    .expect("scope");
     assert!(
         matches!(admin_scope, ActivityScope::All),
         "an owner resolves to the unfiltered feed"
@@ -258,9 +268,14 @@ async fn a_node_credential_resolves_to_the_unfiltered_feed() {
         principal: Principal::Node(NodeId::new()),
         cookie_session: false,
     };
-    let scope = ActivityScope::load(&bed.db(), tenant, &node_ctx)
-        .await
-        .expect("scope");
+    let scope = ActivityScope::load(
+        &bed.db(),
+        tenant,
+        &node_ctx,
+        &nook_control::repo::identity::DbIdentityRepository::new(bed.db()),
+    )
+    .await
+    .expect("scope");
     assert!(
         matches!(scope, ActivityScope::All),
         "a node token keeps the unfiltered tenant feed"

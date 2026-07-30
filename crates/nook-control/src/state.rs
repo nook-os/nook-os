@@ -14,6 +14,10 @@ use nook_dispatcher::{DispatcherBackend, RuleBasedDispatcher};
 #[derive(Clone)]
 pub struct AppState {
     pub db: DbPool,
+    /// Identity/auth data access behind its trait (MAIN-246). Handed out as
+    /// `Arc<dyn …>` so a test can build an `AppState` on the in-memory fake and
+    /// exercise the callers with no database at all.
+    pub identity: Arc<dyn crate::repo::identity::IdentityRepository>,
     pub cfg: Arc<Config>,
     /// OIDC discovery state — configured/usable/degraded, hot-swappable after
     /// boot so an IdP that was down at startup recovers without a restart
@@ -75,6 +79,7 @@ impl AppState {
         let queue: Arc<dyn crate::queue::Queue> =
             Arc::from(crate::queue::from_config(&cfg, db.clone()).await);
         Self {
+            identity: Arc::new(crate::repo::identity::DbIdentityRepository::new(db.clone())),
             artifacts,
             mailer,
             cache,
