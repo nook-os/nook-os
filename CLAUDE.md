@@ -59,6 +59,18 @@ hygiene now, not a shared-DB workaround.)
 - **`sqlx::migrate!` embeds migrations at compile time.** Adding a `.sql` file does not by itself trigger a rebuild — touch `crates/nook-control/src/lib.rs` (where `MIGRATOR` lives) or the container will keep running the old set and silently skip your migration.
 - **Ledger-ahead-of-tree is a dev hazard, tolerated in dev, fatal in prod (MAIN-224).** A branch carrying migration N runs against the shared dev DB — most often an inline `#[cfg(test)]` module in nook-control or nook-chat that connects straight to `DATABASE_URL` and runs `MIGRATOR.run`, so *any* `./test.sh` from a branch/worktree with a new migration records N — or a stack boot from that checkout. Afterwards every checkout *without* that `.sql` file used to fail boot with *"migration N was previously applied but is missing in the resolved migrations,"* and switching the bind-mounted tree to any branch behind the ledger bricked the control plane. Now the boot path (`nook_db::migrate::run_with_dev_tolerance`) runs both services' migrators with sqlx's `ignore_missing` **when `APP_ENV != production`**: it emits a loud WARN naming each unknown version and this failure class, then proceeds. Production keeps the strict fatal error, so real schema drift is never masked. This tolerates a *missing* version only — a *modified* migration (checksum mismatch) stays fatal everywhere.
 - **Heal the ledger with `scripts/dev-db-heal.sh`.** It lists ledger rows with no matching local migration file; `--fix` deletes exactly those (asks first; `--yes` skips the prompt; `--chat` targets `chat._sqlx_migrations`). It refuses when `APP_ENV=production` and refuses any `DATABASE_URL` whose host is not local or a compose service name — deliberately strict, better to refuse a legitimate dev URL than to touch prod.
+- **The SQLite track's `0001` is HAND-OWNED and frozen (MAIN-236).**
+  `crates/nook-control/migrations_sqlite/0001_init.sql` and nook-chat's twin were
+  scaffolded once from the schema the Postgres migrations actually produce, then
+  hand-corrected; the generator that made them was deleted in the same PR, on
+  purpose — nothing regenerates over these files. **Forward changes are
+  hand-authored SQLite deltas**: a Postgres `00NN_x.sql` gets a `migrations_sqlite/
+  00NN_x.sql` twin written by hand, in the same commit. The type map is
+  `docs/db-dialect-audit.md`'s (uuid/timestamptz/jsonb → `TEXT`, `now()` →
+  `CURRENT_TIMESTAMP`, `::` casts stripped, `= ANY (ARRAY[…])` → `IN (…)`), and
+  `crates/nook-control/tests/sqlite_scaffold.rs` proves an empty SQLite database
+  still builds from them. Boot wiring and the both-engines divergence guard are
+  MAIN-196's, not here.
 - The dev reboot loop still works on a *local* database: `docker compose down -v` destroys everything, `./run.sh` recreates it (migrations + seeds). It is not available for prod.
 
 ## Ports
