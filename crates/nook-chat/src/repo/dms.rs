@@ -1,0 +1,250 @@
+//! Direct messages (MAIN-257).
+//!
+//! A DM is a channel with `owner_type = 'dm'` and a participant list, so this
+//! trait shares tables with [`super::channels`]. What it owns is the DM-shaped
+//! questions: who may message whom, which conversation already exists for a
+//! given set of people, and what a DM looks like in a list.
+//!
+//! The org boundary is the same one org channels use (MAIN-113 AC-4), and it is
+//! enforced twice on purpose — once to scope the people picker, once to gate
+//! `open` — so a DM cannot be created cross-org even by posting an id the
+//! picker never offered.
+
+use async_trait::async_trait;
+use chrono::{DateTime, Utc};
+use nook_db::{params, Db, DbPool, Postgres, TypeMapping};
+use uuid::Uuid;
+
+/// A person the caller may start a DM with.
+#[derive(Debug, Clone)]
+pub struct PersonEntry {
+    pub person_id: Uuid,
+    pub display_name: String,
+}
+
+/// A DM's participant, whose display name may be missing if no user row backs
+/// the person any more.
+#[derive(Debug, Clone)]
+pub struct Participant {
+    pub person_id: Uuid,
+    pub display_name: Option<String>,
+}
+
+#[async_trait]
+pub trait DmRepository: Send + Sync {
+    /// The person behind a user. Reads `public.users` — nook-control's data,
+    /// unreachable from this crate (see the module note on `repo/mod.rs`).
+    async fn person_of(&self, user: Uuid) -> Result<Option<Uuid>, sqlx::Error>;
+
+    /// May `me` message `other`? True when `other` belongs to a tenant under
+    /// any org `me` belongs to.
+    async fn may_dm(&self, me: Uuid, other: Uuid) -> Result<bool, sqlx::Error>;
+
+    /// Everyone in the caller's org(s) except the caller. `DISTINCT ON` folds a
+    /// person's several tenant users into one entry, so somebody in two of an
+    /// org's tenants appears once.
+    async fn people_in_my_orgs(&self, me: Uuid) -> Result<Vec<PersonEntry>, sqlx::Error>;
+
+    /// The caller's DMs, newest first. A non-participant never sees one.
+    async fn my_dms(&self, me: Uuid) -> Result<Vec<Uuid>, sqlx::Error>;
+
+    /// The DM whose participant set is *exactly* `persons`, if it exists.
+    ///
+    /// Count-equality plus "every participant is in the set" gives exact
+    /// equality, because the set is deduped: |members| = N and members ⊆ set
+    /// with |set| = N implies members = set. This is what makes open-or-create
+    /// idempotent rather than spawning a second conversation.
+    async fn find_exact(&self, persons: &[Uuid]) -> Result<Option<Uuid>, sqlx::Error>;
+
+    /// Create the channel and its participant rows together. One transaction:
+    /// a DM with no participants would be invisible to everyone including its
+    /// creator, so a partial write must not be reachable.
+    async fn open(
+        &self,
+        id: Uuid,
+        creator_person: Uuid,
+        slug: &str,
+        persons: &[Uuid],
+    ) -> Result<(), sqlx::Error>;
+
+    async fn created_at(&self, channel: Uuid) -> Result<Option<DateTime<Utc>>, sqlx::Error>;
+
+    async fn participants(&self, channel: Uuid) -> Result<Vec<Participant>, sqlx::Error>;
+
+    /// Unread from the other participants since the reader's cursor — the same
+    /// semantics a channel uses: the reader's own messages and deleted ones do
+    /// not count, and no cursor row means everything counts.
+    async fn unread_count(&self, channel: Uuid, reader: Uuid) -> Result<i64, sqlx::Error>;
+}
+
+pub struct DbDmRepository {
+    db: DbPool,
+}
+
+impl DbDmRepository {
+    pub fn new(db: DbPool) -> Self {
+        Self { db }
+    }
+}
+
+#[async_trait]
+impl DmRepository for DbDmRepository {
+    async fn person_of(&self, user: Uuid) -> Result<Option<Uuid>, sqlx::Error> {
+        self.db
+            .query_scalar_opt::<Uuid>(
+                "SELECT person_id FROM public.users WHERE id = $1",
+                params![user],
+            )
+            .await
+    }
+
+    async fn may_dm(&self, me: Uuid, other: Uuid) -> Result<bool, sqlx::Error> {
+        self.db
+            .query_scalar::<bool>(
+                "SELECT EXISTS(
+                     SELECT 1 FROM public.users u
+                     JOIN public.tenants t ON t.id = u.tenant_id
+                     WHERE u.person_id = $2
+                       AND t.org_id IN (
+                           SELECT t2.org_id FROM public.users u2
+                           JOIN public.tenants t2 ON t2.id = u2.tenant_id
+                           WHERE u2.person_id = $1
+                       )
+                 )",
+                params![me, other],
+            )
+            .await
+    }
+
+    async fn people_in_my_orgs(&self, me: Uuid) -> Result<Vec<PersonEntry>, sqlx::Error> {
+        let rows: Vec<(Uuid, String)> = self
+            .db
+            .query_all(
+                "SELECT DISTINCT ON (u.person_id) u.person_id, u.display_name
+                   FROM public.users u
+                   JOIN public.tenants t ON t.id = u.tenant_id
+                  WHERE u.person_id <> $1
+                    AND t.org_id IN (
+                        SELECT t2.org_id FROM public.users u2
+                        JOIN public.tenants t2 ON t2.id = u2.tenant_id
+                        WHERE u2.person_id = $1
+                    )
+                  ORDER BY u.person_id, u.display_name",
+                params![me],
+            )
+            .await?;
+        Ok(rows
+            .into_iter()
+            .map(|(person_id, display_name)| PersonEntry {
+                person_id,
+                display_name,
+            })
+            .collect())
+    }
+
+    async fn my_dms(&self, me: Uuid) -> Result<Vec<Uuid>, sqlx::Error> {
+        self.db
+            .query_scalar_all::<Uuid>(
+                "SELECT c.id FROM chat_channels c
+                   JOIN chat_channel_participants p ON p.channel_id = c.id
+                  WHERE c.owner_type = 'dm' AND p.person_id = $1
+                  ORDER BY c.created_at DESC",
+                params![me],
+            )
+            .await
+    }
+
+    async fn find_exact(&self, persons: &[Uuid]) -> Result<Option<Uuid>, sqlx::Error> {
+        let n = persons.len() as i64;
+        self.db
+            .query_scalar_opt::<Uuid>(
+                "SELECT c.id FROM chat_channels c
+                   JOIN chat_channel_participants p ON p.channel_id = c.id
+                  WHERE c.owner_type = 'dm'
+                  GROUP BY c.id
+                 HAVING count(*) = $2
+                    AND count(*) FILTER (WHERE p.person_id = ANY($1)) = $2
+                  LIMIT 1",
+                params![persons.to_vec(), n],
+            )
+            .await
+    }
+
+    async fn open(
+        &self,
+        id: Uuid,
+        creator_person: Uuid,
+        slug: &str,
+        persons: &[Uuid],
+    ) -> Result<(), sqlx::Error> {
+        let mut tx = self.db.begin().await?;
+        // owner_id = the creating person; name is empty (the UI names a DM by
+        // its counterparts). The generated slug satisfies the
+        // (owner_type, owner_id, slug) uniqueness constraint without any
+        // human-facing slug.
+        tx.exec(
+            "INSERT INTO chat_channels (id, owner_type, owner_id, name, slug)
+             VALUES ($1, 'dm', $2, '', $3)",
+            params![id, creator_person, slug],
+        )
+        .await?;
+        for &p in persons {
+            tx.exec(
+                "INSERT INTO chat_channel_participants (channel_id, person_id) VALUES ($1, $2)",
+                params![id, p],
+            )
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    async fn created_at(&self, channel: Uuid) -> Result<Option<DateTime<Utc>>, sqlx::Error> {
+        self.db
+            .query_scalar_opt::<DateTime<Utc>>(
+                "SELECT created_at FROM chat_channels WHERE id = $1",
+                params![channel],
+            )
+            .await
+    }
+
+    async fn participants(&self, channel: Uuid) -> Result<Vec<Participant>, sqlx::Error> {
+        let rows: Vec<(Uuid, Option<String>)> = self
+            .db
+            .query_all(
+                "SELECT DISTINCT ON (pp.person_id) pp.person_id, u.display_name
+                   FROM chat_channel_participants pp
+                   LEFT JOIN public.users u ON u.person_id = pp.person_id
+                  WHERE pp.channel_id = $1
+                  ORDER BY pp.person_id, u.display_name",
+                params![channel],
+            )
+            .await?;
+        Ok(rows
+            .into_iter()
+            .map(|(person_id, display_name)| Participant {
+                person_id,
+                display_name,
+            })
+            .collect())
+    }
+
+    async fn unread_count(&self, channel: Uuid, reader: Uuid) -> Result<i64, sqlx::Error> {
+        self.db
+            .query_scalar::<i64>(
+                &format!(
+                    "SELECT count(*) FROM chat_messages m
+                      WHERE m.channel_id = $1
+                        AND m.author_id <> $2
+                        AND m.deleted_at IS NULL
+                        AND m.created_at > COALESCE(
+                            (SELECT r.last_read_at FROM chat_read_cursors r
+                               WHERE r.channel_id = $1 AND r.user_id = $2),
+                            {ninf})",
+                    ninf = Postgres.cast("'-infinity'", "timestamptz")
+                ),
+                params![channel, reader],
+            )
+            .await
+    }
+}

@@ -9,6 +9,7 @@ name = "nook-chat"
 path = "src/main.rs"
 
 [dependencies]
+async-trait = { workspace = true }
 nook-db = { workspace = true }
 nook-auth = { workspace = true }
 nook-types = { workspace = true }
