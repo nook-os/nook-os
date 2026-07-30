@@ -68,6 +68,10 @@ pub struct AppState {
     pub oidc: Arc<OidcState>,
     pub kanban: Arc<KanbanRegistry>,
     pub registry: Arc<Registry>,
+    /// Deliveries a sessionless authorize flow is still waiting to hear about
+    /// (MAIN-290). In memory because a flow lives only as long as the process
+    /// that started it — the credential was never persisted either.
+    pub pending_deliveries: crate::services::runtime_auth_flow::SharedPendingDeliveries,
     pub dispatcher: Arc<dyn DispatcherBackend>,
     pub vault: Vault,
     /// Where node binaries are read from and written to — a directory or an
@@ -126,6 +130,9 @@ impl AppState {
         let tasks: Arc<dyn crate::repo::tasks::TaskRepository> =
             Arc::new(crate::repo::tasks::DbTaskRepository::new(db.clone()));
         Self {
+            pending_deliveries: Arc::new(
+                crate::services::runtime_auth_flow::PendingDeliveries::new(),
+            ),
             identity: Arc::new(crate::repo::identity::DbIdentityRepository::new(db.clone())),
             invites: Arc::new(crate::repo::invites::DbInviteRepository::new(db.clone())),
             workspaces: Arc::new(crate::repo::workspaces::DbWorkspaceRepository::new(

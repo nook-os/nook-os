@@ -405,6 +405,21 @@ async fn handle_message(
                     "node could not install a runtime credential"
                 );
             }
+            // If a sessionless flow (MAIN-290) is waiting on this delivery,
+            // this is its per-node outcome. Correlated in memory because C2's
+            // message carries no flow id — the node has no use for one, so the
+            // wire format was not widened to carry it.
+            if let Some(flow_id) = state.pending_deliveries.take(node_id, &runtime) {
+                state.registry.publish(
+                    tenant,
+                    nook_proto::UiEvent::RuntimeAuthDelivered {
+                        flow_id,
+                        node_id,
+                        runtime: runtime.clone(),
+                        error: error.clone(),
+                    },
+                );
+            }
             events::record(
                 state,
                 tenant,
