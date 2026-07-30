@@ -113,6 +113,38 @@ pub async fn orphan_versions(migrator: &Migrator, pool: &PgPool) -> Result<Vec<i
 /// a control plane whose schema history we cannot account for — and in dev it is
 /// a loud WARN, because there the overwhelmingly likely cause is a branch's
 /// stray migration, and tolerance already knows how to carry that boot.
+/// The engine-aware boot step (MAIN-196 AC-2/AC-3): pick the migration set for
+/// the pool in front of us and run it.
+///
+/// SQLite takes the simple path deliberately. The squash re-stamp (MAIN-235)
+/// exists to rescue databases that applied a *previous* Postgres migration set;
+/// a SQLite file has no such history — its track starts at its own frozen
+/// `0001` — so there is nothing to collapse and pretending otherwise would only
+/// add a way to be wrong. Dev tolerance is likewise Postgres's problem: it fixes
+/// a SHARED dev database that branches take turns migrating, and a SQLite file
+/// is nobody's shared database.
+pub async fn run_boot_migrations_for(
+    pool: &crate::DbPool,
+    is_production: bool,
+    pg_migrator: &Migrator,
+    sqlite_migrator: &Migrator,
+    manifest_text: &str,
+) -> Result<(), BootMigrateError> {
+    match pool.engine() {
+        crate::Engine::Postgres => {
+            run_boot_migrations(pg_migrator, pool.pg(), is_production, manifest_text).await
+        }
+        crate::Engine::Sqlite => {
+            sqlite_migrator
+                .run(pool.sqlite())
+                .await
+                .map_err(BootMigrateError::Migrate)?;
+            tracing::info!("sqlite schema migrated");
+            Ok(())
+        }
+    }
+}
+
 pub async fn run_boot_migrations(
     migrator: &Migrator,
     pool: &PgPool,
