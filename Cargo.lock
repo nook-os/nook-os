@@ -2575,12 +2575,14 @@ dependencies = [
  "nook-auth",
  "nook-control",
  "nook-db",
+ "nook-errors",
  "nook-types",
  "serde",
  "serde_json",
  "sqlx",
  "thiserror 2.0.19",
  "tokio",
+ "tower",
  "tower-http",
  "tracing",
  "tracing-subscriber",
@@ -2613,6 +2615,7 @@ dependencies = [
  "nook-auth",
  "nook-db",
  "nook-dispatcher",
+ "nook-errors",
  "nook-infra",
  "nook-mcp",
  "nook-proto",
@@ -2669,6 +2672,18 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.19",
+]
+
+[[package]]
+name = "nook-errors"
+version = "0.4.22"
+dependencies = [
+ "axum",
+ "serde_json",
+ "tokio",
+ "tower",
+ "tower-http",
+ "tracing",
 ]
 
 [[package]]
@@ -4784,6 +4799,7 @@ dependencies = [
  "futures-util",
  "http 1.4.2",
  "http-body 1.1.0",
+ "http-body-util",
  "pin-project-lite",
  "tower",
  "tower-layer",

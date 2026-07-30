@@ -14,6 +14,7 @@ members = [
     "crates/nook-openapi-gen",
     "crates/nook-worker",
     "crates/nook-testkit",
+    "crates/nook-errors",
 ]
 
 [workspace.package]
@@ -23,6 +24,7 @@ license = "Apache-2.0"
 repository = "https://github.com/nookos/nookos"
 
 [workspace.dependencies]
+nook-errors = { path = "crates/nook-errors" }
 nook-types = { path = "crates/nook-types" }
 nook-db = { path = "crates/nook-db" }
 nook-proto = { path = "crates/nook-proto" }
@@ -37,7 +39,7 @@ tokio = { version = "1", features = ["full"] }
 axum = { version = "0.8", features = ["ws", "macros"] }
 axum-extra = { version = "0.10", features = ["cookie", "cookie-private"] }
 tower = "0.5"
-tower-http = { version = "0.6", features = ["trace", "cors"] }
+tower-http = { version = "0.6", features = ["trace", "cors", "catch-panic"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sqlx = { version = "0.8", features = ["runtime-tokio", "tls-rustls", "postgres", "sqlite", "uuid", "chrono", "json", "migrate"] }

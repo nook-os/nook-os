@@ -74,6 +74,28 @@ hygiene now, not a shared-DB workaround.)
   MAIN-196's, not here.
 - The dev reboot loop still works on a *local* database: `docker compose down -v` destroys everything, `./run.sh` recreates it (migrations + seeds). It is not available for prod.
 
+## Panics are caught, logged, and never drop a connection (MAIN-273)
+
+- Both services wrap their router in `tower_http`'s `CatchPanicLayer`, **inside**
+  the trace layer, from the shared `nook-errors` crate — one implementation, so
+  the two services cannot drift (the reason `nook-auth` exists). `nook-errors`
+  is named for the whole job: MAIN-274 hoists the shared `ApiError` there to
+  retire nook-chat's `ChatError`, and the panic net belongs beside it because
+  its entire contract is emitting the *same* body the error mapping does. A panic in a handler or extractor becomes a clean `500`
+  with the ordinary `{"error":"internal error"}` body — the same one
+  `ApiError::Internal` returns — so a client cannot tell a panic from any other
+  internal error and no panic detail leaks.
+- The detail goes to the log instead: one `tracing::error!` carrying the panic
+  message, its source location, and a backtrace. Location reaches only the panic
+  hook, so `panics::install_panic_hook()` runs once at boot in each service and
+  stashes it for the layer; it chains to the previous hook, so a panic in a
+  background task still prints exactly as it did before.
+- **Backtraces are opt-in.** The capture honours `RUST_BACKTRACE`: unset, the
+  record reads `backtrace=disabled (set RUST_BACKTRACE=1)` and costs nothing.
+  Set `RUST_BACKTRACE=1` on the service (compose `environment:` or the pod spec)
+  when you need frames — it is deliberately not forced on, because capturing on
+  a hot panic path is expensive and that is an operator's call.
+
 ## Ports
 
 - Postgres: 5432. Control plane: 8080. Web (Vite): 5173, proxies `/api` to 8080.
