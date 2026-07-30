@@ -7,6 +7,7 @@ pub mod error;
 pub mod events;
 pub mod mcp_backend;
 pub mod openapi;
+pub mod repo;
 pub mod routes;
 pub mod seed;
 pub mod services;

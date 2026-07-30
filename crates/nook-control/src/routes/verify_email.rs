@@ -48,7 +48,7 @@ pub async fn status(
 ) -> ApiResult<Json<EmailVerificationStatus>> {
     auth.require_user()?;
     let (email, is_local) = user_email_and_local(&state, auth.user_id).await?;
-    let verified = email_is_verified(&state.db, auth.user_id).await?;
+    let verified = email_is_verified(state.identity.as_ref(), auth.user_id).await?;
     Ok(Json(EmailVerificationStatus {
         email,
         verified,
@@ -82,7 +82,7 @@ pub async fn request_core(
             "email verification is for local accounts; your email is verified by your identity provider".into(),
         ));
     }
-    if email_is_verified(&state.db, user_id).await? {
+    if email_is_verified(state.identity.as_ref(), user_id).await? {
         return Ok(RequestVerificationResult {
             sent: false,
             message: "your email is already verified".into(),
@@ -163,7 +163,9 @@ pub async fn confirm(
     State(state): State<AppState>,
     Json(req): Json<ConfirmVerificationRequest>,
 ) -> ApiResult<Json<ConfirmVerificationResult>> {
-    Ok(Json(confirm_core(&state.db, &req.token).await?))
+    Ok(Json(
+        confirm_core(&state.db, state.identity.as_ref(), &req.token).await?,
+    ))
 }
 
 /// The confirm state machine, split from the handler for testing. Consumes a
@@ -171,6 +173,7 @@ pub async fn confirm(
 /// used link on an already-verified address as an idempotent success.
 pub async fn confirm_core(
     db: &nook_db::DbPool,
+    repo: &dyn crate::repo::identity::IdentityRepository,
     token: &str,
 ) -> ApiResult<ConfirmVerificationResult> {
     let decline = |msg: &str| {
@@ -205,7 +208,7 @@ pub async fn confirm_core(
 
     if consumed_at.is_some() {
         // Re-opening a used link after verifying is a no-op success (AC-5).
-        return if email_is_verified(db, user_id).await? {
+        return if email_is_verified(repo, user_id).await? {
             Ok(ConfirmVerificationResult {
                 verified: true,
                 message: "your email is already verified".into(),
@@ -227,7 +230,7 @@ pub async fn confirm_core(
         params![id],
     )
     .await?;
-    mark_local_email_verified(db, user_id, &email).await?;
+    mark_local_email_verified(repo, user_id, &email).await?;
 
     Ok(ConfirmVerificationResult {
         verified: true,
@@ -237,6 +240,12 @@ pub async fn confirm_core(
 
 #[cfg(test)]
 mod tests {
+
+    /// The real repository over this test's pool — these are DB-backed tests
+    /// (NG-4 keeps them that way), so the double here is the genuine impl.
+    fn repo_of(db: &DbPool) -> crate::repo::identity::DbIdentityRepository {
+        crate::repo::identity::DbIdentityRepository::new(db.clone())
+    }
     use super::{confirm_core, request_core};
     use crate::config::Config;
     use crate::seed::hash_token;
@@ -392,21 +401,24 @@ mod tests {
         .unwrap();
 
         assert!(
-            !email_is_verified(&db, uid).await.unwrap(),
+            !email_is_verified(&repo_of(&db), uid).await.unwrap(),
             "starts unverified"
         );
 
         // A wrong token is refused, leaving the address unverified.
-        let bad = confirm_core(&db, "evr_nope").await.unwrap();
+        let bad = confirm_core(&db, &repo_of(&db), "evr_nope").await.unwrap();
         assert!(!bad.verified);
 
         // The real token verifies.
-        let ok = confirm_core(&db, token).await.unwrap();
+        let ok = confirm_core(&db, &repo_of(&db), token).await.unwrap();
         assert!(ok.verified);
-        assert!(email_is_verified(&db, uid).await.unwrap(), "now verified");
+        assert!(
+            email_is_verified(&repo_of(&db), uid).await.unwrap(),
+            "now verified"
+        );
 
         // Re-opening the now-consumed link is an idempotent success (AC-5).
-        let again = confirm_core(&db, token).await.unwrap();
+        let again = confirm_core(&db, &repo_of(&db), token).await.unwrap();
         assert!(again.verified && again.message.contains("already"));
 
         // An expired token is refused (AC-2).
@@ -421,7 +433,9 @@ mod tests {
         )
         .await
         .unwrap();
-        let exp = confirm_core(&db, expired_plain).await.unwrap();
+        let exp = confirm_core(&db, &repo_of(&db), expired_plain)
+            .await
+            .unwrap();
         assert!(!exp.verified && exp.message.contains("expired"));
 
         cleanup(&db, &[t]).await;

@@ -16,16 +16,11 @@
 //! tenant, and `tenant_members` is what will let someone belong to a shared
 //! team tenant as well. Both are written here so the two never disagree.
 
-use chrono::{DateTime, Utc};
-use nook_db::{params, CiMatch, Db, DbPool, Json, Postgres, TypeMapping};
-use nook_types::{
-    IdentityId, Tenant, TenantId, TenantMemberItem, TenantMemberPage, TenantMembership, User,
-    UserId,
-};
+use nook_types::{Tenant, TenantId, TenantMemberPage, TenantMembership, User, UserId};
 use serde_json::Value;
 
 use crate::error::{ApiError, ApiResult};
-use crate::services::core::search_filter;
+use crate::repo::identity::{IdentityRepository, MembershipRow};
 use crate::state::AppState;
 
 /// Every tenant this person belongs to, resolved from `tenant_members`.
@@ -42,27 +37,11 @@ use crate::state::AppState;
 ///
 /// `active` is the tenant the session is scoped to right now, marked `current`.
 pub async fn memberships_for(
-    db: &DbPool,
+    repo: &dyn IdentityRepository,
     user_id: UserId,
     active: TenantId,
 ) -> ApiResult<Vec<TenantMembership>> {
-    let rows: Vec<(TenantId, String, String, String, DateTime<Utc>)> = db
-        .query_all(
-            "SELECT t.id, t.name, t.slug, tm.role, t.created_at
-         FROM users me
-         JOIN users u ON u.person_id = me.person_id
-         JOIN tenant_members tm
-             ON tm.tenant_id = u.tenant_id
-            AND tm.principal_type = 'user'
-            AND tm.principal_id = u.id
-         JOIN tenants t ON t.id = u.tenant_id
-         WHERE me.id = $1
-         ORDER BY t.created_at",
-            params![user_id],
-        )
-        .await?;
-
-    Ok(to_memberships(rows, active))
+    Ok(to_memberships(repo.memberships_of(user_id).await?, active))
 }
 
 /// How long a cached tenants list survives without explicit invalidation
@@ -96,7 +75,7 @@ fn tenants_cache_key(user_id: UserId) -> String {
 /// access (NG-2), so authorization always reads the table directly.
 pub async fn cached_memberships_for(
     cache: &dyn crate::cache::Cache,
-    db: &DbPool,
+    repo: &dyn IdentityRepository,
     user_id: UserId,
     active: TenantId,
 ) -> ApiResult<Vec<TenantMembership>> {
@@ -109,7 +88,7 @@ pub async fn cached_memberships_for(
             return Ok(list);
         }
     }
-    let list = memberships_for(db, user_id, active).await?;
+    let list = memberships_for(repo, user_id, active).await?;
     if let Ok(bytes) = serde_json::to_vec(&list) {
         let _ = cache.set(&key, bytes, TENANTS_CACHE_TTL).await;
     }
@@ -127,16 +106,10 @@ pub async fn cached_memberships_for(
 /// falls back to the TTL, and must never fail the write path that called it.
 pub async fn invalidate_person_tenants(
     cache: &dyn crate::cache::Cache,
-    db: &DbPool,
+    repo: &dyn IdentityRepository,
     user_id: UserId,
 ) {
-    let ids: Vec<UserId> = db
-        .query_scalar_all(
-            "SELECT u.id FROM users me JOIN users u ON u.person_id = me.person_id WHERE me.id = $1",
-            params![user_id],
-        )
-        .await
-        .unwrap_or_default();
+    let ids: Vec<UserId> = repo.sibling_user_ids(user_id).await.unwrap_or_default();
     // The join includes `me`, so an empty result means the row is gone; delete
     // its own key anyway as a floor.
     if ids.is_empty() {
@@ -149,18 +122,15 @@ pub async fn invalidate_person_tenants(
 
 /// Mark which tenant is active and shape the rows into `TenantMembership`s.
 /// Pure, so the "current" flag and the passthrough are testable without a DB.
-fn to_memberships(
-    rows: Vec<(TenantId, String, String, String, DateTime<Utc>)>,
-    active: TenantId,
-) -> Vec<TenantMembership> {
+fn to_memberships(rows: Vec<MembershipRow>, active: TenantId) -> Vec<TenantMembership> {
     rows.into_iter()
-        .map(|(id, name, slug, role, created_at)| TenantMembership {
-            current: id == active,
-            id,
-            name,
-            slug,
-            role,
-            created_at,
+        .map(|r| TenantMembership {
+            current: r.tenant_id == active,
+            id: r.tenant_id,
+            name: r.name,
+            slug: r.slug,
+            role: r.role,
+            created_at: r.created_at,
         })
         .collect()
 }
@@ -172,25 +142,11 @@ fn to_memberships(
 /// Correlated by `person_id`, never email (MAIN-12), so a matching email string
 /// in another tenant cannot be leveraged into a switch.
 pub async fn member_user_in_tenant(
-    db: &DbPool,
+    repo: &dyn IdentityRepository,
     user_id: UserId,
     target: TenantId,
 ) -> ApiResult<Option<UserId>> {
-    let row: Option<UserId> = db
-        .query_scalar_opt(
-            "SELECT u.id
-         FROM users me
-         JOIN users u ON u.person_id = me.person_id
-         JOIN tenant_members tm
-             ON tm.tenant_id = u.tenant_id
-            AND tm.principal_type = 'user'
-            AND tm.principal_id = u.id
-         WHERE me.id = $1 AND u.tenant_id = $2
-         LIMIT 1",
-            params![user_id, target],
-        )
-        .await?;
-    Ok(row)
+    repo.user_in_tenant(user_id, target).await
 }
 
 /// Does this user still have a live `tenant_members` grant in `tenant`?
@@ -202,19 +158,11 @@ pub async fn member_user_in_tenant(
 /// indexed lookup; the personal-tenant grant every user has (written in
 /// `login_identity`) means a legitimate session always passes.
 pub async fn active_membership_exists(
-    db: &DbPool,
+    repo: &dyn IdentityRepository,
     user_id: UserId,
     tenant: TenantId,
 ) -> ApiResult<bool> {
-    let row: Option<i32> = db
-        .query_scalar_opt(
-            "SELECT 1 FROM tenant_members
-         WHERE tenant_id = $1 AND principal_type = 'user' AND principal_id = $2
-         LIMIT 1",
-            params![tenant, user_id],
-        )
-        .await?;
-    Ok(row.is_some())
+    repo.has_active_membership(user_id, tenant).await
 }
 
 pub struct IdentityClaims {
@@ -238,17 +186,8 @@ pub struct IdentityClaims {
 /// anything: a local account (no identity) is unverified, and so is an OIDC
 /// login whose IdP did not assert `email_verified`. This is the platform
 /// predicate invite acceptance and account-linking will gate on.
-pub async fn email_is_verified(db: &DbPool, user_id: UserId) -> ApiResult<bool> {
-    let verified: bool = db
-        .query_scalar(
-            "SELECT EXISTS (
-             SELECT 1 FROM identities
-             WHERE user_id = $1 AND email_verified_at IS NOT NULL
-         )",
-            params![user_id],
-        )
-        .await?;
-    Ok(verified)
+pub async fn email_is_verified(repo: &dyn IdentityRepository, user_id: UserId) -> ApiResult<bool> {
+    repo.email_is_verified(user_id).await
 }
 
 /// Record that a local account's email was verified (MAIN-30), through the same
@@ -257,22 +196,12 @@ pub async fn email_is_verified(db: &DbPool, user_id: UserId) -> ApiResult<bool> 
 /// user, carrying `email_verified_at`. `email_is_verified` then reports true
 /// with no change to the predicate. Idempotent — a second confirm keeps the
 /// first verification time.
-pub async fn mark_local_email_verified(db: &DbPool, user_id: UserId, email: &str) -> ApiResult<()> {
-    // The static raw_claims literal routes through the json seam (MAIN-201).
-    let sql = format!(
-        "INSERT INTO identities (id, user_id, issuer, subject, email, raw_claims, email_verified_at)
-         VALUES ($1, $2, 'local', $3, $4, {}, {now})
-         ON CONFLICT (issuer, subject)
-           DO UPDATE SET email_verified_at = COALESCE(identities.email_verified_at, {now})",
-        Postgres.literal("{\"verified_via\":\"local\"}"),
-        now = Postgres.now()
-    );
-    db.exec(
-        &sql,
-        params![uuid::Uuid::now_v7(), user_id, user_id.0.to_string(), email],
-    )
-    .await?;
-    Ok(())
+pub async fn mark_local_email_verified(
+    repo: &dyn IdentityRepository,
+    user_id: UserId,
+    email: &str,
+) -> ApiResult<()> {
+    repo.mark_local_email_verified(user_id, email).await
 }
 
 /// The pseudo-issuer the dev-login hatch stamps on its identities. It is never a
@@ -290,41 +219,23 @@ pub async fn login_identity(state: &AppState, claims: IdentityClaims) -> ApiResu
     // below, so the one-way lock is untouched for genuine sign-ins (AC-2, NG-1).
     let claims_the_mode = claims.issuer != DEV_ISSUER;
     // Existing identity → existing user.
-    let existing: Option<UserId> = state
-        .db
-        .query_scalar_opt(
-            "SELECT user_id FROM identities WHERE issuer = $1 AND subject = $2",
-            params![&claims.issuer, &claims.subject],
-        )
+    let repo = state.identity.as_ref();
+    let existing = repo
+        .user_id_by_identity(&claims.issuer, &claims.subject)
         .await?;
 
     if let Some(user_id) = existing {
-        let user: User = state
-            .db
-            .query_one("SELECT * FROM users WHERE id = $1", params![user_id])
-            .await?;
-        let tenant: Tenant = state
-            .db
-            .query_one(
-                "SELECT * FROM tenants WHERE id = $1",
-                params![user.tenant_id],
-            )
-            .await?;
+        let user = repo.get_user(user_id).await?.ok_or(ApiError::NotFound)?;
+        let tenant = repo
+            .get_tenant(user.tenant_id)
+            .await?
+            .ok_or(ApiError::NotFound)?;
         // A returning identity may have become verified since last time (the IdP
         // confirmed the address). Record it the first time we see the claim, and
         // never clear it — verification only moves one way, and only from a true
         // claim.
         if claims.email_verified {
-            state
-                .db
-                .exec(
-                    &format!(
-                        "UPDATE identities SET email_verified_at = {}
-                 WHERE issuer = $1 AND subject = $2 AND email_verified_at IS NULL",
-                        Postgres.now()
-                    ),
-                    params![&claims.issuer, &claims.subject],
-                )
+            repo.mark_identity_verified(&claims.issuer, &claims.subject)
                 .await?;
         }
         // The lock has to bind both directions, or it is not a lock: a tenant
@@ -333,7 +244,7 @@ pub async fn login_identity(state: &AppState, claims: IdentityClaims) -> ApiResu
         // exists to prevent. (Skipped for the dev hatch — AC-1.)
         if claims_the_mode {
             crate::services::local_auth::claim_mode(
-                &state.db,
+                state.identity.as_ref(),
                 tenant.id,
                 crate::services::local_auth::AuthMode::Oidc,
             )
@@ -360,31 +271,23 @@ pub async fn login_identity(state: &AppState, claims: IdentityClaims) -> ApiResu
     // and was made its OWNER: full access to somebody else's nodes, workspaces
     // and secrets. "Is this instance empty?" is a question about people, and
     // there is only one table that knows.
-    let user_count: i64 = state
-        .db
-        .query_scalar("SELECT count(*) FROM users", params![])
-        .await?;
+    let user_count = repo.count_users().await?;
 
     let (tenant, role) = if user_count == 0 {
         // Fresh instance: adopt the seeded default tenant rather than creating
         // a duplicate beside it, and the first person owns it.
         let name = state.cfg.default_tenant_name.clone();
         let slug = slugify(&name);
-        let existing: Option<Tenant> = state
-            .db
-            .query_opt("SELECT * FROM tenants WHERE slug = $1", params![&slug])
-            .await?;
-        let tenant = match existing {
+        let tenant = match repo.tenant_by_slug(&slug).await? {
             Some(t) => t,
-            None => {
-                state
-                    .db
-                    .query_one(
-                        "INSERT INTO tenants (id, name, slug) VALUES ($1, $2, $3) RETURNING *",
-                        params![TenantId::new(), &name, &slug],
-                    )
-                    .await?
-            }
+            // Nothing else can be racing the seeded default tenant on a fresh
+            // instance, so a taken slug here would be a genuine surprise rather
+            // than the ordinary contention `create_personal_tenant` retries on.
+            None => repo.create_tenant(&name, &slug).await?.ok_or_else(|| {
+                ApiError::Internal(anyhow::anyhow!(
+                    "default tenant slug {slug} was taken between read and write"
+                ))
+            })?,
         };
         (tenant, "owner")
     } else {
@@ -399,20 +302,14 @@ pub async fn login_identity(state: &AppState, claims: IdentityClaims) -> ApiResu
 
     // Same email already present in the tenant (e.g. relinked IdP): attach the
     // new identity to that user instead of creating a duplicate.
-    let user: Option<User> = state
-        .db
-        .query_opt(
-            "SELECT * FROM users WHERE tenant_id = $1 AND email = $2",
-            params![tenant.id, &email],
-        )
-        .await?;
+    let user = repo.user_by_email_in_tenant(tenant.id, &email).await?;
 
     // Commit the tenant to OIDC before creating anything. A tenant already on
     // local accounts must be refused here, with nothing half-made left behind.
     // (Skipped for the dev hatch — AC-1; the dev issuer never locks the mode.)
     if claims_the_mode {
         crate::services::local_auth::claim_mode(
-            &state.db,
+            state.identity.as_ref(),
             tenant.id,
             crate::services::local_auth::AuthMode::Oidc,
         )
@@ -422,59 +319,34 @@ pub async fn login_identity(state: &AppState, claims: IdentityClaims) -> ApiResu
     let user = match user {
         Some(u) => u,
         None => {
-            state
-                .db
-                .query_one(
-                    "INSERT INTO users (id, tenant_id, display_name, email, avatar_url, role)
-                 VALUES ($1, $2, $3, $4, $5, $6) RETURNING *",
-                    params![
-                        UserId::new(),
-                        tenant.id,
-                        &display_name,
-                        &email,
-                        claims.avatar_url.clone(),
-                        role
-                    ],
-                )
-                .await?
+            repo.create_oidc_user(crate::repo::identity::NewOidcUser {
+                tenant: tenant.id,
+                display_name: display_name.clone(),
+                email: email.clone(),
+                avatar_url: claims.avatar_url.clone(),
+                role: role.to_string(),
+            })
+            .await?
         }
     };
 
     // Membership mirrors the personal tenant. Written even in the single-tenant
     // case, so "which tenants can this user reach" has exactly one answer to
     // read — the table — rather than two rules to keep in step.
-    state
-        .db
-        .exec(
-            "INSERT INTO tenant_members (id, tenant_id, principal_type, principal_id, role)
-         VALUES ($1, $2, 'user', $3, $4)
-         ON CONFLICT (tenant_id, principal_type, principal_id) DO NOTHING",
-            params![uuid::Uuid::now_v7(), tenant.id, user.id.0, role],
-        )
-        .await?;
+    repo.grant_membership(tenant.id, user.id, role).await?;
 
     // `email_verified_at` is stamped now ONLY when the IdP asserted the address;
     // otherwise it stays null. A CASE on the bound flag keeps "verified means a
     // real timestamp" true — nothing here derives it from the email string.
-    state
-        .db
-        .exec(
-            &format!(
-                "INSERT INTO identities (id, user_id, issuer, subject, email, raw_claims, email_verified_at)
-         VALUES ($1, $2, $3, $4, $5, $6, CASE WHEN $7 THEN {} ELSE NULL END)",
-                Postgres.now()
-            ),
-            params![
-                IdentityId::new(),
-                user.id,
-                &claims.issuer,
-                &claims.subject,
-                claims.email.clone(),
-                &claims.raw_claims,
-                claims.email_verified
-            ],
-        )
-        .await?;
+    repo.create_identity(crate::repo::identity::NewIdentity {
+        user_id: user.id,
+        issuer: claims.issuer.clone(),
+        subject: claims.subject.clone(),
+        email: claims.email.clone(),
+        raw_claims: claims.raw_claims.clone(),
+        email_verified: claims.email_verified,
+    })
+    .await?;
 
     // Somebody has to be able to run this deployment. Seeding cannot do it —
     // it runs before anybody has signed in — and "the next boot will pick it
@@ -521,17 +393,10 @@ async fn create_personal_tenant(
                 .collect();
             format!("{base}-{}", suffix.to_lowercase())
         };
-        let res: Result<Tenant, sqlx::Error> = state
-            .db
-            .query_one(
-                "INSERT INTO tenants (id, name, slug) VALUES ($1, $2, $3) RETURNING *",
-                params![TenantId::new(), &name, &slug],
-            )
-            .await;
-        match res {
-            Ok(tenant) => return Ok(tenant),
-            Err(sqlx::Error::Database(d)) if d.is_unique_violation() => continue,
-            Err(e) => return Err(e.into()),
+        // `None` is "slug taken" — the retry the loop exists for. The driver
+        // detail that used to be matched on here now stops inside the repo.
+        if let Some(tenant) = state.identity.create_tenant(&name, &slug).await? {
+            return Ok(tenant);
         }
     }
     Err(ApiError::Internal(anyhow::anyhow!(
@@ -555,7 +420,7 @@ pub fn slugify(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{slugify, to_memberships};
+    use super::{slugify, to_memberships, MembershipRow};
     use chrono::Utc;
     use nook_types::TenantId;
 
@@ -573,8 +438,20 @@ mod tests {
         let b = TenantId::new();
         let now = Utc::now();
         let rows = vec![
-            (a, "Personal".into(), "personal".into(), "owner".into(), now),
-            (b, "Shared".into(), "shared".into(), "member".into(), now),
+            MembershipRow {
+                tenant_id: a,
+                name: "Personal".into(),
+                slug: "personal".into(),
+                role: "owner".into(),
+                created_at: now,
+            },
+            MembershipRow {
+                tenant_id: b,
+                name: "Shared".into(),
+                slug: "shared".into(),
+                role: "member".into(),
+                created_at: now,
+            },
         ];
         let out = to_memberships(rows, b);
         assert_eq!(out.len(), 2);
@@ -592,13 +469,13 @@ mod tests {
         // selected" rather than crashing.
         let a = TenantId::new();
         let orphan = TenantId::new();
-        let rows = vec![(
-            a,
-            "Personal".into(),
-            "personal".into(),
-            "owner".into(),
-            Utc::now(),
-        )];
+        let rows = vec![MembershipRow {
+            tenant_id: a,
+            name: "Personal".into(),
+            slug: "personal".into(),
+            role: "owner".into(),
+            created_at: Utc::now(),
+        }];
         let out = to_memberships(rows, orphan);
         assert!(out.iter().all(|m| !m.current));
     }
@@ -611,6 +488,11 @@ mod tests {
 /// machine without Postgres still passes.
 #[cfg(test)]
 mod db_tests {
+
+    /// The real repository over this test's pool — these stay DB-backed (NG-4).
+    fn repo_of(db: &DbPool) -> crate::repo::identity::DbIdentityRepository {
+        crate::repo::identity::DbIdentityRepository::new(db.clone())
+    }
     use super::{
         active_membership_exists, cached_memberships_for, email_is_verified,
         invalidate_person_tenants, member_user_in_tenant, memberships_for,
@@ -723,14 +605,14 @@ mod db_tests {
 
         // Collect every result BEFORE asserting, so cleanup always runs even
         // when an assertion is about to fail.
-        let reachable: Vec<TenantId> = memberships_for(&db, me, a)
+        let reachable: Vec<TenantId> = memberships_for(&repo_of(&db), me, a)
             .await
             .unwrap()
             .into_iter()
             .map(|m| m.id)
             .collect();
-        let into_b = member_user_in_tenant(&db, me, b).await.unwrap();
-        let into_c = member_user_in_tenant(&db, me, c).await.unwrap();
+        let into_b = member_user_in_tenant(&repo_of(&db), me, b).await.unwrap();
+        let into_c = member_user_in_tenant(&repo_of(&db), me, c).await.unwrap();
 
         cleanup(&db, &[a, b, c]).await;
 
@@ -837,8 +719,10 @@ mod db_tests {
 
         // While the grant is live: the session guard passes and re-selecting the
         // current tenant resolves to this user.
-        let live_ok = active_membership_exists(&db, me, t).await.unwrap();
-        let switch_live = member_user_in_tenant(&db, me, t).await.unwrap();
+        let live_ok = active_membership_exists(&repo_of(&db), me, t)
+            .await
+            .unwrap();
+        let switch_live = member_user_in_tenant(&repo_of(&db), me, t).await.unwrap();
 
         // Revoke the grant (what member-management / a leave will do).
         db.exec(
@@ -848,8 +732,10 @@ mod db_tests {
         .await
         .unwrap();
 
-        let revoked_ok = active_membership_exists(&db, me, t).await.unwrap();
-        let switch_revoked = member_user_in_tenant(&db, me, t).await.unwrap();
+        let revoked_ok = active_membership_exists(&repo_of(&db), me, t)
+            .await
+            .unwrap();
+        let switch_revoked = member_user_in_tenant(&repo_of(&db), me, t).await.unwrap();
 
         cleanup(&db, &[t]).await;
 
@@ -896,8 +782,8 @@ mod db_tests {
         .await
         .unwrap();
 
-        let local_before = email_is_verified(&db, local).await.unwrap();
-        let oidc_unverified = email_is_verified(&db, oidc).await.unwrap();
+        let local_before = email_is_verified(&repo_of(&db), local).await.unwrap();
+        let oidc_unverified = email_is_verified(&repo_of(&db), oidc).await.unwrap();
 
         // Now the IdP verifies the OIDC identity's address.
         db.exec(
@@ -909,9 +795,9 @@ mod db_tests {
         )
         .await
         .unwrap();
-        let oidc_verified = email_is_verified(&db, oidc).await.unwrap();
+        let oidc_verified = email_is_verified(&repo_of(&db), oidc).await.unwrap();
         // The local user shares the email but is still unverified — no string join.
-        let local_after = email_is_verified(&db, local).await.unwrap();
+        let local_after = email_is_verified(&repo_of(&db), local).await.unwrap();
 
         cleanup(&db, &[ta, tb]).await;
 
@@ -943,7 +829,9 @@ mod db_tests {
         let cache = MemoryCache::new();
 
         // Miss → populates from the join.
-        let first = cached_memberships_for(&cache, &db, uid, a).await.unwrap();
+        let first = cached_memberships_for(&cache, &repo_of(&db), uid, a)
+            .await
+            .unwrap();
         assert_eq!(first.len(), 1, "the live membership is returned and cached");
 
         // Revoke the grant in the DB WITHOUT invalidating the cache.
@@ -955,12 +843,16 @@ mod db_tests {
         .unwrap();
 
         // A hit: the stale list is served, proving the join was skipped.
-        let hit = cached_memberships_for(&cache, &db, uid, a).await.unwrap();
+        let hit = cached_memberships_for(&cache, &repo_of(&db), uid, a)
+            .await
+            .unwrap();
         assert_eq!(hit.len(), 1, "served the cached list — the read was a hit");
 
         // Explicit invalidation → the next read re-queries and sees the revoke.
-        invalidate_person_tenants(&cache, &db, uid).await;
-        let fresh = cached_memberships_for(&cache, &db, uid, a).await.unwrap();
+        invalidate_person_tenants(&cache, &repo_of(&db), uid).await;
+        let fresh = cached_memberships_for(&cache, &repo_of(&db), uid, a)
+            .await
+            .unwrap();
         assert!(
             fresh.is_empty(),
             "after invalidation the revoked grant is gone"
@@ -988,14 +880,14 @@ mod db_tests {
 
         // Both per-tenant rows see the same two-tenant set, and both get cached.
         assert_eq!(
-            cached_memberships_for(&cache, &db, uid_a, a)
+            cached_memberships_for(&cache, &repo_of(&db), uid_a, a)
                 .await
                 .unwrap()
                 .len(),
             2
         );
         assert_eq!(
-            cached_memberships_for(&cache, &db, uid_b, b)
+            cached_memberships_for(&cache, &repo_of(&db), uid_b, b)
                 .await
                 .unwrap()
                 .len(),
@@ -1009,9 +901,11 @@ mod db_tests {
         )
         .await
         .unwrap();
-        invalidate_person_tenants(&cache, &db, uid_b).await;
+        invalidate_person_tenants(&cache, &repo_of(&db), uid_b).await;
 
-        let a_fresh = cached_memberships_for(&cache, &db, uid_a, a).await.unwrap();
+        let a_fresh = cached_memberships_for(&cache, &repo_of(&db), uid_a, a)
+            .await
+            .unwrap();
         assert_eq!(a_fresh.len(), 1, "invalidating via row B refreshed row A");
 
         cleanup(&db, &[a, b]).await;
@@ -1033,13 +927,15 @@ mod db_tests {
 
         // Warm the display cache and confirm the gate agrees while the grant lives.
         assert_eq!(
-            cached_memberships_for(&cache, &db, uid, a)
+            cached_memberships_for(&cache, &repo_of(&db), uid, a)
                 .await
                 .unwrap()
                 .len(),
             1
         );
-        assert!(active_membership_exists(&db, uid, a).await.unwrap());
+        assert!(active_membership_exists(&repo_of(&db), uid, a)
+            .await
+            .unwrap());
 
         // Revoke, but do NOT invalidate: the display cache stays stale on purpose.
         db.exec(
@@ -1049,7 +945,7 @@ mod db_tests {
         .await
         .unwrap();
         assert_eq!(
-            cached_memberships_for(&cache, &db, uid, a)
+            cached_memberships_for(&cache, &repo_of(&db), uid, a)
                 .await
                 .unwrap()
                 .len(),
@@ -1060,7 +956,9 @@ mod db_tests {
         // The gate reads the table directly, so access is refused the instant
         // the grant is gone — the cache never gates.
         assert!(
-            !active_membership_exists(&db, uid, a).await.unwrap(),
+            !active_membership_exists(&repo_of(&db), uid, a)
+                .await
+                .unwrap(),
             "a stale display cache must never keep access alive"
         );
 
@@ -1076,65 +974,26 @@ mod db_tests {
 /// `operator_audit_page` (MAIN-45 AC-2). Keyed on the member's UUID v7
 /// `principal_id`; searches only members of `tenant`.
 pub async fn tenant_members_page(
-    db: &DbPool,
+    repo: &dyn IdentityRepository,
     tenant: TenantId,
     q: Option<String>,
     after: Option<uuid::Uuid>,
     limit: i64,
 ) -> ApiResult<TenantMemberPage> {
-    let limit = limit.clamp(1, 200);
-    let q = search_filter(q);
-    let term = Postgres.cast("$3", "text");
-    let rows: Vec<TenantMemberItem> = db
-        .query_all(
-            &format!(
-                "SELECT m.principal_id, u.email, u.display_name, m.role, m.created_at AS joined_at
-         FROM tenant_members m
-         JOIN users u ON u.id = m.principal_id
-         WHERE m.tenant_id = $1 AND m.principal_type = 'user'
-           AND ({term} IS NULL OR (
-                    {m_email}
-                 OR {m_name}
-                 OR {m_role}))
-           AND ({cursor} IS NULL OR m.principal_id < $4)
-         ORDER BY m.principal_id DESC
-         LIMIT $2",
-                cursor = Postgres.cast("$4", "uuid"),
-                m_email = Postgres.ci_match("u.email", "'%' || $3 || '%'"),
-                m_name = Postgres.ci_match("u.display_name", "'%' || $3 || '%'"),
-                m_role = Postgres.ci_match("m.role", "'%' || $3 || '%'")
-            ),
-            params![tenant, limit, q, after],
-        )
-        .await?;
-    let next_cursor = if rows.len() as i64 == limit {
-        rows.last().map(|r| r.principal_id)
-    } else {
-        None
-    };
-    Ok(TenantMemberPage { rows, next_cursor })
+    repo.members_page(tenant, q, after, limit).await
 }
 
 /// The instance's first tenant — what an MCP token maps to until per-user MCP
-/// OAuth exists. Moved verbatim out of `mcp_backend` (MAIN-245).
-pub async fn first_tenant(db: &DbPool) -> anyhow::Result<TenantId> {
-    let id: TenantId = db
-        .query_scalar(
-            "SELECT id FROM tenants ORDER BY created_at LIMIT 1",
-            params![],
-        )
-        .await?;
-    Ok(id)
+/// OAuth exists.
+pub async fn first_tenant(repo: &dyn IdentityRepository) -> anyhow::Result<TenantId> {
+    repo.first_tenant()
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("this instance has no tenants"))
 }
 
-/// A tenant's owner — who an MCP call acts as. Moved verbatim out of
-/// `mcp_backend` (MAIN-245).
-pub async fn first_user(db: &DbPool, tenant: TenantId) -> anyhow::Result<UserId> {
-    let id: UserId = db
-        .query_scalar(
-            "SELECT id FROM users WHERE tenant_id = $1 ORDER BY created_at LIMIT 1",
-            params![tenant],
-        )
-        .await?;
-    Ok(id)
+/// A tenant's owner — who an MCP call acts as.
+pub async fn first_user(repo: &dyn IdentityRepository, tenant: TenantId) -> anyhow::Result<UserId> {
+    repo.first_user(tenant)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("tenant has no users"))
 }

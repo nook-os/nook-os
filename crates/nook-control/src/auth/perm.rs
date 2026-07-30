@@ -20,7 +20,6 @@
 //! branching lives in `role_permissions` rows, where it can be listed and
 //! audited, rather than in code where it can only be read.
 
-use nook_db::{params, Db};
 use nook_types::TenantId;
 use uuid::Uuid;
 
@@ -118,29 +117,12 @@ impl AuthCtx {
             Scope::Tenant(t) => (org_of(state, t).await?, Some(t.0)),
         };
 
-        let hit: Option<(bool,)> = state
-            .db
-            .query_opt(
-                "SELECT true
-             FROM role_bindings b
-             JOIN role_permissions rp ON rp.role_key = b.role_key
-             WHERE b.subject_type = 'user'
-               AND b.subject_id = $1
-               AND rp.permission_key = $2
-               AND (
-                     -- Deployment covers everything below it.
-                     b.scope_type = 'deployment'
-                     -- The org itself, or the org the target tenant lives in.
-                  OR (b.scope_type = 'org' AND b.scope_id = $3)
-                     -- The exact tenant.
-                  OR (b.scope_type = 'tenant' AND b.scope_id = $4)
-               )
-             LIMIT 1",
-                params![self.user_id.0, permission.key(), org_id, tenant_id],
-            )
+        let hit = state
+            .identity
+            .has_permission(self.user_id, permission.key(), org_id, tenant_id)
             .await?;
 
-        if hit.is_some() {
+        if hit {
             return Ok(());
         }
         // Names the permission, not the scope: telling somebody which org they
@@ -161,11 +143,7 @@ impl AuthCtx {
 }
 
 async fn org_of(state: &AppState, tenant: TenantId) -> Result<Option<Uuid>, ApiError> {
-    let row: Option<(Option<Uuid>,)> = state
-        .db
-        .query_opt("SELECT org_id FROM tenants WHERE id = $1", params![tenant])
-        .await?;
-    Ok(row.and_then(|(o,)| o))
+    state.identity.org_of(tenant).await
 }
 
 #[cfg(test)]

@@ -60,7 +60,7 @@ pub async fn list(
     // is scoped to the sessions they created. Reuses the shared role check
     // (`is_tenant_admin`, MAIN-132) rather than a duplicate query here.
     let sees_all = !matches!(auth.principal, crate::auth::Principal::User)
-        || auth.is_tenant_admin(&state.db).await?;
+        || auth.is_tenant_admin(state.identity.as_ref()).await?;
     let creator = if sees_all { None } else { Some(auth.user_id) };
     Ok(Json(
         session_queries::list_sessions(

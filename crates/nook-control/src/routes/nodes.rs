@@ -30,7 +30,7 @@ async fn visibility_scope(state: &AppState, auth: &AuthCtx) -> ApiResult<Option<
     if !matches!(auth.principal, crate::auth::Principal::User) {
         return Ok(None); // node token: current behavior, unchanged
     }
-    if auth.is_tenant_admin(&state.db).await? {
+    if auth.is_tenant_admin(state.identity.as_ref()).await? {
         return Ok(None);
     }
     Ok(Some(

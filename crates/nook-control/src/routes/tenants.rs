@@ -143,7 +143,7 @@ pub async fn list_members(
     // paged, not fetched whole (MAIN-45 AC-2). The keyset order (newest member
     // first) replaces the old owner-first display sort.
     let page = crate::services::identity::tenant_members_page(
-        &state.db,
+        state.identity.as_ref(),
         tenant,
         q.q,
         q.after,
@@ -223,8 +223,12 @@ pub async fn change_member_role(
 
     // The role is part of the cached tenants list, so a change makes that
     // person's cached entry stale — drop it across their sessions (MAIN-27 AC-4).
-    crate::services::identity::invalidate_person_tenants(&*state.cache, &state.db, UserId(pid))
-        .await;
+    crate::services::identity::invalidate_person_tenants(
+        &*state.cache,
+        state.identity.as_ref(),
+        UserId(pid),
+    )
+    .await;
 
     let member: TenantMemberItem = state
         .db
@@ -285,8 +289,12 @@ pub async fn remove_member(
     // every one of their sessions reflects the removal immediately (AC-4). The
     // access gate already reads the table directly, so access was refused the
     // moment the row was deleted regardless of the cache (NG-2).
-    crate::services::identity::invalidate_person_tenants(&*state.cache, &state.db, UserId(pid))
-        .await;
+    crate::services::identity::invalidate_person_tenants(
+        &*state.cache,
+        state.identity.as_ref(),
+        UserId(pid),
+    )
+    .await;
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
 
@@ -317,8 +325,12 @@ pub async fn leave_tenant(
         )
         .await?;
     // You just left: drop the tenant from your own cached list immediately (AC-4).
-    crate::services::identity::invalidate_person_tenants(&*state.cache, &state.db, auth.user_id)
-        .await;
+    crate::services::identity::invalidate_person_tenants(
+        &*state.cache,
+        state.identity.as_ref(),
+        auth.user_id,
+    )
+    .await;
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
 

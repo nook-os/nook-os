@@ -19,7 +19,7 @@ impl McpBackend {
     /// M1: the MCP token maps to the instance's first tenant (dev). Per-user
     /// MCP OAuth is post-M1.
     async fn tenant(&self) -> anyhow::Result<TenantId> {
-        crate::services::identity::first_tenant(&self.state.db).await
+        crate::services::identity::first_tenant(self.state.identity.as_ref()).await
     }
 
     /// Who an MCP call acts as.
@@ -29,7 +29,7 @@ impl McpBackend {
     /// null so a comment or a claim has an author that can be revoked.
     async fn user(&self) -> anyhow::Result<UserId> {
         let tenant = self.tenant().await?;
-        crate::services::identity::first_user(&self.state.db, tenant).await
+        crate::services::identity::first_user(self.state.identity.as_ref(), tenant).await
     }
 
     /// Resolve a workspace by **id or slug** (both unique), falling back to name
