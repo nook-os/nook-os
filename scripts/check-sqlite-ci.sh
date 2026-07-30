@@ -83,10 +83,20 @@ LOG="${1:-}"
 # skipped — a crash is the one outcome that must never read as "covered and
 # fine".
 #
+# CI sets CARGO_TERM_COLOR=always, so every line arrives wrapped in ANSI escapes
+# and an anchored `^ *Running` never matches. That is not hypothetical: it is how
+# this first ran in CI — the guard reported "no test binaries found" and failed
+# the leg. It failing loudly is the only reason it was not silently decorative,
+# which is exactly why "found nothing" is an error here and not an empty pass.
+# Escapes are stripped before anything is matched, so the parse does not depend
+# on whether the caller had a TTY.
+#
 # The `$0`/`$1` inside the awk program are awk's fields, not shell parameters.
 # shellcheck disable=SC2016
 outcomes() {
   awk '
+    { gsub(/\033\[[0-9;]*[a-zA-Z]/, "") }
+
     /^[[:space:]]*Running / {
       if (cur != "" && !seen[cur]) { print cur "\tFAILED" }
       # .../deps/<name>-<hash>[.exe])

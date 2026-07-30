@@ -146,6 +146,23 @@ printf 'error[E0432]: unresolved import\n' > "$TMP/run.txt"
 allow '# nothing excluded'
 check "red when the run never reached any test" fail
 
+# ── a colourised log (CARGO_TERM_COLOR=always, which CI sets) ──────────────
+# The first CI run of this guard failed exactly here: ANSI escapes meant the
+# anchored `Running` match found nothing, and the leg reported "no test binaries
+# found". Pinned so the parse can never again depend on whether the caller had a
+# TTY.
+printf '\033[0m\033[1m\033[32m     Running\033[0m tests/good_one.rs (/app/target/debug/deps/good_one-aaaa1111)\n' > "$TMP/run.txt"
+printf '\033[32mtest result\033[0m: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s\n' >> "$TMP/run.txt"
+printf '\033[0m\033[1m\033[32m     Running\033[0m tests/bad_one.rs (/app/target/debug/deps/bad_one-bbbb2222)\n' >> "$TMP/run.txt"
+printf 'test result: \033[31mFAILED\033[0m. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s\n' >> "$TMP/run.txt"
+allow 'bad_one  # pending (MAIN-268)'
+check "a colourised cargo log parses" pass
+
+# ...and the colours must not hide a regression either.
+allow '# nothing excluded'
+check "red on a colourised log when a covered binary fails" fail
+grep -q 'bad_one' "$TMP/out" || { echo "  ✗ the regression is not named in a colourised log" >&2; fail=1; }
+
 # ── the permanent engine-specific list excludes too ────────────────────────
 # A deliberately Postgres-only test must not read as a regression.
 log run.txt
