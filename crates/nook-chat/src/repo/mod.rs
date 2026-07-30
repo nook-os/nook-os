@@ -44,13 +44,12 @@ pub(crate) enum RepoError {
 
 pub(crate) type RepoResult<T> = Result<T, RepoError>;
 
-impl From<sqlx::Error> for RepoError {
-    fn from(e: sqlx::Error) -> Self {
-        match &e {
-            sqlx::Error::Database(db) if db.code().as_deref() == Some("23505") => {
-                RepoError::Conflict
-            }
-            _ => RepoError::Other,
+impl From<nook_db::DbError> for RepoError {
+    fn from(e: nook_db::DbError) -> Self {
+        if e.is_unique_violation() {
+            RepoError::Conflict
+        } else {
+            RepoError::Other
         }
     }
 }

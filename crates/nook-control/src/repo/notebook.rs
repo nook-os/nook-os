@@ -592,7 +592,7 @@ impl NotebookRepository for DbNotebookRepository {
         person: Uuid,
         id: UserNoteFolderId,
     ) -> ApiResult<bool> {
-        let mut tx = self.db.begin().await?;
+        let mut tx = self.db.begin().await.map_err(nook_db::DbError::from)?;
         let parent: Option<(Option<UserNoteFolderId>,)> = tx
             .query_opt(
                 "SELECT parent_id FROM user_note_folders WHERE id = $1 AND person_id = $2",

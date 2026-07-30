@@ -51,11 +51,11 @@ pub struct Resolved {
 pub enum AuthError {
     Unauthorized,
     Forbidden,
-    Db(sqlx::Error),
+    Db(nook_db::DbError),
 }
 
-impl From<sqlx::Error> for AuthError {
-    fn from(e: sqlx::Error) -> Self {
+impl From<nook_db::DbError> for AuthError {
+    fn from(e: nook_db::DbError) -> Self {
         AuthError::Db(e)
     }
 }

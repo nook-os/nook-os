@@ -53,7 +53,7 @@ pub enum ApiError {
     #[error("{0}")]
     ServiceUnavailable(String),
     #[error(transparent)]
-    Db(#[from] sqlx::Error),
+    Db(#[from] nook_db::DbError),
     #[error(transparent)]
     Internal(#[from] anyhow::Error),
 }
@@ -70,7 +70,7 @@ impl IntoResponse for ApiError {
             ApiError::TooManyRequests(m) => (StatusCode::TOO_MANY_REQUESTS, m.clone()),
             ApiError::SetupRequired(m) => (StatusCode::PRECONDITION_REQUIRED, m.clone()),
             ApiError::ServiceUnavailable(m) => (StatusCode::SERVICE_UNAVAILABLE, m.clone()),
-            ApiError::Db(sqlx::Error::RowNotFound) => (StatusCode::NOT_FOUND, "not found".into()),
+            ApiError::Db(e) if e.is_row_not_found() => (StatusCode::NOT_FOUND, "not found".into()),
             ApiError::Db(e) => {
                 tracing::error!(error = %e, "database error");
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal error".into())
@@ -199,7 +199,10 @@ mod tests {
     /// depends on the error inside it.
     #[tokio::test]
     async fn a_missing_row_is_not_found_rather_than_internal() {
-        let (status, body) = parts(ApiError::Db(sqlx::Error::RowNotFound)).await;
+        let (status, body) = parts(ApiError::Db(nook_db::DbError::Query(
+            sqlx::Error::RowNotFound,
+        )))
+        .await;
         assert_eq!(status, StatusCode::NOT_FOUND);
         assert_eq!(
             body,

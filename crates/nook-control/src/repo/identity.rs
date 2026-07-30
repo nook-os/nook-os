@@ -688,7 +688,7 @@ impl IdentityRepository for DbIdentityRepository {
     }
 
     async fn create_tenant(&self, name: &str, slug: &str) -> ApiResult<Option<Tenant>> {
-        let res: Result<Tenant, sqlx::Error> = self
+        let res: Result<Tenant, nook_db::DbError> = self
             .db
             .query_one(
                 "INSERT INTO tenants (id, name, slug) VALUES ($1, $2, $3) RETURNING *",
@@ -700,7 +700,7 @@ impl IdentityRepository for DbIdentityRepository {
             // A taken slug is an ordinary outcome the caller retries around, not
             // an error — so the driver detail stops here rather than travelling
             // out through the trait.
-            Err(sqlx::Error::Database(d)) if d.is_unique_violation() => Ok(None),
+            Err(e) if e.is_unique_violation() => Ok(None),
             Err(e) => Err(e.into()),
         }
     }
@@ -927,8 +927,8 @@ impl IdentityRepository for DbIdentityRepository {
             Ok(u) => u,
             // Which uniqueness failed is the only thing the caller needs, so it
             // is decided here — the constraint name never leaves this file.
-            Err(sqlx::Error::Database(d)) if d.is_unique_violation() => {
-                let taken = d.constraint().unwrap_or_default();
+            Err(e) if e.is_unique_violation() => {
+                let taken = e.constraint().unwrap_or_default();
                 return Ok(Err(if taken.contains("username") {
                     CreateUserError::UsernameTaken
                 } else {

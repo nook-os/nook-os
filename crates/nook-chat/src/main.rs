@@ -188,16 +188,18 @@ async fn main() -> anyhow::Result<()> {
 /// then race the `pg_namespace` insert, and the loser gets `23505`
 /// (unique_violation) even though `IF NOT EXISTS` was asked for. The schema
 /// exists either way, so a duplicate is success, not an error.
-pub(crate) async fn ensure_chat_schema(pool: &nook_db::DbPool) -> Result<(), sqlx::Error> {
+pub(crate) async fn ensure_chat_schema(pool: &nook_db::DbPool) -> anyhow::Result<()> {
     match pool
         .exec("CREATE SCHEMA IF NOT EXISTS chat", params![])
         .await
     {
         Ok(_) => Ok(()),
-        Err(e) if e.as_database_error().and_then(|d| d.code()).as_deref() == Some("23505") => {
-            Ok(())
-        }
-        Err(e) => Err(e),
+        // A concurrent `CREATE SCHEMA IF NOT EXISTS` can still lose the
+        // `pg_namespace` race and come back 23505. The schema exists either
+        // way, so a duplicate is success. Asked through `DbError` now rather
+        // than by reaching for the driver's SQLSTATE (MAIN-269).
+        Err(e) if e.is_unique_violation() => Ok(()),
+        Err(e) => Err(e.into()),
     }
 }
 

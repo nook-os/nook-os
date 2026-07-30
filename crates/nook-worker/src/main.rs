@@ -2,7 +2,6 @@
 //! termination signal, finishing in-flight work on the way out (MAIN-148).
 
 use anyhow::Result;
-use sqlx::postgres::PgPoolOptions;
 use std::sync::Arc;
 use tracing_subscriber::EnvFilter;
 
@@ -21,12 +20,11 @@ async fn main() -> Result<()> {
     // the rest so a misconfiguration fails the same way here as there.
     let cfg = Config::from_env()?;
 
-    let db = nook_db::EnginePool::from_pg(
-        PgPoolOptions::new()
-            .max_connections(5)
-            .connect(&cfg.database_url)
-            .await?,
-    );
+    // Through the adapter, not a Postgres pool built here (MAIN-269). The old
+    // form pinned the worker to Postgres in its own boot: a `sqlite://` URL got
+    // a driver-level parse failure instead of `DbError::NotYetSupported`, which
+    // names the engine and the card that adds it.
+    let db = nook_db::connect(&cfg.database_url, 5).await?;
 
     // The worker does NOT run migrations — the control plane owns them
     // (MAIN-146 NG-2). It just connects to the schema they produced.

@@ -1026,7 +1026,7 @@ impl TenantCaRepository for DbTenantCaRepository {
     }
 
     async fn promote(&self, tenant: TenantId, ca_id: Uuid) -> ApiResult<bool> {
-        let mut tx = self.db.begin().await?;
+        let mut tx = self.db.begin().await.map_err(nook_db::DbError::from)?;
         // Demote first: the partial unique index allows only one active row, so
         // the order matters.
         tx.exec(
