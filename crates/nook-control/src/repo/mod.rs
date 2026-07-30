@@ -13,5 +13,6 @@
 
 pub mod identity;
 pub mod invites;
+pub mod notebook;
 pub mod tasks;
 pub mod workspaces;

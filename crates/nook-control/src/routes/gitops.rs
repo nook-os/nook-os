@@ -600,11 +600,7 @@ async fn require_app_password(state: &AppState, auth: &AuthCtx, passphrase: &str
             "a .env has to be sealed with your app password".into(),
         ));
     }
-    let Some(challenge) = state
-        .workspace_secrets
-        .vault_challenge(auth.user_id)
-        .await?
-    else {
+    let Some(challenge) = state.vaults.app_password_challenge(auth.user_id).await? else {
         return Err(ApiError::SetupRequired(
             "set an app password before storing secrets".into(),
         ));

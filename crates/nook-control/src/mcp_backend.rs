@@ -279,23 +279,28 @@ impl NookBackend for McpBackend {
     async fn get_notes(&self, workspace: String) -> anyhow::Result<Vec<Note>> {
         let tenant = self.tenant().await?;
         let workspace_id = self.resolve_workspace(tenant, &workspace).await?;
-        Ok(notebook_queries::list_notes(&self.state.db, tenant, workspace_id).await?)
+        Ok(notebook_queries::list_notes(&*self.state.notebook, tenant, workspace_id).await?)
     }
 
     async fn append_note(&self, workspace: String, content: String) -> anyhow::Result<Note> {
         let tenant = self.tenant().await?;
         let workspace_id = self.resolve_workspace(tenant, &workspace).await?;
         let existing =
-            notebook_queries::latest_rolling_note(&self.state.db, tenant, workspace_id).await?;
+            notebook_queries::latest_rolling_note(&*self.state.notebook, tenant, workspace_id)
+                .await?;
 
         let note = match existing {
             Some(note) => {
-                notebook_queries::append_to_note(&self.state.db, note.id, format!("\n{content}"))
-                    .await?
+                notebook_queries::append_to_note(
+                    &*self.state.notebook,
+                    note.id,
+                    format!("\n{content}"),
+                )
+                .await?
             }
             None => {
                 notebook_queries::create_note(
-                    &self.state.db,
+                    &*self.state.notebook,
                     tenant,
                     workspace_id,
                     CreateNoteRequest {
