@@ -7,19 +7,19 @@
 //! makes them worth asserting rather than reviewing.
 
 use nook_control::services::local_auth::{self, AuthMode};
+use nook_db::{params, Db, DbPool};
 use nook_testkit::TestBed;
 use nook_types::TenantId;
-use sqlx::PgPool;
 use uuid::Uuid;
 
-async fn seed_tenant(pool: &PgPool) -> TenantId {
+async fn seed_tenant(pool: &DbPool) -> TenantId {
     let id = TenantId::new();
-    sqlx::query("INSERT INTO tenants (id, slug, name) VALUES ($1, $2, $2)")
-        .bind(id)
-        .bind(format!("local-{}", Uuid::now_v7().simple()))
-        .execute(pool)
-        .await
-        .expect("tenant");
+    pool.exec(
+        "INSERT INTO tenants (id, slug, name) VALUES ($1, $2, $2)",
+        params![id, format!("local-{}", Uuid::now_v7().simple())],
+    )
+    .await
+    .expect("tenant");
     id
 }
 
@@ -30,7 +30,7 @@ async fn an_account_signs_in_with_its_password_and_not_with_another() {
     let Some(mut bed) = TestBed::new().await else {
         return;
     };
-    let t = seed_tenant(&bed.pool).await;
+    let t = seed_tenant(&bed.db()).await;
 
     local_auth::create(
         &nook_control::repo::identity::DbIdentityRepository::new(bed.db()),
@@ -83,7 +83,7 @@ async fn choosing_a_sign_in_method_is_one_way() {
     let Some(mut bed) = TestBed::new().await else {
         return;
     };
-    let t = seed_tenant(&bed.pool).await;
+    let t = seed_tenant(&bed.db()).await;
 
     assert_eq!(
         local_auth::mode_of(
@@ -145,7 +145,7 @@ async fn a_failed_login_does_not_claim_the_mode() {
     let Some(mut bed) = TestBed::new().await else {
         return;
     };
-    let t = seed_tenant(&bed.pool).await;
+    let t = seed_tenant(&bed.db()).await;
 
     assert!(local_auth::login(
         &nook_control::repo::identity::DbIdentityRepository::new(bed.db()),
@@ -177,7 +177,7 @@ async fn the_password_hash_never_leaves_the_database() {
     let Some(mut bed) = TestBed::new().await else {
         return;
     };
-    let t = seed_tenant(&bed.pool).await;
+    let t = seed_tenant(&bed.db()).await;
 
     let user = local_auth::create(
         &nook_control::repo::identity::DbIdentityRepository::new(bed.db()),
@@ -192,12 +192,14 @@ async fn the_password_hash_never_leaves_the_database() {
     .expect("create");
 
     // It really is stored…
-    let (stored,): (Option<String>,) =
-        sqlx::query_as("SELECT password_hash FROM users WHERE id = $1")
-            .bind(user.id)
-            .fetch_one(&bed.pool)
-            .await
-            .unwrap();
+    let (stored,): (Option<String>,) = bed
+        .db()
+        .query_one(
+            "SELECT password_hash FROM users WHERE id = $1",
+            params![user.id],
+        )
+        .await
+        .unwrap();
     assert!(stored.unwrap().starts_with("$argon2id$"));
 
     // …and it really is absent from everything we hand out.
@@ -211,9 +213,9 @@ async fn the_password_hash_never_leaves_the_database() {
 
     // And from the shape the rest of the API fetches, which is the one that
     // would regress if someone added the field to the struct.
-    let refetched: nook_types::User = sqlx::query_as("SELECT * FROM users WHERE id = $1")
-        .bind(user.id)
-        .fetch_one(&bed.pool)
+    let refetched: nook_types::User = bed
+        .db()
+        .query_one("SELECT * FROM users WHERE id = $1", params![user.id])
         .await
         .unwrap();
     let json = serde_json::to_string(&refetched).unwrap();
@@ -229,18 +231,17 @@ async fn an_oidc_account_cannot_be_given_a_password() {
     let Some(mut bed) = TestBed::new().await else {
         return;
     };
-    let t = seed_tenant(&bed.pool).await;
+    let t = seed_tenant(&bed.db()).await;
 
     let id = nook_types::UserId::new();
-    sqlx::query(
-        "INSERT INTO users (id, tenant_id, display_name, email, role)
+    bed.db()
+        .exec(
+            "INSERT INTO users (id, tenant_id, display_name, email, role)
          VALUES ($1, $2, 'Fed', 'fed@example.com', 'member')",
-    )
-    .bind(id)
-    .bind(t)
-    .execute(&bed.pool)
-    .await
-    .unwrap();
+            params![id, t],
+        )
+        .await
+        .unwrap();
 
     assert!(
         local_auth::change_password(
@@ -271,7 +272,7 @@ async fn changing_a_password_requires_the_current_one() {
     let Some(mut bed) = TestBed::new().await else {
         return;
     };
-    let t = seed_tenant(&bed.pool).await;
+    let t = seed_tenant(&bed.db()).await;
 
     let user = local_auth::create(
         &nook_control::repo::identity::DbIdentityRepository::new(bed.db()),
@@ -327,7 +328,7 @@ async fn usernames_are_unique_within_a_tenant_case_insensitively() {
     let Some(mut bed) = TestBed::new().await else {
         return;
     };
-    let t = seed_tenant(&bed.pool).await;
+    let t = seed_tenant(&bed.db()).await;
 
     local_auth::create(
         &nook_control::repo::identity::DbIdentityRepository::new(bed.db()),
@@ -354,7 +355,7 @@ async fn usernames_are_unique_within_a_tenant_case_insensitively() {
     assert!(format!("{err:?}").contains("already taken"), "{err:?}");
 
     // A different tenant is a different namespace.
-    let other = seed_tenant(&bed.pool).await;
+    let other = seed_tenant(&bed.db()).await;
     local_auth::create(
         &nook_control::repo::identity::DbIdentityRepository::new(bed.db()),
         other,
@@ -377,7 +378,7 @@ async fn a_weak_password_creates_nothing() {
     let Some(mut bed) = TestBed::new().await else {
         return;
     };
-    let t = seed_tenant(&bed.pool).await;
+    let t = seed_tenant(&bed.db()).await;
 
     assert!(local_auth::create(
         &nook_control::repo::identity::DbIdentityRepository::new(bed.db()),
@@ -391,9 +392,12 @@ async fn a_weak_password_creates_nothing() {
     .await
     .is_err());
 
-    let (n,): (i64,) = sqlx::query_as("SELECT count(*) FROM users WHERE tenant_id = $1")
-        .bind(t)
-        .fetch_one(&bed.pool)
+    let (n,): (i64,) = bed
+        .db()
+        .query_one(
+            "SELECT count(*) FROM users WHERE tenant_id = $1",
+            params![t],
+        )
         .await
         .unwrap();
     assert_eq!(n, 0, "a rejected password must leave no user behind");

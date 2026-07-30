@@ -6,6 +6,7 @@
 //! during a handshake actually reaches the request, and that the control plane
 //! turns it into the right node.
 
+use nook_db::{params, Db, DbPool};
 use std::sync::Arc;
 
 use nook_control::agent_tls;
@@ -13,7 +14,6 @@ use nook_control::ca;
 use nook_control::crypto::Vault;
 use nook_testkit::TestBed;
 use nook_types::TenantId;
-use sqlx::PgPool;
 use uuid::Uuid;
 
 /// The CA and node repositories over the bed's pool. Tests keep raw DB access
@@ -31,27 +31,24 @@ fn vault() -> Vault {
     Vault::from_env("test-session-secret-that-is-long-enough-000000").expect("vault")
 }
 
-async fn seed_tenant(pool: &PgPool) -> TenantId {
+async fn seed_tenant(pool: &DbPool) -> TenantId {
     let id = TenantId::new();
-    sqlx::query("INSERT INTO tenants (id, slug, name) VALUES ($1, $2, $2)")
-        .bind(id)
-        .bind(format!("mtls-{}", Uuid::now_v7().simple()))
-        .execute(pool)
-        .await
-        .expect("tenant");
+    pool.exec(
+        "INSERT INTO tenants (id, slug, name) VALUES ($1, $2, $2)",
+        params![id, format!("mtls-{}", Uuid::now_v7().simple())],
+    )
+    .await
+    .expect("tenant");
     id
 }
 
-async fn seed_node(pool: &PgPool, tenant: TenantId) -> Uuid {
+async fn seed_node(pool: &DbPool, tenant: TenantId) -> Uuid {
     let id = Uuid::now_v7();
-    sqlx::query(
+    pool.exec(
         "INSERT INTO nodes (id, tenant_id, name, node_token_hash, status)
          VALUES ($1, $2, $3, $3, 'offline')",
+        params![id, tenant, format!("n-{}", Uuid::now_v7().simple())],
     )
-    .bind(id)
-    .bind(tenant)
-    .bind(format!("n-{}", Uuid::now_v7().simple()))
-    .execute(pool)
     .await
     .expect("node");
     id
@@ -59,7 +56,7 @@ async fn seed_node(pool: &PgPool, tenant: TenantId) -> Uuid {
 
 /// Issue a client certificate the way enrolment does.
 async fn issue_client_cert(
-    pool: &PgPool,
+    pool: &DbPool,
     tenant: TenantId,
     node: Uuid,
 ) -> (String, rcgen::KeyPair) {
@@ -72,9 +69,7 @@ async fn issue_client_cert(
     let csr = params.serialize_request(&key).unwrap().pem().unwrap();
 
     let leaf = ca::sign_node_csr(
-        &nook_control::repo::nodes::DbTenantCaRepository::new(nook_db::EnginePool::from_pg(
-            pool.clone(),
-        )),
+        &nook_control::repo::nodes::DbTenantCaRepository::new(pool.clone()),
         &vault(),
         tenant,
         node,
@@ -108,12 +103,12 @@ async fn a_client_certificate_survives_the_handshake_and_identifies_the_node() {
     // rustls needs a process-wide crypto provider; ignore a second install.
     let _ = rustls::crypto::ring::default_provider().install_default();
 
-    let tenant = seed_tenant(&bed.pool).await;
+    let tenant = seed_tenant(&bed.db()).await;
     ca::generate(&cas(&bed), &vault(), tenant, true)
         .await
         .unwrap();
-    let node = seed_node(&bed.pool, tenant).await;
-    let (client_cert, client_key) = issue_client_cert(&bed.pool, tenant, node).await;
+    let node = seed_node(&bed.db(), tenant).await;
+    let (client_cert, client_key) = issue_client_cert(&bed.db(), tenant, node).await;
 
     // Stand up the real acceptor with a real certificate on disk.
     let dir = std::env::temp_dir().join(format!("nook-mtls-{}", Uuid::now_v7().simple()));

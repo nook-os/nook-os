@@ -22,19 +22,20 @@ use nook_control::routes::auth::{
 use nook_control::services::identity::{login_identity, IdentityClaims, DEV_ISSUER};
 use nook_control::services::local_auth::{self, AuthMode};
 use nook_control::{AppState, Config};
+use nook_db::{params, Db, DbPool};
 use nook_testkit::TestBed;
 use nook_types::{TenantId, UserId};
-use sqlx::PgPool;
 use uuid::Uuid;
 
 /// A tenant already mode-locked to `local` — the state the dev hatch must work
 /// against and a real IdP must not.
 async fn locked_local_tenant(bed: &TestBed) -> TenantId {
     let id = TenantId::new();
-    sqlx::query("INSERT INTO tenants (id, slug, name) VALUES ($1, $2, $2)")
-        .bind(id)
-        .bind(format!("locked-{}", Uuid::now_v7().simple()))
-        .execute(&bed.pool)
+    bed.db()
+        .exec(
+            "INSERT INTO tenants (id, slug, name) VALUES ($1, $2, $2)",
+            params![id, format!("locked-{}", Uuid::now_v7().simple())],
+        )
         .await
         .expect("tenant");
     local_auth::claim_mode(
@@ -47,30 +48,27 @@ async fn locked_local_tenant(bed: &TestBed) -> TenantId {
     id
 }
 
-async fn seed_user(pool: &PgPool, tenant: TenantId, email: &str) -> UserId {
+async fn seed_user(pool: &DbPool, tenant: TenantId, email: &str) -> UserId {
     let id = UserId::new();
-    sqlx::query(
+    pool.exec(
+        // The person id is generated HERE rather than by `gen_random_uuid()`:
+        // that function is Postgres-only, and the value is not under test.
         "INSERT INTO users (id, tenant_id, person_id, display_name, email)
-         VALUES ($1, $2, gen_random_uuid(), 'Test', $3)",
+         VALUES ($1, $2, $3, 'Test', $4)",
+        params![id, tenant, uuid::Uuid::now_v7(), email],
     )
-    .bind(id)
-    .bind(tenant)
-    .bind(email)
-    .execute(pool)
     .await
     .expect("user");
     id
 }
 
-async fn seed_identity(pool: &PgPool, user: UserId, issuer: &str, subject: &str) {
-    sqlx::query("INSERT INTO identities (id, user_id, issuer, subject) VALUES ($1, $2, $3, $4)")
-        .bind(Uuid::now_v7())
-        .bind(user)
-        .bind(issuer)
-        .bind(subject)
-        .execute(pool)
-        .await
-        .expect("identity");
+async fn seed_identity(pool: &DbPool, user: UserId, issuer: &str, subject: &str) {
+    pool.exec(
+        "INSERT INTO identities (id, user_id, issuer, subject) VALUES ($1, $2, $3, $4)",
+        params![Uuid::now_v7(), user, issuer, subject],
+    )
+    .await
+    .expect("identity");
 }
 
 fn claims(issuer: &str, subject: &str, email: &str) -> IdentityClaims {
@@ -92,8 +90,8 @@ async fn dev_issuer_signs_in_on_a_local_locked_tenant() {
         return;
     };
     let t = locked_local_tenant(&bed).await;
-    let u = seed_user(&bed.pool, t, "dev-me@example.test").await;
-    seed_identity(&bed.pool, u, DEV_ISSUER, "dev-me@example.test").await;
+    let u = seed_user(&bed.db(), t, "dev-me@example.test").await;
+    seed_identity(&bed.db(), u, DEV_ISSUER, "dev-me@example.test").await;
     let state = bed.app_state().await;
 
     let (user, tenant) = login_identity(
@@ -167,20 +165,19 @@ async fn dev_login_lands_a_usable_session_for_a_memberless_account() {
     };
     let t = locked_local_tenant(&bed).await;
     let email = format!("orphan-{}@example.test", Uuid::now_v7().simple());
-    let u = seed_user(&bed.pool, t, &email).await;
+    let u = seed_user(&bed.db(), t, &email).await;
 
     let member_count = |bed: &TestBed| {
-        let pool = bed.pool.clone();
+        let pool = bed.db().clone();
         async move {
-            let (n,): (i64,) = sqlx::query_as(
-                "SELECT count(*) FROM tenant_members
+            let (n,): (i64,) = pool
+                .query_one(
+                    "SELECT count(*) FROM tenant_members
                  WHERE tenant_id = $1 AND principal_type = 'user' AND principal_id = $2",
-            )
-            .bind(t)
-            .bind(u)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+                    params![t, u],
+                )
+                .await
+                .unwrap();
             n
         }
     };
@@ -220,8 +217,8 @@ async fn a_real_issuer_is_still_refused_on_a_local_locked_tenant() {
     };
     // Identical setup to the dev case — only the issuer differs.
     let t = locked_local_tenant(&bed).await;
-    let u = seed_user(&bed.pool, t, "real-me@example.test").await;
-    seed_identity(&bed.pool, u, "https://idp.example.test", "real-subject").await;
+    let u = seed_user(&bed.db(), t, "real-me@example.test").await;
+    seed_identity(&bed.db(), u, "https://idp.example.test", "real-subject").await;
     let state = bed.app_state().await;
 
     let err = login_identity(
@@ -252,15 +249,14 @@ async fn purge_removes_only_test_tenants_and_is_idempotent() {
     };
     let mk = |name: &str, slug: &str| {
         let (name, slug) = (name.to_string(), slug.to_string());
-        let pool = bed.pool.clone();
+        let pool = bed.db().clone();
         async move {
-            sqlx::query("INSERT INTO tenants (id, slug, name) VALUES ($1, $2, $3)")
-                .bind(TenantId::new())
-                .bind(slug)
-                .bind(name)
-                .execute(&pool)
-                .await
-                .expect("tenant");
+            pool.exec(
+                "INSERT INTO tenants (id, slug, name) VALUES ($1, $2, $3)",
+                params![TenantId::new(), slug, name],
+            )
+            .await
+            .expect("tenant");
         }
     };
     // Two legacy markers (one by name, one by slug) and one real tenant.
@@ -277,16 +273,21 @@ async fn purge_removes_only_test_tenants_and_is_idempotent() {
         .deleted;
     assert_eq!(deleted, 2, "only the two test-% tenants are removed");
 
-    let (survivors,): (i64,) = sqlx::query_as(
-        "SELECT count(*) FROM tenants WHERE slug LIKE 'test-%' OR name LIKE 'test-%'",
-    )
-    .fetch_one(&bed.pool)
-    .await
-    .unwrap();
+    let (survivors,): (i64,) = bed
+        .db()
+        .query_one(
+            "SELECT count(*) FROM tenants WHERE slug LIKE 'test-%' OR name LIKE 'test-%'",
+            params![],
+        )
+        .await
+        .unwrap();
     assert_eq!(survivors, 0, "no test-% tenant remains");
-    let (real_alive,): (i64,) = sqlx::query_as("SELECT count(*) FROM tenants WHERE slug = $1")
-        .bind(&real_slug)
-        .fetch_one(&bed.pool)
+    let (real_alive,): (i64,) = bed
+        .db()
+        .query_one(
+            "SELECT count(*) FROM tenants WHERE slug = $1",
+            params![&real_slug],
+        )
         .await
         .unwrap();
     assert_eq!(real_alive, 1, "a real tenant is never touched");
@@ -330,7 +331,7 @@ async fn dev_accounts_caps_the_page_and_searches() {
     // whatever the bootstrap seed created.
     let marker = format!("cap{}", Uuid::now_v7().simple());
     for i in 0..55 {
-        seed_user(&bed.pool, t, &format!("{marker}-{i:02}@example.test")).await;
+        seed_user(&bed.db(), t, &format!("{marker}-{i:02}@example.test")).await;
     }
     let state = bed.app_state().await;
 

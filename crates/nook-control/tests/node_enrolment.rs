@@ -6,9 +6,9 @@
 
 use nook_control::ca;
 use nook_control::crypto::Vault;
+use nook_db::{params, Db, DbPool};
 use nook_testkit::TestBed;
 use nook_types::TenantId;
-use sqlx::PgPool;
 use uuid::Uuid;
 
 /// The CA and node repositories over the bed's pool. Tests keep raw DB access
@@ -38,27 +38,24 @@ fn node_csr(node_hint: &str) -> (rcgen::KeyPair, String) {
     (key, csr.pem().unwrap())
 }
 
-async fn seed_tenant(pool: &PgPool) -> TenantId {
+async fn seed_tenant(pool: &DbPool) -> TenantId {
     let id = TenantId::new();
-    sqlx::query("INSERT INTO tenants (id, slug, name) VALUES ($1, $2, $2)")
-        .bind(id)
-        .bind(format!("en-{}", Uuid::now_v7().simple()))
-        .execute(pool)
-        .await
-        .expect("tenant");
+    pool.exec(
+        "INSERT INTO tenants (id, slug, name) VALUES ($1, $2, $2)",
+        params![id, format!("en-{}", Uuid::now_v7().simple())],
+    )
+    .await
+    .expect("tenant");
     id
 }
 
-async fn seed_node(pool: &PgPool, tenant: TenantId) -> Uuid {
+async fn seed_node(pool: &DbPool, tenant: TenantId) -> Uuid {
     let id = Uuid::now_v7();
-    sqlx::query(
+    pool.exec(
         "INSERT INTO nodes (id, tenant_id, name, node_token_hash, status)
          VALUES ($1, $2, $3, $3, 'offline')",
+        params![id, tenant, format!("n-{}", Uuid::now_v7().simple())],
     )
-    .bind(id)
-    .bind(tenant)
-    .bind(format!("n-{}", Uuid::now_v7().simple()))
-    .execute(pool)
     .await
     .expect("node");
     id
@@ -72,9 +69,9 @@ async fn signs_a_csr_with_server_chosen_identity() {
         return;
     };
     let v = vault();
-    let tenant = seed_tenant(&bed.pool).await;
+    let tenant = seed_tenant(&bed.db()).await;
     ca::generate(&cas(&bed), &v, tenant, true).await.unwrap();
-    let node = seed_node(&bed.pool, tenant).await;
+    let node = seed_node(&bed.db(), tenant).await;
 
     // The CSR lies about who it is; the issued cert must not repeat the lie.
     let (_key, csr) = node_csr("i-am-somebody-else");
@@ -138,31 +135,30 @@ async fn renews_after_expiry_and_across_a_rotation() {
         return;
     };
     let v = vault();
-    let tenant = seed_tenant(&bed.pool).await;
+    let tenant = seed_tenant(&bed.db()).await;
     let old_ca = ca::generate(&cas(&bed), &v, tenant, true).await.unwrap();
-    let node = seed_node(&bed.pool, tenant).await;
+    let node = seed_node(&bed.db(), tenant).await;
 
     // Enrol.
     let (key, csr) = node_csr("first");
     let first = ca::sign_node_csr(&cas(&bed), &v, tenant, node, &csr)
         .await
         .unwrap();
-    sqlx::query(
-        "UPDATE nodes SET ca_id = $2, cert_not_after = $3, public_key_pem = $4 WHERE id = $1",
-    )
-    .bind(node)
-    .bind(first.ca_id)
-    .bind(first.not_after)
-    .bind(&first.public_key_pem)
-    .execute(&bed.pool)
-    .await
-    .unwrap();
+    bed.db()
+        .exec(
+            "UPDATE nodes SET ca_id = $2, cert_not_after = $3, public_key_pem = $4 WHERE id = $1",
+            params![node, first.ca_id, first.not_after, &first.public_key_pem],
+        )
+        .await
+        .unwrap();
 
     // The machine goes away, its certificate expires, and the tenant rotates
     // its CA while nobody is looking.
-    sqlx::query("UPDATE nodes SET cert_not_after = now() - interval '90 days' WHERE id = $1")
-        .bind(node)
-        .execute(&bed.pool)
+    bed.db()
+        .exec(
+            "UPDATE nodes SET cert_not_after = now() - interval '90 days' WHERE id = $1",
+            params![node],
+        )
         .await
         .unwrap();
     let new_ca = ca::generate(&cas(&bed), &v, tenant, false).await.unwrap();
@@ -210,8 +206,8 @@ async fn refuses_to_sign_without_an_active_ca() {
         return;
     };
     let v = vault();
-    let tenant = seed_tenant(&bed.pool).await;
-    let node = seed_node(&bed.pool, tenant).await;
+    let tenant = seed_tenant(&bed.db()).await;
+    let node = seed_node(&bed.db(), tenant).await;
     let (_k, csr) = node_csr("x");
 
     let err = ca::sign_node_csr(&cas(&bed), &v, tenant, node, &csr)
@@ -243,9 +239,9 @@ async fn a_valid_certificate_identifies_its_node() {
         return;
     };
     let v = vault();
-    let tenant = seed_tenant(&bed.pool).await;
+    let tenant = seed_tenant(&bed.db()).await;
     ca::generate(&cas(&bed), &v, tenant, true).await.unwrap();
-    let node = seed_node(&bed.pool, tenant).await;
+    let node = seed_node(&bed.db(), tenant).await;
 
     let (_k, csr) = node_csr("n");
     let leaf = ca::sign_node_csr(&cas(&bed), &v, tenant, node, &csr)
@@ -270,12 +266,12 @@ async fn a_certificate_from_another_tenant_is_rejected() {
         return;
     };
     let v = vault();
-    let (a, b) = (seed_tenant(&bed.pool).await, seed_tenant(&bed.pool).await);
+    let (a, b) = (seed_tenant(&bed.db()).await, seed_tenant(&bed.db()).await);
     ca::generate(&cas(&bed), &v, a, true).await.unwrap();
     ca::generate(&cas(&bed), &v, b, true).await.unwrap();
 
     // A node that really belongs to tenant B...
-    let node_b = seed_node(&bed.pool, b).await;
+    let node_b = seed_node(&bed.db(), b).await;
     // ...but tenant A's CA signs a certificate naming it.
     let (_k, csr) = node_csr("n");
     let forged = ca::sign_node_csr(&cas(&bed), &v, a, node_b, &csr)
@@ -300,9 +296,9 @@ async fn a_self_signed_certificate_is_rejected() {
         return;
     };
     let v = vault();
-    let tenant = seed_tenant(&bed.pool).await;
+    let tenant = seed_tenant(&bed.db()).await;
     ca::generate(&cas(&bed), &v, tenant, true).await.unwrap();
-    let node = seed_node(&bed.pool, tenant).await;
+    let node = seed_node(&bed.db(), tenant).await;
 
     // Forge one with the right names but our own key.
     use rcgen::{CertificateParams, DistinguishedName, DnType};
@@ -332,17 +328,19 @@ async fn a_revoked_node_is_refused() {
         return;
     };
     let v = vault();
-    let tenant = seed_tenant(&bed.pool).await;
+    let tenant = seed_tenant(&bed.db()).await;
     ca::generate(&cas(&bed), &v, tenant, true).await.unwrap();
-    let node = seed_node(&bed.pool, tenant).await;
+    let node = seed_node(&bed.db(), tenant).await;
     let (_k, csr) = node_csr("n");
     let leaf = ca::sign_node_csr(&cas(&bed), &v, tenant, node, &csr)
         .await
         .unwrap();
 
-    sqlx::query("UPDATE nodes SET revoked_at = now() WHERE id = $1")
-        .bind(node)
-        .execute(&bed.pool)
+    bed.db()
+        .exec(
+            "UPDATE nodes SET revoked_at = now() WHERE id = $1",
+            params![node],
+        )
         .await
         .unwrap();
 
@@ -362,9 +360,9 @@ async fn a_leaf_from_a_retiring_ca_still_authenticates() {
         return;
     };
     let v = vault();
-    let tenant = seed_tenant(&bed.pool).await;
+    let tenant = seed_tenant(&bed.db()).await;
     let old = ca::generate(&cas(&bed), &v, tenant, true).await.unwrap();
-    let node = seed_node(&bed.pool, tenant).await;
+    let node = seed_node(&bed.db(), tenant).await;
 
     let (_k, csr) = node_csr("n");
     let leaf = ca::sign_node_csr(&cas(&bed), &v, tenant, node, &csr)
