@@ -159,3 +159,63 @@ async fn a_node_credential_sees_all_sessions_unchanged() {
 
     bed.teardown().await;
 }
+
+/// The `status IN ('starting','running','detached')` guard on the status write,
+/// which nothing covered until MAIN-253 moved the statement and went looking.
+///
+/// Terminal sockets close after the process they were watching has already
+/// gone, so a `detached` write routinely races an `exited` one. Without the
+/// guard the late write wins and a dead session reads `detached` — which is a
+/// LIVE status, so it never leaves the active list, keeps its slot in the
+/// capacity view, and looks resumable in the UI. Dropping the `AND status IN
+/// (…)` is a one-line edit no other test notices.
+#[tokio::test]
+async fn a_late_status_write_cannot_resurrect_a_finished_session() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let state = bed.app_state().await;
+    let tenant = bed.tenant("late").await;
+    let node = add_node(&bed.pool, tenant).await;
+    let id = add_session(&bed.pool, tenant, node, None).await;
+
+    // While it is live, the write lands.
+    assert_eq!(
+        state
+            .sessions
+            .mark_status_if_live(id, "detached")
+            .await
+            .expect("live write"),
+        1
+    );
+    assert_eq!(
+        state.sessions.status_of(id).await.unwrap().as_deref(),
+        Some("detached")
+    );
+
+    // The process exits.
+    sqlx::query("UPDATE sessions SET status = 'exited' WHERE id = $1")
+        .bind(id)
+        .execute(&bed.pool)
+        .await
+        .expect("exit");
+
+    // The socket's detach handler fires afterwards. It must match no row.
+    assert_eq!(
+        state
+            .sessions
+            .mark_status_if_live(id, "detached")
+            .await
+            .expect("late write"),
+        0,
+        "a finished session is final"
+    );
+    assert_eq!(
+        state.sessions.status_of(id).await.unwrap().as_deref(),
+        Some("exited"),
+        "without the guard this reads 'detached' and the session never leaves \
+         the active list"
+    );
+
+    bed.teardown().await;
+}

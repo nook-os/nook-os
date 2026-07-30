@@ -1,70 +1,55 @@
-//! Session reads and creation (MAIN-245).
+//! Session reads and creation (MAIN-245; queries moved behind
+//! [`SessionRepository`] by MAIN-253).
 //!
-//! Split verbatim out of `services/core.rs`. The four `create_*` entry points
-//! live together because they share the same placement and runtime rules and
-//! differ only in who is asking — a worktree session, an ad-hoc one, an
-//! auth-flow one.
+//! What is left here is orchestration, not data access: resolving which
+//! checkout to start in, telling the node to start the session, recording the
+//! activity event, and undoing the row when the node turned out to be gone. The
+//! four `create_*` entry points live together because they share those rules
+//! and differ only in who is asking — a worktree session, an ad-hoc terminal,
+//! an auth-flow one.
 
-use nook_db::{params, Db, DbPool, Postgres, TypeMapping};
 use nook_types::*;
 
 use crate::error::ApiResult;
+use crate::repo::sessions::{NewSession, SessionFilter, SessionRepository};
+use crate::repo::workspaces::WorkspaceRepository;
 
 /// List a tenant's sessions, optionally scoped to a single creator (MAIN-133).
-/// `creator = Some(user)` returns only sessions that user started — a member's
-/// own view, which naturally excludes `created_by NULL` (legacy/MCP) rows since
-/// `NULL = user` is never true. `creator = None` returns all sessions (the
-/// owner/admin metadata view, and the unchanged view MCP/dispatcher get). This
-/// is the metadata/list layer only; content access stays with `session_guard`.
+/// This is the metadata/list layer only; content access stays with
+/// `session_guard`.
 pub async fn list_sessions(
-    db: &DbPool,
+    sessions: &dyn SessionRepository,
+    workspaces: &dyn WorkspaceRepository,
     tenant: TenantId,
     workspace: Option<WorkspaceId>,
     active_only: bool,
     creator: Option<UserId>,
 ) -> ApiResult<Vec<Session>> {
-    let mut sql = String::from("SELECT * FROM sessions WHERE tenant_id = $1");
-    let mut n = 1;
-    if workspace.is_some() {
-        n += 1;
-        sql.push_str(&format!(" AND workspace_id = ${n}"));
-    }
-    if creator.is_some() {
-        n += 1;
-        sql.push_str(&format!(" AND created_by = ${n}"));
-    }
-    if active_only {
-        sql.push_str(" AND status IN ('starting', 'running', 'detached')");
-    }
-    sql.push_str(" ORDER BY created_at DESC");
-    // Binds follow the same order the placeholders were numbered above.
-    let mut binds = params![tenant];
-    if let Some(w) = workspace {
-        binds.extend(params![w]);
-    }
-    if let Some(c) = creator {
-        binds.extend(params![c]);
-    }
-    let mut sessions = db.query_all::<Session>(&sql, binds).await?;
-    hydrate_checkouts(db, &mut sessions).await?;
-    Ok(sessions)
+    let mut rows = sessions
+        .list(
+            tenant,
+            SessionFilter {
+                workspace,
+                creator,
+                active_only,
+            },
+        )
+        .await?;
+    hydrate_checkouts(workspaces, &mut rows).await?;
+    Ok(rows)
 }
 
 /// Fill each session's `checkout` summary from its `checkout_id` (MAIN-222 AC-5)
 /// — id, path, branch, kind, and the node it lives on. A small N+1 over a short
 /// page of sessions; sessions with no binding (ad-hoc terminals, pruned
 /// checkouts) are left `None`.
-pub async fn hydrate_checkouts(db: &DbPool, sessions: &mut [Session]) -> ApiResult<()> {
+pub async fn hydrate_checkouts(
+    workspaces: &dyn WorkspaceRepository,
+    sessions: &mut [Session],
+) -> ApiResult<()> {
     for s in sessions.iter_mut() {
         let Some(cid) = s.checkout_id else { continue };
-        s.checkout = db
-            .query_opt::<nook_types::CheckoutSummary>(
-                "SELECT nw.id, nw.path, nw.git_branch AS branch, nw.kind, n.name AS node_name
-                 FROM node_workspaces nw JOIN nodes n ON n.id = nw.node_id
-                 WHERE nw.id = $1",
-                params![cid],
-            )
-            .await?;
+        s.checkout = workspaces.checkout_summary(cid).await?;
     }
     Ok(())
 }
@@ -81,33 +66,21 @@ pub async fn create_session(
     use crate::error::ApiError;
 
     // Pin to an explicit checkout (e.g. a worktree) when given, validating it
-    // belongs to this workspace on this node. Otherwise use the first checkout.
-    // LIMIT 1: a workspace can have several checkouts on one node (worktrees).
+    // belongs to this workspace on this node. Otherwise use the clone — a
+    // workspace can have several checkouts on one node (worktrees), and
+    // MAIN-222 AC-3 makes the default deterministic rather than whichever a
+    // delete/reinsert happened to order first.
     let path: Option<String> = match &req.path {
         Some(p) => {
             state
-                .db
-                .query_scalar_opt(
-                    "SELECT path FROM node_workspaces
-             WHERE tenant_id = $1 AND node_id = $2 AND workspace_id = $3 AND path = $4
-               AND missing_at IS NULL",
-                    params![tenant, req.node_id, req.workspace_id, p],
-                )
+                .workspaces
+                .present_checkout_path(tenant, req.workspace_id, req.node_id, p)
                 .await?
         }
         None => {
             state
-                .db
-                .query_scalar_opt(
-                    // MAIN-222 AC-3: the default "the checkout" is the CLONE,
-                    // deterministically — never a worktree a delete/reinsert
-                    // happened to order first.
-                    "SELECT path FROM node_workspaces
-             WHERE tenant_id = $1 AND node_id = $2 AND workspace_id = $3
-               AND kind = 'clone' AND missing_at IS NULL
-             ORDER BY discovered_at LIMIT 1",
-                    params![tenant, req.node_id, req.workspace_id],
-                )
+                .workspaces
+                .clone_path(tenant, req.workspace_id, req.node_id)
                 .await?
         }
     };
@@ -154,35 +127,26 @@ pub async fn create_session_at(
     // runs. Resolved from the path (present rows only) — whatever picked the
     // path, primary clone or a freshly-created worktree; NULL if no row yet
     // (discovery may not have scanned a just-made worktree) or an ad-hoc $HOME.
-    let checkout_id: Option<NodeWorkspaceId> = if workspace_path.is_empty() {
+    let checkout_id = if workspace_path.is_empty() {
         None
     } else {
         state
-            .db
-            .query_scalar_opt(
-                "SELECT id FROM node_workspaces
-                 WHERE node_id = $1 AND path = $2 AND missing_at IS NULL",
-                params![node_id, workspace_path],
-            )
+            .workspaces
+            .present_checkout_id_at(node_id, workspace_path)
             .await?
     };
 
-    let session: Session = state
-        .db
-        .query_one(
-            "INSERT INTO sessions (id, tenant_id, workspace_id, node_id, name, runtime, status, created_by, checkout_id)
-         VALUES ($1, $2, $3, $4, $5, $6, 'starting', $7, $8) RETURNING *",
-            params![
-                SessionId::new(),
-                tenant,
-                workspace_id,
-                node_id,
-                &name,
-                runtime,
-                created_by.map(|u| u.0),
-                checkout_id.map(|c| c.0)
-            ],
-        )
+    let session = state
+        .sessions
+        .create(NewSession {
+            tenant,
+            workspace_id: Some(workspace_id),
+            node_id,
+            name: name.clone(),
+            runtime: runtime.to_string(),
+            created_by,
+            checkout_id,
+        })
         .await?;
 
     let sent = state.registry.send_to_node(
@@ -196,16 +160,7 @@ pub async fn create_session_at(
         },
     );
     if !sent {
-        state
-            .db
-            .exec(
-                &format!(
-                    "UPDATE sessions SET status = 'error', updated_at = {} WHERE id = $1",
-                    Postgres.now()
-                ),
-                params![session.id],
-            )
-            .await?;
+        state.sessions.mark_failed_to_start(session.id).await?;
         return Err(ApiError::BadRequest("node went offline".into()));
     }
 
@@ -240,20 +195,17 @@ pub async fn create_ad_hoc_session(
         return Err(ApiError::BadRequest("node is offline".into()));
     }
     let name = name.unwrap_or_else(|| format!("{runtime} · terminal"));
-    let session: Session = state
-        .db
-        .query_one(
-            "INSERT INTO sessions (id, tenant_id, workspace_id, node_id, name, runtime, status, created_by)
-         VALUES ($1, $2, NULL, $3, $4, $5, 'starting', $6) RETURNING *",
-            params![
-                SessionId::new(),
-                tenant,
-                node_id,
-                &name,
-                runtime,
-                created_by.map(|u| u.0)
-            ],
-        )
+    let session = state
+        .sessions
+        .create(NewSession {
+            tenant,
+            workspace_id: None,
+            node_id,
+            name: name.clone(),
+            runtime: runtime.to_string(),
+            created_by,
+            checkout_id: None,
+        })
         .await?;
 
     let sent = state.registry.send_to_node(
@@ -268,16 +220,7 @@ pub async fn create_ad_hoc_session(
         },
     );
     if !sent {
-        state
-            .db
-            .exec(
-                &format!(
-                    "UPDATE sessions SET status = 'error', updated_at = {} WHERE id = $1",
-                    Postgres.now()
-                ),
-                params![session.id],
-            )
-            .await?;
+        state.sessions.mark_failed_to_start(session.id).await?;
         return Err(ApiError::BadRequest("node went offline".into()));
     }
 
@@ -314,20 +257,17 @@ pub async fn create_auth_session(
         return Err(ApiError::BadRequest("node is offline".into()));
     }
     let name = format!("authorize {runtime}");
-    let session: Session = state
-        .db
-        .query_one(
-            "INSERT INTO sessions (id, tenant_id, workspace_id, node_id, name, runtime, status, created_by)
-         VALUES ($1, $2, NULL, $3, $4, $5, 'starting', $6) RETURNING *",
-            params![
-                SessionId::new(),
-                tenant,
-                node_id,
-                &name,
-                runtime,
-                created_by.map(|u| u.0)
-            ],
-        )
+    let session = state
+        .sessions
+        .create(NewSession {
+            tenant,
+            workspace_id: None,
+            node_id,
+            name: name.clone(),
+            runtime: runtime.to_string(),
+            created_by,
+            checkout_id: None,
+        })
         .await?;
 
     let sent = state.registry.send_to_node(
@@ -340,16 +280,7 @@ pub async fn create_auth_session(
         },
     );
     if !sent {
-        state
-            .db
-            .exec(
-                &format!(
-                    "UPDATE sessions SET status = 'error', updated_at = {} WHERE id = $1",
-                    Postgres.now()
-                ),
-                params![session.id],
-            )
-            .await?;
+        state.sessions.mark_failed_to_start(session.id).await?;
         return Err(ApiError::BadRequest("node went offline".into()));
     }
 
@@ -369,14 +300,9 @@ pub async fn create_auth_session(
 /// One session by id, scoped to its tenant. Moved out of `mcp_backend`
 /// (MAIN-245), where the identical query appeared three times.
 pub async fn get_session(
-    db: &DbPool,
+    sessions: &dyn SessionRepository,
     tenant: TenantId,
     id: SessionId,
 ) -> ApiResult<Option<Session>> {
-    Ok(db
-        .query_opt(
-            "SELECT * FROM sessions WHERE id = $1 AND tenant_id = $2",
-            params![id, tenant],
-        )
-        .await?)
+    sessions.get(tenant, id).await
 }

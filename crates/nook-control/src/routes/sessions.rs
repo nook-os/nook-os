@@ -1,6 +1,5 @@
 use axum::extract::{Path, Query, State};
 use axum::Json;
-use nook_db::{params, Db, Postgres, TypeMapping};
 use nook_proto::{ControlToNode, UiEvent, WindowAction};
 use nook_types::*;
 use serde::Deserialize;
@@ -23,10 +22,7 @@ async fn session_for_content(
     auth: &AuthCtx,
     id: SessionId,
 ) -> ApiResult<Session> {
-    let session: Option<Session> = state
-        .db
-        .query_opt("SELECT * FROM sessions WHERE id = $1", params![id])
-        .await?;
+    let session: Option<Session> = state.sessions.by_id_unscoped(id).await?;
     let session = session.ok_or(ApiError::NotFound)?;
     auth.require_session_access(state, session.tenant_id)
         .await?;
@@ -64,7 +60,8 @@ pub async fn list(
     let creator = if sees_all { None } else { Some(auth.user_id) };
     Ok(Json(
         session_queries::list_sessions(
-            &state.db,
+            &*state.sessions,
+            &*state.workspaces,
             auth.tenant_id,
             q.workspace_id,
             q.active.unwrap_or(false),
@@ -84,7 +81,8 @@ pub async fn get_one(
     Path(id): Path<SessionId>,
 ) -> ApiResult<Json<Session>> {
     let mut session = session_for_content(&state, &auth, id).await?;
-    session_queries::hydrate_checkouts(&state.db, std::slice::from_mut(&mut session)).await?;
+    session_queries::hydrate_checkouts(&*state.workspaces, std::slice::from_mut(&mut session))
+        .await?;
     Ok(Json(session))
 }
 
@@ -103,7 +101,8 @@ pub async fn create(
     auth.require_node_may_use(&state, req.node_id).await?;
     let mut session =
         session_queries::create_session(&state, auth.tenant_id, Some(auth.user_id), req).await?;
-    session_queries::hydrate_checkouts(&state.db, std::slice::from_mut(&mut session)).await?;
+    session_queries::hydrate_checkouts(&*state.workspaces, std::slice::from_mut(&mut session))
+        .await?;
     Ok(Json(session))
 }
 
@@ -310,17 +309,7 @@ pub async fn update(
     if name.is_empty() {
         return Err(ApiError::BadRequest("name cannot be empty".into()));
     }
-    let session: Option<Session> = state
-        .db
-        .query_opt(
-            &format!(
-                "UPDATE sessions SET name = $3, updated_at = {}
-         WHERE id = $1 AND tenant_id = $2 RETURNING *",
-                Postgres.now()
-            ),
-            params![id, auth.tenant_id, name],
-        )
-        .await?;
+    let session: Option<Session> = state.sessions.rename(id, auth.tenant_id, name).await?;
     let session = session.ok_or(ApiError::NotFound)?;
     // A node may only touch sessions running on itself.
     auth.require_node_self(session.node_id)?;
@@ -411,31 +400,19 @@ pub async fn restart(
             // MAIN-222 AC-4: reuse the EXACT checkout the session started in when
             // it is still present. The stored binding is what makes "restart
             // lands in the same worktree" true instead of aspirational.
-            let bound: Option<(String,)> = if let Some(cid) = session.checkout_id {
-                state
-                    .db
-                    .query_opt(
-                        "SELECT path FROM node_workspaces WHERE id = $1 AND missing_at IS NULL",
-                        params![cid],
-                    )
-                    .await?
+            let bound: Option<String> = if let Some(cid) = session.checkout_id {
+                state.workspaces.present_checkout_path_by_id(cid).await?
             } else {
                 None
             };
             match bound {
-                Some((p,)) => p,
+                Some(p) => p,
                 // NULL binding, or the bound checkout is gone: fall back to the
                 // deterministic clone-only pick (AC-3), and say so.
                 None => {
                     let fallback: Option<(NodeWorkspaceId, String)> = state
-                        .db
-                        .query_opt(
-                            "SELECT id, path FROM node_workspaces
-                         WHERE workspace_id = $1 AND node_id = $2
-                           AND kind = 'clone' AND missing_at IS NULL
-                         ORDER BY discovered_at LIMIT 1",
-                            params![workspace_id, session.node_id],
-                        )
+                        .workspaces
+                        .present_clone(workspace_id, session.node_id)
                         .await?;
                     match fallback {
                         Some((clone_id, p)) => {
@@ -443,13 +420,7 @@ pub async fn restart(
                             // in, so the summary chip names it — not the pruned
                             // worktree it started in. The RETURNING * below picks
                             // this up for the response.
-                            state
-                                .db
-                                .exec(
-                                    "UPDATE sessions SET checkout_id = $2 WHERE id = $1",
-                                    params![id, clone_id],
-                                )
-                                .await?;
+                            state.sessions.bind_checkout(id, clone_id).await?;
                             tracing::info!(
                                 session_id = %id,
                                 "restart: bound checkout absent — rebound to the primary clone"
@@ -481,19 +452,9 @@ pub async fn restart(
         return Err(ApiError::BadRequest("node went offline".into()));
     }
 
-    let mut session: Session = state
-        .db
-        .query_one(
-            &format!(
-                "UPDATE sessions SET status = 'starting', error = NULL, ended_at = NULL,
-                updated_at = {}
-         WHERE id = $1 RETURNING *",
-                Postgres.now()
-            ),
-            params![id],
-        )
+    let mut session: Session = state.sessions.mark_restarting(id).await?;
+    session_queries::hydrate_checkouts(&*state.workspaces, std::slice::from_mut(&mut session))
         .await?;
-    session_queries::hydrate_checkouts(&state.db, std::slice::from_mut(&mut session)).await?;
     state.registry.publish(
         auth.tenant_id,
         UiEvent::SessionStatus {
@@ -534,13 +495,7 @@ pub async fn delete(
             ControlToNode::KillSession { session_id: id },
         );
     }
-    state
-        .db
-        .exec(
-            "DELETE FROM sessions WHERE id = $1 AND tenant_id = $2",
-            params![id, auth.tenant_id],
-        )
-        .await?;
+    state.sessions.delete(id, auth.tenant_id).await?;
     events::record(
         &state,
         auth.tenant_id,
