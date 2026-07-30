@@ -74,7 +74,23 @@ pub async fn overview(
         .await?;
 
     // Active sessions, creator-scoped identically to `list_sessions`.
-    let sessions = list_sessions(db, tenant, None, true, session_creator).await?;
+    //
+    // The repositories are built from the pool this read-model already holds
+    // rather than injected: `overview` spans five aggregates and belongs to no
+    // card yet (see the inline-SQL allow-list), so it still takes a `DbPool`.
+    // Whichever card gives it a home should hand it `AppState`'s repositories
+    // instead.
+    let session_repo = crate::repo::sessions::DbSessionRepository::new(db.clone());
+    let workspace_repo = crate::repo::workspaces::DbWorkspaceRepository::new(db.clone());
+    let sessions = list_sessions(
+        &session_repo,
+        &workspace_repo,
+        tenant,
+        None,
+        true,
+        session_creator,
+    )
+    .await?;
 
     // The ticket each checkout is working (MAIN-230), by the two joins that can
     // know it:

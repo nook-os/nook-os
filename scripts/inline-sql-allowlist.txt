@@ -19,13 +19,7 @@ crates/nook-control/src/routes/tenant_ca.rs      # per-tenant CA rows
 crates/nook-control/src/ca.rs                    # CA issue/sign, keyed by node
 crates/nook-control/src/services/node_queries.rs # split out by MAIN-245, awaits its trait
 crates/nook-control/src/ws/node.rs               # node socket: heartbeat + resources
-
-# ── MAIN-253 · SessionRepository ────────────────────────────────────────────
-crates/nook-control/src/routes/sessions.rs       # session start/list/kill
-crates/nook-control/src/services/session_queries.rs     # split out by MAIN-245, awaits its trait
-crates/nook-control/src/ws/attach.rs             # terminal attach: session lookup
-crates/nook-control/src/ws/registry.rs           # live agent-state persistence
-crates/nook-control/src/ws/bus.rs                # cross-instance UI fan-out
+crates/nook-control/src/ws/registry.rs           # the node lease cache — `nodes`, not sessions (re-filed by MAIN-253)
 
 # ── MAIN-255 · LoopJobRepository ────────────────────────────────────────────
 crates/nook-control/src/services/jobs.rs         # loop-job lifecycle + transcript
@@ -56,6 +50,7 @@ crates/nook-control/src/events.rs                # the activity-event writer, us
 crates/nook-control/src/services/activity_queries.rs    # the activity feed (split out by MAIN-245)
 crates/nook-control/src/services/overview_queries.rs    # Mission Control read-model, spans 5 aggregates
 crates/nook-control/src/routes/health.rs         # the liveness probe's SELECT 1
+crates/nook-control/src/ws/bus.rs                # bus_outbox + pg_notify; no aggregate owns it (re-filed by MAIN-253)
 crates/nook-control/src/services/secrets.rs      # secret sync: workspace_secrets + node_workspaces + sessions, no notebook data (re-filed by MAIN-254)
 
 # ── Permanently out of scope ────────────────────────────────────────────────

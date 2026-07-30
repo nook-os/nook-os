@@ -247,6 +247,45 @@ pub trait WorkspaceRepository: Send + Sync {
         path: &str,
     ) -> ApiResult<Option<NodeWorkspaceId>>;
 
+    // ── present-only lookups, for starting a session in one (MAIN-253) ──────
+    //
+    // A session must never be started in a checkout that has been tombstoned:
+    // the directory is gone, so the shell would land nowhere. These are the
+    // `missing_at IS NULL` variants of the reads above, kept distinct rather
+    // than adding a flag — the guard is the whole point of them.
+
+    /// A named checkout of this workspace on this node, if it is still present.
+    async fn present_checkout_path(
+        &self,
+        tenant: TenantId,
+        workspace: WorkspaceId,
+        node: NodeId,
+        path: &str,
+    ) -> ApiResult<Option<String>>;
+
+    /// The row id for a path on a node, present rows only — what binds a
+    /// session to the checkout it actually runs in (MAIN-222 AC-2).
+    async fn present_checkout_id_at(
+        &self,
+        node: NodeId,
+        path: &str,
+    ) -> ApiResult<Option<NodeWorkspaceId>>;
+
+    /// A checkout's path by row id, if it is still present. `None` means the
+    /// session's original checkout has gone.
+    async fn present_checkout_path_by_id(&self, id: NodeWorkspaceId) -> ApiResult<Option<String>>;
+
+    /// The workspace's clone on a node, id and path — where a restart falls
+    /// back to when the session's own checkout has gone.
+    async fn present_clone(
+        &self,
+        workspace: WorkspaceId,
+        node: NodeId,
+    ) -> ApiResult<Option<(NodeWorkspaceId, String)>>;
+
+    /// A checkout as the UI shows it beside a session (MAIN-222 AC-5).
+    async fn checkout_summary(&self, id: NodeWorkspaceId) -> ApiResult<Option<CheckoutSummary>>;
+
     /// Record a scanned checkout, healing a tombstone in place. `ON CONFLICT
     /// (node_id, path)` keeps the row id stable across a re-report.
     async fn upsert_checkout(&self, checkout: CheckoutUpsert) -> ApiResult<()>;
@@ -782,6 +821,78 @@ impl WorkspaceRepository for DbWorkspaceRepository {
             .query_scalar_opt(
                 "SELECT id FROM node_workspaces WHERE node_id = $1 AND path = $2",
                 params![node, path],
+            )
+            .await?)
+    }
+
+    async fn present_checkout_path(
+        &self,
+        tenant: TenantId,
+        workspace: WorkspaceId,
+        node: NodeId,
+        path: &str,
+    ) -> ApiResult<Option<String>> {
+        Ok(self
+            .db
+            .query_scalar_opt(
+                "SELECT path FROM node_workspaces
+                 WHERE tenant_id = $1 AND node_id = $2 AND workspace_id = $3 AND path = $4
+                   AND missing_at IS NULL",
+                params![tenant, node, workspace, path],
+            )
+            .await?)
+    }
+
+    async fn present_checkout_id_at(
+        &self,
+        node: NodeId,
+        path: &str,
+    ) -> ApiResult<Option<NodeWorkspaceId>> {
+        Ok(self
+            .db
+            .query_scalar_opt(
+                "SELECT id FROM node_workspaces
+                 WHERE node_id = $1 AND path = $2 AND missing_at IS NULL",
+                params![node, path],
+            )
+            .await?)
+    }
+
+    async fn present_checkout_path_by_id(&self, id: NodeWorkspaceId) -> ApiResult<Option<String>> {
+        Ok(self
+            .db
+            .query_scalar_opt(
+                "SELECT path FROM node_workspaces WHERE id = $1 AND missing_at IS NULL",
+                params![id],
+            )
+            .await?)
+    }
+
+    async fn present_clone(
+        &self,
+        workspace: WorkspaceId,
+        node: NodeId,
+    ) -> ApiResult<Option<(NodeWorkspaceId, String)>> {
+        Ok(self
+            .db
+            .query_opt(
+                "SELECT id, path FROM node_workspaces
+                 WHERE workspace_id = $1 AND node_id = $2
+                   AND kind = 'clone' AND missing_at IS NULL
+                 ORDER BY discovered_at LIMIT 1",
+                params![workspace, node],
+            )
+            .await?)
+    }
+
+    async fn checkout_summary(&self, id: NodeWorkspaceId) -> ApiResult<Option<CheckoutSummary>> {
+        Ok(self
+            .db
+            .query_opt(
+                "SELECT nw.id, nw.path, nw.git_branch AS branch, nw.kind, n.name AS node_name
+                 FROM node_workspaces nw JOIN nodes n ON n.id = nw.node_id
+                 WHERE nw.id = $1",
+                params![id],
             )
             .await?)
     }
@@ -1697,6 +1808,93 @@ impl WorkspaceRepository for FakeWorkspaceRepository {
             .iter()
             .find(|c| c.node_id == node && c.path == path)
             .map(|c| c.id))
+    }
+
+    async fn present_checkout_path(
+        &self,
+        tenant: TenantId,
+        workspace: WorkspaceId,
+        node: NodeId,
+        path: &str,
+    ) -> ApiResult<Option<String>> {
+        Ok(self
+            .inner
+            .lock()
+            .unwrap()
+            .checkouts
+            .iter()
+            .find(|c| {
+                c.tenant == tenant
+                    && c.workspace_id == workspace
+                    && c.node_id == node
+                    && c.path == path
+                    && c.missing_at.is_none()
+            })
+            .map(|c| c.path.clone()))
+    }
+
+    async fn present_checkout_id_at(
+        &self,
+        node: NodeId,
+        path: &str,
+    ) -> ApiResult<Option<NodeWorkspaceId>> {
+        Ok(self
+            .inner
+            .lock()
+            .unwrap()
+            .checkouts
+            .iter()
+            .find(|c| c.node_id == node && c.path == path && c.missing_at.is_none())
+            .map(|c| c.id))
+    }
+
+    async fn present_checkout_path_by_id(&self, id: NodeWorkspaceId) -> ApiResult<Option<String>> {
+        Ok(self
+            .inner
+            .lock()
+            .unwrap()
+            .checkouts
+            .iter()
+            .find(|c| c.id == id && c.missing_at.is_none())
+            .map(|c| c.path.clone()))
+    }
+
+    async fn present_clone(
+        &self,
+        workspace: WorkspaceId,
+        node: NodeId,
+    ) -> ApiResult<Option<(NodeWorkspaceId, String)>> {
+        let s = self.inner.lock().unwrap();
+        let mut clones: Vec<&FakeCheckout> = s
+            .checkouts
+            .iter()
+            .filter(|c| {
+                c.workspace_id == workspace
+                    && c.node_id == node
+                    && c.kind == "clone"
+                    && c.missing_at.is_none()
+            })
+            .collect();
+        clones.sort_by_key(|c| c.seq);
+        Ok(clones.first().map(|c| (c.id, c.path.clone())))
+    }
+
+    async fn checkout_summary(&self, id: NodeWorkspaceId) -> ApiResult<Option<CheckoutSummary>> {
+        let s = self.inner.lock().unwrap();
+        let Some(c) = s.checkouts.iter().find(|c| c.id == id) else {
+            return Ok(None);
+        };
+        // An INNER JOIN to nodes: an unknown node means no row, as in SQL.
+        let Some((_, _, node_name, _)) = s.nodes.iter().find(|(nid, ..)| *nid == c.node_id) else {
+            return Ok(None);
+        };
+        Ok(Some(CheckoutSummary {
+            id: c.id,
+            path: c.path.clone(),
+            branch: c.branch.clone(),
+            kind: c.kind.clone(),
+            node_name: node_name.clone(),
+        }))
     }
 
     async fn upsert_checkout(&self, c: CheckoutUpsert) -> ApiResult<()> {
