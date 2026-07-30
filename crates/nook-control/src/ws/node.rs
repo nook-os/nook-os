@@ -653,6 +653,21 @@ async fn handle_message(
         // A running loop job streamed a chunk of output (MAIN-161). Appended to
         // the transcript verbatim — never interpreted (NG-2). A bad id or a job
         // that has since vanished is dropped, not fatal to the connection.
+        // A real turn boundary from the streaming adapter (MAIN-240). Scoped to
+        // this node's own job for the same reason transcript lines are: a node
+        // token must not be able to drive another executor's UI.
+        NodeToControl::JobTurn { job_id, active } => {
+            if let Ok(id) = job_id.parse::<uuid::Uuid>() {
+                crate::services::jobs::turn_from_node(
+                    state,
+                    tenant,
+                    node_id,
+                    nook_types::JobId(id),
+                    active,
+                )
+                .await;
+            }
+        }
         NodeToControl::JobTranscript {
             job_id,
             source,

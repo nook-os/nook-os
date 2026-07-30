@@ -222,6 +222,25 @@ fn one_line(s: &str) -> String {
 /// if the session is gone the message has nowhere to land and that is reported,
 /// never silently swallowed.
 pub fn deliver_message(job_id: &str, body: &str) -> Result<(), String> {
+    if body.trim().is_empty() {
+        return Err("empty message".into());
+    }
+
+    // Streaming first (MAIN-240): write the turn as structured input. Note the
+    // message is NOT flattened here — the tmux path had to collapse newlines
+    // because `send_keys` would submit at the first one; structured input
+    // carries a multi-line brief intact.
+    {
+        let handle = stream_writers()
+            .lock()
+            .ok()
+            .and_then(|w| w.get(job_id).cloned());
+        if let Some(stdin) = handle {
+            return crate::job_adapter::write_turn(&stdin, body.trim());
+        }
+    }
+
+    // Fallback: a tmux-driven job still gets its keys typed (NG-1).
     let line = one_line(body);
     if line.is_empty() {
         return Err("empty message".into());
@@ -289,21 +308,223 @@ pub fn run(cfg: NodeConfig, out: Sender<NodeToControl>, job: LoopJob) {
         ),
     );
 
-    let (ok, message) = drive_session(
-        &out,
-        &job_id,
-        &tmux_name,
-        &worktree,
-        skill,
-        &target_task_key,
-        seed.as_deref(),
-    );
+    // Which execution strategy this runtime gets (MAIN-240). Claude speaks
+    // stream-json, so it runs headless and the transcript comes from real
+    // events; anything else keeps the tmux/PTY path untouched (NG-1).
+    let (ok, message) = match crate::job_adapter::adapter_for(RUNTIME) {
+        crate::job_adapter::Adapter::Streaming => drive_streaming(
+            &out,
+            &job_id,
+            &worktree,
+            skill,
+            &target_task_key,
+            seed.as_deref(),
+        ),
+        crate::job_adapter::Adapter::Tmux => drive_session(
+            &out,
+            &job_id,
+            &tmux_name,
+            &worktree,
+            skill,
+            &target_task_key,
+            seed.as_deref(),
+        ),
+    };
 
     if let Err(e) = remove_job_worktree(&cache, &worktree) {
         note(&out, &job_id, format!("worktree cleanup: {e}"));
     }
     unregister(&dirname);
     finished(&out, &job_id, ok, message);
+}
+
+/// Live streaming sessions, so a steering message can be written to the right
+/// agent's stdin — the structured replacement for `tmux send-keys` (MAIN-240).
+///
+/// Keyed by job id and holding only the stdin handle: the reader thread owns
+/// the rest, and handing a writer around is all delivery needs.
+type StreamWriters = std::collections::HashMap<String, crate::job_adapter::SharedStdin>;
+fn stream_writers() -> &'static Mutex<StreamWriters> {
+    static W: OnceLock<Mutex<StreamWriters>> = OnceLock::new();
+    W.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+
+fn register_stream(job_id: &str, session: &crate::job_adapter::StreamingSession) {
+    if let Ok(mut w) = stream_writers().lock() {
+        w.insert(job_id.to_string(), session.stdin_handle());
+    }
+}
+
+fn unregister_stream(job_id: &str) {
+    if let Ok(mut w) = stream_writers().lock() {
+        w.remove(job_id);
+    }
+}
+
+/// The runtime a loop job drives. One constant because this slice has one; a
+/// future job kind that needs another would carry it on the job.
+const RUNTIME: &str = "claude";
+
+/// Streaming execution (MAIN-240): run the agent headless and build the
+/// transcript from structured events.
+///
+/// On a node restart mid-job this does NOT auto-resume. AC-5 allows either
+/// resume or an honest failure, and the honest failure is already built and
+/// tested: the process dies with the node, the job stays `running` with no
+/// executor, and MAIN-164's reaper fails it within the grace window so it can
+/// be re-run. Auto-resume would need the job's runtime session id to survive
+/// the restart — it is recorded on the transcript (`agent session <id>`) so an
+/// operator can resume by hand today, and a future ticket has what it needs.
+///
+/// The shape mirrors `drive_session` on purpose — same signature, same
+/// `(ok, message)` contract, same transcript stream back to the control plane —
+/// so the two adapters are interchangeable from `run`'s point of view and a
+/// skill cannot tell which one is driving it.
+fn drive_streaming(
+    out: &Sender<NodeToControl>,
+    job_id: &str,
+    worktree: &Path,
+    skill: &str,
+    target: &str,
+    seed: Option<&str>,
+) -> (bool, String) {
+    use crate::job_adapter::{self, Event, StreamingSession, TurnState};
+
+    let args = job_adapter::claude_stream_args(job_id);
+    let mut env: Vec<(&str, &str)> = vec![("NOOK_JOB_ID", job_id)];
+    if let Some(s) = seed.filter(|s| !s.trim().is_empty()) {
+        env.push(("NOOK_JOB_SEED", s));
+    }
+
+    let mut session = match StreamingSession::spawn(RUNTIME, &args, worktree, &env) {
+        Ok(s) => s,
+        Err(e) => return (false, e),
+    };
+    register_stream(job_id, &session);
+
+    let Some(stdout) = session.take_stdout() else {
+        session.kill();
+        unregister_stream(job_id);
+        return (false, "the agent produced no stdout".into());
+    };
+
+    // The opening turn is the skill command — the same line the tmux path typed,
+    // now sent as structured input. A multi-line seed survives intact here,
+    // which the typed path could not manage.
+    let mut opening = format!("/{skill} {target}");
+    if let Some(s) = seed.filter(|s| !s.trim().is_empty()) {
+        opening.push(' ');
+        opening.push_str(s);
+    }
+    if let Err(e) = session.send(&opening) {
+        session.kill();
+        unregister_stream(job_id);
+        return (false, format!("could not send the skill command: {e}"));
+    }
+
+    // Pump events on this thread; the child owns the pace.
+    let tail = session.tail.clone();
+    let stdin_for_close = session.stdin_handle();
+    let mut turn = TurnState::default();
+    let mut outcome: Option<(bool, String)> = None;
+    let tx = out.clone();
+    let id = job_id.to_string();
+
+    job_adapter::pump_events(stdout, tail, |ev| match ev {
+        Event::SessionStarted { session_id } => {
+            // On the transcript, which is durable (MAIN-127) — an in-memory
+            // copy would die with the very restart it is meant to survive.
+            // This is the id an operator resumes with by hand (see AC-5 above).
+            note(&tx, &id, format!("agent session {session_id}"));
+        }
+        Event::UserEcho(text) => {
+            // Echoed back by --replay-user-messages: the agent HAS it. Recording
+            // on the echo rather than on our write is the difference between
+            // "we sent it" and "it arrived".
+            let _ = tx.blocking_send(NodeToControl::JobTranscript {
+                job_id: id.clone(),
+                source: "human".into(),
+                content: text,
+            });
+        }
+        Event::AssistantText(text) => {
+            if let Some(now) = turn.observe(&Event::AssistantText(text.clone())) {
+                report_turn(&tx, &id, now);
+            }
+            let _ = tx.blocking_send(NodeToControl::JobTranscript {
+                job_id: id.clone(),
+                source: "agent".into(),
+                content: text,
+            });
+        }
+        Event::ToolUse { name } => {
+            if let Some(now) = turn.observe(&Event::ToolUse { name: name.clone() }) {
+                report_turn(&tx, &id, now);
+            }
+            let _ = tx.blocking_send(NodeToControl::JobTranscript {
+                job_id: id.clone(),
+                source: "agent".into(),
+                content: format!("· {name}"),
+            });
+        }
+        Event::TurnStarted => {
+            if let Some(now) = turn.observe(&Event::TurnStarted) {
+                report_turn(&tx, &id, now);
+            }
+        }
+        Event::TurnEnded { ok, message } => {
+            if let Some(now) = turn.observe(&Event::TurnEnded { ok, message: None }) {
+                report_turn(&tx, &id, now);
+            }
+            outcome = Some((ok, message.unwrap_or_else(|| "turn complete".into())));
+            // The run's result: no more turns are coming, so let the agent
+            // exit. Without this the agent blocks reading stdin while we block
+            // reading its stdout (see `close_stdin`).
+            job_adapter::close_stdin(&stdin_for_close);
+        }
+        Event::Ignored => {}
+    });
+
+    // A stream that died mid-turn would otherwise leave the UI showing
+    // "working" forever.
+    if turn.active() {
+        report_turn(out, job_id, false);
+    }
+
+    let code = session.wait();
+    unregister_stream(job_id);
+
+    match outcome {
+        Some((ok, message)) => (ok, message),
+        // The stream ended without a result record: fall back to the exit code
+        // and the tail, the same crash-honesty rule the tmux path uses (AC-4 of
+        // MAIN-161) rather than reporting a success nobody observed.
+        None => {
+            let tail = session.tail_text();
+            let reason = match code {
+                Some(0) => "the agent exited without a result record".to_string(),
+                Some(c) => format!("the agent exited with status {c}"),
+                None => "the agent died without an exit status".to_string(),
+            };
+            (
+                false,
+                if tail.is_empty() {
+                    reason
+                } else {
+                    format!("{reason}\n{tail}")
+                },
+            )
+        }
+    }
+}
+
+/// Tell the control plane whether a turn is in flight (AC-2). A real signal
+/// off real events — the thing screen-scraping could only guess at.
+fn report_turn(out: &Sender<NodeToControl>, job_id: &str, active: bool) {
+    let _ = out.blocking_send(NodeToControl::JobTurn {
+        job_id: job_id.to_string(),
+        active,
+    });
 }
 
 fn unregister(dirname: &str) {
