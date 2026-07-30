@@ -7,7 +7,6 @@
 use axum::extract::{ConnectInfo, Path, Query, State};
 use axum::http::HeaderMap;
 use axum::Json;
-use nook_db::{params, Db, Postgres, TimeMath, TypeMapping};
 use nook_types::*;
 use serde::Deserialize;
 use std::net::SocketAddr;
@@ -126,26 +125,27 @@ async fn send_invite_email(
 
 /// The tenant's display name for the email, with a neutral fallback.
 async fn tenant_display_name(state: &AppState, tenant: TenantId) -> String {
+    // Tenant and user names are identity's data; read them through that
+    // aggregate rather than adding a second copy of the query here.
     state
-        .db
-        .query_scalar_opt::<String>("SELECT name FROM tenants WHERE id = $1", params![tenant])
+        .identity
+        .get_tenant(tenant)
         .await
         .ok()
         .flatten()
+        .map(|t| t.name)
         .unwrap_or_else(|| "a NookOS tenant".into())
 }
 
 /// The inviter's display name for the email, with a neutral fallback.
 async fn inviter_display_name(state: &AppState, user_id: uuid::Uuid) -> String {
     state
-        .db
-        .query_scalar_opt::<String>(
-            "SELECT display_name FROM users WHERE id = $1",
-            params![user_id],
-        )
+        .identity
+        .get_user(UserId(user_id))
         .await
         .ok()
         .flatten()
+        .map(|u| u.display_name)
         .unwrap_or_else(|| "Someone".into())
 }
 
@@ -180,37 +180,13 @@ pub async fn create(
         return Err(ApiError::BadRequest("a valid email is required".into()));
     }
 
-    // Replace any existing pending invite for this email so re-inviting does not
-    // stack (AC-2); the partial unique index also enforces one pending.
-    state
-        .db
-        .exec(
-            "DELETE FROM invites
-         WHERE tenant_id = $1 AND status = 'pending' AND lower(email) = lower($2)",
-            params![tenant, email],
-        )
-        .await?;
-
     // Only the hash is stored; the plaintext rides in the accept link (AC-9).
+    // Replacing any pending invite for this email and inserting the new one is
+    // one call, because the replace exists only to make room for the insert.
     let token = new_token();
-    let mut invite: Invite = state
-        .db
-        .query_one(
-            &format!(
-                "INSERT INTO invites (id, tenant_id, email, role, token_hash, status, invited_by, expires_at)
-         VALUES ($1, $2, $3, $4, $5, 'pending', $6, {expiry})
-         RETURNING id, email, role, status, created_at, expires_at",
-                expiry = Postgres.now_plus("14 days")
-            ),
-            params![
-                uuid::Uuid::now_v7(),
-                tenant,
-                email,
-                role,
-                hash_token(&token),
-                auth.user_id.0
-            ],
-        )
+    let mut invite = state
+        .invites
+        .issue(tenant, email, role, &hash_token(&token), auth.user_id.0)
         .await?;
 
     // The accept link points at the web app, which drives sign-in then calls the
@@ -249,16 +225,7 @@ pub async fn list(
     Path(tenant): Path<TenantId>,
 ) -> ApiResult<Json<Vec<Invite>>> {
     require_admin_of(&state, &auth, tenant).await?;
-    let rows: Vec<Invite> = state
-        .db
-        .query_all(
-            "SELECT id, email, role, status, created_at, expires_at
-         FROM invites WHERE tenant_id = $1 AND status = 'pending'
-         ORDER BY created_at DESC",
-            params![tenant],
-        )
-        .await?;
-    Ok(Json(rows))
+    Ok(Json(state.invites.list_pending(tenant).await?))
 }
 
 /// `DELETE /api/v1/tenants/{id}/invites/{invite}` — revoke a pending invite; its
@@ -273,14 +240,7 @@ pub async fn revoke(
     Path((tenant, invite)): Path<(TenantId, uuid::Uuid)>,
 ) -> ApiResult<axum::http::StatusCode> {
     require_admin_of(&state, &auth, tenant).await?;
-    let res = state
-        .db
-        .exec(
-            "UPDATE invites SET status = 'revoked'
-         WHERE id = $1 AND tenant_id = $2 AND status = 'pending'",
-            params![invite, tenant],
-        )
-        .await?;
+    let res = state.invites.revoke(invite, tenant).await?;
     if res == 0 {
         return Err(ApiError::NotFound);
     }
@@ -304,18 +264,9 @@ pub async fn resend(
     // plaintext is unrecoverable — a resend issues a FRESH token, invalidating
     // the old link, and re-stamps the expiry before emailing the new link.
     let token = new_token();
-    let mut invite: Invite = state
-        .db
-        .query_opt(
-            &format!(
-                "UPDATE invites
-            SET token_hash = $1, expires_at = {expiry}
-          WHERE id = $2 AND tenant_id = $3 AND status = 'pending'
-      RETURNING id, email, role, status, created_at, expires_at",
-                expiry = Postgres.now_plus("14 days")
-            ),
-            params![hash_token(&token), invite_id, tenant],
-        )
+    let mut invite = state
+        .invites
+        .reissue(invite_id, tenant, &hash_token(&token))
         .await?
         .ok_or(ApiError::NotFound)?;
 
@@ -357,7 +308,7 @@ pub async fn accept(
     // not yet a member of any tenant. `accept_core` still enforces every check —
     // pending+unexpired invite, email match, verified email, invited role.
     let result = accept_core(
-        &state.db,
+        state.invites.as_ref(),
         state.identity.as_ref(),
         id.user_id.0,
         id.tenant_id,
@@ -372,11 +323,8 @@ pub async fn accept(
     // accepting from their own tenant (the OIDC flow) keeps its session.
     if result.accepted && id.cookie_session && !id.is_member {
         let _ = state
-            .db
-            .exec(
-                "UPDATE sessions_auth SET tenant_id = $2 WHERE id = $1",
-                params![id.session_id.0, result.tenant_id],
-            )
+            .identity
+            .move_session_to_tenant(id.session_id.0, result.tenant_id)
             .await;
     }
     Ok(Json(result))
@@ -386,10 +334,11 @@ pub async fn accept(
 /// database without an `AuthCtx`. `fallback_tenant` is where a declined/no-op
 /// caller stays (their own active tenant).
 pub async fn accept_core(
-    db: &nook_db::DbPool,
-    // Verified-email is identity's question now (MAIN-246); the invite tables
-    // stay on the pool, so this helper carries both.
-    repo: &dyn crate::repo::identity::IdentityRepository,
+    // Accepting spans two aggregates: the invite row, and the user/membership
+    // it grants. Both arrive as their own repository — no pool, because after
+    // MAIN-250 this function issues no queries of its own.
+    invites: &dyn crate::repo::invites::InviteRepository,
+    identity: &dyn crate::repo::identity::IdentityRepository,
     user_id: uuid::Uuid,
     fallback_tenant: TenantId,
     token: &str,
@@ -403,23 +352,22 @@ pub async fn accept_core(
     };
 
     // Who is accepting — email, name, and the cross-tenant person key.
-    let (my_email, my_name, my_person): (String, String, uuid::Uuid) = db
-        .query_one(
-            "SELECT email, display_name, person_id FROM users WHERE id = $1",
-            params![user_id],
-        )
-        .await?;
+    let (my_email, my_name, my_person) = identity
+        .user_identity_bits(UserId(user_id))
+        .await?
+        .ok_or(ApiError::NotFound)?;
 
     // Look up by the token's hash — the plaintext is never at rest (AC-9).
-    let invite: Option<(uuid::Uuid, TenantId, String, String, String)> = db
-        .query_opt(
-            "SELECT id, tenant_id, email, role, status FROM invites WHERE token_hash = $1",
-            params![hash_token(token)],
-        )
-        .await?;
-    let Some((invite_id, tenant, invite_email, role, status)) = invite else {
+    let Some(found) = invites.by_token_hash(&hash_token(token)).await? else {
         return decline("this invite link is not valid");
     };
+    let (invite_id, tenant, invite_email, role, status) = (
+        found.id,
+        found.tenant,
+        found.email,
+        found.role,
+        found.status,
+    );
 
     let email_matches = my_email.to_lowercase() == invite_email.to_lowercase();
 
@@ -427,24 +375,10 @@ pub async fn accept_core(
     // invite only when it was addressed to THIS person's email (AC-10) —
     // otherwise the invite belongs to someone else and must stay pending rather
     // than be burned by whoever happens to click the link.
-    let existing_member: Option<UserId> = db
-        .query_scalar_opt(
-            "SELECT u.id FROM users u
-         JOIN tenant_members m
-           ON m.tenant_id = u.tenant_id AND m.principal_type = 'user' AND m.principal_id = u.id
-         WHERE u.tenant_id = $1 AND u.person_id = $2
-         LIMIT 1",
-            params![tenant, my_person],
-        )
-        .await?;
+    let existing_member = identity.member_user_by_person(tenant, my_person).await?;
     if existing_member.is_some() {
         if status == "pending" && email_matches {
-            let _ = db
-                .exec(
-                    "UPDATE invites SET status = 'accepted' WHERE id = $1",
-                    params![invite_id],
-                )
-                .await;
+            let _ = invites.mark_accepted(invite_id).await;
         }
         return Ok(AcceptInviteResult {
             accepted: true,
@@ -457,15 +391,7 @@ pub async fn accept_core(
     if status != "pending" {
         return decline("this invite has already been used or revoked");
     }
-    let fresh: bool = db
-        .query_scalar(
-            &format!(
-                "SELECT expires_at > {} FROM invites WHERE id = $1",
-                Postgres.now()
-            ),
-            params![invite_id],
-        )
-        .await?;
+    let fresh = invites.is_fresh(invite_id).await?;
     if !fresh {
         return decline("this invite has expired");
     }
@@ -476,48 +402,24 @@ pub async fn accept_core(
     // The email must be VERIFIED, not merely equal — email equality is the
     // MAIN-12 root cause. An unverified accepter is declined and the invite is
     // NOT consumed (AC-8), so it stays valid until they verify.
-    if !email_is_verified(repo, UserId(user_id)).await? {
+    if !email_is_verified(identity, UserId(user_id)).await? {
         return decline("verify your email address first, then open the invite link again");
     }
 
     // Add the per-tenant user row carrying this person_id (or reuse one that
     // exists by email), then the membership grant, then consume the invite.
-    let user_id: uuid::Uuid = match db
-        .query_scalar_opt::<uuid::Uuid>(
-            "SELECT id FROM users WHERE tenant_id = $1 AND lower(email) = lower($2) LIMIT 1",
-            params![tenant, &invite_email],
-        )
-        .await?
-    {
+    let user_id = match identity.user_id_by_email_ci(tenant, &invite_email).await? {
         Some(id) => id,
         None => {
-            db.query_scalar::<uuid::Uuid>(
-                "INSERT INTO users (id, tenant_id, display_name, email, role, person_id)
-                 VALUES ($1, $2, $3, $4, $5, $6) RETURNING id",
-                params![
-                    uuid::Uuid::now_v7(),
-                    tenant,
-                    &my_name,
-                    &invite_email,
-                    &role,
-                    my_person
-                ],
-            )
-            .await?
+            identity
+                .create_member_user(tenant, &my_name, &invite_email, &role, my_person)
+                .await?
         }
     };
-    db.exec(
-        "INSERT INTO tenant_members (id, tenant_id, principal_type, principal_id, role)
-         VALUES ($1, $2, 'user', $3, $4)
-         ON CONFLICT (tenant_id, principal_type, principal_id) DO NOTHING",
-        params![uuid::Uuid::now_v7(), tenant, user_id, &role],
-    )
-    .await?;
-    db.exec(
-        "UPDATE invites SET status = 'accepted' WHERE id = $1",
-        params![invite_id],
-    )
-    .await?;
+    identity
+        .grant_membership(tenant, UserId(user_id), &role)
+        .await?;
+    invites.mark_accepted(invite_id).await?;
 
     Ok(AcceptInviteResult {
         accepted: true,
@@ -571,24 +473,15 @@ pub async fn preview(
 
     // One lookup by token hash. `invited_by` is nullable, and validity is
     // computed in SQL so the row is the same shape whatever the status.
-    let row: Option<(TenantId, String, Option<uuid::Uuid>, bool)> = state
-        .db
-        .query_opt(
-            &format!(
-                "SELECT tenant_id, email, invited_by, (status = 'pending' AND expires_at > {})
-         FROM invites WHERE token_hash = $1",
-                Postgres.now()
-            ),
-            params![hash_token(&params.token)],
-        )
-        .await?;
+    let row = state.invites.preview(&hash_token(&params.token)).await?;
 
     // Do the SAME follow-up work regardless of whether the token was found or
     // usable, so a missing/expired/revoked/accepted token cannot be told apart
     // by timing. A missing row resolves the two name lookups against nil ids
     // (both return their neutral fallbacks), which we then discard.
-    let (tenant_id, email, inviter_id, valid) =
-        row.unwrap_or((TenantId(uuid::Uuid::nil()), String::new(), None, false));
+    let (tenant_id, email, inviter_id, valid) = row
+        .map(|p| (p.tenant, p.email, p.invited_by, p.valid))
+        .unwrap_or((TenantId(uuid::Uuid::nil()), String::new(), None, false));
     let tenant = tenant_display_name(&state, tenant_id).await;
     let inviter = inviter_display_name(&state, inviter_id.unwrap_or_else(uuid::Uuid::nil)).await;
 
@@ -646,17 +539,11 @@ pub async fn register(
 
     // The invite: tenant, the email the account MUST use, the role acceptance
     // will apply, and whether it is pending + unexpired.
-    let invite: Option<(TenantId, String, String, bool)> = state
-        .db
-        .query_opt(
-            &format!(
-                "SELECT tenant_id, email, role, (status = 'pending' AND expires_at > {})
-         FROM invites WHERE token_hash = $1",
-                Postgres.now()
-            ),
-            params![hash_token(&req.token)],
-        )
-        .await?;
+    let invite = state
+        .invites
+        .registration_target(&hash_token(&req.token))
+        .await?
+        .map(|r| (r.tenant, r.email, r.role, r.valid));
     let Some((tenant, email, role, true)) = invite else {
         return Err(ApiError::BadRequest(
             "this invite link is not valid or has expired".into(),
@@ -679,13 +566,7 @@ pub async fn register(
     // Anti-enumeration: if an account already exists for the invite's email, do
     // not create or touch anything and return the SAME generic result a fresh
     // registration returns (AC-3). Hash the password anyway so timing matches.
-    let exists: Option<uuid::Uuid> = state
-        .db
-        .query_scalar_opt(
-            "SELECT id FROM users WHERE tenant_id = $1 AND lower(email) = lower($2) LIMIT 1",
-            params![tenant, &email],
-        )
-        .await?;
+    let exists = state.identity.user_id_by_email_ci(tenant, &email).await?;
     if exists.is_some() {
         let _ = crate::auth::password::hash(&req.password);
         return generic();
@@ -783,6 +664,11 @@ mod tests {
 mod db_tests {
 
     /// The real repository over this test's pool — these are DB-backed tests
+    /// The real repositories over this test's pool — these stay DB-backed (NG-4).
+    fn invites_of(db: &nook_db::DbPool) -> crate::repo::invites::DbInviteRepository {
+        crate::repo::invites::DbInviteRepository::new(db.clone())
+    }
+
     /// (NG-4 keeps them that way), so the double here is the genuine impl.
     fn repo_of(db: &DbPool) -> crate::repo::identity::DbIdentityRepository {
         crate::repo::identity::DbIdentityRepository::new(db.clone())
@@ -899,26 +785,38 @@ mod db_tests {
 
         // Wrong email invite → declined, no membership.
         let wrong = invite(&db, shared, "someone-else@i6.test", 7).await;
-        let r_wrong = accept_core(&db, &repo_of(&db), me, TenantId(home), &wrong)
+        let r_wrong = accept_core(&invites_of(&db), &repo_of(&db), me, TenantId(home), &wrong)
             .await
             .unwrap();
 
         // Expired invite (own tenant) → declined.
         let expired = invite(&db, stale, "invitee@i6.test", -1).await;
-        let r_expired = accept_core(&db, &repo_of(&db), me, TenantId(home), &expired)
-            .await
-            .unwrap();
+        let r_expired = accept_core(
+            &invites_of(&db),
+            &repo_of(&db),
+            me,
+            TenantId(home),
+            &expired,
+        )
+        .await
+        .unwrap();
 
         // Unknown token → declined.
-        let r_unknown = accept_core(&db, &repo_of(&db), me, TenantId(home), "inv_nope")
-            .await
-            .unwrap();
+        let r_unknown = accept_core(
+            &invites_of(&db),
+            &repo_of(&db),
+            me,
+            TenantId(home),
+            "inv_nope",
+        )
+        .await
+        .unwrap();
         let member_before = is_member(&db, shared, person).await;
 
         // Good invite, matching email, but the accepter is NOT verified →
         // declined and the invite is NOT consumed (AC-8).
         let good = invite(&db, shared, "invitee@i6.test", 7).await;
-        let r_unverified = accept_core(&db, &repo_of(&db), me, TenantId(home), &good)
+        let r_unverified = accept_core(&invites_of(&db), &repo_of(&db), me, TenantId(home), &good)
             .await
             .unwrap();
         let member_after_unverified = is_member(&db, shared, person).await;
@@ -933,12 +831,12 @@ mod db_tests {
 
         // Verify the address; the same link now works (AC-8).
         verify(&db, me, "invitee@i6.test").await;
-        let r_ok = accept_core(&db, &repo_of(&db), me, TenantId(home), &good)
+        let r_ok = accept_core(&invites_of(&db), &repo_of(&db), me, TenantId(home), &good)
             .await
             .unwrap();
         let member_after = is_member(&db, shared, person).await;
         // Idempotent: second accept is a no-op success; token can't be reused for a NEW membership.
-        let r_again = accept_core(&db, &repo_of(&db), me, TenantId(home), &good)
+        let r_again = accept_core(&invites_of(&db), &repo_of(&db), me, TenantId(home), &good)
             .await
             .unwrap();
         let member_rows: i64 = db
@@ -1010,7 +908,7 @@ mod db_tests {
 
         // An invite in `shared` for SOMEONE ELSE's email.
         let others = invite(&db, shared, "colleague@i10.test", 7).await;
-        let r = accept_core(&db, &repo_of(&db), me, TenantId(home), &others)
+        let r = accept_core(&invites_of(&db), &repo_of(&db), me, TenantId(home), &others)
             .await
             .unwrap();
 
@@ -1053,7 +951,7 @@ mod db_tests {
         let token = invite(&db, shared, "invitee@i8.test", 7).await;
 
         // Unverified accept → declined, and nothing joins.
-        let declined = accept_core(&db, &repo_of(&db), me, TenantId(home), &token)
+        let declined = accept_core(&invites_of(&db), &repo_of(&db), me, TenantId(home), &token)
             .await
             .unwrap();
         let member_after_decline = is_member(&db, shared, person).await;
@@ -1069,7 +967,7 @@ mod db_tests {
         // token now accepts — proving the decline was the AC-8 gate, not a
         // mismatch or an expiry.
         verify(&db, me, "invitee@i8.test").await;
-        let accepted = accept_core(&db, &repo_of(&db), me, TenantId(home), &token)
+        let accepted = accept_core(&invites_of(&db), &repo_of(&db), me, TenantId(home), &token)
             .await
             .unwrap();
         let member_after_verify = is_member(&db, shared, person).await;

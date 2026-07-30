@@ -53,7 +53,13 @@ hits() {
 
         # Classify this line before moving depth, so the `mod tests {` line
         # itself is still outside the module.
-        if (!intest && $0 ~ /\.(query_[a-z_]*\(|exec\()/) print FILENAME ":" FNR
+        # The optional `::<T>` is not decoration: `.query_scalar_opt::<String>(`
+        # is a real call shape in this codebase, and a pattern that demanded `(`
+        # straight after the method name walked past two of them in
+        # routes/invites.rs. Found by cross-checking two independent counters —
+        # a guard nobody checks is just a comment.
+        if (!intest && $0 ~ /\.(query_[a-z_]*(::<[^(]*>)?\(|exec(::<[^(]*>)?\()/)
+          print FILENAME ":" FNR
 
         depth += opens - closes
 
