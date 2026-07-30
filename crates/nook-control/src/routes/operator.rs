@@ -24,7 +24,6 @@
 
 use axum::extract::{Path, Query, State};
 use axum::Json;
-use nook_db::{params, Db, Postgres, TypeMapping};
 use nook_types::*;
 use serde::Deserialize;
 use uuid::Uuid;
@@ -64,15 +63,7 @@ pub async fn orgs(
 ) -> ApiResult<Json<Vec<OperatorOrg>>> {
     auth.require(&state, Permission::OrgView, Scope::Deployment)
         .await?;
-    let rows: Vec<OperatorOrg> = state
-        .db
-        .query_all(
-            "SELECT o.id, o.name, o.slug, o.created_at,
-                (SELECT count(*) FROM tenants t WHERE t.org_id = o.id) AS tenants
-         FROM orgs o ORDER BY o.name",
-            params![],
-        )
-        .await?;
+    let rows = state.operator.orgs().await?;
     audit(&state, &auth, "orgs", None).await;
     Ok(Json(rows))
 }
@@ -111,7 +102,7 @@ pub async fn tenants(
         .await?;
 
     let mut page = operator_queries::operator_tenants_page(
-        &state.db,
+        &*state.operator,
         q.q,
         q.after.map(TenantId),
         q.limit.unwrap_or(50),
@@ -127,6 +118,11 @@ pub async fn tenants(
     Ok(Json(page))
 }
 
+/// How many policy-gated values one tenant row carries. A cap, not a page:
+/// the console shows a sample, and an operator who needs the whole list has
+/// the tenant's own surfaces for it.
+const ENRICH_LIMIT: i64 = 50;
+
 /// Add policy-gated fields, one opt-in at a time.
 ///
 /// Each field is fetched only if its org has enabled it. The default path
@@ -136,31 +132,24 @@ async fn enrich(state: &AppState, row: &mut OperatorTenant) -> ApiResult<()> {
     let Some(org) = row.org_id else { return Ok(()) };
 
     if policy::enabled(&state.db, org, Field::RepositoryNames).await? {
-        let names: Vec<(String,)> = state
-            .db
-            .query_all(
-                "SELECT name FROM workspaces WHERE tenant_id = $1 ORDER BY name LIMIT 50",
-                params![row.id],
-            )
-            .await?;
-        row.repositories = Some(names.into_iter().map(|(n,)| n).collect());
+        row.repositories = Some(
+            state
+                .workspaces
+                .names_in_tenant(row.id, ENRICH_LIMIT)
+                .await?,
+        );
     }
     if policy::enabled(&state.db, org, Field::TaskTitles).await? {
-        // A `private` task never reaches an operator, even with the policy on
-        // (MAIN-76 AC-4). The exclusion is baked into the projection itself
-        // because the policy is ADDITIVE (it adds titles, it does not filter),
-        // so a private card must simply never be selected here — a missed filter
-        // would fail open.
-        let titles: Vec<(String,)> = state
-            .db
-            .query_all(
-                "SELECT title FROM tasks
-             WHERE tenant_id = $1 AND visibility <> 'private'
-             ORDER BY created_at DESC LIMIT 50",
-                params![row.id],
-            )
-            .await?;
-        row.task_titles = Some(titles.into_iter().map(|(t,)| t).collect());
+        // The `private` exclusion lives inside `operator_visible_titles`, not
+        // here: the policy is ADDITIVE (it adds titles, it does not filter), so
+        // a private card must simply never be selected. A filter applied at this
+        // end would fail open the first time somebody forgot it (MAIN-76 AC-4).
+        row.task_titles = Some(
+            state
+                .tasks
+                .operator_visible_titles(row.id, ENRICH_LIMIT)
+                .await?,
+        );
     }
     Ok(())
 }
@@ -178,7 +167,7 @@ pub async fn nodes(
     auth.require(&state, Permission::NodeView, Scope::Deployment)
         .await?;
     let page = operator_queries::operator_nodes_page(
-        &state.db,
+        &*state.operator,
         q.q,
         q.after.map(NodeId),
         q.limit.unwrap_or(50),
@@ -214,9 +203,13 @@ pub async fn audit_log(
         .await?;
     // Kinds, actors and times — never payloads. The projection and the
     // prefix filter live in `operator_queries::operator_audit_page`, shared with its tests.
-    let page =
-        operator_queries::operator_audit_page(&state.db, q.q, q.after, q.limit.unwrap_or(50))
-            .await?;
+    let page = operator_queries::operator_audit_page(
+        &*state.operator,
+        q.q,
+        q.after,
+        q.limit.unwrap_or(50),
+    )
+    .await?;
     audit(&state, &auth, "audit", None).await;
     Ok(Json(page))
 }
@@ -274,33 +267,21 @@ pub async fn grant(
     auth.require(&state, Permission::RbacGrant, Scope::Deployment)
         .await?;
 
-    let user: Option<(uuid::Uuid,)> = state
-        .db
-        .query_opt(
-            "SELECT id FROM users WHERE lower(email) = lower($1)",
-            params![&req.email],
-        )
-        .await?;
-    let (user_id,) = user.ok_or_else(|| crate::error::ApiError::NotFound)?;
+    let user_id = state
+        .identity
+        .user_id_by_email(&req.email)
+        .await?
+        .ok_or(crate::error::ApiError::NotFound)?;
 
     if req.revoke {
         state
-            .db
-            .exec(
-                "DELETE FROM role_bindings
-             WHERE subject_id = $1 AND role_key = $2 AND scope_type = 'deployment'",
-                params![user_id, &req.role],
-            )
+            .operator
+            .revoke_deployment_role(user_id.0, &req.role)
             .await?;
     } else {
         state
-            .db
-            .exec(
-                "INSERT INTO role_bindings (id, subject_type, subject_id, role_key, scope_type, scope_id, created_by)
-             VALUES ($1, 'user', $2, $3, 'deployment', NULL, $4)
-             ON CONFLICT DO NOTHING",
-                params![uuid::Uuid::now_v7(), user_id, &req.role, auth.user_id.0],
-            )
+            .operator
+            .grant_deployment_role(user_id.0, &req.role, auth.user_id.0)
             .await?;
     }
 
@@ -375,17 +356,7 @@ pub async fn create_org(
         .map(str::to_lowercase)
         .unwrap_or_else(|| slugify(name));
 
-    let row: OperatorOrg = state
-        .db
-        .query_one(
-            &format!(
-                "INSERT INTO orgs (id, name, slug) VALUES ($1, $2, $3)
-         RETURNING id, name, slug, created_at, {} AS tenants",
-                Postgres.cast("0", "bigint")
-            ),
-            params![Uuid::now_v7(), name, &slug],
-        )
-        .await?;
+    let row = state.operator.create_org(name, &slug).await?;
 
     audit_write(
         &state,
@@ -411,19 +382,11 @@ pub async fn rename_org(
     // holding anything at the deployment.
     auth.require(&state, Permission::OrgManage, Scope::Org(id))
         .await?;
-    let row: Option<OperatorOrg> = state
-        .db
-        .query_opt(
-            &format!(
-                "UPDATE orgs SET name = $2, updated_at = {} WHERE id = $1
-         RETURNING id, name, slug, created_at,
-                   (SELECT count(*) FROM tenants t WHERE t.org_id = orgs.id) AS tenants",
-                Postgres.now()
-            ),
-            params![id, req.name.trim()],
-        )
-        .await?;
-    let row = row.ok_or(crate::error::ApiError::NotFound)?;
+    let row = state
+        .operator
+        .rename_org(id, req.name.trim())
+        .await?
+        .ok_or(crate::error::ApiError::NotFound)?;
     audit_write(
         &state,
         &auth,
@@ -450,14 +413,11 @@ pub async fn move_tenant(
     Path(id): Path<TenantId>,
     Json(req): Json<MoveTenantRequest>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let current: Option<(Option<Uuid>, String)> = state
-        .db
-        .query_opt(
-            "SELECT org_id, slug FROM tenants WHERE id = $1",
-            params![id],
-        )
-        .await?;
-    let (from, slug) = current.ok_or(crate::error::ApiError::NotFound)?;
+    let (from, slug) = state
+        .operator
+        .tenant_org_and_slug(id)
+        .await?
+        .ok_or(crate::error::ApiError::NotFound)?;
 
     if let Some(from) = from {
         auth.require(&state, Permission::OrgManage, Scope::Org(from))
@@ -466,16 +426,7 @@ pub async fn move_tenant(
     auth.require(&state, Permission::OrgManage, Scope::Org(req.org_id))
         .await?;
 
-    state
-        .db
-        .exec(
-            &format!(
-                "UPDATE tenants SET org_id = $2, updated_at = {} WHERE id = $1",
-                Postgres.now()
-            ),
-            params![id, req.org_id],
-        )
-        .await?;
+    state.operator.move_tenant_to_org(id, req.org_id).await?;
 
     audit_write(
         &state,
@@ -550,16 +501,9 @@ pub async fn revoke_node(
     let tenant = crate::routes::nodes::node_tenant(&state, id).await?;
     auth.require(&state, Permission::NodeManage, Scope::Tenant(tenant))
         .await?;
-    state
-        .db
-        .exec(
-            &format!(
-                "UPDATE nodes SET revoked_at = {now}, updated_at = {now} WHERE id = $1",
-                now = Postgres.now()
-            ),
-            params![id],
-        )
-        .await?;
+    // `tenant` was just resolved FROM this node, so the repository's
+    // tenant-scoped write reaches exactly the same row (MAIN-252 owns `nodes`).
+    state.nodes.revoke(id, tenant).await?;
     audit_write(
         &state,
         &auth,
@@ -581,10 +525,7 @@ pub async fn remove_node(
     let tenant = crate::routes::nodes::node_tenant(&state, id).await?;
     auth.require(&state, Permission::NodeManage, Scope::Tenant(tenant))
         .await?;
-    state
-        .db
-        .exec("DELETE FROM nodes WHERE id = $1", params![id])
-        .await?;
+    state.nodes.delete(tenant, id).await?;
     audit_write(
         &state,
         &auth,
@@ -608,9 +549,13 @@ pub async fn bindings(
 ) -> ApiResult<Json<OperatorBindingPage>> {
     auth.require(&state, Permission::RbacGrant, Scope::Deployment)
         .await?;
-    let page =
-        operator_queries::operator_bindings_page(&state.db, q.q, q.after, q.limit.unwrap_or(50))
-            .await?;
+    let page = operator_queries::operator_bindings_page(
+        &*state.operator,
+        q.q,
+        q.after,
+        q.limit.unwrap_or(50),
+    )
+    .await?;
     audit(&state, &auth, "bindings", None).await;
     Ok(Json(page))
 }

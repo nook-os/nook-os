@@ -273,7 +273,7 @@ async fn handle_message(
             // "my fleet knows this" stops depending on which machines happened
             // to be awake when somebody ran `nook teach`. The node skips writes
             // whose content it already has, so the steady state is free.
-            match crate::routes::skills::all_for_tenant(&state.db, tenant).await {
+            match crate::routes::skills::all_for_tenant(&*state.skills, tenant).await {
                 Ok(msgs) => {
                     if !msgs.is_empty() {
                         tracing::debug!(node = %name, count = msgs.len(), "syncing skills");
@@ -292,7 +292,7 @@ async fn handle_message(
             // replayed to every node on connect, so a machine that was offline
             // when a new default shipped converges here. The node skips writes
             // whose sha it already has, so the steady state is free.
-            match crate::routes::managed::managed_skills_as_install(&state.db).await {
+            match crate::routes::managed::managed_skills_as_install(&*state.managed).await {
                 Ok(msgs) => {
                     for m in msgs {
                         _tx.send(m).await.ok();
@@ -300,7 +300,7 @@ async fn handle_message(
                 }
                 Err(e) => tracing::warn!(node = %name, error = %e, "cannot sync managed skills"),
             }
-            match crate::routes::managed::managed_hooks_as_install(&state.db).await {
+            match crate::routes::managed::managed_hooks_as_install(&*state.managed).await {
                 Ok(Some(m)) => {
                     _tx.send(m).await.ok();
                 }

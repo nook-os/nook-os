@@ -124,9 +124,13 @@ pub trait NodeRepository: Send + Sync {
     /// session-start stays owner-only.
     async fn list(&self, tenant: TenantId, owner: Option<Uuid>) -> ApiResult<Vec<Node>>;
 
-    /// Every node's id and name in a tenant. The online filtering that uses it
-    /// stays in the caller, because liveness comes from the registry rather
-    /// than the database.
+    /// Every node's id and name in a tenant, BY NAME. The online filtering that
+    /// uses it stays in the caller, because liveness comes from the registry
+    /// rather than the database.
+    ///
+    /// The order is part of the contract: `nook teach` reports which machines
+    /// took a skill and which were offline, and an unordered list would shuffle
+    /// those two lists between otherwise identical runs.
     async fn list_ids_and_names(&self, tenant: TenantId) -> ApiResult<Vec<(NodeId, String)>>;
 
     async fn ids_in_tenant(&self, tenant: TenantId) -> ApiResult<Vec<NodeId>>;
@@ -383,7 +387,7 @@ impl NodeRepository for DbNodeRepository {
         Ok(self
             .db
             .query_all(
-                "SELECT id, name FROM nodes WHERE tenant_id = $1",
+                "SELECT id, name FROM nodes WHERE tenant_id = $1 ORDER BY name",
                 params![tenant],
             )
             .await?)
@@ -1259,7 +1263,11 @@ impl NodeRepository for FakeNodeRepository {
             .iter()
             .filter(|n| n.node.tenant_id == tenant)
             .map(|n| (n.node.id, n.node.name.clone()))
-            .collect())
+            .collect::<Vec<_>>())
+        .map(|mut v: Vec<(NodeId, String)>| {
+            v.sort_by(|a, b| a.1.cmp(&b.1));
+            v
+        })
     }
 
     async fn ids_in_tenant(&self, tenant: TenantId) -> ApiResult<Vec<NodeId>> {

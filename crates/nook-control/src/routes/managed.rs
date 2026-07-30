@@ -15,13 +15,13 @@
 
 use axum::extract::State;
 use axum::Json;
-use nook_db::{params, Db};
 use nook_types::*;
 use sha2::{Digest, Sha256};
 
 use crate::auth::perm::{Permission, Scope};
 use crate::auth::AuthCtx;
 use crate::error::{ApiError, ApiResult};
+use crate::repo::admin::ManagedContentRepository;
 use crate::state::AppState;
 
 /// The managed skill's name — a path component on every machine
@@ -57,9 +57,9 @@ fn hooks_content() -> String {
 /// "Newer" is decided by the default's own sha, recorded per row as
 /// `default_sha256`, so it is the shipped content changing — not the row
 /// differing from the default — that triggers a refresh.
-pub async fn seed(db: &nook_db::DbPool) -> Result<(), sqlx::Error> {
-    upsert_default(db, "skill", MANAGED_SKILL_NAME, NOOKOS_SKILL).await?;
-    upsert_default(db, "hooks", HOOKS_NAME, &hooks_content()).await?;
+pub async fn seed(repo: &dyn ManagedContentRepository) -> ApiResult<()> {
+    upsert_default(repo, "skill", MANAGED_SKILL_NAME, NOOKOS_SKILL).await?;
+    upsert_default(repo, "hooks", HOOKS_NAME, &hooks_content()).await?;
     Ok(())
 }
 
@@ -67,51 +67,24 @@ pub async fn seed(db: &nook_db::DbPool) -> Result<(), sqlx::Error> {
 /// applies to each embedded default). Public so the seed rules can be exercised
 /// against a synthetic key without disturbing the real rows.
 pub async fn upsert_default(
-    db: &nook_db::DbPool,
+    repo: &dyn ManagedContentRepository,
     kind: &str,
     name: &str,
     content: &str,
-) -> Result<(), sqlx::Error> {
+) -> ApiResult<()> {
     let default_sha = digest(content);
-    let existing: Option<(i64, String)> = db
-        .query_opt(
-            "SELECT version, default_sha256 FROM managed_content WHERE kind = $1 AND name = $2",
-            params![kind, name],
-        )
-        .await?;
 
-    match existing {
+    match repo.default_state(kind, name).await? {
         // Fresh: install at version 1, content == default.
         None => {
-            db.exec(
-                "INSERT INTO managed_content
-                   (id, kind, name, content, sha256, version, default_sha256)
-                 VALUES ($1, $2, $3, $4, $5, 1, $5)
-                 ON CONFLICT (kind, name) DO NOTHING",
-                params![uuid::Uuid::now_v7(), kind, name, content, &default_sha],
-            )
-            .await?;
+            repo.install_default(kind, name, content, &default_sha)
+                .await?
         }
         // The shipped default advanced: refresh the row to it and bump version.
         // This is the one case that overwrites — a newer default is meant to win.
-        Some((version, stored_default)) if stored_default != default_sha => {
-            db.exec(
-                &format!(
-                    "UPDATE managed_content
-                    SET content = $3, sha256 = $4, version = $5,
-                        default_sha256 = $4, updated_at = {}
-                  WHERE kind = $1 AND name = $2",
-                    // Engine-selected (MAIN-196). This branch only runs on an
-                    // UPGRADE — a shipped default whose sha moved — which is
-                    // why a fresh boot never reached it and the first pass
-                    // missed it. On SQLite `now()` is a syntax error, so the
-                    // second boot of a single-machine deployment after any
-                    // change to a managed skill would have died here.
-                    nook_db::dialect::type_mapping(db.engine()).now()
-                ),
-                params![kind, name, content, &default_sha, version + 1],
-            )
-            .await?;
+        Some(state) if state.default_sha256 != default_sha => {
+            repo.refresh_to_default(kind, name, content, &default_sha, state.version + 1)
+                .await?
         }
         // Unchanged default: leave the row exactly as it is (an operator edit
         // from sub-ticket 5 survives a redeploy of the same binary).
@@ -138,14 +111,7 @@ pub async fn list_skills(
     auth: AuthCtx,
 ) -> ApiResult<Json<Vec<ManagedContent>>> {
     require_node_manage(&state, &auth).await?;
-    let rows: Vec<ManagedContent> = state
-        .db
-        .query_all(
-            "SELECT id, kind, name, content, sha256, version, updated_at
-         FROM managed_content WHERE kind = 'skill' ORDER BY name",
-            params![],
-        )
-        .await?;
+    let rows = state.managed.list_kind("skill").await?;
     Ok(Json(rows))
 }
 
@@ -157,14 +123,7 @@ pub async fn get_hooks(
     auth: AuthCtx,
 ) -> ApiResult<Json<ManagedContent>> {
     require_node_manage(&state, &auth).await?;
-    let row: Option<ManagedContent> = state
-        .db
-        .query_opt(
-            "SELECT id, kind, name, content, sha256, version, updated_at
-         FROM managed_content WHERE kind = 'hooks' AND name = $1",
-            params![HOOKS_NAME],
-        )
-        .await?;
+    let row = state.managed.get("hooks", HOOKS_NAME).await?;
     row.map(Json).ok_or(ApiError::NotFound)
 }
 
@@ -174,23 +133,17 @@ pub async fn get_hooks(
 /// node applies (AC-4). Sub-ticket 2's push is `send_to_node(node, payload)` over
 /// these; here we only prove the stored row maps cleanly onto the wire type.
 pub async fn managed_skills_as_install(
-    db: &nook_db::DbPool,
-) -> Result<Vec<nook_proto::ControlToNode>, sqlx::Error> {
-    let rows: Vec<(String, String, String)> = db
-        .query_all(
-            "SELECT name, content, sha256 FROM managed_content WHERE kind = 'skill' ORDER BY name",
-            params![],
-        )
-        .await?;
-    Ok(rows
+    repo: &dyn ManagedContentRepository,
+) -> ApiResult<Vec<nook_proto::ControlToNode>> {
+    Ok(repo
+        .payloads_of_kind("skill")
+        .await?
         .into_iter()
-        .map(
-            |(name, content, sha256)| nook_proto::ControlToNode::InstallSkill {
-                name,
-                content,
-                sha256,
-            },
-        )
+        .map(|p| nook_proto::ControlToNode::InstallSkill {
+            name: p.name,
+            content: p.content,
+            sha256: p.sha256,
+        })
         .collect())
 }
 
@@ -198,15 +151,15 @@ pub async fn managed_skills_as_install(
 /// node applies (MAIN-105 AC-3). `None` when the store has no hooks row, so
 /// connect-replay simply sends nothing rather than an empty push.
 pub async fn managed_hooks_as_install(
-    db: &nook_db::DbPool,
-) -> Result<Option<nook_proto::ControlToNode>, sqlx::Error> {
-    let row: Option<(String, String)> = db
-        .query_opt(
-            "SELECT content, sha256 FROM managed_content WHERE kind = 'hooks' AND name = $1",
-            params![HOOKS_NAME],
-        )
-        .await?;
-    Ok(row.map(|(content, sha256)| nook_proto::ControlToNode::InstallHooks { content, sha256 }))
+    repo: &dyn ManagedContentRepository,
+) -> ApiResult<Option<nook_proto::ControlToNode>> {
+    Ok(repo
+        .payload("hooks", HOOKS_NAME)
+        .await?
+        .map(|p| nook_proto::ControlToNode::InstallHooks {
+            content: p.content,
+            sha256: p.sha256,
+        }))
 }
 
 #[cfg(test)]

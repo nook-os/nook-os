@@ -11,6 +11,7 @@
 //! - a per-engine implementation becomes a swap rather than a rewrite, if a
 //!   hotspot ever proves it needs one (deliberately not needed yet — NG-3).
 
+pub mod admin;
 pub mod identity;
 pub mod invites;
 pub mod jobs;

@@ -179,6 +179,13 @@ pub trait IdentityRepository: Send + Sync {
         email: &str,
     ) -> ApiResult<Option<User>>;
 
+    /// The user with this email ANYWHERE in the deployment, matched
+    /// case-insensitively. Distinct from `user_by_email_in_tenant` on purpose:
+    /// this is the operator's grant lookup, which has no tenant to scope to,
+    /// and it returns only the id so it cannot become a back door to a user
+    /// record the caller has no tenant claim on.
+    async fn user_id_by_email(&self, email: &str) -> ApiResult<Option<UserId>>;
+
     /// "Is this instance empty?" is a question about **people**, and only
     /// `users` knows: an instance bootstrapped with a local account has zero
     /// identities but is not empty (the bug this counts around).
@@ -646,6 +653,17 @@ impl IdentityRepository for DbIdentityRepository {
             .db
             .query_opt("SELECT * FROM tenants WHERE slug = $1", params![slug])
             .await?)
+    }
+
+    async fn user_id_by_email(&self, email: &str) -> ApiResult<Option<UserId>> {
+        let row: Option<(Uuid,)> = self
+            .db
+            .query_opt(
+                "SELECT id FROM users WHERE lower(email) = lower($1)",
+                params![email],
+            )
+            .await?;
+        Ok(row.map(|(id,)| UserId(id)))
     }
 
     async fn user_by_email_in_tenant(
@@ -1758,6 +1776,15 @@ impl IdentityRepository for FakeIdentityRepository {
     async fn tenant_by_slug(&self, slug: &str) -> ApiResult<Option<Tenant>> {
         let st = self.inner.lock().unwrap();
         Ok(st.tenants.iter().find(|t| t.slug == slug).cloned())
+    }
+
+    async fn user_id_by_email(&self, email: &str) -> ApiResult<Option<UserId>> {
+        let st = self.inner.lock().unwrap();
+        Ok(st
+            .users
+            .iter()
+            .find(|u| u.email.eq_ignore_ascii_case(email))
+            .map(|u| u.id))
     }
 
     async fn user_by_email_in_tenant(

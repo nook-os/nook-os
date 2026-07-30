@@ -1,15 +1,41 @@
-//! Operator-console page reads (MAIN-245).
+//! Operator-console page reads (MAIN-245, behind `OperatorRepository` since
+//! MAIN-258).
 //!
 //! Split verbatim out of `services/core.rs`. The keyset-pagination tests moved
 //! with them; they also cover `tenant_members_page`, which now lives in
 //! `services::identity` — the shared cursor/search behaviour is the thing under
 //! test, so they stayed together rather than being split in half.
+//!
+//! What is left here after MAIN-258 is the one rule these four lists share and
+//! the repository does not: how a page decides whether there is another one.
+//! The queries themselves live in `repo::admin`.
 
-use nook_db::{params, CiMatch, Db, DbPool, Postgres, TypeMapping};
 use nook_types::*;
 
 use crate::error::ApiResult;
+use crate::repo::admin::{Keyset, OperatorRepository};
 use crate::services::core::search_filter;
+
+/// The console's page size, clamped the same way for every list.
+fn keyset(after: Option<uuid::Uuid>, limit: i64) -> Keyset {
+    Keyset {
+        after,
+        limit: limit.clamp(1, 200),
+    }
+}
+
+/// The cursor is the last id of a FULL page: a page short of `limit` means
+/// there is no more, so `next_cursor` is null. A caller that pages one past the
+/// end therefore gets an empty page and a null cursor — a clean end-of-list,
+/// not an error.
+fn next_cursor<T, F, Id>(rows: &[T], limit: i64, id_of: F) -> Option<Id>
+where
+    F: Fn(&T) -> Id,
+{
+    (rows.len() as i64 == limit)
+        .then(|| rows.last().map(id_of))
+        .flatten()
+}
 
 /// The operator audit trail, paged by keyset cursor and filtered by an optional
 /// server-side search (MAIN-43).
@@ -20,55 +46,20 @@ use crate::services::core::search_filter;
 /// row's UUID v7 `id`: `after` is the last id the caller has seen, and rows are
 /// walked `id DESC`, so each page is strictly older with no offset to drift.
 ///
-/// The cursor is the last id of a full page (mirroring `events_page`): when a
-/// page comes back short of `limit` there is no more, so `next_cursor` is null.
-/// A caller that pages one past the end gets an empty page and a null cursor —
-/// a clean end-of-list, not an error.
-///
 /// Kinds, actors and times only — never payloads, which can carry a branch name
 /// or task title this surface must not hand over (the same rule `audit_log`
 /// enforced before it grew a cursor).
 pub async fn operator_audit_page(
-    db: &DbPool,
+    repo: &dyn OperatorRepository,
     q: Option<String>,
     after: Option<EventId>,
     limit: i64,
 ) -> ApiResult<OperatorAuditPage> {
-    let limit = limit.clamp(1, 200);
+    let page = keyset(after.map(|e| e.0), limit);
     // An empty or whitespace-only search is "no filter", not "match the empty
     // string" — the search box clears to that and must show the whole log.
-    let q = q.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
-    let term = Postgres.cast("$2", "text");
-    let rows: Vec<OperatorAuditEntry> = db
-        .query_all(
-            &format!(
-                "SELECT e.id, e.kind, e.actor_type, e.actor_id, e.tenant_id,
-                t.slug AS tenant_slug, e.occurred_at
-         FROM events e JOIN tenants t ON t.id = e.tenant_id
-         WHERE (e.kind LIKE 'operator.%' OR e.kind LIKE 'rbac.%'
-                OR e.kind LIKE 'node.%'  OR e.kind LIKE 'user.%')
-           AND ({term} IS NULL OR (
-                    {m_kind}
-                 OR {m_slug}
-                 OR {m_atype}
-                 OR {m_aid}))
-           AND ({cursor} IS NULL OR e.id < $3)
-         ORDER BY e.id DESC
-         LIMIT $1",
-                cursor = Postgres.cast("$3", "uuid"),
-                m_kind = Postgres.ci_match("e.kind", "'%' || $2 || '%'"),
-                m_slug = Postgres.ci_match("t.slug", "'%' || $2 || '%'"),
-                m_atype = Postgres.ci_match("e.actor_type", "'%' || $2 || '%'"),
-                m_aid = Postgres.ci_match(&Postgres.cast("e.actor_id", "text"), "'%' || $2 || '%'")
-            ),
-            params![limit, q, after.map(|e| e.0)],
-        )
-        .await?;
-    let next_cursor = if rows.len() as i64 == limit {
-        rows.last().map(|r| r.id)
-    } else {
-        None
-    };
+    let rows = repo.audit_page(search_filter(q), page).await?;
+    let next_cursor = next_cursor(&rows, page.limit, |r| r.id);
     Ok(OperatorAuditPage { rows, next_cursor })
 }
 
@@ -76,140 +67,54 @@ pub async fn operator_audit_page(
 /// `operator_audit_page`. Rows come back WITHOUT the policy-gated fields
 /// (`repositories`/`task_titles`); the handler enriches them per opted-in org.
 pub async fn operator_tenants_page(
-    db: &DbPool,
+    repo: &dyn OperatorRepository,
     q: Option<String>,
     after: Option<TenantId>,
     limit: i64,
 ) -> ApiResult<OperatorTenantPage> {
-    let limit = limit.clamp(1, 200);
-    let q = search_filter(q);
-    let term = Postgres.cast("$2", "text");
-    let rows: Vec<OperatorTenant> = db
-        .query_all(
-            &format!(
-                "SELECT t.id, t.slug, t.org_id, t.created_at,
-                (SELECT count(*) FROM users u WHERE u.tenant_id = t.id)    AS members,
-                (SELECT count(*) FROM nodes n WHERE n.tenant_id = t.id)    AS nodes,
-                (SELECT count(*) FROM sessions s
-                  WHERE s.tenant_id = t.id
-                    AND s.status IN ('starting','running','detached'))     AS active_sessions,
-                (SELECT count(*) FROM workspaces w WHERE w.tenant_id = t.id) AS workspaces
-         FROM tenants t
-         WHERE ({term} IS NULL OR {m_slug} OR {m_name})
-           AND ({cursor} IS NULL OR t.id < $3)
-         ORDER BY t.id DESC
-         LIMIT $1",
-                cursor = Postgres.cast("$3", "uuid"),
-                m_slug = Postgres.ci_match("t.slug", "'%' || $2 || '%'"),
-                m_name = Postgres.ci_match("t.name", "'%' || $2 || '%'")
-            ),
-            params![limit, q, after.map(|t| t.0)],
-        )
-        .await?;
-    let next_cursor = if rows.len() as i64 == limit {
-        rows.last().map(|r| r.id)
-    } else {
-        None
-    };
+    let page = keyset(after.map(|t| t.0), limit);
+    let rows = repo.tenants_page(search_filter(q), page).await?;
+    let next_cursor = next_cursor(&rows, page.limit, |r| r.id);
     Ok(OperatorTenantPage { rows, next_cursor })
 }
 
 /// Operator nodes, keyset-paginated + searched (name/tenant slug/platform/status).
 pub async fn operator_nodes_page(
-    db: &DbPool,
+    repo: &dyn OperatorRepository,
     q: Option<String>,
     after: Option<NodeId>,
     limit: i64,
 ) -> ApiResult<OperatorNodePage> {
-    let limit = limit.clamp(1, 200);
-    let q = search_filter(q);
-    let term = Postgres.cast("$2", "text");
-    let rows: Vec<OperatorNode> = db
-        .query_all(
-            &format!(
-                "SELECT n.id, n.name, n.platform, n.status, n.last_seen_at, n.resources,
-                n.tenant_id, t.slug AS tenant_slug,
-                (SELECT count(*) FROM sessions s
-                  WHERE s.node_id = n.id
-                    AND s.status IN ('starting','running','detached')) AS active_sessions
-         FROM nodes n JOIN tenants t ON t.id = n.tenant_id
-         WHERE ({term} IS NULL OR (
-                    {m_name}
-                 OR {m_slug}
-                 OR {m_platform}
-                 OR {m_status}))
-           AND ({cursor} IS NULL OR n.id < $3)
-         ORDER BY n.id DESC
-         LIMIT $1",
-                cursor = Postgres.cast("$3", "uuid"),
-                m_name = Postgres.ci_match("n.name", "'%' || $2 || '%'"),
-                m_slug = Postgres.ci_match("t.slug", "'%' || $2 || '%'"),
-                m_platform = Postgres.ci_match("n.platform", "'%' || $2 || '%'"),
-                m_status = Postgres.ci_match("n.status", "'%' || $2 || '%'")
-            ),
-            params![limit, q, after.map(|n| n.0)],
-        )
-        .await?;
-    let next_cursor = if rows.len() as i64 == limit {
-        rows.last().map(|r| r.id)
-    } else {
-        None
-    };
+    let page = keyset(after.map(|n| n.0), limit);
+    let rows = repo.nodes_page(search_filter(q), page).await?;
+    let next_cursor = next_cursor(&rows, page.limit, |r| r.id);
     Ok(OperatorNodePage { rows, next_cursor })
 }
 
 /// Operator role bindings, keyset-paginated + searched (email/role/scope).
 pub async fn operator_bindings_page(
-    db: &DbPool,
+    repo: &dyn OperatorRepository,
     q: Option<String>,
     after: Option<uuid::Uuid>,
     limit: i64,
 ) -> ApiResult<OperatorBindingPage> {
-    let limit = limit.clamp(1, 200);
-    let q = search_filter(q);
-    let term = Postgres.cast("$2", "text");
-    let rows: Vec<BindingRow> = db
-        .query_all(
-            &format!(
-                "SELECT b.id, u.email, u.display_name, b.role_key, b.scope_type, b.scope_id,
-                COALESCE(o.slug, t.slug) AS scope_label, b.created_at
-         FROM role_bindings b
-         JOIN users u ON u.id = b.subject_id
-         LEFT JOIN orgs o    ON b.scope_type = 'org'    AND o.id = b.scope_id
-         LEFT JOIN tenants t ON b.scope_type = 'tenant' AND t.id = b.scope_id
-         WHERE ({term} IS NULL OR (
-                    {m_email}
-                 OR {m_role}
-                 OR {m_scope}
-                 OR {m_label}))
-           AND ({cursor} IS NULL OR b.id < $3)
-         ORDER BY b.id DESC
-         LIMIT $1",
-                cursor = Postgres.cast("$3", "uuid"),
-                m_email = Postgres.ci_match("u.email", "'%' || $2 || '%'"),
-                m_role = Postgres.ci_match("b.role_key", "'%' || $2 || '%'"),
-                m_scope = Postgres.ci_match("b.scope_type", "'%' || $2 || '%'"),
-                m_label = Postgres.ci_match("COALESCE(o.slug, t.slug)", "'%' || $2 || '%'")
-            ),
-            params![limit, q, after],
-        )
-        .await?;
-    let next_cursor = if rows.len() as i64 == limit {
-        rows.last().map(|r| r.id)
-    } else {
-        None
-    };
+    let page = keyset(after, limit);
+    let rows = repo.bindings_page(search_filter(q), page).await?;
+    let next_cursor = next_cursor(&rows, page.limit, |r| r.id);
     Ok(OperatorBindingPage { rows, next_cursor })
 }
 
-/// DB-backed tests for the audit paging/search query. They self-provision the
-/// schema and no-op without `NOOK_REQUIRE_DB=1`, matching the suite convention.
 #[cfg(test)]
 mod db_tests {
 
-    /// The real repository over this test's pool — these stay DB-backed (NG-4).
+    /// The real repositories over this test's pool — these stay DB-backed
+    /// (NG-4): the SQL is what is under test.
     fn repo_of(db: &DbPool) -> crate::repo::identity::DbIdentityRepository {
         crate::repo::identity::DbIdentityRepository::new(db.clone())
+    }
+
+    fn operator_repo(db: &DbPool) -> crate::repo::admin::DbOperatorRepository {
+        crate::repo::admin::DbOperatorRepository::new(db.clone())
     }
     use super::{
         operator_audit_page, operator_bindings_page, operator_nodes_page, operator_tenants_page,
@@ -416,7 +321,9 @@ mod db_tests {
         let newest_first: Vec<EventId> = ids.iter().rev().copied().collect();
 
         // Page 1: the two newest, with a cursor.
-        let p1 = operator_audit_page(&db, None, None, 2).await.unwrap();
+        let p1 = operator_audit_page(&operator_repo(&db), None, None, 2)
+            .await
+            .unwrap();
         // Filter to THIS tenant's rows so a shared dev DB's other events don't
         // perturb the assertions — we only reason about ids we inserted.
         let seen: Vec<EventId> = p1
@@ -443,7 +350,7 @@ mod db_tests {
             let after = cursor.take().unwrap();
             guard += 1;
             assert!(guard < 20, "cursor did not reach our rows");
-            let page = operator_audit_page(&db, None, Some(after), 2)
+            let page = operator_audit_page(&operator_repo(&db), None, Some(after), 2)
                 .await
                 .unwrap();
             for r in &page.rows {
@@ -491,7 +398,7 @@ mod db_tests {
 
         // Case-insensitive substring on the kind, small page — the match is not
         // on page one, yet search returns it.
-        let hit = operator_audit_page(&db, Some("revoked".into()), None, 2)
+        let hit = operator_audit_page(&operator_repo(&db), Some("revoked".into()), None, 2)
             .await
             .unwrap();
         assert!(
@@ -527,7 +434,7 @@ mod db_tests {
 
         // Search by that unique token: a list of exactly one row, so the page is
         // short and the cursor is null.
-        let page = operator_audit_page(&db, Some(kind.clone()), None, 50)
+        let page = operator_audit_page(&operator_repo(&db), Some(kind.clone()), None, 50)
             .await
             .unwrap();
         assert!(
@@ -542,7 +449,7 @@ mod db_tests {
         assert!(page.next_cursor.is_none(), "a short page ends the list");
 
         // Paging strictly past our row returns no error (empty of our id).
-        let past = operator_audit_page(&db, None, Some(only), 50)
+        let past = operator_audit_page(&operator_repo(&db), None, Some(only), 50)
             .await
             .unwrap();
         assert!(
@@ -569,12 +476,14 @@ mod db_tests {
         }
 
         // Page 1 is bounded and carries a cursor.
-        let p1 = operator_tenants_page(&db, None, None, 2).await.unwrap();
+        let p1 = operator_tenants_page(&operator_repo(&db), None, None, 2)
+            .await
+            .unwrap();
         assert!(p1.rows.len() <= 2, "page is bounded");
         assert!(p1.next_cursor.is_some(), "a full page carries a cursor");
 
         // Search reaches the needle even though it is not on page 1.
-        let hit = operator_tenants_page(&db, Some("ZZNEEDLE".into()), None, 2)
+        let hit = operator_tenants_page(&operator_repo(&db), Some("ZZNEEDLE".into()), None, 2)
             .await
             .unwrap();
         assert!(
@@ -604,16 +513,18 @@ mod db_tests {
             node(&db, t, &format!("worker{i}"), "offline").await;
         }
 
-        let p1 = operator_nodes_page(&db, None, None, 2).await.unwrap();
+        let p1 = operator_nodes_page(&operator_repo(&db), None, None, 2)
+            .await
+            .unwrap();
         assert!(p1.rows.len() <= 2 && p1.next_cursor.is_some());
 
         // Search by (distinctive) name reaches the needle on a later page.
-        let by_name = operator_nodes_page(&db, Some("ODDBALL".into()), None, 2)
+        let by_name = operator_nodes_page(&operator_repo(&db), Some("ODDBALL".into()), None, 2)
             .await
             .unwrap();
         assert!(by_name.rows.iter().any(|r| r.id == NodeId(needle)));
         // Search by status matches the whole set of that status.
-        let online = operator_nodes_page(&db, Some("online".into()), None, 50)
+        let online = operator_nodes_page(&operator_repo(&db), Some("online".into()), None, 50)
             .await
             .unwrap();
         assert!(online.rows.iter().all(|r| r.status == "online"));
@@ -637,18 +548,21 @@ mod db_tests {
             binding(&db, u, "org_admin").await;
         }
 
-        let p1 = operator_bindings_page(&db, None, None, 2).await.unwrap();
+        let p1 = operator_bindings_page(&operator_repo(&db), None, None, 2)
+            .await
+            .unwrap();
         assert!(p1.rows.len() <= 2 && p1.next_cursor.is_some());
 
         // Search by email reaches the needle beyond page 1.
-        let by_email = operator_bindings_page(&db, Some("NEEDLE@".into()), None, 2)
+        let by_email = operator_bindings_page(&operator_repo(&db), Some("NEEDLE@".into()), None, 2)
             .await
             .unwrap();
         assert!(by_email.rows.iter().any(|r| r.id == needle));
         // Search by role narrows to that role.
-        let operators = operator_bindings_page(&db, Some("operator".into()), None, 50)
-            .await
-            .unwrap();
+        let operators =
+            operator_bindings_page(&operator_repo(&db), Some("operator".into()), None, 50)
+                .await
+                .unwrap();
         assert!(operators.rows.iter().all(|r| r.role_key == "operator"));
 
         cleanup(&db, t).await;
