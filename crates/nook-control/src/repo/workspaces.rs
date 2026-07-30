@@ -283,6 +283,18 @@ pub trait WorkspaceRepository: Send + Sync {
         node: NodeId,
     ) -> ApiResult<Option<(NodeWorkspaceId, String)>>;
 
+    /// A workspace's display name and normalized remote — what the feedback
+    /// surface shows for its configured target (MAIN-256).
+    async fn name_and_remote(
+        &self,
+        id: WorkspaceId,
+        tenant: TenantId,
+    ) -> ApiResult<Option<(String, Option<String>)>>;
+
+    /// Any node holding a checkout of this workspace — where a feedback
+    /// session gets started when there is no live one (MAIN-256).
+    async fn any_checkout_node(&self, workspace: WorkspaceId) -> ApiResult<Option<NodeId>>;
+
     /// A checkout as the UI shows it beside a session (MAIN-222 AC-5).
     async fn checkout_summary(&self, id: NodeWorkspaceId) -> ApiResult<Option<CheckoutSummary>>;
 
@@ -881,6 +893,31 @@ impl WorkspaceRepository for DbWorkspaceRepository {
                    AND kind = 'clone' AND missing_at IS NULL
                  ORDER BY discovered_at LIMIT 1",
                 params![workspace, node],
+            )
+            .await?)
+    }
+
+    async fn name_and_remote(
+        &self,
+        id: WorkspaceId,
+        tenant: TenantId,
+    ) -> ApiResult<Option<(String, Option<String>)>> {
+        Ok(self
+            .db
+            .query_opt(
+                "SELECT w.name, w.git_remote_normalized FROM workspaces w
+                 WHERE w.id = $1 AND w.tenant_id = $2",
+                params![id, tenant],
+            )
+            .await?)
+    }
+
+    async fn any_checkout_node(&self, workspace: WorkspaceId) -> ApiResult<Option<NodeId>> {
+        Ok(self
+            .db
+            .query_scalar_opt(
+                "SELECT node_id FROM node_workspaces WHERE workspace_id = $1 LIMIT 1",
+                params![workspace],
             )
             .await?)
     }
@@ -1877,6 +1914,32 @@ impl WorkspaceRepository for FakeWorkspaceRepository {
             .collect();
         clones.sort_by_key(|c| c.seq);
         Ok(clones.first().map(|c| (c.id, c.path.clone())))
+    }
+
+    async fn name_and_remote(
+        &self,
+        id: WorkspaceId,
+        tenant: TenantId,
+    ) -> ApiResult<Option<(String, Option<String>)>> {
+        Ok(self
+            .inner
+            .lock()
+            .unwrap()
+            .workspaces
+            .iter()
+            .find(|w| w.id == id && w.tenant_id == tenant)
+            .map(|w| (w.name.clone(), w.git_remote_normalized.clone())))
+    }
+
+    async fn any_checkout_node(&self, workspace: WorkspaceId) -> ApiResult<Option<NodeId>> {
+        Ok(self
+            .inner
+            .lock()
+            .unwrap()
+            .checkouts
+            .iter()
+            .find(|c| c.workspace_id == workspace)
+            .map(|c| c.node_id))
     }
 
     async fn checkout_summary(&self, id: NodeWorkspaceId) -> ApiResult<Option<CheckoutSummary>> {

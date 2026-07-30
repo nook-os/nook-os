@@ -36,6 +36,10 @@ pub struct AppState {
     pub join_tokens: Arc<dyn crate::repo::nodes::JoinTokenRepository>,
     /// The per-tenant certificate authority (MAIN-252).
     pub tenant_cas: Arc<dyn crate::repo::nodes::TenantCaRepository>,
+    /// The notification inbox and its channels (MAIN-256).
+    pub notifications: Arc<dyn crate::repo::notifications::NotificationRepository>,
+    /// Product feedback and the settings that configure its surface (MAIN-256).
+    pub feedback: Arc<dyn crate::repo::notifications::FeedbackRepository>,
     /// Notes and folders — personal notebook and workspace notes (MAIN-254).
     pub notebook: Arc<dyn crate::repo::notebook::NotebookRepository>,
     /// The app password, its passkeys, and the notebook's per-note seal
@@ -122,6 +126,12 @@ impl AppState {
             join_tokens: Arc::new(crate::repo::nodes::DbJoinTokenRepository::new(db.clone())),
             tenant_cas: Arc::new(crate::repo::nodes::DbTenantCaRepository::new(db.clone())),
             notebook: Arc::new(crate::repo::notebook::DbNotebookRepository::new(db.clone())),
+            notifications: Arc::new(crate::repo::notifications::DbNotificationRepository::new(
+                db.clone(),
+            )),
+            feedback: Arc::new(crate::repo::notifications::DbFeedbackRepository::new(
+                db.clone(),
+            )),
             vaults: Arc::new(crate::repo::notebook::DbVaultRepository::new(db.clone())),
             kanban: Arc::new(KanbanRegistry::new(tasks.clone())),
             tasks,

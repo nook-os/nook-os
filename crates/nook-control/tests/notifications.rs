@@ -253,3 +253,93 @@ async fn catalog_route_lists_every_notable_kind() {
         "route serves the whole catalog"
     );
 }
+
+/// The inbox's `(user_id IS NULL OR user_id = $2)` scope, which nothing covered
+/// until MAIN-256 moved the statement and went looking.
+///
+/// A notification addressed to one person can carry a private card's title, a
+/// review verdict, a failure someone would rather not broadcast. Lose that
+/// clause and every member of the tenant reads every other member's inbox —
+/// silently, because the list still looks right to whoever is testing it. The
+/// tenant-wide (`user_id IS NULL`) rows must keep reaching everyone, which is
+/// why the fix is a scope and not simply `user_id = $2`.
+#[tokio::test]
+async fn one_persons_inbox_never_shows_another_persons_notifications() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let state = bed.app_state().await;
+    let tenant = bed.tenant("inbox").await;
+    let (alice, _) = bed.user(tenant, "member").await;
+    let (bob, _) = bed.user(tenant, "member").await;
+
+    use nook_control::repo::notifications::{NewNotification, NotificationFilter};
+    let raise = |to: Option<UserId>, title: &str| {
+        let state = state.clone();
+        let title = title.to_string();
+        async move {
+            state
+                .notifications
+                .raise(NewNotification {
+                    tenant,
+                    user_id: to.map(|u| u.0),
+                    level: "info".into(),
+                    title,
+                    body: String::new(),
+                    kind: "test".into(),
+                    link: None,
+                    payload: serde_json::json!({}),
+                })
+                .await
+                .expect("raise")
+        }
+    };
+    raise(Some(alice), "for alice").await;
+    raise(Some(bob), "for bob").await;
+    raise(None, "for everyone").await;
+
+    let seen = |who: UserId| {
+        let state = state.clone();
+        async move {
+            let mut t: Vec<String> = state
+                .notifications
+                .list(
+                    tenant,
+                    who,
+                    NotificationFilter {
+                        unread_only: false,
+                        limit: 50,
+                    },
+                )
+                .await
+                .expect("list")
+                .into_iter()
+                .map(|n| n.title)
+                .collect();
+            t.sort();
+            t
+        }
+    };
+
+    assert_eq!(
+        seen(alice).await,
+        vec!["for alice", "for everyone"],
+        "alice sees her own and the tenant-wide one — never bob's"
+    );
+    assert_eq!(
+        seen(bob).await,
+        vec!["for bob", "for everyone"],
+        "and the same holds the other way round"
+    );
+    assert_eq!(
+        state
+            .notifications
+            .unread_count(tenant, alice)
+            .await
+            .expect("count"),
+        2,
+        "the badge counts the same rows the list shows"
+    );
+
+    bed.teardown().await;
+}

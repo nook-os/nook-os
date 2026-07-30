@@ -18,12 +18,6 @@ crates/nook-control/src/services/jobs.rs         # loop-job lifecycle + transcri
 crates/nook-control/src/services/interactions.rs # durable ask/answer
 crates/nook-control/src/services/loops.rs        # the loops.enabled setting read
 
-# ── MAIN-256 · NotificationRepository ───────────────────────────────────────
-crates/nook-control/src/routes/notifications.rs  # inbox + channels
-crates/nook-control/src/routes/feedback.rs       # feedback capture
-crates/nook-control/src/services/notify.rs       # delivery + dedupe
-crates/nook-control/src/services/triggers.rs     # board automation firing
-
 # ── MAIN-258 · Operator/admin repositories ──────────────────────────────────
 crates/nook-control/src/routes/operator.rs       # operator console actions
 crates/nook-control/src/routes/managed.rs        # managed skill/hook content

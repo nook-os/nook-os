@@ -7,12 +7,12 @@
 
 use axum::extract::{Path, Query, State};
 use axum::Json;
-use nook_db::{params, Db, Postgres, TypeMapping};
 use nook_types::*;
 use serde::Deserialize;
 
 use crate::auth::AuthCtx;
 use crate::error::{ApiError, ApiResult};
+use crate::repo::notifications::{ChannelEdit, NewChannel, NotificationFilter};
 use crate::services::notify;
 use crate::state::AppState;
 
@@ -34,37 +34,20 @@ pub async fn list(
 ) -> ApiResult<Json<NotificationPage>> {
     let limit = q.limit.unwrap_or(50).clamp(1, 200);
     let rows: Vec<Notification> = state
-        .db
-        .query_all(
-            &format!(
-                "SELECT id, tenant_id, user_id, level, title, body, kind, link, payload,
-                read_at, created_at
-         FROM notifications
-         WHERE tenant_id = $1
-           -- Tenant-wide (user_id IS NULL) or addressed to this person. Never
-           -- somebody else's.
-           AND (user_id IS NULL OR user_id = $2)
-           AND (NOT {} OR read_at IS NULL)
-         ORDER BY created_at DESC
-         LIMIT $4",
-                Postgres.cast("$3", "bool")
-            ),
-            params![
-                auth.tenant_id,
-                auth.user_id.0,
-                q.unread.unwrap_or(false),
-                limit
-            ],
+        .notifications
+        .list(
+            auth.tenant_id,
+            auth.user_id,
+            NotificationFilter {
+                unread_only: q.unread.unwrap_or(false),
+                limit,
+            },
         )
         .await?;
 
     let unread = state
-        .db
-        .query_scalar::<i64>(
-            "SELECT count(*) FROM notifications
-         WHERE tenant_id = $1 AND (user_id IS NULL OR user_id = $2) AND read_at IS NULL",
-            params![auth.tenant_id, auth.user_id.0],
-        )
+        .notifications
+        .unread_count(auth.tenant_id, auth.user_id)
         .await?;
 
     Ok(Json(NotificationPage {
@@ -88,29 +71,12 @@ pub async fn mark_read(
             let uuid: uuid::Uuid = id
                 .parse()
                 .map_err(|_| ApiError::BadRequest("that is not a notification id".into()))?;
-            state
-                .db
-                .exec(
-                    &format!(
-                        "UPDATE notifications SET read_at = {}
-                 WHERE id = $1 AND tenant_id = $2 AND read_at IS NULL",
-                        Postgres.now()
-                    ),
-                    params![uuid, auth.tenant_id],
-                )
-                .await?;
+            state.notifications.mark_read(uuid, auth.tenant_id).await?;
         }
         None => {
             state
-                .db
-                .exec(
-                    &format!(
-                        "UPDATE notifications SET read_at = {}
-                 WHERE tenant_id = $1 AND (user_id IS NULL OR user_id = $2) AND read_at IS NULL",
-                        Postgres.now()
-                    ),
-                    params![auth.tenant_id, auth.user_id.0],
-                )
+                .notifications
+                .mark_all_read(auth.tenant_id, auth.user_id)
                 .await?;
         }
     }
@@ -124,11 +90,8 @@ pub async fn clear(
     auth: AuthCtx,
 ) -> ApiResult<axum::http::StatusCode> {
     state
-        .db
-        .exec(
-            "DELETE FROM notifications WHERE tenant_id = $1 AND (user_id IS NULL OR user_id = $2)",
-            params![auth.tenant_id, auth.user_id.0],
-        )
+        .notifications
+        .clear(auth.tenant_id, auth.user_id)
         .await?;
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
@@ -222,15 +185,7 @@ pub async fn list_channels(
 ) -> ApiResult<Json<Vec<NotificationChannel>>> {
     // `config` is never selected — it holds bot tokens and webhook URLs, and
     // this list is fetched often and logged freely.
-    let rows: Vec<NotificationChannel> = state
-        .db
-        .query_all(
-            "SELECT id, tenant_id, kind, name, enabled, levels, kinds,
-                last_ok_at, last_error, created_at, updated_at
-         FROM notification_channels WHERE tenant_id = $1 ORDER BY name",
-            params![auth.tenant_id],
-        )
-        .await?;
+    let rows: Vec<NotificationChannel> = state.notifications.list_channels(auth.tenant_id).await?;
     Ok(Json(rows))
 }
 
@@ -258,23 +213,16 @@ pub async fn create_channel(
     // receiver is told it once, when they can write it down.
     let secret = crate::routes::join::random_token("", 32);
     let row: NotificationChannel = state
-        .db
-        .query_one(
-            "INSERT INTO notification_channels (id, tenant_id, kind, name, config, levels, kinds, secret)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-         RETURNING id, tenant_id, kind, name, enabled, levels, kinds,
-                   last_ok_at, last_error, created_at, updated_at",
-            params![
-                uuid::Uuid::now_v7(),
-                auth.tenant_id,
-                &req.kind,
-                req.name.trim(),
-                &req.config,
-                req.levels.clone(),
-                req.kinds.clone(),
-                &secret
-            ],
-        )
+        .notifications
+        .create_channel(NewChannel {
+            tenant: auth.tenant_id,
+            kind: req.kind.clone(),
+            name: req.name.trim().to_string(),
+            config: req.config.clone(),
+            levels: req.levels.clone(),
+            kinds: req.kinds.clone(),
+            secret: Some(secret),
+        })
         .await?;
     Ok(Json(row))
 }
@@ -310,30 +258,17 @@ pub async fn update_channel(
     // cannot read them back must be able to save a name change without
     // blanking the token it never saw.
     let row: Option<NotificationChannel> = state
-        .db
-        .query_opt(
-            &format!(
-                "UPDATE notification_channels SET
-            name = COALESCE($3, name),
-            config = COALESCE($4, config),
-            enabled = COALESCE($5, enabled),
-            levels = COALESCE($6, levels),
-            kinds = COALESCE($7, kinds),
-            updated_at = {}
-         WHERE id = $1 AND tenant_id = $2
-         RETURNING id, tenant_id, kind, name, enabled, levels, kinds,
-                   last_ok_at, last_error, created_at, updated_at",
-                Postgres.now()
-            ),
-            params![
-                id,
-                auth.tenant_id,
-                req.name.as_deref(),
-                req.config.clone(),
-                req.enabled,
-                req.levels.clone(),
-                req.kinds.clone()
-            ],
+        .notifications
+        .update_channel(
+            id,
+            auth.tenant_id,
+            ChannelEdit {
+                name: req.name.clone(),
+                config: req.config.clone(),
+                enabled: req.enabled,
+                levels: req.levels.clone(),
+                kinds: req.kinds.clone(),
+            },
         )
         .await?;
     row.map(Json).ok_or(ApiError::NotFound)
@@ -349,11 +284,8 @@ pub async fn delete_channel(
 ) -> ApiResult<axum::http::StatusCode> {
     auth.require_user()?;
     let res = state
-        .db
-        .exec(
-            "DELETE FROM notification_channels WHERE id = $1 AND tenant_id = $2",
-            params![id, auth.tenant_id],
-        )
+        .notifications
+        .delete_channel(id, auth.tenant_id)
         .await?;
     if res == 0 {
         return Err(ApiError::NotFound);

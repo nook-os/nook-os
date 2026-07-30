@@ -334,6 +334,22 @@ pub trait TaskRepository: Send + Sync {
     /// A column's type, unscoped — the caller already holds a task that names it.
     async fn column_type_of(&self, column: ColumnId) -> ApiResult<Option<String>>;
 
+    /// A board's automation rules blob (MAIN-256 moved this off `triggers.rs`).
+    async fn board_automation(
+        &self,
+        board: BoardId,
+        tenant: TenantId,
+    ) -> ApiResult<Option<serde_json::Value>>;
+
+    /// A task's visibility, unscoped — board automation already holds the task
+    /// and only needs to know whether announcing it would leak a private card.
+    async fn visibility_of(&self, task: TaskId) -> ApiResult<Option<String>>;
+
+    /// Key parts plus title, for naming a task in an automated message. The
+    /// board key is nullable, so an unkeyed board yields `(None, …)` rather
+    /// than dropping the row.
+    async fn task_ref(&self, task: TaskId) -> ApiResult<Option<(Option<String>, i32, String)>>;
+
     /// A column's type, scoped through its board's tenant. `board_columns` has
     /// no `tenant_id` of its own, so this is the tenant-safe form.
     async fn column_type_in_tenant(
@@ -1239,6 +1255,38 @@ impl TaskRepository for DbTaskRepository {
                     p.backlog,
                     p.visibility
                 ],
+            )
+            .await?)
+    }
+
+    async fn board_automation(
+        &self,
+        board: BoardId,
+        tenant: TenantId,
+    ) -> ApiResult<Option<serde_json::Value>> {
+        Ok(self
+            .db
+            .query_scalar_opt(
+                "SELECT automation FROM boards WHERE id = $1 AND tenant_id = $2",
+                params![board, tenant],
+            )
+            .await?)
+    }
+
+    async fn visibility_of(&self, task: TaskId) -> ApiResult<Option<String>> {
+        Ok(self
+            .db
+            .query_scalar_opt("SELECT visibility FROM tasks WHERE id = $1", params![task])
+            .await?)
+    }
+
+    async fn task_ref(&self, task: TaskId) -> ApiResult<Option<(Option<String>, i32, String)>> {
+        Ok(self
+            .db
+            .query_opt(
+                "SELECT b.key, t.number, t.title
+                   FROM tasks t JOIN boards b ON b.id = t.board_id WHERE t.id = $1",
+                params![task],
             )
             .await?)
     }
@@ -2604,6 +2652,46 @@ impl TaskRepository for FakeTaskRepository {
         out.sort_by_key(|t| (if t.priority == 0 { 5 } else { t.priority }, t.created_at));
         out.truncate(p.limit.max(0) as usize);
         Ok(out)
+    }
+
+    async fn board_automation(
+        &self,
+        board: BoardId,
+        tenant: TenantId,
+    ) -> ApiResult<Option<serde_json::Value>> {
+        let st = self.inner.lock().unwrap();
+        Ok(st
+            .boards
+            .iter()
+            .find(|b| b.id == board && b.tenant_id == tenant)
+            .map(|b| b.automation.clone()))
+    }
+
+    async fn visibility_of(&self, task: TaskId) -> ApiResult<Option<String>> {
+        let st = self.inner.lock().unwrap();
+        Ok(st
+            .tasks
+            .iter()
+            .find(|t| t.id == task)
+            .map(|t| t.visibility.clone()))
+    }
+
+    async fn task_ref(&self, task: TaskId) -> ApiResult<Option<(Option<String>, i32, String)>> {
+        let st = self.inner.lock().unwrap();
+        let Some(t) = st.tasks.iter().find(|t| t.id == task) else {
+            return Ok(None);
+        };
+        // The real query INNER JOINs boards, so an unknown board yields no row;
+        // a board with a NULL key still does, with `None` for the key.
+        if !st.boards.iter().any(|b| b.id == t.board_id) {
+            return Ok(None);
+        }
+        let key = st
+            .boards
+            .iter()
+            .find(|b| b.id == t.board_id)
+            .and_then(|b| b.key.clone());
+        Ok(t.number.map(|n| (key, n, t.title.clone())))
     }
 
     async fn column_type_of(&self, column: ColumnId) -> ApiResult<Option<String>> {

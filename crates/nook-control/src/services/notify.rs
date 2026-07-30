@@ -22,11 +22,11 @@
 
 use async_trait::async_trait;
 use hmac::{Hmac, Mac};
-use nook_db::{params, Db, DbPool, Postgres, TypeMapping};
 use nook_types::*;
 use serde_json::Value;
 use sha2::Sha256;
 
+use crate::repo::notifications::ChannelTarget;
 use crate::state::AppState;
 
 /// Sign an outbound webhook body.
@@ -623,28 +623,21 @@ pub async fn raise(state: &AppState, tenant: TenantId, draft: Draft) {
     };
 
     let row: Result<Notification, _> = state
-        .db
-        .query_one(
-            "INSERT INTO notifications (id, tenant_id, user_id, level, title, body, kind, link, payload)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-         RETURNING id, tenant_id, user_id, level, title, body, kind, link, payload,
-                   read_at, created_at",
-            params![
-                uuid::Uuid::now_v7(),
-                tenant,
-                draft.user_id,
-                &level,
-                &draft.title,
-                &draft.body,
-                &draft.kind,
-                draft.link.clone(),
-                if draft.payload.is_null() {
-                    serde_json::json!({})
-                } else {
-                    draft.payload.clone()
-                }
-            ],
-        )
+        .notifications
+        .raise(crate::repo::notifications::NewNotification {
+            tenant,
+            user_id: draft.user_id,
+            level: level.clone(),
+            title: draft.title.clone(),
+            body: draft.body.clone(),
+            kind: draft.kind.clone(),
+            link: draft.link.clone(),
+            payload: if draft.payload.is_null() {
+                serde_json::json!({})
+            } else {
+                draft.payload.clone()
+            },
+        })
         .await;
 
     let notification = match row {
@@ -671,44 +664,11 @@ pub async fn raise(state: &AppState, tenant: TenantId, draft: Draft) {
     });
 }
 
-/// A channel as the dispatcher needs it — including `config`, which is why
-/// this never leaves this module.
-///
-/// FromRow is hand-written (MAIN-205): `levels`/`kinds` are Postgres text[]
-/// arrays with no SQLite `Decode`, so the derive can't satisfy the SqliteRow arm
-/// the dispatch pool bounds on. The PgRow impl reproduces the derive; the
-/// SqliteRow impl defers to MAIN-196.
-struct ChannelRow {
-    id: uuid::Uuid,
-    kind: String,
-    config: Value,
-    levels: Vec<String>,
-    kinds: Vec<String>,
-    secret: Option<String>,
-}
-
-impl<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> for ChannelRow {
-    fn from_row(row: &'r sqlx::postgres::PgRow) -> sqlx::Result<Self> {
-        use sqlx::Row;
-        Ok(Self {
-            id: row.try_get("id")?,
-            kind: row.try_get("kind")?,
-            config: row.try_get("config")?,
-            levels: row.try_get("levels")?,
-            kinds: row.try_get("kinds")?,
-            secret: row.try_get("secret")?,
-        })
-    }
-}
-impl<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> for ChannelRow {
-    fn from_row(_row: &'r sqlx::sqlite::SqliteRow) -> sqlx::Result<Self> {
-        Err(sqlx::Error::Decode(
-            "SQLite row mapping for array-column type `ChannelRow` lands in MAIN-196".into(),
-        ))
-    }
-}
-
-impl ChannelRow {
+/// `config_with_secret` stays here rather than on the repository: merging the
+/// signing secret into the config blob is what a *provider* needs in order to
+/// send, not how the row is stored. The row type itself is
+/// [`crate::repo::notifications::ChannelTarget`].
+impl ChannelTarget {
     /// `config` plus the signing secret, which lives in its own column so it
     /// is never returned by an endpoint that returns config.
     fn config_with_secret(&self) -> Value {
@@ -721,15 +681,7 @@ impl ChannelRow {
 }
 
 async fn fan_out(state: &AppState, tenant: TenantId, n: &Notification) {
-    let rows: Vec<ChannelRow> = match state
-        .db
-        .query_all(
-            "SELECT id, kind, config, levels, kinds, secret FROM notification_channels
-         WHERE tenant_id = $1 AND enabled",
-            params![tenant],
-        )
-        .await
-    {
+    let rows: Vec<ChannelTarget> = match state.notifications.enabled_channels(tenant).await {
         Ok(r) => r,
         Err(e) => {
             tracing::warn!(error = %e, "could not load notification channels");
@@ -749,7 +701,7 @@ async fn fan_out(state: &AppState, tenant: TenantId, n: &Notification) {
         let result = provider
             .deliver(&row.config_with_secret(), n, &*state.mailer)
             .await;
-        record_outcome(&state.db, row.id, result).await;
+        record_outcome(&*state.notifications, row.id, result).await;
     }
 }
 
@@ -765,7 +717,11 @@ pub fn matches_filters(n: &Notification, levels: &[String], kinds: &[String]) ->
     true
 }
 
-async fn record_outcome(db: &DbPool, channel: uuid::Uuid, result: anyhow::Result<()>) {
+async fn record_outcome(
+    repo: &dyn crate::repo::notifications::NotificationRepository,
+    channel: uuid::Uuid,
+    result: anyhow::Result<()>,
+) {
     let (ok, err) = match result {
         Ok(()) => (true, None),
         Err(e) => {
@@ -776,19 +732,7 @@ async fn record_outcome(db: &DbPool, channel: uuid::Uuid, result: anyhow::Result
             )
         }
     };
-    let _ = db
-        .exec(
-            &format!(
-                "UPDATE notification_channels
-         SET last_ok_at = CASE WHEN $2 THEN {now} ELSE last_ok_at END,
-             last_error = $3,
-             updated_at = {now}
-         WHERE id = $1",
-                now = Postgres.now()
-            ),
-            params![channel, ok, err],
-        )
-        .await;
+    let _ = repo.record_outcome(channel, ok, err.as_deref()).await;
 }
 
 /// Deliver to exactly one channel, for the "test" button.
@@ -800,14 +744,7 @@ pub async fn test_channel(
     tenant: TenantId,
     id: uuid::Uuid,
 ) -> anyhow::Result<()> {
-    let row: Option<ChannelRow> = state
-        .db
-        .query_opt(
-            "SELECT id, kind, config, levels, kinds, secret FROM notification_channels
-         WHERE id = $1 AND tenant_id = $2",
-            params![id, tenant],
-        )
-        .await?;
+    let row: Option<ChannelTarget> = state.notifications.channel_target(id, tenant).await?;
     let row = row.ok_or_else(|| anyhow::anyhow!("no such channel"))?;
     let (kind, config) = (row.kind.clone(), row.config_with_secret());
     let provider = channels()
@@ -830,7 +767,7 @@ pub async fn test_channel(
     };
     let result = provider.deliver(&config, &sample, &*state.mailer).await;
     let message = result.as_ref().err().map(|e| e.to_string());
-    record_outcome(&state.db, id, result).await;
+    record_outcome(&*state.notifications, id, result).await;
     match message {
         Some(m) => Err(anyhow::anyhow!(m)),
         None => Ok(()),
