@@ -24,6 +24,8 @@ pub struct AppState {
     pub invites: Arc<dyn crate::repo::invites::InviteRepository>,
     /// Workspaces and their checkouts (MAIN-251). Same contract.
     pub workspaces: Arc<dyn crate::repo::workspaces::WorkspaceRepository>,
+    /// Sessions: creation, status transitions, the two list shapes (MAIN-253).
+    pub sessions: Arc<dyn crate::repo::sessions::SessionRepository>,
     /// Tenant git credentials (MAIN-251).
     pub git_credentials: Arc<dyn crate::repo::workspaces::GitCredentialRepository>,
     /// Sealed per-workspace secret files (MAIN-251).
@@ -98,6 +100,7 @@ impl AppState {
             workspaces: Arc::new(crate::repo::workspaces::DbWorkspaceRepository::new(
                 db.clone(),
             )),
+            sessions: Arc::new(crate::repo::sessions::DbSessionRepository::new(db.clone())),
             git_credentials: Arc::new(crate::repo::workspaces::DbGitCredentialRepository::new(
                 db.clone(),
             )),
