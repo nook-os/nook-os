@@ -182,3 +182,60 @@ async fn a_second_boot_over_the_same_file_is_clean() {
         .expect("roles");
     assert!(roles >= 1, "the seeded role model survived the restart");
 }
+
+/// The branch a fresh boot never takes (review of 8a34a63).
+///
+/// `managed::upsert_default` has three paths: insert (fresh), update (the
+/// shipped default's sha moved — i.e. an UPGRADE), and no-op. Only the first
+/// runs on a virgin file, which is exactly why the rest of this suite — and a
+/// manual boot — missed a `Postgres.now()` splice living in the second. On
+/// SQLite that is a syntax error, so the *second* boot of a single-machine
+/// deployment, after any change to a shipped managed skill, would have died in
+/// seeding.
+///
+/// This drives the update branch directly, which is the only way a fresh-boot
+/// suite can see this class of conditional-branch Postgres-ism.
+#[tokio::test]
+async fn the_managed_upgrade_branch_survives_on_sqlite() {
+    let file = ScratchDb::new("managed");
+    let db = boot(&file).await;
+
+    // Install at version 1 (the insert branch).
+    nook_control::routes::managed::upsert_default(&db, "skill", "sqlite-probe", "v1 body")
+        .await
+        .expect("insert branch");
+
+    // Now ship a DIFFERENT default: the sha moves, so the UPDATE branch runs.
+    // This is the call that failed before the fix.
+    nook_control::routes::managed::upsert_default(&db, "skill", "sqlite-probe", "v2 body")
+        .await
+        .expect("the upgrade branch must not be Postgres-only");
+
+    let (version, content, updated): (i64, String, Option<String>) = sqlx::query_as(
+        "SELECT version, content, updated_at FROM managed_content
+          WHERE kind = 'skill' AND name = 'sqlite-probe'",
+    )
+    .fetch_one(db.sqlite())
+    .await
+    .expect("the managed row");
+
+    assert_eq!(version, 2, "the version bumped");
+    assert_eq!(content, "v2 body", "the newer default won");
+    assert!(
+        updated.is_some_and(|u| !u.is_empty()),
+        "updated_at was stamped by CURRENT_TIMESTAMP, not left null"
+    );
+
+    // Re-running with unchanged content takes the no-op branch and must also
+    // survive — this is the ordinary restart.
+    nook_control::routes::managed::upsert_default(&db, "skill", "sqlite-probe", "v2 body")
+        .await
+        .expect("no-op branch");
+    let version: i64 = sqlx::query_scalar(
+        "SELECT version FROM managed_content WHERE kind = 'skill' AND name = 'sqlite-probe'",
+    )
+    .fetch_one(db.sqlite())
+    .await
+    .expect("version");
+    assert_eq!(version, 2, "an unchanged default does not churn the row");
+}
