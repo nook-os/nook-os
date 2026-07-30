@@ -30,6 +30,10 @@ pub struct AppState {
     pub git_credentials: Arc<dyn crate::repo::workspaces::GitCredentialRepository>,
     /// Sealed per-workspace secret files (MAIN-251).
     pub workspace_secrets: Arc<dyn crate::repo::workspaces::WorkspaceSecretRepository>,
+    /// Loop jobs and their transcripts (MAIN-255).
+    pub jobs: Arc<dyn crate::repo::jobs::LoopJobRepository>,
+    /// Durable ask/answer between a running job and a human (MAIN-255).
+    pub interactions: Arc<dyn crate::repo::jobs::InteractionRepository>,
     /// Nodes: identity, sharing, the liveness lease (MAIN-252). Same contract.
     pub nodes: Arc<dyn crate::repo::nodes::NodeRepository>,
     /// Single-use enrolment tokens (MAIN-252).
@@ -107,6 +111,8 @@ impl AppState {
                 db.clone(),
             )),
             sessions: Arc::new(crate::repo::sessions::DbSessionRepository::new(db.clone())),
+            jobs: Arc::new(crate::repo::jobs::DbLoopJobRepository::new(db.clone())),
+            interactions: Arc::new(crate::repo::jobs::DbInteractionRepository::new(db.clone())),
             git_credentials: Arc::new(crate::repo::workspaces::DbGitCredentialRepository::new(
                 db.clone(),
             )),

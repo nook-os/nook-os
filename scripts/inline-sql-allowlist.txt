@@ -20,11 +20,6 @@ crates/nook-control/src/routes/vault.rs          # person vault entries
 crates/nook-control/src/services/secrets.rs      # sealed secret storage
 crates/nook-control/src/services/notebook_queries.rs    # split out by MAIN-245, awaits its trait
 
-# ── MAIN-255 · LoopJobRepository ────────────────────────────────────────────
-crates/nook-control/src/services/jobs.rs         # loop-job lifecycle + transcript
-crates/nook-control/src/services/interactions.rs # durable ask/answer
-crates/nook-control/src/services/loops.rs        # the loops.enabled setting read
-
 # ── MAIN-256 · NotificationRepository ───────────────────────────────────────
 crates/nook-control/src/routes/notifications.rs  # inbox + channels
 crates/nook-control/src/routes/feedback.rs       # feedback capture
@@ -51,6 +46,7 @@ crates/nook-control/src/services/overview_queries.rs    # Mission Control read-m
 crates/nook-control/src/routes/health.rs         # the liveness probe's SELECT 1
 crates/nook-control/src/ws/bus.rs                # bus_outbox + pg_notify; no aggregate owns it (re-filed by MAIN-253)
 crates/nook-control/src/ws/registry.rs           # the node lease cache; NodeRepository owns `nodes` but MAIN-252 landed without this one site
+crates/nook-control/src/services/loops.rs        # the loops.enabled setting read — `settings`, no loop-job data (re-filed by MAIN-255)
 
 # ── Permanently out of scope ────────────────────────────────────────────────
 # Named by MAIN-260 NG-1 as legitimately holding SQL. Listed rather than
