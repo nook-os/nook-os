@@ -356,7 +356,14 @@ pub async fn accept(
     // Identity-only (MAIN-98): a local invitee reaches this route signed in but
     // not yet a member of any tenant. `accept_core` still enforces every check —
     // pending+unexpired invite, email match, verified email, invited role.
-    let result = accept_core(&state.db, id.user_id.0, id.tenant_id, &req.token).await?;
+    let result = accept_core(
+        &state.db,
+        state.identity.as_ref(),
+        id.user_id.0,
+        id.tenant_id,
+        &req.token,
+    )
+    .await?;
 
     // A local invitee's session points at the tenant they registered in, where
     // until now they had no membership. On a successful accept move the cookie
@@ -380,6 +387,9 @@ pub async fn accept(
 /// caller stays (their own active tenant).
 pub async fn accept_core(
     db: &nook_db::DbPool,
+    // Verified-email is identity's question now (MAIN-246); the invite tables
+    // stay on the pool, so this helper carries both.
+    repo: &dyn crate::repo::identity::IdentityRepository,
     user_id: uuid::Uuid,
     fallback_tenant: TenantId,
     token: &str,
@@ -466,7 +476,7 @@ pub async fn accept_core(
     // The email must be VERIFIED, not merely equal — email equality is the
     // MAIN-12 root cause. An unverified accepter is declined and the invite is
     // NOT consumed (AC-8), so it stays valid until they verify.
-    if !email_is_verified(db, UserId(user_id)).await? {
+    if !email_is_verified(repo, UserId(user_id)).await? {
         return decline("verify your email address first, then open the invite link again");
     }
 
@@ -657,7 +667,7 @@ pub async fn register(
     // OIDC-claimed tenant (AC-3/NG-2).
     use crate::services::local_auth::{self, AuthMode};
     if matches!(
-        local_auth::mode_of(&state.db, tenant).await?,
+        local_auth::mode_of(state.identity.as_ref(), tenant).await?,
         Some(AuthMode::Oidc)
     ) {
         return Err(ApiError::BadRequest(
@@ -684,7 +694,7 @@ pub async fn register(
     // Create the local account — invite's email, unverified, NO membership. A
     // duplicate/invalid username is a clean 400 (about the chosen username).
     let user = local_auth::register_invited(
-        &state.db,
+        state.identity.as_ref(),
         tenant,
         &req.username,
         &email,
@@ -771,6 +781,12 @@ mod tests {
 
 #[cfg(test)]
 mod db_tests {
+
+    /// The real repository over this test's pool — these are DB-backed tests
+    /// (NG-4 keeps them that way), so the double here is the genuine impl.
+    fn repo_of(db: &DbPool) -> crate::repo::identity::DbIdentityRepository {
+        crate::repo::identity::DbIdentityRepository::new(db.clone())
+    }
     use super::accept_core;
     use crate::seed::hash_token;
     use nook_db::{params, Db, DbPool, Json};
@@ -883,16 +899,18 @@ mod db_tests {
 
         // Wrong email invite → declined, no membership.
         let wrong = invite(&db, shared, "someone-else@i6.test", 7).await;
-        let r_wrong = accept_core(&db, me, TenantId(home), &wrong).await.unwrap();
+        let r_wrong = accept_core(&db, &repo_of(&db), me, TenantId(home), &wrong)
+            .await
+            .unwrap();
 
         // Expired invite (own tenant) → declined.
         let expired = invite(&db, stale, "invitee@i6.test", -1).await;
-        let r_expired = accept_core(&db, me, TenantId(home), &expired)
+        let r_expired = accept_core(&db, &repo_of(&db), me, TenantId(home), &expired)
             .await
             .unwrap();
 
         // Unknown token → declined.
-        let r_unknown = accept_core(&db, me, TenantId(home), "inv_nope")
+        let r_unknown = accept_core(&db, &repo_of(&db), me, TenantId(home), "inv_nope")
             .await
             .unwrap();
         let member_before = is_member(&db, shared, person).await;
@@ -900,7 +918,9 @@ mod db_tests {
         // Good invite, matching email, but the accepter is NOT verified →
         // declined and the invite is NOT consumed (AC-8).
         let good = invite(&db, shared, "invitee@i6.test", 7).await;
-        let r_unverified = accept_core(&db, me, TenantId(home), &good).await.unwrap();
+        let r_unverified = accept_core(&db, &repo_of(&db), me, TenantId(home), &good)
+            .await
+            .unwrap();
         let member_after_unverified = is_member(&db, shared, person).await;
         // The token is stored hashed, never in plaintext (AC-9).
         let stored_hash: String = db
@@ -913,10 +933,14 @@ mod db_tests {
 
         // Verify the address; the same link now works (AC-8).
         verify(&db, me, "invitee@i6.test").await;
-        let r_ok = accept_core(&db, me, TenantId(home), &good).await.unwrap();
+        let r_ok = accept_core(&db, &repo_of(&db), me, TenantId(home), &good)
+            .await
+            .unwrap();
         let member_after = is_member(&db, shared, person).await;
         // Idempotent: second accept is a no-op success; token can't be reused for a NEW membership.
-        let r_again = accept_core(&db, me, TenantId(home), &good).await.unwrap();
+        let r_again = accept_core(&db, &repo_of(&db), me, TenantId(home), &good)
+            .await
+            .unwrap();
         let member_rows: i64 = db
             .query_scalar(
                 "SELECT count(*) FROM tenant_members m JOIN users u ON u.id=m.principal_id
@@ -986,7 +1010,9 @@ mod db_tests {
 
         // An invite in `shared` for SOMEONE ELSE's email.
         let others = invite(&db, shared, "colleague@i10.test", 7).await;
-        let r = accept_core(&db, me, TenantId(home), &others).await.unwrap();
+        let r = accept_core(&db, &repo_of(&db), me, TenantId(home), &others)
+            .await
+            .unwrap();
 
         let still_pending: i64 = db
             .query_scalar(
@@ -1027,7 +1053,9 @@ mod db_tests {
         let token = invite(&db, shared, "invitee@i8.test", 7).await;
 
         // Unverified accept → declined, and nothing joins.
-        let declined = accept_core(&db, me, TenantId(home), &token).await.unwrap();
+        let declined = accept_core(&db, &repo_of(&db), me, TenantId(home), &token)
+            .await
+            .unwrap();
         let member_after_decline = is_member(&db, shared, person).await;
         let still_pending: i64 = db
             .query_scalar(
@@ -1041,7 +1069,9 @@ mod db_tests {
         // token now accepts — proving the decline was the AC-8 gate, not a
         // mismatch or an expiry.
         verify(&db, me, "invitee@i8.test").await;
-        let accepted = accept_core(&db, me, TenantId(home), &token).await.unwrap();
+        let accepted = accept_core(&db, &repo_of(&db), me, TenantId(home), &token)
+            .await
+            .unwrap();
         let member_after_verify = is_member(&db, shared, person).await;
 
         cleanup(&db, &[shared, home]).await;

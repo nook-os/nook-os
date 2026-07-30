@@ -38,6 +38,9 @@ impl ActivityScope {
         db: &DbPool,
         tenant: TenantId,
         auth: &crate::auth::AuthCtx,
+        // The admin check is identity's now (MAIN-246); the activity tables
+        // stay on the pool, so `load` carries both.
+        repo: &dyn crate::repo::identity::IdentityRepository,
     ) -> ApiResult<Self> {
         // A node credential is not a person watching a feed — unchanged tenant
         // view. Kept ahead of the role check because `is_tenant_admin` reports a
@@ -48,7 +51,7 @@ impl ActivityScope {
         // An owner/admin sees the whole tenant's activity. Now that MAIN-118's
         // children have merged, this reuses the one shared role check rather
         // than its own copy of the query (MAIN-137).
-        if auth.is_tenant_admin(db).await? {
+        if auth.is_tenant_admin(repo).await? {
             return Ok(Self::All);
         }
         // A member: their person's user ids, the nodes that person owns, and the

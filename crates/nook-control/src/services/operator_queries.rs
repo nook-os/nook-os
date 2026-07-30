@@ -206,6 +206,11 @@ pub async fn operator_bindings_page(
 /// schema and no-op without `NOOK_REQUIRE_DB=1`, matching the suite convention.
 #[cfg(test)]
 mod db_tests {
+
+    /// The real repository over this test's pool — these stay DB-backed (NG-4).
+    fn repo_of(db: &DbPool) -> crate::repo::identity::DbIdentityRepository {
+        crate::repo::identity::DbIdentityRepository::new(db.clone())
+    }
     use super::{
         operator_audit_page, operator_bindings_page, operator_nodes_page, operator_tenants_page,
     };
@@ -358,12 +363,14 @@ mod db_tests {
             .await;
         }
 
-        let p1 = tenant_members_page(&db, t, None, None, 2).await.unwrap();
+        let p1 = tenant_members_page(&repo_of(&db), t, None, None, 2)
+            .await
+            .unwrap();
         assert!(p1.rows.len() <= 2, "page is bounded");
         assert!(p1.next_cursor.is_some(), "a full page carries a cursor");
 
         // Search by (distinctive) email/name reaches the needle on a later page.
-        let hit = tenant_members_page(&db, t, Some("NEEDLE".into()), None, 2)
+        let hit = tenant_members_page(&repo_of(&db), t, Some("NEEDLE".into()), None, 2)
             .await
             .unwrap();
         assert!(
@@ -380,7 +387,7 @@ mod db_tests {
 
         // No matches → empty.
         assert!(
-            tenant_members_page(&db, t, Some("zzno".into()), None, 50)
+            tenant_members_page(&repo_of(&db), t, Some("zzno".into()), None, 50)
                 .await
                 .unwrap()
                 .rows
