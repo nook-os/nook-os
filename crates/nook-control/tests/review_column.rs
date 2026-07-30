@@ -106,9 +106,13 @@ async fn review_is_a_valid_type_and_resolves_by_type() {
     add_col(&bed.pool, board, "In Review", 1, "review").await;
     add_col(&bed.pool, board, "Done", 2, "completed").await;
 
-    let review = column_of_type(&bed.db(), board, "review")
-        .await
-        .expect("review resolves");
+    let review = column_of_type(
+        &nook_control::repo::tasks::DbTaskRepository::new(bed.db()),
+        board,
+        "review",
+    )
+    .await
+    .expect("review resolves");
     let by_pos = cols(&bed.pool, board).await;
     // The resolved id is the review-typed column.
     assert_eq!(by_pos[1].2, "review");
@@ -134,9 +138,13 @@ async fn submit_pr_resolution_prefers_review_then_falls_back_to_completed() {
     add_col(&bed.pool, with_review, "In Progress", 0, "started").await;
     add_col(&bed.pool, with_review, "In Review", 1, "review").await;
     add_col(&bed.pool, with_review, "Done", 2, "completed").await;
-    assert!(column_of_type(&bed.db(), with_review, "review")
-        .await
-        .is_ok());
+    assert!(column_of_type(
+        &nook_control::repo::tasks::DbTaskRepository::new(bed.db()),
+        with_review,
+        "review"
+    )
+    .await
+    .is_ok());
 
     // A board WITHOUT one: review errors and the fallback (completed) resolves —
     // exactly the chain submit_pr walks.
@@ -144,15 +152,23 @@ async fn submit_pr_resolution_prefers_review_then_falls_back_to_completed() {
     add_col(&bed.pool, no_review, "In Progress", 0, "started").await;
     add_col(&bed.pool, no_review, "Done", 1, "completed").await;
     assert!(
-        column_of_type(&bed.db(), no_review, "review")
-            .await
-            .is_err(),
+        column_of_type(
+            &nook_control::repo::tasks::DbTaskRepository::new(bed.db()),
+            no_review,
+            "review"
+        )
+        .await
+        .is_err(),
         "a board with no review column has none to resolve"
     );
     assert!(
-        column_of_type(&bed.db(), no_review, "completed")
-            .await
-            .is_ok(),
+        column_of_type(
+            &nook_control::repo::tasks::DbTaskRepository::new(bed.db()),
+            no_review,
+            "completed"
+        )
+        .await
+        .is_ok(),
         "so submit_pr falls back to the completed column"
     );
 

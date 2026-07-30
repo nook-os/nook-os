@@ -2,7 +2,6 @@
 //! submit-PR, prune. Shared by REST handlers and MCP tools so an AI can drive
 //! the same lifecycle a human can.
 
-use nook_db::{params, Db, Postgres, TypeMapping};
 use nook_proto::ControlToNode;
 use nook_types::*;
 
@@ -17,17 +16,11 @@ use crate::state::AppState;
 /// an ad-hoc path with no checkout row. Mirrors `create_session_at`'s session
 /// binding so a task and its session agree on which checkout they run in.
 pub async fn present_checkout_at(
-    db: &nook_db::DbPool,
+    repo: &dyn crate::repo::tasks::TaskRepository,
     node_id: NodeId,
     path: &str,
 ) -> ApiResult<Option<NodeWorkspaceId>> {
-    Ok(db
-        .query_scalar_opt(
-            "SELECT id FROM node_workspaces
-             WHERE node_id = $1 AND path = $2 AND missing_at IS NULL",
-            params![node_id, path],
-        )
-        .await?)
+    repo.present_checkout_at(node_id, path).await
 }
 
 /// The `(path, node)` of the worktree `prune_worktree` should remove (MAIN-225
@@ -39,14 +32,7 @@ pub async fn prune_target(
     task: &TaskItem,
 ) -> ApiResult<Option<(String, NodeId)>> {
     if let Some(checkout) = task.checkout_id {
-        let row: Option<(String, NodeId)> = state
-            .db
-            .query_opt(
-                "SELECT path, node_id FROM node_workspaces
-                 WHERE id = $1 AND missing_at IS NULL",
-                params![checkout],
-            )
-            .await?;
+        let row = state.tasks.checkout_location(checkout).await?;
         if let Some(pair) = row {
             return Ok(Some(pair));
         }
@@ -61,11 +47,8 @@ pub async fn prune_target(
 
 async fn load_task(state: &AppState, tenant: TenantId, id: TaskId) -> ApiResult<TaskItem> {
     state
-        .db
-        .query_opt(
-            "SELECT * FROM tasks WHERE id = $1 AND tenant_id = $2",
-            params![id, tenant],
-        )
+        .tasks
+        .get_row(tenant, id)
         .await?
         .ok_or(ApiError::NotFound)
 }
@@ -92,34 +75,16 @@ async fn column_id(
         _ => None,
     };
     if let Some(t) = wanted_type {
-        if let Some(id) = state
-            .db
-            .query_scalar_opt::<ColumnId>(
-                "SELECT id FROM board_columns WHERE board_id = $1 AND type = $2
-             ORDER BY position LIMIT 1",
-                params![board_id, t],
-            )
-            .await?
-        {
+        if let Some(id) = state.tasks.column_of_type(board_id, t).await? {
             return Ok(id);
         }
     }
-    if let Some(id) = state
-        .db
-        .query_scalar_opt::<ColumnId>(
-            "SELECT id FROM board_columns WHERE board_id = $1 AND lower(name) = lower($2)",
-            params![board_id, name],
-        )
-        .await?
-    {
+    if let Some(id) = state.tasks.column_by_name(board_id, name).await? {
         return Ok(id);
     }
     state
-        .db
-        .query_scalar_opt::<ColumnId>(
-            "SELECT id FROM board_columns WHERE board_id = $1 ORDER BY position OFFSET $2 LIMIT 1",
-            params![board_id, fallback_pos.max(0) as i64],
-        )
+        .tasks
+        .column_at_position(board_id, fallback_pos.max(0) as i64)
         .await?
         .ok_or_else(|| ApiError::BadRequest("board has no columns".into()))
 }
@@ -151,16 +116,9 @@ pub async fn dispatch(
     let needs_clone = placement.needs_clone();
     let todo = column_id(state, task.board_id, "Todo", 1).await?;
 
-    let mut updated: TaskItem = state
-        .db
-        .query_one(
-            &format!(
-                "UPDATE tasks SET assigned_node_id = $2, column_id = $3, updated_at = {}
-         WHERE id = $1 RETURNING *",
-                Postgres.now()
-            ),
-            params![task_id, node, todo],
-        )
+    let mut updated = state
+        .tasks
+        .assign_node_and_column(task_id, node, todo)
         .await?;
     updated.needs_clone = needs_clone;
 
@@ -245,18 +203,9 @@ pub async fn start_work(
         .unwrap_or_else(|| slugify(&task.title));
 
     // A checkout of this workspace must exist on the node to worktree from.
-    let repo_path: Option<String> = state
-        .db
-        .query_scalar_opt(
-            // MAIN-222 AC-3: worktree from the CLONE, never from a worktree — a
-            // deterministic, clone-only pick (kind + missing_at), not bare
-            // discovered_at order that a delete/reinsert could reshuffle.
-            "SELECT path FROM node_workspaces
-         WHERE tenant_id = $1 AND workspace_id = $2 AND node_id = $3
-           AND kind = 'clone' AND missing_at IS NULL
-         ORDER BY discovered_at LIMIT 1",
-            params![tenant, workspace_id, node_id],
-        )
+    let repo_path = state
+        .tasks
+        .clone_path_on_node(tenant, workspace_id, node_id)
         .await?;
     let Some(repo_path) = repo_path else {
         return Err(ApiError::BadRequest(
@@ -305,29 +254,22 @@ pub async fn start_work(
     // session's checkout. NULL when discovery has not yet scanned the just-created
     // worktree — never guessed. The legacy strings are still written in the same
     // UPDATE, so no existing reader regresses (NG-1).
-    let checkout_id = present_checkout_at(&state.db, node_id, &worktree_path).await?;
+    let checkout_id = present_checkout_at(state.tasks.as_ref(), node_id, &worktree_path).await?;
 
     let in_progress = column_id(state, task.board_id, "In Progress", 2).await?;
-    let updated: TaskItem = state
-        .db
-        .query_one(
-            &format!(
-                "UPDATE tasks SET workspace_id = $2, assigned_node_id = $3, branch = $4,
-                worktree_path = $5, worktree_node_id = $3, session_id = $6,
-                column_id = $7, checkout_id = $8, updated_at = {}
-         WHERE id = $1 RETURNING *",
-                Postgres.now()
-            ),
-            params![
-                task_id,
-                workspace_id,
+    let updated = state
+        .tasks
+        .record_started_work(
+            task_id,
+            crate::repo::tasks::StartedWork {
+                workspace_id: workspace_id.0,
                 node_id,
-                &branch,
-                &worktree_path,
-                session.id,
-                in_progress,
-                checkout_id.map(|c| c.0)
-            ],
+                branch: branch.clone(),
+                worktree_path: worktree_path.clone(),
+                session_id: Some(session.id.0),
+                column_id: in_progress,
+                checkout_id: checkout_id.map(|c| c.0),
+            },
         )
         .await?;
 
@@ -370,25 +312,21 @@ pub async fn submit_pr(
     // By TYPE, not name: a submitted PR parks in the board's `review` column,
     // falling back to `completed` only for a board that somehow has no review
     // column (one that predates this and missed the backfill).
-    let target = match crate::services::tasks::column_of_type(&state.db, task.board_id, "review")
-        .await
-    {
-        Ok(id) => id,
-        Err(_) => {
-            crate::services::tasks::column_of_type(&state.db, task.board_id, "completed").await?
-        }
-    };
-    let updated: TaskItem = state
-        .db
-        .query_one(
-            &format!(
-                "UPDATE tasks SET pr_url = $2, column_id = $3, updated_at = {}
-         WHERE id = $1 RETURNING *",
-                Postgres.now()
-            ),
-            params![task_id, &url, target],
-        )
-        .await?;
+    let target =
+        match crate::services::tasks::column_of_type(state.tasks.as_ref(), task.board_id, "review")
+            .await
+        {
+            Ok(id) => id,
+            Err(_) => {
+                crate::services::tasks::column_of_type(
+                    state.tasks.as_ref(),
+                    task.board_id,
+                    "completed",
+                )
+                .await?
+            }
+        };
+    let updated = state.tasks.set_pr_url(task_id, &url, target).await?;
 
     events::record(
         state,
@@ -433,18 +371,7 @@ pub async fn prune_worktree(
         )));
     }
 
-    let updated: TaskItem = state
-        .db
-        .query_one(
-            &format!(
-                "UPDATE tasks SET checkout_id = NULL, worktree_path = NULL,
-                worktree_node_id = NULL, updated_at = {}
-         WHERE id = $1 RETURNING *",
-                Postgres.now()
-            ),
-            params![task_id],
-        )
-        .await?;
+    let updated = state.tasks.clear_worktree(task_id).await?;
 
     events::record(
         state,
@@ -465,16 +392,7 @@ pub async fn move_task(
 ) -> ApiResult<TaskItem> {
     let task = load_task(state, tenant, task_id).await?;
     let col = column_id(state, task.board_id, column, 0).await?;
-    let updated: TaskItem = state
-        .db
-        .query_one(
-            &format!(
-                "UPDATE tasks SET column_id = $2, updated_at = {} WHERE id = $1 RETURNING *",
-                Postgres.now()
-            ),
-            params![task_id, col],
-        )
-        .await?;
+    let updated = state.tasks.set_column(task_id, col).await?;
     fire_automation(state, tenant, &task, &updated).await;
     Ok(updated)
 }
@@ -482,12 +400,8 @@ pub async fn move_task(
 /// Best-effort compare/MR URL from the worktree's git remote.
 async fn derive_pr_url(state: &AppState, task: &TaskItem, branch: &str) -> Option<String> {
     let raw: String = state
-        .db
-        .query_scalar_opt(
-            "SELECT git_remote_url FROM node_workspaces
-         WHERE tenant_id = $1 AND workspace_id = $2 AND git_remote_url IS NOT NULL LIMIT 1",
-            params![task.tenant_id, task.workspace_id?],
-        )
+        .tasks
+        .git_remote_for_workspace(task.tenant_id, task.workspace_id?)
         .await
         .ok()??;
     // Normalize to https host/path (reuse the discovery normalizer).

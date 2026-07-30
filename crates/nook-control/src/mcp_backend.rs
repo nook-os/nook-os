@@ -98,10 +98,13 @@ impl McpBackend {
         tenant: TenantId,
         task_id: TaskId,
     ) -> anyhow::Result<std::sync::Arc<dyn crate::services::kanban::KanbanProvider>> {
-        let provider: String =
-            crate::services::tasks::board_provider_for_task(&self.state.db, tenant, task_id)
-                .await?
-                .ok_or_else(|| anyhow::anyhow!("no such task"))?;
+        let provider: String = crate::services::tasks::board_provider_for_task(
+            self.state.tasks.as_ref(),
+            tenant,
+            task_id,
+        )
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("no such task"))?;
         self.state
             .kanban
             .get(&provider)
@@ -475,7 +478,8 @@ impl NookBackend for McpBackend {
     ) -> anyhow::Result<TaskItem> {
         use crate::services::kanban::ProviderError;
         let tenant = self.tenant().await?;
-        let id = crate::services::tasks::resolve_id(&self.state.db, tenant, &task).await?;
+        let id =
+            crate::services::tasks::resolve_id(self.state.tasks.as_ref(), tenant, &task).await?;
         // Through the task's OWN board provider, not a hardwired local one
         // (MAIN-86 AC-2).
         let provider = self.provider_for_task(tenant, id).await?;
@@ -484,7 +488,8 @@ impl NookBackend for McpBackend {
         // concurrent edit re-read and try again a bounded number of times, so an
         // agent's body edit never silently clobbers a human's change (AC-3).
         for _ in 0..5 {
-            let cur = crate::services::tasks::get_row(&self.state.db, tenant, id).await?;
+            let cur =
+                crate::services::tasks::get_row(self.state.tasks.as_ref(), tenant, id).await?;
             let Some(cur) = cur else {
                 anyhow::bail!("no such task");
             };
@@ -510,7 +515,7 @@ impl NookBackend for McpBackend {
                         .registry
                         .publish(tenant, nook_proto::UiEvent::TaskChanged { task_id: id });
                     return Ok(crate::services::tasks::enrich_one(
-                        &self.state.db,
+                        self.state.tasks.as_ref(),
                         &self.state.cfg.public_base_url,
                         viewer,
                         t,
@@ -571,7 +576,8 @@ impl NookBackend for McpBackend {
     async fn get_task(&self, task: String) -> anyhow::Result<serde_json::Value> {
         let tenant = self.tenant().await?;
         let viewer = self.user().await?;
-        let id = crate::services::tasks::resolve_id(&self.state.db, tenant, &task).await?;
+        let id =
+            crate::services::tasks::resolve_id(self.state.tasks.as_ref(), tenant, &task).await?;
         let detail = crate::routes::task_detail::detail(&self.state, tenant, viewer, id).await?;
         Ok(serde_json::to_value(detail)?)
     }
@@ -592,13 +598,15 @@ impl NookBackend for McpBackend {
     async fn release_task(&self, task: String) -> anyhow::Result<TaskItem> {
         let tenant = self.tenant().await?;
         let viewer = self.user().await?;
-        let id = crate::services::tasks::resolve_id(&self.state.db, tenant, &task).await?;
-        let t = crate::services::tasks::clear_assignee(&self.state.db, tenant, id).await?;
+        let id =
+            crate::services::tasks::resolve_id(self.state.tasks.as_ref(), tenant, &task).await?;
+        let t =
+            crate::services::tasks::clear_assignee(self.state.tasks.as_ref(), tenant, id).await?;
         self.state
             .registry
             .publish(tenant, nook_proto::UiEvent::TaskChanged { task_id: id });
         Ok(crate::services::tasks::enrich_one(
-            &self.state.db,
+            self.state.tasks.as_ref(),
             &self.state.cfg.public_base_url,
             viewer,
             t,
@@ -614,13 +622,14 @@ impl NookBackend for McpBackend {
     ) -> anyhow::Result<serde_json::Value> {
         let tenant = self.tenant().await?;
         let user = self.user().await?;
-        let id = crate::services::tasks::resolve_id(&self.state.db, tenant, &task).await?;
+        let id =
+            crate::services::tasks::resolve_id(self.state.tasks.as_ref(), tenant, &task).await?;
         // `agent` here, not `user`: MCP is the one caller we DO know is a tool
         // rather than a person typing. The author_id remains the real user
         // whose token authorised it, so the record stays honest about both.
         let name = author_name.unwrap_or_else(|| "agent (mcp)".into());
         let row = crate::services::tasks::insert_agent_comment(
-            &self.state.db,
+            self.state.tasks.as_ref(),
             tenant,
             id,
             user.0,
@@ -644,9 +653,10 @@ impl NookBackend for McpBackend {
                 "`agent-ready` is the human approval gate and cannot be applied by an agent"
             );
         }
-        let id = crate::services::tasks::resolve_id(&self.state.db, tenant, &task).await?;
+        let id =
+            crate::services::tasks::resolve_id(self.state.tasks.as_ref(), tenant, &task).await?;
         let name = label.trim().to_lowercase();
-        crate::services::tasks::attach_label(&self.state.db, tenant, id, &name).await?;
+        crate::services::tasks::attach_label(self.state.tasks.as_ref(), tenant, id, &name).await?;
         self.state
             .registry
             .publish(tenant, nook_proto::UiEvent::TaskChanged { task_id: id });
@@ -655,9 +665,10 @@ impl NookBackend for McpBackend {
 
     async fn remove_label(&self, task: String, label: String) -> anyhow::Result<serde_json::Value> {
         let tenant = self.tenant().await?;
-        let id = crate::services::tasks::resolve_id(&self.state.db, tenant, &task).await?;
+        let id =
+            crate::services::tasks::resolve_id(self.state.tasks.as_ref(), tenant, &task).await?;
         let name = label.trim().to_lowercase();
-        crate::services::tasks::detach_label(&self.state.db, tenant, id, &name).await?;
+        crate::services::tasks::detach_label(self.state.tasks.as_ref(), tenant, id, &name).await?;
         self.state
             .registry
             .publish(tenant, nook_proto::UiEvent::TaskChanged { task_id: id });
@@ -667,9 +678,10 @@ impl NookBackend for McpBackend {
     async fn set_priority(&self, task: String, priority: i32) -> anyhow::Result<TaskItem> {
         let tenant = self.tenant().await?;
         let viewer = self.user().await?;
-        let id = crate::services::tasks::resolve_id(&self.state.db, tenant, &task).await?;
+        let id =
+            crate::services::tasks::resolve_id(self.state.tasks.as_ref(), tenant, &task).await?;
         let t = crate::services::tasks::set_priority_row(
-            &self.state.db,
+            self.state.tasks.as_ref(),
             tenant,
             id,
             priority.clamp(0, 4),
@@ -679,7 +691,7 @@ impl NookBackend for McpBackend {
             .registry
             .publish(tenant, nook_proto::UiEvent::TaskChanged { task_id: id });
         Ok(crate::services::tasks::enrich_one(
-            &self.state.db,
+            self.state.tasks.as_ref(),
             &self.state.cfg.public_base_url,
             viewer,
             t,
@@ -693,7 +705,8 @@ impl NookBackend for McpBackend {
         parent: Option<String>,
     ) -> anyhow::Result<TaskItem> {
         let tenant = self.tenant().await?;
-        let id = crate::services::tasks::resolve_id(&self.state.db, tenant, &task).await?;
+        let id =
+            crate::services::tasks::resolve_id(self.state.tasks.as_ref(), tenant, &task).await?;
         // Through the task's OWN board provider, not a hardwired local one
         // (MAIN-86 AC-1).
         let provider = self.provider_for_task(tenant, id).await?;
@@ -725,7 +738,7 @@ impl NookBackend for McpBackend {
             .registry
             .publish(tenant, nook_proto::UiEvent::TaskChanged { task_id: id });
         Ok(crate::services::tasks::enrich_one(
-            &self.state.db,
+            self.state.tasks.as_ref(),
             &self.state.cfg.public_base_url,
             viewer,
             t,
@@ -741,8 +754,9 @@ impl NookBackend for McpBackend {
     ) -> anyhow::Result<serde_json::Value> {
         let tenant = self.tenant().await?;
         let viewer = self.user().await?;
-        let f = crate::services::tasks::resolve_id(&self.state.db, tenant, &from).await?;
-        let t = crate::services::tasks::resolve_id(&self.state.db, tenant, &to).await?;
+        let f =
+            crate::services::tasks::resolve_id(self.state.tasks.as_ref(), tenant, &from).await?;
+        let t = crate::services::tasks::resolve_id(self.state.tasks.as_ref(), tenant, &to).await?;
         let row =
             crate::routes::task_detail::link(&self.state, tenant, viewer, f, t, &kind).await?;
         Ok(serde_json::to_value(row)?)

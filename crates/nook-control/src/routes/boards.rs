@@ -115,7 +115,7 @@ pub async fn get_one(
     // the wrong shape for the external ones this trait exists to allow.
     let detail = BoardDetail {
         tasks: crate::services::tasks::enrich(
-            &state.db,
+            state.tasks.as_ref(),
             &state.cfg.public_base_url,
             auth.user_id,
             visible,
@@ -172,7 +172,7 @@ pub async fn create_task(
     // owner. Grab visibility before enrich (which does not touch it).
     let is_private = task.visibility == "private";
     let enriched = crate::services::tasks::enrich_one(
-        &state.db,
+        state.tasks.as_ref(),
         &state.cfg.public_base_url,
         auth.user_id,
         task,
@@ -225,7 +225,8 @@ pub async fn update_task(
     // Accepts `NOOK-42` as well as a uuid: agents are handed keys, and an
     // endpoint that took only ids would be one an agent cannot call with what
     // it was given.
-    let id = crate::services::tasks::resolve_id(&state.db, auth.tenant_id, &ident).await?;
+    let id =
+        crate::services::tasks::resolve_id(state.tasks.as_ref(), auth.tenant_id, &ident).await?;
     // Load the whole task so visibility is checked before any change: a private
     // card cannot be seen OR altered by anyone but its owner (MAIN-76 AC-5),
     // including a tenant admin — refused as NotFound, consistent with the read.
@@ -297,7 +298,7 @@ pub async fn update_task(
     );
     Ok(Json(
         crate::services::tasks::enrich_one(
-            &state.db,
+            state.tasks.as_ref(),
             &state.cfg.public_base_url,
             auth.user_id,
             task,
@@ -317,7 +318,8 @@ pub(crate) async fn set_archived(
     ident: &str,
     archive: bool,
 ) -> ApiResult<TaskItem> {
-    let id = crate::services::tasks::resolve_id(&state.db, auth.tenant_id, ident).await?;
+    let id =
+        crate::services::tasks::resolve_id(state.tasks.as_ref(), auth.tenant_id, ident).await?;
     let task: TaskItem = state
         .db
         .query_opt(
@@ -351,9 +353,13 @@ pub(crate) async fn set_archived(
         auth.tenant_id,
         nook_proto::UiEvent::TaskChanged { task_id: task.id },
     );
-    crate::services::tasks::enrich_one(&state.db, &state.cfg.public_base_url, auth.user_id, task)
-        .await
-        .map_err(Into::into)
+    crate::services::tasks::enrich_one(
+        state.tasks.as_ref(),
+        &state.cfg.public_base_url,
+        auth.user_id,
+        task,
+    )
+    .await
 }
 
 #[utoipa::path(post, path = "/api/v1/tasks/{id}/archive",
@@ -458,7 +464,8 @@ pub async fn delete_task(
     auth: AuthCtx,
     Path(ident): Path<String>,
 ) -> ApiResult<axum::http::StatusCode> {
-    let id = crate::services::tasks::resolve_id(&state.db, auth.tenant_id, &ident).await?;
+    let id =
+        crate::services::tasks::resolve_id(state.tasks.as_ref(), auth.tenant_id, &ident).await?;
     let res = state
         .db
         .exec(

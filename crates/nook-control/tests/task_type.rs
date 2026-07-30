@@ -82,7 +82,9 @@ async fn create_persists_type_and_defaults_to_task() {
         return;
     };
     let (tenant, board) = fixture(&bed.pool).await;
-    let provider = LocalBoardProvider { db: bed.db() };
+    let provider = LocalBoardProvider {
+        repo: std::sync::Arc::new(nook_control::repo::tasks::DbTaskRepository::new(bed.db())),
+    };
 
     // Explicit type is stored.
     let bug = provider
@@ -107,7 +109,9 @@ async fn an_invalid_type_is_rejected_not_coerced() {
         return;
     };
     let (tenant, board) = fixture(&bed.pool).await;
-    let provider = LocalBoardProvider { db: bed.db() };
+    let provider = LocalBoardProvider {
+        repo: std::sync::Arc::new(nook_control::repo::tasks::DbTaskRepository::new(bed.db())),
+    };
 
     let err = provider
         .create_task(tenant, board, None, create("nope", Some("frobnicate")))
@@ -130,7 +134,9 @@ async fn patch_changes_the_type() {
         return;
     };
     let (tenant, board) = fixture(&bed.pool).await;
-    let provider = LocalBoardProvider { db: bed.db() };
+    let provider = LocalBoardProvider {
+        repo: std::sync::Arc::new(nook_control::repo::tasks::DbTaskRepository::new(bed.db())),
+    };
 
     let task = provider
         .create_task(tenant, board, None, create("t", None))
@@ -153,7 +159,9 @@ async fn the_list_filter_ors_within_types_and_is_off_by_default() {
         return;
     };
     let (tenant, board) = fixture(&bed.pool).await;
-    let provider = LocalBoardProvider { db: bed.db() };
+    let provider = LocalBoardProvider {
+        repo: std::sync::Arc::new(nook_control::repo::tasks::DbTaskRepository::new(bed.db())),
+    };
 
     for (title, ty) in [("e", "epic"), ("b", "bug"), ("c", "chore"), ("t", "task")] {
         provider
@@ -168,8 +176,9 @@ async fn the_list_filter_ors_within_types_and_is_off_by_default() {
             ..Default::default()
         };
         let db = bed.db();
+        let repo = nook_control::repo::tasks::DbTaskRepository::new(db.clone());
         async move {
-            query_rows(&db, tenant, nook_types::UserId::new(), &f)
+            query_rows(&db, &repo, tenant, nook_types::UserId::new(), &f)
                 .await
                 .expect("query")
         }

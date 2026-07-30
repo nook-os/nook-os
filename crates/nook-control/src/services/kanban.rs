@@ -3,7 +3,6 @@
 //! external providers are registered but unconfigured in milestone 1.
 
 use async_trait::async_trait;
-use nook_db::{params, Db, DbPool, Postgres, TypeMapping};
 use nook_types::{
     Board, BoardDetail, BoardId, ColumnId, CreateTaskRequest, TaskId, TaskItem, TenantId,
     UpdateTaskRequest, UserId,
@@ -63,7 +62,7 @@ fn validate_visibility(v: Option<&str>) -> ApiResult<()> {
 /// nesting, which also makes cycles impossible). Every failure is a 400 naming
 /// the rule.
 async fn validate_parent(
-    db: &nook_db::DbPool,
+    repo: &dyn crate::repo::tasks::TaskRepository,
     tenant: TenantId,
     viewer: UserId,
     board: BoardId,
@@ -75,20 +74,14 @@ async fn validate_parent(
             "an epic cannot have a parent — epics do not nest".into(),
         ));
     }
-    let parent_id = crate::services::tasks::resolve_id(db, tenant, parent_ref)
+    let parent_id = crate::services::tasks::resolve_id(repo, tenant, parent_ref)
         .await
         .map_err(|_| {
             ApiError::BadRequest(format!(
                 "parent {parent_ref:?} is not a task in this tenant"
             ))
         })?;
-    let parent: Option<TaskItem> = db
-        .query_opt(
-            "SELECT * FROM tasks WHERE id = $1 AND tenant_id = $2",
-            params![parent_id, tenant],
-        )
-        .await
-        .map_err(ApiError::from)?;
+    let parent = repo.get_row(tenant, parent_id).await?;
     let parent = parent.ok_or_else(|| {
         ApiError::BadRequest(format!(
             "parent {parent_ref:?} is not a task in this tenant"
@@ -142,7 +135,7 @@ pub trait KanbanProvider: Send + Sync {
 // ── Local boards (Postgres) ─────────────────────────────────────────────────
 
 pub struct LocalBoardProvider {
-    pub db: DbPool,
+    pub repo: std::sync::Arc<dyn crate::repo::tasks::TaskRepository>,
 }
 
 #[async_trait]
@@ -152,43 +145,17 @@ impl KanbanProvider for LocalBoardProvider {
     }
 
     async fn list_boards(&self, tenant: TenantId) -> ProviderResult<Vec<Board>> {
-        let boards: Vec<Board> = self
-            .db
-            .query_all(
-                "SELECT * FROM boards WHERE tenant_id = $1 AND provider = 'local' ORDER BY created_at",
-                params![tenant],
-            )
-            .await
-            .map_err(ApiError::from)?;
-        Ok(boards)
+        Ok(self.repo.list_local_boards(tenant).await?)
     }
 
     async fn board_detail(&self, tenant: TenantId, board: BoardId) -> ProviderResult<BoardDetail> {
-        let b: Board = self
-            .db
-            .query_opt(
-                "SELECT * FROM boards WHERE id = $1 AND tenant_id = $2",
-                params![board, tenant],
-            )
-            .await
-            .map_err(ApiError::from)?
+        let b = self
+            .repo
+            .get_board(tenant, board)
+            .await?
             .ok_or(ApiError::NotFound)?;
-        let columns: Vec<nook_types::BoardColumn> = self
-            .db
-            .query_all(
-                "SELECT * FROM board_columns WHERE board_id = $1 ORDER BY position, name",
-                params![board],
-            )
-            .await
-            .map_err(ApiError::from)?;
-        let tasks: Vec<TaskItem> = self
-            .db
-            .query_all(
-                "SELECT * FROM tasks WHERE board_id = $1 ORDER BY position, created_at",
-                params![board],
-            )
-            .await
-            .map_err(ApiError::from)?;
+        let columns = self.repo.board_columns(board).await?;
+        let tasks = self.repo.board_tasks(board).await?;
         Ok(BoardDetail {
             board: b,
             columns,
@@ -213,7 +180,7 @@ impl KanbanProvider for LocalBoardProvider {
         let parent_task_id = match req.parent.as_deref() {
             Some(p) => Some(
                 validate_parent(
-                    &self.db,
+                    self.repo.as_ref(),
                     tenant,
                     viewer,
                     board,
@@ -228,25 +195,16 @@ impl KanbanProvider for LocalBoardProvider {
         // knows; then the board's first column.
         let column_id: ColumnId = match (req.column_id, req.column_type.as_deref()) {
             (Some(c), _) => c,
-            (None, Some(ct)) => crate::services::tasks::column_of_type(&self.db, board, ct).await?,
+            (None, Some(ct)) => {
+                crate::services::tasks::column_of_type(self.repo.as_ref(), board, ct).await?
+            }
             (None, None) => self
-                .db
-                .query_scalar_opt::<ColumnId>(
-                    "SELECT id FROM board_columns WHERE board_id = $1 ORDER BY position LIMIT 1",
-                    params![board],
-                )
-                .await
-                .map_err(ApiError::from)?
+                .repo
+                .first_column(board)
+                .await?
                 .ok_or_else(|| ApiError::BadRequest("board has no columns".into()))?,
         };
-        let max_pos: Option<i32> = self
-            .db
-            .query_scalar(
-                "SELECT max(position) FROM tasks WHERE column_id = $1",
-                params![column_id],
-            )
-            .await
-            .map_err(ApiError::from)?;
+        let max_pos = self.repo.max_position_in_column(column_id).await?;
 
         // Number allocation and the insert share one transaction, and the
         // board row is locked while it happens. Without the lock two concurrent
@@ -254,72 +212,38 @@ impl KanbanProvider for LocalBoardProvider {
         // unique index — which is a 500 for something the caller did nothing
         // wrong to cause. `FOR UPDATE` makes the second create wait rather than
         // fail, so `NOOK-7` is allocated exactly once.
-        let mut tx = self.db.begin().await.map_err(ApiError::from)?;
-        let number: i32 = tx
-            .query_scalar(
-                "UPDATE boards SET next_number = next_number + 1
-             WHERE id = (SELECT id FROM boards WHERE id = $1 FOR UPDATE)
-             RETURNING next_number - 1",
-                params![board],
-            )
-            .await
-            .map_err(ApiError::from)?;
-
-        let task: TaskItem = tx
-            .query_one(
-                "INSERT INTO tasks (id, tenant_id, board_id, column_id, title, description,
-                                position, workspace_id, priority, type, number,
-                                visibility, created_by, parent_task_id)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14) RETURNING *",
-                params![
-                    TaskId::new(),
-                    tenant,
-                    board,
-                    column_id,
-                    &req.title,
-                    req.description,
-                    max_pos.unwrap_or(-1) + 1,
-                    req.workspace_id.map(|w| w.0),
-                    req.priority.unwrap_or(0).clamp(0, 4),
-                    // Omitted → the column DEFAULT ('task'); validated above (AC-2).
-                    req.type_.as_deref().unwrap_or("task"),
-                    number,
-                    // Omitted → the column DEFAULT ('team'), reproducing today's behaviour.
-                    req.visibility.as_deref().unwrap_or("team"),
-                    created_by.map(|u| u.0),
-                    parent_task_id.map(|t| t.0)
-                ],
-            )
-            .await
-            .map_err(ApiError::from)?;
-
-        // Labels by NAME, created if new: a filer knows `agent-ready`, not its
-        // uuid. Inside the transaction so a task never exists momentarily
-        // without the labels it was filed with — the pick query would otherwise
-        // have a window in which it sees unlabelled work.
-        for name in req.labels.iter().map(|l| l.trim().to_lowercase()) {
-            if name.is_empty() {
-                continue;
-            }
-            let label_id: uuid::Uuid = tx
-                .query_scalar(
-                    "INSERT INTO labels (id, tenant_id, name) VALUES ($1, $2, $3)
-                 ON CONFLICT (tenant_id, name) DO UPDATE SET name = EXCLUDED.name
-                 RETURNING id",
-                    params![uuid::Uuid::now_v7(), tenant, &name],
-                )
-                .await
-                .map_err(ApiError::from)?;
-            tx.exec(
-                "INSERT INTO task_labels (task_id, label_id) VALUES ($1, $2)
-                 ON CONFLICT DO NOTHING",
-                params![task.id, label_id],
-            )
-            .await
-            .map_err(ApiError::from)?;
-        }
-
-        tx.commit().await.map_err(ApiError::from)?;
+        // Number allocation, the insert, and the labels are ONE repository call
+        // because they are one transaction: the board row is locked while the
+        // number is taken (so `NOOK-7` is allocated exactly once), and the
+        // labels land inside it (so the pick query never sees the task for a
+        // moment without the labels it was filed with).
+        let task = self
+            .repo
+            .create_task(crate::repo::tasks::NewTask {
+                tenant,
+                board,
+                column_id,
+                title: req.title.clone(),
+                description: req.description.clone(),
+                position: max_pos.unwrap_or(-1) + 1,
+                workspace_id: req.workspace_id.map(|w| w.0),
+                priority: req.priority.unwrap_or(0).clamp(0, 4),
+                // Omitted → the column DEFAULT ('task'); validated above (AC-2).
+                type_: req.type_.as_deref().unwrap_or("task").to_string(),
+                // Omitted → the column DEFAULT ('team'), reproducing today's behaviour.
+                visibility: req.visibility.as_deref().unwrap_or("team").to_string(),
+                created_by: created_by.map(|u| u.0),
+                parent_task_id: parent_task_id.map(|t| t.0),
+                // Labels by NAME, created if new: a filer knows `agent-ready`,
+                // not its uuid. Empty names dropped here, as before.
+                labels: req
+                    .labels
+                    .iter()
+                    .map(|l| l.trim().to_lowercase())
+                    .filter(|l| !l.is_empty())
+                    .collect(),
+            })
+            .await?;
         Ok(task)
     }
 
@@ -336,28 +260,17 @@ impl KanbanProvider for LocalBoardProvider {
         // Load the task's current type/board/parent once — the column-type
         // resolution, the epic-retype guard, and the parent validation all need
         // it, and one read keeps them consistent.
-        let (cur_type, cur_board, cur_parent): (String, BoardId, Option<TaskId>) = self
-            .db
-            .query_opt(
-                "SELECT type, board_id, parent_task_id FROM tasks WHERE id = $1 AND tenant_id = $2",
-                params![task, tenant],
-            )
-            .await
-            .map_err(ApiError::from)?
+        let (cur_type, cur_board, cur_parent) = self
+            .repo
+            .task_shape(tenant, task)
+            .await?
             .ok_or(ApiError::NotFound)?;
 
         // AC-3: changing an epic's type away from `epic` while it still has
         // children is refused (naming the count) — the children would be
         // orphaned onto a non-epic parent.
         if cur_type == "epic" && req.type_.as_deref().is_some_and(|t| t != "epic") {
-            let children: i64 = self
-                .db
-                .query_scalar(
-                    "SELECT count(*) FROM tasks WHERE parent_task_id = $1",
-                    params![task],
-                )
-                .await
-                .map_err(ApiError::from)?;
+            let children = self.repo.count_children(task).await?;
             if children > 0 {
                 return Err(ApiError::BadRequest(format!(
                     "cannot change this epic's type: it still has {children} child ticket(s) — \
@@ -377,8 +290,15 @@ impl KanbanProvider for LocalBoardProvider {
             Some(Some(p)) => (
                 true,
                 Some(
-                    validate_parent(&self.db, tenant, viewer, cur_board, p, effective_is_epic)
-                        .await?,
+                    validate_parent(
+                        self.repo.as_ref(),
+                        tenant,
+                        viewer,
+                        cur_board,
+                        p,
+                        effective_is_epic,
+                    )
+                    .await?,
                 ),
             ),
         };
@@ -394,65 +314,36 @@ impl KanbanProvider for LocalBoardProvider {
         // A type given instead of an id is resolved against the task's OWN board.
         let column_id = match (req.column_id, req.column_type.as_deref()) {
             (Some(c), _) => Some(c),
-            (None, Some(ct)) => {
-                Some(crate::services::tasks::column_of_type(&self.db, cur_board, ct).await?)
-            }
+            (None, Some(ct)) => Some(
+                crate::services::tasks::column_of_type(self.repo.as_ref(), cur_board, ct).await?,
+            ),
             (None, None) => None,
         };
 
-        let updated: Option<TaskItem> = self
-            .db
-            .query_opt(
-                &format!(
-                    // Workspace cannot use COALESCE like the rest: COALESCE reads a
-                    // NULL as "leave it", which is exactly the instruction to clear
-                    // it. The flag says whether the caller mentioned the field at all.
-                    //
-                    // `$11` is the optimistic-concurrency precondition (MAIN-36): NULL
-                    // means "unguarded" (behaviour unchanged), otherwise the row updates
-                    // only while its `updated_at` still equals what the caller last saw.
-                    // A guarded update that touches 0 rows is a lost race, handled below.
-                    "UPDATE tasks SET
-                title = COALESCE($3, title),
-                description = COALESCE($4, description),
-                column_id = COALESCE($5, column_id),
-                position = COALESCE($6, position),
-                assignee_user_id = COALESCE($7, assignee_user_id),
-                priority = COALESCE($8, priority),
-                workspace_id = CASE WHEN $9 THEN $10 ELSE workspace_id END,
-                type = COALESCE($12, type),
-                visibility = COALESCE($13, visibility),
-                parent_task_id = CASE WHEN $14 THEN $15 ELSE parent_task_id END,
-                updated_at = {now}
-             WHERE id = $1 AND tenant_id = $2
-               AND ({guard} IS NULL OR updated_at = $11)
-             RETURNING *",
-                    now = Postgres.now(),
-                    guard = Postgres.cast("$11", "timestamptz")
-                ),
-                params![
-                    task,
-                    tenant,
-                    req.title,
-                    req.description,
-                    column_id.map(|c| c.0),
-                    req.position,
-                    req.assignee_user_id.map(|u| u.0),
-                    req.priority.map(|p| p.clamp(0, 4)),
-                    req.workspace_id.is_some(),
-                    req.workspace_id.flatten().map(|w| w.0),
-                    req.expected_updated_at,
-                    // $12: absent leaves the type unchanged (COALESCE); validated above.
-                    req.type_.as_deref(),
-                    // $13: absent leaves the visibility unchanged (COALESCE); validated above.
-                    req.visibility.as_deref(),
-                    // $14/$15: the parent tri-state (set flag + value); validated above.
+        let updated = self
+            .repo
+            .update_fields(
+                tenant,
+                task,
+                crate::repo::tasks::TaskEdit {
+                    title: req.title.clone(),
+                    description: req.description.clone(),
+                    column_id: column_id.map(|c| c.0),
+                    position: req.position,
+                    assignee_user_id: req.assignee_user_id.map(|u| u.0),
+                    priority: req.priority.map(|p| p.clamp(0, 4)),
+                    // The flag, not the value: COALESCE reads a NULL as "leave
+                    // it", which is exactly the instruction to clear it.
+                    set_workspace: req.workspace_id.is_some(),
+                    workspace_id: req.workspace_id.flatten().map(|w| w.0),
+                    expected_updated_at: req.expected_updated_at,
+                    type_: req.type_.clone(),
+                    visibility: req.visibility.clone(),
                     set_parent,
-                    parent_val.map(|t| t.0)
-                ],
+                    parent_task_id: parent_val.map(|t| t.0),
+                },
             )
-            .await
-            .map_err(ApiError::from)?;
+            .await?;
 
         if let Some(t) = updated {
             return Ok(t);
@@ -462,14 +353,7 @@ impl KanbanProvider for LocalBoardProvider {
         // (404). With one, tell a lost race (409, carrying the CURRENT task so
         // the caller can reconcile without a second round-trip) apart from a
         // task that truly no longer exists (404).
-        let current: Option<TaskItem> = self
-            .db
-            .query_opt(
-                "SELECT * FROM tasks WHERE id = $1 AND tenant_id = $2",
-                params![task, tenant],
-            )
-            .await
-            .map_err(ApiError::from)?;
+        let current = self.repo.get_row(tenant, task).await?;
         match current {
             Some(cur) if req.expected_updated_at.is_some() => {
                 let body = serde_json::to_string(&cur)
@@ -532,10 +416,10 @@ pub struct KanbanRegistry {
 }
 
 impl KanbanRegistry {
-    pub fn new(db: DbPool) -> Self {
+    pub fn new(repo: std::sync::Arc<dyn crate::repo::tasks::TaskRepository>) -> Self {
         Self {
             providers: vec![
-                std::sync::Arc::new(LocalBoardProvider { db }),
+                std::sync::Arc::new(LocalBoardProvider { repo }),
                 std::sync::Arc::new(JiraProvider),
                 std::sync::Arc::new(GithubProjectsProvider),
                 std::sync::Arc::new(LinearProvider),

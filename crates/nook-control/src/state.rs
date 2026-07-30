@@ -18,6 +18,8 @@ pub struct AppState {
     /// `Arc<dyn …>` so a test can build an `AppState` on the in-memory fake and
     /// exercise the callers with no database at all.
     pub identity: Arc<dyn crate::repo::identity::IdentityRepository>,
+    /// Task/board data access behind its trait (MAIN-248). Same contract.
+    pub tasks: Arc<dyn crate::repo::tasks::TaskRepository>,
     pub cfg: Arc<Config>,
     /// OIDC discovery state — configured/usable/degraded, hot-swappable after
     /// boot so an IdP that was down at startup recovers without a restart
@@ -78,13 +80,18 @@ impl AppState {
         // The durable work queue; database-backed today (MAIN-147).
         let queue: Arc<dyn crate::queue::Queue> =
             Arc::from(crate::queue::from_config(&cfg, db.clone()).await);
+        // Built once and shared: the kanban registry's local provider reads
+        // through the same repository the services do.
+        let tasks: Arc<dyn crate::repo::tasks::TaskRepository> =
+            Arc::new(crate::repo::tasks::DbTaskRepository::new(db.clone()));
         Self {
             identity: Arc::new(crate::repo::identity::DbIdentityRepository::new(db.clone())),
+            kanban: Arc::new(KanbanRegistry::new(tasks.clone())),
+            tasks,
             artifacts,
             mailer,
             cache,
             queue,
-            kanban: Arc::new(KanbanRegistry::new(db.clone())),
             registry: Arc::new(Registry::new()),
             dispatcher: Arc::new(RuleBasedDispatcher),
             vault,

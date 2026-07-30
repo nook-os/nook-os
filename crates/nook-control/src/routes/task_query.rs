@@ -196,10 +196,14 @@ pub async fn pick(
     viewer: UserId,
     f: TaskFilter,
 ) -> ApiResult<Vec<TaskItem>> {
-    let rows = query_rows(&state.db, tenant, viewer, &f).await?;
-    tasks::enrich(&state.db, &state.cfg.public_base_url, viewer, rows)
-        .await
-        .map_err(Into::into)
+    let rows = query_rows(&state.db, state.tasks.as_ref(), tenant, viewer, &f).await?;
+    tasks::enrich(
+        state.tasks.as_ref(),
+        &state.cfg.public_base_url,
+        viewer,
+        rows,
+    )
+    .await
 }
 
 /// The pick SQL, before enrichment. Split out from `pick` so the archived
@@ -207,6 +211,9 @@ pub async fn pick(
 /// without constructing an `AppState`.
 pub async fn query_rows(
     db: &nook_db::DbPool,
+    // The pick SQL stays on the pool (this file is not one MAIN-248 owns); only
+    // the parent resolution moved behind the repository.
+    repo: &dyn crate::repo::tasks::TaskRepository,
     tenant: TenantId,
     viewer: UserId,
     f: &TaskFilter,
@@ -246,7 +253,7 @@ pub async fn query_rows(
     // a typo is not silently "this epic has no tickets".
     let parent_id: Option<uuid::Uuid> = match f.parent.as_deref() {
         Some(p) => Some(
-            tasks::resolve_id(db, tenant, p)
+            tasks::resolve_id(repo, tenant, p)
                 .await
                 .map_err(|_| {
                     ApiError::BadRequest(format!("parent {p:?} is not a task in this tenant"))
@@ -422,7 +429,7 @@ pub async fn claim_inner(
     ident: &str,
     column_type: Option<String>,
 ) -> ApiResult<TaskItem> {
-    let id = tasks::resolve_id(&state.db, tenant, ident).await?;
+    let id = tasks::resolve_id(state.tasks.as_ref(), tenant, ident).await?;
 
     // Visibility guard (MAIN-76 AC-9): a private card is claimable only by its
     // owner (creator or assignee). Refused as NotFound — consistent with the
@@ -474,7 +481,7 @@ pub async fn claim_inner(
                 .db
                 .query_scalar("SELECT board_id FROM tasks WHERE id = $1", params![id])
                 .await?;
-            Some(tasks::column_of_type(&state.db, board, ct).await?)
+            Some(tasks::column_of_type(state.tasks.as_ref(), board, ct).await?)
         }
         None => None,
     };
@@ -542,9 +549,13 @@ pub async fn claim_inner(
         .registry
         .publish(tenant, nook_proto::UiEvent::TaskChanged { task_id: id });
 
-    tasks::enrich_one(&state.db, &state.cfg.public_base_url, claimant, task)
-        .await
-        .map_err(Into::into)
+    tasks::enrich_one(
+        state.tasks.as_ref(),
+        &state.cfg.public_base_url,
+        claimant,
+        task,
+    )
+    .await
 }
 
 /// Give the work back: clear the assignee so somebody else can pick it up.
@@ -556,7 +567,7 @@ pub async fn release(
     auth: AuthCtx,
     Path(ident): Path<String>,
 ) -> ApiResult<Json<TaskItem>> {
-    let id = tasks::resolve_id(&state.db, auth.tenant_id, &ident).await?;
+    let id = tasks::resolve_id(state.tasks.as_ref(), auth.tenant_id, &ident).await?;
     let task: TaskItem = state
         .db
         .query_opt(
@@ -574,7 +585,13 @@ pub async fn release(
         nook_proto::UiEvent::TaskChanged { task_id: id },
     );
     Ok(Json(
-        tasks::enrich_one(&state.db, &state.cfg.public_base_url, auth.user_id, task).await?,
+        tasks::enrich_one(
+            state.tasks.as_ref(),
+            &state.cfg.public_base_url,
+            auth.user_id,
+            task,
+        )
+        .await?,
     ))
 }
 
@@ -816,12 +833,18 @@ mod db_tests {
                 ..Default::default()
             };
             async move {
-                query_rows(&db, TenantId(tenant), nook_types::UserId::new(), &f)
-                    .await
-                    .unwrap()
-                    .into_iter()
-                    .map(|t| t.id)
-                    .collect::<Vec<_>>()
+                query_rows(
+                    &db,
+                    &crate::repo::tasks::DbTaskRepository::new(db.clone()),
+                    TenantId(tenant),
+                    nook_types::UserId::new(),
+                    &f,
+                )
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|t| t.id)
+                .collect::<Vec<_>>()
             }
         };
 
@@ -906,13 +929,18 @@ mod db_tests {
             board: Some(board.to_string()),
             ..Default::default()
         };
-        let default_ids: Vec<TaskId> =
-            query_rows(&db, TenantId(tenant), nook_types::UserId::new(), &f)
-                .await
-                .unwrap()
-                .into_iter()
-                .map(|t| t.id)
-                .collect();
+        let default_ids: Vec<TaskId> = query_rows(
+            &db,
+            &crate::repo::tasks::DbTaskRepository::new(db.clone()),
+            TenantId(tenant),
+            nook_types::UserId::new(),
+            &f,
+        )
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|t| t.id)
+        .collect();
 
         let with_archived = TaskFilter {
             archived: Some(true),
@@ -920,6 +948,7 @@ mod db_tests {
         };
         let all_ids: Vec<TaskId> = query_rows(
             &db,
+            &crate::repo::tasks::DbTaskRepository::new(db.clone()),
             TenantId(tenant),
             nook_types::UserId::new(),
             &with_archived,
@@ -1054,12 +1083,18 @@ mod db_tests {
                 ..Default::default()
             };
             async move {
-                query_rows(&db, TenantId(tenant), nook_types::UserId(me), &f)
-                    .await
-                    .unwrap()
-                    .into_iter()
-                    .map(|t| t.id)
-                    .collect::<Vec<_>>()
+                query_rows(
+                    &db,
+                    &crate::repo::tasks::DbTaskRepository::new(db.clone()),
+                    TenantId(tenant),
+                    nook_types::UserId(me),
+                    &f,
+                )
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|t| t.id)
+                .collect::<Vec<_>>()
             }
         };
 

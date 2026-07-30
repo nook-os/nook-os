@@ -86,10 +86,14 @@ async fn epic_parent_create_patch_validate_filter_and_orphan() {
         .await
         .expect("epic");
     // create_task returns the raw row; the human key is computed by enrich.
-    let epic =
-        nook_control::services::tasks::enrich_one(&bed.db(), "http://x", UserId::new(), epic)
-            .await
-            .expect("enrich epic");
+    let epic = nook_control::services::tasks::enrich_one(
+        &nook_control::repo::tasks::DbTaskRepository::new(bed.db()),
+        "http://x",
+        UserId::new(),
+        epic,
+    )
+    .await
+    .expect("enrich epic");
     let epic_key = epic.key.clone().expect("epic key"); // e.g. B123-1
     let plain = provider
         .create_task(tenant, board, None, req("a plain task", None, None))
@@ -124,12 +128,18 @@ async fn epic_parent_create_patch_validate_filter_and_orphan() {
         limit: Some(200),
         ..Default::default()
     };
-    let mut ids: Vec<TaskId> = query_rows(&bed.db(), tenant, nook_types::UserId::new(), &f)
-        .await
-        .expect("children")
-        .into_iter()
-        .map(|t| t.id)
-        .collect();
+    let mut ids: Vec<TaskId> = query_rows(
+        &bed.db(),
+        &nook_control::repo::tasks::DbTaskRepository::new(bed.db()),
+        tenant,
+        nook_types::UserId::new(),
+        &f,
+    )
+    .await
+    .expect("children")
+    .into_iter()
+    .map(|t| t.id)
+    .collect();
     ids.sort();
     let mut want = vec![child.id, child2.id];
     want.sort();
@@ -274,10 +284,14 @@ async fn private_child_does_not_leak_through_epic() {
         .create_task(tenant, board, Some(a), req("Epic", Some("epic"), None))
         .await
         .expect("epic");
-    let epic =
-        nook_control::services::tasks::enrich_one(&bed.db(), "http://x", UserId::new(), epic)
-            .await
-            .expect("enrich");
+    let epic = nook_control::services::tasks::enrich_one(
+        &nook_control::repo::tasks::DbTaskRepository::new(bed.db()),
+        "http://x",
+        UserId::new(),
+        epic,
+    )
+    .await
+    .expect("enrich");
     let epic_key = epic.key.clone().expect("key");
 
     let team_child = provider
@@ -324,23 +338,35 @@ async fn private_child_does_not_leak_through_epic() {
         limit: Some(200),
         ..Default::default()
     };
-    let b_ids: Vec<TaskId> = query_rows(&bed.db(), tenant, b, &f)
-        .await
-        .expect("B parent list")
-        .into_iter()
-        .map(|t| t.id)
-        .collect();
+    let b_ids: Vec<TaskId> = query_rows(
+        &bed.db(),
+        &nook_control::repo::tasks::DbTaskRepository::new(bed.db()),
+        tenant,
+        b,
+        &f,
+    )
+    .await
+    .expect("B parent list")
+    .into_iter()
+    .map(|t| t.id)
+    .collect();
     assert!(b_ids.contains(&team_child.id));
     assert!(
         !b_ids.contains(&secret_child.id),
         "the parent filter never leaks the private child to a non-owner"
     );
-    let a_ids: Vec<TaskId> = query_rows(&bed.db(), tenant, a, &f)
-        .await
-        .expect("A parent list")
-        .into_iter()
-        .map(|t| t.id)
-        .collect();
+    let a_ids: Vec<TaskId> = query_rows(
+        &bed.db(),
+        &nook_control::repo::tasks::DbTaskRepository::new(bed.db()),
+        tenant,
+        a,
+        &f,
+    )
+    .await
+    .expect("A parent list")
+    .into_iter()
+    .map(|t| t.id)
+    .collect();
     assert!(
         a_ids.contains(&secret_child.id),
         "the owner still sees their private child under the epic"

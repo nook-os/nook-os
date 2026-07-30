@@ -202,23 +202,35 @@ async fn present_checkout_at_matches_present_rows_only() {
     checkout(&bed.pool, tenant, node, ws, "/srv/dead", true).await;
 
     assert_eq!(
-        present_checkout_at(&bed.db(), node, "/srv/live")
-            .await
-            .unwrap(),
+        present_checkout_at(
+            &nook_control::repo::tasks::DbTaskRepository::new(bed.db()),
+            node,
+            "/srv/live"
+        )
+        .await
+        .unwrap(),
         Some(present),
         "a present checkout resolves"
     );
     assert_eq!(
-        present_checkout_at(&bed.db(), node, "/srv/dead")
-            .await
-            .unwrap(),
+        present_checkout_at(
+            &nook_control::repo::tasks::DbTaskRepository::new(bed.db()),
+            node,
+            "/srv/dead"
+        )
+        .await
+        .unwrap(),
         None,
         "a missing checkout does not (start_work leaves checkout_id NULL)"
     );
     assert_eq!(
-        present_checkout_at(&bed.db(), node, "/srv/never")
-            .await
-            .unwrap(),
+        present_checkout_at(
+            &nook_control::repo::tasks::DbTaskRepository::new(bed.db()),
+            node,
+            "/srv/never"
+        )
+        .await
+        .unwrap(),
         None,
         "an unscanned worktree path resolves to nothing"
     );

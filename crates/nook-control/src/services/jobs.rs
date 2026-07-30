@@ -146,7 +146,8 @@ pub async fn create(
     // Accept a UUID or a board key (MAIN-209) — the Loop panel opens by key.
     // `resolve_id` is tenant-scoped and 404s an unknown key.
     let target_id =
-        crate::services::tasks::resolve_id(&state.db, tenant, &req.target_task_id).await?;
+        crate::services::tasks::resolve_id(state.tasks.as_ref(), tenant, &req.target_task_id)
+            .await?;
 
     // The target must exist in this tenant and be visible to the requester —
     // a job is not a way to reach a private card you could not otherwise see.
