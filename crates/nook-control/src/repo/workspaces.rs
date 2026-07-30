@@ -286,6 +286,22 @@ pub trait WorkspaceRepository: Send + Sync {
     /// A checkout as the UI shows it beside a session (MAIN-222 AC-5).
     async fn checkout_summary(&self, id: NodeWorkspaceId) -> ApiResult<Option<CheckoutSummary>>;
 
+    /// The remote URL and branch of a workspace's checkout on a node — what a
+    /// loop job hands its executor so the run knows which repo it is in
+    /// (MAIN-255).
+    async fn checkout_repo_and_branch(
+        &self,
+        workspace: WorkspaceId,
+        node: NodeId,
+    ) -> ApiResult<Option<(Option<String>, Option<String>)>>;
+
+    /// Any checkout of this workspace that records a remote — the fallback when
+    /// the executor node holds no usable row of its own (MAIN-255).
+    async fn any_checkout_repo_and_branch(
+        &self,
+        workspace: WorkspaceId,
+    ) -> ApiResult<Option<(Option<String>, Option<String>)>>;
+
     /// Record a scanned checkout, healing a tombstone in place. `ON CONFLICT
     /// (node_id, path)` keeps the row id stable across a re-report.
     async fn upsert_checkout(&self, checkout: CheckoutUpsert) -> ApiResult<()>;
@@ -881,6 +897,36 @@ impl WorkspaceRepository for DbWorkspaceRepository {
                    AND kind = 'clone' AND missing_at IS NULL
                  ORDER BY discovered_at LIMIT 1",
                 params![workspace, node],
+            )
+            .await?)
+    }
+
+    async fn checkout_repo_and_branch(
+        &self,
+        workspace: WorkspaceId,
+        node: NodeId,
+    ) -> ApiResult<Option<(Option<String>, Option<String>)>> {
+        Ok(self
+            .db
+            .query_opt(
+                "SELECT git_remote_url, git_branch FROM node_workspaces
+                 WHERE workspace_id = $1 AND node_id = $2",
+                params![workspace, node],
+            )
+            .await?)
+    }
+
+    async fn any_checkout_repo_and_branch(
+        &self,
+        workspace: WorkspaceId,
+    ) -> ApiResult<Option<(Option<String>, Option<String>)>> {
+        Ok(self
+            .db
+            .query_opt(
+                "SELECT git_remote_url, git_branch FROM node_workspaces
+                 WHERE workspace_id = $1 AND git_remote_url IS NOT NULL
+                 LIMIT 1",
+                params![workspace],
             )
             .await?)
     }
@@ -1877,6 +1923,35 @@ impl WorkspaceRepository for FakeWorkspaceRepository {
             .collect();
         clones.sort_by_key(|c| c.seq);
         Ok(clones.first().map(|c| (c.id, c.path.clone())))
+    }
+
+    async fn checkout_repo_and_branch(
+        &self,
+        workspace: WorkspaceId,
+        node: NodeId,
+    ) -> ApiResult<Option<(Option<String>, Option<String>)>> {
+        Ok(self
+            .inner
+            .lock()
+            .unwrap()
+            .checkouts
+            .iter()
+            .find(|c| c.workspace_id == workspace && c.node_id == node)
+            .map(|c| (c.git_remote_url.clone(), c.branch.clone())))
+    }
+
+    async fn any_checkout_repo_and_branch(
+        &self,
+        workspace: WorkspaceId,
+    ) -> ApiResult<Option<(Option<String>, Option<String>)>> {
+        Ok(self
+            .inner
+            .lock()
+            .unwrap()
+            .checkouts
+            .iter()
+            .find(|c| c.workspace_id == workspace && c.git_remote_url.is_some())
+            .map(|c| (c.git_remote_url.clone(), c.branch.clone())))
     }
 
     async fn checkout_summary(&self, id: NodeWorkspaceId) -> ApiResult<Option<CheckoutSummary>> {

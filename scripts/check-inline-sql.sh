@@ -53,12 +53,17 @@ hits() {
 
         # Classify this line before moving depth, so the `mod tests {` line
         # itself is still outside the module.
-        # The optional `::<T>` is not decoration: `.query_scalar_opt::<String>(`
-        # is a real call shape in this codebase, and a pattern that demanded `(`
-        # straight after the method name walked past two of them in
-        # routes/invites.rs. Found by cross-checking two independent counters —
-        # a guard nobody checks is just a comment.
-        if (!intest && $0 ~ /\.(query_[a-z_]*(::<[^(]*>)?\(|exec(::<[^(]*>)?\()/)
+        # Match the method name followed by `(` OR `::<`, rather than trying to
+        # spell the turbofish. Two earlier attempts each missed a real shape:
+        # demanding `(` straight after the name walked past
+        # `.query_scalar_opt::<String>(` (MAIN-250, two sites in
+        # routes/invites.rs), and `::<[^(]*>` then walked past
+        # `.query_opt::<(TenantId, TaskId)>(` — a TUPLE turbofish, whose parens
+        # the character class excluded (MAIN-255, two live sites in
+        # services/jobs.rs). Not spelling the type at all cannot have a third
+        # hole of that shape. Both were found by cross-checking two independent
+        # counters — a guard nobody checks is just a comment.
+        if (!intest && $0 ~ /\.(query_[a-z_]*|exec)(\(|::<)/)
           print FILENAME ":" FNR
 
         depth += opens - closes

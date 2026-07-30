@@ -71,6 +71,29 @@ else
 fi
 mv "$victim.orig" "$victim"
 
+# ── (b2) the call shapes that have actually slipped through ─────────────────
+# Two regressions, both real, both found by cross-checking counters rather than
+# by reading the pattern:
+#   MAIN-250  `.query_scalar_opt::<String>(`      — a turbofish at all
+#   MAIN-255  `.query_opt::<(TenantId, TaskId)>(` — a TUPLE turbofish, whose
+#                                                   parens a `[^(]*` class ate
+# Each is asserted by shape so a future rewrite of the pattern has to keep them.
+for shape in \
+  'db.query_scalar_opt::<String>("SELECT 1", nook_db::params![])' \
+  'db.query_opt::<(i64, i64)>("SELECT 1, 2", nook_db::params![])' \
+  'db.query_all::<Vec<String>>("SELECT 1", nook_db::params![])'
+do
+  cp "$victim" "$victim.orig"
+  printf '\nasync fn drifted_shape(db: &nook_db::DbPool) {\n    let _ = %s.await;\n}\n' "$shape" >> "$victim"
+  if check; then
+    echo "✗ the guard stayed GREEN on: $shape" >&2
+    fail=1
+  else
+    echo "  ✓ red on $shape"
+  fi
+  mv "$victim.orig" "$victim"
+done
+
 # ── (c) a test-only query is NOT an offence (the chain's NG-4) ──────────────
 # Tests keep raw DB access. If the guard flagged them it would pressure exactly
 # the change the epic says not to make.

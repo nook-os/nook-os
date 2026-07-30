@@ -14,7 +14,6 @@
 //! (`waiting_on_human → running`). A job that fails or is canceled cancels its
 //! pending ask (see [`cancel_for_job`]).
 
-use nook_db::{params, Db, Postgres, TypeMapping};
 use nook_types::*;
 use serde_json::json;
 use uuid::Uuid;
@@ -27,33 +26,24 @@ use crate::state::AppState;
 
 async fn load(state: &AppState, tenant: TenantId, id: InteractionId) -> ApiResult<Interaction> {
     state
-        .db
-        .query_opt::<Interaction>(
-            "SELECT * FROM interactions WHERE id = $1 AND tenant_id = $2",
-            params![id, tenant],
-        )
+        .interactions
+        .get(tenant, id)
         .await?
         .ok_or(ApiError::NotFound)
 }
 
 async fn load_task(state: &AppState, tenant: TenantId, task_id: TaskId) -> ApiResult<TaskItem> {
     state
-        .db
-        .query_opt::<TaskItem>(
-            "SELECT * FROM tasks WHERE id = $1 AND tenant_id = $2",
-            params![task_id, tenant],
-        )
+        .tasks
+        .get_row(tenant, task_id)
         .await?
         .ok_or(ApiError::NotFound)
 }
 
 async fn load_job(state: &AppState, tenant: TenantId, job_id: JobId) -> ApiResult<LoopJob> {
     state
-        .db
-        .query_opt::<LoopJob>(
-            "SELECT * FROM loop_jobs WHERE id = $1 AND tenant_id = $2",
-            params![job_id, tenant],
-        )
+        .jobs
+        .get(tenant, job_id)
         .await?
         .ok_or(ApiError::NotFound)
 }
@@ -147,24 +137,17 @@ pub async fn create(
 
     let id = InteractionId::new();
     let interaction: Interaction = state
-        .db
-        .query_one(
-            "INSERT INTO interactions
-            (id, tenant_id, job_id, task_id, prompt, choices,
-             requested_by_node_id, requested_by_session_id)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-         RETURNING *",
-            params![
-                id,
-                tenant,
-                job_id.map(|x| x.0),
-                task_id.map(|x| x.0),
-                prompt,
-                req.choices.clone(),
-                node_id.map(|x| x.0),
-                req.session_id.map(|x| x.0)
-            ],
-        )
+        .interactions
+        .create(crate::repo::jobs::NewInteraction {
+            id,
+            tenant,
+            job_id,
+            task_id,
+            prompt: prompt.to_string(),
+            choices: req.choices.clone(),
+            requested_by_node_id: node_id,
+            requested_by_session_id: req.session_id,
+        })
         .await?;
 
     // MAIN-162 bridging: a job-scoped ask pauses its run. Record the question on
@@ -237,15 +220,7 @@ pub async fn list_pending(
     tenant: TenantId,
     viewer: UserId,
 ) -> ApiResult<Vec<Interaction>> {
-    let rows: Vec<Interaction> = state
-        .db
-        .query_all(
-            "SELECT * FROM interactions
-         WHERE tenant_id = $1 AND state = 'pending'
-         ORDER BY created_at",
-            params![tenant],
-        )
-        .await?;
+    let rows: Vec<Interaction> = state.interactions.list_pending(tenant).await?;
 
     let mut out = Vec::with_capacity(rows.len());
     for i in rows {
@@ -278,20 +253,7 @@ pub async fn answer(
         return Err(ApiError::NotFound);
     }
 
-    let updated: Option<Interaction> = state
-        .db
-        .query_opt(
-            &format!(
-                "UPDATE interactions
-            SET state = 'answered', answered_by = $2, response = $3,
-                answered_at = {now}, updated_at = {now}
-          WHERE id = $1 AND state = 'pending'
-          RETURNING *",
-                now = Postgres.now()
-            ),
-            params![id, viewer, &response],
-        )
-        .await?;
+    let updated: Option<Interaction> = state.interactions.answer(id, viewer, &response).await?;
 
     let Some(interaction) = updated else {
         // No longer pending. Distinguish a canceled ask (its job ended — MAIN-162
@@ -384,19 +346,7 @@ pub async fn cancel(
     if !subject_visible(state, tenant, viewer, existing.task_id).await? {
         return Err(ApiError::NotFound);
     }
-    let updated: Option<Interaction> = state
-        .db
-        .query_opt(
-            &format!(
-                "UPDATE interactions
-            SET state = 'canceled', updated_at = {}
-          WHERE id = $1 AND state = 'pending'
-          RETURNING *",
-                Postgres.now()
-            ),
-            params![id],
-        )
-        .await?;
+    let updated: Option<Interaction> = state.interactions.cancel(id).await?;
     let Some(interaction) = updated else {
         return Err(ApiError::Conflict(
             "this interaction is no longer pending".into(),
@@ -423,20 +373,7 @@ pub async fn cancel(
 /// not fail the job transition that triggered it. Each cancel records its
 /// activity event and fans the live `InteractionChanged` signal, like `cancel`.
 pub async fn cancel_for_job(state: &AppState, tenant: TenantId, job_id: JobId) {
-    let canceled: Vec<Interaction> = match state
-        .db
-        .query_all::<Interaction>(
-            &format!(
-                "UPDATE interactions
-            SET state = 'canceled', updated_at = {}
-          WHERE job_id = $1 AND tenant_id = $2 AND state = 'pending'
-          RETURNING *",
-                Postgres.now()
-            ),
-            params![job_id, tenant],
-        )
-        .await
-    {
+    let canceled: Vec<Interaction> = match state.interactions.cancel_for_job(tenant, job_id).await {
         Ok(rows) => rows,
         Err(e) => {
             tracing::warn!(job = %job_id.0, error = %e, "could not cancel pending interactions for job");
