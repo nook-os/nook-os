@@ -27,6 +27,7 @@
 //! signature, and row mapping lives inside the impls (AC-2).
 
 use async_trait::async_trait;
+use nook_db::dialect::type_mapping;
 use nook_db::{params, Db, DbPool, Json, Postgres, TypeMapping};
 use nook_types::*;
 use uuid::Uuid;
@@ -479,7 +480,7 @@ impl NodeRepository for DbNodeRepository {
                     "UPDATE nodes SET shared = $3, updated_at = {}
                      WHERE id = $1 AND tenant_id = $2
                      RETURNING {NODE_COLUMNS}",
-                    Postgres.now()
+                    type_mapping(self.db.engine()).now()
                 ),
                 params![id, tenant, shared],
             )
@@ -514,7 +515,7 @@ impl NodeRepository for DbNodeRepository {
                                                    EXCLUDED.owner_person_id),
                         updated_at = {}
                      RETURNING id",
-                    Postgres.now()
+                    type_mapping(self.db.engine()).now()
                 ),
                 params![
                     NodeId::new(),
@@ -550,7 +551,7 @@ impl NodeRepository for DbNodeRepository {
                                                    EXCLUDED.owner_person_id),
                         updated_at = {}
                      RETURNING id",
-                    Postgres.now()
+                    type_mapping(self.db.engine()).now()
                 ),
                 params![id, tenant, name, token_hash, owner_person_id],
             )
@@ -598,7 +599,7 @@ impl NodeRepository for DbNodeRepository {
                     "UPDATE nodes SET ca_id = $2, cert_not_after = $3, cert_pem = $4,
                         public_key_pem = $5, updated_at = {}
                      WHERE id = $1",
-                    Postgres.now()
+                    type_mapping(self.db.engine()).now()
                 ),
                 params![
                     id,
@@ -619,7 +620,7 @@ impl NodeRepository for DbNodeRepository {
                 &format!(
                     "UPDATE nodes SET revoked_at = {now}, updated_at = {now}
                      WHERE id = $1 AND tenant_id = $2",
-                    now = Postgres.now()
+                    now = type_mapping(self.db.engine()).now()
                 ),
                 params![id, tenant],
             )
@@ -635,7 +636,7 @@ impl NodeRepository for DbNodeRepository {
                      WHERE tenant_id = $1 AND ca_id = $2
                        AND revoked_at IS NULL
                        AND cert_not_after IS NOT NULL AND cert_not_after > {now}",
-                    now = Postgres.now()
+                    now = type_mapping(self.db.engine()).now()
                 ),
                 params![tenant, ca_id],
             )
@@ -715,7 +716,7 @@ impl NodeRepository for DbNodeRepository {
                     "UPDATE nodes SET owning_instance_id = $2,
                         lease_expires_at = {now} + make_interval(secs => $3)
                      WHERE id = $1",
-                    now = Postgres.now()
+                    now = type_mapping(self.db.engine()).now()
                 ),
                 params![id, instance, lease_seconds],
             )
@@ -730,7 +731,7 @@ impl NodeRepository for DbNodeRepository {
                     "UPDATE nodes SET status = 'offline', updated_at = {now},
                         owning_instance_id = NULL, lease_expires_at = NULL
                      WHERE id = $1 AND owning_instance_id = $2",
-                    now = Postgres.now()
+                    now = type_mapping(self.db.engine()).now()
                 ),
                 params![id, instance],
             )
@@ -749,7 +750,7 @@ impl NodeRepository for DbNodeRepository {
                     "UPDATE nodes SET capabilities = $2, hostname = $3, platform = $4,
                         status = 'online', last_seen_at = {now}, updated_at = {now}
                      WHERE id = $1",
-                    now = Postgres.now()
+                    now = type_mapping(self.db.engine()).now()
                 ),
                 params![
                     id,
@@ -777,7 +778,7 @@ impl NodeRepository for DbNodeRepository {
                             THEN {now} + make_interval(secs => $4)
                             ELSE lease_expires_at END
                      WHERE id = $1",
-                    now = Postgres.now()
+                    now = type_mapping(self.db.engine()).now()
                 ),
                 params![id, resources, instance, lease_seconds],
             )
@@ -794,7 +795,7 @@ impl NodeRepository for DbNodeRepository {
                      SET capabilities = {merge},
                          updated_at = {now}
                      WHERE id = $1",
-                    now = Postgres.now()
+                    now = type_mapping(self.db.engine()).now()
                 ),
                 params![id, profiles],
             )
@@ -815,7 +816,7 @@ impl NodeRepository for DbNodeRepository {
                      WHERE node_id = $1
                        AND status IN ('starting', 'running', 'detached')
                        AND (tmux_session IS NULL OR tmux_session != ALL($2))",
-                    now = Postgres.now()
+                    now = type_mapping(self.db.engine()).now()
                 ),
                 params![node, live_tmux_sessions.to_vec()],
             )
@@ -834,7 +835,7 @@ impl NodeRepository for DbNodeRepository {
                 &format!(
                     "UPDATE sessions SET status = 'running', tmux_session = $2, updated_at = {now}
                      WHERE id = $1 AND tenant_id = $3",
-                    now = Postgres.now()
+                    now = type_mapping(self.db.engine()).now()
                 ),
                 params![session, tmux_session, tenant],
             )
@@ -848,7 +849,7 @@ impl NodeRepository for DbNodeRepository {
                 &format!(
                     "UPDATE sessions SET status = 'exited', ended_at = {now}, updated_at = {now}
                      WHERE id = $1 AND tenant_id = $2",
-                    now = Postgres.now()
+                    now = type_mapping(self.db.engine()).now()
                 ),
                 params![session, tenant],
             )
@@ -868,7 +869,7 @@ impl NodeRepository for DbNodeRepository {
                     "UPDATE sessions SET status = 'error', error = $3, ended_at = {now},
                         updated_at = {now}
                      WHERE id = $1 AND tenant_id = $2",
-                    now = Postgres.now()
+                    now = type_mapping(self.db.engine()).now()
                 ),
                 params![session, tenant, message],
             )
@@ -919,7 +920,7 @@ impl JoinTokenRepository for DbJoinTokenRepository {
                     "UPDATE join_tokens SET used_at = {now}
                      WHERE token_hash = $1 AND expires_at > {now}
                      RETURNING id, tenant_id, created_by",
-                    now = Postgres.now()
+                    now = type_mapping(self.db.engine()).now()
                 ),
                 params![token_hash],
             )

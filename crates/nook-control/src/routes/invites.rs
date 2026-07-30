@@ -675,8 +675,7 @@ mod db_tests {
     }
     use super::accept_core;
     use crate::seed::hash_token;
-    use nook_db::{params, Db, DbPool, Json};
-    use nook_db::{Postgres, TypeMapping};
+    use nook_db::{params, Db, DbPool, Json, Postgres, TypeMapping};
     use nook_types::TenantId;
     use sqlx::postgres::PgPoolOptions;
     use uuid::Uuid;

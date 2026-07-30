@@ -9,6 +9,7 @@ use async_trait::async_trait;
 
 use super::RepoResult;
 use chrono::{DateTime, Utc};
+use nook_db::dialect::type_mapping;
 use nook_db::{params, Db, DbPool, Postgres, TypeMapping};
 use uuid::Uuid;
 
@@ -328,7 +329,7 @@ impl ChannelRepository for DbChannelRepository {
                          END
                      WHERE id = $1
                      RETURNING {CHANNEL_COLS}",
-                    now = Postgres.now(),
+                    now = type_mapping(self.db.engine()).now(),
                 ),
                 params![id, name, archived.is_some(), archived.unwrap_or(false)],
             )
@@ -380,7 +381,7 @@ impl ChannelRepository for DbChannelRepository {
                      ON CONFLICT (channel_id, user_id)
                      DO UPDATE SET last_read_at =
                          GREATEST(chat_read_cursors.last_read_at, EXCLUDED.last_read_at)",
-                    Postgres.now()
+                    type_mapping(self.db.engine()).now()
                 ),
                 params![channel, user],
             )

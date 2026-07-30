@@ -18,7 +18,8 @@
 //! signature, and row mapping lives inside the impl (AC-2).
 
 use async_trait::async_trait;
-use nook_db::{params, CiMatch, Db, DbPool, Postgres, TypeMapping};
+use nook_db::dialect::type_mapping;
+use nook_db::{params, CiMatch, Db, DbPool, Postgres};
 use nook_types::*;
 
 use crate::error::ApiResult;
@@ -204,7 +205,7 @@ impl SessionRepository for DbSessionRepository {
                 &format!(
                     "UPDATE sessions SET name = $3, updated_at = {}
                      WHERE id = $1 AND tenant_id = $2 RETURNING *",
-                    Postgres.now()
+                    type_mapping(self.db.engine()).now()
                 ),
                 params![id, tenant, name],
             )
@@ -217,7 +218,7 @@ impl SessionRepository for DbSessionRepository {
             .exec(
                 &format!(
                     "UPDATE sessions SET status = 'error', updated_at = {} WHERE id = $1",
-                    Postgres.now()
+                    type_mapping(self.db.engine()).now()
                 ),
                 params![id],
             )
@@ -232,7 +233,7 @@ impl SessionRepository for DbSessionRepository {
                     "UPDATE sessions SET status = 'starting', error = NULL, ended_at = NULL,
                         updated_at = {}
                      WHERE id = $1 RETURNING *",
-                    Postgres.now()
+                    type_mapping(self.db.engine()).now()
                 ),
                 params![id],
             )
@@ -296,7 +297,7 @@ impl SessionRepository for DbSessionRepository {
                 &format!(
                     "UPDATE sessions SET status = $2, updated_at = {now}
                      WHERE id = $1 AND status IN ('starting', 'running', 'detached')",
-                    now = Postgres.now()
+                    now = type_mapping(self.db.engine()).now()
                 ),
                 params![id, status],
             )

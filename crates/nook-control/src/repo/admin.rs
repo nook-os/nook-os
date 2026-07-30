@@ -35,6 +35,7 @@
 //! column this trait writes, and it is named for that.
 
 use async_trait::async_trait;
+use nook_db::dialect::type_mapping;
 use nook_db::{params, CiMatch, Db, DbPool, Postgres, TypeMapping};
 use nook_types::*;
 use uuid::Uuid;
@@ -206,7 +207,7 @@ impl OperatorRepository for DbOperatorRepository {
                     "UPDATE orgs SET name = $2, updated_at = {} WHERE id = $1
          RETURNING id, name, slug, created_at,
                    (SELECT count(*) FROM tenants t WHERE t.org_id = orgs.id) AS tenants",
-                    Postgres.now()
+                    type_mapping(self.db.engine()).now()
                 ),
                 params![id, name],
             )
@@ -231,7 +232,7 @@ impl OperatorRepository for DbOperatorRepository {
             .exec(
                 &format!(
                     "UPDATE tenants SET org_id = $2, updated_at = {} WHERE id = $1",
-                    Postgres.now()
+                    type_mapping(self.db.engine()).now()
                 ),
                 params![tenant, org],
             )
@@ -654,7 +655,7 @@ impl SkillRepository for DbSkillRepository {
                updated_by = EXCLUDED.updated_by
          RETURNING id, name, sha256, {size} AS size, updated_at,
            (SELECT display_name FROM users WHERE id = $6) AS updated_by",
-                    now = Postgres.now(),
+                    now = type_mapping(self.db.engine()).now(),
                     size = Postgres.cast("length(content)", "bigint"),
                 ),
                 params![

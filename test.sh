@@ -90,6 +90,7 @@ run_lint() {
     scripts/check-secrets-untracked.test.sh run.sh \
     scripts/check-inline-sql.sh scripts/check-inline-sql.test.sh \
     scripts/check-sqlx-signatures.sh scripts/check-sqlx-signatures.test.sh \
+    scripts/check-dialect-dispatch.sh scripts/check-dialect-dispatch.test.sh \
     scripts/squash-migrations.sh \
     || die "shellcheck"
   pass "shell scripts clean"
@@ -117,6 +118,15 @@ run_lint() {
   ./scripts/check-sqlx-signatures.sh || die "sqlx signatures"
   ./scripts/check-sqlx-signatures.test.sh || die "sqlx signature guard self-test"
   pass "sqlx signatures guarded"
+
+  # MAIN-289: production asks the ENGINE for its SQL fragments rather than
+  # assuming Postgres. Green for the same reason as the guard above — the
+  # allow-list names every file whose sweep is still open, and shrinks as they
+  # land.
+  say "dialect dispatch"
+  ./scripts/check-dialect-dispatch.sh || die "dialect dispatch"
+  ./scripts/check-dialect-dispatch.test.sh || die "dialect dispatch guard self-test"
+  pass "dialect dispatch guarded"
 }
 
 run_rust() {

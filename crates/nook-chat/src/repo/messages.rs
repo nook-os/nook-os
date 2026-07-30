@@ -12,6 +12,7 @@ use async_trait::async_trait;
 
 use super::RepoResult;
 use chrono::{DateTime, Utc};
+use nook_db::dialect::type_mapping;
 use nook_db::{params, Db, DbPool, Postgres, TypeMapping};
 use uuid::Uuid;
 
@@ -315,7 +316,7 @@ impl MessageRepository for DbMessageRepository {
             .exec(
                 &format!(
                     "UPDATE chat_messages SET body = $2, edited_at = {} WHERE id = $1",
-                    Postgres.now()
+                    type_mapping(self.db.engine()).now()
                 ),
                 params![message, body],
             )
@@ -336,7 +337,7 @@ impl MessageRepository for DbMessageRepository {
             .exec(
                 &format!(
                     "UPDATE chat_messages SET deleted_at = {} WHERE id = $1",
-                    Postgres.now()
+                    type_mapping(self.db.engine()).now()
                 ),
                 params![message],
             )

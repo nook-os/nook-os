@@ -23,10 +23,11 @@
 //! **One impl over the engine-agnostic `DbPool`** ([`DbTaskRepository`]), row
 //! mapping inside it, no per-engine branch and no dialect dispatch — that layer
 //! is underneath us (NG-1), and a per-engine impl is a later, hotspot-proven
-//! escape hatch (NG-3). The `Postgres.now()` / `.cast()` calls came in with the
+//! escape hatch (NG-3). The `type_mapping(self.db.engine()).now()` / `.cast()` calls came in with the
 //! moved SQL unchanged; replacing them is the dialect sweep's job.
 
 use async_trait::async_trait;
+use nook_db::dialect::type_mapping;
 use nook_db::{params, CiMatch, Db, DbPool, Postgres, TypeMapping};
 use nook_types::*;
 use std::collections::HashMap;
@@ -904,7 +905,7 @@ impl TaskRepository for DbTaskRepository {
              WHERE id = $1 AND tenant_id = $2
                AND ({guard} IS NULL OR updated_at = $11)
              RETURNING *",
-                    now = Postgres.now(),
+                    now = type_mapping(self.db.engine()).now(),
                     guard = Postgres.cast("$11", "timestamptz")
                 ),
                 params![
@@ -935,7 +936,7 @@ impl TaskRepository for DbTaskRepository {
                 &format!(
                     "UPDATE tasks SET assignee_user_id = NULL, updated_at = {now}
              WHERE id = $1 AND tenant_id = $2 RETURNING *",
-                    now = Postgres.now()
+                    now = type_mapping(self.db.engine()).now()
                 ),
                 params![id, tenant],
             )
@@ -954,7 +955,7 @@ impl TaskRepository for DbTaskRepository {
                 &format!(
                     "UPDATE tasks SET priority = $3, updated_at = {now}
              WHERE id = $1 AND tenant_id = $2 RETURNING *",
-                    now = Postgres.now()
+                    now = type_mapping(self.db.engine()).now()
                 ),
                 params![id, tenant, priority],
             )
@@ -973,7 +974,7 @@ impl TaskRepository for DbTaskRepository {
                 &format!(
                     "UPDATE tasks SET assigned_node_id = $2, column_id = $3, updated_at = {}
          WHERE id = $1 RETURNING *",
-                    Postgres.now()
+                    type_mapping(self.db.engine()).now()
                 ),
                 params![id, node, column],
             )
@@ -989,7 +990,7 @@ impl TaskRepository for DbTaskRepository {
                 worktree_path = $5, worktree_node_id = $3, session_id = $6,
                 column_id = $7, checkout_id = $8, updated_at = {}
          WHERE id = $1 RETURNING *",
-                    Postgres.now()
+                    type_mapping(self.db.engine()).now()
                 ),
                 params![
                     id,
@@ -1012,7 +1013,7 @@ impl TaskRepository for DbTaskRepository {
                 &format!(
                     "UPDATE tasks SET pr_url = $2, column_id = $3, updated_at = {}
          WHERE id = $1 RETURNING *",
-                    Postgres.now()
+                    type_mapping(self.db.engine()).now()
                 ),
                 params![id, url, column],
             )
@@ -1027,7 +1028,7 @@ impl TaskRepository for DbTaskRepository {
                     "UPDATE tasks SET checkout_id = NULL, worktree_path = NULL,
                 worktree_node_id = NULL, updated_at = {}
          WHERE id = $1 RETURNING *",
-                    Postgres.now()
+                    type_mapping(self.db.engine()).now()
                 ),
                 params![id],
             )
@@ -1040,7 +1041,7 @@ impl TaskRepository for DbTaskRepository {
             .query_one(
                 &format!(
                     "UPDATE tasks SET column_id = $2, updated_at = {} WHERE id = $1 RETURNING *",
-                    Postgres.now()
+                    type_mapping(self.db.engine()).now()
                 ),
                 params![id, column],
             )
@@ -1373,7 +1374,7 @@ impl TaskRepository for DbTaskRepository {
              updated_at = {}
          WHERE id = $3 AND tenant_id = $4 AND assignee_user_id IS NULL
          RETURNING *",
-                    Postgres.now()
+                    type_mapping(self.db.engine()).now()
                 ),
                 params![assignee, column.map(|c| c.0), id, tenant],
             )
@@ -1401,7 +1402,7 @@ impl TaskRepository for DbTaskRepository {
                 &format!(
                     "UPDATE tasks SET assignee_user_id = NULL, updated_at = {}
          WHERE id = $1 AND tenant_id = $2 RETURNING *",
-                    Postgres.now()
+                    type_mapping(self.db.engine()).now()
                 ),
                 params![id, tenant],
             )
@@ -1587,7 +1588,7 @@ impl TaskRepository for DbTaskRepository {
                     "UPDATE tasks SET archived_at = CASE WHEN $3 THEN {now} ELSE NULL END,
                           updated_at = {now}
          WHERE id = $1 AND tenant_id = $2 RETURNING *",
-                    now = Postgres.now()
+                    now = type_mapping(self.db.engine()).now()
                 ),
                 params![id, tenant, archived],
             )
@@ -1606,7 +1607,7 @@ impl TaskRepository for DbTaskRepository {
                     "UPDATE tasks SET archived_at = {now}, updated_at = {now}
          WHERE column_id = $1 AND tenant_id = $2 AND archived_at IS NULL
          RETURNING id",
-                    now = Postgres.now()
+                    now = type_mapping(self.db.engine()).now()
                 ),
                 params![column, tenant],
             )
@@ -1638,7 +1639,7 @@ impl TaskRepository for DbTaskRepository {
                     "UPDATE boards SET name = $3, key = COALESCE($4, key),
                            automation = COALESCE($5, automation), updated_at = {}
          WHERE id = $1 AND tenant_id = $2 RETURNING *",
-                    Postgres.now()
+                    type_mapping(self.db.engine()).now()
                 ),
                 params![id, tenant, name, key, automation],
             )
@@ -1719,7 +1720,7 @@ impl TaskRepository for DbTaskRepository {
          WHERE id = $2 AND tenant_id = $3
          RETURNING id, tenant_id, task_id, author_type, author_id, author_name,
                    body_md, created_at, updated_at",
-                    Postgres.now()
+                    type_mapping(self.db.engine()).now()
                 ),
                 params![body_md, id, tenant],
             )
