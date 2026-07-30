@@ -8,14 +8,19 @@ use crate::error::{ApiError, ApiResult};
 use crate::services::session_queries;
 use crate::state::AppState;
 
-impl From<DispatchError> for ApiError {
-    fn from(e: DispatchError) -> Self {
-        match e {
-            DispatchError::NotConfigured(id) => {
-                ApiError::BadRequest(format!("dispatcher backend '{id}' is not configured"))
-            }
-            DispatchError::Internal(m) => ApiError::Internal(anyhow::anyhow!(m)),
+/// A dispatcher failure as an HTTP error.
+///
+/// A free function rather than `impl From<DispatchError> for ApiError`: since
+/// MAIN-274 moved `ApiError` to `nook-errors`, both types are foreign here and
+/// the orphan rule forbids the impl. Putting it in `nook-errors` instead would
+/// drag the dispatcher into the error crate for one mapping, so it stays beside
+/// the one route that needs it. The mapping itself is unchanged.
+fn dispatch_error(e: DispatchError) -> ApiError {
+    match e {
+        DispatchError::NotConfigured(id) => {
+            ApiError::BadRequest(format!("dispatcher backend '{id}' is not configured"))
         }
+        DispatchError::Internal(m) => ApiError::Internal(anyhow::anyhow!(m)),
     }
 }
 
@@ -60,6 +65,7 @@ pub async fn suggest(
             active_sessions: sessions.len(),
             online_nodes: nodes.iter().filter(|n| n.status == "online").count(),
         })
-        .await?;
+        .await
+        .map_err(dispatch_error)?;
     Ok(Json(suggestion))
 }

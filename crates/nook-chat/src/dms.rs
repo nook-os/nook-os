@@ -14,7 +14,9 @@ use axum::http::StatusCode;
 use nook_types::{DmSummary, OpenDmRequest, PersonRef};
 use uuid::Uuid;
 
-use crate::{AppState, Caller, ChatError};
+use crate::internal;
+use crate::{AppState, Caller};
+use nook_errors::ApiError;
 
 /// A DM has at least the creator plus one other, and at most eight people.
 const MIN_PARTICIPANTS: usize = 2;
@@ -24,11 +26,11 @@ const MAX_PARTICIPANTS: usize = 8;
 async fn person_of(
     repo: &dyn crate::repo::dms::DmRepository,
     user_id: Uuid,
-) -> Result<Uuid, ChatError> {
+) -> Result<Uuid, ApiError> {
     repo.person_of(user_id)
         .await
-        .map_err(|_| ChatError::Internal)?
-        .ok_or(ChatError::Forbidden)
+        .map_err(|_| internal())?
+        .ok_or(ApiError::Forbidden)
 }
 
 /// May `me` DM `other`? Yes iff `other` has a user in a tenant under one of
@@ -38,10 +40,8 @@ async fn dmable(
     repo: &dyn crate::repo::dms::DmRepository,
     me: Uuid,
     other: Uuid,
-) -> Result<bool, ChatError> {
-    repo.may_dm(me, other)
-        .await
-        .map_err(|_| ChatError::Internal)
+) -> Result<bool, ApiError> {
+    repo.may_dm(me, other).await.map_err(|_| internal())
 }
 
 /// The people the caller may start a DM with (AC-4): every person in the
@@ -50,13 +50,13 @@ async fn dmable(
 pub async fn people(
     State(state): State<AppState>,
     caller: Caller,
-) -> Result<Json<Vec<PersonRef>>, ChatError> {
+) -> Result<Json<Vec<PersonRef>>, ApiError> {
     let me = person_of(&*state.dms, caller.user_id).await?;
     let rows = state
         .dms
         .people_in_my_orgs(me)
         .await
-        .map_err(|_| ChatError::Internal)?;
+        .map_err(|_| internal())?;
     Ok(Json(
         rows.into_iter()
             .map(|p| PersonRef {
@@ -72,13 +72,9 @@ pub async fn people(
 pub async fn list(
     State(state): State<AppState>,
     caller: Caller,
-) -> Result<Json<Vec<DmSummary>>, ChatError> {
+) -> Result<Json<Vec<DmSummary>>, ApiError> {
     let me = person_of(&*state.dms, caller.user_id).await?;
-    let ids = state
-        .dms
-        .my_dms(me)
-        .await
-        .map_err(|_| ChatError::Internal)?;
+    let ids = state.dms.my_dms(me).await.map_err(|_| internal())?;
 
     let mut out = Vec::with_capacity(ids.len());
     for id in ids {
@@ -95,7 +91,7 @@ pub async fn open(
     State(state): State<AppState>,
     caller: Caller,
     Json(req): Json<OpenDmRequest>,
-) -> Result<(StatusCode, Json<DmSummary>), ChatError> {
+) -> Result<(StatusCode, Json<DmSummary>), ApiError> {
     let me = person_of(&*state.dms, caller.user_id).await?;
 
     // Canonical participant set: creator ∪ requested, deduped and sorted so the
@@ -105,7 +101,7 @@ pub async fn open(
     persons.sort();
     persons.dedup();
     if persons.len() < MIN_PARTICIPANTS || persons.len() > MAX_PARTICIPANTS {
-        return Err(ChatError::BadRequest(format!(
+        return Err(ApiError::BadRequest(format!(
             "a DM has {MIN_PARTICIPANTS}–{MAX_PARTICIPANTS} participants"
         )));
     }
@@ -113,7 +109,7 @@ pub async fn open(
     // cross-org DMs, and unknown persons are rejected here.
     for &p in &persons {
         if p != me && !dmable(&*state.dms, me, p).await? {
-            return Err(ChatError::Forbidden);
+            return Err(ApiError::Forbidden);
         }
     }
 
@@ -131,7 +127,7 @@ pub async fn open(
         .dms
         .open(id, me, &slug, &persons)
         .await
-        .map_err(|_| ChatError::Internal)?;
+        .map_err(|_| internal())?;
 
     Ok((
         StatusCode::CREATED,
@@ -145,10 +141,8 @@ pub async fn open(
 async fn find_exact(
     repo: &dyn crate::repo::dms::DmRepository,
     persons: &[Uuid],
-) -> Result<Option<Uuid>, ChatError> {
-    repo.find_exact(persons)
-        .await
-        .map_err(|_| ChatError::Internal)
+) -> Result<Option<Uuid>, ApiError> {
+    repo.find_exact(persons).await.map_err(|_| internal())
 }
 
 /// A DM's summary: its id, creation time, and participants with display names.
@@ -156,23 +150,20 @@ async fn summary(
     repo: &dyn crate::repo::dms::DmRepository,
     id: Uuid,
     reader: Uuid,
-) -> Result<DmSummary, ChatError> {
+) -> Result<DmSummary, ApiError> {
     let created_at = repo
         .created_at(id)
         .await
-        .map_err(|_| ChatError::Internal)?
-        .ok_or(ChatError::NotFound)?;
-    let rows = repo
-        .participants(id)
-        .await
-        .map_err(|_| ChatError::Internal)?;
+        .map_err(|_| internal())?
+        .ok_or(ApiError::NotFound)?;
+    let rows = repo.participants(id).await.map_err(|_| internal())?;
     // Unread from the other participant(s) since the reader's cursor (MAIN-117),
     // same semantics as a channel: the reader's own messages and deleted ones
     // don't count, and no cursor row means everything counts.
     let unread_count = repo
         .unread_count(id, reader)
         .await
-        .map_err(|_| ChatError::Internal)?;
+        .map_err(|_| internal())?;
     Ok(DmSummary {
         id,
         created_at,
@@ -189,8 +180,10 @@ async fn summary(
 
 #[cfg(test)]
 mod tests {
+    use nook_errors::ApiError;
+
     use super::{list, open, people};
-    use crate::{channels, AppState, Caller, ChatError};
+    use crate::{channels, AppState, Caller};
     use axum::extract::{Json, State};
     use nook_db::{params, Db, DbPool};
     use nook_types::OpenDmRequest;
@@ -354,7 +347,7 @@ mod tests {
             .is_ok());
         assert!(matches!(
             channels::access(&*state.channels, dm.0.id, &caller(uc, t)).await,
-            Err(ChatError::Forbidden)
+            Err(ApiError::Forbidden)
         ));
     }
 
@@ -415,7 +408,7 @@ mod tests {
                 }),
             )
             .await,
-            Err(ChatError::Forbidden)
+            Err(ApiError::Forbidden)
         ));
 
         // The picker lists org members (pb) and never the outsider (pout) or self.
@@ -564,7 +557,7 @@ mod fake_tests {
         let repo = FakeDmRepository::new();
         assert!(matches!(
             summary(&repo, Uuid::now_v7(), Uuid::now_v7()).await,
-            Err(ChatError::NotFound)
+            Err(ApiError::NotFound)
         ));
     }
 
@@ -573,7 +566,7 @@ mod fake_tests {
         let repo = FakeDmRepository::new();
         assert!(matches!(
             person_of(&repo, Uuid::now_v7()).await,
-            Err(ChatError::Forbidden)
+            Err(ApiError::Forbidden)
         ));
     }
 }

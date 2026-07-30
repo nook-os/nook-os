@@ -10,7 +10,9 @@ use axum::Json;
 use nook_types::{ChatCategory, CreateChatCategory, ReorderChatCategories, UpdateChatCategory};
 use uuid::Uuid;
 
-use crate::{AppState, Caller, ChatError};
+use crate::internal;
+use crate::{AppState, Caller};
+use nook_errors::ApiError;
 
 impl From<crate::repo::channels::CategoryRow> for ChatCategory {
     fn from(r: crate::repo::channels::CategoryRow) -> Self {
@@ -28,11 +30,11 @@ impl From<crate::repo::channels::CategoryRow> for ChatCategory {
 async fn org_of(
     repo: &dyn crate::repo::channels::ChannelRepository,
     tenant: Uuid,
-) -> Result<Uuid, ChatError> {
+) -> Result<Uuid, ApiError> {
     repo.org_of_tenant(tenant)
         .await
-        .map_err(|_| ChatError::Internal)?
-        .ok_or(ChatError::Internal)
+        .map_err(|_| internal())?
+        .ok_or(internal())
 }
 
 /// A scope's categories in display order — the shared read behind the list
@@ -40,11 +42,8 @@ async fn org_of(
 async fn scoped(
     repo: &dyn crate::repo::channels::ChannelRepository,
     tenant: Uuid,
-) -> Result<Vec<ChatCategory>, ChatError> {
-    let rows = repo
-        .categories(tenant)
-        .await
-        .map_err(|_| ChatError::Internal)?;
+) -> Result<Vec<ChatCategory>, ApiError> {
+    let rows = repo.categories(tenant).await.map_err(|_| internal())?;
     Ok(rows.into_iter().map(Into::into).collect())
 }
 
@@ -52,7 +51,7 @@ async fn scoped(
 pub async fn list(
     State(state): State<AppState>,
     caller: Caller,
-) -> Result<Json<Vec<ChatCategory>>, ChatError> {
+) -> Result<Json<Vec<ChatCategory>>, ApiError> {
     Ok(Json(scoped(&*state.channels, caller.tenant_id).await?))
 }
 
@@ -61,17 +60,17 @@ pub async fn create(
     State(state): State<AppState>,
     caller: Caller,
     Json(req): Json<CreateChatCategory>,
-) -> Result<(StatusCode, Json<ChatCategory>), ChatError> {
+) -> Result<(StatusCode, Json<ChatCategory>), ApiError> {
     crate::require_admin(&*state.channels, &caller).await?;
     let name = req.name.trim();
     if name.is_empty() {
-        return Err(ChatError::BadRequest("a category needs a name".into()));
+        return Err(ApiError::BadRequest("a category needs a name".into()));
     }
     let (owner_type, owner_id) = match req.owner.as_deref().unwrap_or("tenant") {
         "tenant" => ("tenant", caller.tenant_id),
         "org" => ("org", org_of(&*state.channels, caller.tenant_id).await?),
         other => {
-            return Err(ChatError::BadRequest(format!(
+            return Err(ApiError::BadRequest(format!(
                 "category owner must be \"tenant\" or \"org\" (got {other:?})"
             )))
         }
@@ -85,12 +84,12 @@ pub async fn create(
         .channels
         .category_count(owner)
         .await
-        .map_err(|_| ChatError::Internal)?;
+        .map_err(|_| internal())?;
     let row = state
         .channels
         .create_category(owner, name, count as i32)
         .await
-        .map_err(|_| ChatError::Internal)?;
+        .map_err(|_| internal())?;
     Ok((StatusCode::CREATED, Json(row.into())))
 }
 
@@ -101,11 +100,11 @@ pub async fn update(
     caller: Caller,
     Path(id): Path<Uuid>,
     Json(req): Json<UpdateChatCategory>,
-) -> Result<Json<ChatCategory>, ChatError> {
+) -> Result<Json<ChatCategory>, ApiError> {
     crate::require_admin(&*state.channels, &caller).await?;
     let name = req.name.trim();
     if name.is_empty() {
-        return Err(ChatError::BadRequest(
+        return Err(ApiError::BadRequest(
             "a category name cannot be blank".into(),
         ));
     }
@@ -113,8 +112,8 @@ pub async fn update(
         .channels
         .rename_category(id, caller.tenant_id, name)
         .await
-        .map_err(|_| ChatError::Internal)?
-        .ok_or(ChatError::NotFound)?;
+        .map_err(|_| internal())?
+        .ok_or(ApiError::NotFound)?;
     Ok(Json(row.into()))
 }
 
@@ -124,15 +123,15 @@ pub async fn delete(
     State(state): State<AppState>,
     caller: Caller,
     Path(id): Path<Uuid>,
-) -> Result<StatusCode, ChatError> {
+) -> Result<StatusCode, ApiError> {
     crate::require_admin(&*state.channels, &caller).await?;
     let affected = state
         .channels
         .delete_category(id, caller.tenant_id)
         .await
-        .map_err(|_| ChatError::Internal)?;
+        .map_err(|_| internal())?;
     if affected == 0 {
-        return Err(ChatError::NotFound);
+        return Err(ApiError::NotFound);
     }
     Ok(StatusCode::NO_CONTENT)
 }
@@ -144,12 +143,12 @@ pub async fn reorder(
     State(state): State<AppState>,
     caller: Caller,
     Json(req): Json<ReorderChatCategories>,
-) -> Result<Json<Vec<ChatCategory>>, ChatError> {
+) -> Result<Json<Vec<ChatCategory>>, ApiError> {
     crate::require_admin(&*state.channels, &caller).await?;
     state
         .channels
         .reorder_categories(caller.tenant_id, &req.ordered_ids)
         .await
-        .map_err(|_| ChatError::Internal)?;
+        .map_err(|_| internal())?;
     Ok(Json(scoped(&*state.channels, caller.tenant_id).await?))
 }
