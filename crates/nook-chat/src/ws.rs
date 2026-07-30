@@ -26,13 +26,14 @@ use futures_util::{SinkExt, StreamExt};
 use nook_types::ChatServerMessage;
 use tokio::sync::broadcast::error::RecvError;
 
-use crate::{channels, AppState, Caller, ChatError};
+use crate::{channels, AppState, Caller};
+use nook_errors::ApiError;
 
 pub async fn stream(
     State(state): State<AppState>,
     caller: Caller,
     ws: WebSocketUpgrade,
-) -> Result<Response, ChatError> {
+) -> Result<Response, ApiError> {
     let events = state.registry.subscribe_all();
     Ok(ws.on_upgrade(move |socket| pump(state, caller, socket, events)))
 }

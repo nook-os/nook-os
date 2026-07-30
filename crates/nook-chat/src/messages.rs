@@ -18,8 +18,10 @@ use nook_types::{
 use serde::Deserialize;
 use uuid::Uuid;
 
+use crate::internal;
 use crate::repo::messages::{MessageRepository, MessageRow, NewMessage, Page};
-use crate::{AppState, Caller, ChatError};
+use crate::{AppState, Caller};
+use nook_errors::ApiError;
 
 /// The body a deleted message shows in every payload — the real content is
 /// redacted server-side and never leaves the database (MAIN-116 AC-4).
@@ -104,14 +106,14 @@ pub async fn post(
     caller: Caller,
     Path(channel_id): Path<Uuid>,
     Json(req): Json<PostChatMessage>,
-) -> Result<(StatusCode, Json<ChatMessage>), ChatError> {
+) -> Result<(StatusCode, Json<ChatMessage>), ApiError> {
     let scope = crate::channels::access(&*state.channels, channel_id, &caller).await?;
     if scope.archived {
-        return Err(ChatError::Conflict("this channel is archived".into()));
+        return Err(ApiError::Conflict("this channel is archived".into()));
     }
     let body = req.body.trim();
     if body.is_empty() {
-        return Err(ChatError::BadRequest("a message needs a body".into()));
+        return Err(ApiError::BadRequest("a message needs a body".into()));
     }
 
     // A reply's parent must live in THIS channel and must itself be top-level —
@@ -122,16 +124,16 @@ pub async fn post(
             .messages
             .parent_of(parent_id)
             .await
-            .map_err(|_| ChatError::Internal)?
-            .ok_or_else(|| ChatError::BadRequest("parent message not found".into()))?;
+            .map_err(|_| internal())?
+            .ok_or_else(|| ApiError::BadRequest("parent message not found".into()))?;
         let (parent_channel, parents_parent) = (parent.channel_id, parent.parent_message_id);
         if parent_channel != channel_id {
-            return Err(ChatError::BadRequest(
+            return Err(ApiError::BadRequest(
                 "parent message is in another channel".into(),
             ));
         }
         if parents_parent.is_some() {
-            return Err(ChatError::BadRequest(
+            return Err(ApiError::BadRequest(
                 "cannot reply to a reply — threads are one level deep".into(),
             ));
         }
@@ -147,7 +149,7 @@ pub async fn post(
             parent_message_id: req.parent_message_id,
         })
         .await
-        .map_err(|_| ChatError::Internal)?;
+        .map_err(|_| internal())?;
     let msg: ChatMessage = row.into(); // no reactions on a brand-new message
 
     // Deliver to subscribers here now, and announce it so peer instances do the
@@ -172,7 +174,7 @@ pub async fn history(
     caller: Caller,
     Path(channel_id): Path<Uuid>,
     Query(q): Query<HistoryQuery>,
-) -> Result<Json<ChatMessagePage>, ChatError> {
+) -> Result<Json<ChatMessagePage>, ApiError> {
     // Read is allowed on archived channels (history stays readable, AC-1); the
     // scope check still refuses another tenant's channel (AC-5).
     crate::channels::access(&*state.channels, channel_id, &caller).await?;
@@ -193,7 +195,7 @@ pub async fn history(
             },
         )
         .await
-        .map_err(|_| ChatError::Internal)?;
+        .map_err(|_| internal())?;
 
     // A full page implies there may be more; the cursor is the oldest id shown.
     let next_cursor = (rows.len() as i64 == limit)
@@ -241,7 +243,7 @@ pub async fn thread(
     caller: Caller,
     Path(message_id): Path<Uuid>,
     Query(q): Query<HistoryQuery>,
-) -> Result<Json<ChatThread>, ChatError> {
+) -> Result<Json<ChatThread>, ApiError> {
     // Resolve the parent (with its reply rollups), then authorize on its channel
     // BEFORE revealing anything else — a cross-tenant caller gets 403, not the
     // is-it-a-reply distinction below.
@@ -249,14 +251,14 @@ pub async fn thread(
         .messages
         .get(message_id)
         .await
-        .map_err(|_| ChatError::Internal)?
-        .ok_or(ChatError::NotFound)?;
+        .map_err(|_| internal())?
+        .ok_or(ApiError::NotFound)?;
     crate::channels::access(&*state.channels, parent.channel_id, &caller).await?;
 
     // A thread hangs off a top-level message; asking for a reply's thread is a
     // 400 — replies are one level deep (AC-1/AC-2).
     if parent.parent_message_id.is_some() {
-        return Err(ChatError::BadRequest(
+        return Err(ApiError::BadRequest(
             "that message is itself a reply — threads are one level deep".into(),
         ));
     }
@@ -272,7 +274,7 @@ pub async fn thread(
             },
         )
         .await
-        .map_err(|_| ChatError::Internal)?;
+        .map_err(|_| internal())?;
 
     let next_cursor = (rows.len() as i64 == limit)
         .then(|| rows.last().map(|m| m.id))
@@ -311,12 +313,12 @@ fn valid_emoji(emoji: &str) -> bool {
 async fn message_meta(
     repo: &dyn MessageRepository,
     id: Uuid,
-) -> Result<(Uuid, Uuid, Option<DateTime<Utc>>), ChatError> {
+) -> Result<(Uuid, Uuid, Option<DateTime<Utc>>), ApiError> {
     let m = repo
         .meta(id)
         .await
-        .map_err(|_| ChatError::Internal)?
-        .ok_or(ChatError::NotFound)?;
+        .map_err(|_| internal())?
+        .ok_or(ApiError::NotFound)?;
     Ok((m.channel_id, m.author_id, m.deleted_at))
 }
 
@@ -338,7 +340,7 @@ pub async fn add_reaction(
     State(state): State<AppState>,
     caller: Caller,
     Path((message_id, emoji)): Path<(Uuid, String)>,
-) -> Result<Json<ChatMessage>, ChatError> {
+) -> Result<Json<ChatMessage>, ApiError> {
     react(&state, &caller, message_id, &emoji, true).await
 }
 
@@ -347,7 +349,7 @@ pub async fn remove_reaction(
     State(state): State<AppState>,
     caller: Caller,
     Path((message_id, emoji)): Path<(Uuid, String)>,
-) -> Result<Json<ChatMessage>, ChatError> {
+) -> Result<Json<ChatMessage>, ApiError> {
     react(&state, &caller, message_id, &emoji, false).await
 }
 
@@ -357,16 +359,16 @@ async fn react(
     message_id: Uuid,
     emoji: &str,
     add: bool,
-) -> Result<Json<ChatMessage>, ChatError> {
+) -> Result<Json<ChatMessage>, ApiError> {
     if !valid_emoji(emoji) {
-        return Err(ChatError::BadRequest("not a supported reaction".into()));
+        return Err(ApiError::BadRequest("not a supported reaction".into()));
     }
     let (channel_id, _author, deleted_at) = message_meta(&*state.messages, message_id).await?;
     // Same visibility gate as reading — a caller who cannot see the channel
     // cannot react in it. A deleted message takes no new reactions.
     crate::channels::access(&*state.channels, channel_id, caller).await?;
     if deleted_at.is_some() {
-        return Err(ChatError::Conflict("this message was deleted".into()));
+        return Err(ApiError::Conflict("this message was deleted".into()));
     }
 
     if add {
@@ -374,13 +376,13 @@ async fn react(
             .messages
             .add_reaction(message_id, caller.user_id, emoji)
             .await
-            .map_err(|_| ChatError::Internal)?;
+            .map_err(|_| internal())?;
     } else {
         state
             .messages
             .remove_reaction(message_id, caller.user_id, emoji)
             .await
-            .map_err(|_| ChatError::Internal)?;
+            .map_err(|_| internal())?;
     }
 
     broadcast_update(state, message_id).await;
@@ -388,7 +390,7 @@ async fn react(
     read_message(&*state.messages, Some(caller.user_id), message_id)
         .await
         .map(Json)
-        .ok_or(ChatError::NotFound)
+        .ok_or(ApiError::NotFound)
 }
 
 /// Edit a message's body (`PATCH`) — author-only, validated like a post; the
@@ -398,18 +400,18 @@ pub async fn update(
     caller: Caller,
     Path(message_id): Path<Uuid>,
     Json(req): Json<UpdateChatMessage>,
-) -> Result<Json<ChatMessage>, ChatError> {
+) -> Result<Json<ChatMessage>, ApiError> {
     let body = req.body.trim();
     if body.is_empty() {
-        return Err(ChatError::BadRequest("a message needs a body".into()));
+        return Err(ApiError::BadRequest("a message needs a body".into()));
     }
     let (channel_id, author_id, deleted_at) = message_meta(&*state.messages, message_id).await?;
     crate::channels::access(&*state.channels, channel_id, &caller).await?;
     if author_id != caller.user_id {
-        return Err(ChatError::Forbidden);
+        return Err(ApiError::Forbidden);
     }
     if deleted_at.is_some() {
-        return Err(ChatError::Conflict("this message was deleted".into()));
+        return Err(ApiError::Conflict("this message was deleted".into()));
     }
 
     // Record the prior content as an audit revision, then update in place. The
@@ -418,13 +420,13 @@ pub async fn update(
         .messages
         .edit(message_id, body, caller.user_id)
         .await
-        .map_err(|_| ChatError::Internal)?;
+        .map_err(|_| internal())?;
 
     broadcast_update(&state, message_id).await;
     read_message(&*state.messages, Some(caller.user_id), message_id)
         .await
         .map(Json)
-        .ok_or(ChatError::NotFound)
+        .ok_or(ApiError::NotFound)
 }
 
 /// Soft-delete a message (`DELETE`) — author or tenant admin (AC-4). The content
@@ -434,7 +436,7 @@ pub async fn delete(
     State(state): State<AppState>,
     caller: Caller,
     Path(message_id): Path<Uuid>,
-) -> Result<Json<ChatMessage>, ChatError> {
+) -> Result<Json<ChatMessage>, ApiError> {
     let (channel_id, author_id, deleted_at) = message_meta(&*state.messages, message_id).await?;
     crate::channels::access(&*state.channels, channel_id, &caller).await?;
     // Author always may; otherwise the caller must be a tenant owner/admin.
@@ -446,20 +448,20 @@ pub async fn delete(
         return read_message(&*state.messages, Some(caller.user_id), message_id)
             .await
             .map(Json)
-            .ok_or(ChatError::NotFound);
+            .ok_or(ApiError::NotFound);
     }
 
     state
         .messages
         .soft_delete(message_id, caller.user_id)
         .await
-        .map_err(|_| ChatError::Internal)?;
+        .map_err(|_| internal())?;
 
     broadcast_update(&state, message_id).await;
     read_message(&*state.messages, Some(caller.user_id), message_id)
         .await
         .map(Json)
-        .ok_or(ChatError::NotFound)
+        .ok_or(ApiError::NotFound)
 }
 
 #[cfg(test)]
@@ -649,7 +651,7 @@ mod tests {
         )
         .await
         .expect_err("cross-tenant read is refused");
-        assert!(matches!(err, ChatError::Forbidden));
+        assert!(matches!(err, ApiError::Forbidden));
 
         // Post as a different tenant → 403.
         let err = post(
@@ -663,7 +665,7 @@ mod tests {
         )
         .await
         .expect_err("cross-tenant post is refused");
-        assert!(matches!(err, ChatError::Forbidden));
+        assert!(matches!(err, ApiError::Forbidden));
     }
 
     #[tokio::test]
@@ -710,7 +712,7 @@ mod tests {
         )
         .await
         .expect_err("an archived channel refuses posts");
-        assert!(matches!(err, ChatError::Conflict(_)));
+        assert!(matches!(err, ApiError::Conflict(_)));
 
         // …but history still reads.
         let Json(page) = history(
@@ -819,7 +821,7 @@ mod tests {
         )
         .await
         .expect_err("a cross-channel parent is refused");
-        assert!(matches!(err, ChatError::BadRequest(_)));
+        assert!(matches!(err, ApiError::BadRequest(_)));
 
         // An unknown parent id is likewise a 400, not a 500.
         let err = post(
@@ -833,7 +835,7 @@ mod tests {
         )
         .await
         .expect_err("an unknown parent is refused");
-        assert!(matches!(err, ChatError::BadRequest(_)));
+        assert!(matches!(err, ApiError::BadRequest(_)));
     }
 
     #[tokio::test]
@@ -856,7 +858,7 @@ mod tests {
         )
         .await
         .expect_err("nesting is refused");
-        assert!(matches!(err, ChatError::BadRequest(_)));
+        assert!(matches!(err, ApiError::BadRequest(_)));
 
         // And a reply has no thread of its own (AC-2).
         let err = thread(
@@ -870,7 +872,7 @@ mod tests {
         )
         .await
         .expect_err("a reply has no thread");
-        assert!(matches!(err, ChatError::BadRequest(_)));
+        assert!(matches!(err, ApiError::BadRequest(_)));
     }
 
     #[tokio::test]
@@ -936,7 +938,7 @@ mod tests {
         )
         .await
         .expect_err("no such message");
-        assert!(matches!(err, ChatError::NotFound));
+        assert!(matches!(err, ApiError::NotFound));
     }
 
     #[tokio::test]
@@ -960,7 +962,7 @@ mod tests {
         )
         .await
         .expect_err("cross-tenant thread read refused");
-        assert!(matches!(err, ChatError::Forbidden));
+        assert!(matches!(err, ApiError::Forbidden));
     }
 
     // ── Reactions + edit/delete (MAIN-116) ──
@@ -1064,7 +1066,7 @@ mod tests {
             Path((m.id, "notemoji".into())),
         )
         .await;
-        assert!(matches!(bad, Err(ChatError::BadRequest(_))));
+        assert!(matches!(bad, Err(ApiError::BadRequest(_))));
     }
 
     #[tokio::test]
@@ -1085,7 +1087,7 @@ mod tests {
             }),
         )
         .await;
-        assert!(matches!(refused, Err(ChatError::Forbidden)));
+        assert!(matches!(refused, Err(ApiError::Forbidden)));
 
         // The author edits (validated + trimmed like a post); edited_at is set.
         let Json(edited) = update(
@@ -1165,14 +1167,14 @@ mod tests {
             }),
         )
         .await;
-        assert!(matches!(e, Err(ChatError::Conflict(_))));
+        assert!(matches!(e, Err(ApiError::Conflict(_))));
         let r = add_reaction(
             State(state.clone()),
             caller_as(tenant, author),
             Path((m.id, "👍".into())),
         )
         .await;
-        assert!(matches!(r, Err(ChatError::Conflict(_))));
+        assert!(matches!(r, Err(ApiError::Conflict(_))));
     }
 }
 

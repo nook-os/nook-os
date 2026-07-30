@@ -37,6 +37,9 @@
 //! captured backtrace on a hot panic path is expensive and the operator, not
 //! this module, decides.
 
+pub mod error;
+pub use error::{ApiError, ApiResult};
+
 use std::any::Any;
 use std::backtrace::Backtrace;
 use std::cell::RefCell;

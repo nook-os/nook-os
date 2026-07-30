@@ -2678,8 +2678,12 @@ dependencies = [
 name = "nook-errors"
 version = "0.4.22"
 dependencies = [
+ "anyhow",
  "axum",
+ "nook-auth",
  "serde_json",
+ "sqlx",
+ "thiserror 2.0.19",
  "tokio",
  "tower",
  "tower-http",

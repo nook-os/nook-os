@@ -24,7 +24,11 @@ license.workspace = true
 # this needs axum. nook-infra is shared too, but it carries S3, SMTP and Redis,
 # which is not a dependency nook-chat should take on for forty lines.
 [dependencies]
+anyhow = { workspace = true }
 axum = { workspace = true }
+nook-auth = { workspace = true }
+sqlx = { workspace = true }
+thiserror = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
 tower-http = { workspace = true }

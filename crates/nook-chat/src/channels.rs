@@ -16,8 +16,10 @@ use axum::Json;
 use nook_types::{ChatChannel, ChatChannelPlacement, CreateChatChannel, UpdateChatChannel};
 use uuid::Uuid;
 
+use crate::internal;
 use crate::repo::channels::{ChannelRow, OwnerScope};
-use crate::{AppState, Caller, ChatError};
+use crate::{AppState, Caller};
+use nook_errors::ApiError;
 
 impl From<ChannelRow> for ChatChannel {
     fn from(r: ChannelRow) -> Self {
@@ -54,14 +56,11 @@ pub async fn access(
     repo: &dyn crate::repo::channels::ChannelRepository,
     channel_id: Uuid,
     caller: &Caller,
-) -> Result<Access, ChatError> {
-    let owner = repo
-        .owner_of(channel_id)
-        .await
-        .map_err(|_| ChatError::Internal)?;
+) -> Result<Access, ApiError> {
+    let owner = repo.owner_of(channel_id).await.map_err(|_| internal())?;
 
     let Some(owner) = owner else {
-        return Err(ChatError::NotFound);
+        return Err(ApiError::NotFound);
     };
     let (owner_type, owner_id, archived_at) = (owner.owner_type, owner.owner_id, owner.archived_at);
     let authorized = match owner_type.as_str() {
@@ -74,7 +73,7 @@ pub async fn access(
         _ => false,
     };
     if !authorized {
-        return Err(ChatError::Forbidden);
+        return Err(ApiError::Forbidden);
     }
     Ok(Access {
         archived: archived_at.is_some(),
@@ -90,10 +89,10 @@ async fn person_in_org(
     repo: &dyn crate::repo::channels::ChannelRepository,
     user_id: Uuid,
     org: Uuid,
-) -> Result<bool, ChatError> {
+) -> Result<bool, ApiError> {
     repo.person_in_org(user_id, org)
         .await
-        .map_err(|_| ChatError::Internal)
+        .map_err(|_| internal())
 }
 
 /// Is the caller's person a participant of this DM (MAIN-113)? Resolves the
@@ -103,35 +102,35 @@ async fn person_is_participant(
     repo: &dyn crate::repo::channels::ChannelRepository,
     channel_id: Uuid,
     user_id: Uuid,
-) -> Result<bool, ChatError> {
+) -> Result<bool, ApiError> {
     repo.person_is_participant(channel_id, user_id)
         .await
-        .map_err(|_| ChatError::Internal)
+        .map_err(|_| internal())
 }
 
 /// The org a tenant belongs to (`tenants.org_id`).
 async fn org_of(
     repo: &dyn crate::repo::channels::ChannelRepository,
     tenant: Uuid,
-) -> Result<Uuid, ChatError> {
+) -> Result<Uuid, ApiError> {
     repo.org_of_tenant(tenant)
         .await
-        .map_err(|_| ChatError::Internal)?
-        .ok_or(ChatError::Internal)
+        .map_err(|_| internal())?
+        .ok_or(internal())
 }
 
 pub async fn create(
     State(state): State<AppState>,
     caller: Caller,
     Json(req): Json<CreateChatChannel>,
-) -> Result<(StatusCode, Json<ChatChannel>), ChatError> {
+) -> Result<(StatusCode, Json<ChatChannel>), ApiError> {
     // Channel management is owner/admin only (AC-5). For an org channel the same
     // tenant owner/admin check is evaluated in the caller's own tenant — being an
     // admin of any tenant in the org is enough (AC-3); no org-level role exists.
     crate::require_admin(&*state.channels, &caller).await?;
     let name = req.name.trim();
     if name.is_empty() {
-        return Err(ChatError::BadRequest("a channel needs a name".into()));
+        return Err(ApiError::BadRequest("a channel needs a name".into()));
     }
     let slug = slugify(name);
     // Default is a tenant channel (unchanged); `owner: "org"` makes an org
@@ -140,7 +139,7 @@ pub async fn create(
         "tenant" => ("tenant", caller.tenant_id),
         "org" => ("org", org_of(&*state.channels, caller.tenant_id).await?),
         other => {
-            return Err(ChatError::BadRequest(format!(
+            return Err(ApiError::BadRequest(format!(
                 "channel owner must be \"tenant\" or \"org\" (got {other:?})"
             )))
         }
@@ -158,9 +157,9 @@ pub async fn create(
         .await
         .map_err(|e| match e {
             crate::repo::RepoError::Conflict => {
-                ChatError::Conflict("a channel with that name already exists".into())
+                ApiError::Conflict("a channel with that name already exists".into())
             }
-            crate::repo::RepoError::Other => ChatError::Internal,
+            crate::repo::RepoError::Other => internal(),
         })?;
     Ok((StatusCode::CREATED, Json(row.into())))
 }
@@ -177,7 +176,7 @@ pub async fn list(
     State(state): State<AppState>,
     caller: Caller,
     Query(q): Query<ListQuery>,
-) -> Result<Json<Vec<ChatChannel>>, ChatError> {
+) -> Result<Json<Vec<ChatChannel>>, ApiError> {
     // Archived channels drop out of the default list but keep their history
     // (AC-1); the management modal opts them back in with `include_archived`
     // (AC-6). Either way the caller only ever sees their own tenant's (AC-5).
@@ -188,7 +187,7 @@ pub async fn list(
         .channels
         .list(caller.tenant_id, q.include_archived, caller.user_id)
         .await
-        .map_err(|_| ChatError::Internal)?;
+        .map_err(|_| internal())?;
     Ok(Json(rows.into_iter().map(Into::into).collect()))
 }
 
@@ -197,7 +196,7 @@ pub async fn update(
     caller: Caller,
     Path(id): Path<Uuid>,
     Json(req): Json<UpdateChatChannel>,
-) -> Result<Json<ChatChannel>, ChatError> {
+) -> Result<Json<ChatChannel>, ApiError> {
     // Channel management is owner/admin only (AC-5); for an org channel this is
     // the tenant admin check in the caller's own tenant (AC-3).
     crate::require_admin(&*state.channels, &caller).await?;
@@ -208,7 +207,7 @@ pub async fn update(
 
     if let Some(name) = req.name.as_deref() {
         if name.trim().is_empty() {
-            return Err(ChatError::BadRequest(
+            return Err(ApiError::BadRequest(
                 "a channel name cannot be blank".into(),
             ));
         }
@@ -225,8 +224,8 @@ pub async fn update(
             req.archived,
         )
         .await
-        .map_err(|_| ChatError::Internal)?
-        .ok_or(ChatError::NotFound)?;
+        .map_err(|_| internal())?
+        .ok_or(ApiError::NotFound)?;
     Ok(Json(row.into()))
 }
 
@@ -240,7 +239,7 @@ pub async fn place(
     caller: Caller,
     Path(id): Path<Uuid>,
     Json(req): Json<ChatChannelPlacement>,
-) -> Result<Json<ChatChannel>, ChatError> {
+) -> Result<Json<ChatChannel>, ApiError> {
     crate::require_admin(&*state.channels, &caller).await?;
     access(&*state.channels, id, &caller).await?;
 
@@ -249,9 +248,9 @@ pub async fn place(
             .channels
             .category_matches_channel(cat, id)
             .await
-            .map_err(|_| ChatError::Internal)?;
+            .map_err(|_| internal())?;
         if !matches!(same_owner, Some(true)) {
-            return Err(ChatError::BadRequest(
+            return Err(ApiError::BadRequest(
                 "that category is not in this channel's scope".into(),
             ));
         }
@@ -261,8 +260,8 @@ pub async fn place(
         .channels
         .place(id, req.category_id, req.position)
         .await
-        .map_err(|_| ChatError::Internal)?
-        .ok_or(ChatError::NotFound)?;
+        .map_err(|_| internal())?
+        .ok_or(ApiError::NotFound)?;
     Ok(Json(row.into()))
 }
 
@@ -275,13 +274,13 @@ pub async fn mark_read(
     State(state): State<AppState>,
     caller: Caller,
     Path(id): Path<Uuid>,
-) -> Result<StatusCode, ChatError> {
+) -> Result<StatusCode, ApiError> {
     access(&*state.channels, id, &caller).await?;
     state
         .channels
         .mark_read(id, caller.user_id)
         .await
-        .map_err(|_| ChatError::Internal)?;
+        .map_err(|_| internal())?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -318,11 +317,12 @@ pub fn slugify(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{access, create, list, mark_read, place, slugify, update, ListQuery};
-    use crate::{AppState, Caller, ChatError};
+    use crate::{AppState, Caller};
     use axum::extract::{Path, Query, State};
     use axum::Json;
     use chrono::{DateTime, Utc};
     use nook_db::{params, Db, DbPool, Postgres, TimeMath};
+    use nook_errors::ApiError;
     use nook_types::{
         ChatChannelPlacement, CreateChatCategory, CreateChatChannel, ReorderChatCategories,
         UpdateChatChannel,
@@ -414,8 +414,8 @@ mod tests {
         }
     }
 
-    fn is_forbidden<T>(r: &Result<T, ChatError>) -> bool {
-        matches!(r, Err(ChatError::Forbidden))
+    fn is_forbidden<T>(r: &Result<T, ApiError>) -> bool {
+        matches!(r, Err(ApiError::Forbidden))
     }
 
     async fn cleanup(db: &DbPool, tenant: Uuid) {
@@ -569,7 +569,7 @@ mod tests {
         assert!(
             matches!(
                 access(&*state.channels, ch.id, &caller(outsider, tc)).await,
-                Err(ChatError::Forbidden)
+                Err(ApiError::Forbidden)
             ),
             "an unrelated org's access is refused"
         );
@@ -650,7 +650,7 @@ mod tests {
         )
         .await;
         assert!(
-            matches!(blank, Err(ChatError::BadRequest(_))),
+            matches!(blank, Err(ApiError::BadRequest(_))),
             "a blank name is rejected, got {blank:?}"
         );
         let ch = create(
@@ -1323,7 +1323,7 @@ mod fake_tests {
         assert!(
             matches!(
                 access(&repo, ch, &caller(ub, tb)).await,
-                Err(ChatError::Forbidden)
+                Err(ApiError::Forbidden)
             ),
             "another tenant is refused, even its owner"
         );
@@ -1352,7 +1352,7 @@ mod fake_tests {
         assert!(
             matches!(
                 access(&repo, ch, &caller(uc, tc)).await,
-                Err(ChatError::Forbidden)
+                Err(ApiError::Forbidden)
             ),
             "an unrelated org does not"
         );
@@ -1375,7 +1375,7 @@ mod fake_tests {
         assert!(
             matches!(
                 access(&repo, dm, &caller(admin, tenant)).await,
-                Err(ChatError::Forbidden)
+                Err(ApiError::Forbidden)
             ),
             "a tenant owner who is not a participant has no special access"
         );
@@ -1394,7 +1394,7 @@ mod fake_tests {
         assert!(
             matches!(
                 access(&repo, Uuid::now_v7(), &caller(user, tenant)).await,
-                Err(ChatError::NotFound)
+                Err(ApiError::NotFound)
             ),
             "a channel that does not exist is 404, never 403"
         );
@@ -1430,7 +1430,7 @@ mod fake_tests {
             .is_ok());
         assert!(matches!(
             crate::require_admin(&repo, &caller(member, tenant)).await,
-            Err(ChatError::Forbidden)
+            Err(ApiError::Forbidden)
         ));
     }
 }

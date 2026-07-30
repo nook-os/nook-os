@@ -23,12 +23,11 @@ use std::sync::Arc;
 
 use axum::extract::{FromRequestParts, State};
 use axum::http::request::Parts;
-use axum::http::StatusCode;
-use axum::response::{IntoResponse, Response};
 use axum::routing::{get, patch, post, put};
 use axum::{Json, Router};
 use axum_extra::extract::CookieJar;
 use nook_db::{params, Db, DbPool};
+use nook_errors::ApiError;
 use serde_json::{json, Value};
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use uuid::Uuid;
@@ -203,12 +202,12 @@ pub(crate) async fn ensure_chat_schema(pool: &nook_db::DbPool) -> Result<(), sql
 }
 
 /// Readiness: the DB is reachable. Mirrors the control plane's `/healthz`.
-async fn healthz(State(state): State<AppState>) -> Result<Json<Value>, ChatError> {
+async fn healthz(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
     state
         .db
         .exec("SELECT 1", params![])
         .await
-        .map_err(|_| ChatError::Internal)?;
+        .map_err(|_| internal())?;
     Ok(Json(json!({ "status": "ok" })))
 }
 
@@ -217,7 +216,7 @@ async fn livez() -> Json<Value> {
     Json(json!({ "status": "alive" }))
 }
 
-async fn me(State(state): State<AppState>, caller: Caller) -> Result<Json<Value>, ChatError> {
+async fn me(State(state): State<AppState>, caller: Caller) -> Result<Json<Value>, ApiError> {
     // The caller's tenant role, so the frontend can gate channel management to
     // admins (MAIN-94 AC-5) — `null` for a caller with no `users` row.
     let role = tenant_role(&*state.channels, caller.user_id, caller.tenant_id).await?;
@@ -228,7 +227,7 @@ async fn me(State(state): State<AppState>, caller: Caller) -> Result<Json<Value>
         .dms
         .person_of(caller.user_id)
         .await
-        .map_err(|_| ChatError::Internal)?;
+        .map_err(|_| internal())?;
     Ok(Json(json!({
         "user_id": caller.user_id,
         "tenant_id": caller.tenant_id,
@@ -246,10 +245,8 @@ pub(crate) async fn tenant_role(
     repo: &dyn repo::channels::ChannelRepository,
     user: Uuid,
     tenant: Uuid,
-) -> Result<Option<String>, ChatError> {
-    repo.tenant_role(user, tenant)
-        .await
-        .map_err(|_| ChatError::Internal)
+) -> Result<Option<String>, ApiError> {
+    repo.tenant_role(user, tenant).await.map_err(|_| internal())
 }
 
 /// Owner and admin manage channels; everyone else is a member who can read and
@@ -264,12 +261,12 @@ pub(crate) fn role_is_admin(role: Option<&str>) -> bool {
 pub(crate) async fn require_admin(
     repo: &dyn repo::channels::ChannelRepository,
     caller: &Caller,
-) -> Result<(), ChatError> {
+) -> Result<(), ApiError> {
     let role = tenant_role(repo, caller.user_id, caller.tenant_id).await?;
     if role_is_admin(role.as_deref()) {
         Ok(())
     } else {
-        Err(ChatError::Forbidden)
+        Err(ApiError::Forbidden)
     }
 }
 
@@ -283,7 +280,7 @@ pub(crate) struct Caller {
 }
 
 impl FromRequestParts<AppState> for Caller {
-    type Rejection = ChatError;
+    type Rejection = ApiError;
 
     async fn from_request_parts(
         parts: &mut Parts,
@@ -299,7 +296,7 @@ impl FromRequestParts<AppState> for Caller {
         {
             let r = nook_auth::resolve_bearer(&state.db, tok)
                 .await
-                .map_err(ChatError::from)?;
+                .map_err(ApiError::from)?;
             return Ok(Self::from(r));
         }
 
@@ -308,10 +305,10 @@ impl FromRequestParts<AppState> for Caller {
         let sid = jar
             .get(nook_auth::SESSION_COOKIE)
             .and_then(|c| c.value().parse::<Uuid>().ok())
-            .ok_or(ChatError::Unauthorized)?;
+            .ok_or(ApiError::Unauthorized)?;
         let r = nook_auth::resolve_session(&state.db, sid)
             .await
-            .map_err(ChatError::from)?;
+            .map_err(ApiError::from)?;
         Ok(Self::from(r))
     }
 }
@@ -326,47 +323,16 @@ impl From<nook_auth::Resolved> for Caller {
     }
 }
 
-/// Chat's error → HTTP mapping. Preserves NookOS's 401/403/500 split, plus the
-/// request-shape errors the messaging routes need.
-#[derive(Debug)]
-pub(crate) enum ChatError {
-    Unauthorized,
-    Forbidden,
-    /// The channel does not exist (distinct from another tenant's channel, which
-    /// is `Forbidden` per AC-5).
-    NotFound,
-    BadRequest(String),
-    /// A rule was violated that is not the client's malformed input — a
-    /// duplicate channel name, a post to an archived channel.
-    Conflict(String),
-    Internal,
-}
-
-impl From<nook_auth::AuthError> for ChatError {
-    fn from(e: nook_auth::AuthError) -> Self {
-        match e {
-            nook_auth::AuthError::Unauthorized => ChatError::Unauthorized,
-            nook_auth::AuthError::Forbidden => ChatError::Forbidden,
-            nook_auth::AuthError::Db(_) => ChatError::Internal,
-        }
-    }
-}
-
-impl IntoResponse for ChatError {
-    fn into_response(self) -> Response {
-        let (status, msg) = match self {
-            ChatError::Unauthorized => (StatusCode::UNAUTHORIZED, "unauthorized".to_string()),
-            ChatError::Forbidden => (StatusCode::FORBIDDEN, "forbidden".to_string()),
-            ChatError::NotFound => (StatusCode::NOT_FOUND, "not found".to_string()),
-            ChatError::BadRequest(m) => (StatusCode::BAD_REQUEST, m),
-            ChatError::Conflict(m) => (StatusCode::CONFLICT, m),
-            ChatError::Internal => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "internal error".to_string(),
-            ),
-        };
-        (status, Json(json!({ "error": msg }))).into_response()
-    }
+/// Chat's "something broke and it is not the caller's fault" error.
+///
+/// `internal()` was a unit variant that carried nothing and logged
+/// nothing (MAIN-274). The shared `ApiError::Internal` carries an
+/// `anyhow::Error` and logs it, so the body a client sees is unchanged —
+/// `{"error":"internal error"}`, 500 — while the server finally records which
+/// call failed. Call sites pass what they know; `internal()` is the bare form
+/// for the many that previously discarded the cause entirely.
+pub(crate) fn internal() -> ApiError {
+    ApiError::Internal(anyhow::anyhow!("chat: internal error"))
 }
 
 /// The outer middleware every chat route is served through.
