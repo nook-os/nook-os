@@ -2650,6 +2650,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "futures-util",
+ "libc",
  "serde_json",
  "sqlx",
  "thiserror 2.0.19",
