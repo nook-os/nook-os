@@ -2724,6 +2724,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "axum",
+ "nook-errors",
  "nook-types",
  "rmcp",
  "serde",

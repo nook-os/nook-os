@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+nook-errors = { workspace = true }
 nook-types = { workspace = true }
 uuid = { workspace = true }
 serde = { workspace = true }
