@@ -3,32 +3,15 @@
 
 use axum::extract::{Path, State};
 use axum::Json;
-use nook_db::{params, Db, Postgres, TypeMapping};
 use nook_proto::ControlToNode;
 use nook_types::*;
 
 use crate::auth::AuthCtx;
 use crate::error::{ApiError, ApiResult};
 use crate::events::{self, EventDraft};
+use crate::repo::workspaces::CheckoutRef;
 use crate::services::secrets;
 use crate::state::AppState;
-
-/// Stored secret rows: (name/content, updated_at, kdf_salt, ephemeral) and the
-/// unlock variant that also carries the verifier.
-type SecretMetaRow = (String, chrono::DateTime<chrono::Utc>, Option<Vec<u8>>, bool);
-type SecretRow = (
-    Vec<u8>,
-    chrono::DateTime<chrono::Utc>,
-    Option<Vec<u8>>,
-    bool,
-);
-type SealedSecretRow = (
-    Vec<u8>,
-    chrono::DateTime<chrono::Utc>,
-    Option<Vec<u8>>,
-    Option<Vec<u8>>,
-    bool,
-);
 
 // ── Tenant git credentials ──────────────────────────────────────────────────
 
@@ -39,14 +22,7 @@ pub async fn list_credentials(
     State(state): State<AppState>,
     auth: AuthCtx,
 ) -> ApiResult<Json<Vec<GitCredential>>> {
-    let creds: Vec<GitCredential> = state
-        .db
-        .query_all(
-            "SELECT id, tenant_id, name, kind, public_key, created_at
-         FROM git_credentials WHERE tenant_id = $1 ORDER BY name",
-            params![auth.tenant_id],
-        )
-        .await?;
+    let creds = state.git_credentials.list(auth.tenant_id).await?;
     Ok(Json(creds))
 }
 
@@ -79,28 +55,10 @@ pub async fn create_credential(
         .encrypt(private_key.as_bytes())
         .map_err(ApiError::Internal)?;
 
-    let cred: GitCredential = state
-        .db
-        .query_one(
-            "INSERT INTO git_credentials (id, tenant_id, name, kind, public_key, secret_enc, created_by)
-         VALUES ($1, $2, $3, 'ssh_key', $4, $5, $6)
-         RETURNING id, tenant_id, name, kind, public_key, created_at",
-            params![
-                GitCredentialId::new(),
-                auth.tenant_id,
-                &req.name,
-                &public_key,
-                enc,
-                auth.user_id
-            ],
-        )
-        .await
-        .map_err(|e| match &e {
-        sqlx::Error::Database(d) if d.is_unique_violation() => {
-            ApiError::Conflict("a credential with that name already exists".into())
-        }
-        _ => e.into(),
-    })?;
+    let cred = state
+        .git_credentials
+        .create(auth.tenant_id, &req.name, &public_key, enc, auth.user_id)
+        .await?;
 
     events::record(
         &state,
@@ -122,13 +80,7 @@ pub async fn delete_credential(
     auth: AuthCtx,
     Path(id): Path<GitCredentialId>,
 ) -> ApiResult<axum::http::StatusCode> {
-    let res = state
-        .db
-        .exec(
-            "DELETE FROM git_credentials WHERE id = $1 AND tenant_id = $2",
-            params![id, auth.tenant_id],
-        )
-        .await?;
+    let res = state.git_credentials.delete(id, auth.tenant_id).await?;
     if res == 0 {
         return Err(ApiError::NotFound);
     }
@@ -208,14 +160,11 @@ pub async fn clone_repo(
     // authorization: that node itself, or a person who owns or shares it (MAIN-227).
     auth.require_node_may_use(&state, node_id).await?;
     // Tenant must own the node.
-    let owned: Option<NodeId> = state
-        .db
-        .query_scalar_opt(
-            "SELECT id FROM nodes WHERE id = $1 AND tenant_id = $2",
-            params![node_id, auth.tenant_id],
-        )
-        .await?;
-    if owned.is_none() {
+    if !state
+        .workspaces
+        .node_in_tenant(node_id, auth.tenant_id)
+        .await?
+    {
         return Err(ApiError::NotFound);
     }
 
@@ -223,14 +172,11 @@ pub async fn clone_repo(
     let ssh_key = match req.credential_id {
         None => None,
         Some(cred_id) => {
-            let enc: Option<Vec<u8>> = state
-                .db
-                .query_scalar_opt(
-                    "SELECT secret_enc FROM git_credentials WHERE id = $1 AND tenant_id = $2",
-                    params![cred_id, auth.tenant_id],
-                )
-                .await?;
-            let enc = enc.ok_or(ApiError::NotFound)?;
+            let enc = state
+                .git_credentials
+                .sealed_secret(cred_id, auth.tenant_id)
+                .await?
+                .ok_or(ApiError::NotFound)?;
             Some(
                 state
                     .vault
@@ -348,15 +294,11 @@ pub async fn add_worktree(
     // Adding a worktree mutates a checkout on that machine — session-start-grade
     // authorization (that node, or a person who owns/shares it) (MAIN-227).
     auth.require_node_may_use(&state, req.node_id).await?;
-    let row: Option<String> = state
-        .db
-        .query_scalar_opt(
-            "SELECT path FROM node_workspaces
-         WHERE tenant_id = $1 AND workspace_id = $2 AND node_id = $3",
-            params![auth.tenant_id, workspace_id, req.node_id],
-        )
-        .await?;
-    let Some(repo_path) = row else {
+    let Some(repo_path) = state
+        .workspaces
+        .checkout_path(auth.tenant_id, workspace_id, req.node_id)
+        .await?
+    else {
         return Err(ApiError::NotFound);
     };
 
@@ -401,15 +343,11 @@ async fn checkout_path(
     workspace_id: WorkspaceId,
     node_id: NodeId,
 ) -> ApiResult<String> {
-    let row: Option<String> = state
-        .db
-        .query_scalar_opt(
-            "SELECT path FROM node_workspaces
-         WHERE tenant_id = $1 AND workspace_id = $2 AND node_id = $3",
-            params![auth.tenant_id, workspace_id, node_id],
-        )
-        .await?;
-    row.ok_or(ApiError::NotFound)
+    state
+        .workspaces
+        .checkout_path(auth.tenant_id, workspace_id, node_id)
+        .await?
+        .ok_or(ApiError::NotFound)
 }
 
 /// Stage everything and commit, on the machine that holds the checkout.
@@ -493,14 +431,11 @@ pub async fn git_push(
     let ssh_key = match req.credential_id {
         None => None,
         Some(cred_id) => {
-            let enc: Option<Vec<u8>> = state
-                .db
-                .query_scalar_opt(
-                    "SELECT secret_enc FROM git_credentials WHERE id = $1 AND tenant_id = $2",
-                    params![cred_id, auth.tenant_id],
-                )
-                .await?;
-            let enc = enc.ok_or(ApiError::NotFound)?;
+            let enc = state
+                .git_credentials
+                .sealed_secret(cred_id, auth.tenant_id)
+                .await?
+                .ok_or(ApiError::NotFound)?;
             Some(
                 state
                     .vault
@@ -556,15 +491,12 @@ pub async fn remove_worktree(
     // authorization (own/share the node, or be it) (MAIN-227).
     auth.require_node_may_use(&state, req.node_id).await?;
     // The path must be a known checkout of this workspace on that node.
-    let owned: Option<String> = state
-        .db
-        .query_scalar_opt(
-            "SELECT path FROM node_workspaces
-         WHERE tenant_id = $1 AND workspace_id = $2 AND node_id = $3 AND path = $4",
-            params![auth.tenant_id, workspace_id, req.node_id, &req.path],
-        )
-        .await?;
-    if owned.is_none() {
+    if state
+        .workspaces
+        .checkout_at(auth.tenant_id, workspace_id, req.node_id, &req.path)
+        .await?
+        .is_none()
+    {
         return Err(ApiError::NotFound);
     }
 
@@ -615,14 +547,11 @@ pub async fn init_project(
     // Initialising a project writes a checkout on that machine — session-start-grade
     // authorization (own/share the node, or be it) (MAIN-227).
     auth.require_node_may_use(&state, node_id).await?;
-    let owned: Option<NodeId> = state
-        .db
-        .query_scalar_opt(
-            "SELECT id FROM nodes WHERE id = $1 AND tenant_id = $2",
-            params![node_id, auth.tenant_id],
-        )
-        .await?;
-    if owned.is_none() {
+    if !state
+        .workspaces
+        .node_in_tenant(node_id, auth.tenant_id)
+        .await?
+    {
         return Err(ApiError::NotFound);
     }
 
@@ -671,18 +600,16 @@ async fn require_app_password(state: &AppState, auth: &AuthCtx, passphrase: &str
             "a .env has to be sealed with your app password".into(),
         ));
     }
-    let row: Option<(Vec<u8>, Vec<u8>)> = state
-        .db
-        .query_opt(
-            "SELECT kdf_salt, verifier FROM user_vaults WHERE user_id = $1",
-            params![auth.user_id],
-        )
-        .await?;
-    let Some((salt, verifier)) = row else {
+    let Some(challenge) = state
+        .workspace_secrets
+        .vault_challenge(auth.user_id)
+        .await?
+    else {
         return Err(ApiError::SetupRequired(
             "set an app password before storing secrets".into(),
         ));
     };
+    let (salt, verifier) = (challenge.kdf_salt, challenge.verifier);
     if !crate::crypto::verify_passphrase(passphrase, &salt, &verifier) {
         return Err(ApiError::Forbidden);
     }
@@ -709,30 +636,15 @@ async fn store_sealed(
         .encrypt(&sealed.ciphertext)
         .map_err(ApiError::Internal)?;
     state
-        .db
-        .exec(
-            &format!(
-                "INSERT INTO workspace_secrets
-            (id, tenant_id, workspace_id, name, content_enc, kdf_salt, verifier, ephemeral)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-         ON CONFLICT (workspace_id, name)
-         DO UPDATE SET content_enc = EXCLUDED.content_enc,
-                       kdf_salt = EXCLUDED.kdf_salt,
-                       verifier = EXCLUDED.verifier,
-                       ephemeral = EXCLUDED.ephemeral,
-                       updated_at = {}",
-                Postgres.now()
-            ),
-            params![
-                nook_types::SettingId::new().0,
-                auth.tenant_id,
-                workspace_id,
-                name,
-                enc,
-                sealed.salt,
-                sealed.verifier,
-                ephemeral
-            ],
+        .workspace_secrets
+        .store(
+            auth.tenant_id,
+            workspace_id,
+            name,
+            enc,
+            sealed.salt,
+            sealed.verifier,
+            ephemeral,
         )
         .await?;
     Ok(())
@@ -747,24 +659,11 @@ pub async fn list_secrets(
     auth: AuthCtx,
     Path(workspace_id): Path<WorkspaceId>,
 ) -> ApiResult<Json<Vec<WorkspaceSecret>>> {
-    let rows: Vec<SecretMetaRow> = state
-        .db
-        .query_all(
-            "SELECT name, updated_at, kdf_salt, ephemeral FROM workspace_secrets
-         WHERE tenant_id = $1 AND workspace_id = $2 ORDER BY name",
-            params![auth.tenant_id, workspace_id],
-        )
-        .await?;
     Ok(Json(
-        rows.into_iter()
-            .map(|(name, updated_at, salt, ephemeral)| WorkspaceSecret {
-                name,
-                updated_at,
-                content: None,
-                protected: salt.is_some(),
-                ephemeral,
-            })
-            .collect(),
+        state
+            .workspace_secrets
+            .list(auth.tenant_id, workspace_id)
+            .await?,
     ))
 }
 
@@ -777,25 +676,21 @@ pub async fn get_secret(
     auth: AuthCtx,
     Path((workspace_id, name)): Path<(WorkspaceId, String)>,
 ) -> ApiResult<Json<WorkspaceSecret>> {
-    let row: Option<SecretRow> = state
-        .db
-        .query_opt(
-            "SELECT content_enc, updated_at, kdf_salt, ephemeral FROM workspace_secrets
-             WHERE tenant_id = $1 AND workspace_id = $2 AND name = $3",
-            params![auth.tenant_id, workspace_id, &name],
-        )
-        .await?;
-    let (_enc, updated_at, salt, ephemeral) = row.ok_or(ApiError::NotFound)?;
+    let stored = state
+        .workspace_secrets
+        .get(auth.tenant_id, workspace_id, &name)
+        .await?
+        .ok_or(ApiError::NotFound)?;
 
     // A GET never returns secret content, sealed or not. The password arrives
     // on the unlock endpoint, which is the only way to read one — including
     // for rows that predate sealing, which unlock re-seals on the way past.
     Ok(Json(WorkspaceSecret {
         name,
-        updated_at,
+        updated_at: stored.updated_at,
         content: None,
-        protected: salt.is_some(),
-        ephemeral,
+        protected: stored.kdf_salt.is_some(),
+        ephemeral: stored.ephemeral,
     }))
 }
 
@@ -812,23 +707,25 @@ pub async fn open_secret(
     Path((workspace_id, name)): Path<(WorkspaceId, String)>,
     Json(req): Json<OpenSecretRequest>,
 ) -> ApiResult<Json<WorkspaceSecret>> {
-    let row: Option<SealedSecretRow> = state
-        .db
-        .query_opt(
-            "SELECT content_enc, updated_at, kdf_salt, verifier, ephemeral
-             FROM workspace_secrets
-             WHERE tenant_id = $1 AND workspace_id = $2 AND name = $3",
-            params![auth.tenant_id, workspace_id, &name],
-        )
-        .await?;
-    let (enc, updated_at, salt, verifier, ephemeral) = row.ok_or(ApiError::NotFound)?;
-    let stored = state.vault.decrypt(&enc).map_err(ApiError::Internal)?;
+    let stored = state
+        .workspace_secrets
+        .get(auth.tenant_id, workspace_id, &name)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    let (updated_at, ephemeral) = (stored.updated_at, stored.ephemeral);
+    let plaintext_at_rest = state
+        .vault
+        .decrypt(&stored.content_enc)
+        .map_err(ApiError::Internal)?;
 
-    let plain = match (salt, verifier) {
-        (Some(salt), Some(verifier)) => {
-            crate::crypto::open_with_passphrase(&stored, &salt, &verifier, &req.passphrase)
-                .map_err(|_| ApiError::Forbidden)?
-        }
+    let plain = match (stored.kdf_salt, stored.verifier) {
+        (Some(salt), Some(verifier)) => crate::crypto::open_with_passphrase(
+            &plaintext_at_rest,
+            &salt,
+            &verifier,
+            &req.passphrase,
+        )
+        .map_err(|_| ApiError::Forbidden)?,
         // A secret from before sealing was mandatory: the app key alone still
         // opens it. Check the password properly, then re-seal it in place, so
         // the next read goes through the same door as everything else.
@@ -839,13 +736,13 @@ pub async fn open_secret(
                 &auth,
                 workspace_id,
                 &name,
-                &stored,
+                &plaintext_at_rest,
                 &req.passphrase,
                 ephemeral,
             )
             .await?;
             tracing::info!(name, %workspace_id, "re-sealed a legacy unsealed secret");
-            stored
+            plaintext_at_rest
         }
     };
     // Unlocking is also how a sealed secret reaches the checkouts — the
@@ -929,13 +826,9 @@ pub async fn secret_on_disk(
     auth: AuthCtx,
     Path((workspace_id, name)): Path<(WorkspaceId, String)>,
 ) -> ApiResult<Json<SecretOnDisk>> {
-    let vaulted: Option<String> = state
-        .db
-        .query_scalar_opt(
-            "SELECT name FROM workspace_secrets
-         WHERE tenant_id = $1 AND workspace_id = $2 AND name = $3",
-            params![auth.tenant_id, workspace_id, &name],
-        )
+    let in_vault = state
+        .workspace_secrets
+        .exists(auth.tenant_id, workspace_id, &name)
         .await?;
 
     let found = read_from_any_checkout(&state, auth.tenant_id, workspace_id, &name)
@@ -944,7 +837,7 @@ pub async fn secret_on_disk(
     Ok(Json(SecretOnDisk {
         found: found.is_some(),
         checkout_path: found,
-        in_vault: vaulted.is_some(),
+        in_vault,
     }))
 }
 
@@ -957,16 +850,13 @@ pub(crate) async fn read_from_any_checkout(
 ) -> Option<(String, Vec<u8>)> {
     use base64::Engine;
 
-    let locations: Vec<(NodeId, String)> = state
-        .db
-        .query_all(
-            "SELECT node_id, path FROM node_workspaces WHERE tenant_id = $1 AND workspace_id = $2",
-            params![tenant, workspace],
-        )
+    let locations = state
+        .workspaces
+        .checkouts_in_tenant(tenant, workspace)
         .await
         .ok()?;
 
-    for (node_id, path) in locations {
+    for CheckoutRef { node_id, path } in locations {
         if !state.registry.node_online(node_id) {
             continue;
         }

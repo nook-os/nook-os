@@ -1,6 +1,5 @@
 use axum::extract::{Path, State};
 use axum::Json;
-use nook_db::{params, Db, Postgres, TypeMapping};
 use nook_types::*;
 
 use crate::auth::AuthCtx;
@@ -18,7 +17,7 @@ pub async fn list(
     auth: AuthCtx,
 ) -> ApiResult<Json<Vec<WorkspaceDetail>>> {
     Ok(Json(
-        workspace_queries::list_workspaces(&state.db, auth.tenant_id).await?,
+        workspace_queries::list_workspaces(&*state.workspaces, auth.tenant_id).await?,
     ))
 }
 
@@ -31,7 +30,7 @@ pub async fn get_one(
     auth: AuthCtx,
     Path(id): Path<WorkspaceId>,
 ) -> ApiResult<Json<WorkspaceDetail>> {
-    workspace_queries::get_workspace(&state.db, auth.tenant_id, id)
+    workspace_queries::get_workspace(&*state.workspaces, auth.tenant_id, id)
         .await?
         .map(Json)
         .ok_or(ApiError::NotFound)
@@ -53,15 +52,11 @@ pub async fn git_status(
     Path(id): Path<WorkspaceId>,
     axum::extract::Query(q): axum::extract::Query<GitQuery>,
 ) -> ApiResult<Json<GitStatusResponse>> {
-    let path: Option<(String,)> = state
-        .db
-        .query_opt(
-            "SELECT path FROM node_workspaces
-         WHERE tenant_id = $1 AND workspace_id = $2 AND node_id = $3",
-            params![auth.tenant_id, id, q.node_id],
-        )
-        .await?;
-    let Some((path,)) = path else {
+    let Some(path) = state
+        .workspaces
+        .checkout_path(auth.tenant_id, id, q.node_id)
+        .await?
+    else {
         return Err(ApiError::NotFound);
     };
 
@@ -101,14 +96,11 @@ pub async fn clone_to_node(
     Json(req): Json<WorkspaceCloneRequest>,
 ) -> ApiResult<Json<OpResponse>> {
     // The workspace must exist in this tenant and carry a stored URL.
-    let row: Option<(Option<String>,)> = state
-        .db
-        .query_opt(
-            "SELECT git_remote_url FROM workspaces WHERE id = $1 AND tenant_id = $2",
-            params![id, auth.tenant_id],
-        )
-        .await?;
-    let (url,) = row.ok_or(ApiError::NotFound)?;
+    let url = state
+        .workspaces
+        .git_remote_url(id, auth.tenant_id)
+        .await?
+        .ok_or(ApiError::NotFound)?;
     let url = url.ok_or_else(|| {
         ApiError::BadRequest(
             "this workspace has no stored git remote URL — clone it once with an \
@@ -130,14 +122,11 @@ pub async fn clone_to_node(
     let ssh_key = match req.credential_id {
         None => None,
         Some(cred_id) => {
-            let enc: Option<Vec<u8>> = state
-                .db
-                .query_scalar_opt(
-                    "SELECT secret_enc FROM git_credentials WHERE id = $1 AND tenant_id = $2",
-                    params![cred_id, auth.tenant_id],
-                )
-                .await?;
-            let enc = enc.ok_or(ApiError::NotFound)?;
+            let enc = state
+                .git_credentials
+                .sealed_secret(cred_id, auth.tenant_id)
+                .await?
+                .ok_or(ApiError::NotFound)?;
             Some(
                 state
                     .vault
@@ -225,32 +214,8 @@ pub async fn associate_cloned_checkout(
 ) -> ApiResult<()> {
     let normalized = crate::services::discovery::normalize_remote(url);
     state
-        .db
-        .exec(
-            &format!(
-                "INSERT INTO node_workspaces
-                   (id, tenant_id, node_id, workspace_id, path, git_remote_url,
-                    git_remote_normalized, git_status, kind)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, '{{}}'::jsonb, 'clone')
-                 ON CONFLICT (node_id, path) DO UPDATE SET
-                   workspace_id = EXCLUDED.workspace_id,
-                   git_remote_url = EXCLUDED.git_remote_url,
-                   git_remote_normalized = EXCLUDED.git_remote_normalized,
-                   kind = EXCLUDED.kind,
-                   missing_at = NULL,
-                   last_scanned_at = {}",
-                Postgres.now()
-            ),
-            params![
-                NodeWorkspaceId::new(),
-                tenant,
-                node_id,
-                workspace_id,
-                path,
-                url,
-                &normalized
-            ],
-        )
+        .workspaces
+        .associate_clone(tenant, node_id, workspace_id, path, url, &normalized)
         .await?;
     // Adopt the normalized remote onto the workspace when it has none — but only
     // if no OTHER workspace already owns it. `workspaces_remote_idx` is unique per
@@ -259,16 +224,8 @@ pub async fn associate_cloned_checkout(
     // pinned by id regardless (that is the point), so skipping the adoption here
     // costs nothing.
     state
-        .db
-        .exec(
-            "UPDATE workspaces SET git_remote_normalized = $2
-             WHERE id = $1 AND git_remote_normalized IS NULL
-               AND NOT EXISTS (
-                   SELECT 1 FROM workspaces
-                   WHERE tenant_id = $3 AND git_remote_normalized = $2
-               )",
-            params![workspace_id, &normalized, tenant],
-        )
+        .workspaces
+        .adopt_normalized_remote(workspace_id, tenant, &normalized)
         .await?;
     Ok(())
 }
@@ -282,26 +239,15 @@ pub async fn create(
     auth: AuthCtx,
     Json(req): Json<CreateWorkspaceRequest>,
 ) -> ApiResult<Json<Workspace>> {
-    let workspace: Workspace = state
-        .db
-        .query_one(
-            "INSERT INTO workspaces (id, tenant_id, name, slug, description)
-         VALUES ($1, $2, $3, $4, $5) RETURNING *",
-            params![
-                WorkspaceId::new(),
-                auth.tenant_id,
-                &req.name,
-                slugify(&req.name),
-                req.description.clone()
-            ],
+    let workspace = state
+        .workspaces
+        .create(
+            auth.tenant_id,
+            &req.name,
+            &slugify(&req.name),
+            req.description.clone(),
         )
-        .await
-        .map_err(|e| match &e {
-            sqlx::Error::Database(d) if d.is_unique_violation() => {
-                ApiError::Conflict("a workspace with that name already exists".into())
-            }
-            _ => e.into(),
-        })?;
+        .await?;
     Ok(Json(workspace))
 }
 
@@ -333,26 +279,21 @@ pub async fn rename(
         ));
     }
 
-    let previous: Option<(String,)> = state
-        .db
-        .query_opt(
-            "SELECT name FROM workspaces WHERE id = $1 AND tenant_id = $2",
-            params![id, auth.tenant_id],
-        )
-        .await?;
-    let (previous,) = previous.ok_or(ApiError::NotFound)?;
+    // Read the old name first: the event carries both ends of the rename, and a
+    // missing workspace is a 404 rather than an UPDATE that silently matches
+    // nothing.
+    let previous = state
+        .workspaces
+        .get(auth.tenant_id, id)
+        .await?
+        .ok_or(ApiError::NotFound)?
+        .name;
 
-    let workspace: Workspace = state
-        .db
-        .query_one(
-            &format!(
-                "UPDATE workspaces SET name = $3, updated_at = {}
-         WHERE id = $1 AND tenant_id = $2 RETURNING *",
-                Postgres.now()
-            ),
-            params![id, auth.tenant_id, name],
-        )
-        .await?;
+    let workspace = state
+        .workspaces
+        .rename(id, auth.tenant_id, name)
+        .await?
+        .ok_or(ApiError::NotFound)?;
 
     // A `workspace.*` event is what makes every other open tab redraw the new
     // name without a refresh.
@@ -385,25 +326,15 @@ pub async fn delete(
 ) -> ApiResult<Json<DeleteWorkspaceResponse>> {
     let Json(req) = body.unwrap_or_default();
 
-    let workspace: Option<Workspace> = state
-        .db
-        .query_opt(
-            "SELECT * FROM workspaces WHERE id = $1 AND tenant_id = $2",
-            params![id, auth.tenant_id],
-        )
-        .await?;
-    let workspace = workspace.ok_or(ApiError::NotFound)?;
+    let workspace = state
+        .workspaces
+        .get(auth.tenant_id, id)
+        .await?
+        .ok_or(ApiError::NotFound)?;
 
     // Live sessions would be killed by the cascade with their tmux left
     // orphaned on the node — make the caller deal with them first.
-    let live = state
-        .db
-        .query_scalar::<i64>(
-            "SELECT count(*) FROM sessions
-         WHERE workspace_id = $1 AND status IN ('starting', 'running', 'detached')",
-            params![id],
-        )
-        .await?;
+    let live = state.workspaces.live_session_count(id).await?;
     if live > 0 {
         return Err(ApiError::Conflict(format!(
             "{live} live session(s) — kill them first"
@@ -411,12 +342,12 @@ pub async fn delete(
     }
 
     let checkouts: Vec<(NodeId, String)> = state
-        .db
-        .query_all(
-            "SELECT node_id, path FROM node_workspaces WHERE workspace_id = $1",
-            params![id],
-        )
-        .await?;
+        .workspaces
+        .checkouts_of(id)
+        .await?
+        .into_iter()
+        .map(|c| (c.node_id, c.path))
+        .collect();
     let total = checkouts.len();
     let mut removed = 0usize;
 
@@ -451,13 +382,7 @@ pub async fn delete(
 
     // Cascades node_workspaces, sessions, notes and secrets; tasks and events
     // keep their history with a null workspace.
-    state
-        .db
-        .exec(
-            "DELETE FROM workspaces WHERE id = $1 AND tenant_id = $2",
-            params![id, auth.tenant_id],
-        )
-        .await?;
+    state.workspaces.delete(id, auth.tenant_id).await?;
 
     events::record(
         &state,

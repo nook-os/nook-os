@@ -374,3 +374,69 @@ async fn slug_is_stable_and_a_rename_collision_does_not_freeze_the_scan() {
 
     bed.teardown().await;
 }
+
+/// The `missing_at IS NULL` guard, which nothing covered until MAIN-251 moved
+/// the statement and went looking.
+///
+/// Every scan re-runs the tombstone sweep, so without the guard a row missing
+/// for a month would have its `missing_at` re-stamped to "just now" on each
+/// pass — the retention clock would restart forever and the reaper would never
+/// reclaim anything. Dropping `AND missing_at IS NULL` from the UPDATE is a
+/// one-token change that no other test in this file notices.
+#[tokio::test]
+async fn a_repeated_empty_report_does_not_restart_the_retention_clock() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let f = seed(&bed.pool).await;
+    let state = bed.app_state().await;
+
+    discovery::reconcile(
+        &state,
+        f.tenant,
+        f.node,
+        vec![discovered("/w/a", &f.remote)],
+    )
+    .await
+    .expect("first reconcile");
+    discovery::reconcile(&state, f.tenant, f.node, vec![])
+        .await
+        .expect("the checkout vanishes");
+
+    let first_stamp = rows(&bed.pool, f.node).await[0]
+        .1
+        .expect("tombstoned by the empty report");
+
+    // Age the tombstone: this is the row that must age out.
+    sqlx::query("UPDATE node_workspaces SET missing_at = $2 WHERE node_id = $1")
+        .bind(f.node)
+        .bind(first_stamp - chrono::Duration::days(30))
+        .execute(&bed.pool)
+        .await
+        .expect("backdate");
+
+    // Another scan, still not reporting it.
+    discovery::reconcile(&state, f.tenant, f.node, vec![])
+        .await
+        .expect("second empty report");
+
+    let now = rows(&bed.pool, f.node).await[0]
+        .1
+        .expect("still tombstoned");
+    assert!(
+        now < Utc::now() - chrono::Duration::days(29),
+        "a second scan re-stamped missing_at ({now}) — the retention clock \
+         restarted, so this checkout would never be reclaimed"
+    );
+
+    // And the consequence that actually matters: it is past a 7-day retention.
+    let reaped = workspace_reaper::reap_missing_checkouts(&state, 7 * 24 * 3600)
+        .await
+        .expect("sweep");
+    assert_eq!(
+        reaped, 1,
+        "a row missing for 30 days is past a 7-day window"
+    );
+
+    bed.teardown().await;
+}

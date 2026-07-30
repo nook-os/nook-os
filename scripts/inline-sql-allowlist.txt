@@ -12,12 +12,6 @@
 # for exactly that reason: an exemption that outlives its cause is how the list
 # stops shrinking.
 
-# ── MAIN-251 · WorkspaceRepository ──────────────────────────────────────────
-crates/nook-control/src/routes/gitops.rs         # clone/worktree/checkout writes
-crates/nook-control/src/routes/workspaces.rs     # workspace + location reads
-crates/nook-control/src/services/discovery.rs    # node_workspaces reconcile
-crates/nook-control/src/services/workspace_queries.rs   # split out by MAIN-245, awaits its trait
-crates/nook-control/src/services/workspace_reaper.rs    # tombstoned-checkout reclaim
 
 # ── MAIN-253 · SessionRepository ────────────────────────────────────────────
 crates/nook-control/src/routes/sessions.rs       # session start/list/kill

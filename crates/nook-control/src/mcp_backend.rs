@@ -39,7 +39,7 @@ impl McpBackend {
         tenant: TenantId,
         key: &str,
     ) -> anyhow::Result<WorkspaceId> {
-        workspace_queries::resolve_by_key(&self.state.db, tenant, key).await
+        workspace_queries::resolve_by_key(&*self.state.workspaces, tenant, key).await
     }
 
     /// Resolve a node by name, or auto-pick an online node when omitted.
@@ -114,7 +114,7 @@ impl McpBackend {
 impl NookBackend for McpBackend {
     async fn list_workspaces(&self) -> anyhow::Result<Vec<WorkspaceDetail>> {
         let tenant = self.tenant().await?;
-        Ok(workspace_queries::list_workspaces(&self.state.db, tenant).await?)
+        Ok(workspace_queries::list_workspaces(&*self.state.workspaces, tenant).await?)
     }
 
     async fn list_nodes(&self) -> anyhow::Result<Vec<Node>> {
@@ -139,9 +139,10 @@ impl NookBackend for McpBackend {
         let workspace_id = self.resolve_workspace(tenant, &workspace).await?;
 
         // Pick the requested node, or any online node with a checkout.
-        let detail = workspace_queries::get_workspace(&self.state.db, tenant, workspace_id)
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("workspace vanished"))?;
+        let detail =
+            workspace_queries::get_workspace(&*self.state.workspaces, tenant, workspace_id)
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("workspace vanished"))?;
         let location = detail
             .locations
             .iter()
@@ -387,10 +388,14 @@ impl NookBackend for McpBackend {
         let tenant = self.tenant().await?;
         let workspace_id = self.resolve_workspace(tenant, &workspace).await?;
         let node_id = self.resolve_node(tenant, node).await?;
-        let repo_path: String =
-            workspace_queries::clone_path_on_node(&self.state.db, tenant, workspace_id, node_id)
-                .await?
-                .ok_or_else(|| anyhow::anyhow!("workspace has no checkout on that node"))?;
+        let repo_path: String = workspace_queries::clone_path_on_node(
+            &*self.state.workspaces,
+            tenant,
+            workspace_id,
+            node_id,
+        )
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("workspace has no checkout on that node"))?;
         self.run_op(
             node_id,
             |request_id| ControlToNode::AddWorktree {

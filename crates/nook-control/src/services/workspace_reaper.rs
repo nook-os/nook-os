@@ -16,9 +16,6 @@
 
 use std::time::Duration;
 
-use nook_db::{params, Db, Postgres, TimeMath};
-use nook_types::{NodeId, NodeWorkspaceId};
-
 use crate::error::ApiResult;
 use crate::state::AppState;
 
@@ -71,37 +68,21 @@ pub async fn reap_missing_checkouts(state: &AppState, retention_secs: u64) -> Ap
     // separate select and delete could otherwise be wrongly reclaimed) and it
     // still hands back node_id + path so the reference log can be built after
     // the row is gone — tasks reference the path directly, not by FK.
-    let reaped: Vec<(NodeWorkspaceId, NodeId, String)> = state
-        .db
-        .query_all(
-            &format!(
-                "DELETE FROM node_workspaces
-                 WHERE missing_at IS NOT NULL AND missing_at < {}
-                 RETURNING id, node_id, path",
-                Postgres.now_minus_scaled("$1", "1 second")
-            ),
-            params![retention_secs as i64],
-        )
+    let reaped = state
+        .workspaces
+        .reap_tombstoned(retention_secs as i64)
         .await?;
 
-    for (nw_id, node_id, path) in &reaped {
-        // Match tasks the same way `migrate_paths` does — node + worktree_path,
+    for c in &reaped {
+        // Match tasks the same way a path migration does — node + worktree_path,
         // the only durable on-disk reference. A reclaimed checkout that still
         // has task worktrees pointing at it is a warning, not a silent drop.
-        let refs: Vec<(Option<String>, Option<i32>)> = state
-            .db
-            .query_all(
-                "SELECT b.key, t.number
-                   FROM tasks t JOIN boards b ON b.id = t.board_id
-                  WHERE t.worktree_node_id = $1 AND t.worktree_path = $2",
-                params![node_id, path],
-            )
+        let task_keys = state
+            .tasks
+            .task_keys_at_worktree(c.node_id, &c.path)
             .await
             .unwrap_or_default();
-        let task_keys: Vec<String> = refs
-            .into_iter()
-            .map(|(key, number)| format!("{}-{}", key.unwrap_or_default(), number.unwrap_or(0)))
-            .collect();
+        let (node_id, nw_id, path) = (c.node_id, c.id, &c.path);
         if task_keys.is_empty() {
             tracing::info!(%node_id, %nw_id, %path, "reclaimed tombstoned checkout past retention");
         } else {

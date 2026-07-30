@@ -288,7 +288,8 @@ pub async fn migrate_paths(
     // The rewrite itself — belonging check + one transaction — lives beside the
     // reconcile it deliberately bypasses, so the two path strategies are read
     // together (crate::services::discovery).
-    let result = crate::services::discovery::migrate_paths(&state.db, id, &req.pairs).await?;
+    let result =
+        crate::services::discovery::migrate_paths(&*state.workspaces, id, &req.pairs).await?;
 
     crate::events::record(
         &state,

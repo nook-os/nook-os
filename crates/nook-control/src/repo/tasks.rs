@@ -487,6 +487,12 @@ pub trait TaskRepository: Send + Sync {
 
     async fn related_tasks(&self, task: TaskId, viewer: UserId) -> ApiResult<Vec<RelatedTask>>;
 
+    /// The keys of tasks whose worktree is that exact directory on that node.
+    /// `worktree_path` is a plain string, not an FK, so a checkout can be
+    /// reclaimed out from under a task — this is what lets the reaper say which
+    /// tasks it just orphaned instead of dropping the row silently (MAIN-220).
+    async fn task_keys_at_worktree(&self, node: NodeId, path: &str) -> ApiResult<Vec<String>>;
+
     // ---- board and column administration (MAIN-249) ------------------------
 
     async fn delete_board(&self, id: BoardId, tenant: TenantId) -> ApiResult<u64>;
@@ -1732,6 +1738,22 @@ impl TaskRepository for DbTaskRepository {
                 params![parent, viewer],
             )
             .await?)
+    }
+
+    async fn task_keys_at_worktree(&self, node: NodeId, path: &str) -> ApiResult<Vec<String>> {
+        let rows: Vec<(Option<String>, Option<i32>)> = self
+            .db
+            .query_all(
+                "SELECT b.key, t.number
+                   FROM tasks t JOIN boards b ON b.id = t.board_id
+                  WHERE t.worktree_node_id = $1 AND t.worktree_path = $2",
+                params![node, path],
+            )
+            .await?;
+        Ok(rows
+            .into_iter()
+            .map(|(key, number)| format!("{}-{}", key.unwrap_or_default(), number.unwrap_or(0)))
+            .collect())
     }
 
     async fn related_tasks(&self, task: TaskId, viewer: UserId) -> ApiResult<Vec<RelatedTask>> {
@@ -3127,6 +3149,26 @@ impl TaskRepository for FakeTaskRepository {
                     .map(|c| c.r#type.clone())
                     .unwrap_or_default(),
                 archived_at: t.archived_at,
+            })
+            .collect())
+    }
+
+    async fn task_keys_at_worktree(&self, node: NodeId, path: &str) -> ApiResult<Vec<String>> {
+        let st = self.inner.lock().unwrap();
+        Ok(st
+            .tasks
+            .iter()
+            .filter(|t| {
+                t.worktree_node_id == Some(node) && t.worktree_path.as_deref() == Some(path)
+            })
+            .map(|t| {
+                let key = st
+                    .boards
+                    .iter()
+                    .find(|b| b.id == t.board_id)
+                    .and_then(|b| b.key.clone())
+                    .unwrap_or_default();
+                format!("{}-{}", key, t.number.unwrap_or(0))
             })
             .collect())
     }
