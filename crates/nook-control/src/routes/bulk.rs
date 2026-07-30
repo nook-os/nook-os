@@ -16,7 +16,6 @@
 
 use axum::extract::State;
 use axum::Json;
-use nook_db::{params, Db, Postgres, TypeMapping};
 use nook_types::*;
 
 use crate::auth::AuthCtx;
@@ -149,13 +148,10 @@ async fn apply_one(
         Err(e) => return Err(ApplyErr::Fatal(e)),
     };
     let task: TaskItem = state
-        .db
-        .query_opt(
-            "SELECT * FROM tasks WHERE id = $1 AND tenant_id = $2",
-            params![id, auth.tenant_id],
-        )
+        .tasks
+        .get_row(auth.tenant_id, id)
         .await
-        .map_err(|e| ApplyErr::Fatal(e.into()))?
+        .map_err(ApplyErr::Fatal)?
         .ok_or_else(|| ApplyErr::Skip("not found".into()))?;
     // Same visibility predicate as the single-task routes: a private card the
     // caller cannot see is skipped, never touched.
@@ -248,17 +244,8 @@ async fn apply_update(
 /// `task_query::release`'s effect (there is no way to clear via
 /// `UpdateTaskRequest`, whose `assignee_user_id` COALESCEs).
 async fn clear_assignee(state: &AppState, auth: &AuthCtx, id: TaskId) -> ApiResult<()> {
-    state
-        .db
-        .exec(
-            &format!(
-                "UPDATE tasks SET assignee_user_id = NULL, updated_at = {}
-         WHERE id = $1 AND tenant_id = $2",
-                Postgres.now()
-            ),
-            params![id, auth.tenant_id],
-        )
-        .await?;
+    // The returned row is ignored here; the single-task release uses it.
+    state.tasks.release_assignment(id, auth.tenant_id).await?;
     state.registry.publish(
         auth.tenant_id,
         nook_proto::UiEvent::TaskChanged { task_id: id },
@@ -275,33 +262,10 @@ async fn toggle_agent_ready(
     id: TaskId,
     on: bool,
 ) -> ApiResult<()> {
-    let label_id: uuid::Uuid = state
-        .db
-        .query_scalar(
-            "INSERT INTO labels (id, tenant_id, name, color)
-         VALUES ($1, $2, 'agent-ready', '#f0a000')
-         ON CONFLICT (tenant_id, name) DO UPDATE SET name = EXCLUDED.name
-         RETURNING id",
-            params![uuid::Uuid::now_v7(), auth.tenant_id],
-        )
-        .await?;
-    if on {
-        state
-            .db
-            .exec(
-                "INSERT INTO task_labels (task_id, label_id) VALUES ($1, $2) ON CONFLICT DO NOTHING",
-                params![id, label_id],
-            )
-            .await?;
-    } else {
-        state
-            .db
-            .exec(
-                "DELETE FROM task_labels WHERE task_id = $1 AND label_id = $2",
-                params![id, label_id],
-            )
-            .await?;
-    }
+    // The label upsert and the attach/detach are one call: the upsert exists
+    // only to feed them.
+    state.tasks.set_agent_ready(auth.tenant_id, id, on).await?;
+
     state.registry.publish(
         auth.tenant_id,
         nook_proto::UiEvent::TaskChanged { task_id: id },

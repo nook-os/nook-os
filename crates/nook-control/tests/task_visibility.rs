@@ -98,7 +98,7 @@ async fn list_ids(
         limit: Some(200),
         ..Default::default()
     };
-    query_rows(&state.db, state.tasks.as_ref(), tenant, viewer, &f)
+    query_rows(state.tasks.as_ref(), tenant, viewer, &f)
         .await
         .expect("list")
         .into_iter()

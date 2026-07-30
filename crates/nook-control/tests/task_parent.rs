@@ -129,7 +129,6 @@ async fn epic_parent_create_patch_validate_filter_and_orphan() {
         ..Default::default()
     };
     let mut ids: Vec<TaskId> = query_rows(
-        &bed.db(),
         &nook_control::repo::tasks::DbTaskRepository::new(bed.db()),
         tenant,
         nook_types::UserId::new(),
@@ -339,7 +338,6 @@ async fn private_child_does_not_leak_through_epic() {
         ..Default::default()
     };
     let b_ids: Vec<TaskId> = query_rows(
-        &bed.db(),
         &nook_control::repo::tasks::DbTaskRepository::new(bed.db()),
         tenant,
         b,
@@ -356,7 +354,6 @@ async fn private_child_does_not_leak_through_epic() {
         "the parent filter never leaks the private child to a non-owner"
     );
     let a_ids: Vec<TaskId> = query_rows(
-        &bed.db(),
         &nook_control::repo::tasks::DbTaskRepository::new(bed.db()),
         tenant,
         a,
