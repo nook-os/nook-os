@@ -6,9 +6,9 @@
 use axum::extract::{Query, State};
 use nook_control::auth::{AuthCtx, Principal};
 use nook_control::routes::sessions::SessionsQuery;
+use nook_db::{params, Db, DbPool};
 use nook_testkit::TestBed;
 use nook_types::*;
-use sqlx::PgPool;
 use uuid::Uuid;
 
 fn user_ctx(user: UserId, tenant: TenantId) -> AuthCtx {
@@ -23,17 +23,18 @@ fn user_ctx(user: UserId, tenant: TenantId) -> AuthCtx {
 
 /// An ownerless node (no `owner_person_id`) — `TestBed::node` always sets an
 /// owner, so this session suite keeps its own helper.
-async fn add_node(db: &PgPool, tenant: TenantId) -> NodeId {
+async fn add_node(db: &DbPool, tenant: TenantId) -> NodeId {
     let id = NodeId::new();
-    sqlx::query(
+    db.exec(
         "INSERT INTO nodes (id, tenant_id, name, node_token_hash, status)
          VALUES ($1, $2, $3, $4, 'offline')",
+        params![
+            id,
+            tenant,
+            format!("n-{}", id.0.simple()),
+            format!("h-{}", id.0.simple())
+        ],
     )
-    .bind(id)
-    .bind(tenant)
-    .bind(format!("n-{}", id.0.simple()))
-    .bind(format!("h-{}", id.0.simple()))
-    .execute(db)
     .await
     .expect("node");
     id
@@ -41,21 +42,17 @@ async fn add_node(db: &PgPool, tenant: TenantId) -> NodeId {
 
 /// A session on `node` created by `creator` (None = a legacy/MCP row).
 async fn add_session(
-    db: &PgPool,
+    db: &DbPool,
     tenant: TenantId,
     node: NodeId,
     creator: Option<UserId>,
 ) -> SessionId {
     let id = SessionId::new();
-    sqlx::query(
+    db.exec(
         "INSERT INTO sessions (id, tenant_id, node_id, runtime, status, created_by)
          VALUES ($1, $2, $3, 'bash', 'running', $4)",
+        params![id, tenant, node, creator.map(|v| v.0)],
     )
-    .bind(id)
-    .bind(tenant)
-    .bind(node)
-    .bind(creator)
-    .execute(db)
     .await
     .expect("session");
     id
@@ -78,11 +75,11 @@ async fn members_see_only_their_own_admins_see_all_including_null_creators() {
     let tenant = bed.tenant("sv").await;
     let (owner, _) = bed.user(tenant, "owner").await;
     let (member, _) = bed.user(tenant, "member").await;
-    let node = add_node(&bed.pool, tenant).await;
+    let node = add_node(&bed.db(), tenant).await;
 
-    let my_session = add_session(&bed.pool, tenant, node, Some(member)).await;
-    let owner_session = add_session(&bed.pool, tenant, node, Some(owner)).await;
-    let legacy_session = add_session(&bed.pool, tenant, node, None).await; // created_by NULL
+    let my_session = add_session(&bed.db(), tenant, node, Some(member)).await;
+    let owner_session = add_session(&bed.db(), tenant, node, Some(owner)).await;
+    let legacy_session = add_session(&bed.db(), tenant, node, None).await; // created_by NULL
 
     // The member sees ONLY their own — not the owner's, not the NULL-creator row.
     let mine = nook_control::routes::sessions::list(
@@ -135,9 +132,9 @@ async fn a_node_credential_sees_all_sessions_unchanged() {
     let state = bed.app_state().await;
     let tenant = bed.tenant("sv").await;
     let (member, _) = bed.user(tenant, "member").await;
-    let node = add_node(&bed.pool, tenant).await;
-    let s1 = add_session(&bed.pool, tenant, node, Some(member)).await;
-    let s2 = add_session(&bed.pool, tenant, node, None).await;
+    let node = add_node(&bed.db(), tenant).await;
+    let s1 = add_session(&bed.db(), tenant, node, Some(member)).await;
+    let s2 = add_session(&bed.db(), tenant, node, None).await;
 
     // A node token's listing is unchanged (whole tenant).
     let node_ctx = AuthCtx {
@@ -176,8 +173,8 @@ async fn a_late_status_write_cannot_resurrect_a_finished_session() {
     };
     let state = bed.app_state().await;
     let tenant = bed.tenant("late").await;
-    let node = add_node(&bed.pool, tenant).await;
-    let id = add_session(&bed.pool, tenant, node, None).await;
+    let node = add_node(&bed.db(), tenant).await;
+    let id = add_session(&bed.db(), tenant, node, None).await;
 
     // While it is live, the write lands.
     assert_eq!(
@@ -194,9 +191,11 @@ async fn a_late_status_write_cannot_resurrect_a_finished_session() {
     );
 
     // The process exits.
-    sqlx::query("UPDATE sessions SET status = 'exited' WHERE id = $1")
-        .bind(id)
-        .execute(&bed.pool)
+    bed.db()
+        .exec(
+            "UPDATE sessions SET status = 'exited' WHERE id = $1",
+            params![id],
+        )
         .await
         .expect("exit");
 

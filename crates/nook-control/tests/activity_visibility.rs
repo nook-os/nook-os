@@ -6,9 +6,9 @@
 
 use nook_control::auth::{AuthCtx, Principal};
 use nook_control::services::activity_queries::{self, ActivityScope};
+use nook_db::{params, Db, DbPool};
 use nook_testkit::TestBed;
 use nook_types::*;
-use sqlx::PgPool;
 use uuid::Uuid;
 
 // ── The pure predicate (the same one the live bus applies per connection) ────
@@ -74,87 +74,86 @@ fn member_scope_allows_only_own_actor_node_or_session() {
 
 // ── The list, and the loader that resolves a caller's scope, against a DB ────
 
-async fn new_tenant(db: &PgPool) -> TenantId {
+async fn new_tenant(db: &DbPool) -> TenantId {
     let id = TenantId::new();
-    sqlx::query("INSERT INTO tenants (id, name, slug) VALUES ($1, $2, $2)")
-        .bind(id)
-        .bind(format!("av-{}", id.0.simple()))
-        .execute(db)
-        .await
-        .expect("tenant");
+    db.exec(
+        "INSERT INTO tenants (id, name, slug) VALUES ($1, $2, $2)",
+        params![id, format!("av-{}", id.0.simple())],
+    )
+    .await
+    .expect("tenant");
     id
 }
 
-async fn add_user(db: &PgPool, tenant: TenantId, role: &str) -> (UserId, Uuid) {
+async fn add_user(db: &DbPool, tenant: TenantId, role: &str) -> (UserId, Uuid) {
     let user = UserId::new();
     let person = Uuid::now_v7();
-    sqlx::query(
+    db.exec(
         "INSERT INTO users (id, tenant_id, person_id, display_name, email, role)
          VALUES ($1, $2, $3, 'U', $4, $5)",
+        params![
+            user,
+            tenant,
+            person,
+            format!("u-{}@example.test", user.0.simple()),
+            role
+        ],
     )
-    .bind(user)
-    .bind(tenant)
-    .bind(person)
-    .bind(format!("u-{}@example.test", user.0.simple()))
-    .bind(role)
-    .execute(db)
     .await
     .expect("user");
     (user, person)
 }
 
-async fn add_node(db: &PgPool, tenant: TenantId, owner: Uuid) -> NodeId {
+async fn add_node(db: &DbPool, tenant: TenantId, owner: Uuid) -> NodeId {
     let id = NodeId::new();
-    sqlx::query(
+    db.exec(
         "INSERT INTO nodes (id, tenant_id, name, node_token_hash, status, owner_person_id)
          VALUES ($1, $2, $3, $4, 'offline', $5)",
+        params![
+            id,
+            tenant,
+            format!("n-{}", id.0.simple()),
+            format!("h-{}", id.0.simple()),
+            owner
+        ],
     )
-    .bind(id)
-    .bind(tenant)
-    .bind(format!("n-{}", id.0.simple()))
-    .bind(format!("h-{}", id.0.simple()))
-    .bind(owner)
-    .execute(db)
     .await
     .expect("node");
     id
 }
 
-async fn add_session(db: &PgPool, tenant: TenantId, node: NodeId, creator: UserId) -> SessionId {
+async fn add_session(db: &DbPool, tenant: TenantId, node: NodeId, creator: UserId) -> SessionId {
     let id = SessionId::new();
-    sqlx::query(
+    db.exec(
         "INSERT INTO sessions (id, tenant_id, node_id, runtime, status, created_by)
          VALUES ($1, $2, $3, 'bash', 'running', $4)",
+        params![id, tenant, node, creator],
     )
-    .bind(id)
-    .bind(tenant)
-    .bind(node)
-    .bind(creator)
-    .execute(db)
     .await
     .expect("session");
     id
 }
 
 async fn add_event(
-    db: &PgPool,
+    db: &DbPool,
     tenant: TenantId,
     actor: Option<UserId>,
     node: Option<NodeId>,
     session: Option<SessionId>,
 ) -> EventId {
     let id = EventId(Uuid::now_v7());
-    sqlx::query(
+    db.exec(
         "INSERT INTO events (id, tenant_id, kind, actor_type, actor_id, node_id, session_id)
          VALUES ($1, $2, 'test.event', $3, $4, $5, $6)",
+        params![
+            id,
+            tenant,
+            actor.map(|_| "user"),
+            actor.map(|u| u.0),
+            node.map(|v| v.0),
+            session.map(|v| v.0)
+        ],
     )
-    .bind(id)
-    .bind(tenant)
-    .bind(actor.map(|_| "user"))
-    .bind(actor.map(|u| u.0))
-    .bind(node)
-    .bind(session)
-    .execute(db)
     .await
     .expect("event");
     id
@@ -176,21 +175,21 @@ async fn events_list_scopes_members_to_their_own_activity() {
         eprintln!("skipping activity-visibility test — no DATABASE_URL");
         return;
     };
-    let tenant = new_tenant(&bed.pool).await;
-    let (owner, owner_person) = add_user(&bed.pool, tenant, "owner").await;
-    let (member, member_person) = add_user(&bed.pool, tenant, "member").await;
+    let tenant = new_tenant(&bed.db()).await;
+    let (owner, owner_person) = add_user(&bed.db(), tenant, "owner").await;
+    let (member, member_person) = add_user(&bed.db(), tenant, "member").await;
 
-    let my_node = add_node(&bed.pool, tenant, member_person).await;
-    let my_session = add_session(&bed.pool, tenant, my_node, member).await;
-    let owner_node = add_node(&bed.pool, tenant, owner_person).await;
+    let my_node = add_node(&bed.db(), tenant, member_person).await;
+    let my_session = add_session(&bed.db(), tenant, my_node, member).await;
+    let owner_node = add_node(&bed.db(), tenant, owner_person).await;
 
     // Five events: mine by action / on my node / on my session, plus a
     // teammate's action and an event on the teammate's node.
-    let e_my_action = add_event(&bed.pool, tenant, Some(member), None, None).await;
-    let e_my_node = add_event(&bed.pool, tenant, None, Some(my_node), None).await;
-    let e_my_session = add_event(&bed.pool, tenant, None, None, Some(my_session)).await;
-    let e_owner_action = add_event(&bed.pool, tenant, Some(owner), None, None).await;
-    let e_owner_node = add_event(&bed.pool, tenant, None, Some(owner_node), None).await;
+    let e_my_action = add_event(&bed.db(), tenant, Some(member), None, None).await;
+    let e_my_node = add_event(&bed.db(), tenant, None, Some(my_node), None).await;
+    let e_my_session = add_event(&bed.db(), tenant, None, None, Some(my_session)).await;
+    let e_owner_action = add_event(&bed.db(), tenant, Some(owner), None, None).await;
+    let e_owner_node = add_event(&bed.db(), tenant, None, Some(owner_node), None).await;
 
     // Member: sees the three that are theirs, none of the teammate's.
     let scope = ActivityScope::load(
@@ -259,7 +258,7 @@ async fn a_node_credential_resolves_to_the_unfiltered_feed() {
     let Some(mut bed) = TestBed::new().await else {
         return;
     };
-    let tenant = new_tenant(&bed.pool).await;
+    let tenant = new_tenant(&bed.db()).await;
 
     let node_ctx = AuthCtx {
         session_id: AuthSessionId(Uuid::nil()),

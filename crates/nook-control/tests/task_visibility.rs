@@ -9,9 +9,9 @@ use nook_control::error::ApiError;
 use nook_control::routes::task_query::{claim_inner, query_rows, TaskFilter};
 use nook_control::services::identity::{login_identity, IdentityClaims};
 use nook_control::state::AppState;
+use nook_db::{params, Db, DbPool};
 use nook_testkit::TestBed;
 use nook_types::*;
-use sqlx::PgPool;
 use uuid::Uuid;
 
 fn claims(subject: &str, name: &str) -> IdentityClaims {
@@ -38,18 +38,19 @@ fn auth(user: UserId, tenant: TenantId) -> AuthCtx {
 
 /// Add another user to an existing tenant (a distinct person), the way a real
 /// second/third member would exist. Returns their per-tenant user id.
-async fn add_member(db: &PgPool, tenant: TenantId, name: &str, role: &str) -> UserId {
+async fn add_member(db: &DbPool, tenant: TenantId, name: &str, role: &str) -> UserId {
     let id = UserId::new();
-    sqlx::query(
+    db.exec(
         "INSERT INTO users (id, tenant_id, person_id, display_name, email, role)
          VALUES ($1, $2, gen_random_uuid(), $3, $4, $5)",
+        params![
+            id,
+            tenant,
+            name,
+            format!("{}-{}@example.test", name, id.0.simple()),
+            role
+        ],
     )
-    .bind(id)
-    .bind(tenant)
-    .bind(name)
-    .bind(format!("{}-{}@example.test", name, id.0.simple()))
-    .bind(role)
-    .execute(db)
     .await
     .expect("member");
     id
@@ -121,29 +122,31 @@ async fn visibility_governs_read_claim_board_and_update() {
         .await
         .expect("owner signs in");
     let a = owner.id;
-    let b = add_member(&bed.pool, tenant.id, "bob", "member").await;
-    let c = add_member(&bed.pool, tenant.id, "carol", "member").await;
+    let b = add_member(&bed.db(), tenant.id, "bob", "member").await;
+    let c = add_member(&bed.db(), tenant.id, "carol", "member").await;
 
     // A board to hang cards on.
-    let board: BoardId = sqlx::query_scalar(
-        "INSERT INTO boards (id, tenant_id, name, key, provider)
+    let board: BoardId = bed
+        .db()
+        .query_scalar(
+            "INSERT INTO boards (id, tenant_id, name, key, provider)
          VALUES ($1, $2, 'b', $3, 'local') RETURNING id",
-    )
-    .bind(BoardId::new())
-    .bind(tenant.id)
-    .bind(format!("V{}", &Uuid::now_v7().simple().to_string()[..6]).to_uppercase())
-    .fetch_one(&bed.pool)
-    .await
-    .expect("board");
-    sqlx::query(
-        "INSERT INTO board_columns (id, board_id, name, position, type)
+            params![
+                BoardId::new(),
+                tenant.id,
+                format!("V{}", &Uuid::now_v7().simple().to_string()[..6]).to_uppercase()
+            ],
+        )
+        .await
+        .expect("board");
+    bed.db()
+        .exec(
+            "INSERT INTO board_columns (id, board_id, name, position, type)
          VALUES ($1, $2, 'Todo', 0, 'unstarted')",
-    )
-    .bind(Uuid::now_v7())
-    .bind(board)
-    .execute(&bed.pool)
-    .await
-    .expect("column");
+            params![Uuid::now_v7(), board],
+        )
+        .await
+        .expect("column");
 
     // A team card (the default) and a private card, both created by A.
     let team = make_task(&state, tenant.id, board, a, "team card", "team").await;
@@ -168,10 +171,11 @@ async fn visibility_governs_read_claim_board_and_update() {
     }
 
     // ── Assignee share (AC-7): assign the private card to C → C now sees it ──
-    sqlx::query("UPDATE tasks SET assignee_user_id = $2 WHERE id = $1")
-        .bind(private.id)
-        .bind(c)
-        .execute(&bed.pool)
+    bed.db()
+        .exec(
+            "UPDATE tasks SET assignee_user_id = $2 WHERE id = $1",
+            params![private.id, c],
+        )
         .await
         .expect("assign");
     assert!(
@@ -287,11 +291,7 @@ async fn visibility_governs_read_claim_board_and_update() {
     );
 
     // ── Operator exclusion (AC-4): the titles projection omits private ──────
-    let titles: Vec<String> = sqlx::query_scalar(
-        "SELECT title FROM tasks WHERE tenant_id = $1 AND visibility <> 'private' ORDER BY title",
-    )
-    .bind(tenant.id)
-    .fetch_all(&bed.pool)
+    let titles: Vec<String> = bed.db().query_scalar_all("SELECT title FROM tasks WHERE tenant_id = $1 AND visibility <> 'private' ORDER BY title", params![tenant.id])
     .await
     .expect("titles");
     assert!(
@@ -327,42 +327,40 @@ async fn visibility_change_is_gated_to_owner_or_admin() {
         .await
         .expect("owner signs in");
     let a = owner.id;
-    let b = add_member(&bed.pool, tenant.id, "bob", "member").await;
-    let adm = add_member(&bed.pool, tenant.id, "admin", "admin").await;
-    let asg = add_member(&bed.pool, tenant.id, "asa", "member").await;
+    let b = add_member(&bed.db(), tenant.id, "bob", "member").await;
+    let adm = add_member(&bed.db(), tenant.id, "admin", "admin").await;
+    let asg = add_member(&bed.db(), tenant.id, "asa", "member").await;
 
-    let board: BoardId = sqlx::query_scalar(
-        "INSERT INTO boards (id, tenant_id, name, key, provider)
+    let board: BoardId = bed
+        .db()
+        .query_scalar(
+            "INSERT INTO boards (id, tenant_id, name, key, provider)
          VALUES ($1, $2, 'b', $3, 'local') RETURNING id",
-    )
-    .bind(BoardId::new())
-    .bind(tenant.id)
-    .bind(format!("G{}", &Uuid::now_v7().simple().to_string()[..6]).to_uppercase())
-    .fetch_one(&bed.pool)
-    .await
-    .expect("board");
-    sqlx::query(
-        "INSERT INTO board_columns (id, board_id, name, position, type)
+            params![
+                BoardId::new(),
+                tenant.id,
+                format!("G{}", &Uuid::now_v7().simple().to_string()[..6]).to_uppercase()
+            ],
+        )
+        .await
+        .expect("board");
+    bed.db()
+        .exec(
+            "INSERT INTO board_columns (id, board_id, name, position, type)
          VALUES ($1, $2, 'Todo', 0, 'unstarted')",
-    )
-    .bind(Uuid::now_v7())
-    .bind(board)
-    .execute(&bed.pool)
-    .await
-    .expect("column");
+            params![Uuid::now_v7(), board],
+        )
+        .await
+        .expect("column");
 
     // Helper: current visibility of a card, read straight from the row.
-    async fn vis(pool: &PgPool, id: TaskId) -> String {
-        sqlx::query_scalar("SELECT visibility FROM tasks WHERE id = $1")
-            .bind(id)
-            .fetch_one(pool)
+    async fn vis(pool: &DbPool, id: TaskId) -> String {
+        pool.query_scalar("SELECT visibility FROM tasks WHERE id = $1", params![id])
             .await
             .expect("visibility")
     }
-    async fn title_of(pool: &PgPool, id: TaskId) -> String {
-        sqlx::query_scalar("SELECT title FROM tasks WHERE id = $1")
-            .bind(id)
-            .fetch_one(pool)
+    async fn title_of(pool: &DbPool, id: TaskId) -> String {
+        pool.query_scalar("SELECT title FROM tasks WHERE id = $1", params![id])
             .await
             .expect("title")
     }
@@ -387,7 +385,7 @@ async fn visibility_change_is_gated_to_owner_or_admin() {
         "a non-owner, non-admin member is refused 403, got {denied:?}"
     );
     assert_eq!(
-        vis(&bed.pool, team.id).await,
+        vis(&bed.db(), team.id).await,
         "team",
         "a refused visibility change leaves the card untouched"
     );
@@ -399,10 +397,11 @@ async fn visibility_change_is_gated_to_owner_or_admin() {
     assert_eq!(asc.0.visibility, "org", "creator set it to org");
 
     // ── AC-1: the assignee may change scope (owner = creator ∪ assignee) ─────
-    sqlx::query("UPDATE tasks SET assignee_user_id = $2 WHERE id = $1")
-        .bind(team.id)
-        .bind(asg)
-        .execute(&bed.pool)
+    bed.db()
+        .exec(
+            "UPDATE tasks SET assignee_user_id = $2 WHERE id = $1",
+            params![team.id, asg],
+        )
         .await
         .expect("assign");
     let by_assignee = patch(&state, asg, team.id, UpdateUserVis::visibility("team"))
@@ -445,7 +444,7 @@ async fn visibility_change_is_gated_to_owner_or_admin() {
     assert_eq!(same_vis.0.visibility, "team", "unchanged, and allowed");
 
     // ── AC-3: a refused change drops the WHOLE request, other fields included ─
-    let before = title_of(&bed.pool, move_card.id).await;
+    let before = title_of(&bed.db(), move_card.id).await;
     let combo = patch(
         &state,
         b,
@@ -458,12 +457,12 @@ async fn visibility_change_is_gated_to_owner_or_admin() {
         "changing visibility + title as a non-owner is refused 403, got {combo:?}"
     );
     assert_eq!(
-        title_of(&bed.pool, move_card.id).await,
+        title_of(&bed.db(), move_card.id).await,
         before,
         "the title in the refused request was NOT applied"
     );
     assert_eq!(
-        vis(&bed.pool, move_card.id).await,
+        vis(&bed.db(), move_card.id).await,
         "team",
         "and neither was the visibility change"
     );
@@ -542,44 +541,41 @@ async fn private_parent_key_is_redacted_from_children_for_non_owners() {
         .await
         .expect("owner signs in");
     let o = owner.id;
-    let v = add_member(&bed.pool, tenant.id, "vic", "member").await;
+    let v = add_member(&bed.db(), tenant.id, "vic", "member").await;
 
     let board_key = format!("E{}", &Uuid::now_v7().simple().to_string()[..6]).to_uppercase();
-    let board: BoardId = sqlx::query_scalar(
-        "INSERT INTO boards (id, tenant_id, name, key, provider)
+    let board: BoardId = bed
+        .db()
+        .query_scalar(
+            "INSERT INTO boards (id, tenant_id, name, key, provider)
          VALUES ($1, $2, 'b', $3, 'local') RETURNING id",
-    )
-    .bind(BoardId::new())
-    .bind(tenant.id)
-    .bind(&board_key)
-    .fetch_one(&bed.pool)
-    .await
-    .expect("board");
-    sqlx::query(
-        "INSERT INTO board_columns (id, board_id, name, position, type)
+            params![BoardId::new(), tenant.id, &board_key],
+        )
+        .await
+        .expect("board");
+    bed.db()
+        .exec(
+            "INSERT INTO board_columns (id, board_id, name, position, type)
          VALUES ($1, $2, 'Todo', 0, 'unstarted')",
-    )
-    .bind(Uuid::now_v7())
-    .bind(board)
-    .execute(&bed.pool)
-    .await
-    .expect("column");
+            params![Uuid::now_v7(), board],
+        )
+        .await
+        .expect("column");
 
     // A PRIVATE epic owned by O, and a TEAM child filed under it.
     let epic = make_task(&state, tenant.id, board, o, "roadmap", "private").await;
     let child = make_task(&state, tenant.id, board, o, "do the thing", "team").await;
-    sqlx::query("UPDATE tasks SET parent_task_id = $2 WHERE id = $1")
-        .bind(child.id)
-        .bind(epic.id)
-        .execute(&bed.pool)
+    bed.db()
+        .exec(
+            "UPDATE tasks SET parent_task_id = $2 WHERE id = $1",
+            params![child.id, epic.id],
+        )
         .await
         .expect("file the child under the epic");
     let expected = format!("{board_key}-{}", epic.number.expect("epic has a number"));
 
-    async fn row(pool: &PgPool, id: TaskId) -> TaskItem {
-        sqlx::query_as("SELECT * FROM tasks WHERE id = $1")
-            .bind(id)
-            .fetch_one(pool)
+    async fn row(pool: &DbPool, id: TaskId) -> TaskItem {
+        pool.query_one("SELECT * FROM tasks WHERE id = $1", params![id])
             .await
             .expect("row")
     }
@@ -597,7 +593,7 @@ async fn private_parent_key_is_redacted_from_children_for_non_owners() {
     };
 
     // O (the epic's owner) sees the parent key.
-    let as_o = enrich_as(o, row(&bed.pool, child.id).await).await;
+    let as_o = enrich_as(o, row(&bed.db(), child.id).await).await;
     assert_eq!(
         as_o.parent_key.as_deref(),
         Some(expected.as_str()),
@@ -605,7 +601,7 @@ async fn private_parent_key_is_redacted_from_children_for_non_owners() {
     );
 
     // V (non-owner) sees the child as parentless — the key is redacted.
-    let as_v = enrich_as(v, row(&bed.pool, child.id).await).await;
+    let as_v = enrich_as(v, row(&bed.db(), child.id).await).await;
     assert_eq!(
         as_v.parent_key, None,
         "a private epic's key is not exposed on a child a non-owner can see"
@@ -618,12 +614,14 @@ async fn private_parent_key_is_redacted_from_children_for_non_owners() {
     );
 
     // Flip the epic to team-visible → the key returns for V (non-regression).
-    sqlx::query("UPDATE tasks SET visibility = 'team' WHERE id = $1")
-        .bind(epic.id)
-        .execute(&bed.pool)
+    bed.db()
+        .exec(
+            "UPDATE tasks SET visibility = 'team' WHERE id = $1",
+            params![epic.id],
+        )
         .await
         .expect("flip epic to team");
-    let as_v2 = enrich_as(v, row(&bed.pool, child.id).await).await;
+    let as_v2 = enrich_as(v, row(&bed.db(), child.id).await).await;
     assert_eq!(
         as_v2.parent_key.as_deref(),
         Some(expected.as_str()),

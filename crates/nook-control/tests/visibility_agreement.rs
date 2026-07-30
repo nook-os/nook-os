@@ -20,9 +20,9 @@
 use nook_control::repo::tasks::{DbTaskRepository, NewTask, PickParams, TaskRepository};
 use nook_control::services::overview_queries::overview;
 use nook_control::services::tasks::visible_by_cols;
+use nook_db::{params, Db, DbPool};
 use nook_testkit::TestBed;
 use nook_types::*;
-use sqlx::PgPool;
 
 /// One task shape under test: the three inputs the rule actually reads.
 struct Case {
@@ -55,23 +55,18 @@ impl Observed {
 }
 
 async fn checkout(
-    db: &PgPool,
+    db: &DbPool,
     tenant: TenantId,
     node: NodeId,
     ws: WorkspaceId,
     path: &str,
 ) -> NodeWorkspaceId {
     let id = NodeWorkspaceId::new();
-    sqlx::query(
+    db.exec(
         "INSERT INTO node_workspaces (id, tenant_id, node_id, workspace_id, path, kind)
          VALUES ($1, $2, $3, $4, $5, 'clone')",
+        params![id, tenant, node, ws, path],
     )
-    .bind(id)
-    .bind(tenant)
-    .bind(node)
-    .bind(ws)
-    .bind(path)
-    .execute(db)
     .await
     .expect("checkout");
     id
@@ -167,16 +162,16 @@ async fn the_agreement_check_catches_a_dropped_predicate_leg() {
     let mut caught = Vec::new();
     for v in &viewers {
         // `epic_children`, verbatim, minus `OR t.created_by = $2`.
-        let rows: Vec<(TaskId,)> = sqlx::query_as(
-            "SELECT t.id FROM tasks t
+        let rows: Vec<(TaskId,)> = bed
+            .db()
+            .query_all(
+                "SELECT t.id FROM tasks t
               WHERE t.parent_task_id = $1
                 AND (t.visibility <> 'private' OR t.assignee_user_id = $2)",
-        )
-        .bind(epic)
-        .bind(v.id)
-        .fetch_all(&bed.pool)
-        .await
-        .expect("mutant epic_children");
+                params![epic, v.id],
+            )
+            .await
+            .expect("mutant epic_children");
         let seen: Vec<TaskId> = rows.into_iter().map(|r| r.0).collect();
 
         for c in &cases {
@@ -234,7 +229,7 @@ async fn fixture(bed: &mut TestBed) -> Fixture {
 
     let node = bed.node(tenant, person).await;
     let ws = bed.workspace(tenant).await;
-    let co = checkout(&bed.pool, tenant, node, ws, "/srv/vis").await;
+    let co = checkout(&bed.db(), tenant, node, ws, "/srv/vis").await;
 
     let mk = |title: &str, type_: &str, visibility: &str, created_by: Option<UserId>| NewTask {
         tenant,
@@ -298,17 +293,14 @@ async fn fixture(bed: &mut TestBed) -> Fixture {
             .expect("case task");
         // create_task takes no assignee, parent or checkout; set them directly.
         // Tests keep raw DB access (repository-chain NG-4).
-        sqlx::query(
-            "UPDATE tasks SET assignee_user_id = $2, parent_task_id = $3, checkout_id = $4
+        bed.db()
+            .exec(
+                "UPDATE tasks SET assignee_user_id = $2, parent_task_id = $3, checkout_id = $4
               WHERE id = $1",
-        )
-        .bind(t.id)
-        .bind(assignee.map(|u| u.0))
-        .bind(epic)
-        .bind(co)
-        .execute(&bed.pool)
-        .await
-        .expect("wire the case row");
+                params![t.id, assignee.map(|u| u.0), epic, co],
+            )
+            .await
+            .expect("wire the case row");
         repo.upsert_relation(tenant, anchor, t.id, "relates")
             .await
             .expect("relation");

@@ -7,41 +7,40 @@
 
 use nook_control::error::ApiError;
 use nook_control::routes::task_query::{claim_inner, query_rows, TaskFilter};
+use nook_db::{params, Db, DbPool};
 use nook_testkit::TestBed;
 use nook_types::*;
-use sqlx::PgPool;
 use uuid::Uuid;
 
 /// A tenant + board with a `backlog` column and an `unstarted` column.
-async fn fixture(db: &PgPool) -> (TenantId, BoardId, ColumnId, ColumnId) {
+async fn fixture(db: &DbPool) -> (TenantId, BoardId, ColumnId, ColumnId) {
     let tenant = TenantId(Uuid::now_v7());
-    sqlx::query("INSERT INTO tenants (id, name, slug) VALUES ($1, $2, $2)")
-        .bind(tenant)
-        .bind(format!("t-{}", tenant.0.simple()))
-        .execute(db)
-        .await
-        .expect("tenant");
-    let board = BoardId(Uuid::now_v7());
-    sqlx::query(
-        "INSERT INTO boards (id, tenant_id, name, key, provider) VALUES ($1,$2,'b',$3,'local')",
+    db.exec(
+        "INSERT INTO tenants (id, name, slug) VALUES ($1, $2, $2)",
+        params![tenant, format!("t-{}", tenant.0.simple())],
     )
-    .bind(board)
-    .bind(tenant)
-    // The random tail, not the shared v7 timestamp prefix, so keys don't collide.
-    .bind(format!("B{}", &board.0.simple().to_string()[26..]).to_uppercase())
-    .execute(db)
+    .await
+    .expect("tenant");
+    let board = BoardId(Uuid::now_v7());
+    db.exec(
+        "INSERT INTO boards (id, tenant_id, name, key, provider) VALUES ($1,$2,'b',$3,'local')",
+        params![
+            board,
+            tenant,
+            // The random tail, not the shared v7 timestamp prefix, so keys
+            // don't collide.
+            format!("B{}", &board.0.simple().to_string()[26..]).to_uppercase()
+        ],
+    )
     .await
     .expect("board");
     let backlog = ColumnId(Uuid::now_v7());
     let todo = ColumnId(Uuid::now_v7());
-    sqlx::query(
+    db.exec(
         "INSERT INTO board_columns (id, board_id, name, position, type)
          VALUES ($1,$2,'Triage',0,'backlog'), ($3,$2,'Todo',1,'unstarted')",
+        params![backlog, board, todo],
     )
-    .bind(backlog)
-    .bind(board)
-    .bind(todo)
-    .execute(db)
     .await
     .expect("columns");
     (tenant, board, backlog, todo)
@@ -49,7 +48,7 @@ async fn fixture(db: &PgPool) -> (TenantId, BoardId, ColumnId, ColumnId) {
 
 /// Insert a task in a column with a type + number, returning its id.
 async fn task(
-    db: &PgPool,
+    db: &DbPool,
     tenant: TenantId,
     board: BoardId,
     col: ColumnId,
@@ -57,28 +56,29 @@ async fn task(
     type_: &str,
 ) -> TaskId {
     let id = TaskId::new();
-    sqlx::query(
+    db.exec(
         "INSERT INTO tasks (id, tenant_id, board_id, column_id, title, number, type)
          VALUES ($1,$2,$3,$4,$5,$6,$7)",
+        params![
+            id,
+            tenant,
+            board,
+            col,
+            format!("task {number}"),
+            number,
+            type_
+        ],
     )
-    .bind(id)
-    .bind(tenant)
-    .bind(board)
-    .bind(col)
-    .bind(format!("task {number}"))
-    .bind(number)
-    .bind(type_)
-    .execute(db)
     .await
     .expect("task");
     id
 }
 
-async fn pick_ids(db: &PgPool, tenant: TenantId, f: &TaskFilter) -> Vec<TaskId> {
+async fn pick_ids(db: &DbPool, tenant: TenantId, f: &TaskFilter) -> Vec<TaskId> {
     // These fixtures set no visibility (default non-private), so any viewer sees
     // them; the pick's MAIN-76 predicate is exercised by task_visibility.rs.
     query_rows(
-        &nook_control::repo::tasks::DbTaskRepository::new(nook_db::EnginePool::from_pg(db.clone())),
+        &nook_control::repo::tasks::DbTaskRepository::new(db.clone()),
         tenant,
         UserId::new(),
         f,
@@ -96,13 +96,13 @@ async fn pick_excludes_backlog_and_epics_by_default() {
         eprintln!("skipping backlog test — no DATABASE_URL");
         return;
     };
-    let (tenant, board, backlog, todo) = fixture(&bed.pool).await;
+    let (tenant, board, backlog, todo) = fixture(&bed.db()).await;
 
     // A normal task on the board, a normal task in the backlog, and an epic on
     // the board.
-    let normal = task(&bed.pool, tenant, board, todo, 1, "task").await;
-    let in_backlog = task(&bed.pool, tenant, board, backlog, 2, "task").await;
-    let epic = task(&bed.pool, tenant, board, todo, 3, "epic").await;
+    let normal = task(&bed.db(), tenant, board, todo, 1, "task").await;
+    let in_backlog = task(&bed.db(), tenant, board, backlog, 2, "task").await;
+    let epic = task(&bed.db(), tenant, board, todo, 3, "epic").await;
 
     let base = TaskFilter {
         board: Some(board.to_string()),
@@ -111,7 +111,7 @@ async fn pick_excludes_backlog_and_epics_by_default() {
     };
 
     // ── Default: backlog + epic excluded (AC-1/AC-2) ────────────────────────
-    let def = pick_ids(&bed.pool, tenant, &base).await;
+    let def = pick_ids(&bed.db(), tenant, &base).await;
     assert!(def.contains(&normal), "a board task is picked");
     assert!(
         !def.contains(&in_backlog),
@@ -124,7 +124,7 @@ async fn pick_excludes_backlog_and_epics_by_default() {
 
     // ── backlog=true includes backlog tasks (AC-1) ──────────────────────────
     let with_backlog = pick_ids(
-        &bed.pool,
+        &bed.db(),
         tenant,
         &TaskFilter {
             backlog: Some(true),
@@ -143,7 +143,7 @@ async fn pick_excludes_backlog_and_epics_by_default() {
 
     // ── type=epic surfaces epics on purpose (AC-2) ──────────────────────────
     let with_epic = pick_ids(
-        &bed.pool,
+        &bed.db(),
         tenant,
         &TaskFilter {
             type_: vec!["epic".into()],
@@ -173,16 +173,17 @@ async fn parent_filter_lifts_the_backlog_exclusion() {
         eprintln!("skipping parent-lift test — no DATABASE_URL");
         return;
     };
-    let (tenant, board, backlog, todo) = fixture(&bed.pool).await;
+    let (tenant, board, backlog, todo) = fixture(&bed.db()).await;
 
-    let epic = task(&bed.pool, tenant, board, todo, 1, "epic").await;
-    let child_backlog = task(&bed.pool, tenant, board, backlog, 2, "task").await;
-    let child_board = task(&bed.pool, tenant, board, todo, 3, "task").await;
+    let epic = task(&bed.db(), tenant, board, todo, 1, "epic").await;
+    let child_backlog = task(&bed.db(), tenant, board, backlog, 2, "task").await;
+    let child_board = task(&bed.db(), tenant, board, todo, 3, "task").await;
     for child in [child_backlog, child_board] {
-        sqlx::query("UPDATE tasks SET parent_task_id = $1 WHERE id = $2")
-            .bind(epic)
-            .bind(child)
-            .execute(&bed.pool)
+        bed.db()
+            .exec(
+                "UPDATE tasks SET parent_task_id = $1 WHERE id = $2",
+                params![epic, child],
+            )
             .await
             .expect("set parent");
     }
@@ -195,7 +196,7 @@ async fn parent_filter_lifts_the_backlog_exclusion() {
 
     // ?parent=<epic> returns BOTH children — the backlog exclusion is lifted.
     let children = pick_ids(
-        &bed.pool,
+        &bed.db(),
         tenant,
         &TaskFilter {
             parent: Some(epic.to_string()),
@@ -213,7 +214,7 @@ async fn parent_filter_lifts_the_backlog_exclusion() {
     );
 
     // Without a parent filter the backlog child stays excluded by default.
-    let default = pick_ids(&bed.pool, tenant, &base).await;
+    let default = pick_ids(&bed.db(), tenant, &base).await;
     assert!(
         !default.contains(&child_backlog),
         "the backlog child is still hidden without parent="
@@ -229,23 +230,25 @@ async fn claim_refuses_backlog_and_epic_with_distinct_messages() {
         return;
     };
     let state = bed.app_state().await;
-    let (tenant, board, backlog, todo) = fixture(&bed.pool).await;
+    let (tenant, board, backlog, todo) = fixture(&bed.db()).await;
     // A real user row — claiming sets assignee_user_id, which has an FK.
     let claimant = UserId::new();
-    sqlx::query(
-        "INSERT INTO users (id, tenant_id, person_id, display_name, email)
+    bed.db()
+        .exec(
+            "INSERT INTO users (id, tenant_id, person_id, display_name, email)
          VALUES ($1, $2, gen_random_uuid(), 'Claimant', $3)",
-    )
-    .bind(claimant)
-    .bind(tenant)
-    .bind(format!("claimant-{}@example.test", claimant.0.simple()))
-    .execute(&bed.pool)
-    .await
-    .expect("claimant user");
+            params![
+                claimant,
+                tenant,
+                format!("claimant-{}@example.test", claimant.0.simple())
+            ],
+        )
+        .await
+        .expect("claimant user");
 
-    let in_backlog = task(&bed.pool, tenant, board, backlog, 1, "task").await;
-    let epic = task(&bed.pool, tenant, board, todo, 2, "epic").await;
-    let normal = task(&bed.pool, tenant, board, todo, 3, "task").await;
+    let in_backlog = task(&bed.db(), tenant, board, backlog, 1, "task").await;
+    let epic = task(&bed.db(), tenant, board, todo, 2, "epic").await;
+    let normal = task(&bed.db(), tenant, board, todo, 3, "task").await;
 
     // Backlog: a 400 naming the backlog, NOT the 409 lost-claim message (AC-4).
     let backlog_err = claim_inner(&state, tenant, claimant, &in_backlog.to_string(), None)
@@ -278,14 +281,15 @@ async fn claim_refuses_backlog_and_epic_with_distinct_messages() {
 
     // resolve_id still finds a backlog task by key (AC-8): it stays readable /
     // commentable / labelable even though it is unpickable and unclaimable.
-    let key: String = sqlx::query_scalar(
-        "SELECT b.key || '-' || t.number::text FROM tasks t
+    let key: String = bed
+        .db()
+        .query_scalar(
+            "SELECT b.key || '-' || t.number::text FROM tasks t
          JOIN boards b ON b.id = t.board_id WHERE t.id = $1",
-    )
-    .bind(in_backlog)
-    .fetch_one(&bed.pool)
-    .await
-    .expect("key");
+            params![in_backlog],
+        )
+        .await
+        .expect("key");
     let resolved = nook_control::services::tasks::resolve_id(
         &nook_control::repo::tasks::DbTaskRepository::new(bed.db()),
         tenant,
