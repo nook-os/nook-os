@@ -5,7 +5,7 @@ use nook_types::*;
 
 use crate::auth::AuthCtx;
 use crate::error::{ApiError, ApiResult};
-use crate::services::core;
+use crate::services::{node_queries, session_queries};
 use crate::state::AppState;
 
 /// Which tenant owns a node.
@@ -45,7 +45,7 @@ async fn visibility_scope(state: &AppState, auth: &AuthCtx) -> ApiResult<Option<
 pub async fn list(State(state): State<AppState>, auth: AuthCtx) -> ApiResult<Json<Vec<Node>>> {
     let scope = visibility_scope(&state, &auth).await?;
     Ok(Json(
-        core::list_nodes(&state.db, auth.tenant_id, scope).await?,
+        node_queries::list_nodes(&state.db, auth.tenant_id, scope).await?,
     ))
 }
 
@@ -209,9 +209,14 @@ pub async fn authorize(
             .await?;
     }
 
-    let session =
-        core::create_auth_session(&state, auth.tenant_id, Some(auth.user_id), id, &req.runtime)
-            .await?;
+    let session = session_queries::create_auth_session(
+        &state,
+        auth.tenant_id,
+        Some(auth.user_id),
+        id,
+        &req.runtime,
+    )
+    .await?;
     Ok(Json(session))
 }
 

@@ -6,7 +6,7 @@ use nook_types::*;
 use crate::auth::AuthCtx;
 use crate::error::{ApiError, ApiResult};
 use crate::events::{self, EventDraft};
-use crate::services::{core, identity::slugify};
+use crate::services::{identity::slugify, workspace_queries};
 use crate::state::AppState;
 use nook_proto::ControlToNode;
 
@@ -18,7 +18,7 @@ pub async fn list(
     auth: AuthCtx,
 ) -> ApiResult<Json<Vec<WorkspaceDetail>>> {
     Ok(Json(
-        core::list_workspaces(&state.db, auth.tenant_id).await?,
+        workspace_queries::list_workspaces(&state.db, auth.tenant_id).await?,
     ))
 }
 
@@ -31,7 +31,7 @@ pub async fn get_one(
     auth: AuthCtx,
     Path(id): Path<WorkspaceId>,
 ) -> ApiResult<Json<WorkspaceDetail>> {
-    core::get_workspace(&state.db, auth.tenant_id, id)
+    workspace_queries::get_workspace(&state.db, auth.tenant_id, id)
         .await?
         .map(Json)
         .ok_or(ApiError::NotFound)

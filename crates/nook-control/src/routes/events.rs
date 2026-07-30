@@ -6,7 +6,7 @@ use serde::Deserialize;
 
 use crate::auth::AuthCtx;
 use crate::error::ApiResult;
-use crate::services::core;
+use crate::services::activity_queries;
 use crate::state::AppState;
 
 #[derive(Deserialize, utoipa::IntoParams)]
@@ -29,9 +29,9 @@ pub async fn list(
 ) -> ApiResult<Json<EventsPage>> {
     // Members see their own activity; owner/admin get the full audit feed. The
     // same scope filters the live bus, so page and push agree (MAIN-134).
-    let scope = core::ActivityScope::load(&state.db, auth.tenant_id, &auth).await?;
+    let scope = activity_queries::ActivityScope::load(&state.db, auth.tenant_id, &auth).await?;
     Ok(Json(
-        core::events_page(
+        activity_queries::events_page(
             &state.db,
             auth.tenant_id,
             q.workspace_id,

@@ -4,7 +4,7 @@
 //!
 //! Runs against a private `nook_testkit::TestBed`. Set `DATABASE_URL`.
 
-use nook_control::services::core::overview;
+use nook_control::services::overview_queries::overview;
 use nook_testkit::TestBed;
 use nook_types::*;
 use sqlx::PgPool;

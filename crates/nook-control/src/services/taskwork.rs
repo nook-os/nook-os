@@ -8,7 +8,7 @@ use nook_types::*;
 
 use crate::error::{ApiError, ApiResult};
 use crate::events::{self, EventDraft};
-use crate::services::{core, identity::slugify};
+use crate::services::{identity::slugify, session_queries};
 use crate::state::AppState;
 
 /// The **present** checkout a working-directory path resolves to on a node
@@ -288,7 +288,7 @@ pub async fn start_work(
         .ok_or_else(|| ApiError::Internal(anyhow::anyhow!("node returned no worktree path")))?;
 
     // Start a session pinned to the new worktree checkout.
-    let session = core::create_session_at(
+    let session = session_queries::create_session_at(
         state,
         tenant,
         user,

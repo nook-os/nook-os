@@ -298,7 +298,7 @@ pub async fn submit(
                 ApiError::BadRequest("that workspace has no checkout on any node".into())
             })?;
             let runtime = req.runtime.unwrap_or_else(|| "claude".to_string());
-            let session = crate::services::core::create_session(
+            let session = crate::services::session_queries::create_session(
                 &state,
                 auth.tenant_id,
                 Some(auth.user_id),

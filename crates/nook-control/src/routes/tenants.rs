@@ -142,7 +142,7 @@ pub async fn list_members(
     // Keyset-paginated + searched server-side, so a large tenant's members are
     // paged, not fetched whole (MAIN-45 AC-2). The keyset order (newest member
     // first) replaces the old owner-first display sort.
-    let page = crate::services::core::tenant_members_page(
+    let page = crate::services::identity::tenant_members_page(
         &state.db,
         tenant,
         q.q,
