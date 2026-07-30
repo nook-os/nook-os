@@ -1,0 +1,64 @@
+# Files outside crates/nook-db that still name a sqlx TYPE, and why (MAIN-268).
+#
+# Generated from the tree as it stood when the guard landed, so the guard is
+# green on its first run. Every entry is a file whose card has not landed yet,
+# or one that will never convert — not a permission to add more.
+# `scripts/check-sqlx-signatures.sh` refuses a sqlx type in any file NOT listed
+# here, and refuses a listed file that no longer has one, so the list can only
+# shrink.
+#
+# PER FILE, never per directory. A directory exemption would let an already
+# converted file regress because a sibling has not been done yet.
+#
+# nook-db is absent because it is the ADAPTER: sqlx is its whole job, and the
+# guard does not scan it at all.
+
+# MAIN-269 (#218) freed seven files that named sqlx::Error only because
+# nook-db's Db trait returned it. They are gone from this list, which is the
+# list doing its job: the stale-entry check named all seven the moment #218
+# landed, and refused to pass until they were removed.
+
+# ── Permanent: hand-written FromRow impls ───────────────────────────────────
+# `FromRow` IS sqlx's trait and the row-mapping layer is built on it, so these
+# are not signature cleanups — replacing them is replacing row mapping, and
+# needs its own decision (raised on MAIN-269, unanswered).
+crates/nook-control/src/repo/notifications.rs  # FromRow for ChannelTarget, both engine arms
+crates/nook-types/src/lib.rs                   # FromRow impls for the id newtypes
+
+# ── Permanent: the thing under test IS a Postgres feature ───────────────────
+crates/nook-chat/src/main.rs                 # PgConnectOptions — chat pins search_path=chat,public; nook_db::connect has no option for it
+crates/nook-chat/tests/auth_search_path.rs   # the subject IS the search_path pin
+crates/nook-chat/tests/migrations.rs         # its own sqlx::migrate::Migrator into the chat schema
+crates/nook-testkit/tests/teardown.rs        # queries pg_database and DROP DATABASE .. WITH (FORCE)
+
+# ── Awaiting MAIN-268's own AC-1 (the bed.pool removal) ─────────────────────
+crates/nook-testkit/src/lib.rs               # the `pool: PgPool` escape hatch itself
+
+# ── Awaiting the testkit conversion (MAIN-267 and its siblings) ─────────────
+# 33 nook-control integration tests still bind raw sqlx against bed.pool.
+# Each line goes when its file is converted.
+crates/nook-control/tests/auth_request_path.rs
+crates/nook-control/tests/board_automation.rs
+crates/nook-control/tests/bulk_tasks.rs
+crates/nook-control/tests/checkout_kind.rs
+crates/nook-control/tests/executor_selection.rs
+crates/nook-control/tests/interactions.rs
+crates/nook-control/tests/invite_registration.rs
+crates/nook-control/tests/job_reaper.rs
+crates/nook-control/tests/loop_job_execution.rs
+crates/nook-control/tests/loop_job_messages.rs
+crates/nook-control/tests/loop_jobs.rs
+crates/nook-control/tests/loops_switch.rs
+crates/nook-control/tests/managed_content.rs
+crates/nook-control/tests/migrate_dev_tolerance.rs
+crates/nook-control/tests/migrate_paths.rs
+crates/nook-control/tests/multi_instance.rs
+crates/nook-control/tests/notebook.rs
+crates/nook-control/tests/notifications.rs
+crates/nook-control/tests/oidc_degraded.rs
+crates/nook-control/tests/placement_and_gitops_auth.rs
+crates/nook-control/tests/reconcile_tombstones.rs
+crates/nook-control/tests/repo_completeness.rs
+crates/nook-control/tests/review_column.rs
+crates/nook-control/tests/squash_restamp.rs
+crates/nook-control/tests/task_checkout_ids.rs

@@ -89,6 +89,7 @@ run_lint() {
     scripts/check-release-version.sh scripts/check-release-version.test.sh \
     scripts/check-secrets-untracked.test.sh run.sh \
     scripts/check-inline-sql.sh scripts/check-inline-sql.test.sh \
+    scripts/check-sqlx-signatures.sh scripts/check-sqlx-signatures.test.sh \
     scripts/squash-migrations.sh \
     || die "shellcheck"
   pass "shell scripts clean"
@@ -108,6 +109,14 @@ run_lint() {
   ./scripts/check-inline-sql.sh || die "inline SQL"
   ./scripts/check-inline-sql.test.sh || die "inline SQL guard self-test"
   pass "inline SQL guarded"
+
+  # MAIN-268 (epic AC-5): a sqlx TYPE may not appear outside the adapter. Same
+  # shape as the guard above and green for the same reason — its allow-list
+  # names every file whose card is still open, and shrinks as they land.
+  say "sqlx signatures"
+  ./scripts/check-sqlx-signatures.sh || die "sqlx signatures"
+  ./scripts/check-sqlx-signatures.test.sh || die "sqlx signature guard self-test"
+  pass "sqlx signatures guarded"
 }
 
 run_rust() {
