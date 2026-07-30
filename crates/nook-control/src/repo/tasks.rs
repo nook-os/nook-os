@@ -27,7 +27,7 @@
 //! moved SQL unchanged; replacing them is the dialect sweep's job.
 
 use async_trait::async_trait;
-use nook_db::{params, Db, DbPool, Postgres, TypeMapping};
+use nook_db::{params, CiMatch, Db, DbPool, Postgres, TypeMapping};
 use nook_types::*;
 use std::collections::HashMap;
 use uuid::Uuid;
@@ -104,6 +104,42 @@ pub struct StartedWork {
     /// Bound as a bare uuid, exactly as the call site did — the checkout may
     /// legitimately be absent.
     pub checkout_id: Option<Uuid>,
+}
+
+/// Everything the pick query filters on, already validated and resolved by the
+/// caller. The route keeps the 400s (an unknown column type, an unresolvable
+/// parent) because those are policy; this carries only what the SQL binds.
+#[derive(Debug, Clone, Default)]
+pub struct PickParams {
+    pub board: Option<String>,
+    pub workspace: Option<Uuid>,
+    pub column_type: Option<String>,
+    pub priority: Option<i32>,
+    pub unassigned_only: bool,
+    pub assignee: Option<Uuid>,
+    pub labels: Vec<String>,
+    pub not_labels: Vec<String>,
+    pub is_blocked: Option<bool>,
+    pub created_after: Option<chrono::DateTime<chrono::Utc>>,
+    pub limit: i64,
+    pub archived: bool,
+    /// Already wrapped in `%…%` by the caller; `None` disables the clause.
+    pub q: Option<String>,
+    pub types: Vec<String>,
+    pub parent: Option<Uuid>,
+    pub backlog: bool,
+    pub visibility: Vec<String>,
+}
+
+/// What a new task comment is made from.
+#[derive(Debug, Clone)]
+pub struct NewComment {
+    pub tenant: TenantId,
+    pub task: TaskId,
+    pub author_type: String,
+    pub author_id: Option<Uuid>,
+    pub author_name: String,
+    pub body_md: String,
 }
 
 #[async_trait]
@@ -280,6 +316,176 @@ pub trait TaskRepository: Send + Sync {
         tenant: TenantId,
         workspace: WorkspaceId,
     ) -> ApiResult<Option<String>>;
+
+    // ---- the pick query (MAIN-249) -----------------------------------------
+
+    /// The filtered pick, before enrichment. One method: the filter is a single
+    /// SQL statement whose clauses interlock (the backlog exclusion is lifted by
+    /// a parent filter, the visibility predicate ANDs with the explicit one), so
+    /// splitting it would be splitting one question into pieces that cannot be
+    /// recombined.
+    async fn pick_tasks(
+        &self,
+        tenant: TenantId,
+        viewer: UserId,
+        p: PickParams,
+    ) -> ApiResult<Vec<TaskItem>>;
+
+    /// A column's type, unscoped — the caller already holds a task that names it.
+    async fn column_type_of(&self, column: ColumnId) -> ApiResult<Option<String>>;
+
+    /// A column's type, scoped through its board's tenant. `board_columns` has
+    /// no `tenant_id` of its own, so this is the tenant-safe form.
+    async fn column_type_in_tenant(
+        &self,
+        column: ColumnId,
+        tenant: TenantId,
+    ) -> ApiResult<Option<String>>;
+
+    async fn board_of_task(&self, id: TaskId) -> ApiResult<Option<BoardId>>;
+
+    /// Take the work atomically: assign and move in one statement whose WHERE
+    /// still tests "unassigned", so two agents racing cannot both win. `None`
+    /// means the row did not match — the caller distinguishes a lost race from a
+    /// missing task by reading the current assignee.
+    async fn claim_task(
+        &self,
+        id: TaskId,
+        tenant: TenantId,
+        assignee: UserId,
+        column: Option<ColumnId>,
+    ) -> ApiResult<Option<TaskItem>>;
+
+    async fn assignee_of(&self, id: TaskId, tenant: TenantId) -> ApiResult<Option<Option<UserId>>>;
+
+    /// Clear the assignee, reporting the row when there was one. Used by both
+    /// the single-task release and the bulk unassign; the latter ignores the
+    /// returned row.
+    async fn release_assignment(&self, id: TaskId, tenant: TenantId)
+        -> ApiResult<Option<TaskItem>>;
+
+    /// Attach or detach the `agent-ready` label, creating it if new. One method
+    /// because the upsert exists only to feed the attach/detach.
+    async fn set_agent_ready(&self, tenant: TenantId, id: TaskId, on: bool) -> ApiResult<()>;
+
+    // ---- labels ------------------------------------------------------------
+
+    async fn list_labels(&self, tenant: TenantId) -> ApiResult<Vec<Label>>;
+    async fn upsert_label(&self, tenant: TenantId, name: &str, color: &str) -> ApiResult<Label>;
+    async fn delete_label(&self, id: Uuid, tenant: TenantId) -> ApiResult<u64>;
+    async fn label_id_by_uuid(&self, id: Uuid, tenant: TenantId) -> ApiResult<Option<Uuid>>;
+    async fn label_id_by_name(&self, tenant: TenantId, name: &str) -> ApiResult<Option<Uuid>>;
+    async fn labels_of_task(&self, task: TaskId) -> ApiResult<Vec<Label>>;
+
+    /// Rows affected, so a caller only records an event when something actually
+    /// changed — an agent re-applying a label every poll would otherwise flood
+    /// the timeline a human reads.
+    async fn attach_label_id(&self, task: TaskId, label: Uuid) -> ApiResult<u64>;
+    async fn detach_label_id(&self, task: TaskId, label: Uuid) -> ApiResult<u64>;
+
+    /// `(title, number, board key)` — enough to name a task in a notification
+    /// without its title when the card is private.
+    async fn task_naming(
+        &self,
+        task: TaskId,
+    ) -> ApiResult<Option<(String, Option<i32>, Option<String>)>>;
+
+    // ---- boards ------------------------------------------------------------
+
+    async fn create_board(
+        &self,
+        tenant: TenantId,
+        workspace: Option<Uuid>,
+        name: &str,
+        key: &str,
+    ) -> ApiResult<Board>;
+
+    async fn create_column(
+        &self,
+        board: BoardId,
+        name: &str,
+        position: i32,
+        type_: &str,
+    ) -> ApiResult<BoardColumn>;
+
+    async fn set_archived(
+        &self,
+        id: TaskId,
+        tenant: TenantId,
+        archived: bool,
+    ) -> ApiResult<Option<TaskItem>>;
+
+    /// Archive every unarchived task in a column, returning what moved so the
+    /// caller can publish one change per card.
+    async fn archive_all_in_column(
+        &self,
+        column: ColumnId,
+        tenant: TenantId,
+    ) -> ApiResult<Vec<TaskId>>;
+
+    async fn delete_task(&self, id: TaskId, tenant: TenantId) -> ApiResult<u64>;
+
+    async fn update_board(
+        &self,
+        id: BoardId,
+        tenant: TenantId,
+        name: &str,
+        key: Option<String>,
+        automation: Option<serde_json::Value>,
+    ) -> ApiResult<Option<Board>>;
+
+    async fn board_key_taken(&self, tenant: TenantId, key: &str) -> ApiResult<bool>;
+
+    // ---- comments and relations -------------------------------------------
+
+    async fn comments_of(&self, task: TaskId) -> ApiResult<Vec<TaskComment>>;
+
+    async fn create_comment(&self, new: NewComment) -> ApiResult<TaskComment>;
+
+    /// `(visibility, number, board key)` — what decides whether a notification
+    /// may carry an excerpt, and how to name the card if not.
+    async fn task_visibility_naming(
+        &self,
+        task: TaskId,
+        tenant: TenantId,
+    ) -> ApiResult<Option<(String, Option<i32>, Option<String>)>>;
+
+    async fn update_comment(
+        &self,
+        id: Uuid,
+        tenant: TenantId,
+        body_md: &str,
+    ) -> ApiResult<TaskComment>;
+
+    async fn delete_comment(&self, id: Uuid, tenant: TenantId) -> ApiResult<()>;
+
+    /// `(author, task)` for a comment — the ownership check editing and deleting
+    /// both route through.
+    async fn comment_author(
+        &self,
+        id: Uuid,
+        tenant: TenantId,
+    ) -> ApiResult<Option<(Option<Uuid>, TaskId)>>;
+
+    async fn upsert_relation(
+        &self,
+        tenant: TenantId,
+        from: TaskId,
+        to: TaskId,
+        kind: &str,
+    ) -> ApiResult<TaskRelation>;
+
+    /// Does `start` reach `target` through `blocks` edges? A cycle is a deadlock
+    /// nothing can ever pick up, so this is the guard that refuses one.
+    async fn blocks_reaches(&self, start: TaskId, target: TaskId) -> ApiResult<bool>;
+
+    async fn delete_relation(&self, id: Uuid, tenant: TenantId) -> ApiResult<u64>;
+
+    /// An epic's children, filtered by the same visibility predicate the list
+    /// and board reads enforce.
+    async fn epic_children(&self, parent: TaskId, viewer: UserId) -> ApiResult<Vec<EpicChild>>;
+
+    async fn related_tasks(&self, task: TaskId, viewer: UserId) -> ApiResult<Vec<RelatedTask>>;
 }
 
 /// The real implementation, over the engine-agnostic pool.
@@ -867,6 +1073,655 @@ impl TaskRepository for DbTaskRepository {
             )
             .await?)
     }
+
+    async fn pick_tasks(
+        &self,
+        tenant: TenantId,
+        viewer: UserId,
+        p: PickParams,
+    ) -> ApiResult<Vec<TaskItem>> {
+        Ok(self
+            .db
+            .query_all(
+                &format!(
+                    r#"
+        SELECT t.* FROM tasks t
+        JOIN boards b ON b.id = t.board_id
+        JOIN board_columns c ON c.id = t.column_id
+        WHERE t.tenant_id = $1
+          AND ({b_text} IS NULL OR {bid_text} = $2 OR upper(b.key) = upper($2))
+          AND ({ws} IS NULL OR t.workspace_id = $3)
+          AND ({col_text} IS NULL OR c.type = $4)
+          AND ({prio_int}  IS NULL OR t.priority = $5)
+          AND (NOT {unassigned_bool} OR t.assignee_user_id IS NULL)
+          AND ({assignee} IS NULL OR t.assignee_user_id = $7)
+          -- every required label must be present
+          AND (cardinality({labels_arr}) = 0 OR (
+                SELECT count(DISTINCT l.name) FROM task_labels tl
+                JOIN labels l ON l.id = tl.label_id
+                WHERE tl.task_id = t.id AND l.name = ANY($8)
+              ) = cardinality({labels_arr}))
+          -- and none of the excluded ones
+          AND NOT EXISTS (
+                SELECT 1 FROM task_labels tl
+                JOIN labels l ON l.id = tl.label_id
+                WHERE tl.task_id = t.id AND l.name = ANY({not_labels_arr}))
+          -- blocked is DERIVED: an unfinished task pointing here with `blocks`
+          AND ({blocked_bool} IS NULL OR $10 = EXISTS (
+                SELECT 1 FROM task_relations r
+                JOIN tasks bt ON bt.id = r.from_task
+                JOIN board_columns bc ON bc.id = bt.column_id
+                WHERE r.to_task = t.id AND r.kind = 'blocks'
+                  AND bc.type NOT IN ('completed', 'canceled')))
+          AND ({created} IS NULL OR t.created_at > $11)
+          -- archived work is off the board and NEVER pickable unless explicitly asked for
+          AND ({archived_bool} OR t.archived_at IS NULL)
+          -- free-text search across title, description, and display key (MAIN-54).
+          -- Substring, case-insensitive; ANDs with every filter above.
+          AND ({q_text} IS NULL OR (
+                    {title_match}
+                 OR {desc_match}
+                 OR {key_match}))
+          -- issue-type filter (MAIN-59) + epic exclusion (MAIN-80): with an
+          -- explicit type filter the requested types pass (so `type=epic`
+          -- surfaces epics on purpose); with no type filter, everything EXCEPT
+          -- `epic` passes — an epic is a container, never a unit of work the
+          -- loop should pick. Labels (incl. agent-ready) have no bearing.
+          AND (t.type = ANY($15)
+               OR (cardinality({types_arr}) = 0 AND t.type <> 'epic'))
+          -- per-task visibility (MAIN-76): a `private` card is seen only by its
+          -- creator or assignee; `team`/`org` are tenant-visible. Same predicate
+          -- an agent's claim path enforces, so the list never shows work it
+          -- could not then start.
+          AND (t.visibility <> 'private' OR t.created_by = $16 OR t.assignee_user_id = $16)
+          -- explicit visibility filter (MAIN-103 AC-3): ANDs with the viewer
+          -- predicate above, so it can only NARROW — `visibility=private` still
+          -- shows only the caller's own private cards, never a teammate's.
+          AND (cardinality({vis_arr}) = 0 OR t.visibility = ANY($19))
+          -- epic children (MAIN-81): when a parent is given, restrict to its
+          -- tickets. This spans every column (children live in backlog and on
+          -- the board), so it deliberately does NOT constrain the column type.
+          -- BOTH this and the visibility predicate apply, so an epic's children
+          -- are still filtered to what the viewer may see.
+          AND ({parent} IS NULL OR t.parent_task_id = $17)
+          -- backlog exclusion (MAIN-80): a `backlog`-type column is the human
+          -- refinement space; the loop never draws from it unless `backlog=true`
+          -- ($18). AC-3: a `parent=` query (an epic's children, which span
+          -- backlog and board — $17 present) LIFTS this exclusion, so listing an
+          -- epic's tickets never silently drops the ones still in triage.
+          AND ({backlog_bool} OR {parent} IS NOT NULL OR c.type <> 'backlog')
+        -- priority 0 means "unset", which sorts last rather than first
+        ORDER BY CASE WHEN t.priority = 0 THEN 5 ELSE t.priority END, t.created_at
+        LIMIT $12
+        "#,
+                    ws = Postgres.cast("$3", "uuid"),
+                    assignee = Postgres.cast("$7", "uuid"),
+                    created = Postgres.cast("$11", "timestamptz"),
+                    parent = Postgres.cast("$17", "uuid"),
+                    b_text = Postgres.cast("$2", "text"),
+                    bid_text = Postgres.cast("b.id", "text"),
+                    col_text = Postgres.cast("$4", "text"),
+                    prio_int = Postgres.cast("$5", "int"),
+                    unassigned_bool = Postgres.cast("$6", "bool"),
+                    blocked_bool = Postgres.cast("$10", "bool"),
+                    archived_bool = Postgres.cast("$13", "bool"),
+                    q_text = Postgres.cast("$14", "text"),
+                    title_match = Postgres.ci_match("t.title", "$14"),
+                    desc_match = Postgres.ci_match("t.description", "$14"),
+                    key_match = Postgres.ci_match(
+                        &format!("(b.key || '-' || {})", Postgres.cast("t.number", "text")),
+                        "$14"
+                    ),
+                    backlog_bool = Postgres.cast("$18", "bool"),
+                    labels_arr = Postgres.cast("$8", "text[]"),
+                    not_labels_arr = Postgres.cast("$9", "text[]"),
+                    types_arr = Postgres.cast("$15", "text[]"),
+                    vis_arr = Postgres.cast("$19", "text[]"),
+                ),
+                params![
+                    tenant,
+                    p.board,
+                    p.workspace,
+                    p.column_type,
+                    p.priority,
+                    p.unassigned_only,
+                    p.assignee,
+                    p.labels,
+                    p.not_labels,
+                    p.is_blocked,
+                    p.created_after,
+                    p.limit,
+                    p.archived,
+                    p.q,
+                    p.types,
+                    viewer,
+                    p.parent,
+                    p.backlog,
+                    p.visibility
+                ],
+            )
+            .await?)
+    }
+
+    async fn column_type_of(&self, column: ColumnId) -> ApiResult<Option<String>> {
+        Ok(self
+            .db
+            .query_scalar_opt(
+                "SELECT c.type FROM board_columns c WHERE c.id = $1",
+                params![column],
+            )
+            .await?)
+    }
+
+    async fn column_type_in_tenant(
+        &self,
+        column: ColumnId,
+        tenant: TenantId,
+    ) -> ApiResult<Option<String>> {
+        Ok(self
+            .db
+            .query_scalar_opt(
+                "SELECT c.type FROM board_columns c
+         JOIN boards b ON b.id = c.board_id
+         WHERE c.id = $1 AND b.tenant_id = $2",
+                params![column, tenant],
+            )
+            .await?)
+    }
+
+    async fn board_of_task(&self, id: TaskId) -> ApiResult<Option<BoardId>> {
+        Ok(self
+            .db
+            .query_scalar_opt("SELECT board_id FROM tasks WHERE id = $1", params![id])
+            .await?)
+    }
+
+    async fn claim_task(
+        &self,
+        id: TaskId,
+        tenant: TenantId,
+        assignee: UserId,
+        column: Option<ColumnId>,
+    ) -> ApiResult<Option<TaskItem>> {
+        Ok(self
+            .db
+            .query_opt(
+                &format!(
+                    "UPDATE tasks SET
+             assignee_user_id = $1,
+             column_id = coalesce($2, column_id),
+             updated_at = {}
+         WHERE id = $3 AND tenant_id = $4 AND assignee_user_id IS NULL
+         RETURNING *",
+                    Postgres.now()
+                ),
+                params![assignee, column.map(|c| c.0), id, tenant],
+            )
+            .await?)
+    }
+
+    async fn assignee_of(&self, id: TaskId, tenant: TenantId) -> ApiResult<Option<Option<UserId>>> {
+        Ok(self
+            .db
+            .query_scalar_opt(
+                "SELECT assignee_user_id FROM tasks WHERE id = $1 AND tenant_id = $2",
+                params![id, tenant],
+            )
+            .await?)
+    }
+
+    async fn release_assignment(
+        &self,
+        id: TaskId,
+        tenant: TenantId,
+    ) -> ApiResult<Option<TaskItem>> {
+        Ok(self
+            .db
+            .query_opt(
+                &format!(
+                    "UPDATE tasks SET assignee_user_id = NULL, updated_at = {}
+         WHERE id = $1 AND tenant_id = $2 RETURNING *",
+                    Postgres.now()
+                ),
+                params![id, tenant],
+            )
+            .await?)
+    }
+
+    async fn set_agent_ready(&self, tenant: TenantId, id: TaskId, on: bool) -> ApiResult<()> {
+        let label_id: Uuid = self
+            .db
+            .query_scalar(
+                "INSERT INTO labels (id, tenant_id, name, color)
+         VALUES ($1, $2, 'agent-ready', '#f0a000')
+         ON CONFLICT (tenant_id, name) DO UPDATE SET name = EXCLUDED.name
+         RETURNING id",
+                params![Uuid::now_v7(), tenant],
+            )
+            .await?;
+        if on {
+            self.db
+                .exec(
+                    "INSERT INTO task_labels (task_id, label_id) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+                    params![id, label_id],
+                )
+                .await?;
+        } else {
+            self.db
+                .exec(
+                    "DELETE FROM task_labels WHERE task_id = $1 AND label_id = $2",
+                    params![id, label_id],
+                )
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn list_labels(&self, tenant: TenantId) -> ApiResult<Vec<Label>> {
+        Ok(self
+            .db
+            .query_all(
+                "SELECT id, tenant_id, name, color, created_at FROM labels
+         WHERE tenant_id = $1 ORDER BY name",
+                params![tenant],
+            )
+            .await?)
+    }
+
+    async fn upsert_label(&self, tenant: TenantId, name: &str, color: &str) -> ApiResult<Label> {
+        Ok(self
+            .db
+            .query_one(
+                "INSERT INTO labels (id, tenant_id, name, color) VALUES ($1, $2, $3, $4)
+         ON CONFLICT (tenant_id, name) DO UPDATE SET name = EXCLUDED.name
+         RETURNING id, tenant_id, name, color, created_at",
+                params![Uuid::now_v7(), tenant, name, color],
+            )
+            .await?)
+    }
+
+    async fn delete_label(&self, id: Uuid, tenant: TenantId) -> ApiResult<u64> {
+        Ok(self
+            .db
+            .exec(
+                "DELETE FROM labels WHERE id = $1 AND tenant_id = $2",
+                params![id, tenant],
+            )
+            .await?)
+    }
+
+    async fn label_id_by_uuid(&self, id: Uuid, tenant: TenantId) -> ApiResult<Option<Uuid>> {
+        let found: Option<(Uuid,)> = self
+            .db
+            .query_opt(
+                "SELECT id FROM labels WHERE id = $1 AND tenant_id = $2",
+                params![id, tenant],
+            )
+            .await?;
+        Ok(found.map(|r| r.0))
+    }
+
+    async fn label_id_by_name(&self, tenant: TenantId, name: &str) -> ApiResult<Option<Uuid>> {
+        let found: Option<(Uuid,)> = self
+            .db
+            .query_opt(
+                "SELECT id FROM labels WHERE tenant_id = $1 AND name = $2",
+                params![tenant, name],
+            )
+            .await?;
+        Ok(found.map(|r| r.0))
+    }
+
+    async fn labels_of_task(&self, task: TaskId) -> ApiResult<Vec<Label>> {
+        Ok(self
+            .db
+            .query_all(
+                "SELECT l.id, l.tenant_id, l.name, l.color, l.created_at
+         FROM task_labels tl JOIN labels l ON l.id = tl.label_id
+         WHERE tl.task_id = $1 ORDER BY l.name",
+                params![task],
+            )
+            .await?)
+    }
+
+    async fn attach_label_id(&self, task: TaskId, label: Uuid) -> ApiResult<u64> {
+        Ok(self
+            .db
+            .exec(
+                "INSERT INTO task_labels (task_id, label_id) VALUES ($1, $2)
+         ON CONFLICT DO NOTHING",
+                params![task, label],
+            )
+            .await?)
+    }
+
+    async fn detach_label_id(&self, task: TaskId, label: Uuid) -> ApiResult<u64> {
+        Ok(self
+            .db
+            .exec(
+                "DELETE FROM task_labels WHERE task_id = $1 AND label_id = $2",
+                params![task, label],
+            )
+            .await?)
+    }
+
+    async fn task_naming(
+        &self,
+        task: TaskId,
+    ) -> ApiResult<Option<(String, Option<i32>, Option<String>)>> {
+        Ok(self
+            .db
+            .query_opt(
+                "SELECT t.title, t.number, b.key FROM tasks t
+         JOIN boards b ON b.id = t.board_id
+         WHERE t.id = $1",
+                params![task],
+            )
+            .await?)
+    }
+
+    async fn create_board(
+        &self,
+        tenant: TenantId,
+        workspace: Option<Uuid>,
+        name: &str,
+        key: &str,
+    ) -> ApiResult<Board> {
+        Ok(self
+            .db
+            .query_one(
+                "INSERT INTO boards (id, tenant_id, workspace_id, name, key, provider)
+         VALUES ($1, $2, $3, $4, $5, 'local') RETURNING *",
+                params![BoardId::new(), tenant, workspace, name, key],
+            )
+            .await?)
+    }
+
+    async fn create_column(
+        &self,
+        board: BoardId,
+        name: &str,
+        position: i32,
+        type_: &str,
+    ) -> ApiResult<BoardColumn> {
+        Ok(self
+            .db
+            .query_one(
+                "INSERT INTO board_columns (id, board_id, name, position, type)
+             VALUES ($1, $2, $3, $4, $5) RETURNING *",
+                params![ColumnId::new(), board, name, position, type_],
+            )
+            .await?)
+    }
+
+    async fn set_archived(
+        &self,
+        id: TaskId,
+        tenant: TenantId,
+        archived: bool,
+    ) -> ApiResult<Option<TaskItem>> {
+        Ok(self
+            .db
+            .query_opt(
+                &format!(
+                    "UPDATE tasks SET archived_at = CASE WHEN $3 THEN {now} ELSE NULL END,
+                          updated_at = {now}
+         WHERE id = $1 AND tenant_id = $2 RETURNING *",
+                    now = Postgres.now()
+                ),
+                params![id, tenant, archived],
+            )
+            .await?)
+    }
+
+    async fn archive_all_in_column(
+        &self,
+        column: ColumnId,
+        tenant: TenantId,
+    ) -> ApiResult<Vec<TaskId>> {
+        Ok(self
+            .db
+            .query_scalar_all(
+                &format!(
+                    "UPDATE tasks SET archived_at = {now}, updated_at = {now}
+         WHERE column_id = $1 AND tenant_id = $2 AND archived_at IS NULL
+         RETURNING id",
+                    now = Postgres.now()
+                ),
+                params![column, tenant],
+            )
+            .await?)
+    }
+
+    async fn delete_task(&self, id: TaskId, tenant: TenantId) -> ApiResult<u64> {
+        Ok(self
+            .db
+            .exec(
+                "DELETE FROM tasks WHERE id = $1 AND tenant_id = $2",
+                params![id, tenant],
+            )
+            .await?)
+    }
+
+    async fn update_board(
+        &self,
+        id: BoardId,
+        tenant: TenantId,
+        name: &str,
+        key: Option<String>,
+        automation: Option<serde_json::Value>,
+    ) -> ApiResult<Option<Board>> {
+        Ok(self
+            .db
+            .query_opt(
+                &format!(
+                    "UPDATE boards SET name = $3, key = COALESCE($4, key),
+                           automation = COALESCE($5, automation), updated_at = {}
+         WHERE id = $1 AND tenant_id = $2 RETURNING *",
+                    Postgres.now()
+                ),
+                params![id, tenant, name, key, automation],
+            )
+            .await?)
+    }
+
+    async fn board_key_taken(&self, tenant: TenantId, key: &str) -> ApiResult<bool> {
+        let taken: Option<Uuid> = self
+            .db
+            .query_scalar_opt(
+                "SELECT id FROM boards WHERE tenant_id = $1 AND key = $2",
+                params![tenant, key],
+            )
+            .await?;
+        Ok(taken.is_some())
+    }
+
+    async fn comments_of(&self, task: TaskId) -> ApiResult<Vec<TaskComment>> {
+        Ok(self
+            .db
+            .query_all(
+                "SELECT id, tenant_id, task_id, author_type, author_id, author_name,
+                body_md, created_at, updated_at
+         FROM task_comments WHERE task_id = $1 ORDER BY created_at",
+                params![task],
+            )
+            .await?)
+    }
+
+    async fn create_comment(&self, new: NewComment) -> ApiResult<TaskComment> {
+        Ok(self
+            .db
+            .query_one(
+                "INSERT INTO task_comments (id, tenant_id, task_id, author_type, author_id, author_name, body_md)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)
+         RETURNING id, tenant_id, task_id, author_type, author_id, author_name,
+                   body_md, created_at, updated_at",
+                params![
+                    Uuid::now_v7(),
+                    new.tenant,
+                    new.task,
+                    new.author_type,
+                    new.author_id,
+                    new.author_name,
+                    new.body_md
+                ],
+            )
+            .await?)
+    }
+
+    async fn task_visibility_naming(
+        &self,
+        task: TaskId,
+        tenant: TenantId,
+    ) -> ApiResult<Option<(String, Option<i32>, Option<String>)>> {
+        Ok(self
+            .db
+            .query_opt(
+                "SELECT t.visibility, t.number, b.key FROM tasks t
+         JOIN boards b ON b.id = t.board_id
+         WHERE t.id = $1 AND t.tenant_id = $2",
+                params![task, tenant],
+            )
+            .await?)
+    }
+
+    async fn update_comment(
+        &self,
+        id: Uuid,
+        tenant: TenantId,
+        body_md: &str,
+    ) -> ApiResult<TaskComment> {
+        Ok(self
+            .db
+            .query_one(
+                &format!(
+                    "UPDATE task_comments SET body_md = $1, updated_at = {}
+         WHERE id = $2 AND tenant_id = $3
+         RETURNING id, tenant_id, task_id, author_type, author_id, author_name,
+                   body_md, created_at, updated_at",
+                    Postgres.now()
+                ),
+                params![body_md, id, tenant],
+            )
+            .await?)
+    }
+
+    async fn delete_comment(&self, id: Uuid, tenant: TenantId) -> ApiResult<()> {
+        self.db
+            .exec(
+                "DELETE FROM task_comments WHERE id = $1 AND tenant_id = $2",
+                params![id, tenant],
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn comment_author(
+        &self,
+        id: Uuid,
+        tenant: TenantId,
+    ) -> ApiResult<Option<(Option<Uuid>, TaskId)>> {
+        Ok(self
+            .db
+            .query_opt(
+                "SELECT author_id, task_id FROM task_comments WHERE id = $1 AND tenant_id = $2",
+                params![id, tenant],
+            )
+            .await?)
+    }
+
+    async fn upsert_relation(
+        &self,
+        tenant: TenantId,
+        from: TaskId,
+        to: TaskId,
+        kind: &str,
+    ) -> ApiResult<TaskRelation> {
+        Ok(self
+            .db
+            .query_one(
+                "INSERT INTO task_relations (id, tenant_id, from_task, to_task, kind)
+         VALUES ($1, $2, $3, $4, $5)
+         ON CONFLICT (from_task, to_task, kind) DO UPDATE SET kind = EXCLUDED.kind
+         RETURNING id, tenant_id, from_task, to_task, kind, created_at",
+                params![Uuid::now_v7(), tenant, from, to, kind],
+            )
+            .await?)
+    }
+
+    async fn blocks_reaches(&self, start: TaskId, target: TaskId) -> ApiResult<bool> {
+        let hit: Option<bool> = self
+            .db
+            .query_scalar_opt(
+                "WITH RECURSIVE reachable(id) AS (
+             SELECT to_task FROM task_relations WHERE from_task = $1 AND kind = 'blocks'
+             UNION
+             SELECT r.to_task FROM task_relations r
+             JOIN reachable p ON r.from_task = p.id
+             WHERE r.kind = 'blocks'
+         )
+         SELECT true FROM reachable WHERE id = $2 LIMIT 1",
+                params![start, target],
+            )
+            .await?;
+        Ok(hit.is_some())
+    }
+
+    async fn delete_relation(&self, id: Uuid, tenant: TenantId) -> ApiResult<u64> {
+        Ok(self
+            .db
+            .exec(
+                "DELETE FROM task_relations WHERE id = $1 AND tenant_id = $2",
+                params![id, tenant],
+            )
+            .await?)
+    }
+
+    async fn epic_children(&self, parent: TaskId, viewer: UserId) -> ApiResult<Vec<EpicChild>> {
+        Ok(self
+            .db
+            .query_all(
+                &format!(
+                    "SELECT t.id,
+                    (b.key || '-' || {}) AS key,
+                    t.title, t.type, t.priority,
+                    bc.type AS column_type,
+                    t.archived_at
+             FROM tasks t
+             JOIN boards b ON b.id = t.board_id
+             JOIN board_columns bc ON bc.id = t.column_id
+             WHERE t.parent_task_id = $1
+               AND (t.visibility <> 'private' OR t.created_by = $2 OR t.assignee_user_id = $2)
+             ORDER BY CASE WHEN t.priority = 0 THEN 5 ELSE t.priority END, t.created_at",
+                    Postgres.cast("t.number", "text")
+                ),
+                params![parent, viewer],
+            )
+            .await?)
+    }
+
+    async fn related_tasks(&self, task: TaskId, viewer: UserId) -> ApiResult<Vec<RelatedTask>> {
+        Ok(self
+            .db
+            .query_all(
+                "SELECT r.id AS relation_id, t.id, t.title,
+                CASE WHEN b.key IS NOT NULL AND t.number IS NOT NULL
+                     THEN b.key || '-' || t.number END AS key,
+                CASE WHEN r.kind = 'blocks' AND r.to_task = $1 THEN 'blocked_by'
+                     WHEN r.kind = 'blocks' THEN 'blocking'
+                     ELSE r.kind END AS kind,
+                c.type AS column_type
+         FROM task_relations r
+         JOIN tasks t ON t.id = CASE WHEN r.from_task = $1 THEN r.to_task ELSE r.from_task END
+         JOIN boards b ON b.id = t.board_id
+         JOIN board_columns c ON c.id = t.column_id
+         WHERE (r.from_task = $1 OR r.to_task = $1)
+           AND (t.visibility <> 'private' OR t.created_by = $2 OR t.assignee_user_id = $2)
+         ORDER BY t.number",
+                params![task, viewer],
+            )
+            .await?)
+    }
 }
 
 /// An in-memory [`TaskRepository`] for tests that should not need a database
@@ -895,6 +1750,8 @@ struct FakeState {
     /// `(task, label_name)`
     task_labels: Vec<(Uuid, String)>,
     comments: Vec<TaskComment>,
+    labels: Vec<Label>,
+    relations: Vec<TaskRelation>,
     /// `(checkout, tenant, workspace, node, path, kind, present, remote)`
     checkouts: Vec<Checkout>,
 }
@@ -1527,5 +2384,678 @@ impl TaskRepository for FakeTaskRepository {
             .iter()
             .find(|c| c.tenant == tenant && c.workspace == workspace && c.remote.is_some())
             .and_then(|c| c.remote.clone()))
+    }
+
+    async fn pick_tasks(
+        &self,
+        tenant: TenantId,
+        viewer: UserId,
+        p: PickParams,
+    ) -> ApiResult<Vec<TaskItem>> {
+        let st = self.inner.lock().unwrap();
+        let labels_of = |id: Uuid| -> Vec<String> {
+            st.task_labels
+                .iter()
+                .filter(|(t, _)| *t == id)
+                .map(|(_, n)| n.clone())
+                .collect()
+        };
+        let col_type = |c: ColumnId| {
+            st.columns
+                .iter()
+                .find(|x| x.id == c)
+                .map(|x| x.r#type.clone())
+                .unwrap_or_default()
+        };
+        let mut out: Vec<TaskItem> = st
+            .tasks
+            .iter()
+            .filter(|t| t.tenant_id == tenant)
+            .filter(|t| p.workspace.is_none() || t.workspace_id.map(|w| w.0) == p.workspace)
+            .filter(|t| match &p.column_type {
+                None => true,
+                Some(ct) => col_type(t.column_id) == *ct,
+            })
+            .filter(|t| p.priority.is_none() || Some(t.priority) == p.priority)
+            .filter(|t| !p.unassigned_only || t.assignee_user_id.is_none())
+            .filter(|t| match p.assignee {
+                None => true,
+                Some(a) => t.assignee_user_id.map(|u| u.0) == Some(a),
+            })
+            .filter(|t| {
+                let have = labels_of(t.id.0);
+                p.labels.iter().all(|l| have.contains(l))
+                    && !p.not_labels.iter().any(|l| have.contains(l))
+            })
+            .filter(|t| p.archived || t.archived_at.is_none())
+            // The epic exclusion: with an explicit type filter the requested
+            // types pass, with none everything except `epic` does.
+            .filter(|t| {
+                if p.types.is_empty() {
+                    t.type_ != "epic"
+                } else {
+                    p.types.contains(&t.type_)
+                }
+            })
+            // The viewer predicate, and the explicit filter which can only
+            // narrow it — never widen.
+            .filter(|t| {
+                crate::services::tasks::visible_by_cols(
+                    &t.visibility,
+                    t.created_by,
+                    t.assignee_user_id,
+                    viewer,
+                )
+            })
+            .filter(|t| p.visibility.is_empty() || p.visibility.contains(&t.visibility))
+            .filter(|t| match p.parent {
+                None => true,
+                Some(par) => t.parent_task_id.map(|x| x.0) == Some(par),
+            })
+            // The backlog exclusion, lifted by a parent filter.
+            .filter(|t| p.backlog || p.parent.is_some() || col_type(t.column_id) != "backlog")
+            .cloned()
+            .collect();
+        // Priority 0 means "unset", which sorts last rather than first.
+        out.sort_by_key(|t| (if t.priority == 0 { 5 } else { t.priority }, t.created_at));
+        out.truncate(p.limit.max(0) as usize);
+        Ok(out)
+    }
+
+    async fn column_type_of(&self, column: ColumnId) -> ApiResult<Option<String>> {
+        let st = self.inner.lock().unwrap();
+        Ok(st
+            .columns
+            .iter()
+            .find(|c| c.id == column)
+            .map(|c| c.r#type.clone()))
+    }
+
+    async fn column_type_in_tenant(
+        &self,
+        column: ColumnId,
+        tenant: TenantId,
+    ) -> ApiResult<Option<String>> {
+        let st = self.inner.lock().unwrap();
+        Ok(st
+            .columns
+            .iter()
+            .find(|c| {
+                c.id == column
+                    && st
+                        .boards
+                        .iter()
+                        .any(|b| b.id == c.board_id && b.tenant_id == tenant)
+            })
+            .map(|c| c.r#type.clone()))
+    }
+
+    async fn board_of_task(&self, id: TaskId) -> ApiResult<Option<BoardId>> {
+        let st = self.inner.lock().unwrap();
+        Ok(st.tasks.iter().find(|t| t.id == id).map(|t| t.board_id))
+    }
+
+    async fn claim_task(
+        &self,
+        id: TaskId,
+        tenant: TenantId,
+        assignee: UserId,
+        column: Option<ColumnId>,
+    ) -> ApiResult<Option<TaskItem>> {
+        let mut st = self.inner.lock().unwrap();
+        let Some(t) = st
+            .tasks
+            .iter_mut()
+            .find(|t| t.id == id && t.tenant_id == tenant)
+        else {
+            return Ok(None);
+        };
+        // The "still unassigned" test lives in the same critical section as the
+        // write, exactly as the real statement's WHERE does — a fake that
+        // checked separately would let both racers win.
+        if t.assignee_user_id.is_some() {
+            return Ok(None);
+        }
+        t.assignee_user_id = Some(assignee);
+        if let Some(c) = column {
+            t.column_id = c;
+        }
+        t.updated_at = chrono::Utc::now();
+        Ok(Some(t.clone()))
+    }
+
+    async fn assignee_of(&self, id: TaskId, tenant: TenantId) -> ApiResult<Option<Option<UserId>>> {
+        let st = self.inner.lock().unwrap();
+        Ok(st
+            .tasks
+            .iter()
+            .find(|t| t.id == id && t.tenant_id == tenant)
+            .map(|t| t.assignee_user_id))
+    }
+
+    async fn release_assignment(
+        &self,
+        id: TaskId,
+        tenant: TenantId,
+    ) -> ApiResult<Option<TaskItem>> {
+        let mut st = self.inner.lock().unwrap();
+        let Some(t) = st
+            .tasks
+            .iter_mut()
+            .find(|t| t.id == id && t.tenant_id == tenant)
+        else {
+            return Ok(None);
+        };
+        t.assignee_user_id = None;
+        t.updated_at = chrono::Utc::now();
+        Ok(Some(t.clone()))
+    }
+
+    async fn set_agent_ready(&self, _tenant: TenantId, id: TaskId, on: bool) -> ApiResult<()> {
+        let mut st = self.inner.lock().unwrap();
+        let present = st
+            .task_labels
+            .iter()
+            .any(|(t, n)| *t == id.0 && n == "agent-ready");
+        match (on, present) {
+            (true, false) => st.task_labels.push((id.0, "agent-ready".into())),
+            (false, true) => st
+                .task_labels
+                .retain(|(t, n)| !(*t == id.0 && n == "agent-ready")),
+            _ => {}
+        }
+        Ok(())
+    }
+
+    async fn list_labels(&self, tenant: TenantId) -> ApiResult<Vec<Label>> {
+        let st = self.inner.lock().unwrap();
+        let mut v: Vec<Label> = st
+            .labels
+            .iter()
+            .filter(|l| l.tenant_id == tenant)
+            .cloned()
+            .collect();
+        v.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(v)
+    }
+
+    async fn upsert_label(&self, tenant: TenantId, name: &str, color: &str) -> ApiResult<Label> {
+        let mut st = self.inner.lock().unwrap();
+        if let Some(l) = st
+            .labels
+            .iter()
+            .find(|l| l.tenant_id == tenant && l.name == name)
+        {
+            return Ok(l.clone());
+        }
+        let l = Label {
+            id: Uuid::now_v7(),
+            tenant_id: tenant,
+            name: name.into(),
+            color: color.into(),
+            created_at: chrono::Utc::now(),
+        };
+        st.labels.push(l.clone());
+        Ok(l)
+    }
+
+    async fn delete_label(&self, id: Uuid, tenant: TenantId) -> ApiResult<u64> {
+        let mut st = self.inner.lock().unwrap();
+        let before = st.labels.len();
+        let names: Vec<String> = st
+            .labels
+            .iter()
+            .filter(|l| l.id == id && l.tenant_id == tenant)
+            .map(|l| l.name.clone())
+            .collect();
+        st.labels.retain(|l| !(l.id == id && l.tenant_id == tenant));
+        // `task_labels` cascades, so the tasks themselves are untouched.
+        st.task_labels.retain(|(_, n)| !names.contains(n));
+        Ok((before - st.labels.len()) as u64)
+    }
+
+    async fn label_id_by_uuid(&self, id: Uuid, tenant: TenantId) -> ApiResult<Option<Uuid>> {
+        let st = self.inner.lock().unwrap();
+        Ok(st
+            .labels
+            .iter()
+            .find(|l| l.id == id && l.tenant_id == tenant)
+            .map(|l| l.id))
+    }
+
+    async fn label_id_by_name(&self, tenant: TenantId, name: &str) -> ApiResult<Option<Uuid>> {
+        let st = self.inner.lock().unwrap();
+        Ok(st
+            .labels
+            .iter()
+            .find(|l| l.tenant_id == tenant && l.name == name)
+            .map(|l| l.id))
+    }
+
+    async fn labels_of_task(&self, task: TaskId) -> ApiResult<Vec<Label>> {
+        let st = self.inner.lock().unwrap();
+        let mut v: Vec<Label> = st
+            .task_labels
+            .iter()
+            .filter(|(t, _)| *t == task.0)
+            .filter_map(|(_, n)| st.labels.iter().find(|l| l.name == *n).cloned())
+            .collect();
+        v.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(v)
+    }
+
+    async fn attach_label_id(&self, task: TaskId, label: Uuid) -> ApiResult<u64> {
+        let mut st = self.inner.lock().unwrap();
+        let Some(name) = st
+            .labels
+            .iter()
+            .find(|l| l.id == label)
+            .map(|l| l.name.clone())
+        else {
+            return Ok(0);
+        };
+        if st
+            .task_labels
+            .iter()
+            .any(|(t, n)| *t == task.0 && *n == name)
+        {
+            return Ok(0); // already attached — the caller records no event
+        }
+        st.task_labels.push((task.0, name));
+        Ok(1)
+    }
+
+    async fn detach_label_id(&self, task: TaskId, label: Uuid) -> ApiResult<u64> {
+        let mut st = self.inner.lock().unwrap();
+        let Some(name) = st
+            .labels
+            .iter()
+            .find(|l| l.id == label)
+            .map(|l| l.name.clone())
+        else {
+            return Ok(0);
+        };
+        let before = st.task_labels.len();
+        st.task_labels
+            .retain(|(t, n)| !(*t == task.0 && *n == name));
+        Ok((before - st.task_labels.len()) as u64)
+    }
+
+    async fn task_naming(
+        &self,
+        task: TaskId,
+    ) -> ApiResult<Option<(String, Option<i32>, Option<String>)>> {
+        let st = self.inner.lock().unwrap();
+        Ok(st.tasks.iter().find(|t| t.id == task).map(|t| {
+            (
+                t.title.clone(),
+                t.number,
+                st.boards
+                    .iter()
+                    .find(|b| b.id == t.board_id)
+                    .and_then(|b| b.key.clone()),
+            )
+        }))
+    }
+
+    async fn create_board(
+        &self,
+        tenant: TenantId,
+        workspace: Option<Uuid>,
+        name: &str,
+        key: &str,
+    ) -> ApiResult<Board> {
+        let mut st = self.inner.lock().unwrap();
+        let now = chrono::Utc::now();
+        let b = Board {
+            id: BoardId::new(),
+            tenant_id: tenant,
+            workspace_id: workspace.map(WorkspaceId),
+            name: name.into(),
+            key: Some(key.into()),
+            provider: "local".into(),
+            automation: serde_json::json!({}),
+            created_at: now,
+            updated_at: now,
+        };
+        st.next_number.insert(b.id.0, 1);
+        st.boards.push(b.clone());
+        Ok(b)
+    }
+
+    async fn create_column(
+        &self,
+        board: BoardId,
+        name: &str,
+        position: i32,
+        type_: &str,
+    ) -> ApiResult<BoardColumn> {
+        let mut st = self.inner.lock().unwrap();
+        let c = BoardColumn {
+            id: ColumnId::new(),
+            board_id: board,
+            name: name.into(),
+            position,
+            r#type: type_.into(),
+        };
+        st.columns.push(c.clone());
+        Ok(c)
+    }
+
+    async fn set_archived(
+        &self,
+        id: TaskId,
+        tenant: TenantId,
+        archived: bool,
+    ) -> ApiResult<Option<TaskItem>> {
+        let mut st = self.inner.lock().unwrap();
+        let Some(t) = st
+            .tasks
+            .iter_mut()
+            .find(|t| t.id == id && t.tenant_id == tenant)
+        else {
+            return Ok(None);
+        };
+        t.archived_at = archived.then(chrono::Utc::now);
+        t.updated_at = chrono::Utc::now();
+        Ok(Some(t.clone()))
+    }
+
+    async fn archive_all_in_column(
+        &self,
+        column: ColumnId,
+        tenant: TenantId,
+    ) -> ApiResult<Vec<TaskId>> {
+        let mut st = self.inner.lock().unwrap();
+        let now = chrono::Utc::now();
+        let mut moved = vec![];
+        for t in st.tasks.iter_mut() {
+            if t.column_id == column && t.tenant_id == tenant && t.archived_at.is_none() {
+                t.archived_at = Some(now);
+                t.updated_at = now;
+                moved.push(t.id);
+            }
+        }
+        Ok(moved)
+    }
+
+    async fn delete_task(&self, id: TaskId, tenant: TenantId) -> ApiResult<u64> {
+        let mut st = self.inner.lock().unwrap();
+        let before = st.tasks.len();
+        st.tasks.retain(|t| !(t.id == id && t.tenant_id == tenant));
+        Ok((before - st.tasks.len()) as u64)
+    }
+
+    async fn update_board(
+        &self,
+        id: BoardId,
+        tenant: TenantId,
+        name: &str,
+        key: Option<String>,
+        automation: Option<serde_json::Value>,
+    ) -> ApiResult<Option<Board>> {
+        let mut st = self.inner.lock().unwrap();
+        let Some(b) = st
+            .boards
+            .iter_mut()
+            .find(|b| b.id == id && b.tenant_id == tenant)
+        else {
+            return Ok(None);
+        };
+        b.name = name.into();
+        // COALESCE: absent leaves it alone.
+        if key.is_some() {
+            b.key = key;
+        }
+        if let Some(a) = automation {
+            b.automation = a;
+        }
+        b.updated_at = chrono::Utc::now();
+        Ok(Some(b.clone()))
+    }
+
+    async fn board_key_taken(&self, tenant: TenantId, key: &str) -> ApiResult<bool> {
+        let st = self.inner.lock().unwrap();
+        Ok(st
+            .boards
+            .iter()
+            .any(|b| b.tenant_id == tenant && b.key.as_deref() == Some(key)))
+    }
+
+    async fn comments_of(&self, task: TaskId) -> ApiResult<Vec<TaskComment>> {
+        let st = self.inner.lock().unwrap();
+        let mut v: Vec<TaskComment> = st
+            .comments
+            .iter()
+            .filter(|c| c.task_id == task)
+            .cloned()
+            .collect();
+        v.sort_by_key(|c| c.created_at);
+        Ok(v)
+    }
+
+    async fn create_comment(&self, new: NewComment) -> ApiResult<TaskComment> {
+        let now = chrono::Utc::now();
+        let c = TaskComment {
+            id: Uuid::now_v7(),
+            tenant_id: new.tenant,
+            task_id: new.task,
+            author_type: new.author_type,
+            author_id: new.author_id,
+            author_name: new.author_name,
+            body_md: new.body_md,
+            created_at: now,
+            updated_at: now,
+        };
+        self.inner.lock().unwrap().comments.push(c.clone());
+        Ok(c)
+    }
+
+    async fn task_visibility_naming(
+        &self,
+        task: TaskId,
+        tenant: TenantId,
+    ) -> ApiResult<Option<(String, Option<i32>, Option<String>)>> {
+        let st = self.inner.lock().unwrap();
+        Ok(st
+            .tasks
+            .iter()
+            .find(|t| t.id == task && t.tenant_id == tenant)
+            .map(|t| {
+                (
+                    t.visibility.clone(),
+                    t.number,
+                    st.boards
+                        .iter()
+                        .find(|b| b.id == t.board_id)
+                        .and_then(|b| b.key.clone()),
+                )
+            }))
+    }
+
+    async fn update_comment(
+        &self,
+        id: Uuid,
+        tenant: TenantId,
+        body_md: &str,
+    ) -> ApiResult<TaskComment> {
+        let mut st = self.inner.lock().unwrap();
+        let c = st
+            .comments
+            .iter_mut()
+            .find(|c| c.id == id && c.tenant_id == tenant)
+            .expect("comment exists");
+        c.body_md = body_md.into();
+        c.updated_at = chrono::Utc::now();
+        Ok(c.clone())
+    }
+
+    async fn delete_comment(&self, id: Uuid, tenant: TenantId) -> ApiResult<()> {
+        let mut st = self.inner.lock().unwrap();
+        st.comments
+            .retain(|c| !(c.id == id && c.tenant_id == tenant));
+        Ok(())
+    }
+
+    async fn comment_author(
+        &self,
+        id: Uuid,
+        tenant: TenantId,
+    ) -> ApiResult<Option<(Option<Uuid>, TaskId)>> {
+        let st = self.inner.lock().unwrap();
+        Ok(st
+            .comments
+            .iter()
+            .find(|c| c.id == id && c.tenant_id == tenant)
+            .map(|c| (c.author_id, c.task_id)))
+    }
+
+    async fn upsert_relation(
+        &self,
+        tenant: TenantId,
+        from: TaskId,
+        to: TaskId,
+        kind: &str,
+    ) -> ApiResult<TaskRelation> {
+        let mut st = self.inner.lock().unwrap();
+        if let Some(r) = st
+            .relations
+            .iter_mut()
+            .find(|r| r.from_task == from && r.to_task == to && r.kind == kind)
+        {
+            return Ok(r.clone());
+        }
+        let r = TaskRelation {
+            id: Uuid::now_v7(),
+            tenant_id: tenant,
+            from_task: from,
+            to_task: to,
+            kind: kind.into(),
+            created_at: chrono::Utc::now(),
+        };
+        st.relations.push(r.clone());
+        Ok(r)
+    }
+
+    async fn blocks_reaches(&self, start: TaskId, target: TaskId) -> ApiResult<bool> {
+        let st = self.inner.lock().unwrap();
+        // The recursive CTE, iteratively. `seen` is what stops a pre-existing
+        // cycle from making the guard itself run forever.
+        let mut seen = std::collections::HashSet::new();
+        let mut frontier = vec![start];
+        while let Some(cur) = frontier.pop() {
+            for r in st
+                .relations
+                .iter()
+                .filter(|r| r.kind == "blocks" && r.from_task == cur)
+            {
+                if r.to_task == target {
+                    return Ok(true);
+                }
+                if seen.insert(r.to_task) {
+                    frontier.push(r.to_task);
+                }
+            }
+        }
+        Ok(false)
+    }
+
+    async fn delete_relation(&self, id: Uuid, tenant: TenantId) -> ApiResult<u64> {
+        let mut st = self.inner.lock().unwrap();
+        let before = st.relations.len();
+        st.relations
+            .retain(|r| !(r.id == id && r.tenant_id == tenant));
+        Ok((before - st.relations.len()) as u64)
+    }
+
+    async fn epic_children(&self, parent: TaskId, viewer: UserId) -> ApiResult<Vec<EpicChild>> {
+        let st = self.inner.lock().unwrap();
+        let mut kids: Vec<&TaskItem> = st
+            .tasks
+            .iter()
+            .filter(|t| t.parent_task_id == Some(parent))
+            .filter(|t| {
+                crate::services::tasks::visible_by_cols(
+                    &t.visibility,
+                    t.created_by,
+                    t.assignee_user_id,
+                    viewer,
+                )
+            })
+            .collect();
+        kids.sort_by_key(|t| (if t.priority == 0 { 5 } else { t.priority }, t.created_at));
+        Ok(kids
+            .into_iter()
+            .map(|t| EpicChild {
+                id: t.id,
+                key: st
+                    .boards
+                    .iter()
+                    .find(|b| b.id == t.board_id)
+                    .and_then(|b| b.key.clone())
+                    .zip(t.number)
+                    .map(|(k, n)| format!("{k}-{n}")),
+                title: t.title.clone(),
+                type_: t.type_.clone(),
+                priority: t.priority,
+                column_type: st
+                    .columns
+                    .iter()
+                    .find(|c| c.id == t.column_id)
+                    .map(|c| c.r#type.clone())
+                    .unwrap_or_default(),
+                archived_at: t.archived_at,
+            })
+            .collect())
+    }
+
+    async fn related_tasks(&self, task: TaskId, viewer: UserId) -> ApiResult<Vec<RelatedTask>> {
+        let st = self.inner.lock().unwrap();
+        let mut out: Vec<RelatedTask> = st
+            .relations
+            .iter()
+            .filter(|r| r.from_task == task || r.to_task == task)
+            .filter_map(|r| {
+                let other = if r.from_task == task {
+                    r.to_task
+                } else {
+                    r.from_task
+                };
+                let t = st.tasks.iter().find(|t| t.id == other)?;
+                if !crate::services::tasks::visible_by_cols(
+                    &t.visibility,
+                    t.created_by,
+                    t.assignee_user_id,
+                    viewer,
+                ) {
+                    return None;
+                }
+                Some(RelatedTask {
+                    relation_id: r.id,
+                    id: t.id,
+                    title: t.title.clone(),
+                    key: st
+                        .boards
+                        .iter()
+                        .find(|b| b.id == t.board_id)
+                        .and_then(|b| b.key.clone())
+                        .zip(t.number)
+                        .map(|(k, n)| format!("{k}-{n}")),
+                    kind: match (r.kind.as_str(), r.to_task == task) {
+                        ("blocks", true) => "blocked_by".into(),
+                        ("blocks", false) => "blocking".into(),
+                        (k, _) => k.into(),
+                    },
+                    column_type: st
+                        .columns
+                        .iter()
+                        .find(|c| c.id == t.column_id)
+                        .map(|c| c.r#type.clone())
+                        .unwrap_or_default(),
+                })
+            })
+            .collect();
+        out.sort_by_key(|r| r.key.clone());
+        Ok(out)
     }
 }

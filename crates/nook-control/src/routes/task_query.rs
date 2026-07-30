@@ -13,7 +13,6 @@
 
 use axum::extract::{Path, RawQuery, State};
 use axum::Json;
-use nook_db::{params, CiMatch, Db, Postgres, TypeMapping};
 use nook_types::*;
 use serde::Deserialize;
 
@@ -196,7 +195,7 @@ pub async fn pick(
     viewer: UserId,
     f: TaskFilter,
 ) -> ApiResult<Vec<TaskItem>> {
-    let rows = query_rows(&state.db, state.tasks.as_ref(), tenant, viewer, &f).await?;
+    let rows = query_rows(state.tasks.as_ref(), tenant, viewer, &f).await?;
     tasks::enrich(
         state.tasks.as_ref(),
         &state.cfg.public_base_url,
@@ -210,9 +209,6 @@ pub async fn pick(
 /// exclusion (and the rest of the filter) can be tested against a real database
 /// without constructing an `AppState`.
 pub async fn query_rows(
-    db: &nook_db::DbPool,
-    // The pick SQL stays on the pool (this file is not one MAIN-248 owns); only
-    // the parent resolution moved behind the repository.
     repo: &dyn crate::repo::tasks::TaskRepository,
     tenant: TenantId,
     viewer: UserId,
@@ -270,129 +266,30 @@ pub async fn query_rows(
         .collect();
     let types: Vec<String> = f.type_.iter().map(|t| t.trim().to_lowercase()).collect();
 
-    let rows: Vec<TaskItem> = db
-        .query_all(
-            &format!(
-                r#"
-        SELECT t.* FROM tasks t
-        JOIN boards b ON b.id = t.board_id
-        JOIN board_columns c ON c.id = t.column_id
-        WHERE t.tenant_id = $1
-          AND ({b_text} IS NULL OR {bid_text} = $2 OR upper(b.key) = upper($2))
-          AND ({ws} IS NULL OR t.workspace_id = $3)
-          AND ({col_text} IS NULL OR c.type = $4)
-          AND ({prio_int}  IS NULL OR t.priority = $5)
-          AND (NOT {unassigned_bool} OR t.assignee_user_id IS NULL)
-          AND ({assignee} IS NULL OR t.assignee_user_id = $7)
-          -- every required label must be present
-          AND (cardinality({labels_arr}) = 0 OR (
-                SELECT count(DISTINCT l.name) FROM task_labels tl
-                JOIN labels l ON l.id = tl.label_id
-                WHERE tl.task_id = t.id AND l.name = ANY($8)
-              ) = cardinality({labels_arr}))
-          -- and none of the excluded ones
-          AND NOT EXISTS (
-                SELECT 1 FROM task_labels tl
-                JOIN labels l ON l.id = tl.label_id
-                WHERE tl.task_id = t.id AND l.name = ANY({not_labels_arr}))
-          -- blocked is DERIVED: an unfinished task pointing here with `blocks`
-          AND ({blocked_bool} IS NULL OR $10 = EXISTS (
-                SELECT 1 FROM task_relations r
-                JOIN tasks bt ON bt.id = r.from_task
-                JOIN board_columns bc ON bc.id = bt.column_id
-                WHERE r.to_task = t.id AND r.kind = 'blocks'
-                  AND bc.type NOT IN ('completed', 'canceled')))
-          AND ({created} IS NULL OR t.created_at > $11)
-          -- archived work is off the board and NEVER pickable unless explicitly asked for
-          AND ({archived_bool} OR t.archived_at IS NULL)
-          -- free-text search across title, description, and display key (MAIN-54).
-          -- Substring, case-insensitive; ANDs with every filter above.
-          AND ({q_text} IS NULL OR (
-                    {title_match}
-                 OR {desc_match}
-                 OR {key_match}))
-          -- issue-type filter (MAIN-59) + epic exclusion (MAIN-80): with an
-          -- explicit type filter the requested types pass (so `type=epic`
-          -- surfaces epics on purpose); with no type filter, everything EXCEPT
-          -- `epic` passes — an epic is a container, never a unit of work the
-          -- loop should pick. Labels (incl. agent-ready) have no bearing.
-          AND (t.type = ANY($15)
-               OR (cardinality({types_arr}) = 0 AND t.type <> 'epic'))
-          -- per-task visibility (MAIN-76): a `private` card is seen only by its
-          -- creator or assignee; `team`/`org` are tenant-visible. Same predicate
-          -- an agent's claim path enforces, so the list never shows work it
-          -- could not then start.
-          AND (t.visibility <> 'private' OR t.created_by = $16 OR t.assignee_user_id = $16)
-          -- explicit visibility filter (MAIN-103 AC-3): ANDs with the viewer
-          -- predicate above, so it can only NARROW — `visibility=private` still
-          -- shows only the caller's own private cards, never a teammate's.
-          AND (cardinality({vis_arr}) = 0 OR t.visibility = ANY($19))
-          -- epic children (MAIN-81): when a parent is given, restrict to its
-          -- tickets. This spans every column (children live in backlog and on
-          -- the board), so it deliberately does NOT constrain the column type.
-          -- BOTH this and the visibility predicate apply, so an epic's children
-          -- are still filtered to what the viewer may see.
-          AND ({parent} IS NULL OR t.parent_task_id = $17)
-          -- backlog exclusion (MAIN-80): a `backlog`-type column is the human
-          -- refinement space; the loop never draws from it unless `backlog=true`
-          -- ($18). AC-3: a `parent=` query (an epic's children, which span
-          -- backlog and board — $17 present) LIFTS this exclusion, so listing an
-          -- epic's tickets never silently drops the ones still in triage.
-          AND ({backlog_bool} OR {parent} IS NOT NULL OR c.type <> 'backlog')
-        -- priority 0 means "unset", which sorts last rather than first
-        ORDER BY CASE WHEN t.priority = 0 THEN 5 ELSE t.priority END, t.created_at
-        LIMIT $12
-        "#,
-                ws = Postgres.cast("$3", "uuid"),
-                assignee = Postgres.cast("$7", "uuid"),
-                created = Postgres.cast("$11", "timestamptz"),
-                parent = Postgres.cast("$17", "uuid"),
-                b_text = Postgres.cast("$2", "text"),
-                bid_text = Postgres.cast("b.id", "text"),
-                col_text = Postgres.cast("$4", "text"),
-                prio_int = Postgres.cast("$5", "int"),
-                unassigned_bool = Postgres.cast("$6", "bool"),
-                blocked_bool = Postgres.cast("$10", "bool"),
-                archived_bool = Postgres.cast("$13", "bool"),
-                q_text = Postgres.cast("$14", "text"),
-                title_match = Postgres.ci_match("t.title", "$14"),
-                desc_match = Postgres.ci_match("t.description", "$14"),
-                key_match = Postgres.ci_match(
-                    &format!("(b.key || '-' || {})", Postgres.cast("t.number", "text")),
-                    "$14"
-                ),
-                backlog_bool = Postgres.cast("$18", "bool"),
-                labels_arr = Postgres.cast("$8", "text[]"),
-                not_labels_arr = Postgres.cast("$9", "text[]"),
-                types_arr = Postgres.cast("$15", "text[]"),
-                vis_arr = Postgres.cast("$19", "text[]"),
-            ),
-            params![
-                tenant,
-                f.board.as_deref(),
-                f.workspace,
-                f.column_type.as_deref(),
-                f.priority,
+    let rows = repo
+        .pick_tasks(
+            tenant,
+            viewer,
+            crate::repo::tasks::PickParams {
+                board: f.board.clone(),
+                workspace: f.workspace,
+                column_type: f.column_type.clone(),
+                priority: f.priority,
                 unassigned_only,
-                assignee_id,
+                assignee: assignee_id,
                 labels,
                 not_labels,
-                f.is_blocked,
-                f.cursor,
+                is_blocked: f.is_blocked,
+                created_after: f.cursor,
                 limit,
-                f.archived.unwrap_or(false),
-                // `%term%` for a substring match; None disables the clause via the IS NULL guard.
-                f.q.as_ref().map(|s| format!("%{s}%")),
+                archived: f.archived.unwrap_or(false),
+                // `%term%` for a substring match; None disables the clause.
+                q: f.q.as_ref().map(|s| format!("%{s}%")),
                 types,
-                // $16: the viewer, for the visibility predicate above.
-                viewer,
-                // $17: the epic-children filter (None disables it via the IS NULL guard).
-                parent_id,
-                // $18: include backlog-column tasks (default false, MAIN-80).
-                f.backlog.unwrap_or(false),
-                // $19: explicit visibility filter (empty = no filter, MAIN-103).
-                &f.visibility[..]
-            ],
+                parent: parent_id,
+                backlog: f.backlog.unwrap_or(false),
+                visibility: f.visibility.clone(),
+            },
         )
         .await?;
 
@@ -436,12 +333,9 @@ pub async fn claim_inner(
     // read filter, and so a non-owner agent cannot claim it even by id. Checked
     // first so a non-owner cannot even distinguish a backlog/epic refusal from
     // "does not exist".
-    let existing: TaskItem = state
-        .db
-        .query_opt(
-            "SELECT * FROM tasks WHERE id = $1 AND tenant_id = $2",
-            params![id, tenant],
-        )
+    let existing = state
+        .tasks
+        .get_row(tenant, id)
         .await?
         .ok_or(ApiError::NotFound)?;
     if !tasks::visible_to(&existing, claimant) {
@@ -454,13 +348,7 @@ pub async fn claim_inner(
     // refinement space; an epic is a container, not a unit of work. The task
     // row is already loaded above for the visibility guard (its `type_` is the
     // epic test); only the column's type needs a lookup.
-    let column_kind: Option<String> = state
-        .db
-        .query_scalar_opt(
-            "SELECT c.type FROM board_columns c WHERE c.id = $1",
-            params![existing.column_id],
-        )
-        .await?;
+    let column_kind = state.tasks.column_type_of(existing.column_id).await?;
     if column_kind.as_deref() == Some("backlog") {
         return Err(ApiError::BadRequest(
             "task is in the backlog — send it to the board first".into(),
@@ -477,41 +365,22 @@ pub async fn claim_inner(
     // the caller gets a 409 naming the type before anything is written.
     let target = match column_type.as_deref() {
         Some(ct) => {
-            let board: BoardId = state
-                .db
-                .query_scalar("SELECT board_id FROM tasks WHERE id = $1", params![id])
-                .await?;
+            let board = state
+                .tasks
+                .board_of_task(id)
+                .await?
+                .ok_or(ApiError::NotFound)?;
             Some(tasks::column_of_type(state.tasks.as_ref(), board, ct).await?)
         }
         None => None,
     };
 
-    let updated: Option<TaskItem> = state
-        .db
-        .query_opt(
-            &format!(
-                "UPDATE tasks SET
-             assignee_user_id = $1,
-             column_id = coalesce($2, column_id),
-             updated_at = {}
-         WHERE id = $3 AND tenant_id = $4 AND assignee_user_id IS NULL
-         RETURNING *",
-                Postgres.now()
-            ),
-            params![claimant, target.map(|c| c.0), id, tenant],
-        )
-        .await?;
+    let updated = state.tasks.claim_task(id, tenant, claimant, target).await?;
 
     let Some(task) = updated else {
         // Losing a race is the expected outcome for all but one caller, so the
         // message says what to do rather than merely that something failed.
-        let current: Option<Option<UserId>> = state
-            .db
-            .query_scalar_opt(
-                "SELECT assignee_user_id FROM tasks WHERE id = $1 AND tenant_id = $2",
-                params![id, tenant],
-            )
-            .await?;
+        let current = state.tasks.assignee_of(id, tenant).await?;
         return match current {
             Some(Some(_)) => Err(ApiError::Conflict(
                 "somebody else claimed this first — pick another task".into(),
@@ -568,16 +437,9 @@ pub async fn release(
     Path(ident): Path<String>,
 ) -> ApiResult<Json<TaskItem>> {
     let id = tasks::resolve_id(state.tasks.as_ref(), auth.tenant_id, &ident).await?;
-    let task: TaskItem = state
-        .db
-        .query_opt(
-            &format!(
-                "UPDATE tasks SET assignee_user_id = NULL, updated_at = {}
-         WHERE id = $1 AND tenant_id = $2 RETURNING *",
-                Postgres.now()
-            ),
-            params![id, auth.tenant_id],
-        )
+    let task = state
+        .tasks
+        .release_assignment(id, auth.tenant_id)
         .await?
         .ok_or(ApiError::NotFound)?;
     state.registry.publish(
@@ -834,7 +696,6 @@ mod db_tests {
             };
             async move {
                 query_rows(
-                    &db,
                     &crate::repo::tasks::DbTaskRepository::new(db.clone()),
                     TenantId(tenant),
                     nook_types::UserId::new(),
@@ -930,7 +791,6 @@ mod db_tests {
             ..Default::default()
         };
         let default_ids: Vec<TaskId> = query_rows(
-            &db,
             &crate::repo::tasks::DbTaskRepository::new(db.clone()),
             TenantId(tenant),
             nook_types::UserId::new(),
@@ -947,7 +807,6 @@ mod db_tests {
             ..f.clone()
         };
         let all_ids: Vec<TaskId> = query_rows(
-            &db,
             &crate::repo::tasks::DbTaskRepository::new(db.clone()),
             TenantId(tenant),
             nook_types::UserId::new(),
@@ -1084,7 +943,6 @@ mod db_tests {
             };
             async move {
                 query_rows(
-                    &db,
                     &crate::repo::tasks::DbTaskRepository::new(db.clone()),
                     TenantId(tenant),
                     nook_types::UserId(me),

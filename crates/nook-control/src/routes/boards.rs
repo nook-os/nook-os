@@ -1,6 +1,6 @@
 use axum::extract::{Path, State};
 use axum::Json;
-use nook_db::{params, Db, Postgres, TypeMapping};
+use nook_db::{params, Db};
 use nook_types::*;
 
 use crate::auth::AuthCtx;
@@ -33,18 +33,13 @@ pub async fn create(
         None => unique_key(&state, auth.tenant_id, &req.name).await?,
     };
 
-    let board: Board = state
-        .db
-        .query_one(
-            "INSERT INTO boards (id, tenant_id, workspace_id, name, key, provider)
-         VALUES ($1, $2, $3, $4, $5, 'local') RETURNING *",
-            params![
-                BoardId::new(),
-                auth.tenant_id,
-                req.workspace_id.map(|w| w.0),
-                &req.name,
-                &key
-            ],
+    let board = state
+        .tasks
+        .create_board(
+            auth.tenant_id,
+            req.workspace_id.map(|w| w.0),
+            &req.name,
+            &key,
         )
         .await?;
 
@@ -61,13 +56,9 @@ pub async fn create(
     .iter()
     .enumerate()
     {
-        let col: BoardColumn = state
-            .db
-            .query_one(
-                "INSERT INTO board_columns (id, board_id, name, position, type)
-             VALUES ($1, $2, $3, $4, $5) RETURNING *",
-                params![ColumnId::new(), board.id, *name, i as i32, *kind],
-            )
+        let col = state
+            .tasks
+            .create_column(board.id, name, i as i32, kind)
             .await?;
         columns.push(col);
     }
@@ -230,12 +221,9 @@ pub async fn update_task(
     // Load the whole task so visibility is checked before any change: a private
     // card cannot be seen OR altered by anyone but its owner (MAIN-76 AC-5),
     // including a tenant admin — refused as NotFound, consistent with the read.
-    let existing: TaskItem = state
-        .db
-        .query_opt(
-            "SELECT * FROM tasks WHERE id = $1 AND tenant_id = $2",
-            params![id, auth.tenant_id],
-        )
+    let existing = state
+        .tasks
+        .get_row(auth.tenant_id, id)
         .await?
         .ok_or(ApiError::NotFound)?;
     if !crate::services::tasks::visible_to(&existing, auth.user_id) {
@@ -320,17 +308,9 @@ pub(crate) async fn set_archived(
 ) -> ApiResult<TaskItem> {
     let id =
         crate::services::tasks::resolve_id(state.tasks.as_ref(), auth.tenant_id, ident).await?;
-    let task: TaskItem = state
-        .db
-        .query_opt(
-            &format!(
-                "UPDATE tasks SET archived_at = CASE WHEN $3 THEN {now} ELSE NULL END,
-                          updated_at = {now}
-         WHERE id = $1 AND tenant_id = $2 RETURNING *",
-                now = Postgres.now()
-            ),
-            params![id, auth.tenant_id, archive],
-        )
+    let task = state
+        .tasks
+        .set_archived(id, auth.tenant_id, archive)
         .await?
         .ok_or(ApiError::NotFound)?;
 
@@ -402,14 +382,9 @@ pub async fn archive_completed_in_column(
 ) -> ApiResult<Json<nook_types::OpResponse>> {
     auth.require_user()?;
     // board_columns has no tenant_id; scope through its board.
-    let col: Option<String> = state
-        .db
-        .query_scalar_opt(
-            "SELECT c.type FROM board_columns c
-         JOIN boards b ON b.id = c.board_id
-         WHERE c.id = $1 AND b.tenant_id = $2",
-            params![column_id, auth.tenant_id],
-        )
+    let col = state
+        .tasks
+        .column_type_in_tenant(column_id, auth.tenant_id)
         .await?;
     let col_type = col.ok_or(ApiError::NotFound)?;
     if col_type != "completed" && col_type != "canceled" {
@@ -418,17 +393,9 @@ pub async fn archive_completed_in_column(
         ));
     }
 
-    let ids: Vec<TaskId> = state
-        .db
-        .query_scalar_all(
-            &format!(
-                "UPDATE tasks SET archived_at = {now}, updated_at = {now}
-         WHERE column_id = $1 AND tenant_id = $2 AND archived_at IS NULL
-         RETURNING id",
-                now = Postgres.now()
-            ),
-            params![column_id, auth.tenant_id],
-        )
+    let ids = state
+        .tasks
+        .archive_all_in_column(column_id, auth.tenant_id)
         .await?;
 
     // One TaskChanged per card so each disappears live; the board query
@@ -466,13 +433,7 @@ pub async fn delete_task(
 ) -> ApiResult<axum::http::StatusCode> {
     let id =
         crate::services::tasks::resolve_id(state.tasks.as_ref(), auth.tenant_id, &ident).await?;
-    let res = state
-        .db
-        .exec(
-            "DELETE FROM tasks WHERE id = $1 AND tenant_id = $2",
-            params![id, auth.tenant_id],
-        )
-        .await?;
+    let res = state.tasks.delete_task(id, auth.tenant_id).await?;
     if res == 0 {
         return Err(ApiError::NotFound);
     }
@@ -499,17 +460,9 @@ pub async fn update_board(
     if let Some(automation) = &req.automation {
         crate::services::triggers::validate(automation)?;
     }
-    let board: Option<Board> = state
-        .db
-        .query_opt(
-            &format!(
-                "UPDATE boards SET name = $3, key = COALESCE($4, key),
-                           automation = COALESCE($5, automation), updated_at = {}
-         WHERE id = $1 AND tenant_id = $2 RETURNING *",
-                Postgres.now()
-            ),
-            params![id, auth.tenant_id, &req.name, key, req.automation],
-        )
+    let board = state
+        .tasks
+        .update_board(id, auth.tenant_id, &req.name, key, req.automation.clone())
         .await?;
     board.map(Json).ok_or(ApiError::NotFound)
 }
@@ -566,14 +519,8 @@ async fn unique_key(state: &AppState, tenant: TenantId, name: &str) -> ApiResult
         } else {
             format!("{base}{n}")
         };
-        let taken: Option<uuid::Uuid> = state
-            .db
-            .query_scalar_opt(
-                "SELECT id FROM boards WHERE tenant_id = $1 AND key = $2",
-                params![tenant, &candidate],
-            )
-            .await?;
-        if taken.is_none() {
+        let taken = state.tasks.board_key_taken(tenant, &candidate).await?;
+        if !taken {
             return Ok(candidate);
         }
     }

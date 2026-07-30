@@ -78,7 +78,6 @@ async fn pick_ids(db: &PgPool, tenant: TenantId, f: &TaskFilter) -> Vec<TaskId> 
     // These fixtures set no visibility (default non-private), so any viewer sees
     // them; the pick's MAIN-76 predicate is exercised by task_visibility.rs.
     query_rows(
-        &nook_db::EnginePool::from_pg(db.clone()),
         &nook_control::repo::tasks::DbTaskRepository::new(nook_db::EnginePool::from_pg(db.clone())),
         tenant,
         UserId::new(),

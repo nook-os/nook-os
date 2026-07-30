@@ -16,7 +16,6 @@
 
 use axum::extract::{Path, State};
 use axum::Json;
-use nook_db::{params, Db, Postgres, TypeMapping};
 use nook_types::*;
 
 use crate::auth::{AuthCtx, Principal};
@@ -41,16 +40,7 @@ pub async fn list_comments(
 pub async fn comments_of(state: &AppState, task: TaskId) -> ApiResult<Vec<TaskComment>> {
     // Oldest first: a comment thread is read as a narrative, and the loop
     // parses the latest verdict by taking the last one.
-    let rows: Vec<TaskComment> = state
-        .db
-        .query_all(
-            "SELECT id, tenant_id, task_id, author_type, author_id, author_name,
-                body_md, created_at, updated_at
-         FROM task_comments WHERE task_id = $1 ORDER BY created_at",
-            params![task],
-        )
-        .await?;
-    Ok(rows)
+    state.tasks.comments_of(task).await
 }
 
 #[utoipa::path(post, path = "/api/v1/tasks/{id}/comments",
@@ -80,23 +70,16 @@ pub async fn create_comment(
         _ => display_name(&state, auth.user_id).await,
     };
 
-    let row: TaskComment = state
-        .db
-        .query_one(
-            "INSERT INTO task_comments (id, tenant_id, task_id, author_type, author_id, author_name, body_md)
-         VALUES ($1, $2, $3, $4, $5, $6, $7)
-         RETURNING id, tenant_id, task_id, author_type, author_id, author_name,
-                   body_md, created_at, updated_at",
-            params![
-                uuid::Uuid::now_v7(),
-                auth.tenant_id,
-                task,
-                author_type,
-                author_id,
-                &name,
-                &req.body_md
-            ],
-        )
+    let row = state
+        .tasks
+        .create_comment(crate::repo::tasks::NewComment {
+            tenant: auth.tenant_id,
+            task,
+            author_type: author_type.to_string(),
+            author_id,
+            author_name: name.clone(),
+            body_md: req.body_md.clone(),
+        })
         .await?;
 
     // Comments are the content; events remain the timeline. Both, so the
@@ -108,14 +91,9 @@ pub async fn create_comment(
     // event carries neither — its body must not reach the tenant-wide feed or a
     // channel, and the absence of an excerpt is exactly what keeps it silent
     // (NG-4, matching MAIN-76's title omission).
-    let meta: Option<(String, Option<i32>, Option<String>)> = state
-        .db
-        .query_opt(
-            "SELECT t.visibility, t.number, b.key FROM tasks t
-         JOIN boards b ON b.id = t.board_id
-         WHERE t.id = $1 AND t.tenant_id = $2",
-            params![task, auth.tenant_id],
-        )
+    let meta = state
+        .tasks
+        .task_visibility_naming(task, auth.tenant_id)
         .await?;
     let mut payload = serde_json::json!({ "task_id": task, "author": name });
     if let Some((visibility, number, board_key)) = meta {
@@ -162,18 +140,9 @@ pub async fn update_comment(
     Json(req): Json<UpdateCommentRequest>,
 ) -> ApiResult<Json<TaskComment>> {
     owned_comment(&state, &auth, id).await?;
-    let row: TaskComment = state
-        .db
-        .query_one(
-            &format!(
-                "UPDATE task_comments SET body_md = $1, updated_at = {}
-         WHERE id = $2 AND tenant_id = $3
-         RETURNING id, tenant_id, task_id, author_type, author_id, author_name,
-                   body_md, created_at, updated_at",
-                Postgres.now()
-            ),
-            params![&req.body_md, id, auth.tenant_id],
-        )
+    let row = state
+        .tasks
+        .update_comment(id, auth.tenant_id, &req.body_md)
         .await?;
     state.registry.publish(
         auth.tenant_id,
@@ -193,13 +162,7 @@ pub async fn delete_comment(
     Path(id): Path<uuid::Uuid>,
 ) -> ApiResult<axum::http::StatusCode> {
     let task = owned_comment(&state, &auth, id).await?;
-    state
-        .db
-        .exec(
-            "DELETE FROM task_comments WHERE id = $1 AND tenant_id = $2",
-            params![id, auth.tenant_id],
-        )
-        .await?;
+    state.tasks.delete_comment(id, auth.tenant_id).await?;
     state.registry.publish(
         auth.tenant_id,
         nook_proto::UiEvent::TaskChanged { task_id: task },
@@ -211,13 +174,7 @@ pub async fn delete_comment(
 ///
 /// Returns the comment's task so callers can publish a change for it.
 async fn owned_comment(state: &AppState, auth: &AuthCtx, id: uuid::Uuid) -> ApiResult<TaskId> {
-    let row: Option<(Option<uuid::Uuid>, TaskId)> = state
-        .db
-        .query_opt(
-            "SELECT author_id, task_id FROM task_comments WHERE id = $1 AND tenant_id = $2",
-            params![id, auth.tenant_id],
-        )
-        .await?;
+    let row = state.tasks.comment_author(id, auth.tenant_id).await?;
     let (author_id, task) = row.ok_or(ApiError::NotFound)?;
     if author_id != Some(auth.user_id.0) {
         return Err(ApiError::ForbiddenMsg(
@@ -228,15 +185,15 @@ async fn owned_comment(state: &AppState, auth: &AuthCtx, id: uuid::Uuid) -> ApiR
 }
 
 async fn display_name(state: &AppState, user: UserId) -> String {
+    // A user's display name is identity data, so it comes from that aggregate's
+    // repository rather than a second copy of the query here (MAIN-246/249).
     state
-        .db
-        .query_scalar_opt::<String>(
-            "SELECT display_name FROM users WHERE id = $1",
-            params![user],
-        )
+        .identity
+        .get_user(user)
         .await
         .ok()
         .flatten()
+        .map(|u| u.display_name)
         .unwrap_or_else(|| "unknown".into())
 }
 
@@ -293,12 +250,9 @@ pub async fn link(
     // own detail — a private task they neither created nor are assigned. A
     // private endpoint they cannot see is refused as NotFound.
     for end in [from, to] {
-        let t: TaskItem = state
-            .db
-            .query_opt(
-                "SELECT * FROM tasks WHERE id = $1 AND tenant_id = $2",
-                params![end, tenant],
-            )
+        let t = state
+            .tasks
+            .get_row(tenant, end)
             .await?
             .ok_or(ApiError::NotFound)?;
         if !tasks::visible_to(&t, viewer) {
@@ -317,16 +271,7 @@ pub async fn link(
         ));
     }
 
-    let row: TaskRelation = state
-        .db
-        .query_one(
-            "INSERT INTO task_relations (id, tenant_id, from_task, to_task, kind)
-         VALUES ($1, $2, $3, $4, $5)
-         ON CONFLICT (from_task, to_task, kind) DO UPDATE SET kind = EXCLUDED.kind
-         RETURNING id, tenant_id, from_task, to_task, kind, created_at",
-            params![uuid::Uuid::now_v7(), tenant, from, to, kind],
-        )
-        .await?;
+    let row = state.tasks.upsert_relation(tenant, from, to, kind).await?;
 
     state
         .registry
@@ -341,21 +286,7 @@ pub async fn link(
 /// terminates it — an existing cycle in the data would otherwise make the walk
 /// itself run forever.
 async fn reaches(state: &AppState, start: TaskId, target: TaskId) -> ApiResult<bool> {
-    let hit: Option<bool> = state
-        .db
-        .query_scalar_opt(
-            "WITH RECURSIVE reachable(id) AS (
-             SELECT to_task FROM task_relations WHERE from_task = $1 AND kind = 'blocks'
-             UNION
-             SELECT r.to_task FROM task_relations r
-             JOIN reachable p ON r.from_task = p.id
-             WHERE r.kind = 'blocks'
-         )
-         SELECT true FROM reachable WHERE id = $2 LIMIT 1",
-            params![start, target],
-        )
-        .await?;
-    Ok(hit.is_some())
+    state.tasks.blocks_reaches(start, target).await
 }
 
 #[utoipa::path(delete, path = "/api/v1/relations/{id}",
@@ -366,13 +297,7 @@ pub async fn delete_relation(
     auth: AuthCtx,
     Path(id): Path<uuid::Uuid>,
 ) -> ApiResult<axum::http::StatusCode> {
-    let res = state
-        .db
-        .exec(
-            "DELETE FROM task_relations WHERE id = $1 AND tenant_id = $2",
-            params![id, auth.tenant_id],
-        )
-        .await?;
+    let res = state.tasks.delete_relation(id, auth.tenant_id).await?;
     if res == 0 {
         return Err(ApiError::NotFound);
     }
@@ -401,12 +326,9 @@ pub async fn detail(
     viewer: UserId,
     id: TaskId,
 ) -> ApiResult<TaskDetail> {
-    let task: TaskItem = state
-        .db
-        .query_opt(
-            "SELECT * FROM tasks WHERE id = $1 AND tenant_id = $2",
-            params![id, tenant],
-        )
+    let task = state
+        .tasks
+        .get_row(tenant, id)
         .await?
         .ok_or(ApiError::NotFound)?;
     // MAIN-76: a private card is a 404 for anyone but its creator or assignee.
@@ -452,26 +374,7 @@ pub async fn detail(
     // created nor is assigned must not leak its title/key through epic detail —
     // the same predicate the list/board reads enforce.
     let children: Vec<EpicChild> = if task.type_ == "epic" {
-        state
-            .db
-            .query_all(
-                &format!(
-                    "SELECT t.id,
-                    (b.key || '-' || {}) AS key,
-                    t.title, t.type, t.priority,
-                    bc.type AS column_type,
-                    t.archived_at
-             FROM tasks t
-             JOIN boards b ON b.id = t.board_id
-             JOIN board_columns bc ON bc.id = t.column_id
-             WHERE t.parent_task_id = $1
-               AND (t.visibility <> 'private' OR t.created_by = $2 OR t.assignee_user_id = $2)
-             ORDER BY CASE WHEN t.priority = 0 THEN 5 ELSE t.priority END, t.created_at",
-                    Postgres.cast("t.number", "text")
-                ),
-                params![id, viewer],
-            )
-            .await?
+        state.tasks.epic_children(id, viewer).await?
     } else {
         Vec::new()
     };
@@ -499,25 +402,6 @@ async fn related_tasks(
     // The OTHER side of each relation is filtered by visibility (MAIN-76): a
     // private task the viewer neither created nor is assigned must not surface
     // its title/key through a relation on a task they can see.
-    let rows: Vec<RelatedTask> = state
-        .db
-        .query_all(
-            "SELECT r.id AS relation_id, t.id, t.title,
-                CASE WHEN b.key IS NOT NULL AND t.number IS NOT NULL
-                     THEN b.key || '-' || t.number END AS key,
-                CASE WHEN r.kind = 'blocks' AND r.to_task = $1 THEN 'blocked_by'
-                     WHEN r.kind = 'blocks' THEN 'blocking'
-                     ELSE r.kind END AS kind,
-                c.type AS column_type
-         FROM task_relations r
-         JOIN tasks t ON t.id = CASE WHEN r.from_task = $1 THEN r.to_task ELSE r.from_task END
-         JOIN boards b ON b.id = t.board_id
-         JOIN board_columns c ON c.id = t.column_id
-         WHERE (r.from_task = $1 OR r.to_task = $1)
-           AND (t.visibility <> 'private' OR t.created_by = $2 OR t.assignee_user_id = $2)
-         ORDER BY t.number",
-            params![id, viewer],
-        )
-        .await?;
+    let rows = state.tasks.related_tasks(id, viewer).await?;
     Ok(rows)
 }

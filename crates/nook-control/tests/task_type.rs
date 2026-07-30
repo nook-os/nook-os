@@ -178,7 +178,7 @@ async fn the_list_filter_ors_within_types_and_is_off_by_default() {
         let db = bed.db();
         let repo = nook_control::repo::tasks::DbTaskRepository::new(db.clone());
         async move {
-            query_rows(&db, &repo, tenant, nook_types::UserId::new(), &f)
+            query_rows(&repo, tenant, nook_types::UserId::new(), &f)
                 .await
                 .expect("query")
         }
