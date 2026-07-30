@@ -36,6 +36,11 @@ pub struct AppState {
     pub join_tokens: Arc<dyn crate::repo::nodes::JoinTokenRepository>,
     /// The per-tenant certificate authority (MAIN-252).
     pub tenant_cas: Arc<dyn crate::repo::nodes::TenantCaRepository>,
+    /// Notes and folders — personal notebook and workspace notes (MAIN-254).
+    pub notebook: Arc<dyn crate::repo::notebook::NotebookRepository>,
+    /// The app password, its passkeys, and the notebook's per-note seal
+    /// (MAIN-254). Named `vaults` because `vault` is the crypto key holder.
+    pub vaults: Arc<dyn crate::repo::notebook::VaultRepository>,
     pub cfg: Arc<Config>,
     /// OIDC discovery state — configured/usable/degraded, hot-swappable after
     /// boot so an IdP that was down at startup recovers without a restart
@@ -116,6 +121,8 @@ impl AppState {
             nodes: Arc::new(crate::repo::nodes::DbNodeRepository::new(db.clone())),
             join_tokens: Arc::new(crate::repo::nodes::DbJoinTokenRepository::new(db.clone())),
             tenant_cas: Arc::new(crate::repo::nodes::DbTenantCaRepository::new(db.clone())),
+            notebook: Arc::new(crate::repo::notebook::DbNotebookRepository::new(db.clone())),
+            vaults: Arc::new(crate::repo::notebook::DbVaultRepository::new(db.clone())),
             kanban: Arc::new(KanbanRegistry::new(tasks.clone())),
             tasks,
             artifacts,

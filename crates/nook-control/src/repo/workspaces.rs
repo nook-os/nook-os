@@ -20,8 +20,8 @@
 //!   one transaction, so it is one method here (AC-1: no cross-repo transaction
 //!   semantics). Splitting it across two repositories would mean either two
 //!   transactions or a transaction handle in a trait signature; both are worse.
-//! - **A few narrow reads answer about `nodes`, `sessions` and `user_vaults`.**
-//!   Those aggregates have no repository yet (MAIN-252/253/254). They are
+//! - **A few narrow reads answer about `nodes` and `sessions`.**
+//!   Those aggregates have no repository yet (MAIN-252/253). They are
 //!   named for the workspace-level question they answer, not the table they
 //!   read, and each carries a note pointing at the card that will reclaim it.
 //!   The chain already works this way — `repo/identity.rs` reads `nodes`,
@@ -376,13 +376,6 @@ pub struct StoredSecret {
     pub ephemeral: bool,
 }
 
-/// The app-password challenge: what a passphrase is verified against.
-#[derive(Debug, Clone)]
-pub struct VaultChallenge {
-    pub kdf_salt: Vec<u8>,
-    pub verifier: Vec<u8>,
-}
-
 #[async_trait]
 pub trait WorkspaceSecretRepository: Send + Sync {
     /// Store a sealed secret, replacing whatever was there.
@@ -416,11 +409,6 @@ pub trait WorkspaceSecretRepository: Send + Sync {
 
     async fn exists(&self, tenant: TenantId, workspace: WorkspaceId, name: &str)
         -> ApiResult<bool>;
-
-    /// The user's app-password challenge. Reads `user_vaults`, which is
-    /// MAIN-254's aggregate; it lives here because sealing a workspace secret
-    /// is the only thing in these files that asks.
-    async fn vault_challenge(&self, user: UserId) -> ApiResult<Option<VaultChallenge>>;
 }
 
 // ── the DbPool implementations ──────────────────────────────────────────────
@@ -1298,17 +1286,6 @@ impl WorkspaceSecretRepository for DbWorkspaceSecretRepository {
             .await?;
         Ok(found.is_some())
     }
-
-    async fn vault_challenge(&self, user: UserId) -> ApiResult<Option<VaultChallenge>> {
-        let row: Option<(Vec<u8>, Vec<u8>)> = self
-            .db
-            .query_opt(
-                "SELECT kdf_salt, verifier FROM user_vaults WHERE user_id = $1",
-                params![user],
-            )
-            .await?;
-        Ok(row.map(|(kdf_salt, verifier)| VaultChallenge { kdf_salt, verifier }))
-    }
 }
 
 // ── in-memory fakes (AC-3) ──────────────────────────────────────────────────
@@ -2152,7 +2129,6 @@ impl GitCredentialRepository for FakeGitCredentialRepository {
 #[derive(Default)]
 struct FakeSecretState {
     secrets: Vec<(TenantId, WorkspaceId, String, StoredSecret)>,
-    vaults: HashMap<UserId, VaultChallenge>,
 }
 
 #[derive(Default)]
@@ -2163,15 +2139,6 @@ pub struct FakeWorkspaceSecretRepository {
 impl FakeWorkspaceSecretRepository {
     pub fn new() -> Self {
         Self::default()
-    }
-
-    /// Give a user an app password, so the sealing path can be tested.
-    pub fn set_vault(&self, user: UserId, kdf_salt: Vec<u8>, verifier: Vec<u8>) {
-        self.inner
-            .lock()
-            .unwrap()
-            .vaults
-            .insert(user, VaultChallenge { kdf_salt, verifier });
     }
 }
 
@@ -2258,9 +2225,5 @@ impl WorkspaceSecretRepository for FakeWorkspaceSecretRepository {
             .secrets
             .iter()
             .any(|(t, w, n, _)| *t == tenant && *w == workspace && n == name))
-    }
-
-    async fn vault_challenge(&self, user: UserId) -> ApiResult<Option<VaultChallenge>> {
-        Ok(self.inner.lock().unwrap().vaults.get(&user).cloned())
     }
 }
