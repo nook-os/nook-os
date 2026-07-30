@@ -6,9 +6,7 @@ use nook_mcp::{McpCaller, NookBackend};
 use nook_proto::ControlToNode;
 use nook_types::*;
 
-use crate::services::{
-    activity_queries, node_queries, notebook_queries, session_queries, workspace_queries,
-};
+use crate::services::{activity_queries, notebook_queries, session_queries, workspace_queries};
 use crate::state::AppState;
 
 pub struct McpBackend {
@@ -46,7 +44,7 @@ impl McpBackend {
 
     /// Resolve a node by name, or auto-pick an online node when omitted.
     async fn resolve_node(&self, tenant: TenantId, name: Option<String>) -> anyhow::Result<NodeId> {
-        let nodes = node_queries::list_ids_and_names(&self.state.db, tenant).await?;
+        let nodes = self.state.nodes.list_ids_and_names(tenant).await?;
         let online: Vec<(NodeId, String)> = nodes
             .into_iter()
             .filter(|(id, _)| self.state.registry.node_online(*id))
@@ -122,7 +120,7 @@ impl NookBackend for McpBackend {
     async fn list_nodes(&self) -> anyhow::Result<Vec<Node>> {
         let tenant = self.tenant().await?;
         // MCP acts for the tenant, not a single member — the whole fleet.
-        Ok(node_queries::list_nodes(&self.state.db, tenant, None).await?)
+        Ok(self.state.nodes.list(tenant, None).await?)
     }
 
     async fn list_sessions(&self, active_only: bool) -> anyhow::Result<Vec<Session>> {

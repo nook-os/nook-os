@@ -17,7 +17,6 @@
 
 use axum::extract::{Path, State};
 use axum::Json;
-use nook_db::{params, Db, Postgres, TypeMapping};
 use nook_types::*;
 
 use crate::auth::AuthCtx;
@@ -83,13 +82,13 @@ pub async fn list(
     auth: AuthCtx,
 ) -> ApiResult<Json<Vec<TenantCaSummary>>> {
     gate(&state, &auth, "list").await?;
-    let cas = crate::ca::trust_bundle(&state.db, auth.tenant_id)
+    let cas = crate::ca::trust_bundle(&*state.tenant_cas, auth.tenant_id)
         .await
         .map_err(ApiError::Internal)?;
 
     let mut out = Vec::with_capacity(cas.len());
     for ca in cas {
-        let nodes = crate::ca::live_leaves(&state.db, auth.tenant_id, ca.id)
+        let nodes = crate::ca::live_leaves(&*state.nodes, auth.tenant_id, ca.id)
             .await
             .map_err(ApiError::Internal)?;
         out.push(TenantCaSummary {
@@ -136,12 +135,12 @@ pub(crate) async fn stage_for(
     // also why there is no one-shot "rotate" — staging and promoting are two
     // acts with machine renewals in between, and collapsing them would break
     // the fleet it was meant to secure.
-    let make_active = crate::ca::trust_bundle(&state.db, tenant)
+    let make_active = crate::ca::trust_bundle(&*state.tenant_cas, tenant)
         .await
         .map_err(ApiError::Internal)?
         .is_empty();
 
-    let ca = crate::ca::generate(&state.db, &state.vault, tenant, make_active)
+    let ca = crate::ca::generate(&*state.tenant_cas, &state.vault, tenant, make_active)
         .await
         .map_err(ApiError::Internal)?;
 
@@ -174,19 +173,15 @@ pub(crate) async fn stage_for(
 /// Best effort: a node that is offline picks the same list up from
 /// `RegisterAck` when it reconnects, so nothing depends on this arriving.
 pub(crate) async fn announce_trust(state: &AppState, tenant: nook_types::TenantId) {
-    let fingerprints: Vec<String> = crate::ca::trust_bundle(&state.db, tenant)
+    let fingerprints: Vec<String> = crate::ca::trust_bundle(&*state.tenant_cas, tenant)
         .await
         .map(|cas| cas.into_iter().map(|c| c.fingerprint).collect())
         .unwrap_or_default();
     if fingerprints.is_empty() {
         return;
     }
-    let nodes: Vec<(nook_types::NodeId,)> = state
-        .db
-        .query_all("SELECT id FROM nodes WHERE tenant_id = $1", params![tenant])
-        .await
-        .unwrap_or_default();
-    for (id,) in nodes {
+    let nodes = state.nodes.ids_in_tenant(tenant).await.unwrap_or_default();
+    for id in nodes {
         state.registry.send_to_node(
             id,
             nook_proto::ControlToNode::TrustChanged {
@@ -223,7 +218,7 @@ pub(crate) async fn promote_for(
         .parse()
         .map_err(|_| ApiError::BadRequest("not a CA id".into()))?;
 
-    crate::ca::promote(&state.db, tenant, ca_id)
+    crate::ca::promote(&*state.tenant_cas, tenant, ca_id)
         .await
         .map_err(|e| ApiError::BadRequest(e.to_string()))?;
 
@@ -254,7 +249,7 @@ pub async fn retire(
         .map_err(|_| ApiError::BadRequest("not a CA id".into()))?;
 
     // The guard lives in ca::retire so it cannot be skipped by another caller.
-    crate::ca::retire(&state.db, auth.tenant_id, ca_id)
+    crate::ca::retire(&*state.tenant_cas, &*state.nodes, auth.tenant_id, ca_id)
         .await
         .map_err(|e| ApiError::Conflict(e.to_string()))?;
 
@@ -287,17 +282,7 @@ pub async fn revoke_node(
 
     // Scoped to the caller's tenant: an admin cannot reach another tenant's
     // machines even by guessing an id.
-    let done = state
-        .db
-        .exec(
-            &format!(
-                "UPDATE nodes SET revoked_at = {now}, updated_at = {now}
-          WHERE id = $1 AND tenant_id = $2",
-                now = Postgres.now()
-            ),
-            params![id, auth.tenant_id],
-        )
-        .await?;
+    let done = state.nodes.revoke(id, auth.tenant_id).await?;
     if done == 0 {
         return Err(ApiError::NotFound);
     }

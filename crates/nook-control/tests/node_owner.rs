@@ -560,3 +560,65 @@ async fn authorize_is_owner_only_for_personal_and_manager_only_for_shared() {
 
     bed.teardown().await;
 }
+
+/// MAIN-119's `COALESCE`, which nothing covered until MAIN-252 moved the
+/// statement and went looking.
+///
+/// A machine that re-runs `nook join` — with anyone's token — must keep the
+/// owner it already has. Without `COALESCE(nodes.owner_person_id, EXCLUDED.…)`
+/// the upsert writes `EXCLUDED.owner_person_id` and the machine silently
+/// changes hands, which then changes who may start sessions on it. Dropping
+/// the COALESCE is a one-line edit that every other test in this file ignores.
+#[tokio::test]
+async fn a_re_join_with_someone_elses_token_does_not_transfer_the_machine() {
+    let Some(mut bed) = TestBed::new().await else {
+        eprintln!("skipping node-owner test — no DATABASE_URL");
+        return;
+    };
+    let state = bed.app_state().await;
+    let tenant = bed.tenant("rejoin").await;
+    let (alice, alice_person) = bed.user(tenant, "member").await;
+    let (bob, bob_person) = bed.user(tenant, "member").await;
+    assert_ne!(alice_person, bob_person);
+
+    let name = format!("workshop-{}", Uuid::now_v7().simple());
+    let join_as = |user, name: String| {
+        let state = state.clone();
+        async move {
+            let token = mint_token(&state, user, tenant).await;
+            nook_control::routes::join::join(
+                State(state.clone()),
+                Json(JoinRequest {
+                    token,
+                    name,
+                    hostname: "host".into(),
+                    platform: "linux".into(),
+                }),
+            )
+            .await
+            .expect("join")
+            .0
+        }
+    };
+
+    let first = join_as(alice, name.clone()).await;
+    assert_eq!(
+        owner_of(&bed.pool, first.node_id).await,
+        Some(alice_person),
+        "alice enrolled it, so alice owns it"
+    );
+
+    // Bob re-enrols the SAME machine (same tenant + name) with his own token.
+    let second = join_as(bob, name.clone()).await;
+    assert_eq!(
+        second.node_id, first.node_id,
+        "same tenant + name is the same machine — ON CONFLICT heals the row"
+    );
+    assert_eq!(
+        owner_of(&bed.pool, second.node_id).await,
+        Some(alice_person),
+        "a re-join must NOT hand alice's machine to bob"
+    );
+
+    bed.teardown().await;
+}

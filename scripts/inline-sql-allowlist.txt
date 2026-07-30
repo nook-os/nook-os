@@ -12,14 +12,6 @@
 # for exactly that reason: an exemption that outlives its cause is how the list
 # stops shrinking.
 
-# ── MAIN-252 · NodeRepository ───────────────────────────────────────────────
-crates/nook-control/src/routes/nodes.rs          # node list/detail/remove
-crates/nook-control/src/routes/join.rs           # enrolment + join tokens
-crates/nook-control/src/routes/tenant_ca.rs      # per-tenant CA rows
-crates/nook-control/src/ca.rs                    # CA issue/sign, keyed by node
-crates/nook-control/src/services/node_queries.rs # split out by MAIN-245, awaits its trait
-crates/nook-control/src/ws/node.rs               # node socket: heartbeat + resources
-crates/nook-control/src/ws/registry.rs           # the node lease cache — `nodes`, not sessions (re-filed by MAIN-253)
 
 # ── MAIN-254 · NotebookRepository ───────────────────────────────────────────
 crates/nook-control/src/routes/notebook.rs       # notes CRUD + search
@@ -58,6 +50,7 @@ crates/nook-control/src/services/activity_queries.rs    # the activity feed (spl
 crates/nook-control/src/services/overview_queries.rs    # Mission Control read-model, spans 5 aggregates
 crates/nook-control/src/routes/health.rs         # the liveness probe's SELECT 1
 crates/nook-control/src/ws/bus.rs                # bus_outbox + pg_notify; no aggregate owns it (re-filed by MAIN-253)
+crates/nook-control/src/ws/registry.rs           # the node lease cache; NodeRepository owns `nodes` but MAIN-252 landed without this one site
 
 # ── Permanently out of scope ────────────────────────────────────────────────
 # Named by MAIN-260 NG-1 as legitimately holding SQL. Listed rather than

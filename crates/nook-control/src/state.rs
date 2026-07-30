@@ -30,6 +30,12 @@ pub struct AppState {
     pub git_credentials: Arc<dyn crate::repo::workspaces::GitCredentialRepository>,
     /// Sealed per-workspace secret files (MAIN-251).
     pub workspace_secrets: Arc<dyn crate::repo::workspaces::WorkspaceSecretRepository>,
+    /// Nodes: identity, sharing, the liveness lease (MAIN-252). Same contract.
+    pub nodes: Arc<dyn crate::repo::nodes::NodeRepository>,
+    /// Single-use enrolment tokens (MAIN-252).
+    pub join_tokens: Arc<dyn crate::repo::nodes::JoinTokenRepository>,
+    /// The per-tenant certificate authority (MAIN-252).
+    pub tenant_cas: Arc<dyn crate::repo::nodes::TenantCaRepository>,
     pub cfg: Arc<Config>,
     /// OIDC discovery state — configured/usable/degraded, hot-swappable after
     /// boot so an IdP that was down at startup recovers without a restart
@@ -107,6 +113,9 @@ impl AppState {
             workspace_secrets: Arc::new(crate::repo::workspaces::DbWorkspaceSecretRepository::new(
                 db.clone(),
             )),
+            nodes: Arc::new(crate::repo::nodes::DbNodeRepository::new(db.clone())),
+            join_tokens: Arc::new(crate::repo::nodes::DbJoinTokenRepository::new(db.clone())),
+            tenant_cas: Arc::new(crate::repo::nodes::DbTenantCaRepository::new(db.clone())),
             kanban: Arc::new(KanbanRegistry::new(tasks.clone())),
             tasks,
             artifacts,
