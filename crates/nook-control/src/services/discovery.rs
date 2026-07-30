@@ -6,7 +6,6 @@
 //! directory-name slug. Never auto-merge two workspaces with different
 //! remotes. Git worktrees are out of scope for M1.
 
-use nook_db::{params, Db, Postgres, TypeMapping};
 use nook_proto::{DiscoveredWorkspace, UiEvent};
 use nook_types::*;
 use rand::distr::Alphanumeric;
@@ -14,6 +13,7 @@ use rand::Rng;
 
 use crate::error::ApiResult;
 use crate::events::{self, EventDraft};
+use crate::repo::workspaces::{CheckoutUpsert, PathMove, WorkspaceRepository};
 use crate::services::identity::slugify;
 use crate::state::AppState;
 
@@ -53,36 +53,25 @@ pub async fn reconcile(
         // Find the workspace this checkout belongs to.
         let workspace_id: Option<WorkspaceId> = match &normalized {
             // The remote on the workspace itself is authoritative; the
-            // node_workspaces lookup is the fallback for rows written before
-            // the identity was recorded there.
+            // checkout lookup is the fallback for rows written before the
+            // identity was recorded there.
             Some(norm) => match state
-                .db
-                .query_scalar_opt::<WorkspaceId>(
-                    "SELECT id FROM workspaces
-                     WHERE tenant_id = $1 AND git_remote_normalized = $2 LIMIT 1",
-                    params![tenant, norm],
-                )
+                .workspaces
+                .find_by_normalized_remote(tenant, norm)
                 .await?
             {
                 Some(id) => Some(id),
                 None => {
                     state
-                        .db
-                        .query_scalar_opt::<WorkspaceId>(
-                            "SELECT workspace_id FROM node_workspaces
-                         WHERE tenant_id = $1 AND git_remote_normalized = $2 LIMIT 1",
-                            params![tenant, norm],
-                        )
+                        .workspaces
+                        .find_by_checkout_remote(tenant, norm)
                         .await?
                 }
             },
             None => {
                 state
-                    .db
-                    .query_scalar_opt::<WorkspaceId>(
-                        "SELECT id FROM workspaces WHERE tenant_id = $1 AND slug = $2",
-                        params![tenant, slugify(&d.name)],
-                    )
+                    .workspaces
+                    .find_by_slug(tenant, &slugify(&d.name))
                     .await?
             }
         };
@@ -94,14 +83,7 @@ pub async fn reconcile(
                 // when the discovered name is the same repo with an owner
                 // prefix, so a hand-picked name is never clobbered.
                 if let Some(norm) = &normalized {
-                    state
-                        .db
-                        .exec(
-                            "UPDATE workspaces SET git_remote_normalized = $2
-                         WHERE id = $1 AND git_remote_normalized IS DISTINCT FROM $2",
-                            params![id, norm],
-                        )
-                        .await?;
+                    state.workspaces.set_normalized_remote(id, norm).await?;
                 }
                 if let Some((_, repo)) = d.name.split_once('/') {
                     // MAIN-220 AC-4: relabel the display name only — the slug is
@@ -109,17 +91,7 @@ pub async fn reconcile(
                     // match broke every client holding the old slug mid-scan, and
                     // could collide with the unique-slug constraint and abort the
                     // whole reconcile. The name may still be qualified in place.
-                    state
-                        .db
-                        .exec(
-                            &format!(
-                                "UPDATE workspaces SET name = $2, updated_at = {}
-                         WHERE id = $1 AND name = $3",
-                                Postgres.now()
-                            ),
-                            params![id, &d.name, repo],
-                        )
-                        .await?;
+                    state.workspaces.qualify_name(id, &d.name, repo).await?;
                 }
                 id
             }
@@ -149,59 +121,30 @@ pub async fn reconcile(
         // checkout's raw URL when the workspace carries none yet. NULL-guarded, so
         // an agreed or hand-set value is never clobbered by one checkout.
         if let Some(raw) = &d.git_remote_url {
-            state
-                .db
-                .exec(
-                    "UPDATE workspaces SET git_remote_url = $2
-                     WHERE id = $1 AND git_remote_url IS NULL",
-                    params![workspace_id, raw],
-                )
-                .await?;
+            state.workspaces.adopt_remote_url(workspace_id, raw).await?;
         }
 
-        let known: Option<NodeWorkspaceId> = state
-            .db
-            .query_scalar_opt(
-                "SELECT id FROM node_workspaces WHERE node_id = $1 AND path = $2",
-                params![node_id, &d.path],
-            )
+        let known = state
+            .workspaces
+            .checkout_id_at_path(node_id, &d.path)
             .await?;
         let is_new_checkout = known.is_none();
 
         state
-            .db
-            .exec(
-                &format!(
-                    "INSERT INTO node_workspaces
-               (id, tenant_id, node_id, workspace_id, path, git_remote_url,
-                git_remote_normalized, git_branch, git_status, kind)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-             ON CONFLICT (node_id, path) DO UPDATE SET
-               workspace_id = EXCLUDED.workspace_id,
-               git_remote_url = EXCLUDED.git_remote_url,
-               git_remote_normalized = EXCLUDED.git_remote_normalized,
-               git_branch = EXCLUDED.git_branch,
-               git_status = EXCLUDED.git_status,
-               kind = EXCLUDED.kind,
-               missing_at = NULL,
-               last_scanned_at = {}",
-                    Postgres.now()
-                ),
-                params![
-                    NodeWorkspaceId::new(),
-                    tenant,
-                    node_id,
-                    workspace_id,
-                    &d.path,
-                    d.git_remote_url.clone(),
-                    normalized.clone(),
-                    d.branch.clone(),
-                    serde_json::json!({ "dirty": d.dirty, "worktree": d.worktree }),
-                    // MAIN-222 AC-1: the node's report drives `kind` directly. The
-                    // jsonb flag stays for compat but nothing new reads it.
-                    if d.worktree { "worktree" } else { "clone" }
-                ],
-            )
+            .workspaces
+            .upsert_checkout(CheckoutUpsert {
+                tenant,
+                node_id,
+                workspace_id,
+                path: d.path.clone(),
+                git_remote_url: d.git_remote_url.clone(),
+                git_remote_normalized: normalized.clone(),
+                branch: d.branch.clone(),
+                git_status: serde_json::json!({ "dirty": d.dirty, "worktree": d.worktree }),
+                // MAIN-222 AC-1: the node's report drives `kind` directly. The
+                // jsonb flag stays for compat but nothing new reads it.
+                kind: if d.worktree { "worktree" } else { "clone" }.to_string(),
+            })
             .await?;
 
         // A new checkout wants the workspace's .env, but the control plane
@@ -237,15 +180,8 @@ pub async fn reconcile(
         );
     }
     state
-        .db
-        .exec(
-            &format!(
-                "UPDATE node_workspaces SET missing_at = {}
-                 WHERE node_id = $1 AND path != ALL($2) AND missing_at IS NULL",
-                Postgres.now()
-            ),
-            params![node_id, reported_paths],
-        )
+        .workspaces
+        .tombstone_checkouts_except(node_id, &reported_paths)
         .await?;
 
     state.registry.publish(
@@ -274,7 +210,7 @@ pub async fn reconcile(
 /// attempt to name another node's paths, aborts the whole request rather than
 /// silently updating nothing.
 pub async fn migrate_paths(
-    db: &nook_db::DbPool,
+    repo: &dyn WorkspaceRepository,
     node_id: NodeId,
     pairs: &[nook_types::MigratePathPair],
 ) -> ApiResult<nook_types::MigratePathsResponse> {
@@ -288,13 +224,11 @@ pub async fn migrate_paths(
 
     // Belonging check, before any write.
     let olds: Vec<String> = pairs.iter().map(|p| p.old.clone()).collect();
-    let mine: Vec<String> = db
-        .query_scalar_all(
-            "SELECT path FROM node_workspaces WHERE node_id = $1 AND path = ANY($2)",
-            params![node_id, &olds[..]],
-        )
-        .await?;
-    let mine: std::collections::HashSet<String> = mine.into_iter().collect();
+    let mine: std::collections::HashSet<String> = repo
+        .existing_paths(node_id, &olds)
+        .await?
+        .into_iter()
+        .collect();
     if let Some(stray) = olds.iter().find(|p| !mine.contains(*p)) {
         return Err(crate::error::ApiError::BadRequest(format!(
             "{stray} is not a checkout of this node — refusing to rewrite paths \
@@ -302,44 +236,22 @@ pub async fn migrate_paths(
         )));
     }
 
-    // One transaction: every path record moves together or none does. `path` on
-    // node_workspaces and `worktree_path` on tasks are the only two durable
-    // on-disk path records (0001_init). Row ids are never touched.
-    let mut tx = db.begin().await?;
-    let mut node_workspaces_updated: u32 = 0;
-    let mut tasks_updated: u32 = 0;
-    for pair in pairs {
-        let nw = tx
-            .exec(
-                &format!(
-                    "UPDATE node_workspaces SET path = $3, last_scanned_at = {}
-             WHERE node_id = $1 AND path = $2",
-                    Postgres.now()
-                ),
-                params![node_id, &pair.old, &pair.new],
-            )
-            .await?;
-        node_workspaces_updated += nw as u32;
-
-        // A task's worktree lives on a specific node; scope the rewrite to this
-        // one so an identical relative path on another machine is never touched.
-        let t = tx
-            .exec(
-                &format!(
-                    "UPDATE tasks SET worktree_path = $3, updated_at = {}
-             WHERE worktree_node_id = $1 AND worktree_path = $2",
-                    Postgres.now()
-                ),
-                params![node_id, &pair.old, &pair.new],
-            )
-            .await?;
-        tasks_updated += t as u32;
-    }
-    tx.commit().await?;
+    // One transaction inside the repository: every path record moves together
+    // or none does. `path` on node_workspaces and `worktree_path` on tasks are
+    // the only two durable on-disk path records (0001_init). Row ids are never
+    // touched.
+    let moves: Vec<PathMove> = pairs
+        .iter()
+        .map(|p| PathMove {
+            old: p.old.clone(),
+            new: p.new.clone(),
+        })
+        .collect();
+    let moved = repo.migrate_checkout_paths(node_id, &moves).await?;
 
     Ok(nook_types::MigratePathsResponse {
-        node_workspaces_updated,
-        tasks_updated,
+        node_workspaces_updated: moved.checkouts,
+        tasks_updated: moved.tasks,
     })
 }
 
@@ -361,24 +273,12 @@ async fn create_workspace_for(
                 .collect();
             format!("{base_slug}-{}", suffix.to_lowercase())
         };
-        let res: Result<WorkspaceId, sqlx::Error> = state
-            .db
-            .query_scalar(
-                "INSERT INTO workspaces (id, tenant_id, name, slug, git_remote_normalized)
-             VALUES ($1, $2, $3, $4, $5) RETURNING id",
-                params![
-                    WorkspaceId::new(),
-                    tenant,
-                    name,
-                    &slug,
-                    git_remote_normalized
-                ],
-            )
-            .await;
-        match res {
-            Ok(id) => return Ok(id),
-            Err(sqlx::Error::Database(d)) if d.is_unique_violation() => continue,
-            Err(e) => return Err(e.into()),
+        if let Some(id) = state
+            .workspaces
+            .insert_discovered(tenant, name, &slug, git_remote_normalized)
+            .await?
+        {
+            return Ok(id);
         }
     }
     Err(crate::error::ApiError::Conflict(
