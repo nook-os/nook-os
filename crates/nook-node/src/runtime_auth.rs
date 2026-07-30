@@ -16,7 +16,9 @@
 //! actually live in. The login flow (`claude auth login`, `hermes setup
 //! --portal`) is deliberately NOT here yet; that is part 2 (AC-2/AC-4).
 
+use anyhow::{bail, Context, Result};
 use nook_types::{AuthProfile, AuthState};
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
@@ -35,6 +37,30 @@ struct Adapter {
     /// a session (MAIN-126). Fixed here; never taken from the wire.
     login: &'static str,
     parse: fn(code: Option<i32>, stdout: &str) -> (AuthState, Option<String>),
+    /// Where a delivered credential lands (MAIN-283). `None` for a runtime
+    /// whose credential layout we do not know — the node refuses the delivery
+    /// rather than guessing at a path, which is the same rule that makes
+    /// `login` a fixed table rather than a wire value.
+    credential: Option<CredentialRule>,
+}
+
+/// How to find one runtime's credential file, without ever taking a path from
+/// the wire.
+///
+/// The directory is the runtime's own configuration directory — read from the
+/// environment variable that runtime honours, because that is what the runtime
+/// itself will read. Falling back to a fixed path under `$HOME` matters for the
+/// deployed case: the fleet's Claude identity is a mounted directory named by
+/// `CLAUDE_CONFIG_DIR`, and writing to `~/.claude` there would install the
+/// credential somewhere nothing reads it.
+#[derive(Debug, Clone, Copy)]
+struct CredentialRule {
+    /// The env var naming the runtime's config directory, if it has one.
+    dir_env: &'static str,
+    /// Relative to `$HOME`, when the env var is unset.
+    default_dir: &'static str,
+    /// The credential file's name inside that directory.
+    file: &'static str,
 }
 
 /// The registry. Hermes supports several providers; this ticket scopes it to
@@ -48,6 +74,11 @@ const ADAPTERS: &[Adapter] = &[
         probe: "auth status",
         login: "auth login",
         parse: parse_claude,
+        credential: Some(CredentialRule {
+            dir_env: "CLAUDE_CONFIG_DIR",
+            default_dir: ".claude",
+            file: ".credentials.json",
+        }),
     },
     Adapter {
         id: "hermes-portal",
@@ -56,6 +87,9 @@ const ADAPTERS: &[Adapter] = &[
         probe: "portal status",
         login: "setup --portal",
         parse: parse_hermes_portal,
+        // Hermes' credential layout is not settled here, so a delivery for it
+        // is refused rather than written to a guessed path (MAIN-283).
+        credential: None,
     },
 ];
 
@@ -67,6 +101,112 @@ pub fn login_args(runtime: &str) -> Option<&'static str> {
         .iter()
         .find(|a| a.runtime == runtime)
         .map(|a| a.login)
+}
+
+/// Where a delivered credential for `runtime` would land, or `None` when this
+/// node has no rule for it.
+///
+/// Exposed so a caller can report the destination without performing the write.
+pub fn credential_path(runtime: &str) -> Option<PathBuf> {
+    let rule = ADAPTERS
+        .iter()
+        .find(|a| a.runtime == runtime)
+        .and_then(|a| a.credential)?;
+    let dir = match std::env::var(rule.dir_env) {
+        Ok(v) if !v.trim().is_empty() => PathBuf::from(v),
+        // `$HOME` rather than a cached home: the node may run as a different
+        // user than the one that built it, and the runtime reads whatever HOME
+        // says at the time it runs.
+        _ => PathBuf::from(std::env::var("HOME").ok()?).join(rule.default_dir),
+    };
+    Some(dir.join(rule.file))
+}
+
+/// Install a credential payload where `runtime` expects it (MAIN-283 AC-2).
+///
+/// The payload is **opaque** — this neither parses nor validates it. What is
+/// decided here is only the destination, from the fixed table above, never from
+/// the wire.
+///
+/// The write is atomic and private, in that order: the temporary file is
+/// created in the SAME directory as the target (so the rename cannot cross a
+/// filesystem and degrade into a copy), its mode is set to `0600` **before**
+/// any bytes are written, and only then is it renamed over the target. A reader
+/// therefore sees either the old credential or the new one, never a truncated
+/// file, and never a world-readable one — not even for the instant between
+/// create and chmod.
+pub fn install_credential(runtime: &str, payload: &[u8]) -> Result<PathBuf> {
+    let Some(target) = credential_path(runtime) else {
+        bail!("this node has no credential rule for runtime `{runtime}`");
+    };
+    let dir = target
+        .parent()
+        .context("the credential path has no parent directory")?;
+    std::fs::create_dir_all(dir).with_context(|| format!("cannot create {}", dir.display()))?;
+
+    // Named for the target so two concurrent deliveries for different runtimes
+    // cannot collide, and with the process id so two for the SAME runtime
+    // cannot either.
+    let tmp = dir.join(format!(
+        ".{}.nook-{}.tmp",
+        target
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("credential"),
+        std::process::id()
+    ));
+    // Best effort: a leftover from a killed process must not fail this one.
+    let _ = std::fs::remove_file(&tmp);
+
+    let result = write_private(&tmp, payload).and_then(|_| {
+        std::fs::rename(&tmp, &target)
+            .with_context(|| format!("cannot move the credential into {}", target.display()))
+    });
+
+    if result.is_err() {
+        // No partial file left behind (AC-5): the target keeps whatever it had.
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result?;
+    Ok(target)
+}
+
+/// Create `path` mode 0600 and write `payload` into it, flushed to disk.
+fn write_private(path: &Path, payload: &[u8]) -> Result<()> {
+    use std::io::Write;
+
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        // Set at CREATION, not afterwards. A create-then-chmod leaves a window
+        // in which the credential is readable by anyone on the box.
+        opts.mode(0o600);
+    }
+    let mut f = opts
+        .open(path)
+        .with_context(|| format!("cannot create {}", path.display()))?;
+    f.write_all(payload)
+        .with_context(|| format!("cannot write {}", path.display()))?;
+    // Durable before the rename, so a crash cannot leave the target pointing at
+    // an empty file.
+    f.sync_all()
+        .with_context(|| format!("cannot flush {}", path.display()))?;
+    Ok(())
+}
+
+/// Probe one runtime and report whether it is now authorized (MAIN-283 AC-5).
+///
+/// A credential that was written but that the runtime does not accept is a
+/// failed delivery, not a successful one — the write is not the outcome anybody
+/// cares about.
+pub fn is_authorized(runtime: &str) -> bool {
+    ADAPTERS
+        .iter()
+        .filter(|a| a.runtime == runtime)
+        .map(profile_for)
+        .any(|p| p.state == AuthState::Authorized)
 }
 
 /// Probe every allowlisted profile, in registry order. Best-effort and never
@@ -247,5 +387,257 @@ mod tests {
         );
         assert_eq!(identity_from_json("[]"), None);
         assert_eq!(identity_from_json("garbage"), None);
+    }
+}
+
+/// Credential delivery (MAIN-283).
+///
+/// These drive the real filesystem through `CLAUDE_CONFIG_DIR`, because the
+/// destination rule IS the subject: a test that passed a path in would be
+/// asserting its own argument. Each test points the env var at its own
+/// temporary directory.
+///
+/// `#[serial]`-free by construction: the env var is process-global, so the
+/// tests share one lock rather than racing over it.
+#[cfg(test)]
+mod credential_tests {
+    use super::*;
+    use std::sync::{Mutex, MutexGuard, OnceLock};
+
+    /// `CLAUDE_CONFIG_DIR` is process-global; these tests take turns.
+    fn env_lock() -> MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// A scratch directory, and `CLAUDE_CONFIG_DIR` pointed at it.
+    fn scratch(name: &str) -> (PathBuf, MutexGuard<'static, ()>) {
+        let guard = env_lock();
+        let dir = std::env::temp_dir().join(format!(
+            "nook-283-{name}-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::env::set_var("CLAUDE_CONFIG_DIR", &dir);
+        (dir, guard)
+    }
+
+    #[cfg(unix)]
+    fn mode_of(p: &Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(p).unwrap().permissions().mode() & 0o777
+    }
+
+    /// AC-2: the payload lands where the runtime reads it, and only the owner
+    /// can read it.
+    #[test]
+    fn a_claude_credential_lands_in_the_config_dir_at_0600() {
+        let (dir, _g) = scratch("lands");
+
+        let path = install_credential("claude", br#"{"token":"abc"}"#).expect("install");
+
+        assert_eq!(
+            path,
+            dir.join(".credentials.json"),
+            "the destination comes from CLAUDE_CONFIG_DIR, not from the caller"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), br#"{"token":"abc"}"#);
+        #[cfg(unix)]
+        assert_eq!(mode_of(&path), 0o600, "a credential is not world-readable");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The payload is opaque: bytes that are not JSON, not UTF-8 even, are
+    /// written through unaltered. This end does not get to have an opinion.
+    #[test]
+    fn the_payload_is_written_through_byte_for_byte() {
+        let (dir, _g) = scratch("opaque");
+        let payload: &[u8] = &[
+            0x00, 0xff, 0xfe, b'n', b'o', b't', b' ', b'j', b's', b'o', b'n',
+        ];
+
+        let path = install_credential("claude", payload).expect("install");
+
+        assert_eq!(std::fs::read(&path).unwrap(), payload);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// AC-5: re-delivering is idempotent — same bytes, same mode, one file, no
+    /// temporary left behind.
+    #[test]
+    fn re_delivery_is_idempotent() {
+        let (dir, _g) = scratch("idempotent");
+
+        let first = install_credential("claude", b"one").expect("first");
+        let second = install_credential("claude", b"one").expect("second");
+        assert_eq!(first, second);
+        assert_eq!(std::fs::read(&first).unwrap(), b"one");
+
+        // And a DIFFERENT payload replaces it rather than appending or failing.
+        install_credential("claude", b"two").expect("replacement");
+        assert_eq!(std::fs::read(&first).unwrap(), b"two");
+        #[cfg(unix)]
+        assert_eq!(mode_of(&first), 0o600, "the replacement is private too");
+
+        let left: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+            .collect();
+        assert_eq!(
+            left,
+            vec![".credentials.json".to_string()],
+            "no temporary file survives a delivery"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// AC-5: a destination that cannot be created fails cleanly, leaves nothing
+    /// behind, and does not destroy the credential that was already there.
+    ///
+    /// The unwritable case is a *file* standing where the directory must be,
+    /// not a chmod: these tests run as root in the container, and root ignores
+    /// permission bits — a `0500` directory would have silently succeeded and
+    /// the test would have been asserting nothing.
+    #[test]
+    fn an_uncreatable_destination_fails_without_a_partial_write() {
+        let (dir, _g) = scratch("uncreatable");
+
+        // Seed a good credential, so the assertion is that a failed delivery
+        // PRESERVED it — not merely that nothing existed.
+        let good = install_credential("claude", b"original").expect("seed");
+
+        // Point the config dir at the seeded FILE. `create_dir_all` cannot make
+        // a directory out of it, for any user.
+        std::env::set_var("CLAUDE_CONFIG_DIR", &good);
+        let err = install_credential("claude", b"replacement")
+            .expect_err("a file is not a directory, for root or anyone else");
+        assert!(
+            format!("{err:#}").contains("cannot create"),
+            "the failure says what it could not do: {err:#}"
+        );
+
+        std::env::set_var("CLAUDE_CONFIG_DIR", &dir);
+        assert_eq!(
+            std::fs::read(&good).unwrap(),
+            b"original",
+            "the existing credential survived the failed delivery"
+        );
+        let left: Vec<_> = std::fs::read_dir(&dir).unwrap().collect();
+        assert_eq!(
+            left.len(),
+            1,
+            "no partial or temporary file was left behind"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// AC-2, the atomicity itself: a reader never sees the credential missing
+    /// or half-written while it is being replaced.
+    ///
+    /// This is the assertion the temp+rename exists for, and the one the other
+    /// tests do NOT make — mutation testing found that replacing the whole
+    /// dance with a plain `remove` + `write` passed every one of them. The
+    /// runtime reads this file whenever it likes; a window in which the file is
+    /// absent is a window in which the runtime is spuriously signed out.
+    ///
+    /// Concurrency, not a mock: a reader spins on the path while a writer
+    /// replaces it, and any observation of "missing" or "short" is a failure.
+    #[test]
+    fn a_reader_never_observes_the_credential_missing_during_a_replacement() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        let (dir, _g) = scratch("atomic");
+        let payload = vec![b'x'; 4096];
+        let target = install_credential("claude", &payload).expect("seed");
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let bad = Arc::new(AtomicUsize::new(0));
+        let reads = Arc::new(AtomicUsize::new(0));
+
+        let reader = {
+            let (stop, bad, reads, target) =
+                (stop.clone(), bad.clone(), reads.clone(), target.clone());
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    match std::fs::read(&target) {
+                        // Every version of this file is 4096 bytes, so a short
+                        // read is a torn one.
+                        Ok(v) if v.len() == 4096 => {}
+                        _ => {
+                            bad.fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
+                    reads.fetch_add(1, Ordering::Relaxed);
+                }
+            })
+        };
+
+        for _ in 0..300 {
+            install_credential("claude", &payload).expect("replace");
+        }
+        stop.store(true, Ordering::Relaxed);
+        reader.join().unwrap();
+
+        assert!(
+            reads.load(Ordering::Relaxed) > 0,
+            "the reader never ran, so this asserted nothing"
+        );
+        assert_eq!(
+            bad.load(Ordering::Relaxed),
+            0,
+            "the credential was missing or truncated during {} reads — the \
+             replacement is not atomic",
+            reads.load(Ordering::Relaxed)
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A runtime with no credential rule is refused, not written to a guessed
+    /// path — the same reason `login_args` returns `None` rather than a default.
+    #[test]
+    fn a_runtime_without_a_rule_is_refused() {
+        let (dir, _g) = scratch("norule");
+        assert!(credential_path("hermes").is_none());
+        assert!(credential_path("nonesuch").is_none());
+
+        let err = install_credential("hermes", b"x").expect_err("refused");
+        assert!(format!("{err:#}").contains("hermes"), "{err:#}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The env var wins over the `$HOME` default: on the deployed node the
+    /// fleet's identity is a mounted directory, and writing to `~/.claude`
+    /// there would install the credential where nothing reads it.
+    #[test]
+    fn the_config_dir_env_var_wins_over_the_home_default() {
+        let (dir, _g) = scratch("envwins");
+        assert_eq!(
+            credential_path("claude").unwrap(),
+            dir.join(".credentials.json")
+        );
+
+        // Unset, and it falls back under HOME rather than failing.
+        std::env::remove_var("CLAUDE_CONFIG_DIR");
+        let fallback = credential_path("claude").expect("a HOME default exists");
+        assert!(
+            fallback.ends_with(".claude/.credentials.json"),
+            "unexpected fallback: {}",
+            fallback.display()
+        );
+        // An empty value is not a directory — treat it as unset rather than
+        // writing to the filesystem root.
+        std::env::set_var("CLAUDE_CONFIG_DIR", "   ");
+        assert_eq!(credential_path("claude").unwrap(), fallback);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

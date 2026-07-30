@@ -667,6 +667,79 @@ pub async fn connect_once(cfg: &NodeConfig) -> Result<()> {
                 };
                 out_tx.send(report).await.ok();
             }
+            ControlToNode::InstallRuntimeCredential {
+                runtime,
+                payload_b64,
+            } => {
+                // Reported, never fatal (AC-5), like every other install push:
+                // a machine whose credential directory is unwritable should
+                // keep running sessions, and the operator needs to be told
+                // which runtime it was.
+                //
+                // The payload is decoded here and nowhere else in this node —
+                // it goes straight from the frame to the file, and is not
+                // logged, because a credential in a log is a credential on
+                // disk somewhere nobody chose (AC-4).
+                use base64::Engine as _;
+                let report = match base64::engine::general_purpose::STANDARD
+                    .decode(payload_b64.as_bytes())
+                    .map_err(|e| {
+                        anyhow::anyhow!("the credential payload was not valid base64: {e}")
+                    })
+                    .and_then(|payload| crate::runtime_auth::install_credential(&runtime, &payload))
+                {
+                    Ok(path) => {
+                        // A write that the runtime does not accept is a FAILED
+                        // delivery. Reporting success on the write alone would
+                        // tell an operator the fleet is authorized when it is
+                        // not, which is the one wrong answer here.
+                        if crate::runtime_auth::is_authorized(&runtime) {
+                            tracing::info!(
+                                %runtime, path = %path.display(),
+                                "installed a runtime credential"
+                            );
+                            NodeToControl::RuntimeCredentialInstalled {
+                                runtime: runtime.clone(),
+                                path: path.display().to_string(),
+                                error: None,
+                            }
+                        } else {
+                            tracing::warn!(
+                                %runtime, path = %path.display(),
+                                "credential installed but the runtime still reports not authorized"
+                            );
+                            NodeToControl::RuntimeCredentialInstalled {
+                                runtime: runtime.clone(),
+                                path: path.display().to_string(),
+                                error: Some(
+                                    "the credential was written but the runtime still reports \
+                                     not authorized"
+                                        .into(),
+                                ),
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(%runtime, error = %e, "cannot install runtime credential");
+                        NodeToControl::RuntimeCredentialInstalled {
+                            runtime: runtime.clone(),
+                            path: String::new(),
+                            error: Some(e.to_string()),
+                        }
+                    }
+                };
+                out_tx.send(report).await.ok();
+
+                // Re-probe and push the fresh set either way (AC-3), the same
+                // path an authorize session uses when it ends. On success this
+                // is what flips the panel to authorized; on failure it is what
+                // stops the panel claiming a state the node does not have.
+                let profiles = crate::runtime_auth::probe_all();
+                out_tx
+                    .send(NodeToControl::RuntimeAuthStatus { profiles })
+                    .await
+                    .ok();
+            }
             ControlToNode::InstallHooks { content, sha256 } => {
                 // Reported, never fatal (AC-2). A machine whose settings.json is
                 // hand-broken should keep running sessions — the operator is

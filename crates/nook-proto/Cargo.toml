@@ -10,3 +10,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 uuid = { workspace = true }
 utoipa = { workspace = true }
+
+[dev-dependencies]
+# The credential-delivery wire test encodes an opaque payload (MAIN-283).
+base64 = { workspace = true }

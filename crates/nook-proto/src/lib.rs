@@ -94,6 +94,24 @@ pub enum NodeToControl {
     RuntimeAuthStatus {
         profiles: Vec<AuthProfile>,
     },
+    /// The outcome of an [`ControlToNode::InstallRuntimeCredential`] (MAIN-283).
+    ///
+    /// Reported whether it worked or not, and never fatal — a machine whose
+    /// credential directory is unwritable should keep running sessions, and the
+    /// operator needs to be told which runtime it was rather than have the node
+    /// disappear. Mirrors `SkillInstalled`: `error` present means it failed.
+    ///
+    /// A successful write whose re-probe still says "not authorized" is a
+    /// FAILURE here — the payload landed but the runtime did not accept it,
+    /// which is exactly the case an operator must not be told is fine.
+    RuntimeCredentialInstalled {
+        runtime: String,
+        /// Where it landed, for an operator who wants to go and look. Empty on
+        /// failure.
+        path: String,
+        #[serde(default)]
+        error: Option<String>,
+    },
     /// A session could not be started at all — the checkout is gone, the
     /// runtime isn't installed, tmux refused. Distinct from `Error` because it
     /// names the session, so the control plane can fail that row instead of
@@ -256,6 +274,22 @@ pub enum ControlToNode {
         workspace_path: String,
         cols: u16,
         rows: u16,
+    },
+    /// Install a runtime credential this node did not obtain (MAIN-283).
+    ///
+    /// `payload` is **opaque**: the control plane got it from the runtime's own
+    /// provider and this end neither parses nor validates it. What the node
+    /// decides is only *where* it goes — a fixed per-runtime rule keyed by
+    /// `runtime`, never a path from the wire, for the same reason
+    /// `StartAuthSession` carries a runtime rather than a command.
+    ///
+    /// This replaces driving `claude auth login` in a live session: a fleet can
+    /// be authorized once and delivered to, instead of one terminal at a time.
+    InstallRuntimeCredential {
+        runtime: String,
+        /// The credential bytes, base64 so the frame stays JSON-safe whatever
+        /// the runtime's file format is.
+        payload_b64: String,
     },
     /// Start a runtime's LOGIN flow in a session, so a headless node can be
     /// authorized from the UI (MAIN-126). The node — never the caller — chooses
@@ -699,6 +733,61 @@ mod wire_tests {
             matches!(back, ControlToNode::InstallHooks { content, sha256 }
                 if content == r#"{"Stop":[]}"# && sha256 == "abc123")
         );
+    }
+
+    /// Credential delivery round-trips, and the payload survives base64
+    /// intact — including bytes that are not valid UTF-8, because the payload
+    /// is opaque and a runtime's credential file need not be text (MAIN-283).
+    #[test]
+    fn install_runtime_credential_round_trips_with_an_opaque_payload() {
+        use base64::Engine as _;
+        let raw: &[u8] = &[0x00, 0xff, 0xfe, b'{', b'}'];
+        let msg = ControlToNode::InstallRuntimeCredential {
+            runtime: "claude".into(),
+            payload_b64: base64::engine::general_purpose::STANDARD.encode(raw),
+        };
+        let json = serde_json::to_value(&msg).unwrap();
+        assert_eq!(json["type"], "install_runtime_credential");
+        assert_eq!(json["data"]["runtime"], "claude");
+        // The credential must not be readable in the frame as plain text.
+        assert_ne!(json["data"]["payload_b64"], "\u{0}\u{ff}");
+
+        let back: ControlToNode = serde_json::from_value(json).unwrap();
+        let ControlToNode::InstallRuntimeCredential {
+            runtime,
+            payload_b64,
+        } = back
+        else {
+            panic!("wrong variant");
+        };
+        assert_eq!(runtime, "claude");
+        assert_eq!(
+            base64::engine::general_purpose::STANDARD
+                .decode(payload_b64)
+                .unwrap(),
+            raw,
+            "the payload survives the wire byte for byte"
+        );
+    }
+
+    /// The delivery report round-trips, and `error` is what distinguishes a
+    /// failure from a success (MAIN-283 AC-5).
+    #[test]
+    fn runtime_credential_installed_round_trips_both_outcomes() {
+        for error in [None, Some("cannot create /nope".to_string())] {
+            let msg = NodeToControl::RuntimeCredentialInstalled {
+                runtime: "claude".into(),
+                path: "/nook-claude/.credentials.json".into(),
+                error: error.clone(),
+            };
+            let json = serde_json::to_value(&msg).unwrap();
+            assert_eq!(json["type"], "runtime_credential_installed");
+            let back: NodeToControl = serde_json::from_value(json).unwrap();
+            assert!(matches!(
+                back,
+                NodeToControl::RuntimeCredentialInstalled { error: e, .. } if e == error
+            ));
+        }
     }
 
     /// The re-probe push round-trips (MAIN-126 AC-4).
