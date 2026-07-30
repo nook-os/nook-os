@@ -19,6 +19,7 @@ pub mod overview_queries;
 pub mod policy;
 pub mod queue;
 pub mod runtime_auth;
+pub mod runtime_auth_flow;
 pub mod schedule;
 pub mod secrets;
 pub mod session_queries;

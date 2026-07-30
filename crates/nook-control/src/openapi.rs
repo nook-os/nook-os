@@ -63,6 +63,9 @@ use utoipa::OpenApi;
         crate::routes::nodes::list,
         crate::routes::nodes::set_shared,
         crate::routes::nodes::authorize,
+        // The sessionless replacement for `nodes::authorize` (MAIN-290). Both
+        // are listed until C5 retires the older one.
+        crate::routes::runtime_auth::start,
         crate::routes::nodes::update,
         crate::routes::auth::dev_accounts,
         crate::routes::auth::purge_test_tenants,

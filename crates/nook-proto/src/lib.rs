@@ -456,6 +456,47 @@ pub enum ControlToNode {
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum UiEvent {
+    /// A device flow has started and is waiting for a human (MAIN-290).
+    ///
+    /// Carries the only two things a person needs — the code to type and where
+    /// to type it — so the UI can put them on screen while the control plane is
+    /// still polling the provider. The device code itself is NOT here: it is
+    /// the secret half of the exchange and never leaves the control plane.
+    RuntimeAuthPrompt {
+        flow_id: uuid::Uuid,
+        runtime: String,
+        user_code: String,
+        /// The pre-filled link when the provider offers one, else the plain
+        /// verification URI.
+        verification_uri: String,
+        /// Seconds until the code stops working, so the UI can count down
+        /// rather than leave a dead code on screen.
+        expires_in_secs: u64,
+    },
+    /// One node's outcome for a delivery (MAIN-290).
+    ///
+    /// Emitted per node, not once per flow: authorize-once/deliver-to-N means
+    /// some machines can succeed while others fail, and a single aggregate
+    /// result would hide that. `error` present means this node did not get it.
+    RuntimeAuthDelivered {
+        flow_id: uuid::Uuid,
+        node_id: NodeId,
+        runtime: String,
+        #[serde(default)]
+        error: Option<String>,
+    },
+    /// The flow ended without a credential (MAIN-290).
+    ///
+    /// `kind` is the machine-readable class — `expired`, `denied`, `provider`,
+    /// `transport` — so the UI can offer "start again" for an expired code and
+    /// something different for a refusal, rather than one dead end for all of
+    /// them.
+    RuntimeAuthFailed {
+        flow_id: uuid::Uuid,
+        runtime: String,
+        kind: String,
+        message: String,
+    },
     NodeStatus {
         node_id: NodeId,
         name: String,

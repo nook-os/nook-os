@@ -21,6 +21,7 @@ pub mod notifications;
 pub mod oidc_exchange;
 pub mod operator;
 pub mod overview;
+pub mod runtime_auth;
 pub mod schedule;
 pub mod sessions;
 pub mod settings;
@@ -257,6 +258,9 @@ pub fn build_router(state: AppState) -> Router {
         .route("/managed/hooks", get(managed::get_hooks))
         .route("/nodes/{id}/shared", post(nodes::set_shared))
         .route("/nodes/{id}/authorize", post(nodes::authorize))
+        // The sessionless replacement (MAIN-290). Coexists with the line
+        // above until C5 retires it.
+        .route("/runtime-auth", post(runtime_auth::start))
         .route("/nodes/{id}/rescan", post(nodes::rescan))
         .route("/nodes/{id}/migrate-paths", post(nodes::migrate_paths))
         .route("/nodes/{id}/update", post(nodes::update))
