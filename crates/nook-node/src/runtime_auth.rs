@@ -36,7 +36,16 @@ struct Adapter {
     /// The allowlisted LOGIN subcommand — the flow the Authorize button runs in
     /// a session (MAIN-126). Fixed here; never taken from the wire.
     login: &'static str,
-    parse: fn(code: Option<i32>, stdout: &str) -> (AuthState, Option<String>),
+    parse: fn(code: Option<i32>, output: &str) -> (AuthState, Option<String>),
+    /// Which stream carries this runtime's status text.
+    ///
+    /// Not a detail worth a flag until a runtime disagreed: **codex-cli 0.145.0
+    /// writes `login status` to STDERR**, so reading stdout hands the parser an
+    /// empty string and a signed-out node reports `Unknown` instead of
+    /// `NotAuthorized`. Recorded per adapter rather than by merging both
+    /// streams for everyone, because claude's parser reads JSON out of stdout
+    /// and merging would let a stray warning corrupt it.
+    status_on_stderr: bool,
     /// Where a delivered credential lands (MAIN-283). `None` for a runtime
     /// whose credential layout we do not know — the node refuses the delivery
     /// rather than guessing at a path, which is the same rule that makes
@@ -74,10 +83,29 @@ const ADAPTERS: &[Adapter] = &[
         probe: "auth status",
         login: "auth login",
         parse: parse_claude,
+        status_on_stderr: false,
         credential: Some(CredentialRule {
             dir_env: "CLAUDE_CONFIG_DIR",
             default_dir: ".claude",
             file: ".credentials.json",
+        }),
+    },
+    Adapter {
+        id: "codex",
+        label: "Codex CLI",
+        runtime: "codex",
+        probe: "login status",
+        // Present so the older per-node path stays uniform; the epic obtains
+        // codex's credential from the CONTROL PLANE and delivers it (MAIN-291
+        // NG-1), so nothing routine runs this.
+        login: "login --device-auth",
+        parse: parse_codex,
+        // Measured on codex-cli 0.145.0: `login status` goes to stderr.
+        status_on_stderr: true,
+        credential: Some(CredentialRule {
+            dir_env: "CODEX_HOME",
+            default_dir: ".codex",
+            file: "auth.json",
         }),
     },
     Adapter {
@@ -87,6 +115,7 @@ const ADAPTERS: &[Adapter] = &[
         probe: "portal status",
         login: "setup --portal",
         parse: parse_hermes_portal,
+        status_on_stderr: false,
         // Hermes' credential layout is not settled here, so a delivery for it
         // is refused rather than written to a guessed path (MAIN-283).
         credential: None,
@@ -215,6 +244,20 @@ pub fn probe_all() -> Vec<AuthProfile> {
     ADAPTERS.iter().map(profile_for).collect()
 }
 
+/// Which of the two captured streams this adapter's parser should read.
+///
+/// A named function rather than an inline `if` so it can be asserted without a
+/// runtime installed: the *fact* that codex reports on stderr is proved by the
+/// behavioural test in nook-control (which needs a real codex), but that we act
+/// on it must hold on every machine.
+fn status_text<'a>(a: &Adapter, stdout: &'a str, stderr: &'a str) -> &'a str {
+    if a.status_on_stderr {
+        stderr
+    } else {
+        stdout
+    }
+}
+
 fn profile_for(a: &Adapter) -> AuthProfile {
     // Presence first, through the login shell, so a runtime that lives only on
     // the interactive PATH is still found — and "not installed" (Unavailable)
@@ -223,7 +266,7 @@ fn profile_for(a: &Adapter) -> AuthProfile {
         (AuthState::Unavailable, None)
     } else {
         match run_probe(a.runtime, a.probe) {
-            Some((code, stdout)) => (a.parse)(code, &stdout),
+            Some((code, stdout, stderr)) => (a.parse)(code, status_text(a, &stdout, &stderr)),
             None => (AuthState::Unknown, None),
         }
     };
@@ -239,7 +282,7 @@ fn profile_for(a: &Adapter) -> AuthProfile {
 /// Run `<runtime> <probe>` through the login shell, bounded by [`PROBE_TIMEOUT`].
 /// Returns `(exit code, stdout)`, or `None` if it could not run or timed out.
 /// The command string is built only from the fixed adapter table, never input.
-fn run_probe(runtime: &str, probe: &str) -> Option<(Option<i32>, String)> {
+fn run_probe(runtime: &str, probe: &str) -> Option<(Option<i32>, String, String)> {
     let shell = crate::tmux::login_shell();
     let cmd = format!("{runtime} {probe}");
     let (tx, rx) = std::sync::mpsc::channel();
@@ -253,6 +296,7 @@ fn run_probe(runtime: &str, probe: &str) -> Option<(Option<i32>, String)> {
         Ok(Ok(out)) => Some((
             out.status.code(),
             String::from_utf8_lossy(&out.stdout).to_string(),
+            String::from_utf8_lossy(&out.stderr).to_string(),
         )),
         _ => None,
     }
@@ -265,6 +309,41 @@ fn parse_claude(code: Option<i32>, stdout: &str) -> (AuthState, Option<String>) 
     match code {
         Some(0) => (AuthState::Authorized, identity_from_json(stdout)),
         Some(1) => (AuthState::NotAuthorized, None),
+        _ => (AuthState::Unknown, None),
+    }
+}
+
+/// `codex login status`, measured against **codex-cli 0.145.0** (MAIN-291 AC-4).
+///
+/// | state                | output                            | exit |
+/// |----------------------|-----------------------------------|------|
+/// | authorized (OAuth)   | `Logged in using ChatGPT`         | 0    |
+/// | authorized (API key) | `Logged in using an API key - ***`| 0    |
+/// | signed out           | `Not logged in`                   | 1    |
+/// | unreadable auth.json | `Error checking login status: …`  | 1    |
+///
+/// **Exit 1 is two different things**, which is why this does not simply mirror
+/// [`parse_claude`]'s `1 => NotAuthorized`. A corrupt or half-written
+/// `auth.json` exits 1 exactly as a clean sign-out does, and calling that
+/// `NotAuthorized` would report a broken credential as an ordinary signed-out
+/// node — inviting a re-delivery that would fail the same way. Only the
+/// explicit sign-out line is `NotAuthorized`; an error is `Unknown`, which is
+/// what the four-state model has for "the probe could not tell us".
+fn parse_codex(code: Option<i32>, stdout: &str) -> (AuthState, Option<String>) {
+    let lc = stdout.to_lowercase();
+    match code {
+        // The identity is the auth MODE codex reports, which is the useful part
+        // and the only part it offers. codex redacts the key itself in the
+        // API-key form, so nothing secret is carried through.
+        Some(0) if lc.contains("logged in") => (
+            AuthState::Authorized,
+            stdout
+                .split_once("Logged in using ")
+                .map(|(_, rest)| rest.trim().to_string())
+                .filter(|s| !s.is_empty()),
+        ),
+        Some(0) => (AuthState::Authorized, None),
+        Some(1) if lc.contains("not logged in") => (AuthState::NotAuthorized, None),
         _ => (AuthState::Unknown, None),
     }
 }
@@ -376,6 +455,87 @@ mod tests {
         assert_eq!(
             parse_hermes_portal(Some(3), "logged in as x@y.com").0,
             AuthState::Unknown
+        );
+    }
+
+    /// `codex login status`, against the contract measured on codex-cli
+    /// 0.145.0 (MAIN-291 AC-4).
+    #[test]
+    fn codex_status_maps_the_measured_exit_codes() {
+        // Authorized, both login styles codex reports.
+        let (state, id) = parse_codex(Some(0), "Logged in using ChatGPT");
+        assert_eq!(state, AuthState::Authorized);
+        assert_eq!(id.as_deref(), Some("ChatGPT"));
+
+        let (state, id) = parse_codex(Some(0), "Logged in using an API key - ***");
+        assert_eq!(state, AuthState::Authorized);
+        assert_eq!(
+            id.as_deref(),
+            Some("an API key - ***"),
+            "codex redacts the key itself, so the mode is safe to surface"
+        );
+
+        // Signed out — the ONLY exit-1 shape that means signed out.
+        assert_eq!(
+            parse_codex(Some(1), "Not logged in").0,
+            AuthState::NotAuthorized
+        );
+    }
+
+    /// The distinction this parser exists for: exit 1 is *also* how codex
+    /// reports an unreadable `auth.json`. Calling that `NotAuthorized` would
+    /// present a corrupt credential as an ordinary signed-out node and invite a
+    /// re-delivery that fails identically.
+    #[test]
+    fn a_broken_credential_is_unknown_not_signed_out() {
+        for msg in [
+            "Error checking login status: missing field `refresh_token` at line 1 column 212",
+            "Error checking login status: invalid ID token format at line 1 column 55",
+        ] {
+            assert_eq!(
+                parse_codex(Some(1), msg).0,
+                AuthState::Unknown,
+                "an error must not read as a clean sign-out: {msg}"
+            );
+        }
+        // Unrecognised output, and a signal death, stay Unknown too.
+        assert_eq!(parse_codex(Some(1), "").0, AuthState::Unknown);
+        assert_eq!(parse_codex(None, "Not logged in").0, AuthState::Unknown);
+    }
+
+    /// The wiring, not the fact: codex's status is read from stderr and every
+    /// other runtime's from stdout.
+    ///
+    /// Worth its own test because getting this wrong is invisible in the happy
+    /// path — an authorized codex exits 0 either way — and only shows up as a
+    /// signed-out node reporting `Unknown`. That is precisely the bug this
+    /// caught during MAIN-291.
+    #[test]
+    fn codex_status_is_read_from_stderr_and_the_others_from_stdout() {
+        let find = |r: &str| ADAPTERS.iter().find(|a| a.runtime == r).unwrap();
+
+        assert_eq!(
+            status_text(find("codex"), "on-stdout", "on-stderr"),
+            "on-stderr",
+            "codex-cli writes login status to stderr"
+        );
+        for runtime in ["claude", "hermes"] {
+            assert_eq!(
+                status_text(find(runtime), "on-stdout", "on-stderr"),
+                "on-stdout",
+                "{runtime} reports on stdout; merging the streams could corrupt \
+                 claude's JSON"
+            );
+        }
+
+        // End to end through the parser: the signed-out line on the stream
+        // codex really uses must reach `parse_codex`.
+        let codex = find("codex");
+        let text = status_text(codex, "", "Not logged in");
+        assert_eq!(
+            (codex.parse)(Some(1), text).0,
+            AuthState::NotAuthorized,
+            "reading the wrong stream turns a clean sign-out into Unknown"
         );
     }
 
@@ -612,6 +772,50 @@ mod credential_tests {
         let err = install_credential("hermes", b"x").expect_err("refused");
         assert!(format!("{err:#}").contains("hermes"), "{err:#}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// MAIN-291 AC-3: codex now HAS a rule, so a delivery for it is accepted
+    /// where it used to be refused. Asserted through the same real-filesystem
+    /// path claude's test uses, with `CODEX_HOME` as the subject.
+    #[test]
+    fn a_codex_credential_lands_in_codex_home_at_0600() {
+        let _g = env_lock();
+        let dir = std::env::temp_dir().join(format!(
+            "nook-291-codex-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::env::set_var("CODEX_HOME", &dir);
+
+        let path = install_credential("codex", br#"{"tokens":{}}"#)
+            .expect("codex is no longer refused (AC-3)");
+        assert_eq!(
+            path,
+            dir.join("auth.json"),
+            "codex reads auth.json under CODEX_HOME"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), br#"{"tokens":{}}"#);
+        #[cfg(unix)]
+        assert_eq!(mode_of(&path), 0o600, "a credential is owner-only");
+
+        std::env::remove_var("CODEX_HOME");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// With `CODEX_HOME` unset the rule falls back to `$HOME/.codex/auth.json`
+    /// — the path a developer's own codex uses.
+    #[test]
+    fn codex_falls_back_to_the_dot_codex_directory() {
+        let _g = env_lock();
+        std::env::remove_var("CODEX_HOME");
+        let home = PathBuf::from(std::env::var("HOME").expect("HOME"));
+        assert_eq!(
+            credential_path("codex"),
+            Some(home.join(".codex").join("auth.json"))
+        );
     }
 
     /// The env var wins over the `$HOME` default: on the deployed node the
