@@ -32,6 +32,14 @@ use nook_types::*;
 use uuid::Uuid;
 
 use crate::ca::TenantCa;
+
+/// A node advertising itself as shared operator substrate.
+fn shared_operator_clause() -> String {
+    Postgres.contains(
+        "capabilities",
+        &Postgres.literal("{\"shared_operator\":true}"),
+    )
+}
 use crate::error::ApiResult;
 
 /// Who may use a node, as the sharing and authorization checks need it.
@@ -187,6 +195,28 @@ pub trait NodeRepository: Send + Sync {
     /// How many nodes still hold an unexpired leaf signed by this CA — the
     /// retirement guard.
     async fn live_leaf_count(&self, tenant: TenantId, ca_id: Uuid) -> ApiResult<i64>;
+
+    // ── executor selection for loop jobs (MAIN-255) ─────────────────────────
+    //
+    // These are `nodes` queries, so they live with `nodes`. A second copy under
+    // "jobs" is exactly how two definitions of "who may run work" drift apart.
+
+    /// The best node to run a loop job on: the requester's own online node
+    /// authorized for `runtime`, else the online authorized shared operator.
+    /// Own-before-shared is the ORDER BY, not the caller's job.
+    async fn pick_loop_executor(
+        &self,
+        tenant: TenantId,
+        person: Uuid,
+        runtime: &str,
+    ) -> ApiResult<Option<NodeId>>;
+
+    /// How many of this person's nodes are online — the first half of phrasing
+    /// *why* nothing could be placed.
+    async fn owned_online_count(&self, tenant: TenantId, person: Uuid) -> ApiResult<i64>;
+
+    /// How many shared operator nodes are online — the second half.
+    async fn shared_operator_online_count(&self, tenant: TenantId) -> ApiResult<i64>;
 
     // ── the liveness lease and what the socket reports ──────────────────────
 
@@ -604,6 +634,72 @@ impl NodeRepository for DbNodeRepository {
                     now = Postgres.now()
                 ),
                 params![tenant, ca_id],
+            )
+            .await?)
+    }
+
+    async fn pick_loop_executor(
+        &self,
+        tenant: TenantId,
+        person: Uuid,
+        runtime: &str,
+    ) -> ApiResult<Option<NodeId>> {
+        // `@>` containment tests the operator flag; the EXISTS scans the
+        // reported auth profiles for our runtime. jsonb operators route through
+        // the json seam (MAIN-201): the runtime_auth array is expanded and its
+        // elements' fields read via the trait, so the Postgres-specific SQL
+        // lives here in the impl.
+        let runtime_auth = Postgres.array_elements(&format!(
+            "COALESCE({}, {})",
+            Postgres.get_json("capabilities", "runtime_auth"),
+            Postgres.literal("[]")
+        ));
+        Ok(self
+            .db
+            .query_scalar_opt(
+                &format!(
+                    "SELECT id FROM nodes
+                     WHERE tenant_id = $1
+                       AND status = 'online'
+                       AND (owner_person_id = $2 OR {operator})
+                       AND EXISTS (
+                             SELECT 1
+                             FROM {runtime_auth} e
+                             WHERE {rt} = $3 AND {state} = 'authorized'
+                           )
+                     ORDER BY (owner_person_id = $2) DESC NULLS LAST, id
+                     LIMIT 1",
+                    operator = shared_operator_clause(),
+                    rt = Postgres.get_text("e", "runtime"),
+                    state = Postgres.get_text("e", "state"),
+                ),
+                params![tenant, person, runtime],
+            )
+            .await?)
+    }
+
+    async fn owned_online_count(&self, tenant: TenantId, person: Uuid) -> ApiResult<i64> {
+        Ok(self
+            .db
+            .query_scalar::<i64>(
+                "SELECT count(*) FROM nodes
+                 WHERE tenant_id = $1 AND owner_person_id = $2 AND status = 'online'",
+                params![tenant, person],
+            )
+            .await?)
+    }
+
+    async fn shared_operator_online_count(&self, tenant: TenantId) -> ApiResult<i64> {
+        Ok(self
+            .db
+            .query_scalar::<i64>(
+                &format!(
+                    "SELECT count(*) FROM nodes
+                     WHERE tenant_id = $1 AND status = 'online'
+                       AND {}",
+                    shared_operator_clause()
+                ),
+                params![tenant],
             )
             .await?)
     }
@@ -1411,6 +1507,79 @@ impl NodeRepository for FakeNodeRepository {
                     && n.ca_id == Some(ca_id)
                     && n.revoked_at.is_none()
                     && n.cert_not_after.is_some_and(|t| t > now)
+            })
+            .count() as i64)
+    }
+
+    async fn pick_loop_executor(
+        &self,
+        tenant: TenantId,
+        person: Uuid,
+        runtime: &str,
+    ) -> ApiResult<Option<NodeId>> {
+        let s = self.inner.lock().unwrap();
+        let authorized_for = |n: &FakeNode| {
+            n.node
+                .capabilities
+                .get("runtime_auth")
+                .and_then(|v| v.as_array())
+                .is_some_and(|profiles| {
+                    profiles.iter().any(|p| {
+                        p.get("runtime").and_then(|v| v.as_str()) == Some(runtime)
+                            && p.get("state").and_then(|v| v.as_str()) == Some("authorized")
+                    })
+                })
+        };
+        let is_operator = |n: &FakeNode| {
+            n.node
+                .capabilities
+                .get("shared_operator")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+        };
+        let mut eligible: Vec<&FakeNode> = s
+            .nodes
+            .iter()
+            .filter(|n| n.node.tenant_id == tenant && n.node.status == "online")
+            .filter(|n| n.node.owner_person_id == Some(person) || is_operator(n))
+            .filter(|n| authorized_for(n))
+            .collect();
+        // `ORDER BY (owner_person_id = $2) DESC`: your own node before the
+        // shared operator.
+        eligible.sort_by_key(|n| (n.node.owner_person_id != Some(person), n.node.id.0));
+        Ok(eligible.first().map(|n| n.node.id))
+    }
+
+    async fn owned_online_count(&self, tenant: TenantId, person: Uuid) -> ApiResult<i64> {
+        Ok(self
+            .inner
+            .lock()
+            .unwrap()
+            .nodes
+            .iter()
+            .filter(|n| {
+                n.node.tenant_id == tenant
+                    && n.node.owner_person_id == Some(person)
+                    && n.node.status == "online"
+            })
+            .count() as i64)
+    }
+
+    async fn shared_operator_online_count(&self, tenant: TenantId) -> ApiResult<i64> {
+        Ok(self
+            .inner
+            .lock()
+            .unwrap()
+            .nodes
+            .iter()
+            .filter(|n| {
+                n.node.tenant_id == tenant
+                    && n.node.status == "online"
+                    && n.node
+                        .capabilities
+                        .get("shared_operator")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false)
             })
             .count() as i64)
     }

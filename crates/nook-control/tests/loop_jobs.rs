@@ -661,3 +661,75 @@ async fn jobs_accept_a_board_key_and_reject_unknown() {
 
     bed.teardown().await;
 }
+
+/// The `AND state = 'queued'` guard on the executor claim, which nothing
+/// covered until MAIN-255 moved the statement and went looking.
+///
+/// Dispatch runs on every replica and on a poll, so two dispatchers reaching
+/// the same queued job at once is ordinary, not exotic. Without the guard the
+/// second `UPDATE` matches and **re-places a job that is already running** —
+/// two machines execute the same ticket, and the first executor's finish is
+/// attributed to a node that never ran it. Dropping the clause is a four-word
+/// edit no other test in this file notices.
+#[tokio::test]
+async fn a_second_dispatcher_cannot_re_place_a_job_that_is_already_claimed() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let (state, tenant, user, b, c) = fixture(&bed).await;
+    let target = task(&bed.pool, tenant, b, c, "task", user, None).await;
+
+    use nook_control::repo::jobs::NewLoopJob;
+    let id = JobId::new();
+    state
+        .jobs
+        .create(NewLoopJob {
+            id,
+            tenant,
+            kind: "spec".into(),
+            target_task_id: target,
+            workspace_id: None,
+            requested_by: user,
+            seed: None,
+            predecessor_job_id: None,
+        })
+        .await
+        .expect("queued job");
+
+    let (first_node, second_node) = (NodeId::new(), NodeId::new());
+
+    let first = state
+        .jobs
+        .claim_for_executor(id, first_node)
+        .await
+        .expect("first claim");
+    let first = first.expect("the first dispatcher places it");
+    assert_eq!(first.executor_node_id, Some(first_node));
+    assert_eq!(first.state, "claimed");
+
+    let second = state
+        .jobs
+        .claim_for_executor(id, second_node)
+        .await
+        .expect("second claim");
+    assert!(
+        second.is_none(),
+        "the second dispatcher must match no row — otherwise the job is placed \
+         twice and runs on two machines"
+    );
+
+    let after = state
+        .jobs
+        .get(tenant, id)
+        .await
+        .expect("reload")
+        .expect("still there");
+    assert_eq!(
+        after.executor_node_id,
+        Some(first_node),
+        "without the guard this would now read the SECOND node, stealing a run \
+         already in flight"
+    );
+
+    bed.teardown().await;
+}

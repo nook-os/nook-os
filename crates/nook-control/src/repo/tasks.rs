@@ -509,6 +509,10 @@ pub trait TaskRepository: Send + Sync {
     /// tasks it just orphaned instead of dropping the row silently (MAIN-220).
     async fn task_keys_at_worktree(&self, node: NodeId, path: &str) -> ApiResult<Vec<String>>;
 
+    /// One task's board key (`MAIN-42`), tenant-scoped. What a loop job quotes
+    /// when it narrates which ticket it is working (MAIN-255).
+    async fn key_of(&self, tenant: TenantId, id: TaskId) -> ApiResult<Option<String>>;
+
     // ---- board and column administration (MAIN-249) ------------------------
 
     async fn delete_board(&self, id: BoardId, tenant: TenantId) -> ApiResult<u64>;
@@ -1784,6 +1788,18 @@ impl TaskRepository for DbTaskRepository {
                     Postgres.cast("t.number", "text")
                 ),
                 params![parent, viewer],
+            )
+            .await?)
+    }
+
+    async fn key_of(&self, tenant: TenantId, id: TaskId) -> ApiResult<Option<String>> {
+        Ok(self
+            .db
+            .query_scalar_opt(
+                "SELECT b.key || '-' || t.number
+                   FROM tasks t JOIN boards b ON b.id = t.board_id
+                  WHERE t.id = $1 AND t.tenant_id = $2",
+                params![id, tenant],
             )
             .await?)
     }
@@ -3239,6 +3255,27 @@ impl TaskRepository for FakeTaskRepository {
                 archived_at: t.archived_at,
             })
             .collect())
+    }
+
+    async fn key_of(&self, tenant: TenantId, id: TaskId) -> ApiResult<Option<String>> {
+        let st = self.inner.lock().unwrap();
+        let Some(t) = st
+            .tasks
+            .iter()
+            .find(|t| t.id == id && t.tenant_id == tenant)
+        else {
+            return Ok(None);
+        };
+        let key = st
+            .boards
+            .iter()
+            .find(|b| b.id == t.board_id)
+            .and_then(|b| b.key.clone());
+        // The SQL concatenates; a NULL on either side yields NULL.
+        Ok(match (key, t.number) {
+            (Some(k), Some(n)) => Some(format!("{k}-{n}")),
+            _ => None,
+        })
     }
 
     async fn task_keys_at_worktree(&self, node: NodeId, path: &str) -> ApiResult<Vec<String>> {
