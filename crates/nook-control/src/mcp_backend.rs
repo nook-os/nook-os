@@ -126,7 +126,15 @@ impl NookBackend for McpBackend {
     async fn list_sessions(&self, active_only: bool) -> anyhow::Result<Vec<Session>> {
         let tenant = self.tenant().await?;
         // MCP acts tenant-wide, not as one member — all sessions (MAIN-133).
-        Ok(session_queries::list_sessions(&self.state.db, tenant, None, active_only, None).await?)
+        Ok(session_queries::list_sessions(
+            &*self.state.sessions,
+            &*self.state.workspaces,
+            tenant,
+            None,
+            active_only,
+            None,
+        )
+        .await?)
     }
 
     async fn start_session(
@@ -172,7 +180,7 @@ impl NookBackend for McpBackend {
         let id: SessionId = session_id
             .parse()
             .map_err(|_| anyhow::anyhow!("bad session id"))?;
-        let session = session_queries::get_session(&self.state.db, tenant, id).await?;
+        let session = session_queries::get_session(&*self.state.sessions, tenant, id).await?;
         let session = session.ok_or_else(|| anyhow::anyhow!("no such session"))?;
         // Ensure the node has a live PTY for this session first — after a node
         // restart the session map is empty and raw input would be dropped.
@@ -208,7 +216,7 @@ impl NookBackend for McpBackend {
         let id: SessionId = session_id
             .parse()
             .map_err(|_| anyhow::anyhow!("bad session id"))?;
-        let session = session_queries::get_session(&self.state.db, tenant, id).await?;
+        let session = session_queries::get_session(&*self.state.sessions, tenant, id).await?;
         let session = session.ok_or_else(|| anyhow::anyhow!("no such session"))?;
         let tmux_session = session
             .tmux_session
@@ -231,7 +239,7 @@ impl NookBackend for McpBackend {
         let id: SessionId = session_id
             .parse()
             .map_err(|_| anyhow::anyhow!("bad session id"))?;
-        let session = session_queries::get_session(&self.state.db, tenant, id).await?;
+        let session = session_queries::get_session(&*self.state.sessions, tenant, id).await?;
         let session = session.ok_or_else(|| anyhow::anyhow!("no such session"))?;
         if !self.state.registry.send_to_node(
             session.node_id,

@@ -40,8 +40,16 @@ pub async fn suggest(
     }
     // The dispatcher's counts are tenant-wide capacity signals, unchanged by the
     // per-member listing scopes (MAIN-132/133: no dispatch changes).
-    let sessions =
-        session_queries::list_sessions(&state.db, auth.tenant_id, None, true, None).await?;
+    // main's session form (#204) + this branch's node form (MAIN-252).
+    let sessions = session_queries::list_sessions(
+        &*state.sessions,
+        &*state.workspaces,
+        auth.tenant_id,
+        None,
+        true,
+        None,
+    )
+    .await?;
     let nodes = state.nodes.list(auth.tenant_id, None).await?;
 
     let suggestion = state
