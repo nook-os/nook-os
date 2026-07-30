@@ -26,13 +26,37 @@
 //! (a new migration never touches the shared dev ledger). `NOOK_KEEP_TEST_DATA=1`
 //! keeps the database around for debugging instead of dropping it. The shared
 //! `DATABASE_URL` database now serves only the running dev stack, never tests.
+//!
+//! ## Engines (MAIN-242)
+//!
+//! The bed follows `DATABASE_URL`'s scheme, the same way boot does (MAIN-195):
+//! `postgres://` gives a Postgres bed, `sqlite://` a SQLite one. Until this, the
+//! harness constructed a `PgPool` directly, so SQLite could not be a *tested*
+//! engine no matter how well the app supported it — the CI matrix and the
+//! "first-class engine" claim had nothing underneath them.
+//!
+//! Two surfaces, and the difference matters:
+//!
+//! - [`TestBed::db`] is the **engine-agnostic** one — an [`EnginePool`], the same
+//!   type production code takes. Anything written against it runs on either
+//!   engine. New tests should use it.
+//! - [`TestBed::pool`] is a **Postgres-only escape**, kept because ~650 existing
+//!   call sites bind raw `sqlx` queries against it and converting them is the
+//!   next unit of work, not this one (MAIN-242 NG-1). On a SQLite bed it is an
+//!   inert handle that has never connected and never will; touching it fails,
+//!   loudly and by design. Tests that use it are Postgres-leg tests.
+//!
+//! Gate on [`TestBed::engine`] (or [`TestBed::is_postgres`]) when a test is
+//! Postgres-only for a real reason — querying `pg_database`, say.
 
 use anyhow::{Context, Result};
 use nook_control::state::AppState;
-use nook_db::EnginePool;
+use nook_db::{params, Db, Engine, EnginePool};
 use nook_infra::Config;
 use nook_types::{NodeId, TenantId, UserId, WorkspaceId};
+use sqlx::postgres::PgPoolOptions;
 use sqlx::{Connection, PgConnection, PgPool};
+use std::path::{Path, PathBuf};
 use tokio::sync::OnceCell;
 use uuid::Uuid;
 
@@ -80,18 +104,71 @@ async fn template_db(base_url: &str) -> &'static str {
         .await
 }
 
+/// What this bed created, and therefore what teardown has to undo. The two
+/// engines have nothing in common here: Postgres owns a database on a server
+/// reachable only through an admin connection, SQLite owns a file.
+enum Arm {
+    Pg {
+        /// `DATABASE_URL` — the server + base database, used for the admin
+        /// `CREATE`/`DROP DATABASE` statements (which cannot run against the
+        /// target).
+        base_url: String,
+        /// The unique database this bed created (e.g. `nook_test_<uuid>`).
+        db_name: String,
+    },
+    Sqlite {
+        /// The unique file this bed created.
+        path: PathBuf,
+    },
+}
+
+/// A pool that has never opened a connection and never will, for the `pool`
+/// field on a SQLite bed.
+///
+/// The field cannot simply be absent: it is `pub`, and ~650 call sites bind
+/// `sqlx` queries against it, so on a SQLite bed it has to hold *something*.
+/// What it holds is chosen for one property — it cannot reach a real server.
+/// The host is a `.invalid` name, which RFC 2606 guarantees never resolves.
+///
+/// The tempting alternative, a lazy pool aimed at the real `DATABASE_URL`, is
+/// the trap this exists to avoid: it would **work**, silently running an
+/// allegedly-isolated test against the shared dev database.
+///
+/// **The failure is safe but not self-explanatory**, and that is worth knowing
+/// rather than discovering. The hostname was picked hoping it would appear in
+/// the error; it does not — sqlx reports connection failures without the
+/// target, so what you actually get is:
+///
+/// ```text
+/// error communicating with database: failed to lookup address information: Name or service not known
+/// ```
+///
+/// (A Unix-socket path in place of the host was tried too, and is elided the
+/// same way.) If you have landed here from that message: you used `bed.pool` on
+/// a SQLite bed. Use [`TestBed::db`], or gate the test with
+/// [`TestBed::is_postgres`].
+fn inert_pg_pool() -> PgPool {
+    PgPoolOptions::new()
+        .connect_lazy("postgres://nobody@bed-pool-is-postgres-only-use-bed-db.invalid/none")
+        .expect("a syntactically valid URL parses without connecting")
+}
+
 /// A prepared, **private** test world: a freshly created, migrated, and seeded
 /// database plus opt-in setup surfaces, dropped whole at teardown.
 pub struct TestBed {
-    /// The raw Postgres pool for this test's private database. Fixture SQL and
-    /// the entity helpers run on it directly; `db()` / `app_state()` wrap it in
-    /// the workspace `EnginePool` for calls into the production API.
+    /// **Postgres-only escape.** The raw pool for this test's private database,
+    /// for fixture SQL written directly against `sqlx`.
+    ///
+    /// On a **SQLite** bed this is [`inert_pg_pool`] — a handle that has never
+    /// connected — so a test that uses it is a Postgres-leg test and fails
+    /// rather than quietly doing something else. Use [`TestBed::db`] for
+    /// anything that should run on both engines.
     pub pool: PgPool,
-    /// `DATABASE_URL` — the server + base database, used for the admin
-    /// `CREATE`/`DROP DATABASE` statements (which cannot run against the target).
-    base_url: String,
-    /// The unique database this bed created (e.g. `nook_test_<uuid>`).
-    db_name: String,
+    /// The engine-agnostic pool, and the real one: on Postgres it wraps `pool`,
+    /// on SQLite it is the only pool there is.
+    db: EnginePool,
+    /// What was created, and how to undo it.
+    arm: Arm,
     /// `NOOK_KEEP_TEST_DATA=1` keeps the database for debugging.
     keep: bool,
     /// Set once the database has been dropped, so teardown + Drop don't double.
@@ -112,6 +189,21 @@ impl TestBed {
             return None;
         };
         let keep = std::env::var("NOOK_KEEP_TEST_DATA").is_ok();
+
+        // The scheme picks the engine, exactly as boot does (MAIN-195/242). An
+        // unparseable URL is a configuration error worth failing on: silently
+        // skipping would report success for a suite that ran nothing.
+        let engine = nook_db::engine_from_url(&base_url)
+            .expect("DATABASE_URL must be postgres:// or sqlite://");
+        Some(match engine {
+            Engine::Postgres => Self::new_postgres(base_url, keep).await,
+            Engine::Sqlite => Self::new_sqlite(keep).await,
+        })
+    }
+
+    /// Postgres: clone the migrated + seeded template into a uniquely-named
+    /// private database.
+    async fn new_postgres(base_url: String, keep: bool) -> TestBed {
         let db_name = format!("nook_test_{}", Uuid::now_v7().simple());
 
         // Clone the migrated + seeded template rather than rebuilding it per test
@@ -134,13 +226,69 @@ impl TestBed {
             .await
             .expect("connect to the fresh test database");
 
-        Some(TestBed {
+        TestBed {
+            db: EnginePool::from_pg(pool.clone()),
             pool,
-            base_url,
-            db_name,
+            arm: Arm::Pg { base_url, db_name },
             keep,
             dropped: false,
-        })
+        }
+    }
+
+    /// SQLite: a unique **file**, migrated through the SQLite track and seeded.
+    ///
+    /// A file rather than a shared-cache in-memory database, for three reasons.
+    /// It is the shape a real single-machine deployment has, so the harness
+    /// tests what ships. `NOOK_KEEP_TEST_DATA=1` means something — you can open
+    /// the artifact in `sqlite3` afterwards, where an in-memory database dies
+    /// with the process and the flag would be a lie. And teardown becomes
+    /// *observable*: a test can assert the file is gone, which is how AC-6 is
+    /// checked rather than assumed.
+    ///
+    /// No template-clone equivalent here. It would be a plain file copy and is
+    /// tempting, but migrate + seed on an empty SQLite file is fast (the whole
+    /// schema is one `0001`), and a second mechanism is only worth its
+    /// complexity once something measures slow.
+    async fn new_sqlite(keep: bool) -> TestBed {
+        let path = std::env::temp_dir().join(format!("nook_test_{}.db", Uuid::now_v7().simple()));
+        // A stale file from a previous run with the same name is impossible
+        // (uuid v7), but an existing file would silently skip migration, so be
+        // explicit rather than lucky.
+        remove_sqlite_files(&path);
+
+        let db = nook_db::connect(&format!("sqlite://{}", path.display()), 1)
+            .await
+            .expect("open the private SQLite test database");
+        // The SQLite track, never the Postgres one (AC-3). Running the wrong
+        // dialect's DDL would fail loudly here rather than produce a subtly
+        // wrong schema, but selecting it explicitly is what makes that a
+        // guarantee instead of an accident.
+        nook_control::MIGRATOR_SQLITE
+            .run(db.sqlite())
+            .await
+            .expect("migrate the private SQLite test database");
+        nook_control::seed::run(&db, &Config::for_test())
+            .await
+            .expect("seed the private SQLite test database");
+
+        TestBed {
+            pool: inert_pg_pool(),
+            db,
+            arm: Arm::Sqlite { path },
+            keep,
+            dropped: false,
+        }
+    }
+
+    /// Which engine this bed is on — for tests that must gate on it, such as
+    /// ones that read `pg_database` or bind raw `sqlx` against [`TestBed::pool`].
+    pub fn engine(&self) -> Engine {
+        self.db.engine()
+    }
+
+    /// Shorthand for the common gate: `if !bed.is_postgres() { return; }`.
+    pub fn is_postgres(&self) -> bool {
+        self.engine() == Engine::Postgres
     }
 
     /// The canonical test [`Config`] — one construction, overridable per field
@@ -154,11 +302,12 @@ impl TestBed {
         AppState::new(self.db(), self.config(), None).await
     }
 
-    /// The workspace pool type ([`EnginePool`]) over this bed's raw pool — for
-    /// passing into production functions that take `&nook_db::DbPool`. Cheap: an
-    /// `EnginePool` is a clone of the underlying pool handle.
+    /// The workspace pool type ([`EnginePool`]) — for passing into production
+    /// functions that take `&nook_db::DbPool`, and **the surface a test should
+    /// use if it wants to run on both engines**. Cheap: an `EnginePool` is a
+    /// clone of the underlying pool handle.
     pub fn db(&self) -> EnginePool {
-        EnginePool::from_pg(self.pool.clone())
+        self.db.clone()
     }
 
     /// Create a tenant (name = slug = `test-<hint>-<uuid>`). No tracking needed —
@@ -166,10 +315,11 @@ impl TestBed {
     pub async fn tenant(&self, hint: &str) -> TenantId {
         let id = TenantId::new();
         let name = format!("test-{hint}-{}", id.0.simple());
-        sqlx::query("INSERT INTO tenants (id, name, slug) VALUES ($1, $2, $2)")
-            .bind(id)
-            .bind(name)
-            .execute(&self.pool)
+        self.db
+            .exec(
+                "INSERT INTO tenants (id, name, slug) VALUES ($1, $2, $2)",
+                params![id, name],
+            )
             .await
             .expect("create tenant");
         id
@@ -180,36 +330,40 @@ impl TestBed {
     pub async fn user(&self, tenant: TenantId, role: &str) -> (UserId, Uuid) {
         let user = UserId::new();
         let person = Uuid::now_v7();
-        sqlx::query(
-            "INSERT INTO users (id, tenant_id, person_id, display_name, email, role)
-             VALUES ($1, $2, $3, 'U', $4, $5)",
-        )
-        .bind(user)
-        .bind(tenant)
-        .bind(person)
-        .bind(format!("u-{}@example.test", user.0.simple()))
-        .bind(role)
-        .execute(&self.pool)
-        .await
-        .expect("create user");
+        self.db
+            .exec(
+                "INSERT INTO users (id, tenant_id, person_id, display_name, email, role)
+                 VALUES ($1, $2, $3, 'U', $4, $5)",
+                params![
+                    user,
+                    tenant,
+                    person,
+                    format!("u-{}@example.test", user.0.simple()),
+                    role.to_string()
+                ],
+            )
+            .await
+            .expect("create user");
         (user, person)
     }
 
     /// Create an offline node in `tenant` owned by `owner` (a person id).
     pub async fn node(&self, tenant: TenantId, owner: Uuid) -> NodeId {
         let id = NodeId::new();
-        sqlx::query(
-            "INSERT INTO nodes (id, tenant_id, name, node_token_hash, status, owner_person_id)
-             VALUES ($1, $2, $3, $4, 'offline', $5)",
-        )
-        .bind(id)
-        .bind(tenant)
-        .bind(format!("n-{}", id.0.simple()))
-        .bind(format!("h-{}", id.0.simple()))
-        .bind(owner)
-        .execute(&self.pool)
-        .await
-        .expect("create node");
+        self.db
+            .exec(
+                "INSERT INTO nodes (id, tenant_id, name, node_token_hash, status, owner_person_id)
+                 VALUES ($1, $2, $3, $4, 'offline', $5)",
+                params![
+                    id,
+                    tenant,
+                    format!("n-{}", id.0.simple()),
+                    format!("h-{}", id.0.simple()),
+                    owner
+                ],
+            )
+            .await
+            .expect("create node");
         id
     }
 
@@ -217,11 +371,11 @@ impl TestBed {
     pub async fn workspace(&self, tenant: TenantId) -> WorkspaceId {
         let id = WorkspaceId::new();
         let name = format!("test-ws-{}", id.0.simple());
-        sqlx::query("INSERT INTO workspaces (id, tenant_id, name, slug) VALUES ($1, $2, $3, $3)")
-            .bind(id)
-            .bind(tenant)
-            .bind(name)
-            .execute(&self.pool)
+        self.db
+            .exec(
+                "INSERT INTO workspaces (id, tenant_id, name, slug) VALUES ($1, $2, $3, $3)",
+                params![id, tenant, name],
+            )
             .await
             .expect("create workspace");
         id
@@ -233,9 +387,14 @@ impl TestBed {
         self.keep = keep;
     }
 
-    /// The name of this bed's private database — for teardown-behaviour tests.
+    /// This bed's private database: the database *name* on Postgres, the file
+    /// *path* on SQLite — for teardown-behaviour tests, which are the only
+    /// caller and know which engine they are on.
     pub fn db_name(&self) -> &str {
-        &self.db_name
+        match &self.arm {
+            Arm::Pg { db_name, .. } => db_name,
+            Arm::Sqlite { path } => path.to_str().unwrap_or_default(),
+        }
     }
 
     /// Drop the whole private database (unless `NOOK_KEEP_TEST_DATA`). Idempotent.
@@ -245,8 +404,29 @@ impl TestBed {
             return;
         }
         self.dropped = true;
-        self.pool.close().await;
-        let _ = drop_database(&self.base_url, &self.db_name).await;
+        match &self.arm {
+            Arm::Pg { base_url, db_name } => {
+                self.pool.close().await;
+                let _ = drop_database(base_url, db_name).await;
+            }
+            Arm::Sqlite { path } => {
+                // Close first: on Windows an open handle would block the
+                // unlink, and on unix it costs nothing to be tidy.
+                self.db.sqlite().close().await;
+                remove_sqlite_files(path);
+            }
+        }
+    }
+}
+
+/// Remove a SQLite database and the sidecars sqlx leaves beside it. The `-wal`
+/// and `-shm` files are not optional housekeeping: leaving them next to a
+/// deleted database is how a later run finds a half-state, and they are the
+/// difference between "the file is gone" and "the database is gone".
+fn remove_sqlite_files(path: &Path) {
+    let _ = std::fs::remove_file(path);
+    for ext in ["-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{ext}", path.display()));
     }
 }
 
@@ -314,20 +494,30 @@ impl Drop for TestBed {
             return;
         }
         self.dropped = true;
-        let base = self.base_url.clone();
-        let name = self.db_name.clone();
-        let _ = std::thread::spawn(move || {
-            let Ok(rt) = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-            else {
-                return;
-            };
-            rt.block_on(async {
-                let _ = drop_database(&base, &name).await;
-            });
-        })
-        .join();
+        match &self.arm {
+            Arm::Pg { base_url, db_name } => {
+                let base = base_url.clone();
+                let name = db_name.clone();
+                let _ = std::thread::spawn(move || {
+                    let Ok(rt) = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                    else {
+                        return;
+                    };
+                    rt.block_on(async {
+                        let _ = drop_database(&base, &name).await;
+                    });
+                })
+                .join();
+            }
+            // SQLite needs no runtime and no thread: unlinking is a sync
+            // syscall. It also must not close the pool, for the same reason the
+            // Postgres arm must not — see the note above. On unix the unlink
+            // succeeds with the file still open, and the pool then drops
+            // inertly on the test thread.
+            Arm::Sqlite { path } => remove_sqlite_files(path),
+        }
     }
 }
 

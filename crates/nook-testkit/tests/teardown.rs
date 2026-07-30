@@ -1,7 +1,10 @@
 //! MAIN-156: `TestBed` gives each test a private database and drops the whole
 //! thing at teardown; `NOOK_KEEP_TEST_DATA` keeps it for debugging. Proven here
 //! against `pg_database` — the database itself vanishes, not just its rows.
-//! Needs `DATABASE_URL`; skips cleanly without one.
+//! Needs a **Postgres** `DATABASE_URL`; skips cleanly without one, and skips on
+//! a SQLite bed because `pg_database` and `bed.pool` are both Postgres-only
+//! (MAIN-242 AC-4). The SQLite half of the same contract — teardown removes the
+//! file, `keep` preserves it — lives in `tests/dual_engine.rs`.
 
 use nook_testkit::TestBed;
 use sqlx::PgPool;
@@ -25,6 +28,10 @@ async fn teardown_drops_the_private_database() {
         eprintln!("skipping teardown test — no DATABASE_URL");
         return;
     };
+    if !bed.is_postgres() {
+        bed.teardown().await;
+        return; // dual_engine.rs owns the SQLite twin of this test
+    }
     let name = bed.db_name().to_string();
     // Put a row in it, so "gone" means the whole database, not an empty one.
     let _tenant = bed.tenant("teardown").await;
@@ -45,6 +52,10 @@ async fn keep_preserves_the_database() {
     let Some(mut bed) = TestBed::new().await else {
         return;
     };
+    if !bed.is_postgres() {
+        bed.teardown().await;
+        return; // dual_engine.rs owns the SQLite twin of this test
+    }
     // The flag normally comes from NOOK_KEEP_TEST_DATA; set it directly here so
     // this test doesn't race the process-global env var with its sibling.
     bed.set_keep(true);
