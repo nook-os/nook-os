@@ -15,6 +15,7 @@ mod config;
 mod dms;
 mod messages;
 mod registry;
+mod repo;
 mod ws;
 
 use std::str::FromStr;
@@ -47,6 +48,12 @@ pub(crate) struct AppState {
     pub(crate) db: DbPool,
     /// Per-channel live fan-out for the delivery websocket (AC-3).
     pub(crate) registry: Arc<registry::Registry>,
+    /// Channels, their categories and read cursors (MAIN-257).
+    pub(crate) channels: Arc<dyn repo::channels::ChannelRepository>,
+    /// Messages, reactions and the revision trail (MAIN-257).
+    pub(crate) messages: Arc<dyn repo::messages::MessageRepository>,
+    /// Direct messages and the person directory that gates them (MAIN-257).
+    pub(crate) dms: Arc<dyn repo::dms::DmRepository>,
 }
 
 #[tokio::main]
@@ -104,7 +111,13 @@ async fn main() -> anyhow::Result<()> {
     let registry = Arc::new(registry::Registry::new());
     bus::start(registry.clone(), db.clone());
 
-    let state = AppState { db, registry };
+    let state = AppState {
+        channels: Arc::new(repo::channels::DbChannelRepository::new(db.clone())),
+        messages: Arc::new(repo::messages::DbMessageRepository::new(db.clone())),
+        dms: Arc::new(repo::dms::DbDmRepository::new(db.clone())),
+        db,
+        registry,
+    };
     let app = Router::new()
         .route("/healthz", get(healthz))
         .route("/livez", get(livez))
