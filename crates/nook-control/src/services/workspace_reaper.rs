@@ -42,8 +42,19 @@ pub fn start(state: AppState) {
 }
 
 async fn run(state: AppState, retention_secs: u64) {
+    let mut switch = crate::services::loops::SwitchLog::default();
     loop {
         tokio::time::sleep(SCAN_INTERVAL).await;
+        // Gated with the rest of the job machinery (MAIN-239). Reclaiming a
+        // tombstoned checkout is only urgent because loops keep making new
+        // ones; with loops off the tombstones can wait, and the operator gets
+        // the quiet they asked for.
+        if !switch.observe(
+            "workspace_reaper",
+            crate::services::loops::any_enabled(&state.db).await,
+        ) {
+            continue;
+        }
         match reap_missing_checkouts(&state, retention_secs).await {
             Ok(0) => {}
             Ok(n) => tracing::info!(reaped = n, "reaped tombstoned checkouts past retention"),

@@ -268,6 +268,11 @@ services:
       # service uses; refused outright when APP_ENV=production.
       NOOK_INSECURE: "1"
       NOOK_SHARED_OPERATOR: "1"
+      # The operator node boots with the dev stack by default (MAIN-140), but it
+      # only claims loop work when the loops master switch is ON — which it is
+      # NOT by default (MAIN-239). So a fresh stack has an operator standing by
+      # and doing nothing, on purpose. Turn loops on with
+      # `nook operator loops on` or Settings → Loops.
       # Put the tmux runtime (its socket dir) on a named volume — tmux honours
       # TMUX_TMPDIR, and nook shells out to tmux inheriting this env.
       TMUX_TMPDIR: /var/lib/nook/tmux

@@ -78,6 +78,20 @@ hygiene now, not a shared-DB workaround.)
 - Postgres: 5432. Control plane: 8080. Web (Vite): 5173, proxies `/api` to 8080.
 - Mailpit: SMTP 1025, web inbox `http://localhost:8025` (dev email).
 
+## Loops are OFF by default (MAIN-239)
+
+- The control plane's job machinery — `job_dispatch`, `job_reaper`,
+  `workspace_reaper` — is gated on one tenant-scoped setting, `loops.enabled`,
+  **default off**. A fresh boot therefore does no polling, no dispatch, and no
+  reaping; the operator node still starts, it just never claims loop work.
+- Turn it on with `nook operator loops on` (or Settings → Loops). It is read on
+  **every poll**, so the change lands within a poll interval with **no restart**;
+  the log says `loops enabled — resuming` / `loops disabled — idle` once per
+  transition, not once per tick.
+- **Off loses nothing.** A job created while loops are off stays `queued`,
+  unplaced, and is picked up when the switch flips. If a promoted ticket is not
+  moving, this switch is the first thing to check.
+
 ## Work model (Git-driven)
 
 - **Git → Workspaces → Projects → Sessions.** A workspace is a repo; it can live on many nodes; each checkout (primary clone or **git worktree**) is a *location*. A **session** is a tmux-backed terminal running a chosen **runtime** in one checkout — runtimes are `bash`/`zsh`/`claude`/`hermes`/`codex`/… (sessions are NOT bash-only).

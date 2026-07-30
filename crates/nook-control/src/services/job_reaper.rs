@@ -10,7 +10,7 @@
 
 use std::time::Duration;
 
-use crate::services::jobs;
+use crate::services::{jobs, loops};
 use crate::state::AppState;
 
 /// How often to scan. Independent of the grace window: a short scan interval over
@@ -29,8 +29,13 @@ pub fn start(state: AppState) {
 }
 
 async fn run(state: AppState, grace_secs: u64) {
+    let mut switch = loops::SwitchLog::default();
     loop {
         tokio::time::sleep(SCAN_INTERVAL).await;
+        // No loops, nothing to reap: there are no runs to strand (MAIN-239).
+        if !switch.observe("job_reaper", loops::any_enabled(&state.db).await) {
+            continue;
+        }
         match jobs::reap_stale_executors(&state, grace_secs).await {
             Ok(0) => {}
             Ok(n) => tracing::warn!(reaped = n, "reaped loop jobs whose executor went offline"),
