@@ -30,6 +30,21 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     let cfg = Config::from_env()?;
 
+    // One control plane per SQLite file (MAIN-197). Taken BEFORE the pool,
+    // because `create_if_missing` means connecting is already a write, and the
+    // value of this check is entirely in refusing before the first one.
+    //
+    // The binding is named on purpose. The lock lives on an open descriptor, so
+    // `let _ = …` would drop it here and enforce nothing while looking correct;
+    // holding it in `main`'s scope is what makes it last as long as the process.
+    // Postgres takes no lock and multi-instance is unaffected.
+    let _instance_lock = nook_db::acquire_single_instance_lock(&cfg.database_url)
+        .map_err(|e| anyhow::anyhow!("{e}"))
+        .context("this control plane cannot use that database")?;
+    if let Some(lock) = &_instance_lock {
+        tracing::info!(lock = %lock.path().display(), "holding the SQLite single-instance lock");
+    }
+
     // Select the engine from the DATABASE_URL scheme and refuse an unknown one
     // here, at boot, with a pointed message (MAIN-195). Postgres connects exactly
     // as before; the pool type is unchanged.
