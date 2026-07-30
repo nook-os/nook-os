@@ -7,7 +7,7 @@
 //! the cost of that is two extra queries for a whole board rather than two per
 //! task.
 
-use nook_db::{params, Db, DbPool};
+use nook_db::{params, Db, DbPool, Postgres, TypeMapping};
 use nook_types::*;
 use std::collections::HashMap;
 
@@ -299,6 +299,132 @@ pub async fn column_of_type(db: &DbPool, board: BoardId, column_type: &str) -> A
             "this board has no {column_type:?} column — add one, or give an explicit column_id"
         ))
     })
+}
+
+/// The `KanbanProvider` name that owns a task, via its board. Moved verbatim out
+/// of `mcp_backend` (MAIN-245); resolving the name to an instance stays there,
+/// because the registry is orchestration rather than data.
+pub async fn board_provider_for_task(
+    db: &DbPool,
+    tenant: TenantId,
+    task_id: TaskId,
+) -> ApiResult<Option<String>> {
+    Ok(db
+        .query_scalar_opt(
+            "SELECT b.provider FROM boards b
+             JOIN tasks t ON t.board_id = b.id
+             WHERE t.id = $1 AND t.tenant_id = $2",
+            params![task_id, tenant],
+        )
+        .await?)
+}
+
+/// One task row by id, scoped to its tenant. Moved verbatim out of
+/// `mcp_backend` (MAIN-245).
+pub async fn get_row(db: &DbPool, tenant: TenantId, id: TaskId) -> ApiResult<Option<TaskItem>> {
+    Ok(db
+        .query_opt(
+            "SELECT * FROM tasks WHERE id = $1 AND tenant_id = $2",
+            params![id, tenant],
+        )
+        .await?)
+}
+
+/// Drop a task's assignee. Moved verbatim out of `mcp_backend` (MAIN-245).
+pub async fn clear_assignee(db: &DbPool, tenant: TenantId, id: TaskId) -> ApiResult<TaskItem> {
+    Ok(db
+        .query_one(
+            &format!(
+                "UPDATE tasks SET assignee_user_id = NULL, updated_at = {now}
+             WHERE id = $1 AND tenant_id = $2 RETURNING *",
+                now = Postgres.now()
+            ),
+            params![id, tenant],
+        )
+        .await?)
+}
+
+/// Set a task's priority. Moved verbatim out of `mcp_backend` (MAIN-245); the
+/// clamp stays at the call site, where it always was.
+pub async fn set_priority_row(
+    db: &DbPool,
+    tenant: TenantId,
+    id: TaskId,
+    priority: i32,
+) -> ApiResult<TaskItem> {
+    Ok(db
+        .query_one(
+            &format!(
+                "UPDATE tasks SET priority = $3, updated_at = {now}
+             WHERE id = $1 AND tenant_id = $2 RETURNING *",
+                now = Postgres.now()
+            ),
+            params![id, tenant, priority],
+        )
+        .await?)
+}
+
+/// Record an agent-authored comment. Moved verbatim out of `mcp_backend`
+/// (MAIN-245).
+pub async fn insert_agent_comment(
+    db: &DbPool,
+    tenant: TenantId,
+    task_id: TaskId,
+    author_id: uuid::Uuid,
+    author_name: &str,
+    body_md: &str,
+) -> ApiResult<TaskComment> {
+    Ok(db
+        .query_one(
+            "INSERT INTO task_comments (id, tenant_id, task_id, author_type, author_id, author_name, body_md)
+             VALUES ($1, $2, $3, 'agent', $4, $5, $6)
+             RETURNING id, tenant_id, task_id, author_type, author_id, author_name,
+                       body_md, created_at, updated_at",
+            params![uuid::Uuid::now_v7(), tenant, task_id, author_id, author_name, body_md],
+        )
+        .await?)
+}
+
+/// Get-or-create a label by name and attach it to a task. Moved verbatim out of
+/// `mcp_backend` (MAIN-245); the two statements travelled together because the
+/// upsert exists only to feed the attach.
+pub async fn attach_label(
+    db: &DbPool,
+    tenant: TenantId,
+    task_id: TaskId,
+    name: &str,
+) -> ApiResult<()> {
+    let label_id: uuid::Uuid = db
+        .query_scalar(
+            "INSERT INTO labels (id, tenant_id, name) VALUES ($1, $2, $3)
+             ON CONFLICT (tenant_id, name) DO UPDATE SET name = EXCLUDED.name RETURNING id",
+            params![uuid::Uuid::now_v7(), tenant, name],
+        )
+        .await?;
+    db.exec(
+        "INSERT INTO task_labels (task_id, label_id) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+        params![task_id, label_id],
+    )
+    .await?;
+    Ok(())
+}
+
+/// Detach a label from a task by name. Moved verbatim out of `mcp_backend`
+/// (MAIN-245).
+pub async fn detach_label(
+    db: &DbPool,
+    tenant: TenantId,
+    task_id: TaskId,
+    name: &str,
+) -> ApiResult<()> {
+    db.exec(
+        "DELETE FROM task_labels tl USING labels l
+             WHERE tl.label_id = l.id AND tl.task_id = $1
+               AND l.tenant_id = $2 AND l.name = $3",
+        params![task_id, tenant, name],
+    )
+    .await?;
+    Ok(())
 }
 
 #[cfg(test)]

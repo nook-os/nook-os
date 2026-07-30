@@ -36,7 +36,7 @@ async fn session_for_content(
 use crate::auth::AuthCtx;
 use crate::error::{ApiError, ApiResult};
 use crate::events::{self, EventDraft};
-use crate::services::core;
+use crate::services::session_queries;
 use crate::state::AppState;
 
 #[derive(Deserialize, utoipa::IntoParams)]
@@ -63,7 +63,7 @@ pub async fn list(
         || auth.is_tenant_admin(&state.db).await?;
     let creator = if sees_all { None } else { Some(auth.user_id) };
     Ok(Json(
-        core::list_sessions(
+        session_queries::list_sessions(
             &state.db,
             auth.tenant_id,
             q.workspace_id,
@@ -84,7 +84,7 @@ pub async fn get_one(
     Path(id): Path<SessionId>,
 ) -> ApiResult<Json<Session>> {
     let mut session = session_for_content(&state, &auth, id).await?;
-    core::hydrate_checkouts(&state.db, std::slice::from_mut(&mut session)).await?;
+    session_queries::hydrate_checkouts(&state.db, std::slice::from_mut(&mut session)).await?;
     Ok(Json(session))
 }
 
@@ -101,8 +101,9 @@ pub async fn create(
     // own, OR one its owner has shared with the team (MAIN-136, relaxing the
     // MAIN-130 owner-only rule). Management of the node stays owner-gated.
     auth.require_node_may_use(&state, req.node_id).await?;
-    let mut session = core::create_session(&state, auth.tenant_id, Some(auth.user_id), req).await?;
-    core::hydrate_checkouts(&state.db, std::slice::from_mut(&mut session)).await?;
+    let mut session =
+        session_queries::create_session(&state, auth.tenant_id, Some(auth.user_id), req).await?;
+    session_queries::hydrate_checkouts(&state.db, std::slice::from_mut(&mut session)).await?;
     Ok(Json(session))
 }
 
@@ -128,7 +129,7 @@ pub async fn open_terminal(
         name: None,
     });
     let runtime = req.runtime.unwrap_or_else(|| "bash".into());
-    let session = core::create_ad_hoc_session(
+    let session = session_queries::create_ad_hoc_session(
         &state,
         auth.tenant_id,
         Some(auth.user_id),
@@ -492,7 +493,7 @@ pub async fn restart(
             params![id],
         )
         .await?;
-    core::hydrate_checkouts(&state.db, std::slice::from_mut(&mut session)).await?;
+    session_queries::hydrate_checkouts(&state.db, std::slice::from_mut(&mut session)).await?;
     state.registry.publish(
         auth.tenant_id,
         UiEvent::SessionStatus {

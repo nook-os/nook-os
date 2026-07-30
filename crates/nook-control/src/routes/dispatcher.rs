@@ -5,7 +5,7 @@ use nook_types::*;
 
 use crate::auth::AuthCtx;
 use crate::error::{ApiError, ApiResult};
-use crate::services::core;
+use crate::services::{node_queries, session_queries};
 use crate::state::AppState;
 
 impl From<DispatchError> for ApiError {
@@ -40,8 +40,9 @@ pub async fn suggest(
     }
     // The dispatcher's counts are tenant-wide capacity signals, unchanged by the
     // per-member listing scopes (MAIN-132/133: no dispatch changes).
-    let sessions = core::list_sessions(&state.db, auth.tenant_id, None, true, None).await?;
-    let nodes = core::list_nodes(&state.db, auth.tenant_id, None).await?;
+    let sessions =
+        session_queries::list_sessions(&state.db, auth.tenant_id, None, true, None).await?;
+    let nodes = node_queries::list_nodes(&state.db, auth.tenant_id, None).await?;
 
     let suggestion = state
         .dispatcher

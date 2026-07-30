@@ -17,11 +17,15 @@
 //! team tenant as well. Both are written here so the two never disagree.
 
 use chrono::{DateTime, Utc};
-use nook_db::{params, Db, DbPool, Json, Postgres, TypeMapping};
-use nook_types::{IdentityId, Tenant, TenantId, TenantMembership, User, UserId};
+use nook_db::{params, CiMatch, Db, DbPool, Json, Postgres, TypeMapping};
+use nook_types::{
+    IdentityId, Tenant, TenantId, TenantMemberItem, TenantMemberPage, TenantMembership, User,
+    UserId,
+};
 use serde_json::Value;
 
 use crate::error::{ApiError, ApiResult};
+use crate::services::core::search_filter;
 use crate::state::AppState;
 
 /// Every tenant this person belongs to, resolved from `tenant_members`.
@@ -1062,4 +1066,75 @@ mod db_tests {
 
         cleanup(&db, &[a]).await;
     }
+}
+
+/// Moved verbatim from `services/core.rs` (MAIN-245): a tenant-members page
+/// is identity data, and the repository chain needs it to live with the rest
+/// of the aggregate. Its tests travelled to `operator_queries`, where the
+/// shared keyset behaviour they exercise is covered as one piece.
+/// Tenant members, keyset-paginated + searched (email/name/role), mirroring
+/// `operator_audit_page` (MAIN-45 AC-2). Keyed on the member's UUID v7
+/// `principal_id`; searches only members of `tenant`.
+pub async fn tenant_members_page(
+    db: &DbPool,
+    tenant: TenantId,
+    q: Option<String>,
+    after: Option<uuid::Uuid>,
+    limit: i64,
+) -> ApiResult<TenantMemberPage> {
+    let limit = limit.clamp(1, 200);
+    let q = search_filter(q);
+    let term = Postgres.cast("$3", "text");
+    let rows: Vec<TenantMemberItem> = db
+        .query_all(
+            &format!(
+                "SELECT m.principal_id, u.email, u.display_name, m.role, m.created_at AS joined_at
+         FROM tenant_members m
+         JOIN users u ON u.id = m.principal_id
+         WHERE m.tenant_id = $1 AND m.principal_type = 'user'
+           AND ({term} IS NULL OR (
+                    {m_email}
+                 OR {m_name}
+                 OR {m_role}))
+           AND ({cursor} IS NULL OR m.principal_id < $4)
+         ORDER BY m.principal_id DESC
+         LIMIT $2",
+                cursor = Postgres.cast("$4", "uuid"),
+                m_email = Postgres.ci_match("u.email", "'%' || $3 || '%'"),
+                m_name = Postgres.ci_match("u.display_name", "'%' || $3 || '%'"),
+                m_role = Postgres.ci_match("m.role", "'%' || $3 || '%'")
+            ),
+            params![tenant, limit, q, after],
+        )
+        .await?;
+    let next_cursor = if rows.len() as i64 == limit {
+        rows.last().map(|r| r.principal_id)
+    } else {
+        None
+    };
+    Ok(TenantMemberPage { rows, next_cursor })
+}
+
+/// The instance's first tenant — what an MCP token maps to until per-user MCP
+/// OAuth exists. Moved verbatim out of `mcp_backend` (MAIN-245).
+pub async fn first_tenant(db: &DbPool) -> anyhow::Result<TenantId> {
+    let id: TenantId = db
+        .query_scalar(
+            "SELECT id FROM tenants ORDER BY created_at LIMIT 1",
+            params![],
+        )
+        .await?;
+    Ok(id)
+}
+
+/// A tenant's owner — who an MCP call acts as. Moved verbatim out of
+/// `mcp_backend` (MAIN-245).
+pub async fn first_user(db: &DbPool, tenant: TenantId) -> anyhow::Result<UserId> {
+    let id: UserId = db
+        .query_scalar(
+            "SELECT id FROM users WHERE tenant_id = $1 ORDER BY created_at LIMIT 1",
+            params![tenant],
+        )
+        .await?;
+    Ok(id)
 }

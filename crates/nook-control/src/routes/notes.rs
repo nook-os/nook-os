@@ -5,7 +5,7 @@ use nook_types::*;
 
 use crate::auth::AuthCtx;
 use crate::error::{ApiError, ApiResult};
-use crate::services::core;
+use crate::services::notebook_queries;
 use crate::state::AppState;
 
 #[utoipa::path(get, path = "/api/v1/workspaces/{id}/notes",
@@ -18,7 +18,7 @@ pub async fn list(
     Path(workspace_id): Path<WorkspaceId>,
 ) -> ApiResult<Json<Vec<Note>>> {
     Ok(Json(
-        core::list_notes(&state.db, auth.tenant_id, workspace_id).await?,
+        notebook_queries::list_notes(&state.db, auth.tenant_id, workspace_id).await?,
     ))
 }
 
@@ -33,7 +33,7 @@ pub async fn create(
     Path(workspace_id): Path<WorkspaceId>,
     Json(req): Json<CreateNoteRequest>,
 ) -> ApiResult<Json<Note>> {
-    let note = core::create_note(&state.db, auth.tenant_id, workspace_id, req).await?;
+    let note = notebook_queries::create_note(&state.db, auth.tenant_id, workspace_id, req).await?;
     crate::events::record(
         &state,
         auth.tenant_id,

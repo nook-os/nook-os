@@ -8,7 +8,7 @@ use axum::Json;
 
 use crate::auth::{AuthCtx, Principal};
 use crate::error::ApiResult;
-use crate::services::core;
+use crate::services::overview_queries;
 use crate::state::AppState;
 
 #[utoipa::path(get, path = "/api/v1/overview",
@@ -42,7 +42,7 @@ pub async fn overview(
     let task_viewer = if sees_all { None } else { Some(auth.user_id) };
 
     Ok(Json(
-        core::overview(
+        overview_queries::overview(
             &state.db,
             auth.tenant_id,
             node_owner,

@@ -12,7 +12,7 @@
 //! Every row is test-created and scoped to its own uniquely-named DB via
 //! `nook_testkit::TestBed`.
 
-use nook_control::services::{core, discovery};
+use nook_control::services::{discovery, session_queries};
 use nook_proto::DiscoveredWorkspace;
 use nook_testkit::TestBed;
 use nook_types::{NodeId, NodeWorkspaceId, SessionId, TenantId, WorkspaceId};
@@ -347,7 +347,7 @@ async fn hydrate_fills_the_checkout_summary_and_leaves_ad_hoc_null() {
     .await
     .expect("adhoc session");
 
-    let sessions = core::list_sessions(&bed.db(), f.tenant, None, false, None)
+    let sessions = session_queries::list_sessions(&bed.db(), f.tenant, None, false, None)
         .await
         .expect("list");
     // list_sessions hydrates; find our two.
@@ -455,7 +455,7 @@ async fn restart_reuses_the_bound_checkout_then_falls_back_when_it_is_gone() {
         .execute(&bed.pool)
         .await
         .unwrap();
-    let sessions = core::list_sessions(&bed.db(), f.tenant, None, false, None)
+    let sessions = session_queries::list_sessions(&bed.db(), f.tenant, None, false, None)
         .await
         .expect("list");
     let summary = sessions

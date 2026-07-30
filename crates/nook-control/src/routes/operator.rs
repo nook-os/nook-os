@@ -32,7 +32,7 @@ use uuid::Uuid;
 use crate::auth::perm::{Permission, Scope};
 use crate::auth::AuthCtx;
 use crate::error::ApiResult;
-use crate::services::core;
+use crate::services::operator_queries;
 use crate::services::policy::{self, Field};
 use crate::state::AppState;
 
@@ -110,9 +110,13 @@ pub async fn tenants(
     auth.require(&state, Permission::TenantView, Scope::Deployment)
         .await?;
 
-    let mut page =
-        core::operator_tenants_page(&state.db, q.q, q.after.map(TenantId), q.limit.unwrap_or(50))
-            .await?;
+    let mut page = operator_queries::operator_tenants_page(
+        &state.db,
+        q.q,
+        q.after.map(TenantId),
+        q.limit.unwrap_or(50),
+    )
+    .await?;
 
     // Policy ADDS. Absent unless an org has opted in, and absent by default.
     for row in &mut page.rows {
@@ -173,9 +177,13 @@ pub async fn nodes(
 ) -> ApiResult<Json<OperatorNodePage>> {
     auth.require(&state, Permission::NodeView, Scope::Deployment)
         .await?;
-    let page =
-        core::operator_nodes_page(&state.db, q.q, q.after.map(NodeId), q.limit.unwrap_or(50))
-            .await?;
+    let page = operator_queries::operator_nodes_page(
+        &state.db,
+        q.q,
+        q.after.map(NodeId),
+        q.limit.unwrap_or(50),
+    )
+    .await?;
     audit(&state, &auth, "nodes", None).await;
     Ok(Json(page))
 }
@@ -205,8 +213,10 @@ pub async fn audit_log(
     auth.require(&state, Permission::AuditView, Scope::Deployment)
         .await?;
     // Kinds, actors and times — never payloads. The projection and the
-    // prefix filter live in `core::operator_audit_page`, shared with its tests.
-    let page = core::operator_audit_page(&state.db, q.q, q.after, q.limit.unwrap_or(50)).await?;
+    // prefix filter live in `operator_queries::operator_audit_page`, shared with its tests.
+    let page =
+        operator_queries::operator_audit_page(&state.db, q.q, q.after, q.limit.unwrap_or(50))
+            .await?;
     audit(&state, &auth, "audit", None).await;
     Ok(Json(page))
 }
@@ -598,7 +608,9 @@ pub async fn bindings(
 ) -> ApiResult<Json<OperatorBindingPage>> {
     auth.require(&state, Permission::RbacGrant, Scope::Deployment)
         .await?;
-    let page = core::operator_bindings_page(&state.db, q.q, q.after, q.limit.unwrap_or(50)).await?;
+    let page =
+        operator_queries::operator_bindings_page(&state.db, q.q, q.after, q.limit.unwrap_or(50))
+            .await?;
     audit(&state, &auth, "bindings", None).await;
     Ok(Json(page))
 }

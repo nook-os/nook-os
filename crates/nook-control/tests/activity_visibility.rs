@@ -5,7 +5,7 @@
 //! the shared predicate and the list. Set `DATABASE_URL`.
 
 use nook_control::auth::{AuthCtx, Principal};
-use nook_control::services::core::{self, ActivityScope};
+use nook_control::services::activity_queries::{self, ActivityScope};
 use nook_testkit::TestBed;
 use nook_types::*;
 use sqlx::PgPool;
@@ -200,7 +200,7 @@ async fn events_list_scopes_members_to_their_own_activity() {
         matches!(scope, ActivityScope::Member { .. }),
         "a member resolves to a scoped view"
     );
-    let seen = core::events_page(&bed.db(), tenant, None, None, None, 200, &scope)
+    let seen = activity_queries::events_page(&bed.db(), tenant, None, None, None, 200, &scope)
         .await
         .expect("list")
         .events;
@@ -225,10 +225,11 @@ async fn events_list_scopes_members_to_their_own_activity() {
         matches!(admin_scope, ActivityScope::All),
         "an owner resolves to the unfiltered feed"
     );
-    let all_seen = core::events_page(&bed.db(), tenant, None, None, None, 200, &admin_scope)
-        .await
-        .expect("list")
-        .events;
+    let all_seen =
+        activity_queries::events_page(&bed.db(), tenant, None, None, None, 200, &admin_scope)
+            .await
+            .expect("list")
+            .events;
     let all_ids: Vec<EventId> = all_seen.iter().map(|e| e.id).collect();
     for id in [
         e_my_action,
