@@ -11,7 +11,6 @@
 
 use axum::extract::{Json, State};
 use axum::http::StatusCode;
-use nook_db::{params, Db, Postgres, TypeMapping};
 use nook_types::{DmSummary, OpenDmRequest, PersonRef};
 use uuid::Uuid;
 
@@ -22,39 +21,27 @@ const MIN_PARTICIPANTS: usize = 2;
 const MAX_PARTICIPANTS: usize = 8;
 
 /// The caller's person — the identity a DM keys on (MAIN-130).
-async fn person_of(db: &nook_db::DbPool, user_id: Uuid) -> Result<Uuid, ChatError> {
-    let p = db
-        .query_scalar_opt::<Uuid>(
-            "SELECT person_id FROM public.users WHERE id = $1",
-            params![user_id],
-        )
+async fn person_of(
+    repo: &dyn crate::repo::dms::DmRepository,
+    user_id: Uuid,
+) -> Result<Uuid, ChatError> {
+    repo.person_of(user_id)
         .await
         .map_err(|_| ChatError::Internal)?
-        .ok_or(ChatError::Forbidden)?;
-    Ok(p)
+        .ok_or(ChatError::Forbidden)
 }
 
 /// May `me` DM `other`? Yes iff `other` has a user in a tenant under one of
 /// `me`'s orgs — the same org boundary org channels use (AC-4). This both scopes
 /// the picker and gates `open`, so a DM can never be opened cross-org.
-async fn dmable(db: &nook_db::DbPool, me: Uuid, other: Uuid) -> Result<bool, ChatError> {
-    let ok = db
-        .query_scalar::<bool>(
-            "SELECT EXISTS(
-             SELECT 1 FROM public.users u
-             JOIN public.tenants t ON t.id = u.tenant_id
-             WHERE u.person_id = $2
-               AND t.org_id IN (
-                   SELECT t2.org_id FROM public.users u2
-                   JOIN public.tenants t2 ON t2.id = u2.tenant_id
-                   WHERE u2.person_id = $1
-               )
-         )",
-            params![me, other],
-        )
+async fn dmable(
+    repo: &dyn crate::repo::dms::DmRepository,
+    me: Uuid,
+    other: Uuid,
+) -> Result<bool, ChatError> {
+    repo.may_dm(me, other)
         .await
-        .map_err(|_| ChatError::Internal)?;
-    Ok(ok)
+        .map_err(|_| ChatError::Internal)
 }
 
 /// The people the caller may start a DM with (AC-4): every person in the
@@ -64,29 +51,17 @@ pub async fn people(
     State(state): State<AppState>,
     caller: Caller,
 ) -> Result<Json<Vec<PersonRef>>, ChatError> {
-    let me = person_of(&state.db, caller.user_id).await?;
-    let rows: Vec<(Uuid, String)> = state
-        .db
-        .query_all(
-            "SELECT DISTINCT ON (u.person_id) u.person_id, u.display_name
-         FROM public.users u
-         JOIN public.tenants t ON t.id = u.tenant_id
-         WHERE u.person_id <> $1
-           AND t.org_id IN (
-               SELECT t2.org_id FROM public.users u2
-               JOIN public.tenants t2 ON t2.id = u2.tenant_id
-               WHERE u2.person_id = $1
-           )
-         ORDER BY u.person_id, u.display_name",
-            params![me],
-        )
+    let me = person_of(&*state.dms, caller.user_id).await?;
+    let rows = state
+        .dms
+        .people_in_my_orgs(me)
         .await
         .map_err(|_| ChatError::Internal)?;
     Ok(Json(
         rows.into_iter()
-            .map(|(person_id, display_name)| PersonRef {
-                person_id,
-                display_name,
+            .map(|p| PersonRef {
+                person_id: p.person_id,
+                display_name: p.display_name,
             })
             .collect(),
     ))
@@ -98,22 +73,16 @@ pub async fn list(
     State(state): State<AppState>,
     caller: Caller,
 ) -> Result<Json<Vec<DmSummary>>, ChatError> {
-    let me = person_of(&state.db, caller.user_id).await?;
-    let ids: Vec<Uuid> = state
-        .db
-        .query_scalar_all(
-            "SELECT c.id FROM chat_channels c
-         JOIN chat_channel_participants p ON p.channel_id = c.id
-         WHERE c.owner_type = 'dm' AND p.person_id = $1
-         ORDER BY c.created_at DESC",
-            params![me],
-        )
+    let me = person_of(&*state.dms, caller.user_id).await?;
+    let ids = state
+        .dms
+        .my_dms(me)
         .await
         .map_err(|_| ChatError::Internal)?;
 
     let mut out = Vec::with_capacity(ids.len());
     for id in ids {
-        out.push(summary(&state.db, id, caller.user_id).await?);
+        out.push(summary(&*state.dms, id, caller.user_id).await?);
     }
     Ok(Json(out))
 }
@@ -127,7 +96,7 @@ pub async fn open(
     caller: Caller,
     Json(req): Json<OpenDmRequest>,
 ) -> Result<(StatusCode, Json<DmSummary>), ChatError> {
-    let me = person_of(&state.db, caller.user_id).await?;
+    let me = person_of(&*state.dms, caller.user_id).await?;
 
     // Canonical participant set: creator ∪ requested, deduped and sorted so the
     // set-equality match below is order-independent.
@@ -143,107 +112,65 @@ pub async fn open(
     // Every other participant must be reachable in the caller's org (AC-4): no
     // cross-org DMs, and unknown persons are rejected here.
     for &p in &persons {
-        if p != me && !dmable(&state.db, me, p).await? {
+        if p != me && !dmable(&*state.dms, me, p).await? {
             return Err(ChatError::Forbidden);
         }
     }
 
     // Open-or-create: an existing DM with this exact participant set wins.
-    if let Some(id) = find_exact(&state.db, &persons).await? {
+    if let Some(id) = find_exact(&*state.dms, &persons).await? {
         return Ok((
             StatusCode::OK,
-            Json(summary(&state.db, id, caller.user_id).await?),
+            Json(summary(&*state.dms, id, caller.user_id).await?),
         ));
     }
 
     let id = Uuid::now_v7();
     let slug = format!("dm-{}", id.simple());
-    let mut tx = state.db.begin().await.map_err(|_| ChatError::Internal)?;
-    // owner_id = the creating person; name is empty (the UI names a DM by its
-    // counterparts). The generated slug keeps the (owner_type, owner_id, slug)
-    // uniqueness constraint satisfied without any human-facing slug.
-    tx.exec(
-        "INSERT INTO chat_channels (id, owner_type, owner_id, name, slug)
-         VALUES ($1, 'dm', $2, '', $3)",
-        params![id, me, &slug],
-    )
-    .await
-    .map_err(|_| ChatError::Internal)?;
-    for &p in &persons {
-        tx.exec(
-            "INSERT INTO chat_channel_participants (channel_id, person_id) VALUES ($1, $2)",
-            params![id, p],
-        )
+    state
+        .dms
+        .open(id, me, &slug, &persons)
         .await
         .map_err(|_| ChatError::Internal)?;
-    }
-    tx.commit().await.map_err(|_| ChatError::Internal)?;
 
     Ok((
         StatusCode::CREATED,
-        Json(summary(&state.db, id, caller.user_id).await?),
+        Json(summary(&*state.dms, id, caller.user_id).await?),
     ))
 }
 
 /// A `dm` channel whose participant set is *exactly* `persons`. Count-equality
 /// plus "every participant is in the set" gives exact equality, since the set is
 /// deduped: |members| = N and members ⊆ set with |set| = N ⇒ members = set.
-async fn find_exact(db: &nook_db::DbPool, persons: &[Uuid]) -> Result<Option<Uuid>, ChatError> {
-    let n = persons.len() as i64;
-    let id: Option<Uuid> = db
-        .query_scalar_opt(
-            "SELECT c.id FROM chat_channels c
-         JOIN chat_channel_participants p ON p.channel_id = c.id
-         WHERE c.owner_type = 'dm'
-         GROUP BY c.id
-         HAVING count(*) = $2
-            AND count(*) FILTER (WHERE p.person_id = ANY($1)) = $2
-         LIMIT 1",
-            params![persons, n],
-        )
+async fn find_exact(
+    repo: &dyn crate::repo::dms::DmRepository,
+    persons: &[Uuid],
+) -> Result<Option<Uuid>, ChatError> {
+    repo.find_exact(persons)
         .await
-        .map_err(|_| ChatError::Internal)?;
-    Ok(id)
+        .map_err(|_| ChatError::Internal)
 }
 
 /// A DM's summary: its id, creation time, and participants with display names.
-async fn summary(db: &nook_db::DbPool, id: Uuid, reader: Uuid) -> Result<DmSummary, ChatError> {
-    let created_at = db
-        .query_scalar::<chrono::DateTime<chrono::Utc>>(
-            "SELECT created_at FROM chat_channels WHERE id = $1",
-            params![id],
-        )
+async fn summary(
+    repo: &dyn crate::repo::dms::DmRepository,
+    id: Uuid,
+    reader: Uuid,
+) -> Result<DmSummary, ChatError> {
+    let created_at = repo
+        .created_at(id)
         .await
-        .map_err(|_| ChatError::Internal)?;
-    let rows: Vec<(Uuid, Option<String>)> = db
-        .query_all(
-            "SELECT DISTINCT ON (pp.person_id) pp.person_id, u.display_name
-         FROM chat_channel_participants pp
-         LEFT JOIN public.users u ON u.person_id = pp.person_id
-         WHERE pp.channel_id = $1
-         ORDER BY pp.person_id, u.display_name",
-            params![id],
-        )
+        .map_err(|_| ChatError::Internal)?
+        .ok_or(ChatError::NotFound)?;
+    let rows = repo
+        .participants(id)
         .await
         .map_err(|_| ChatError::Internal)?;
     // Unread from the other participant(s) since the reader's cursor (MAIN-117),
     // same semantics as a channel: the reader's own messages and deleted ones
     // don't count, and no cursor row means everything counts.
-    let unread_count = db
-        .query_scalar::<i64>(
-            &format!(
-                "SELECT count(*) FROM chat_messages m
-          WHERE m.channel_id = $1
-            AND m.author_id <> $2
-            AND m.deleted_at IS NULL
-            AND m.created_at > COALESCE(
-                (SELECT r.last_read_at FROM chat_read_cursors r
-                   WHERE r.channel_id = $1 AND r.user_id = $2),
-                {})",
-                Postgres.cast("'-infinity'", "timestamptz")
-            ),
-            params![id, reader],
-        )
+    let unread_count = repo
+        .unread_count(id, reader)
         .await
         .map_err(|_| ChatError::Internal)?;
     Ok(DmSummary {
@@ -251,9 +178,9 @@ async fn summary(db: &nook_db::DbPool, id: Uuid, reader: Uuid) -> Result<DmSumma
         created_at,
         participants: rows
             .into_iter()
-            .map(|(person_id, name)| PersonRef {
-                person_id,
-                display_name: name.unwrap_or_default(),
+            .map(|p| PersonRef {
+                person_id: p.person_id,
+                display_name: p.display_name.unwrap_or_default(),
             })
             .collect(),
         unread_count,
@@ -298,6 +225,9 @@ mod tests {
         let db = pool(&url, "chat,public").await;
         crate::MIGRATOR.run(db.pg()).await.unwrap();
         Some(AppState {
+            channels: Arc::new(crate::repo::channels::DbChannelRepository::new(db.clone())),
+            messages: Arc::new(crate::repo::messages::DbMessageRepository::new(db.clone())),
+            dms: Arc::new(crate::repo::dms::DbDmRepository::new(db.clone())),
             db,
             registry: Arc::new(crate::registry::Registry::new()),
         })
@@ -419,11 +349,11 @@ mod tests {
         .unwrap();
 
         // A participant may access; the tenant owner who is not in it may not.
-        assert!(channels::access(&state.db, dm.0.id, &caller(ua, t))
+        assert!(channels::access(&*state.channels, dm.0.id, &caller(ua, t))
             .await
             .is_ok());
         assert!(matches!(
-            channels::access(&state.db, dm.0.id, &caller(uc, t)).await,
+            channels::access(&*state.channels, dm.0.id, &caller(uc, t)).await,
             Err(ChatError::Forbidden)
         ));
     }
@@ -451,12 +381,16 @@ mod tests {
         .unwrap();
 
         // pp reaches the DM as their t1 user AND as their t2 user (person-keyed).
-        assert!(channels::access(&state.db, dm.0.id, &caller(up1, t1))
-            .await
-            .is_ok());
-        assert!(channels::access(&state.db, dm.0.id, &caller(up2, t2))
-            .await
-            .is_ok());
+        assert!(
+            channels::access(&*state.channels, dm.0.id, &caller(up1, t1))
+                .await
+                .is_ok()
+        );
+        assert!(
+            channels::access(&*state.channels, dm.0.id, &caller(up2, t2))
+                .await
+                .is_ok()
+        );
     }
 
     #[tokio::test]
@@ -532,5 +466,114 @@ mod tests {
             !channels.iter().any(|c| c.id == dm.0.id),
             "a DM never appears in the channel list"
         );
+    }
+}
+
+/// The DM rules against an in-memory [`FakeDmRepository`] — no database
+/// (MAIN-257 AC-3).
+///
+/// Open-or-create hinges on `find_exact` being *exact* set equality: a near
+/// miss must create a new conversation, not join an existing one. That is worth
+/// proving without a database in the loop, because it is a property of the
+/// participant set rather than of any query plan.
+#[cfg(test)]
+mod fake_tests {
+    use super::*;
+    use crate::repo::fakes::FakeDmRepository;
+
+    #[tokio::test]
+    async fn find_exact_matches_the_whole_set_and_nothing_near_it() {
+        let (a, b, c) = (Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7());
+        let pair = Uuid::now_v7();
+        let repo = FakeDmRepository::new().with_dm(pair, &[a, b]);
+
+        let mut set = vec![b, a];
+        set.sort();
+        assert_eq!(
+            find_exact(&repo, &set).await.unwrap(),
+            Some(pair),
+            "the match is order-independent"
+        );
+        assert_eq!(
+            find_exact(&repo, &[a, b, c]).await.unwrap(),
+            None,
+            "a superset opens a new conversation rather than joining the pair"
+        );
+        assert_eq!(
+            find_exact(&repo, &[a]).await.unwrap(),
+            None,
+            "so does a subset"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_org_boundary_gates_who_may_be_messaged() {
+        let (org, other_org) = (Uuid::now_v7(), Uuid::now_v7());
+        let (me, mate, stranger) = (Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7());
+        let repo = FakeDmRepository::new()
+            .with_user(Uuid::now_v7(), me, "me", org)
+            .with_user(Uuid::now_v7(), mate, "mate", org)
+            .with_user(Uuid::now_v7(), stranger, "stranger", other_org);
+
+        assert!(dmable(&repo, me, mate).await.unwrap());
+        assert!(
+            !dmable(&repo, me, stranger).await.unwrap(),
+            "no cross-org DM, even by posting a person id the picker never offered"
+        );
+
+        let offered = people_in_my_orgs(&repo, me).await;
+        assert_eq!(offered, vec!["mate".to_string()], "and the picker agrees");
+    }
+
+    /// The picker's display names, in order — the shape `people()` maps.
+    async fn people_in_my_orgs(repo: &FakeDmRepository, me: Uuid) -> Vec<String> {
+        use crate::repo::dms::DmRepository;
+        repo.people_in_my_orgs(me)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|p| p.display_name)
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_summary_names_every_participant_and_counts_the_readers_unread() {
+        let org = Uuid::now_v7();
+        let (p1, p2) = (Uuid::now_v7(), Uuid::now_v7());
+        let (u1, u2) = (Uuid::now_v7(), Uuid::now_v7());
+        let dm = Uuid::now_v7();
+        let repo = FakeDmRepository::new()
+            .with_user(u1, p1, "ada", org)
+            .with_user(u2, p2, "grace", org)
+            .with_dm(dm, &[p1, p2])
+            .with_unread(dm, u1, 3);
+
+        let s = summary(&repo, dm, u1).await.unwrap();
+        assert_eq!(s.id, dm);
+        assert_eq!(s.participants.len(), 2);
+        assert_eq!(s.unread_count, 3);
+        assert_eq!(
+            summary(&repo, dm, u2).await.unwrap().unread_count,
+            0,
+            "unread is per reader, not per conversation"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_dm_that_does_not_exist_has_no_summary() {
+        let repo = FakeDmRepository::new();
+        assert!(matches!(
+            summary(&repo, Uuid::now_v7(), Uuid::now_v7()).await,
+            Err(ChatError::NotFound)
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_person_with_no_user_row_is_refused_rather_than_erroring() {
+        let repo = FakeDmRepository::new();
+        assert!(matches!(
+            person_of(&repo, Uuid::now_v7()).await,
+            Err(ChatError::Forbidden)
+        ));
     }
 }

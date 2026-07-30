@@ -9,6 +9,8 @@
 //! `MessageRow` needs.
 
 use async_trait::async_trait;
+
+use super::RepoResult;
 use chrono::{DateTime, Utc};
 use nook_db::{params, Db, DbPool, Postgres, TypeMapping};
 use uuid::Uuid;
@@ -38,6 +40,15 @@ pub struct ReactionRow {
     pub emoji: String,
     pub count: i64,
     pub reacted: bool,
+}
+
+/// The three facts an authz decision on a message needs: where it lives, who
+/// wrote it, and whether it is already gone.
+#[derive(Debug, Clone)]
+pub struct MessageMeta {
+    pub channel_id: Uuid,
+    pub author_id: Uuid,
+    pub deleted_at: Option<DateTime<Utc>>,
 }
 
 /// Where a reply hangs: its channel, and whether it is itself a reply.
@@ -99,46 +110,44 @@ pub trait MessageRepository: Send + Sync {
         &self,
         messages: &[Uuid],
         viewer: Option<Uuid>,
-    ) -> Result<Vec<ReactionRow>, sqlx::Error>;
+    ) -> RepoResult<Vec<ReactionRow>>;
 
     /// Where a message hangs — used to refuse a reply to a reply before any
     /// write happens (threads are one level deep).
-    async fn parent_of(&self, message: Uuid) -> Result<Option<MessageParent>, sqlx::Error>;
+    async fn parent_of(&self, message: Uuid) -> RepoResult<Option<MessageParent>>;
 
-    async fn post(&self, new: NewMessage) -> Result<MessageRow, sqlx::Error>;
+    /// Channel, author and deleted state — everything the edit/delete/react
+    /// authz decisions need, in one read.
+    async fn meta(&self, message: Uuid) -> RepoResult<Option<MessageMeta>>;
+
+    async fn post(&self, new: NewMessage) -> RepoResult<MessageRow>;
 
     /// One message, with its thread rollups.
-    async fn get(&self, message: Uuid) -> Result<Option<MessageRow>, sqlx::Error>;
+    async fn get(&self, message: Uuid) -> RepoResult<Option<MessageRow>>;
 
     /// A channel's top-level history, newest first. Replies are excluded — they
     /// live only under their parent's thread (MAIN-114 AC-2) — and each parent
     /// carries its rollups from the same query (AC-3).
-    async fn history(&self, channel: Uuid, page: Page) -> Result<Vec<MessageRow>, sqlx::Error>;
+    async fn history(&self, channel: Uuid, page: Page) -> RepoResult<Vec<MessageRow>>;
 
     /// One thread's replies, newest first. Replies have no rollups of their
     /// own, so this uses the cheap projection.
-    async fn replies(&self, parent: Uuid, page: Page) -> Result<Vec<MessageRow>, sqlx::Error>;
+    async fn replies(&self, parent: Uuid, page: Page) -> RepoResult<Vec<MessageRow>>;
 
     /// Add a reaction, idempotently — reacting twice is not an error and does
     /// not double-count.
-    async fn add_reaction(&self, message: Uuid, user: Uuid, emoji: &str)
-        -> Result<(), sqlx::Error>;
+    async fn add_reaction(&self, message: Uuid, user: Uuid, emoji: &str) -> RepoResult<()>;
 
-    async fn remove_reaction(
-        &self,
-        message: Uuid,
-        user: Uuid,
-        emoji: &str,
-    ) -> Result<(), sqlx::Error>;
+    async fn remove_reaction(&self, message: Uuid, user: Uuid, emoji: &str) -> RepoResult<()>;
 
     /// Edit, keeping the prior body. The revision is written from the row
     /// itself (`SELECT … FROM chat_messages`) rather than from anything the
     /// caller passed, so what is preserved is what was actually stored.
-    async fn edit(&self, message: Uuid, body: &str, actor: Uuid) -> Result<(), sqlx::Error>;
+    async fn edit(&self, message: Uuid, body: &str, actor: Uuid) -> RepoResult<()>;
 
     /// Soft-delete, keeping the prior body in the revision trail. The row stays
     /// so threads do not lose their shape; the content is redacted on read.
-    async fn soft_delete(&self, message: Uuid, actor: Uuid) -> Result<(), sqlx::Error>;
+    async fn soft_delete(&self, message: Uuid, actor: Uuid) -> RepoResult<()>;
 }
 
 pub struct DbMessageRepository {
@@ -157,12 +166,12 @@ impl MessageRepository for DbMessageRepository {
         &self,
         messages: &[Uuid],
         viewer: Option<Uuid>,
-    ) -> Result<Vec<ReactionRow>, sqlx::Error> {
+    ) -> RepoResult<Vec<ReactionRow>> {
         self.db
             .query_all::<ReactionRow>(
                 &format!(
                     "SELECT message_id, emoji, {cnt} AS count,
-                            bool_or(user_id = $2) AS reacted
+                            COALESCE(bool_or(user_id = $2), false) AS reacted
                        FROM chat_reactions
                       WHERE message_id = ANY($1)
                       GROUP BY message_id, emoji
@@ -172,9 +181,10 @@ impl MessageRepository for DbMessageRepository {
                 params![messages.to_vec(), viewer],
             )
             .await
+            .map_err(Into::into)
     }
 
-    async fn parent_of(&self, message: Uuid) -> Result<Option<MessageParent>, sqlx::Error> {
+    async fn parent_of(&self, message: Uuid) -> RepoResult<Option<MessageParent>> {
         let row: Option<(Uuid, Option<Uuid>)> = self
             .db
             .query_opt(
@@ -188,7 +198,22 @@ impl MessageRepository for DbMessageRepository {
         }))
     }
 
-    async fn post(&self, new: NewMessage) -> Result<MessageRow, sqlx::Error> {
+    async fn meta(&self, message: Uuid) -> RepoResult<Option<MessageMeta>> {
+        let row: Option<(Uuid, Uuid, Option<DateTime<Utc>>)> = self
+            .db
+            .query_opt(
+                "SELECT channel_id, author_id, deleted_at FROM chat_messages WHERE id = $1",
+                params![message],
+            )
+            .await?;
+        Ok(row.map(|(channel_id, author_id, deleted_at)| MessageMeta {
+            channel_id,
+            author_id,
+            deleted_at,
+        }))
+    }
+
+    async fn post(&self, new: NewMessage) -> RepoResult<MessageRow> {
         self.db
             .query_one::<MessageRow>(
                 &format!(
@@ -213,18 +238,20 @@ impl MessageRepository for DbMessageRepository {
                 ],
             )
             .await
+            .map_err(Into::into)
     }
 
-    async fn get(&self, message: Uuid) -> Result<Option<MessageRow>, sqlx::Error> {
+    async fn get(&self, message: Uuid) -> RepoResult<Option<MessageRow>> {
         self.db
             .query_opt::<MessageRow>(
                 &format!("{SELECT_MESSAGE_WITH_REPLIES} WHERE m.id = $1"),
                 params![message],
             )
             .await
+            .map_err(Into::into)
     }
 
-    async fn history(&self, channel: Uuid, page: Page) -> Result<Vec<MessageRow>, sqlx::Error> {
+    async fn history(&self, channel: Uuid, page: Page) -> RepoResult<Vec<MessageRow>> {
         self.db
             .query_all::<MessageRow>(
                 &format!(
@@ -236,9 +263,10 @@ impl MessageRepository for DbMessageRepository {
                 params![channel, page.before, page.limit],
             )
             .await
+            .map_err(Into::into)
     }
 
-    async fn replies(&self, parent: Uuid, page: Page) -> Result<Vec<MessageRow>, sqlx::Error> {
+    async fn replies(&self, parent: Uuid, page: Page) -> RepoResult<Vec<MessageRow>> {
         self.db
             .query_all::<MessageRow>(
                 &format!(
@@ -250,14 +278,10 @@ impl MessageRepository for DbMessageRepository {
                 params![parent, page.before, page.limit],
             )
             .await
+            .map_err(Into::into)
     }
 
-    async fn add_reaction(
-        &self,
-        message: Uuid,
-        user: Uuid,
-        emoji: &str,
-    ) -> Result<(), sqlx::Error> {
+    async fn add_reaction(&self, message: Uuid, user: Uuid, emoji: &str) -> RepoResult<()> {
         self.db
             .exec(
                 "INSERT INTO chat_reactions (message_id, user_id, emoji) VALUES ($1, $2, $3)
@@ -268,12 +292,7 @@ impl MessageRepository for DbMessageRepository {
         Ok(())
     }
 
-    async fn remove_reaction(
-        &self,
-        message: Uuid,
-        user: Uuid,
-        emoji: &str,
-    ) -> Result<(), sqlx::Error> {
+    async fn remove_reaction(&self, message: Uuid, user: Uuid, emoji: &str) -> RepoResult<()> {
         self.db
             .exec(
                 "DELETE FROM chat_reactions WHERE message_id = $1 AND user_id = $2 AND emoji = $3",
@@ -283,7 +302,7 @@ impl MessageRepository for DbMessageRepository {
         Ok(())
     }
 
-    async fn edit(&self, message: Uuid, body: &str, actor: Uuid) -> Result<(), sqlx::Error> {
+    async fn edit(&self, message: Uuid, body: &str, actor: Uuid) -> RepoResult<()> {
         self.db
             .exec(
                 "INSERT INTO chat_message_revisions
@@ -304,7 +323,7 @@ impl MessageRepository for DbMessageRepository {
         Ok(())
     }
 
-    async fn soft_delete(&self, message: Uuid, actor: Uuid) -> Result<(), sqlx::Error> {
+    async fn soft_delete(&self, message: Uuid, actor: Uuid) -> RepoResult<()> {
         self.db
             .exec(
                 "INSERT INTO chat_message_revisions

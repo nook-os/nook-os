@@ -27,6 +27,36 @@
 //! Methods are intent-named and coarse; no `sqlx` type appears in any
 //! signature, and row mapping lives inside the impls (AC-2).
 
+/// What a repository can fail with. Deliberately NOT `sqlx::Error`: a trait
+/// signature that names the driver leaks the engine into every caller and into
+/// every fake, which is exactly what this layer exists to prevent (AC-1).
+///
+/// Only one failure is worth distinguishing at a call site — a uniqueness
+/// clash, which callers turn into a 409 with their own wording. Everything else
+/// is a 500 whatever caused it, so it collapses into one variant rather than
+/// re-exporting the driver's taxonomy.
+#[derive(Debug)]
+pub(crate) enum RepoError {
+    /// A unique constraint rejected the write (a duplicate channel name).
+    Conflict,
+    Other,
+}
+
+pub(crate) type RepoResult<T> = Result<T, RepoError>;
+
+impl From<sqlx::Error> for RepoError {
+    fn from(e: sqlx::Error) -> Self {
+        match &e {
+            sqlx::Error::Database(db) if db.code().as_deref() == Some("23505") => {
+                RepoError::Conflict
+            }
+            _ => RepoError::Other,
+        }
+    }
+}
+
 pub(crate) mod channels;
 pub(crate) mod dms;
+#[cfg(test)]
+pub(crate) mod fakes;
 pub(crate) mod messages;

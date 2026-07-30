@@ -62,7 +62,7 @@ pub async fn create(
     caller: Caller,
     Json(req): Json<CreateChatCategory>,
 ) -> Result<(StatusCode, Json<ChatCategory>), ChatError> {
-    crate::require_admin(&state.db, &caller).await?;
+    crate::require_admin(&*state.channels, &caller).await?;
     let name = req.name.trim();
     if name.is_empty() {
         return Err(ChatError::BadRequest("a category needs a name".into()));
@@ -102,7 +102,7 @@ pub async fn update(
     Path(id): Path<Uuid>,
     Json(req): Json<UpdateChatCategory>,
 ) -> Result<Json<ChatCategory>, ChatError> {
-    crate::require_admin(&state.db, &caller).await?;
+    crate::require_admin(&*state.channels, &caller).await?;
     let name = req.name.trim();
     if name.is_empty() {
         return Err(ChatError::BadRequest(
@@ -125,7 +125,7 @@ pub async fn delete(
     caller: Caller,
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode, ChatError> {
-    crate::require_admin(&state.db, &caller).await?;
+    crate::require_admin(&*state.channels, &caller).await?;
     let affected = state
         .channels
         .delete_category(id, caller.tenant_id)
@@ -145,7 +145,7 @@ pub async fn reorder(
     caller: Caller,
     Json(req): Json<ReorderChatCategories>,
 ) -> Result<Json<Vec<ChatCategory>>, ChatError> {
-    crate::require_admin(&state.db, &caller).await?;
+    crate::require_admin(&*state.channels, &caller).await?;
     state
         .channels
         .reorder_categories(caller.tenant_id, &req.ordered_ids)

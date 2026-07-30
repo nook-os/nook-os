@@ -6,6 +6,8 @@
 //! written against it (MAIN-112).
 
 use async_trait::async_trait;
+
+use super::RepoResult;
 use chrono::{DateTime, Utc};
 use nook_db::{params, Db, DbPool, Postgres, TypeMapping};
 use uuid::Uuid;
@@ -98,10 +100,10 @@ pub trait ChannelRepository: Send + Sync {
     /// A channel's owner and archived state, or `None` if there is no such
     /// channel. The caller turns that `None` into 404 and a scope mismatch into
     /// 403 — the two are kept distinct on purpose (MAIN-49 AC-5).
-    async fn owner_of(&self, channel: Uuid) -> Result<Option<ChannelOwner>, sqlx::Error>;
+    async fn owner_of(&self, channel: Uuid) -> RepoResult<Option<ChannelOwner>>;
 
     /// Which org a tenant belongs to.
-    async fn org_of_tenant(&self, tenant: Uuid) -> Result<Option<Uuid>, sqlx::Error>;
+    async fn org_of_tenant(&self, tenant: Uuid) -> RepoResult<Option<Uuid>>;
 
     /// Does the person behind `user` belong to any tenant under `org`? The org
     /// visibility rule: a person in two of an org's tenants sees the one
@@ -109,20 +111,20 @@ pub trait ChannelRepository: Send + Sync {
     ///
     /// Reads `public.users`/`public.tenants` — nook-control's data, unreachable
     /// from this crate's repositories. Named for the question, not the table.
-    async fn person_in_org(&self, user: Uuid, org: Uuid) -> Result<bool, sqlx::Error>;
+    async fn person_in_org(&self, user: Uuid, org: Uuid) -> RepoResult<bool>;
+
+    /// The caller's role in their tenant. Chat's ONLY role source (MAIN-94
+    /// NG-5): the existing per-tenant `users.role`, never a new catalog.
+    /// `None` when there is no membership row.
+    async fn tenant_role(&self, user: Uuid, tenant: Uuid) -> RepoResult<Option<String>>;
 
     /// Is the person behind `user` a participant of this channel? The DM
     /// membership check.
-    async fn person_is_participant(&self, channel: Uuid, user: Uuid) -> Result<bool, sqlx::Error>;
+    async fn person_is_participant(&self, channel: Uuid, user: Uuid) -> RepoResult<bool>;
 
     // ── channels ────────────────────────────────────────────────────────────
 
-    async fn create(
-        &self,
-        owner: OwnerScope,
-        name: &str,
-        slug: &str,
-    ) -> Result<ChannelRow, sqlx::Error>;
+    async fn create(&self, owner: OwnerScope, name: &str, slug: &str) -> RepoResult<ChannelRow>;
 
     /// The caller's tenant channels plus their org's, with unread counts.
     /// Archived channels drop out unless asked for, but keep their history.
@@ -131,7 +133,7 @@ pub trait ChannelRepository: Send + Sync {
         tenant: Uuid,
         include_archived: bool,
         reader: Uuid,
-    ) -> Result<Vec<ChannelRow>, sqlx::Error>;
+    ) -> RepoResult<Vec<ChannelRow>>;
 
     /// Rename and/or archive. `archived = None` leaves the flag alone, which is
     /// why it is threaded as an `Option<bool>` rather than a `bool`.
@@ -140,7 +142,7 @@ pub trait ChannelRepository: Send + Sync {
         id: Uuid,
         name: Option<String>,
         archived: Option<bool>,
-    ) -> Result<Option<ChannelRow>, sqlx::Error>;
+    ) -> RepoResult<Option<ChannelRow>>;
 
     /// Does that category belong to the same owner as that channel? `None` when
     /// either row is missing. The guard that stops a channel being filed under
@@ -149,32 +151,32 @@ pub trait ChannelRepository: Send + Sync {
         &self,
         category: Uuid,
         channel: Uuid,
-    ) -> Result<Option<bool>, sqlx::Error>;
+    ) -> RepoResult<Option<bool>>;
 
     async fn place(
         &self,
         id: Uuid,
         category: Option<Uuid>,
         position: i32,
-    ) -> Result<Option<ChannelRow>, sqlx::Error>;
+    ) -> RepoResult<Option<ChannelRow>>;
 
     /// Move the reader's cursor to now. `GREATEST` so an out-of-order write
     /// never rewinds it — a stale request must not resurrect read messages.
-    async fn mark_read(&self, channel: Uuid, user: Uuid) -> Result<(), sqlx::Error>;
+    async fn mark_read(&self, channel: Uuid, user: Uuid) -> RepoResult<()>;
 
     // ── categories ──────────────────────────────────────────────────────────
 
     /// Every category the caller can see: their tenant's plus their org's.
-    async fn categories(&self, tenant: Uuid) -> Result<Vec<CategoryRow>, sqlx::Error>;
+    async fn categories(&self, tenant: Uuid) -> RepoResult<Vec<CategoryRow>>;
 
-    async fn category_count(&self, owner: OwnerScope) -> Result<i64, sqlx::Error>;
+    async fn category_count(&self, owner: OwnerScope) -> RepoResult<i64>;
 
     async fn create_category(
         &self,
         owner: OwnerScope,
         name: &str,
         position: i32,
-    ) -> Result<CategoryRow, sqlx::Error>;
+    ) -> RepoResult<CategoryRow>;
 
     /// Rename, scoped to what the caller can see — a category outside their
     /// tenant/org yields `None`, never a rename.
@@ -183,13 +185,13 @@ pub trait ChannelRepository: Send + Sync {
         id: Uuid,
         tenant: Uuid,
         name: &str,
-    ) -> Result<Option<CategoryRow>, sqlx::Error>;
+    ) -> RepoResult<Option<CategoryRow>>;
 
-    async fn delete_category(&self, id: Uuid, tenant: Uuid) -> Result<u64, sqlx::Error>;
+    async fn delete_category(&self, id: Uuid, tenant: Uuid) -> RepoResult<u64>;
 
     /// Apply an ordering. Every write carries the same scope predicate, so a
     /// reorder can only ever touch categories the caller can see.
-    async fn reorder_categories(&self, tenant: Uuid, ordered: &[Uuid]) -> Result<(), sqlx::Error>;
+    async fn reorder_categories(&self, tenant: Uuid, ordered: &[Uuid]) -> RepoResult<()>;
 }
 
 pub struct DbChannelRepository {
@@ -204,7 +206,7 @@ impl DbChannelRepository {
 
 #[async_trait]
 impl ChannelRepository for DbChannelRepository {
-    async fn owner_of(&self, channel: Uuid) -> Result<Option<ChannelOwner>, sqlx::Error> {
+    async fn owner_of(&self, channel: Uuid) -> RepoResult<Option<ChannelOwner>> {
         let row: Option<(String, Uuid, Option<DateTime<Utc>>)> = self
             .db
             .query_opt(
@@ -219,16 +221,17 @@ impl ChannelRepository for DbChannelRepository {
         }))
     }
 
-    async fn org_of_tenant(&self, tenant: Uuid) -> Result<Option<Uuid>, sqlx::Error> {
+    async fn org_of_tenant(&self, tenant: Uuid) -> RepoResult<Option<Uuid>> {
         self.db
             .query_scalar_opt::<Uuid>(
                 "SELECT org_id FROM public.tenants WHERE id = $1",
                 params![tenant],
             )
             .await
+            .map_err(Into::into)
     }
 
-    async fn person_in_org(&self, user: Uuid, org: Uuid) -> Result<bool, sqlx::Error> {
+    async fn person_in_org(&self, user: Uuid, org: Uuid) -> RepoResult<bool> {
         self.db
             .query_scalar::<bool>(
                 "SELECT EXISTS(
@@ -240,9 +243,21 @@ impl ChannelRepository for DbChannelRepository {
                 params![user, org],
             )
             .await
+            .map_err(Into::into)
     }
 
-    async fn person_is_participant(&self, channel: Uuid, user: Uuid) -> Result<bool, sqlx::Error> {
+    async fn tenant_role(&self, user: Uuid, tenant: Uuid) -> RepoResult<Option<String>> {
+        let row: Option<(String,)> = self
+            .db
+            .query_opt(
+                "SELECT role FROM users WHERE id = $1 AND tenant_id = $2",
+                params![user, tenant],
+            )
+            .await?;
+        Ok(row.map(|(r,)| r))
+    }
+
+    async fn person_is_participant(&self, channel: Uuid, user: Uuid) -> RepoResult<bool> {
         self.db
             .query_scalar::<bool>(
                 "SELECT EXISTS(
@@ -253,14 +268,10 @@ impl ChannelRepository for DbChannelRepository {
                 params![channel, user],
             )
             .await
+            .map_err(Into::into)
     }
 
-    async fn create(
-        &self,
-        owner: OwnerScope,
-        name: &str,
-        slug: &str,
-    ) -> Result<ChannelRow, sqlx::Error> {
+    async fn create(&self, owner: OwnerScope, name: &str, slug: &str) -> RepoResult<ChannelRow> {
         self.db
             .query_one::<ChannelRow>(
                 &format!(
@@ -271,6 +282,7 @@ impl ChannelRepository for DbChannelRepository {
                 params![Uuid::now_v7(), owner.owner_type, owner.owner_id, name, slug],
             )
             .await
+            .map_err(Into::into)
     }
 
     async fn list(
@@ -278,7 +290,7 @@ impl ChannelRepository for DbChannelRepository {
         tenant: Uuid,
         include_archived: bool,
         reader: Uuid,
-    ) -> Result<Vec<ChannelRow>, sqlx::Error> {
+    ) -> RepoResult<Vec<ChannelRow>> {
         self.db
             .query_all::<ChannelRow>(
                 &format!(
@@ -296,6 +308,7 @@ impl ChannelRepository for DbChannelRepository {
                 params![tenant, include_archived, reader],
             )
             .await
+            .map_err(Into::into)
     }
 
     async fn update(
@@ -303,7 +316,7 @@ impl ChannelRepository for DbChannelRepository {
         id: Uuid,
         name: Option<String>,
         archived: Option<bool>,
-    ) -> Result<Option<ChannelRow>, sqlx::Error> {
+    ) -> RepoResult<Option<ChannelRow>> {
         self.db
             .query_opt::<ChannelRow>(
                 &format!(
@@ -320,13 +333,14 @@ impl ChannelRepository for DbChannelRepository {
                 params![id, name, archived.is_some(), archived.unwrap_or(false)],
             )
             .await
+            .map_err(Into::into)
     }
 
     async fn category_matches_channel(
         &self,
         category: Uuid,
         channel: Uuid,
-    ) -> Result<Option<bool>, sqlx::Error> {
+    ) -> RepoResult<Option<bool>> {
         let row: Option<(bool,)> = self
             .db
             .query_opt(
@@ -344,7 +358,7 @@ impl ChannelRepository for DbChannelRepository {
         id: Uuid,
         category: Option<Uuid>,
         position: i32,
-    ) -> Result<Option<ChannelRow>, sqlx::Error> {
+    ) -> RepoResult<Option<ChannelRow>> {
         self.db
             .query_opt::<ChannelRow>(
                 &format!(
@@ -354,9 +368,10 @@ impl ChannelRepository for DbChannelRepository {
                 params![id, category, position],
             )
             .await
+            .map_err(Into::into)
     }
 
-    async fn mark_read(&self, channel: Uuid, user: Uuid) -> Result<(), sqlx::Error> {
+    async fn mark_read(&self, channel: Uuid, user: Uuid) -> RepoResult<()> {
         self.db
             .exec(
                 &format!(
@@ -373,7 +388,7 @@ impl ChannelRepository for DbChannelRepository {
         Ok(())
     }
 
-    async fn categories(&self, tenant: Uuid) -> Result<Vec<CategoryRow>, sqlx::Error> {
+    async fn categories(&self, tenant: Uuid) -> RepoResult<Vec<CategoryRow>> {
         self.db
             .query_all::<CategoryRow>(
                 &format!(
@@ -384,9 +399,10 @@ impl ChannelRepository for DbChannelRepository {
                 params![tenant],
             )
             .await
+            .map_err(Into::into)
     }
 
-    async fn category_count(&self, owner: OwnerScope) -> Result<i64, sqlx::Error> {
+    async fn category_count(&self, owner: OwnerScope) -> RepoResult<i64> {
         self.db
             .query_scalar::<i64>(
                 "SELECT count(*) FROM chat_channel_categories
@@ -394,6 +410,7 @@ impl ChannelRepository for DbChannelRepository {
                 params![owner.owner_type, owner.owner_id],
             )
             .await
+            .map_err(Into::into)
     }
 
     async fn create_category(
@@ -401,7 +418,7 @@ impl ChannelRepository for DbChannelRepository {
         owner: OwnerScope,
         name: &str,
         position: i32,
-    ) -> Result<CategoryRow, sqlx::Error> {
+    ) -> RepoResult<CategoryRow> {
         self.db
             .query_one::<CategoryRow>(
                 &format!(
@@ -417,6 +434,7 @@ impl ChannelRepository for DbChannelRepository {
                 ],
             )
             .await
+            .map_err(Into::into)
     }
 
     async fn rename_category(
@@ -424,7 +442,7 @@ impl ChannelRepository for DbChannelRepository {
         id: Uuid,
         tenant: Uuid,
         name: &str,
-    ) -> Result<Option<CategoryRow>, sqlx::Error> {
+    ) -> RepoResult<Option<CategoryRow>> {
         self.db
             .query_opt::<CategoryRow>(
                 &format!(
@@ -435,9 +453,10 @@ impl ChannelRepository for DbChannelRepository {
                 params![id, name, tenant],
             )
             .await
+            .map_err(Into::into)
     }
 
-    async fn delete_category(&self, id: Uuid, tenant: Uuid) -> Result<u64, sqlx::Error> {
+    async fn delete_category(&self, id: Uuid, tenant: Uuid) -> RepoResult<u64> {
         self.db
             .exec(
                 &format!(
@@ -447,9 +466,10 @@ impl ChannelRepository for DbChannelRepository {
                 params![id, tenant],
             )
             .await
+            .map_err(Into::into)
     }
 
-    async fn reorder_categories(&self, tenant: Uuid, ordered: &[Uuid]) -> Result<(), sqlx::Error> {
+    async fn reorder_categories(&self, tenant: Uuid, ordered: &[Uuid]) -> RepoResult<()> {
         for (position, id) in ordered.iter().enumerate() {
             self.db
                 .exec(

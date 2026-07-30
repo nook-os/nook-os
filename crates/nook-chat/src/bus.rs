@@ -62,10 +62,14 @@ pub async fn publish(pool: &DbPool, message_id: Uuid, origin: Uuid, updated: boo
 /// Spawn the listener for the life of the process: receive peers' announcements,
 /// read the message back, and deliver it to local subscribers. Reconnects on
 /// error so a dropped listener connection is self-healing.
-pub fn start(registry: Arc<Registry>, pool: DbPool) {
+pub fn start(
+    registry: Arc<Registry>,
+    pool: DbPool,
+    messages: Arc<dyn crate::repo::messages::MessageRepository>,
+) {
     tokio::spawn(async move {
         loop {
-            if let Err(e) = run(&registry, &pool).await {
+            if let Err(e) = run(&registry, &pool, &*messages).await {
                 tracing::warn!(error = %e, "chat bus listener dropped; reconnecting");
                 tokio::time::sleep(Duration::from_secs(1)).await;
             }
@@ -73,7 +77,11 @@ pub fn start(registry: Arc<Registry>, pool: DbPool) {
     });
 }
 
-async fn run(registry: &Registry, pool: &DbPool) -> anyhow::Result<()> {
+async fn run(
+    registry: &Registry,
+    pool: &DbPool,
+    messages: &dyn crate::repo::messages::MessageRepository,
+) -> anyhow::Result<()> {
     // Subscribe through the event-bus seam: it owns the LISTEN connection and
     // yields each peer's raw payload. Only the id travels in NOTIFY, so we still
     // read the message body back by id through the same pool.
@@ -88,7 +96,7 @@ async fn run(registry: &Registry, pool: &DbPool) -> anyhow::Result<()> {
         if notice.origin == registry.instance() {
             continue;
         }
-        if let Some(msg) = crate::messages::fetch(pool, notice.id).await {
+        if let Some(msg) = crate::messages::fetch(messages, notice.id).await {
             // Re-deliver under the right variant so a peer's edit/delete/reaction
             // arrives as an update, not a duplicate new message (MAIN-116 AC-5).
             let event = if notice.updated {

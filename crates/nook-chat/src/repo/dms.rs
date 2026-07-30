@@ -11,6 +11,8 @@
 //! picker never offered.
 
 use async_trait::async_trait;
+
+use super::RepoResult;
 use chrono::{DateTime, Utc};
 use nook_db::{params, Db, DbPool, Postgres, TypeMapping};
 use uuid::Uuid;
@@ -34,19 +36,19 @@ pub struct Participant {
 pub trait DmRepository: Send + Sync {
     /// The person behind a user. Reads `public.users` — nook-control's data,
     /// unreachable from this crate (see the module note on `repo/mod.rs`).
-    async fn person_of(&self, user: Uuid) -> Result<Option<Uuid>, sqlx::Error>;
+    async fn person_of(&self, user: Uuid) -> RepoResult<Option<Uuid>>;
 
     /// May `me` message `other`? True when `other` belongs to a tenant under
     /// any org `me` belongs to.
-    async fn may_dm(&self, me: Uuid, other: Uuid) -> Result<bool, sqlx::Error>;
+    async fn may_dm(&self, me: Uuid, other: Uuid) -> RepoResult<bool>;
 
     /// Everyone in the caller's org(s) except the caller. `DISTINCT ON` folds a
     /// person's several tenant users into one entry, so somebody in two of an
     /// org's tenants appears once.
-    async fn people_in_my_orgs(&self, me: Uuid) -> Result<Vec<PersonEntry>, sqlx::Error>;
+    async fn people_in_my_orgs(&self, me: Uuid) -> RepoResult<Vec<PersonEntry>>;
 
     /// The caller's DMs, newest first. A non-participant never sees one.
-    async fn my_dms(&self, me: Uuid) -> Result<Vec<Uuid>, sqlx::Error>;
+    async fn my_dms(&self, me: Uuid) -> RepoResult<Vec<Uuid>>;
 
     /// The DM whose participant set is *exactly* `persons`, if it exists.
     ///
@@ -54,7 +56,7 @@ pub trait DmRepository: Send + Sync {
     /// equality, because the set is deduped: |members| = N and members ⊆ set
     /// with |set| = N implies members = set. This is what makes open-or-create
     /// idempotent rather than spawning a second conversation.
-    async fn find_exact(&self, persons: &[Uuid]) -> Result<Option<Uuid>, sqlx::Error>;
+    async fn find_exact(&self, persons: &[Uuid]) -> RepoResult<Option<Uuid>>;
 
     /// Create the channel and its participant rows together. One transaction:
     /// a DM with no participants would be invisible to everyone including its
@@ -65,16 +67,16 @@ pub trait DmRepository: Send + Sync {
         creator_person: Uuid,
         slug: &str,
         persons: &[Uuid],
-    ) -> Result<(), sqlx::Error>;
+    ) -> RepoResult<()>;
 
-    async fn created_at(&self, channel: Uuid) -> Result<Option<DateTime<Utc>>, sqlx::Error>;
+    async fn created_at(&self, channel: Uuid) -> RepoResult<Option<DateTime<Utc>>>;
 
-    async fn participants(&self, channel: Uuid) -> Result<Vec<Participant>, sqlx::Error>;
+    async fn participants(&self, channel: Uuid) -> RepoResult<Vec<Participant>>;
 
     /// Unread from the other participants since the reader's cursor — the same
     /// semantics a channel uses: the reader's own messages and deleted ones do
     /// not count, and no cursor row means everything counts.
-    async fn unread_count(&self, channel: Uuid, reader: Uuid) -> Result<i64, sqlx::Error>;
+    async fn unread_count(&self, channel: Uuid, reader: Uuid) -> RepoResult<i64>;
 }
 
 pub struct DbDmRepository {
@@ -89,16 +91,21 @@ impl DbDmRepository {
 
 #[async_trait]
 impl DmRepository for DbDmRepository {
-    async fn person_of(&self, user: Uuid) -> Result<Option<Uuid>, sqlx::Error> {
-        self.db
-            .query_scalar_opt::<Uuid>(
+    async fn person_of(&self, user: Uuid) -> RepoResult<Option<Uuid>> {
+        // `(Option<Uuid>,)`, not a bare `Uuid`: `person_id` is nullable on
+        // pre-MAIN-130 user rows, and `/api/me` documents `null` for those. A
+        // non-null decode would turn that documented null into a 500.
+        let row: Option<(Option<Uuid>,)> = self
+            .db
+            .query_opt(
                 "SELECT person_id FROM public.users WHERE id = $1",
                 params![user],
             )
-            .await
+            .await?;
+        Ok(row.and_then(|(p,)| p))
     }
 
-    async fn may_dm(&self, me: Uuid, other: Uuid) -> Result<bool, sqlx::Error> {
+    async fn may_dm(&self, me: Uuid, other: Uuid) -> RepoResult<bool> {
         self.db
             .query_scalar::<bool>(
                 "SELECT EXISTS(
@@ -114,9 +121,10 @@ impl DmRepository for DbDmRepository {
                 params![me, other],
             )
             .await
+            .map_err(Into::into)
     }
 
-    async fn people_in_my_orgs(&self, me: Uuid) -> Result<Vec<PersonEntry>, sqlx::Error> {
+    async fn people_in_my_orgs(&self, me: Uuid) -> RepoResult<Vec<PersonEntry>> {
         let rows: Vec<(Uuid, String)> = self
             .db
             .query_all(
@@ -142,7 +150,7 @@ impl DmRepository for DbDmRepository {
             .collect())
     }
 
-    async fn my_dms(&self, me: Uuid) -> Result<Vec<Uuid>, sqlx::Error> {
+    async fn my_dms(&self, me: Uuid) -> RepoResult<Vec<Uuid>> {
         self.db
             .query_scalar_all::<Uuid>(
                 "SELECT c.id FROM chat_channels c
@@ -152,9 +160,10 @@ impl DmRepository for DbDmRepository {
                 params![me],
             )
             .await
+            .map_err(Into::into)
     }
 
-    async fn find_exact(&self, persons: &[Uuid]) -> Result<Option<Uuid>, sqlx::Error> {
+    async fn find_exact(&self, persons: &[Uuid]) -> RepoResult<Option<Uuid>> {
         let n = persons.len() as i64;
         self.db
             .query_scalar_opt::<Uuid>(
@@ -168,6 +177,7 @@ impl DmRepository for DbDmRepository {
                 params![persons.to_vec(), n],
             )
             .await
+            .map_err(Into::into)
     }
 
     async fn open(
@@ -176,7 +186,7 @@ impl DmRepository for DbDmRepository {
         creator_person: Uuid,
         slug: &str,
         persons: &[Uuid],
-    ) -> Result<(), sqlx::Error> {
+    ) -> RepoResult<()> {
         let mut tx = self.db.begin().await?;
         // owner_id = the creating person; name is empty (the UI names a DM by
         // its counterparts). The generated slug satisfies the
@@ -199,16 +209,17 @@ impl DmRepository for DbDmRepository {
         Ok(())
     }
 
-    async fn created_at(&self, channel: Uuid) -> Result<Option<DateTime<Utc>>, sqlx::Error> {
+    async fn created_at(&self, channel: Uuid) -> RepoResult<Option<DateTime<Utc>>> {
         self.db
             .query_scalar_opt::<DateTime<Utc>>(
                 "SELECT created_at FROM chat_channels WHERE id = $1",
                 params![channel],
             )
             .await
+            .map_err(Into::into)
     }
 
-    async fn participants(&self, channel: Uuid) -> Result<Vec<Participant>, sqlx::Error> {
+    async fn participants(&self, channel: Uuid) -> RepoResult<Vec<Participant>> {
         let rows: Vec<(Uuid, Option<String>)> = self
             .db
             .query_all(
@@ -229,7 +240,7 @@ impl DmRepository for DbDmRepository {
             .collect())
     }
 
-    async fn unread_count(&self, channel: Uuid, reader: Uuid) -> Result<i64, sqlx::Error> {
+    async fn unread_count(&self, channel: Uuid, reader: Uuid) -> RepoResult<i64> {
         self.db
             .query_scalar::<i64>(
                 &format!(
@@ -246,5 +257,6 @@ impl DmRepository for DbDmRepository {
                 params![channel, reader],
             )
             .await
+            .map_err(Into::into)
     }
 }
