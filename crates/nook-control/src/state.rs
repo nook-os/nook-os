@@ -20,6 +20,8 @@ pub struct AppState {
     pub identity: Arc<dyn crate::repo::identity::IdentityRepository>,
     /// Task/board data access behind its trait (MAIN-248). Same contract.
     pub tasks: Arc<dyn crate::repo::tasks::TaskRepository>,
+    /// Invite data access behind its trait (MAIN-250). Same contract.
+    pub invites: Arc<dyn crate::repo::invites::InviteRepository>,
     pub cfg: Arc<Config>,
     /// OIDC discovery state — configured/usable/degraded, hot-swappable after
     /// boot so an IdP that was down at startup recovers without a restart
@@ -86,6 +88,7 @@ impl AppState {
             Arc::new(crate::repo::tasks::DbTaskRepository::new(db.clone()));
         Self {
             identity: Arc::new(crate::repo::identity::DbIdentityRepository::new(db.clone())),
+            invites: Arc::new(crate::repo::invites::DbInviteRepository::new(db.clone())),
             kanban: Arc::new(KanbanRegistry::new(tasks.clone())),
             tasks,
             artifacts,

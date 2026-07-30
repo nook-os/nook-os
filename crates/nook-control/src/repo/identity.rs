@@ -403,6 +403,52 @@ pub trait IdentityRepository: Send + Sync {
 
     /// Dev-only cleanup of the legacy `test-%` tenants. Returns rows deleted.
     async fn purge_test_tenants(&self) -> ApiResult<u64>;
+
+    // ---- reads the invite flow needs (MAIN-250) ----------------------------
+    //
+    // `routes/invites.rs` reads `users`, writes `tenant_members` and moves a
+    // `sessions_auth` row while accepting. That is identity's data, so it lives
+    // here rather than being copied into `InviteRepository` — two traits
+    // touching `users` would be two places to change when it does.
+
+    /// Email, display name and the cross-tenant person key, in one read —
+    /// everything the accept path needs to know about who is accepting.
+    async fn user_identity_bits(
+        &self,
+        user_id: UserId,
+    ) -> ApiResult<Option<(String, String, Uuid)>>;
+
+    /// This person's *member* row in a tenant, correlated by `person_id`. A
+    /// `users` row without a live grant does not count — being listed is not
+    /// being a member.
+    async fn member_user_by_person(
+        &self,
+        tenant: TenantId,
+        person: Uuid,
+    ) -> ApiResult<Option<UserId>>;
+
+    /// A user id by email, matched **case-insensitively**. Distinct from
+    /// [`IdentityRepository::user_by_email_in_tenant`], which matches exactly:
+    /// the invite paths compare addresses a human typed, and folding them
+    /// together would silently change who an invite matches.
+    async fn user_id_by_email_ci(&self, tenant: TenantId, email: &str) -> ApiResult<Option<Uuid>>;
+
+    /// Create the `users` row an accepted invite needs: no password, no
+    /// membership (the caller grants that), carrying the accepter's person key
+    /// so the row joins their identity across tenants.
+    async fn create_member_user(
+        &self,
+        tenant: TenantId,
+        display_name: &str,
+        email: &str,
+        role: &str,
+        person: Uuid,
+    ) -> ApiResult<Uuid>;
+
+    /// Move a live cookie session onto another tenant without changing who it
+    /// is. Distinct from [`IdentityRepository::switch_session`], which moves
+    /// both — here the user row is unchanged and only the active tenant moves.
+    async fn move_session_to_tenant(&self, session: Uuid, tenant: TenantId) -> ApiResult<()>;
 }
 
 /// The real implementation, over the engine-agnostic pool.
@@ -1302,6 +1348,75 @@ impl IdentityRepository for DbIdentityRepository {
             )
             .await?)
     }
+
+    async fn user_identity_bits(
+        &self,
+        user_id: UserId,
+    ) -> ApiResult<Option<(String, String, Uuid)>> {
+        Ok(self
+            .db
+            .query_opt(
+                "SELECT email, display_name, person_id FROM users WHERE id = $1",
+                params![user_id],
+            )
+            .await?)
+    }
+
+    async fn member_user_by_person(
+        &self,
+        tenant: TenantId,
+        person: Uuid,
+    ) -> ApiResult<Option<UserId>> {
+        Ok(self
+            .db
+            .query_scalar_opt(
+                "SELECT u.id FROM users u
+         JOIN tenant_members m
+           ON m.tenant_id = u.tenant_id AND m.principal_type = 'user' AND m.principal_id = u.id
+         WHERE u.tenant_id = $1 AND u.person_id = $2
+         LIMIT 1",
+                params![tenant, person],
+            )
+            .await?)
+    }
+
+    async fn user_id_by_email_ci(&self, tenant: TenantId, email: &str) -> ApiResult<Option<Uuid>> {
+        Ok(self
+            .db
+            .query_scalar_opt(
+                "SELECT id FROM users WHERE tenant_id = $1 AND lower(email) = lower($2) LIMIT 1",
+                params![tenant, email],
+            )
+            .await?)
+    }
+
+    async fn create_member_user(
+        &self,
+        tenant: TenantId,
+        display_name: &str,
+        email: &str,
+        role: &str,
+        person: Uuid,
+    ) -> ApiResult<Uuid> {
+        Ok(self
+            .db
+            .query_scalar(
+                "INSERT INTO users (id, tenant_id, display_name, email, role, person_id)
+                 VALUES ($1, $2, $3, $4, $5, $6) RETURNING id",
+                params![Uuid::now_v7(), tenant, display_name, email, role, person],
+            )
+            .await?)
+    }
+
+    async fn move_session_to_tenant(&self, session: Uuid, tenant: TenantId) -> ApiResult<()> {
+        self.db
+            .exec(
+                "UPDATE sessions_auth SET tenant_id = $2 WHERE id = $1",
+                params![session, tenant],
+            )
+            .await?;
+        Ok(())
+    }
 }
 
 /// An in-memory [`IdentityRepository`] for tests that should not need a
@@ -2183,6 +2298,76 @@ impl IdentityRepository for FakeIdentityRepository {
         st.users.retain(|u| !doomed.contains(&u.tenant_id));
         st.members.retain(|(t, _, _)| !doomed.contains(t));
         Ok(doomed.len() as u64)
+    }
+
+    async fn user_identity_bits(
+        &self,
+        user_id: UserId,
+    ) -> ApiResult<Option<(String, String, Uuid)>> {
+        let st = self.inner.lock().unwrap();
+        Ok(st.users.iter().find(|u| u.id == user_id).map(|u| {
+            (
+                u.email.clone(),
+                u.display_name.clone(),
+                st.person_of.get(&u.id).copied().unwrap_or_default(),
+            )
+        }))
+    }
+
+    async fn member_user_by_person(
+        &self,
+        tenant: TenantId,
+        person: Uuid,
+    ) -> ApiResult<Option<UserId>> {
+        let st = self.inner.lock().unwrap();
+        Ok(st
+            .users
+            .iter()
+            .find(|u| {
+                u.tenant_id == tenant
+                    && st.person_of.get(&u.id).copied() == Some(person)
+                    // The JOIN: a users row without a live grant is not a member.
+                    && st.members.iter().any(|(t, mu, _)| *t == tenant && *mu == u.id)
+            })
+            .map(|u| u.id))
+    }
+
+    async fn user_id_by_email_ci(&self, tenant: TenantId, email: &str) -> ApiResult<Option<Uuid>> {
+        let st = self.inner.lock().unwrap();
+        Ok(st
+            .users
+            .iter()
+            .find(|u| u.tenant_id == tenant && u.email.eq_ignore_ascii_case(email))
+            .map(|u| u.id.0))
+    }
+
+    async fn create_member_user(
+        &self,
+        tenant: TenantId,
+        display_name: &str,
+        email: &str,
+        role: &str,
+        person: Uuid,
+    ) -> ApiResult<Uuid> {
+        let mut st = self.inner.lock().unwrap();
+        let u = new_user(tenant, display_name, email, None, role);
+        st.person_of.insert(u.id, person);
+        let id = u.id.0;
+        st.users.push(u);
+        // Deliberately NO membership: the caller grants it, exactly as the real
+        // INSERT does. A fake that granted here would hide a missing grant.
+        Ok(id)
+    }
+
+    async fn move_session_to_tenant(&self, session: Uuid, tenant: TenantId) -> ApiResult<()> {
+        let mut st = self.inner.lock().unwrap();
+        for s in st.auth_sessions.iter_mut() {
+            if s.0 .0 == session {
+                // Only the tenant moves; who the session is stays put.
+                s.2 = tenant;
+            }
+        }
+        Ok(())
     }
 }
 

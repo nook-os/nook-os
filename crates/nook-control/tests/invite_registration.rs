@@ -284,7 +284,7 @@ async fn acceptance_needs_a_verified_email_then_creates_membership_with_the_invi
 
     // Unverified: acceptance is declined and NO membership is created (AC-2).
     let declined = invites::accept_core(
-        &bed.db(),
+        &nook_control::repo::invites::DbInviteRepository::new(bed.db()),
         &nook_control::repo::identity::DbIdentityRepository::new(bed.db()),
         user.id.0,
         tenant,
@@ -308,7 +308,7 @@ async fn acceptance_needs_a_verified_email_then_creates_membership_with_the_invi
     .await
     .unwrap();
     let accepted = invites::accept_core(
-        &bed.db(),
+        &nook_control::repo::invites::DbInviteRepository::new(bed.db()),
         &nook_control::repo::identity::DbIdentityRepository::new(bed.db()),
         user.id.0,
         tenant,
@@ -366,7 +366,7 @@ async fn a_mismatched_or_invalid_invite_creates_no_membership() {
 
     // Verified, but the invite's email is not this account's — declined.
     let declined = invites::accept_core(
-        &bed.db(),
+        &nook_control::repo::invites::DbInviteRepository::new(bed.db()),
         &nook_control::repo::identity::DbIdentityRepository::new(bed.db()),
         user.id.0,
         tenant,
@@ -379,7 +379,7 @@ async fn a_mismatched_or_invalid_invite_creates_no_membership() {
 
     // An unknown token is declined too.
     let bad = invites::accept_core(
-        &bed.db(),
+        &nook_control::repo::invites::DbInviteRepository::new(bed.db()),
         &nook_control::repo::identity::DbIdentityRepository::new(bed.db()),
         user.id.0,
         tenant,

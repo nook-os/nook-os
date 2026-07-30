@@ -12,4 +12,5 @@
 //!   hotspot ever proves it needs one (deliberately not needed yet — NG-3).
 
 pub mod identity;
+pub mod invites;
 pub mod tasks;

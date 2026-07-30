@@ -12,9 +12,6 @@
 # for exactly that reason: an exemption that outlives its cause is how the list
 # stops shrinking.
 
-# ── MAIN-250 · InviteRepository ─────────────────────────────────────────────
-crates/nook-control/src/routes/invites.rs        # invite issue/accept/revoke
-
 # ── MAIN-251 · WorkspaceRepository ──────────────────────────────────────────
 crates/nook-control/src/routes/gitops.rs         # clone/worktree/checkout writes
 crates/nook-control/src/routes/workspaces.rs     # workspace + location reads
@@ -39,6 +36,7 @@ crates/nook-control/src/ws/bus.rs                # cross-instance UI fan-out
 
 # ── MAIN-254 · NotebookRepository ───────────────────────────────────────────
 crates/nook-control/src/routes/notebook.rs       # notes CRUD + search
+crates/nook-control/src/routes/notes.rs          # workspace notes CRUD
 crates/nook-control/src/routes/vault.rs          # person vault entries
 crates/nook-control/src/services/secrets.rs      # sealed secret storage
 crates/nook-control/src/services/notebook_queries.rs    # split out by MAIN-245, awaits its trait
@@ -62,6 +60,7 @@ crates/nook-control/src/routes/settings.rs       # tenant settings
 crates/nook-control/src/routes/themes.rs         # theme catalogue
 crates/nook-control/src/services/operator_queries.rs    # split out by MAIN-245, awaits its trait
 crates/nook-control/src/services/policy.rs       # visibility policy rows
+crates/nook-control/src/routes/schedule.rs       # scheduled-node lookup
 crates/nook-control/src/services/schedule.rs     # scheduled operator work
 
 # ── Cross-cutting reads, no card yet ────────────────────────────────────────
