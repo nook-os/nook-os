@@ -18,6 +18,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
+use nook_db::dialect::type_mapping;
 use nook_db::{params, AtomicClaim, Db, DbPool, Postgres, TypeMapping};
 use uuid::Uuid;
 
@@ -77,7 +78,7 @@ impl Queue for DbQueue {
         let id = Uuid::now_v7();
         // `now()` routes through the type-mapping seam (MAIN-211); `make_interval`
         // is an interval construct outside this (b) card and stays inline.
-        let now = Postgres.now();
+        let now = type_mapping(self.db.engine()).now();
         self.db
             .exec(
                 &format!(
@@ -119,7 +120,7 @@ impl Queue for DbQueue {
         // engine's lock-and-skip clause (Postgres: `FOR UPDATE SKIP LOCKED`),
         // so the Postgres-specific SQL lives in the trait, not inline here
         // (MAIN-199). Behavior is bit-identical.
-        let now = Postgres.now();
+        let now = type_mapping(self.db.engine()).now();
         let claim_sql = format!(
             "SELECT id, tenant_id, work_type, payload, attempts, max_attempts, \
                     not_before, enqueued_at \
@@ -146,7 +147,7 @@ impl Queue for DbQueue {
                 dead_letter(&mut tx, row.id, "max attempts exhausted").await?;
                 continue;
             }
-            let now = Postgres.now();
+            let now = type_mapping(self.db.engine()).now();
             tx.exec(
                 &format!(
                     "UPDATE work_queue \
@@ -195,7 +196,7 @@ impl Queue for DbQueue {
     }
 
     async fn extend_visibility(&self, id: Uuid, visibility: Duration) -> Result<()> {
-        let now = Postgres.now();
+        let now = type_mapping(self.db.engine()).now();
         self.db
             .exec(
                 &format!(
@@ -208,7 +209,7 @@ impl Queue for DbQueue {
     }
 
     async fn describe(&self) -> Result<QueueStats> {
-        let now = Postgres.now();
+        let now = type_mapping(self.db.engine()).now();
         let (ready, in_flight): (i64, i64) = self
             .db
             .query_one(

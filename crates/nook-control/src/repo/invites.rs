@@ -15,7 +15,8 @@
 //! accident.
 
 use async_trait::async_trait;
-use nook_db::{params, Db, DbPool, Postgres, TimeMath, TypeMapping};
+use nook_db::dialect::{time_math, type_mapping};
+use nook_db::{params, Db, DbPool};
 use nook_types::{Invite, TenantId};
 use uuid::Uuid;
 
@@ -135,7 +136,7 @@ impl InviteRepository for DbInviteRepository {
                     "INSERT INTO invites (id, tenant_id, email, role, token_hash, status, invited_by, expires_at)
          VALUES ($1, $2, $3, $4, $5, 'pending', $6, {expiry})
          RETURNING id, email, role, status, created_at, expires_at",
-                    expiry = Postgres.now_plus("14 days")
+                    expiry = time_math(self.db.engine()).now_plus("14 days")
                 ),
                 params![Uuid::now_v7(), tenant, email, role, token_hash, invited_by],
             )
@@ -179,7 +180,7 @@ impl InviteRepository for DbInviteRepository {
             SET token_hash = $1, expires_at = {expiry}
           WHERE id = $2 AND tenant_id = $3 AND status = 'pending'
       RETURNING id, email, role, status, created_at, expires_at",
-                    expiry = Postgres.now_plus("14 days")
+                    expiry = time_math(self.db.engine()).now_plus("14 days")
                 ),
                 params![token_hash, id, tenant],
             )
@@ -209,7 +210,7 @@ impl InviteRepository for DbInviteRepository {
             .query_scalar(
                 &format!(
                     "SELECT expires_at > {} FROM invites WHERE id = $1",
-                    Postgres.now()
+                    type_mapping(self.db.engine()).now()
                 ),
                 params![id],
             )
@@ -233,7 +234,7 @@ impl InviteRepository for DbInviteRepository {
                 &format!(
                     "SELECT tenant_id, email, invited_by, (status = 'pending' AND expires_at > {})
          FROM invites WHERE token_hash = $1",
-                    Postgres.now()
+                    type_mapping(self.db.engine()).now()
                 ),
                 params![token_hash],
             )
@@ -253,7 +254,7 @@ impl InviteRepository for DbInviteRepository {
                 &format!(
                     "SELECT tenant_id, email, role, (status = 'pending' AND expires_at > {})
          FROM invites WHERE token_hash = $1",
-                    Postgres.now()
+                    type_mapping(self.db.engine()).now()
                 ),
                 params![token_hash],
             )

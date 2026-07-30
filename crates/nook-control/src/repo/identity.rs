@@ -18,7 +18,7 @@
 //! **One impl over the engine-agnostic `DbPool`** ([`DbIdentityRepository`]),
 //! with row mapping inside it. There is no per-engine branch here and no
 //! dialect dispatch: that layer is underneath us (MAIN-189), and a per-engine
-//! impl is a later, hotspot-proven escape hatch (NG-1, NG-3). The `Postgres.now()`
+//! impl is a later, hotspot-proven escape hatch (NG-1, NG-3). The `type_mapping(self.db.engine()).now()`
 //! and `Postgres.cast()` calls that came in with the moved SQL are unchanged —
 //! they were already there, and replacing them is the dialect sweep's job, not
 //! this card's.
@@ -31,7 +31,8 @@
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use nook_db::{params, CiMatch, Db, DbPool, Json, Postgres, TimeMath, TypeMapping};
+use nook_db::dialect::{time_math, type_mapping};
+use nook_db::{params, CiMatch, Db, DbPool, Json, Postgres, TypeMapping};
 use nook_types::{
     AuthSessionId, DevAccount, IdentityId, Tenant, TenantId, TenantMemberItem, TenantMemberPage,
     User, UserId, UserToken,
@@ -812,7 +813,7 @@ impl IdentityRepository for DbIdentityRepository {
                 &format!(
                     "UPDATE identities SET email_verified_at = {}
                  WHERE issuer = $1 AND subject = $2 AND email_verified_at IS NULL",
-                    Postgres.now()
+                    type_mapping(self.db.engine()).now()
                 ),
                 params![issuer, subject],
             )
@@ -828,7 +829,7 @@ impl IdentityRepository for DbIdentityRepository {
          ON CONFLICT (issuer, subject)
            DO UPDATE SET email_verified_at = COALESCE(identities.email_verified_at, {now})",
             Postgres.literal("{\"verified_via\":\"local\"}"),
-            now = Postgres.now()
+            now = type_mapping(self.db.engine()).now()
         );
         self.db
             .exec(
@@ -845,7 +846,7 @@ impl IdentityRepository for DbIdentityRepository {
                 &format!(
                     "INSERT INTO identities (id, user_id, issuer, subject, email, raw_claims, email_verified_at)
          VALUES ($1, $2, $3, $4, $5, $6, CASE WHEN $7 THEN {} ELSE NULL END)",
-                    Postgres.now()
+                    type_mapping(self.db.engine()).now()
                 ),
                 params![
                     IdentityId::new(),
@@ -968,7 +969,7 @@ impl IdentityRepository for DbIdentityRepository {
             .exec(
                 &format!(
                     "UPDATE users SET password_hash = $2, updated_at = {} WHERE id = $1",
-                    Postgres.now()
+                    type_mapping(self.db.engine()).now()
                 ),
                 params![user_id, hash],
             )
@@ -988,7 +989,7 @@ impl IdentityRepository for DbIdentityRepository {
                 &format!(
                     "INSERT INTO sessions_auth (id, user_id, tenant_id, expires_at)
          VALUES ($1, $2, $3, {now} + make_interval(hours => $4))",
-                    now = Postgres.now()
+                    now = type_mapping(self.db.engine()).now()
                 ),
                 params![id, user_id, tenant, ttl_hours],
             )
@@ -1104,7 +1105,7 @@ impl IdentityRepository for DbIdentityRepository {
                 &format!(
                     "INSERT INTO email_verification_tokens (id, user_id, email, token_hash, expires_at)
          VALUES ($1, $2, $3, $4, {expiry})",
-                    expiry = Postgres.now_plus("24 hours")
+                    expiry = time_math(self.db.engine()).now_plus("24 hours")
                 ),
                 params![Uuid::now_v7(), user_id, email, token_hash],
             )
@@ -1120,7 +1121,7 @@ impl IdentityRepository for DbIdentityRepository {
                 &format!(
                     "SELECT id, user_id, email, consumed_at, expires_at < {}
              FROM email_verification_tokens WHERE token_hash = $1",
-                    Postgres.now()
+                    type_mapping(self.db.engine()).now()
                 ),
                 params![token_hash],
             )
@@ -1141,7 +1142,7 @@ impl IdentityRepository for DbIdentityRepository {
             .exec(
                 &format!(
                     "UPDATE email_verification_tokens SET consumed_at = {} WHERE id = $1",
-                    Postgres.now()
+                    type_mapping(self.db.engine()).now()
                 ),
                 params![id],
             )
@@ -1180,7 +1181,7 @@ impl IdentityRepository for DbIdentityRepository {
                 &format!(
                     "INSERT INTO user_tokens (id, user_id, tenant_id, token_hash, name, expires_at)
          VALUES ($1, $2, $3, $4, $5, {expiry})",
-                    expiry = Postgres.now_plus("365 days")
+                    expiry = time_math(self.db.engine()).now_plus("365 days")
                 ),
                 params![id, user_id, tenant, token_hash, name],
             )
@@ -1277,7 +1278,7 @@ impl IdentityRepository for DbIdentityRepository {
             .exec(
                 &format!(
                     "UPDATE users SET role = $3, updated_at = {} WHERE id = $2 AND tenant_id = $1",
-                    Postgres.now()
+                    type_mapping(self.db.engine()).now()
                 ),
                 params![tenant, user_id, role],
             )

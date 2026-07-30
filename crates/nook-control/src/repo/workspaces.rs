@@ -32,7 +32,8 @@
 //! signature, and row mapping lives inside the impl (AC-2).
 
 use async_trait::async_trait;
-use nook_db::{params, Db, DbPool, Postgres, TimeMath, TypeMapping};
+use nook_db::dialect::{time_math, type_mapping};
+use nook_db::{params, Db, DbPool};
 use nook_types::*;
 
 use crate::error::{ApiError, ApiResult};
@@ -541,7 +542,7 @@ impl WorkspaceRepository for DbWorkspaceRepository {
                 &format!(
                     "UPDATE workspaces SET name = $3, updated_at = {}
                      WHERE id = $1 AND tenant_id = $2 RETURNING *",
-                    Postgres.now()
+                    type_mapping(self.db.engine()).now()
                 ),
                 params![id, tenant, name],
             )
@@ -707,7 +708,7 @@ impl WorkspaceRepository for DbWorkspaceRepository {
                 &format!(
                     "UPDATE workspaces SET name = $2, updated_at = {}
                      WHERE id = $1 AND name = $3",
-                    Postgres.now()
+                    type_mapping(self.db.engine()).now()
                 ),
                 params![id, new_name, only_if_named],
             )
@@ -1014,7 +1015,7 @@ impl WorkspaceRepository for DbWorkspaceRepository {
                        kind = EXCLUDED.kind,
                        missing_at = NULL,
                        last_scanned_at = {}",
-                    Postgres.now()
+                    type_mapping(self.db.engine()).now()
                 ),
                 params![
                     NodeWorkspaceId::new(),
@@ -1056,7 +1057,7 @@ impl WorkspaceRepository for DbWorkspaceRepository {
                        kind = EXCLUDED.kind,
                        missing_at = NULL,
                        last_scanned_at = {}",
-                    Postgres.now()
+                    type_mapping(self.db.engine()).now()
                 ),
                 params![
                     NodeWorkspaceId::new(),
@@ -1083,7 +1084,7 @@ impl WorkspaceRepository for DbWorkspaceRepository {
                 &format!(
                     "UPDATE node_workspaces SET missing_at = {}
                      WHERE node_id = $1 AND path != ALL($2) AND missing_at IS NULL",
-                    Postgres.now()
+                    type_mapping(self.db.engine()).now()
                 ),
                 params![node, reported_paths.to_vec()],
             )
@@ -1113,7 +1114,7 @@ impl WorkspaceRepository for DbWorkspaceRepository {
                     &format!(
                         "UPDATE node_workspaces SET path = $3, last_scanned_at = {}
                          WHERE node_id = $1 AND path = $2",
-                        Postgres.now()
+                        type_mapping(self.db.engine()).now()
                     ),
                     params![node, &m.old, &m.new],
                 )
@@ -1128,7 +1129,7 @@ impl WorkspaceRepository for DbWorkspaceRepository {
                     &format!(
                         "UPDATE tasks SET worktree_path = $3, updated_at = {}
                          WHERE worktree_node_id = $1 AND worktree_path = $2",
-                        Postgres.now()
+                        type_mapping(self.db.engine()).now()
                     ),
                     params![node, &m.old, &m.new],
                 )
@@ -1147,7 +1148,7 @@ impl WorkspaceRepository for DbWorkspaceRepository {
                     "DELETE FROM node_workspaces
                      WHERE missing_at IS NOT NULL AND missing_at < {}
                      RETURNING id, node_id, path",
-                    Postgres.now_minus_scaled("$1", "1 second")
+                    time_math(self.db.engine()).now_minus_scaled("$1", "1 second")
                 ),
                 params![retention_secs],
             )
@@ -1296,7 +1297,7 @@ impl WorkspaceSecretRepository for DbWorkspaceSecretRepository {
                                    verifier = EXCLUDED.verifier,
                                    ephemeral = EXCLUDED.ephemeral,
                                    updated_at = {}",
-                    Postgres.now()
+                    type_mapping(self.db.engine()).now()
                 ),
                 params![
                     SettingId::new().0,

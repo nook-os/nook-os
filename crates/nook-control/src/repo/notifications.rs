@@ -27,6 +27,7 @@
 //! access moved.
 
 use async_trait::async_trait;
+use nook_db::dialect::type_mapping;
 use nook_db::{params, Db, DbPool, Postgres, TypeMapping};
 use nook_types::*;
 use serde_json::Value;
@@ -321,7 +322,7 @@ impl NotificationRepository for DbNotificationRepository {
                 &format!(
                     "UPDATE notifications SET read_at = {}
                      WHERE id = $1 AND tenant_id = $2 AND read_at IS NULL",
-                    Postgres.now()
+                    type_mapping(self.db.engine()).now()
                 ),
                 params![id, tenant],
             )
@@ -336,7 +337,7 @@ impl NotificationRepository for DbNotificationRepository {
                     "UPDATE notifications SET read_at = {}
                      WHERE tenant_id = $1 AND (user_id IS NULL OR user_id = $2)
                        AND read_at IS NULL",
-                    Postgres.now()
+                    type_mapping(self.db.engine()).now()
                 ),
                 params![tenant, user.0],
             )
@@ -432,7 +433,7 @@ impl NotificationRepository for DbNotificationRepository {
                         updated_at = {}
                      WHERE id = $1 AND tenant_id = $2
                      RETURNING {CHANNEL_COLUMNS}",
-                    Postgres.now()
+                    type_mapping(self.db.engine()).now()
                 ),
                 params![
                     id,
@@ -466,7 +467,7 @@ impl NotificationRepository for DbNotificationRepository {
                          last_error = $3,
                          updated_at = {now}
                      WHERE id = $1",
-                    now = Postgres.now()
+                    now = type_mapping(self.db.engine()).now()
                 ),
                 params![id, ok, error],
             )
@@ -529,7 +530,7 @@ impl FeedbackRepository for DbFeedbackRepository {
             .query_opt(
                 &format!(
                     "UPDATE feedback SET status = $2, updated_at = {} WHERE id = $1 RETURNING *",
-                    Postgres.now()
+                    type_mapping(self.db.engine()).now()
                 ),
                 params![id, status],
             )
@@ -552,7 +553,7 @@ impl FeedbackRepository for DbFeedbackRepository {
                         pr_url = COALESCE($4, pr_url),
                         updated_at = {}
                      WHERE id = $1 AND tenant_id = $2 RETURNING *",
-                    Postgres.now()
+                    type_mapping(self.db.engine()).now()
                 ),
                 params![id, tenant, status, pr_url],
             )

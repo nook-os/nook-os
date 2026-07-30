@@ -23,7 +23,8 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use async_trait::async_trait;
-use nook_db::{params, Db, DbPool, Postgres, TypeMapping};
+use nook_db::dialect::type_mapping;
+use nook_db::{params, Db, DbPool};
 
 use super::{Category, Mailer, SendOutcome};
 
@@ -72,7 +73,7 @@ impl GuardedMailer {
             .query_scalar::<i64>(
                 &format!(
                     "SELECT count(*) FROM mail_sends WHERE sent_at >= date_trunc($1, {})",
-                    Postgres.now()
+                    type_mapping(self.db.engine()).now()
                 ),
                 params![unit],
             )

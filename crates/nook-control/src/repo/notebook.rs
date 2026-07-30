@@ -27,6 +27,7 @@
 //! signature, and row mapping lives inside the impls (AC-2).
 
 use async_trait::async_trait;
+use nook_db::dialect::type_mapping;
 use nook_db::{params, CiMatch, Db, DbPool, Postgres, TypeMapping};
 use nook_types::*;
 use uuid::Uuid;
@@ -465,7 +466,7 @@ impl NotebookRepository for DbNotebookRepository {
                         folder_id = CASE WHEN $5 THEN $6 ELSE folder_id END,
                         updated_at = {}
                      WHERE id = $1 AND person_id = $2 RETURNING {NOTE_COLUMNS}",
-                    Postgres.now()
+                    type_mapping(self.db.engine()).now()
                 ),
                 params![
                     id,
@@ -504,7 +505,7 @@ impl NotebookRepository for DbNotebookRepository {
                      SET content_enc = $3, sealed_salt = $4, sealed_verifier = $5,
                          updated_at = {}
                      WHERE id = $1 AND person_id = $2 RETURNING {NOTE_COLUMNS}",
-                    Postgres.now()
+                    type_mapping(self.db.engine()).now()
                 ),
                 params![id, person, body.content_enc, body.salt, body.verifier],
             )
@@ -527,7 +528,7 @@ impl NotebookRepository for DbNotebookRepository {
                          updated_at = {}
                      WHERE id = $1 AND person_id = $2 AND sealed_salt IS NOT NULL
                      RETURNING {NOTE_COLUMNS}",
-                    Postgres.now()
+                    type_mapping(self.db.engine()).now()
                 ),
                 params![id, person, content_enc],
             )
@@ -580,7 +581,7 @@ impl NotebookRepository for DbNotebookRepository {
                         parent_id = CASE WHEN $4 THEN $5 ELSE parent_id END,
                         updated_at = {}
                      WHERE id = $1 AND person_id = $2 RETURNING *",
-                    Postgres.now()
+                    type_mapping(self.db.engine()).now()
                 ),
                 params![id, person, edit.name, set_parent, parent_val.map(|p| p.0)],
             )
@@ -678,7 +679,7 @@ impl NotebookRepository for DbNotebookRepository {
                 &format!(
                     "UPDATE notes SET content_md = content_md || $2, updated_at = {now}
                      WHERE id = $1 RETURNING *",
-                    now = Postgres.now()
+                    now = type_mapping(self.db.engine()).now()
                 ),
                 params![id, addition],
             )
@@ -701,7 +702,7 @@ impl NotebookRepository for DbNotebookRepository {
                         content_md = COALESCE($4, content_md),
                         updated_at = {}
                      WHERE id = $1 AND tenant_id = $2 RETURNING *",
-                    Postgres.now()
+                    type_mapping(self.db.engine()).now()
                 ),
                 params![id, tenant, title, content_md],
             )
@@ -859,7 +860,7 @@ impl VaultRepository for DbVaultRepository {
             .exec(
                 &format!(
                     "UPDATE user_passkeys SET last_used_at = {} WHERE id = $1 AND user_id = $2",
-                    Postgres.now()
+                    type_mapping(self.db.engine()).now()
                 ),
                 params![id, user],
             )

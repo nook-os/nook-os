@@ -1,0 +1,41 @@
+# Files outside crates/nook-db that still call the hardcoded Postgres dialect
+# arm, and why (MAIN-289).
+#
+# Generated from the tree as it stood when the guard landed, so it is green on
+# its first run. Every entry is a file whose sweep has not landed yet.
+# `scripts/check-dialect-dispatch.sh` refuses a hardcoded fragment in any file
+# NOT listed here, and refuses a listed file that no longer has one, so the list
+# can only shrink.
+#
+# nook-db is absent because it DEFINES both arms — the guard does not scan it.
+#
+# The now()/interval family is already swept: 87 call sites across 13 files now
+# ask `type_mapping(pool.engine())` / `time_math(pool.engine())`. What remains
+# is `cast`, `ci_match` and the json fragments, plus the now() calls in files
+# that hold no pool of their own and need one threaded to them.
+
+# ── Blocked: no SQLite arm exists to dispatch to ────────────────────────────
+# `claim_lock_clause` is AtomicClaim's, and `impl AtomicClaim for Sqlite` does
+# not exist — its doc says SQLite will use BEGIN IMMEDIATE + a conditional
+# update instead, "a later card". Writing that arm is a NEW ARM, which
+# MAIN-289's NG-1 forbids, so these cannot be swept under this card.
+crates/nook-control/src/repo/jobs.rs           # claim_lock_clause + now() with no pool field
+
+# ── Awaiting the cast / ci_match / json sweep ───────────────────────────────
+crates/nook-chat/src/repo/channels.rs
+crates/nook-chat/src/repo/dms.rs
+crates/nook-chat/src/repo/messages.rs
+crates/nook-control/src/main.rs
+crates/nook-control/src/repo/admin.rs
+crates/nook-control/src/repo/identity.rs
+crates/nook-control/src/repo/nodes.rs
+crates/nook-control/src/repo/notebook.rs
+crates/nook-control/src/repo/notifications.rs
+crates/nook-control/src/repo/sessions.rs
+crates/nook-control/src/repo/tasks.rs
+crates/nook-control/src/routes/auth.rs
+crates/nook-control/src/services/activity_queries.rs
+crates/nook-control/src/services/overview_queries.rs
+crates/nook-control/src/ws/bus.rs
+crates/nook-control/src/ws/registry.rs
+crates/nook-infra/src/queue/database.rs
