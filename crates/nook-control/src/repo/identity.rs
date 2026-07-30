@@ -31,9 +31,10 @@
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use nook_db::{params, CiMatch, Db, DbPool, Json, Postgres, TypeMapping};
+use nook_db::{params, CiMatch, Db, DbPool, Json, Postgres, TimeMath, TypeMapping};
 use nook_types::{
-    AuthSessionId, IdentityId, Tenant, TenantId, TenantMemberItem, TenantMemberPage, User, UserId,
+    AuthSessionId, DevAccount, IdentityId, Tenant, TenantId, TenantMemberItem, TenantMemberPage,
+    User, UserId, UserToken,
 };
 use serde_json::Value;
 use uuid::Uuid;
@@ -101,6 +102,27 @@ pub struct NewLocalUser {
 pub enum CreateUserError {
     UsernameTaken,
     EmailTaken,
+}
+
+/// A verification token as stored, with expiry decided by the database.
+#[derive(Debug, Clone)]
+pub struct VerificationToken {
+    pub id: Uuid,
+    pub user_id: UserId,
+    pub email: String,
+    pub consumed_at: Option<DateTime<Utc>>,
+    pub expired: bool,
+}
+
+/// What a new API token is made from.
+#[derive(Debug, Clone)]
+pub struct NewUserToken {
+    pub id: Uuid,
+    pub tenant: TenantId,
+    pub user_id: UserId,
+    pub token_hash: String,
+    pub name: String,
+    pub expires_at: Option<DateTime<Utc>>,
 }
 
 #[async_trait]
@@ -267,6 +289,120 @@ pub trait IdentityRepository: Send + Sync {
 
     /// `(node_id, tenant_id)` for a presented node token hash.
     async fn node_by_token_hash(&self, hash: &str) -> ApiResult<Option<(Uuid, Uuid)>>;
+
+    // ---- email verification (MAIN-247) ------------------------------------
+
+    /// A user's email and whether they hold a local password — an OIDC account
+    /// has none, and only a local one can request a verification email.
+    async fn email_and_local_flag(&self, user_id: UserId) -> ApiResult<Option<(String, bool)>>;
+
+    /// Which tenant a user belongs to, for addressing the outbound mail job.
+    async fn tenant_of_user(&self, user_id: UserId) -> ApiResult<Option<Uuid>>;
+
+    /// Issue a verification token, dropping any live one first — one live token
+    /// per user. Both statements in one method so a user can never briefly hold
+    /// two, or none.
+    async fn issue_verification_token(
+        &self,
+        user_id: UserId,
+        email: &str,
+        token_hash: &str,
+    ) -> ApiResult<()>;
+
+    /// A verification token by its hash, with whether it has already expired
+    /// decided by the database rather than by our clock.
+    async fn verification_token(&self, token_hash: &str) -> ApiResult<Option<VerificationToken>>;
+
+    /// Mark a token used. Consumed *before* the email is verified, so a replayed
+    /// link finds it spent.
+    async fn consume_verification_token(&self, id: Uuid) -> ApiResult<()>;
+
+    // ---- API tokens --------------------------------------------------------
+
+    async fn create_user_token(&self, new: NewUserToken) -> ApiResult<()>;
+
+    /// The long-lived credential the OIDC device exchange hands a native
+    /// client. Separate from [`IdentityRepository::create_user_token`] because
+    /// its expiry is a fixed policy rather than a caller's choice.
+    async fn create_native_client_token(
+        &self,
+        id: Uuid,
+        user_id: UserId,
+        tenant: TenantId,
+        token_hash: &str,
+        name: &str,
+    ) -> ApiResult<()>;
+
+    async fn list_user_tokens(&self, user_id: UserId) -> ApiResult<Vec<UserToken>>;
+
+    /// Scoped to the owner: one user revoking another's credential is an
+    /// administrative act, not a self-service one. Returns rows removed.
+    async fn revoke_user_token(&self, id: Uuid, user_id: UserId) -> ApiResult<u64>;
+
+    // ---- tenant membership management --------------------------------------
+
+    /// The role a user holds in a tenant, from `tenant_members` — the source of
+    /// truth for access, not `users.role`.
+    async fn membership_role(&self, tenant: TenantId, user_id: Uuid) -> ApiResult<Option<String>>;
+
+    /// How many owners a tenant has — the guard that keeps it from being left
+    /// ownerless.
+    async fn owner_count(&self, tenant: TenantId) -> ApiResult<i64>;
+
+    /// Every tenant this **user row** is a member of. Correlated by
+    /// `principal_id`, not by person: this is the tenant-management list, where
+    /// the question is which grants this row holds.
+    async fn tenant_grants_of(&self, user_id: Uuid) -> ApiResult<Vec<MembershipRow>>;
+
+    /// Change a member's role in `tenant_members` **and** keep `users.role` in
+    /// step. One method, because the two disagreeing is the bug.
+    async fn change_member_role(
+        &self,
+        tenant: TenantId,
+        user_id: Uuid,
+        role: &str,
+    ) -> ApiResult<()>;
+
+    async fn member_item(
+        &self,
+        tenant: TenantId,
+        user_id: Uuid,
+    ) -> ApiResult<Option<TenantMemberItem>>;
+
+    /// Remove a grant. Returns rows removed, so the caller can tell "not a
+    /// member" from "removed".
+    async fn remove_membership(&self, tenant: TenantId, user_id: Uuid) -> ApiResult<u64>;
+
+    // ---- sessions and the dev hatch ---------------------------------------
+
+    /// Point a live cookie session at a different user/tenant pair. Returns rows
+    /// updated: zero means the session vanished under us.
+    async fn switch_session(
+        &self,
+        session: AuthSessionId,
+        user_id: UserId,
+        tenant: TenantId,
+    ) -> ApiResult<u64>;
+
+    async fn delete_auth_session(&self, session: Uuid) -> ApiResult<()>;
+
+    async fn user_and_tenant_by_email(&self, email: &str) -> ApiResult<Option<(UserId, TenantId)>>;
+
+    /// How many local credentials a tenant has — the break-glass signal for an
+    /// OIDC outage.
+    async fn count_local_credentials(&self, tenant: TenantId) -> ApiResult<i64>;
+
+    /// The dev-hatch account browser: one page and its total. Both come from
+    /// one method because they share a filter whose construction belongs with
+    /// the SQL, not with the route.
+    async fn dev_accounts_page(
+        &self,
+        pattern: Option<String>,
+        cap: i64,
+    ) -> ApiResult<(Vec<DevAccount>, i64)>;
+
+    /// Dev-only cleanup of the legacy `test-%` tenants. Returns rows deleted.
+    async fn purge_test_tenants(&self) -> ApiResult<u64>;
 }
 
 /// The real implementation, over the engine-agnostic pool.
@@ -824,6 +960,348 @@ impl IdentityRepository for DbIdentityRepository {
             )
             .await?)
     }
+
+    async fn email_and_local_flag(&self, user_id: UserId) -> ApiResult<Option<(String, bool)>> {
+        let row: Option<(String, Option<String>)> = self
+            .db
+            .query_opt(
+                "SELECT email, password_hash FROM users WHERE id = $1",
+                params![user_id],
+            )
+            .await?;
+        Ok(row.map(|(email, hash)| (email, hash.is_some())))
+    }
+
+    async fn tenant_of_user(&self, user_id: UserId) -> ApiResult<Option<Uuid>> {
+        Ok(self
+            .db
+            .query_scalar_opt(
+                "SELECT tenant_id FROM users WHERE id = $1",
+                params![user_id],
+            )
+            .await?)
+    }
+
+    async fn issue_verification_token(
+        &self,
+        user_id: UserId,
+        email: &str,
+        token_hash: &str,
+    ) -> ApiResult<()> {
+        // One live token per user: drop any outstanding one first.
+        self.db
+            .exec(
+                "DELETE FROM email_verification_tokens WHERE user_id = $1 AND consumed_at IS NULL",
+                params![user_id],
+            )
+            .await?;
+        self.db
+            .exec(
+                &format!(
+                    "INSERT INTO email_verification_tokens (id, user_id, email, token_hash, expires_at)
+         VALUES ($1, $2, $3, $4, {expiry})",
+                    expiry = Postgres.now_plus("24 hours")
+                ),
+                params![Uuid::now_v7(), user_id, email, token_hash],
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn verification_token(&self, token_hash: &str) -> ApiResult<Option<VerificationToken>> {
+        type TokenRow = (Uuid, UserId, String, Option<DateTime<Utc>>, bool);
+        let row: Option<TokenRow> = self
+            .db
+            .query_opt(
+                &format!(
+                    "SELECT id, user_id, email, consumed_at, expires_at < {}
+             FROM email_verification_tokens WHERE token_hash = $1",
+                    Postgres.now()
+                ),
+                params![token_hash],
+            )
+            .await?;
+        Ok(row.map(
+            |(id, user_id, email, consumed_at, expired)| VerificationToken {
+                id,
+                user_id,
+                email,
+                consumed_at,
+                expired,
+            },
+        ))
+    }
+
+    async fn consume_verification_token(&self, id: Uuid) -> ApiResult<()> {
+        self.db
+            .exec(
+                &format!(
+                    "UPDATE email_verification_tokens SET consumed_at = {} WHERE id = $1",
+                    Postgres.now()
+                ),
+                params![id],
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn create_user_token(&self, new: NewUserToken) -> ApiResult<()> {
+        self.db
+            .exec(
+                "INSERT INTO user_tokens (id, tenant_id, user_id, token_hash, name, expires_at)
+         VALUES ($1, $2, $3, $4, $5, $6)",
+                params![
+                    new.id,
+                    new.tenant,
+                    new.user_id,
+                    new.token_hash,
+                    new.name,
+                    new.expires_at
+                ],
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn create_native_client_token(
+        &self,
+        id: Uuid,
+        user_id: UserId,
+        tenant: TenantId,
+        token_hash: &str,
+        name: &str,
+    ) -> ApiResult<()> {
+        self.db
+            .exec(
+                &format!(
+                    "INSERT INTO user_tokens (id, user_id, tenant_id, token_hash, name, expires_at)
+         VALUES ($1, $2, $3, $4, $5, {expiry})",
+                    expiry = Postgres.now_plus("365 days")
+                ),
+                params![id, user_id, tenant, token_hash, name],
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn list_user_tokens(&self, user_id: UserId) -> ApiResult<Vec<UserToken>> {
+        Ok(self
+            .db
+            .query_all(
+                &format!(
+                    "SELECT {}, name, last_used_at, expires_at, created_at
+         FROM user_tokens WHERE user_id = $1 ORDER BY created_at DESC",
+                    Postgres.cast("id", "text")
+                ),
+                params![user_id],
+            )
+            .await?)
+    }
+
+    async fn revoke_user_token(&self, id: Uuid, user_id: UserId) -> ApiResult<u64> {
+        Ok(self
+            .db
+            .exec(
+                "DELETE FROM user_tokens WHERE id = $1 AND user_id = $2",
+                params![id, user_id],
+            )
+            .await?)
+    }
+
+    async fn membership_role(&self, tenant: TenantId, user_id: Uuid) -> ApiResult<Option<String>> {
+        Ok(self
+            .db
+            .query_scalar_opt(
+                "SELECT role FROM tenant_members
+         WHERE tenant_id = $1 AND principal_type = 'user' AND principal_id = $2",
+                params![tenant, user_id],
+            )
+            .await?)
+    }
+
+    async fn owner_count(&self, tenant: TenantId) -> ApiResult<i64> {
+        Ok(self
+            .db
+            .query_scalar(
+                "SELECT count(*) FROM tenant_members
+         WHERE tenant_id = $1 AND principal_type = 'user' AND role = 'owner'",
+                params![tenant],
+            )
+            .await?)
+    }
+
+    async fn tenant_grants_of(&self, user_id: Uuid) -> ApiResult<Vec<MembershipRow>> {
+        let rows: Vec<(TenantId, String, String, String, DateTime<Utc>)> = self
+            .db
+            .query_all(
+                "SELECT t.id, t.name, t.slug, m.role, t.created_at
+             FROM tenant_members m
+             JOIN tenants t ON t.id = m.tenant_id
+             WHERE m.principal_type = 'user' AND m.principal_id = $1
+             ORDER BY t.created_at",
+                params![user_id],
+            )
+            .await?;
+        Ok(rows
+            .into_iter()
+            .map(|(tenant_id, name, slug, role, created_at)| MembershipRow {
+                tenant_id,
+                name,
+                slug,
+                role,
+                created_at,
+            })
+            .collect())
+    }
+
+    async fn change_member_role(
+        &self,
+        tenant: TenantId,
+        user_id: Uuid,
+        role: &str,
+    ) -> ApiResult<()> {
+        self.db
+            .exec(
+                "UPDATE tenant_members SET role = $3
+         WHERE tenant_id = $1 AND principal_type = 'user' AND principal_id = $2",
+                params![tenant, user_id, role],
+            )
+            .await?;
+        // Keep users.role in step with tenant_members.role so the two never
+        // disagree (see the identity module's invariant).
+        self.db
+            .exec(
+                &format!(
+                    "UPDATE users SET role = $3, updated_at = {} WHERE id = $2 AND tenant_id = $1",
+                    Postgres.now()
+                ),
+                params![tenant, user_id, role],
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn member_item(
+        &self,
+        tenant: TenantId,
+        user_id: Uuid,
+    ) -> ApiResult<Option<TenantMemberItem>> {
+        Ok(self
+            .db
+            .query_opt(
+                "SELECT m.principal_id, u.email, u.display_name, m.role, m.created_at AS joined_at
+         FROM tenant_members m JOIN users u ON u.id = m.principal_id
+         WHERE m.tenant_id = $1 AND m.principal_id = $2",
+                params![tenant, user_id],
+            )
+            .await?)
+    }
+
+    async fn remove_membership(&self, tenant: TenantId, user_id: Uuid) -> ApiResult<u64> {
+        Ok(self
+            .db
+            .exec(
+                "DELETE FROM tenant_members
+         WHERE tenant_id = $1 AND principal_type = 'user' AND principal_id = $2",
+                params![tenant, user_id],
+            )
+            .await?)
+    }
+
+    async fn switch_session(
+        &self,
+        session: AuthSessionId,
+        user_id: UserId,
+        tenant: TenantId,
+    ) -> ApiResult<u64> {
+        Ok(self
+            .db
+            .exec(
+                "UPDATE sessions_auth SET user_id = $1, tenant_id = $2 WHERE id = $3",
+                params![user_id, tenant, session],
+            )
+            .await?)
+    }
+
+    async fn delete_auth_session(&self, session: Uuid) -> ApiResult<()> {
+        self.db
+            .exec("DELETE FROM sessions_auth WHERE id = $1", params![session])
+            .await?;
+        Ok(())
+    }
+
+    async fn user_and_tenant_by_email(&self, email: &str) -> ApiResult<Option<(UserId, TenantId)>> {
+        Ok(self
+            .db
+            .query_opt(
+                "SELECT id, tenant_id FROM users WHERE lower(email) = lower($1) LIMIT 1",
+                params![email],
+            )
+            .await?)
+    }
+
+    async fn count_local_credentials(&self, tenant: TenantId) -> ApiResult<i64> {
+        Ok(self
+            .db
+            .query_scalar(
+                "SELECT count(*) FROM users WHERE tenant_id = $1 AND password_hash IS NOT NULL",
+                params![tenant],
+            )
+            .await?)
+    }
+
+    async fn dev_accounts_page(
+        &self,
+        pattern: Option<String>,
+        cap: i64,
+    ) -> ApiResult<(Vec<DevAccount>, i64)> {
+        // `$1` matches any of the three columns; a NULL `$1` matches all rows.
+        let filter = format!(
+            "($1::text IS NULL OR {} OR {} OR {})",
+            Postgres.ci_match("u.email", "$1"),
+            Postgres.ci_match("u.display_name", "$1"),
+            Postgres.ci_match("t.slug", "$1"),
+        );
+        let total: i64 = self
+            .db
+            .query_scalar(
+                &format!(
+                    "SELECT count(*) FROM users u JOIN tenants t ON t.id = u.tenant_id WHERE {filter}"
+                ),
+                params![pattern.clone()],
+            )
+            .await?;
+        let accounts: Vec<DevAccount> = self
+            .db
+            .query_all(
+                &format!(
+                    "SELECT u.email, u.display_name, t.slug AS tenant_slug,
+                    COALESCE(
+                        (SELECT array_agg(b.role_key ORDER BY b.role_key)
+                         FROM role_bindings b
+                         WHERE b.subject_id = u.id AND b.scope_type = 'deployment'),
+                        '{{}}'
+                    ) AS deployment_roles
+             FROM users u JOIN tenants t ON t.id = u.tenant_id
+             WHERE {filter}
+             ORDER BY u.created_at
+             LIMIT $2"
+                ),
+                params![pattern, cap],
+            )
+            .await?;
+        Ok((accounts, total))
+    }
+
+    async fn purge_test_tenants(&self) -> ApiResult<u64> {
+        Ok(self
+            .db
+            .exec(
+                "DELETE FROM tenants WHERE name LIKE 'test-%' OR slug LIKE 'test-%'",
+                params![],
+            )
+            .await?)
+    }
 }
 
 /// An in-memory [`IdentityRepository`] for tests that should not need a
@@ -864,6 +1342,12 @@ struct FakeState {
     auth_modes: std::collections::HashMap<TenantId, String>,
     passwords: std::collections::HashMap<UserId, Option<String>>,
     auth_sessions: Vec<(AuthSessionId, UserId, TenantId)>,
+    /// `(id, user, email, token_hash, consumed, expired)` — expiry is a flag
+    /// rather than a clock, so a test can make a token expired without waiting.
+    verification_tokens: Vec<(Uuid, UserId, String, String, bool, bool)>,
+    user_tokens: Vec<UserToken>,
+    /// Which user each API token belongs to (`UserToken` does not carry it).
+    token_owner: std::collections::HashMap<String, UserId>,
 }
 
 impl FakeIdentityRepository {
@@ -1384,6 +1868,321 @@ impl IdentityRepository for FakeIdentityRepository {
             .iter()
             .find(|(_, _, _, _, h)| h == hash)
             .map(|(id, t, _, _, _)| (*id, t.0)))
+    }
+
+    async fn email_and_local_flag(&self, user_id: UserId) -> ApiResult<Option<(String, bool)>> {
+        let st = self.inner.lock().unwrap();
+        Ok(st.users.iter().find(|u| u.id == user_id).map(|u| {
+            (
+                u.email.clone(),
+                st.passwords.get(&u.id).cloned().flatten().is_some(),
+            )
+        }))
+    }
+
+    async fn tenant_of_user(&self, user_id: UserId) -> ApiResult<Option<Uuid>> {
+        let st = self.inner.lock().unwrap();
+        Ok(st
+            .users
+            .iter()
+            .find(|u| u.id == user_id)
+            .map(|u| u.tenant_id.0))
+    }
+
+    async fn issue_verification_token(
+        &self,
+        user_id: UserId,
+        email: &str,
+        token_hash: &str,
+    ) -> ApiResult<()> {
+        let mut st = self.inner.lock().unwrap();
+        // One live token per user, as the real impl's DELETE guarantees. A fake
+        // that skipped this would let a caller test pass while a user held two.
+        st.verification_tokens
+            .retain(|(_, u, _, _, consumed, _)| !(*u == user_id && !*consumed));
+        st.verification_tokens.push((
+            Uuid::now_v7(),
+            user_id,
+            email.into(),
+            token_hash.into(),
+            false,
+            false,
+        ));
+        Ok(())
+    }
+
+    async fn verification_token(&self, token_hash: &str) -> ApiResult<Option<VerificationToken>> {
+        let st = self.inner.lock().unwrap();
+        Ok(st
+            .verification_tokens
+            .iter()
+            .find(|(_, _, _, h, _, _)| h == token_hash)
+            .map(
+                |(id, user_id, email, _, consumed, expired)| VerificationToken {
+                    id: *id,
+                    user_id: *user_id,
+                    email: email.clone(),
+                    consumed_at: consumed.then(Utc::now),
+                    expired: *expired,
+                },
+            ))
+    }
+
+    async fn consume_verification_token(&self, id: Uuid) -> ApiResult<()> {
+        let mut st = self.inner.lock().unwrap();
+        for t in st.verification_tokens.iter_mut() {
+            if t.0 == id {
+                t.4 = true;
+            }
+        }
+        Ok(())
+    }
+
+    async fn create_user_token(&self, new: NewUserToken) -> ApiResult<()> {
+        let mut st = self.inner.lock().unwrap();
+        st.token_owner.insert(new.id.to_string(), new.user_id);
+        st.user_tokens.push(UserToken {
+            id: new.id.to_string(),
+            name: new.name,
+            last_used_at: None,
+            expires_at: new.expires_at,
+            created_at: Utc::now(),
+        });
+        Ok(())
+    }
+
+    async fn create_native_client_token(
+        &self,
+        id: Uuid,
+        user_id: UserId,
+        tenant: TenantId,
+        token_hash: &str,
+        name: &str,
+    ) -> ApiResult<()> {
+        self.create_user_token(NewUserToken {
+            id,
+            tenant,
+            user_id,
+            token_hash: token_hash.into(),
+            name: name.into(),
+            // The real impl's fixed 365-day policy, expressed as a value here.
+            expires_at: Some(Utc::now() + chrono::Duration::days(365)),
+        })
+        .await
+    }
+
+    async fn list_user_tokens(&self, user_id: UserId) -> ApiResult<Vec<UserToken>> {
+        let st = self.inner.lock().unwrap();
+        let mut v: Vec<UserToken> = st
+            .user_tokens
+            .iter()
+            .filter(|t| st.token_owner.get(&t.id) == Some(&user_id))
+            .cloned()
+            .collect();
+        // Newest first, matching the real query's `ORDER BY created_at DESC`.
+        v.sort_by_key(|t| std::cmp::Reverse(t.created_at));
+        Ok(v)
+    }
+
+    async fn revoke_user_token(&self, id: Uuid, user_id: UserId) -> ApiResult<u64> {
+        let mut st = self.inner.lock().unwrap();
+        let key = id.to_string();
+        // Scoped to the owner, exactly as the real DELETE's `AND user_id = $2`.
+        if st.token_owner.get(&key) != Some(&user_id) {
+            return Ok(0);
+        }
+        let before = st.user_tokens.len();
+        st.user_tokens.retain(|t| t.id != key);
+        st.token_owner.remove(&key);
+        Ok((before - st.user_tokens.len()) as u64)
+    }
+
+    async fn membership_role(&self, tenant: TenantId, user_id: Uuid) -> ApiResult<Option<String>> {
+        let st = self.inner.lock().unwrap();
+        Ok(st
+            .members
+            .iter()
+            .find(|(t, u, _)| *t == tenant && u.0 == user_id)
+            .map(|(_, _, r)| r.clone()))
+    }
+
+    async fn owner_count(&self, tenant: TenantId) -> ApiResult<i64> {
+        let st = self.inner.lock().unwrap();
+        Ok(st
+            .members
+            .iter()
+            .filter(|(t, _, r)| *t == tenant && r == "owner")
+            .count() as i64)
+    }
+
+    async fn tenant_grants_of(&self, user_id: Uuid) -> ApiResult<Vec<MembershipRow>> {
+        let st = self.inner.lock().unwrap();
+        let mut out: Vec<MembershipRow> = st
+            .members
+            .iter()
+            .filter(|(_, u, _)| u.0 == user_id)
+            .filter_map(|(t, _, role)| {
+                let tn = st.tenants.iter().find(|x| x.id == *t)?;
+                Some(MembershipRow {
+                    tenant_id: tn.id,
+                    name: tn.name.clone(),
+                    slug: tn.slug.clone(),
+                    role: role.clone(),
+                    created_at: tn.created_at,
+                })
+            })
+            .collect();
+        out.sort_by_key(|r| r.created_at);
+        Ok(out)
+    }
+
+    async fn change_member_role(
+        &self,
+        tenant: TenantId,
+        user_id: Uuid,
+        role: &str,
+    ) -> ApiResult<()> {
+        let mut st = self.inner.lock().unwrap();
+        for (t, u, r) in st.members.iter_mut() {
+            if *t == tenant && u.0 == user_id {
+                *r = role.into();
+            }
+        }
+        // …and `users.role` in step, which is the whole point of the method.
+        for u in st.users.iter_mut() {
+            if u.id.0 == user_id && u.tenant_id == tenant {
+                u.role = role.into();
+            }
+        }
+        Ok(())
+    }
+
+    async fn member_item(
+        &self,
+        tenant: TenantId,
+        user_id: Uuid,
+    ) -> ApiResult<Option<TenantMemberItem>> {
+        let st = self.inner.lock().unwrap();
+        let role = st
+            .members
+            .iter()
+            .find(|(t, u, _)| *t == tenant && u.0 == user_id)
+            .map(|(_, _, r)| r.clone());
+        Ok(st
+            .users
+            .iter()
+            .find(|u| u.id.0 == user_id)
+            .zip(role)
+            .map(|(u, role)| TenantMemberItem {
+                principal_id: u.id.0,
+                email: u.email.clone(),
+                display_name: u.display_name.clone(),
+                role,
+                joined_at: u.created_at,
+            }))
+    }
+
+    async fn remove_membership(&self, tenant: TenantId, user_id: Uuid) -> ApiResult<u64> {
+        let mut st = self.inner.lock().unwrap();
+        let before = st.members.len();
+        st.members
+            .retain(|(t, u, _)| !(*t == tenant && u.0 == user_id));
+        Ok((before - st.members.len()) as u64)
+    }
+
+    async fn switch_session(
+        &self,
+        session: AuthSessionId,
+        user_id: UserId,
+        tenant: TenantId,
+    ) -> ApiResult<u64> {
+        let mut st = self.inner.lock().unwrap();
+        let mut n = 0;
+        for s in st.auth_sessions.iter_mut() {
+            if s.0 == session {
+                s.1 = user_id;
+                s.2 = tenant;
+                n += 1;
+            }
+        }
+        Ok(n)
+    }
+
+    async fn delete_auth_session(&self, session: Uuid) -> ApiResult<()> {
+        let mut st = self.inner.lock().unwrap();
+        st.auth_sessions.retain(|(id, _, _)| id.0 != session);
+        Ok(())
+    }
+
+    async fn user_and_tenant_by_email(&self, email: &str) -> ApiResult<Option<(UserId, TenantId)>> {
+        let st = self.inner.lock().unwrap();
+        let e = email.to_lowercase();
+        Ok(st
+            .users
+            .iter()
+            .find(|u| u.email.to_lowercase() == e)
+            .map(|u| (u.id, u.tenant_id)))
+    }
+
+    async fn count_local_credentials(&self, tenant: TenantId) -> ApiResult<i64> {
+        let st = self.inner.lock().unwrap();
+        Ok(st
+            .users
+            .iter()
+            .filter(|u| {
+                u.tenant_id == tenant && st.passwords.get(&u.id).cloned().flatten().is_some()
+            })
+            .count() as i64)
+    }
+
+    async fn dev_accounts_page(
+        &self,
+        pattern: Option<String>,
+        cap: i64,
+    ) -> ApiResult<(Vec<DevAccount>, i64)> {
+        let st = self.inner.lock().unwrap();
+        // The `%term%` the caller built, matched case-insensitively on the same
+        // three columns. Not a collation reproduction — a substring test.
+        let needle = pattern.map(|p| p.trim_matches('%').to_lowercase());
+        let matched: Vec<DevAccount> = st
+            .users
+            .iter()
+            .filter_map(|u| {
+                let t = st.tenants.iter().find(|t| t.id == u.tenant_id)?;
+                let hit = match &needle {
+                    None => true,
+                    Some(n) => {
+                        u.email.to_lowercase().contains(n)
+                            || u.display_name.to_lowercase().contains(n)
+                            || t.slug.to_lowercase().contains(n)
+                    }
+                };
+                hit.then(|| DevAccount {
+                    email: u.email.clone(),
+                    display_name: u.display_name.clone(),
+                    tenant_slug: t.slug.clone(),
+                    deployment_roles: vec![],
+                })
+            })
+            .collect();
+        let total = matched.len() as i64;
+        Ok((matched.into_iter().take(cap as usize).collect(), total))
+    }
+
+    async fn purge_test_tenants(&self) -> ApiResult<u64> {
+        let mut st = self.inner.lock().unwrap();
+        let doomed: Vec<TenantId> = st
+            .tenants
+            .iter()
+            .filter(|t| t.name.starts_with("test-") || t.slug.starts_with("test-"))
+            .map(|t| t.id)
+            .collect();
+        st.tenants.retain(|t| !doomed.contains(&t.id));
+        // The real DELETE cascades on every tenant_id FK; mirror the two the
+        // fake models, so a caller cannot see orphans it never would in reality.
+        st.users.retain(|u| !doomed.contains(&u.tenant_id));
+        st.members.retain(|(t, _, _)| !doomed.contains(t));
+        Ok(doomed.len() as u64)
     }
 }
 

@@ -9,7 +9,6 @@ use axum::extract::State;
 use axum::response::IntoResponse;
 use axum::Json;
 use axum_extra::extract::CookieJar;
-use nook_db::{params, Db};
 use nook_types::*;
 
 use crate::auth::{create_auth_session, session_cookie, AuthCtx};
@@ -20,12 +19,8 @@ use crate::services::local_auth::{self, AuthMode};
 use crate::state::AppState;
 
 /// Is this instance unclaimed? Used to decide whether `/bootstrap` is open.
-async fn user_count(state: &AppState) -> Result<i64, sqlx::Error> {
-    let n = state
-        .db
-        .query_scalar::<i64>("SELECT count(*) FROM users", params![])
-        .await?;
-    Ok(n)
+async fn user_count(state: &AppState) -> ApiResult<i64> {
+    state.identity.count_users().await
 }
 
 /// The tenant a local sign-in belongs to: the seeded default.
@@ -35,20 +30,21 @@ async fn user_count(state: &AppState) -> Result<i64, sqlx::Error> {
 /// the login form, which is a different product decision.
 async fn default_tenant(state: &AppState) -> ApiResult<Tenant> {
     let slug = slugify(&state.cfg.default_tenant_name);
-    let existing: Option<Tenant> = state
-        .db
-        .query_opt("SELECT * FROM tenants WHERE slug = $1", params![&slug])
-        .await?;
-    if let Some(t) = existing {
+    if let Some(t) = state.identity.tenant_by_slug(&slug).await? {
         return Ok(t);
     }
-    Ok(state
-        .db
-        .query_one(
-            "INSERT INTO tenants (id, name, slug) VALUES ($1, $2, $3) RETURNING *",
-            params![TenantId::new(), &state.cfg.default_tenant_name, &slug],
-        )
-        .await?)
+    // Nothing races the seeded default tenant here, so a taken slug would be a
+    // genuine surprise rather than the ordinary contention the personal-tenant
+    // allocator retries on.
+    state
+        .identity
+        .create_tenant(&state.cfg.default_tenant_name, &slug)
+        .await?
+        .ok_or_else(|| {
+            ApiError::Internal(anyhow::anyhow!(
+                "default tenant slug {slug} was taken between read and write"
+            ))
+        })
 }
 
 /// POST /api/v1/auth/local/bootstrap — claim an unclaimed instance.
@@ -244,13 +240,7 @@ pub async fn status(State(state): State<AppState>) -> ApiResult<Json<LocalAuthSt
     // Break-glass signal (MAIN-169 AC-5): does this tenant have any existing
     // local credential that could sign in during an OIDC outage? Scoped to the
     // local sign-in tenant — the one the password form authenticates against.
-    let local_creds = state
-        .db
-        .query_scalar::<i64>(
-            "SELECT count(*) FROM users WHERE tenant_id = $1 AND password_hash IS NOT NULL",
-            params![tenant.id],
-        )
-        .await?;
+    let local_creds = state.identity.count_local_credentials(tenant.id).await?;
     Ok(Json(LocalAuthStatus {
         // Undecided, or already committed to local.
         available: !matches!(mode, Some(AuthMode::Oidc)),
