@@ -234,8 +234,20 @@ services:
       # insecure hatch exists for; it is refused outright when APP_ENV=production.
       NOOK_INSECURE: "1"
       CARGO_TARGET_DIR: /app/target-docker-node
+      # The fleet's Claude identity (MAIN-238). `claude` 2.1.220 honours
+      # CLAUDE_CONFIG_DIR — verified: setting it makes the CLI read and write
+      # its `.claude.json` there — so the mount below IS the session store, and
+      # the host's ~/.claude is never touched. An empty/absent dir just means
+      # unauthenticated: the runtime probe reports `claude` NotAuthorized and
+      # the stack boots exactly as it does today.
+      CLAUDE_CONFIG_DIR: /nook-claude
       RUST_LOG: nook=info
     volumes:
+      # Device-auth session files, gitignored on the host. Deliberately a
+      # SEPARATE identity from the operator's own login, so swapping the
+      # fleet's account is `rm -rf .nook-secrets/claude` + `./run.sh
+      # --claude-login`, with no risk to a personal session.
+      - ./.nook-secrets/claude:/nook-claude
       - .:/app
       - cargo-registry:/usr/local/cargo/registry
       - cargo-target-node:/app/target-docker-node
@@ -276,8 +288,20 @@ services:
       # Put the tmux runtime (its socket dir) on a named volume — tmux honours
       # TMUX_TMPDIR, and nook shells out to tmux inheriting this env.
       TMUX_TMPDIR: /var/lib/nook/tmux
+      # The fleet's Claude identity (MAIN-238). `claude` 2.1.220 honours
+      # CLAUDE_CONFIG_DIR — verified: setting it makes the CLI read and write
+      # its `.claude.json` there — so the mount below IS the session store, and
+      # the host's ~/.claude is never touched. An empty/absent dir just means
+      # unauthenticated: the runtime probe reports `claude` NotAuthorized and
+      # the stack boots exactly as it does today.
+      CLAUDE_CONFIG_DIR: /nook-claude
       RUST_LOG: nook=info
     volumes:
+      # Device-auth session files, gitignored on the host. Deliberately a
+      # SEPARATE identity from the operator's own login, so swapping the
+      # fleet's account is `rm -rf .nook-secrets/claude` + `./run.sh
+      # --claude-login`, with no risk to a personal session.
+      - ./.nook-secrets/claude:/nook-claude
       # Node identity + generated SSH key: a restart re-attaches as the SAME
       # node instead of re-joining as a new one (AC-5).
       - operator-config:/root/.config/nook
