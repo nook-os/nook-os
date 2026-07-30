@@ -2681,6 +2681,7 @@ dependencies = [
  "anyhow",
  "axum",
  "nook-auth",
+ "nook-db",
  "serde_json",
  "sqlx",
  "thiserror 2.0.19",

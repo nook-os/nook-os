@@ -187,7 +187,7 @@ impl DmRepository for DbDmRepository {
         slug: &str,
         persons: &[Uuid],
     ) -> RepoResult<()> {
-        let mut tx = self.db.begin().await?;
+        let mut tx = self.db.begin().await.map_err(nook_db::DbError::from)?;
         // owner_id = the creating person; name is empty (the UI names a DM by
         // its counterparts). The generated slug satisfies the
         // (owner_type, owner_id, slug) uniqueness constraint without any

@@ -811,7 +811,7 @@ impl TaskRepository for DbTaskRepository {
         // Without the lock two concurrent creates read the same `next_number`
         // and one then violates the unique index — a 500 for something the
         // caller did nothing wrong to cause. `FOR UPDATE` makes the second wait.
-        let mut tx = self.db.begin().await?;
+        let mut tx = self.db.begin().await.map_err(nook_db::DbError::from)?;
         let number: i32 = tx
             .query_scalar(
                 "UPDATE boards SET next_number = next_number + 1

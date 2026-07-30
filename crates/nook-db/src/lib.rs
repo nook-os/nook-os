@@ -84,6 +84,52 @@ pub enum DbError {
     NotYetSupported(Engine),
     /// The engine was fine, but opening the pool failed.
     Connect(sqlx::Error),
+    /// A query failed (MAIN-269).
+    ///
+    /// This is what makes `DbError` the type the [`pool::Db`] trait returns, so
+    /// callers stop naming `sqlx::Error` in their own signatures. The driver's
+    /// error is kept inside rather than flattened: the two things callers
+    /// actually branch on are exposed as predicates below, and everything else
+    /// about a failed query is diagnostic text nobody matches on.
+    Query(sqlx::Error),
+}
+
+impl From<sqlx::Error> for DbError {
+    fn from(e: sqlx::Error) -> Self {
+        DbError::Query(e)
+    }
+}
+
+impl DbError {
+    /// Did a write collide with a unique constraint?
+    ///
+    /// Callers branch on this to turn a duplicate into a 409 rather than a 500
+    /// — the one query failure that is the caller's business. Exposed here so
+    /// they do not have to reach through to `sqlx::Error::Database` and the
+    /// driver's SQLSTATE to ask.
+    pub fn is_unique_violation(&self) -> bool {
+        matches!(self, DbError::Query(sqlx::Error::Database(d)) if d.is_unique_violation())
+    }
+
+    /// Which constraint a violation names, when the driver says.
+    ///
+    /// A caller that inserts against two unique constraints has to know which
+    /// one failed to answer "username taken" versus "email taken". Exposing
+    /// the name here keeps that decision in the caller while keeping the
+    /// driver's error type out of its signature.
+    pub fn constraint(&self) -> Option<&str> {
+        match self {
+            DbError::Query(sqlx::Error::Database(d)) => d.constraint(),
+            _ => None,
+        }
+    }
+
+    /// Did a `query_one` find nothing?
+    ///
+    /// The other branch worth a caller's attention: it is a 404, not a 500.
+    pub fn is_row_not_found(&self) -> bool {
+        matches!(self, DbError::Query(sqlx::Error::RowNotFound))
+    }
 }
 
 impl fmt::Display for DbError {
@@ -100,6 +146,7 @@ impl fmt::Display for DbError {
             ),
             DbError::NotYetSupported(e) => write!(f, "{e} is not supported yet"),
             DbError::Connect(e) => write!(f, "could not connect to the database: {e}"),
+            DbError::Query(e) => write!(f, "{e}"),
         }
     }
 }
@@ -107,7 +154,7 @@ impl fmt::Display for DbError {
 impl std::error::Error for DbError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            DbError::Connect(e) => Some(e),
+            DbError::Connect(e) | DbError::Query(e) => Some(e),
             _ => None,
         }
     }

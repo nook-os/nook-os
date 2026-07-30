@@ -494,7 +494,7 @@ impl WorkspaceRepository for DbWorkspaceRepository {
             )
             .await
             .map_err(|e| match &e {
-                sqlx::Error::Database(d) if d.is_unique_violation() => {
+                e if e.is_unique_violation() => {
                     ApiError::Conflict("a workspace with that name already exists".into())
                 }
                 _ => e.into(),
@@ -508,7 +508,7 @@ impl WorkspaceRepository for DbWorkspaceRepository {
         slug: &str,
         git_remote_normalized: Option<&str>,
     ) -> ApiResult<Option<WorkspaceId>> {
-        let res: Result<WorkspaceId, sqlx::Error> = self
+        let res: Result<WorkspaceId, nook_db::DbError> = self
             .db
             .query_scalar(
                 "INSERT INTO workspaces (id, tenant_id, name, slug, git_remote_normalized)
@@ -524,7 +524,7 @@ impl WorkspaceRepository for DbWorkspaceRepository {
             .await;
         match res {
             Ok(id) => Ok(Some(id)),
-            Err(sqlx::Error::Database(d)) if d.is_unique_violation() => Ok(None),
+            Err(e) if e.is_unique_violation() => Ok(None),
             Err(e) => Err(e.into()),
         }
     }
@@ -1105,7 +1105,7 @@ impl WorkspaceRepository for DbWorkspaceRepository {
         node: NodeId,
         moves: &[PathMove],
     ) -> ApiResult<MigratedPaths> {
-        let mut tx = self.db.begin().await?;
+        let mut tx = self.db.begin().await.map_err(nook_db::DbError::from)?;
         let mut out = MigratedPaths::default();
         for m in moves {
             let checkouts = tx
@@ -1229,7 +1229,7 @@ impl GitCredentialRepository for DbGitCredentialRepository {
             )
             .await
             .map_err(|e| match &e {
-                sqlx::Error::Database(d) if d.is_unique_violation() => {
+                e if e.is_unique_violation() => {
                     ApiError::Conflict("a credential with that name already exists".into())
                 }
                 _ => e.into(),

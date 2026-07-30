@@ -349,8 +349,8 @@ pub fn notable(base_url: &str, event: &Event) -> Option<crate::services::notify:
 /// Insert only (no live publish) — for contexts without an `AppState`, e.g.
 /// seeding.
 pub async fn insert(db: &DbPool, tenant_id: TenantId, draft: EventDraft) -> Option<Event> {
-    let res: Result<Event, sqlx::Error> = db
-        .query_one(
+    let res = db
+        .query_one::<Event>(
             "INSERT INTO events (id, tenant_id, kind, actor_type, actor_id, workspace_id, node_id, session_id, payload)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
          RETURNING *",
