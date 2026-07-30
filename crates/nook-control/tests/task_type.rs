@@ -1,43 +1,46 @@
 //! Issue types on tasks (MAIN-59): create/patch/persist and the list filter.
 //!
-//! Needs a running Postgres (the dev stack's works): set `DATABASE_URL`.
+//! Engine-neutral (MAIN-264): nothing here names a `sqlx` type, so the same
+//! file runs on whichever engine `DATABASE_URL` selects.
 
 use nook_control::routes::task_query::{query_rows, TaskFilter};
 use nook_control::services::kanban::{KanbanProvider, LocalBoardProvider};
+use nook_db::{params, Db, DbPool};
 use nook_testkit::TestBed;
 use nook_types::{BoardId, CreateTaskRequest, TenantId, UpdateTaskRequest};
-use sqlx::PgPool;
 use uuid::Uuid;
 
 /// A tenant + board + one column to hang tasks on.
-async fn fixture(db: &PgPool) -> (TenantId, BoardId) {
+async fn fixture(db: &DbPool) -> (TenantId, BoardId) {
     let tenant = TenantId(Uuid::now_v7());
-    sqlx::query("INSERT INTO tenants (id, name, slug) VALUES ($1, $2, $3)")
-        .bind(tenant)
-        .bind(format!("t-{}", tenant.0.simple()))
-        .bind(format!("t-{}", tenant.0.simple()))
-        .execute(db)
-        .await
-        .expect("tenant");
+    db.exec(
+        "INSERT INTO tenants (id, name, slug) VALUES ($1, $2, $3)",
+        params![
+            tenant,
+            format!("t-{}", tenant.0.simple()),
+            format!("t-{}", tenant.0.simple())
+        ],
+    )
+    .await
+    .expect("tenant");
 
     let board = BoardId(Uuid::now_v7());
-    sqlx::query(
+    db.exec(
         "INSERT INTO boards (id, tenant_id, name, key, provider) VALUES ($1,$2,$3,$4,'local')",
+        params![
+            board,
+            tenant,
+            "b",
+            format!("B{}", &board.0.simple().to_string()[..6]).to_uppercase()
+        ],
     )
-    .bind(board)
-    .bind(tenant)
-    .bind("b")
-    .bind(format!("B{}", &board.0.simple().to_string()[..6]).to_uppercase())
-    .execute(db)
     .await
     .expect("board");
-    sqlx::query(
+    db.exec(
         "INSERT INTO board_columns (id, board_id, name, position, type)
          VALUES ($1, $2, 'Triage', 0, 'unstarted')",
+        params![Uuid::now_v7(), board],
     )
-    .bind(Uuid::now_v7())
-    .bind(board)
-    .execute(db)
     .await
     .expect("column");
 
@@ -81,7 +84,7 @@ async fn create_persists_type_and_defaults_to_task() {
     let Some(mut bed) = TestBed::new().await else {
         return;
     };
-    let (tenant, board) = fixture(&bed.pool).await;
+    let (tenant, board) = fixture(&bed.db()).await;
     let provider = LocalBoardProvider {
         repo: std::sync::Arc::new(nook_control::repo::tasks::DbTaskRepository::new(bed.db())),
     };
@@ -108,7 +111,7 @@ async fn an_invalid_type_is_rejected_not_coerced() {
     let Some(mut bed) = TestBed::new().await else {
         return;
     };
-    let (tenant, board) = fixture(&bed.pool).await;
+    let (tenant, board) = fixture(&bed.db()).await;
     let provider = LocalBoardProvider {
         repo: std::sync::Arc::new(nook_control::repo::tasks::DbTaskRepository::new(bed.db())),
     };
@@ -133,7 +136,7 @@ async fn patch_changes_the_type() {
     let Some(mut bed) = TestBed::new().await else {
         return;
     };
-    let (tenant, board) = fixture(&bed.pool).await;
+    let (tenant, board) = fixture(&bed.db()).await;
     let provider = LocalBoardProvider {
         repo: std::sync::Arc::new(nook_control::repo::tasks::DbTaskRepository::new(bed.db())),
     };
@@ -158,7 +161,7 @@ async fn the_list_filter_ors_within_types_and_is_off_by_default() {
     let Some(mut bed) = TestBed::new().await else {
         return;
     };
-    let (tenant, board) = fixture(&bed.pool).await;
+    let (tenant, board) = fixture(&bed.db()).await;
     let provider = LocalBoardProvider {
         repo: std::sync::Arc::new(nook_control::repo::tasks::DbTaskRepository::new(bed.db())),
     };

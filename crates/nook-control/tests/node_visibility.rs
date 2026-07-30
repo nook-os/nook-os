@@ -8,9 +8,9 @@
 use axum::extract::{Path, State};
 use nook_control::auth::{AuthCtx, Principal};
 use nook_control::state::AppState;
+use nook_db::{params, Db, DbPool};
 use nook_testkit::TestBed;
 use nook_types::*;
-use sqlx::PgPool;
 use uuid::Uuid;
 
 fn user_ctx(user: UserId, tenant: TenantId) -> AuthCtx {
@@ -174,17 +174,18 @@ async fn me_carries_role_and_person_id() {
 // ── MAIN-135: shared nodes (owner-set flag + team visibility) ─────────────────
 
 /// An ownerless node (owner_person_id NULL), for the "cannot share" case.
-async fn add_ownerless_node(db: &PgPool, tenant: TenantId) -> NodeId {
+async fn add_ownerless_node(db: &DbPool, tenant: TenantId) -> NodeId {
     let id = NodeId::new();
-    sqlx::query(
+    db.exec(
         "INSERT INTO nodes (id, tenant_id, name, node_token_hash, status)
          VALUES ($1, $2, $3, $4, 'offline')",
+        params![
+            id,
+            tenant,
+            format!("n-{}", id.0.simple()),
+            format!("h-{}", id.0.simple())
+        ],
     )
-    .bind(id)
-    .bind(tenant)
-    .bind(format!("n-{}", id.0.simple()))
-    .bind(format!("h-{}", id.0.simple()))
-    .execute(db)
     .await
     .expect("ownerless node");
     id
@@ -319,7 +320,7 @@ async fn only_the_owner_may_toggle_shared() {
 
     // An ownerless node cannot be shared — nobody to consent (AC-3). Toggle as
     // the admin, who (unscoped) passes visibility and is caught by the owner gate.
-    let orphan = add_ownerless_node(&bed.pool, tenant).await;
+    let orphan = add_ownerless_node(&bed.db(), tenant).await;
     assert!(
         set_shared(&state, user_ctx(admin, tenant), orphan, true)
             .await
