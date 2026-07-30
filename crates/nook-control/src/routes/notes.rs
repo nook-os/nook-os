@@ -1,6 +1,5 @@
 use axum::extract::{Path, State};
 use axum::Json;
-use nook_db::{params, Db, Postgres, TypeMapping};
 use nook_types::*;
 
 use crate::auth::AuthCtx;
@@ -18,7 +17,7 @@ pub async fn list(
     Path(workspace_id): Path<WorkspaceId>,
 ) -> ApiResult<Json<Vec<Note>>> {
     Ok(Json(
-        notebook_queries::list_notes(&state.db, auth.tenant_id, workspace_id).await?,
+        notebook_queries::list_notes(&*state.notebook, auth.tenant_id, workspace_id).await?,
     ))
 }
 
@@ -33,7 +32,8 @@ pub async fn create(
     Path(workspace_id): Path<WorkspaceId>,
     Json(req): Json<CreateNoteRequest>,
 ) -> ApiResult<Json<Note>> {
-    let note = notebook_queries::create_note(&state.db, auth.tenant_id, workspace_id, req).await?;
+    let note =
+        notebook_queries::create_note(&*state.notebook, auth.tenant_id, workspace_id, req).await?;
     crate::events::record(
         &state,
         auth.tenant_id,
@@ -57,18 +57,8 @@ pub async fn update(
     Json(req): Json<UpdateNoteRequest>,
 ) -> ApiResult<Json<Note>> {
     let note: Option<Note> = state
-        .db
-        .query_opt::<Note>(
-            &format!(
-                "UPDATE notes SET
-            title = COALESCE($3, title),
-            content_md = COALESCE($4, content_md),
-            updated_at = {}
-         WHERE id = $1 AND tenant_id = $2 RETURNING *",
-                Postgres.now()
-            ),
-            params![id, auth.tenant_id, req.title, req.content_md],
-        )
+        .notebook
+        .update_workspace_note(id, auth.tenant_id, req.title, req.content_md)
         .await?;
     note.map(Json).ok_or(ApiError::NotFound)
 }

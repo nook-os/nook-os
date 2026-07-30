@@ -15,6 +15,7 @@ pub mod identity;
 pub mod invites;
 pub mod jobs;
 pub mod nodes;
+pub mod notebook;
 pub mod sessions;
 pub mod tasks;
 pub mod workspaces;

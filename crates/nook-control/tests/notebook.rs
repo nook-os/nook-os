@@ -864,3 +864,95 @@ async fn notebook_person_vault_and_seal_contract() {
 
     bed.teardown().await;
 }
+
+/// The `AND sealed_salt IS NOT NULL` guard on unseal, which nothing covered
+/// until MAIN-254 moved the statement and went looking.
+///
+/// Unseal takes a plaintext body from the client and writes it. On a note that
+/// is already unsealed, matching it would let anyone who can reach the endpoint
+/// **replace an unsealed note's body wholesale** — the very write the plain
+/// PATCH path refuses on sealed notes, arriving through the other door. The
+/// guard makes the second unseal a 404. Dropping it is a one-clause edit no
+/// other test in this file notices.
+#[tokio::test]
+async fn unsealing_an_already_unsealed_note_is_a_404_not_a_body_overwrite() {
+    let Some(mut bed) = TestBed::new().await else {
+        eprintln!("skipping notebook unseal-guard test — no DATABASE_URL");
+        return;
+    };
+    let state = bed.app_state().await;
+
+    let sub = format!("unseal-{}", Uuid::now_v7().simple());
+    let (user, tenant) = login_identity(&state, claims(&sub, "Ana"))
+        .await
+        .expect("ana signs in");
+    let a = auth(user.id, tenant.id);
+    let pass = "correct horse staple";
+    let _ = notebook::set_vault_passphrase(State(state.clone()), a, Json(pass_req(pass)))
+        .await
+        .expect("set vault");
+
+    let note = notebook::create_note(
+        State(state.clone()),
+        a,
+        Json(mk_note("plans", "the original body", None)),
+    )
+    .await
+    .expect("create")
+    .0;
+
+    // Seal it, then unseal it once — the legitimate round trip.
+    let sealed = crypto::seal_with_passphrase(b"sealed body", pass).expect("seal");
+    let _ = notebook::seal_note(
+        State(state.clone()),
+        a,
+        Path(note.id),
+        Json(seal_req(&sealed, pass)),
+    )
+    .await
+    .expect("seal");
+    let opened = notebook::unseal_note(
+        State(state.clone()),
+        a,
+        Path(note.id),
+        Json(UnsealNoteRequest {
+            passphrase: pass.into(),
+            content_md: "restored body".into(),
+        }),
+    )
+    .await
+    .expect("first unseal")
+    .0;
+    assert_eq!(opened.content_md.as_deref(), Some("restored body"));
+    assert!(!opened.sealed);
+
+    // A second unseal — same valid password, same note, now unsealed. It must
+    // match no row rather than rewrite the body.
+    let again = notebook::unseal_note(
+        State(state.clone()),
+        a,
+        Path(note.id),
+        Json(UnsealNoteRequest {
+            passphrase: pass.into(),
+            content_md: "CLOBBERED".into(),
+        }),
+    )
+    .await;
+    assert!(
+        matches!(again, Err(ApiError::NotFound)),
+        "unsealing an unsealed note must match nothing"
+    );
+
+    let after = notebook::get_note(State(state.clone()), a, Path(note.id))
+        .await
+        .expect("still readable")
+        .0;
+    assert_eq!(
+        after.content_md.as_deref(),
+        Some("restored body"),
+        "without the guard the body would now read CLOBBERED — a full-body \
+         overwrite through the seal door"
+    );
+
+    bed.teardown().await;
+}
