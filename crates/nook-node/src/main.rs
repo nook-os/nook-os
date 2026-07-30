@@ -560,6 +560,7 @@ async fn main() -> Result<()> {
         Command::Operator(OperatorCommand::Revoke { email, role }) => {
             cli::operator_role(&email, &role, true).await
         }
+        Command::Operator(OperatorCommand::Loops { state }) => cli::operator_loops(&state).await,
         Command::Operator(OperatorCommand::Who) => cli::operator_who().await,
         Command::Operator(OperatorCommand::Bindings { json }) => cli::operator_bindings(json).await,
         Command::Operator(OperatorCommand::Org(OrgCommand::List { json })) => {
@@ -888,6 +889,13 @@ enum OperatorCommand {
         email: String,
         #[arg(long, default_value = "operator")]
         role: String,
+    },
+    /// Turn the loop machinery on or off for this tenant, or ask its state.
+    /// Default is OFF: a fresh deployment runs no loops until asked.
+    Loops {
+        /// `on` | `off` | `status` (omit for status).
+        #[arg(default_value = "status")]
+        state: String,
     },
     /// What does the CLI's current credential hold?
     Who,

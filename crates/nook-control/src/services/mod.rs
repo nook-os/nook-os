@@ -10,6 +10,7 @@ pub mod job_reaper;
 pub mod jobs;
 pub mod kanban;
 pub mod local_auth;
+pub mod loops;
 pub mod notify;
 pub mod policy;
 pub mod queue;

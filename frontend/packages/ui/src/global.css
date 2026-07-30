@@ -5162,3 +5162,13 @@ a.toast-main:hover .toast-title { text-decoration: underline; }
 }
 .loop-ask-prompt { color: var(--nook-fg-bright); font-size: 12px; margin-bottom: 6px; }
 .loop-ask-choices { display: flex; flex-wrap: wrap; gap: 4px; }
+
+/* The loops master switch (MAIN-239) — state and its consequence on one line,
+   because "off" is only useful if you can see what off costs you. */
+.loops-switch {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 6px;
+}

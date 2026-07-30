@@ -2100,6 +2100,71 @@ pub async fn operator_role(email: &str, role: &str, revoke: bool) -> Result<()> 
     Ok(())
 }
 
+/// `nook operator loops [on|off|status]` — the loop machinery's master switch
+/// (MAIN-239).
+///
+/// Lives under `operator` rather than a new top-level verb (the CLI freeze),
+/// because turning the fleet's loops on is a deployment act, not a per-user
+/// preference. It writes the same tenant-scoped setting the Settings UI does,
+/// and the control plane re-reads it every poll — so the change lands within a
+/// poll interval with no restart.
+pub async fn operator_loops(state: &str) -> Result<()> {
+    let client = Client::from_config()?;
+
+    let want = match state {
+        "on" | "enable" | "enabled" => Some(true),
+        "off" | "disable" | "disabled" => Some(false),
+        "status" | "" => None,
+        other => {
+            anyhow::bail!("unknown state {other:?} — expected on, off, or status");
+        }
+    };
+
+    if let Some(on) = want {
+        client
+            .put(
+                "/api/v1/settings/loops.enabled",
+                serde_json::json!({ "scope": "tenant", "value": on }),
+            )
+            .await?;
+        println!(
+            "loops {}",
+            if on {
+                crate::style::ok_c("enabled")
+            } else {
+                crate::style::dim("disabled")
+            }
+        );
+        if on {
+            println!("  Queued jobs are picked up within a poll interval.");
+        } else {
+            println!("  Queued jobs stay queued; nothing is lost.");
+        }
+        return Ok(());
+    }
+
+    // Status. An absent setting is the default — say "off (default)" rather
+    // than a bare "off", so nobody hunts for a switch they never flipped.
+    let settings = client.get("/api/v1/settings").await?;
+    let row = settings.as_array().and_then(|a| {
+        a.iter().find(|s| {
+            s["key"].as_str() == Some("loops.enabled") && s["scope"].as_str() == Some("tenant")
+        })
+    });
+    match row {
+        Some(r) if r["value"].as_bool() == Some(true) => {
+            println!("loops {}", crate::style::ok_c("enabled"))
+        }
+        Some(_) => println!("loops {}", crate::style::dim("disabled")),
+        None => println!(
+            "loops {} — no setting stored yet",
+            crate::style::dim("disabled (default)")
+        ),
+    }
+    println!("  Change with: nook operator loops on|off");
+    Ok(())
+}
+
 /// `nook operator who` — who holds what, so "why can't I see that" has an
 /// answer that does not require reading the database.
 pub async fn operator_who() -> Result<()> {
