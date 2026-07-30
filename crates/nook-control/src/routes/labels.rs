@@ -106,7 +106,7 @@ pub async fn add(
     auth: AuthCtx,
     Path((ident, label)): Path<(String, String)>,
 ) -> ApiResult<Json<Vec<Label>>> {
-    let task = tasks::resolve_id(&state.db, auth.tenant_id, &ident).await?;
+    let task = tasks::resolve_id(state.tasks.as_ref(), auth.tenant_id, &ident).await?;
     let label_id = resolve_label(&state, auth.tenant_id, &label).await?;
 
     let res = state
@@ -137,7 +137,7 @@ pub async fn remove(
     auth: AuthCtx,
     Path((ident, label)): Path<(String, String)>,
 ) -> ApiResult<Json<Vec<Label>>> {
-    let task = tasks::resolve_id(&state.db, auth.tenant_id, &ident).await?;
+    let task = tasks::resolve_id(state.tasks.as_ref(), auth.tenant_id, &ident).await?;
     let label_id = resolve_label(&state, auth.tenant_id, &label).await?;
     let res = state
         .db

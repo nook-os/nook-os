@@ -355,7 +355,9 @@ async fn board_with_task(db: &PgPool, tenant: TenantId, bed: &TestBed) -> (Board
     .execute(db)
     .await
     .expect("column");
-    let provider = LocalBoardProvider { db: bed.db() };
+    let provider = LocalBoardProvider {
+        repo: std::sync::Arc::new(nook_control::repo::tasks::DbTaskRepository::new(bed.db())),
+    };
     let task = provider
         .create_task(
             tenant,

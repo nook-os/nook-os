@@ -141,7 +141,9 @@ async fn apply_one(
 ) -> Result<(), ApplyErr> {
     // Tenant-scoped resolve; an id in another tenant (or a bad key) is invisible
     // and skipped, exactly as a single-task route returns 404 for it.
-    let id = match crate::services::tasks::resolve_id(&state.db, auth.tenant_id, ident).await {
+    let id = match crate::services::tasks::resolve_id(state.tasks.as_ref(), auth.tenant_id, ident)
+        .await
+    {
         Ok(id) => id,
         Err(ApiError::NotFound) => return Err(ApplyErr::Skip("not found in your tenant".into())),
         Err(e) => return Err(ApplyErr::Fatal(e)),

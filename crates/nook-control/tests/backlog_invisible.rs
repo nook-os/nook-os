@@ -79,6 +79,7 @@ async fn pick_ids(db: &PgPool, tenant: TenantId, f: &TaskFilter) -> Vec<TaskId> 
     // them; the pick's MAIN-76 predicate is exercised by task_visibility.rs.
     query_rows(
         &nook_db::EnginePool::from_pg(db.clone()),
+        &nook_control::repo::tasks::DbTaskRepository::new(nook_db::EnginePool::from_pg(db.clone())),
         tenant,
         UserId::new(),
         f,
@@ -286,9 +287,13 @@ async fn claim_refuses_backlog_and_epic_with_distinct_messages() {
     .fetch_one(&bed.pool)
     .await
     .expect("key");
-    let resolved = nook_control::services::tasks::resolve_id(&bed.db(), tenant, &key)
-        .await
-        .expect("backlog task resolves by key");
+    let resolved = nook_control::services::tasks::resolve_id(
+        &nook_control::repo::tasks::DbTaskRepository::new(bed.db()),
+        tenant,
+        &key,
+    )
+    .await
+    .expect("backlog task resolves by key");
     assert_eq!(
         resolved, in_backlog,
         "the backlog task is still addressable"

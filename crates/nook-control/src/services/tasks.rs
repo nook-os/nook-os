@@ -7,7 +7,7 @@
 //! the cost of that is two extra queries for a whole board rather than two per
 //! task.
 
-use nook_db::{params, Db, DbPool, Postgres, TypeMapping};
+use crate::repo::tasks::TaskRepository;
 use nook_types::*;
 use std::collections::HashMap;
 
@@ -75,11 +75,11 @@ pub fn public_title(task: &TaskItem) -> Option<&str> {
 /// N+1 there is the difference between one render and two hundred round trips.
 /// Two queries regardless of how many tasks come in.
 pub async fn enrich(
-    db: &DbPool,
+    repo: &dyn TaskRepository,
     base_url: &str,
     viewer: UserId,
     mut tasks: Vec<TaskItem>,
-) -> Result<Vec<TaskItem>, sqlx::Error> {
+) -> ApiResult<Vec<TaskItem>> {
     if tasks.is_empty() {
         return Ok(tasks);
     }
@@ -92,32 +92,9 @@ pub async fn enrich(
         v.dedup();
         v
     };
-    let keys: HashMap<uuid::Uuid, Option<String>> = db
-        .query_all::<(uuid::Uuid, Option<String>)>(
-            "SELECT id, key FROM boards WHERE id = ANY($1)",
-            params![&board_ids[..]],
-        )
-        .await?
-        .into_iter()
-        .collect();
+    let keys = repo.board_keys(&board_ids).await?;
 
-    let label_rows: Vec<(
-        uuid::Uuid,
-        uuid::Uuid,
-        TenantId,
-        String,
-        String,
-        chrono::DateTime<chrono::Utc>,
-    )> = db
-        .query_all(
-            "SELECT tl.task_id, l.id, l.tenant_id, l.name, l.color, l.created_at
-             FROM task_labels tl
-             JOIN labels l ON l.id = tl.label_id
-             WHERE tl.task_id = ANY($1)
-             ORDER BY l.name",
-            params![&ids[..]],
-        )
-        .await?;
+    let label_rows = repo.labels_for_tasks(&ids).await?;
 
     let mut by_task: HashMap<uuid::Uuid, Vec<Label>> = HashMap::new();
     for (task_id, id, tenant_id, name, color, created_at) in label_rows {
@@ -147,28 +124,7 @@ pub async fn enrich(
     };
     // (number, visibility, created_by, assignee) — enough to build the key AND
     // decide whether this viewer may see it.
-    type ParentInfo = (Option<i32>, String, Option<UserId>, Option<UserId>);
-    let parents: HashMap<uuid::Uuid, ParentInfo> = if parent_ids.is_empty() {
-        HashMap::new()
-    } else {
-        db.query_all::<(
-            uuid::Uuid,
-            Option<i32>,
-            String,
-            Option<UserId>,
-            Option<UserId>,
-        )>(
-            "SELECT id, number, visibility, created_by, assignee_user_id
-             FROM tasks WHERE id = ANY($1)",
-            params![&parent_ids[..]],
-        )
-        .await?
-        .into_iter()
-        .map(|(id, number, visibility, created_by, assignee)| {
-            (id, (number, visibility, created_by, assignee))
-        })
-        .collect()
-    };
+    let parents = repo.parent_info(&parent_ids).await?;
 
     let base = base_url.trim_end_matches('/');
     for t in &mut tasks {
@@ -206,12 +162,12 @@ pub async fn enrich(
 
 /// One task, enriched.
 pub async fn enrich_one(
-    db: &DbPool,
+    repo: &dyn TaskRepository,
     base_url: &str,
     viewer: UserId,
     task: TaskItem,
-) -> Result<TaskItem, sqlx::Error> {
-    Ok(enrich(db, base_url, viewer, vec![task])
+) -> ApiResult<TaskItem> {
+    Ok(enrich(repo, base_url, viewer, vec![task])
         .await?
         .pop()
         .expect("enrich preserves length"))
@@ -222,15 +178,16 @@ pub async fn enrich_one(
 /// Agents are told keys, not uuids — `Closes NOOK-42` is the join between a PR
 /// and its issue — so every task-addressed endpoint accepts both. Tenant-scoped
 /// either way: a uuid is not an authorisation.
-pub async fn resolve_id(db: &DbPool, tenant: TenantId, ident: &str) -> ApiResult<TaskId> {
+pub async fn resolve_id(
+    repo: &dyn TaskRepository,
+    tenant: TenantId,
+    ident: &str,
+) -> ApiResult<TaskId> {
     if let Ok(uuid) = ident.parse::<uuid::Uuid>() {
-        let found: Option<TaskId> = db
-            .query_scalar_opt(
-                "SELECT id FROM tasks WHERE id = $1 AND tenant_id = $2",
-                params![uuid, tenant],
-            )
-            .await?;
-        return found.ok_or(ApiError::NotFound);
+        return repo
+            .id_by_uuid(tenant, uuid)
+            .await?
+            .ok_or(ApiError::NotFound);
     }
 
     let (key, number) = split_key(ident).ok_or_else(|| {
@@ -238,15 +195,9 @@ pub async fn resolve_id(db: &DbPool, tenant: TenantId, ident: &str) -> ApiResult
             "{ident:?} is neither a task id nor a key like NOOK-42"
         ))
     })?;
-    let found: Option<TaskId> = db
-        .query_scalar_opt(
-            "SELECT t.id FROM tasks t
-         JOIN boards b ON b.id = t.board_id
-         WHERE t.tenant_id = $1 AND upper(b.key) = upper($2) AND t.number = $3",
-            params![tenant, &key, number],
-        )
-        .await?;
-    found.ok_or(ApiError::NotFound)
+    repo.id_by_key(tenant, &key, number)
+        .await?
+        .ok_or(ApiError::NotFound)
 }
 
 /// `NOOK-42` → `("ENG", 42)`.
@@ -268,7 +219,11 @@ fn split_key(ident: &str) -> Option<(String, i32)> {
 /// Lowest position wins when a board has two of a type — a deliberate choice
 /// rather than an error, because a board with "In Review" and "In Progress"
 /// both marked `started` is a reasonable thing for a human to build.
-pub async fn column_of_type(db: &DbPool, board: BoardId, column_type: &str) -> ApiResult<ColumnId> {
+pub async fn column_of_type(
+    repo: &dyn TaskRepository,
+    board: BoardId,
+    column_type: &str,
+) -> ApiResult<ColumnId> {
     const TYPES: [&str; 6] = [
         "backlog",
         "unstarted",
@@ -283,13 +238,7 @@ pub async fn column_of_type(db: &DbPool, board: BoardId, column_type: &str) -> A
             TYPES.join(", ")
         )));
     }
-    let found: Option<ColumnId> = db
-        .query_scalar_opt(
-            "SELECT id FROM board_columns WHERE board_id = $1 AND type = $2
-         ORDER BY position LIMIT 1",
-            params![board, column_type],
-        )
-        .await?;
+    let found = repo.column_of_type(board, column_type).await?;
 
     // 409, not 500 and not 404: the request was well formed and the board is
     // real, but this board has no column meaning that. Naming the missing type
@@ -301,148 +250,74 @@ pub async fn column_of_type(db: &DbPool, board: BoardId, column_type: &str) -> A
     })
 }
 
-/// The `KanbanProvider` name that owns a task, via its board. Moved verbatim out
-/// of `mcp_backend` (MAIN-245); resolving the name to an instance stays there,
-/// because the registry is orchestration rather than data.
+/// The `KanbanProvider` name that owns a task, via its board. Resolving the
+/// name to an instance stays in `mcp_backend`, because the registry is
+/// orchestration rather than data.
 pub async fn board_provider_for_task(
-    db: &DbPool,
+    repo: &dyn TaskRepository,
     tenant: TenantId,
     task_id: TaskId,
 ) -> ApiResult<Option<String>> {
-    Ok(db
-        .query_scalar_opt(
-            "SELECT b.provider FROM boards b
-             JOIN tasks t ON t.board_id = b.id
-             WHERE t.id = $1 AND t.tenant_id = $2",
-            params![task_id, tenant],
-        )
-        .await?)
+    repo.board_provider_for_task(tenant, task_id).await
 }
 
-/// One task row by id, scoped to its tenant. Moved verbatim out of
-/// `mcp_backend` (MAIN-245).
-pub async fn get_row(db: &DbPool, tenant: TenantId, id: TaskId) -> ApiResult<Option<TaskItem>> {
-    Ok(db
-        .query_opt(
-            "SELECT * FROM tasks WHERE id = $1 AND tenant_id = $2",
-            params![id, tenant],
-        )
-        .await?)
+/// One task row by id, scoped to its tenant.
+pub async fn get_row(
+    repo: &dyn TaskRepository,
+    tenant: TenantId,
+    id: TaskId,
+) -> ApiResult<Option<TaskItem>> {
+    repo.get_row(tenant, id).await
 }
 
-/// Drop a task's assignee. Moved verbatim out of `mcp_backend` (MAIN-245).
-pub async fn clear_assignee(db: &DbPool, tenant: TenantId, id: TaskId) -> ApiResult<TaskItem> {
-    Ok(db
-        .query_one(
-            &format!(
-                "UPDATE tasks SET assignee_user_id = NULL, updated_at = {now}
-             WHERE id = $1 AND tenant_id = $2 RETURNING *",
-                now = Postgres.now()
-            ),
-            params![id, tenant],
-        )
-        .await?)
+/// Drop a task's assignee.
+pub async fn clear_assignee(
+    repo: &dyn TaskRepository,
+    tenant: TenantId,
+    id: TaskId,
+) -> ApiResult<TaskItem> {
+    repo.clear_assignee(tenant, id).await
 }
 
-/// Set a task's priority. Moved verbatim out of `mcp_backend` (MAIN-245); the
-/// clamp stays at the call site, where it always was.
+/// Set a task's priority. The clamp stays at the call site, where it always was.
 pub async fn set_priority_row(
-    db: &DbPool,
+    repo: &dyn TaskRepository,
     tenant: TenantId,
     id: TaskId,
     priority: i32,
 ) -> ApiResult<TaskItem> {
-    Ok(db
-        .query_one(
-            &format!(
-                "UPDATE tasks SET priority = $3, updated_at = {now}
-             WHERE id = $1 AND tenant_id = $2 RETURNING *",
-                now = Postgres.now()
-            ),
-            params![id, tenant, priority],
-        )
-        .await?)
+    repo.set_priority(tenant, id, priority).await
 }
 
-/// Record an agent-authored comment. Moved verbatim out of `mcp_backend`
-/// (MAIN-245).
+/// Record an agent-authored comment.
 pub async fn insert_agent_comment(
-    db: &DbPool,
+    repo: &dyn TaskRepository,
     tenant: TenantId,
     task_id: TaskId,
     author_id: uuid::Uuid,
     author_name: &str,
     body_md: &str,
 ) -> ApiResult<TaskComment> {
-    Ok(db
-        .query_one(
-            "INSERT INTO task_comments (id, tenant_id, task_id, author_type, author_id, author_name, body_md)
-             VALUES ($1, $2, $3, 'agent', $4, $5, $6)
-             RETURNING id, tenant_id, task_id, author_type, author_id, author_name,
-                       body_md, created_at, updated_at",
-            params![uuid::Uuid::now_v7(), tenant, task_id, author_id, author_name, body_md],
-        )
-        .await?)
+    repo.insert_agent_comment(tenant, task_id, author_id, author_name, body_md)
+        .await
 }
 
-/// Get-or-create a label by name and attach it to a task. Moved verbatim out of
-/// `mcp_backend` (MAIN-245); the two statements travelled together because the
-/// upsert exists only to feed the attach.
+/// Get-or-create a label by name and attach it to a task.
 pub async fn attach_label(
-    db: &DbPool,
+    repo: &dyn TaskRepository,
     tenant: TenantId,
     task_id: TaskId,
     name: &str,
 ) -> ApiResult<()> {
-    let label_id: uuid::Uuid = db
-        .query_scalar(
-            "INSERT INTO labels (id, tenant_id, name) VALUES ($1, $2, $3)
-             ON CONFLICT (tenant_id, name) DO UPDATE SET name = EXCLUDED.name RETURNING id",
-            params![uuid::Uuid::now_v7(), tenant, name],
-        )
-        .await?;
-    db.exec(
-        "INSERT INTO task_labels (task_id, label_id) VALUES ($1, $2) ON CONFLICT DO NOTHING",
-        params![task_id, label_id],
-    )
-    .await?;
-    Ok(())
+    repo.attach_label(tenant, task_id, name).await
 }
 
-/// Detach a label from a task by name. Moved verbatim out of `mcp_backend`
-/// (MAIN-245).
+/// Detach a label from a task by name.
 pub async fn detach_label(
-    db: &DbPool,
+    repo: &dyn TaskRepository,
     tenant: TenantId,
     task_id: TaskId,
     name: &str,
 ) -> ApiResult<()> {
-    db.exec(
-        "DELETE FROM task_labels tl USING labels l
-             WHERE tl.label_id = l.id AND tl.task_id = $1
-               AND l.tenant_id = $2 AND l.name = $3",
-        params![task_id, tenant, name],
-    )
-    .await?;
-    Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Keys go into PR bodies and branch names, where a human types them. A
-    /// key that parses differently from how it was printed points at the wrong
-    /// task, silently.
-    #[test]
-    fn a_human_key_splits_at_the_last_hyphen() {
-        assert_eq!(split_key("NOOK-42"), Some(("NOOK".into(), 42)));
-        assert_eq!(split_key("  NOOK-42  "), Some(("NOOK".into(), 42)));
-        // A hyphenated board key still resolves, and to the right number.
-        assert_eq!(split_key("WEB-UI-7"), Some(("WEB-UI".into(), 7)));
-
-        for bad in ["ENG", "-42", "ENG-", "ENG-x", "", "42"] {
-            assert_eq!(split_key(bad), None, "must refuse {bad:?}");
-        }
-    }
+    repo.detach_label(tenant, task_id, name).await
 }

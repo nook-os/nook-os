@@ -98,7 +98,7 @@ async fn list_ids(
         limit: Some(200),
         ..Default::default()
     };
-    query_rows(&state.db, tenant, viewer, &f)
+    query_rows(&state.db, state.tasks.as_ref(), tenant, viewer, &f)
         .await
         .expect("list")
         .into_iter()
@@ -586,8 +586,9 @@ async fn private_parent_key_is_redacted_from_children_for_non_owners() {
     let enrich_as = |viewer: UserId, t: TaskItem| {
         let db = state.db.clone();
         let base = state.cfg.public_base_url.clone();
+        let repo = nook_control::repo::tasks::DbTaskRepository::new(db.clone());
         async move {
-            nook_control::services::tasks::enrich(&db, &base, viewer, vec![t])
+            nook_control::services::tasks::enrich(&repo, &base, viewer, vec![t])
                 .await
                 .expect("enrich")
                 .pop()

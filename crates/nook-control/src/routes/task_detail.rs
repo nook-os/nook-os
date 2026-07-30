@@ -34,7 +34,7 @@ pub async fn list_comments(
     auth: AuthCtx,
     Path(ident): Path<String>,
 ) -> ApiResult<Json<Vec<TaskComment>>> {
-    let task = tasks::resolve_id(&state.db, auth.tenant_id, &ident).await?;
+    let task = tasks::resolve_id(state.tasks.as_ref(), auth.tenant_id, &ident).await?;
     Ok(Json(comments_of(&state, task).await?))
 }
 
@@ -66,7 +66,7 @@ pub async fn create_comment(
     if req.body_md.trim().is_empty() {
         return Err(ApiError::BadRequest("a comment needs a body".into()));
     }
-    let task = tasks::resolve_id(&state.db, auth.tenant_id, &ident).await?;
+    let task = tasks::resolve_id(state.tasks.as_ref(), auth.tenant_id, &ident).await?;
 
     // See the module note. A node is `system` because a machine reporting on
     // its own work is not a person; a user token is `user` even when a tool is
@@ -252,8 +252,13 @@ pub async fn create_relation(
     Path(ident): Path<String>,
     Json(req): Json<CreateRelationRequest>,
 ) -> ApiResult<Json<TaskRelation>> {
-    let from = tasks::resolve_id(&state.db, auth.tenant_id, &ident).await?;
-    let to = tasks::resolve_id(&state.db, auth.tenant_id, &req.to_task.to_string()).await?;
+    let from = tasks::resolve_id(state.tasks.as_ref(), auth.tenant_id, &ident).await?;
+    let to = tasks::resolve_id(
+        state.tasks.as_ref(),
+        auth.tenant_id,
+        &req.to_task.to_string(),
+    )
+    .await?;
     Ok(Json(
         link(&state, auth.tenant_id, auth.user_id, from, to, &req.kind).await?,
     ))
@@ -384,7 +389,7 @@ pub async fn get_task(
     auth: AuthCtx,
     Path(ident): Path<String>,
 ) -> ApiResult<Json<TaskDetail>> {
-    let id = tasks::resolve_id(&state.db, auth.tenant_id, &ident).await?;
+    let id = tasks::resolve_id(state.tasks.as_ref(), auth.tenant_id, &ident).await?;
     Ok(Json(
         detail(&state, auth.tenant_id, auth.user_id, id).await?,
     ))
@@ -408,7 +413,13 @@ pub async fn detail(
     if !tasks::visible_to(&task, viewer) {
         return Err(ApiError::NotFound);
     }
-    let task = tasks::enrich_one(&state.db, &state.cfg.public_base_url, viewer, task).await?;
+    let task = tasks::enrich_one(
+        state.tasks.as_ref(),
+        &state.cfg.public_base_url,
+        viewer,
+        task,
+    )
+    .await?;
 
     let related = related_tasks(state, viewer, id).await?;
     let blocked_by: Vec<RelatedTask> = related
