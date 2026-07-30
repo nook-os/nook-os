@@ -39,6 +39,7 @@ pub mod workspaces;
 use axum::response::IntoResponse;
 use axum::routing::{delete as delete_route, get, patch, post, put};
 use axum::{Json, Router};
+use tower_http::catch_panic::CatchPanicLayer;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::trace::TraceLayer;
 use utoipa::OpenApi;
@@ -457,10 +458,29 @@ pub fn build_router(state: AppState) -> Router {
         );
     }
 
+    with_middleware(router).with_state(state)
+}
+
+/// The outer middleware every route is served through.
+///
+/// A named function rather than a chain inlined into [`build_router`] so a test
+/// can drive the REAL stack (`panic_layer_tests` below) without an `AppState` or
+/// a database. A test that assembled its own replica would keep passing if
+/// somebody deleted a layer from here — which is the regression worth catching.
+fn with_middleware<S>(router: Router<S>) -> Router<S>
+where
+    S: Clone + Send + Sync + 'static,
+{
     router
         .layer(desktop_cors())
+        // INSIDE the trace layer, not outside it (MAIN-273). Layers wrap
+        // outward, so this sits under `TraceLayer` and above everything else:
+        // a panic anywhere in a handler, extractor or the auth middleware
+        // becomes a 500 that the trace layer then records like any other
+        // response. Outside it, the panic would unwind past tracing and the
+        // request would vanish from the log it belongs in.
+        .layer(CatchPanicLayer::custom(nook_errors::panic_response))
         .layer(TraceLayer::new_for_http())
-        .with_state(state)
 }
 
 /// Bearer gate for the MCP endpoint. Two accepted credentials:
@@ -684,5 +704,53 @@ mod host_of_tests {
             Some("h.example")
         );
         assert_eq!(host_of(""), None);
+    }
+}
+
+#[cfg(test)]
+mod panic_layer_tests {
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use axum::routing::get;
+    use axum::Router;
+    use tower::ServiceExt;
+
+    // The unwrap IS the subject: clippy is right that it always panics, which
+    // is exactly the bug this net has to survive.
+    #[allow(clippy::unnecessary_literal_unwrap)]
+    async fn boom() -> &'static str {
+        let nothing: Option<u8> = None;
+        let _ = nothing.expect("a value that was not there");
+        "unreachable"
+    }
+
+    /// MAIN-273 AC-1, against the middleware stack this crate actually serves.
+    ///
+    /// `tests/panic_safety_net.rs` pins what the layer DOES; this pins that the
+    /// layer is WIRED. Deleting `CatchPanicLayer` from `with_middleware` fails
+    /// here and nowhere else.
+    #[tokio::test]
+    async fn the_real_middleware_stack_catches_a_handler_panic() {
+        let app = super::with_middleware(Router::new().route("/boom", get(boom)))
+            // No `AppState` is needed: the panic never reaches state, and this
+            // keeps the assertion about middleware rather than about wiring up
+            // a database.
+            // Generic over state on purpose: none of these layers touch it,
+            // so the test needs no `AppState` and no database.
+            .with_state(());
+
+        let res = app
+            .oneshot(Request::builder().uri("/boom").body(Body::empty()).unwrap())
+            .await
+            .expect("the real stack answers rather than dropping the connection");
+        assert_eq!(res.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+        let body = axum::body::to_bytes(res.into_body(), 64 * 1024)
+            .await
+            .expect("a readable body — a dropped connection has none");
+        assert_eq!(
+            String::from_utf8(body.to_vec()).unwrap(),
+            r#"{"error":"internal error"}"#
+        );
     }
 }

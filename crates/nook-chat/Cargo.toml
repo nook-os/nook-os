@@ -12,6 +12,7 @@ path = "src/main.rs"
 async-trait = { workspace = true }
 nook-db = { workspace = true }
 nook-auth = { workspace = true }
+nook-errors = { workspace = true }
 nook-types = { workspace = true }
 tokio = { workspace = true }
 axum = { workspace = true }
@@ -31,6 +32,9 @@ dashmap = { workspace = true }
 futures-util = { workspace = true }
 
 [dev-dependencies]
+# `oneshot` for the panic-layer test (MAIN-273); nook-chat otherwise needs only
+# tower-http.
+tower = { workspace = true }
 # Test-only: the search_path regression test provisions the control-plane
 # `public` schema (tenants/users/sessions_auth/tenant_members) via its MIGRATOR,
 # so the test does not depend on a database that already has it. No cycle —

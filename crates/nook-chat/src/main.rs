@@ -66,6 +66,10 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
 
+    // After the subscriber, so the hook's chained default and the layer's
+    // structured record both land in the configured log (MAIN-273).
+    nook_errors::install_panic_hook();
+
     let cfg = config::Config::from_env()?;
     tracing::info!(
         bind = %cfg.bind,
@@ -167,9 +171,8 @@ async fn main() -> anyhow::Result<()> {
         // Direct messages (MAIN-113): open-or-create + list the caller's DMs,
         // and the org-scoped people picker that feeds the new-DM affordance.
         .route("/api/dms", get(dms::list).post(dms::open))
-        .route("/api/people", get(dms::people))
-        .layer(tower_http::trace::TraceLayer::new_for_http())
-        .with_state(state);
+        .route("/api/people", get(dms::people));
+    let app = with_middleware(app).with_state(state);
 
     let listener = tokio::net::TcpListener::bind(&cfg.bind).await?;
     tracing::info!(bind = %cfg.bind, "nook-chat listening");
@@ -363,6 +366,63 @@ impl IntoResponse for ChatError {
             ),
         };
         (status, Json(json!({ "error": msg }))).into_response()
+    }
+}
+
+/// The outer middleware every chat route is served through.
+///
+/// Named rather than inlined so a test can drive the REAL stack without an
+/// `AppState` — a test that assembled its own replica would keep passing if
+/// somebody deleted a layer from here (MAIN-273).
+fn with_middleware<S>(router: axum::Router<S>) -> axum::Router<S>
+where
+    S: Clone + Send + Sync + 'static,
+{
+    router
+        // INSIDE the trace layer, not outside it: a panic anywhere in a handler
+        // or extractor becomes a 500 the trace layer then records like any
+        // other response, rather than unwinding past it.
+        .layer(tower_http::catch_panic::CatchPanicLayer::custom(
+            nook_errors::panic_response,
+        ))
+        .layer(tower_http::trace::TraceLayer::new_for_http())
+}
+
+#[cfg(test)]
+mod panic_layer_tests {
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use axum::routing::get;
+    use axum::Router;
+    use tower::ServiceExt;
+
+    // The unwrap IS the subject: clippy is right that it always panics, which
+    // is exactly the bug this net has to survive.
+    #[allow(clippy::unnecessary_literal_unwrap)]
+    async fn boom() -> &'static str {
+        let nothing: Option<u8> = None;
+        let _ = nothing.expect("a chat handler bug");
+        "unreachable"
+    }
+
+    /// MAIN-273 AC-1 for this service: `nook-errors` proves what the layer does;
+    /// this proves chat's router is wired to it. Deleting the layer from
+    /// `with_middleware` fails here and nowhere else.
+    #[tokio::test]
+    async fn the_real_middleware_stack_catches_a_handler_panic() {
+        let app = super::with_middleware(Router::new().route("/boom", get(boom))).with_state(());
+        let res = app
+            .oneshot(Request::builder().uri("/boom").body(Body::empty()).unwrap())
+            .await
+            .expect("the real stack answers rather than dropping the connection");
+        assert_eq!(res.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = axum::body::to_bytes(res.into_body(), 64 * 1024)
+            .await
+            .expect("a readable body — a dropped connection has none");
+        assert_eq!(
+            String::from_utf8(body.to_vec()).unwrap(),
+            r#"{"error":"internal error"}"#
+        );
     }
 }
 
