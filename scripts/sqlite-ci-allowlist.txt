@@ -1,0 +1,79 @@
+# Test binaries that do NOT yet pass on SQLite (MAIN-270, epic AC-6).
+#
+# This file is the SQLite leg's remaining work, in one place. Everything NOT
+# named here is COVERED: it passes on SQLite today and a failure fails the
+# build. scripts/check-sqlite-ci.sh enforces both directions — a covered binary
+# that breaks reddens CI, and a binary listed here that starts PASSING also
+# reddens CI, so the list can only ever shrink.
+#
+# WHEN YOUR CARD LANDS, DELETE ITS LINES. That deletion is what grows the leg's
+# coverage; the guard will tell you if you forget, and will not let you add a
+# line for a failure that is already covered.
+#
+# EVERY LINE NAMES THE CARD THAT OWNS IT, because a list of failures with no
+# owner is where failures go to be forgotten — the guard's self-test enforces
+# it. Tests that are Postgres-only BY DESIGN have no card and never get deleted,
+# so they are not in this file at all: see scripts/sqlite-ci-engine-specific.txt.
+#
+# Measured on two full runs of `cargo test --workspace --no-fail-fast` under
+# sqlite://, which produced identical failure sets — nothing here is flaky.
+#
+# 90 test binaries: 44 COVERED, 45 pending below, 1 deliberately Postgres-only.
+# (AC-1's "~55 of 101" was an earlier estimate of mine that counted the 11
+# `Doc-tests` result lines as binaries; cargo prints 101 `test result:` lines
+# but only 90 of them are test binaries. Corrected here against the real runs.)
+
+# ── raw sqlx / bed.pool still in the test (MAIN-268, the de-sqlx chain) ──
+auth_request_path          # raw sqlx / bed.pool in the test itself (MAIN-268)
+board_automation           # raw sqlx / bed.pool in the test itself (MAIN-268)
+bulk_tasks                 # raw sqlx / bed.pool in the test itself (MAIN-268)
+checkout_kind              # raw sqlx / bed.pool in the test itself (MAIN-268)
+dispatch_ownership         # raw sqlx / bed.pool in the test itself (MAIN-268)
+executor_selection         # raw sqlx / bed.pool in the test itself (MAIN-268)
+interactions               # raw sqlx / bed.pool in the test itself (MAIN-268)
+invite_registration        # raw sqlx / bed.pool in the test itself (MAIN-268)
+job_reaper                 # raw sqlx / bed.pool in the test itself (MAIN-268)
+loop_job_execution         # raw sqlx / bed.pool in the test itself (MAIN-268)
+loop_job_messages          # raw sqlx / bed.pool in the test itself (MAIN-268)
+loop_jobs                  # raw sqlx / bed.pool in the test itself (MAIN-268)
+loops_switch               # raw sqlx / bed.pool in the test itself (MAIN-268)
+managed_content            # raw sqlx / bed.pool in the test itself (MAIN-268)
+migrate_dev_tolerance      # raw sqlx / bed.pool in the test itself (MAIN-268)
+migrate_paths              # raw sqlx / bed.pool in the test itself (MAIN-268)
+multi_instance             # raw sqlx / bed.pool in the test itself (MAIN-268)
+notebook                   # raw sqlx / bed.pool in the test itself (MAIN-268)
+notifications              # raw sqlx / bed.pool in the test itself (MAIN-268)
+oidc_degraded              # raw sqlx / bed.pool in the test itself (MAIN-268)
+placement_and_gitops_auth  # raw sqlx / bed.pool in the test itself (MAIN-268)
+reconcile_tombstones       # raw sqlx / bed.pool in the test itself (MAIN-268)
+repo_completeness          # raw sqlx / bed.pool in the test itself (MAIN-268)
+review_column              # raw sqlx / bed.pool in the test itself (MAIN-268)
+squash_restamp             # raw sqlx / bed.pool in the test itself (MAIN-268)
+task_checkout_ids          # raw sqlx / bed.pool in the test itself (MAIN-268)
+tenant_isolation           # raw sqlx / bed.pool in the test itself (MAIN-268)
+
+# ── production still emits Postgres SQL (MAIN-289, the dialect sweep) ──
+mcp_notebook               # production still emits Postgres SQL on this path (MAIN-289)
+node_enrolment             # production still emits Postgres SQL on this path (MAIN-289)
+node_owner                 # production still emits Postgres SQL on this path (MAIN-289)
+nook_worker:lib            # production still emits Postgres SQL on this path (MAIN-289)
+overview_visibility        # production still emits Postgres SQL on this path (MAIN-289)
+task_parent                # production still emits Postgres SQL on this path (MAIN-289)
+task_type                  # production still emits Postgres SQL on this path (MAIN-289)
+task_workspace             # production still emits Postgres SQL on this path (MAIN-289)
+taught_skills              # production still emits Postgres SQL on this path (MAIN-289)
+visibility_agreement       # production still emits Postgres SQL on this path (MAIN-289)
+
+# ── migrations_sqlite 0001 defect (MAIN-293) ──
+backlog_invisible          # migrations_sqlite 0001: users.person_id has no default (MAIN-293)
+dev_signin                 # migrations_sqlite 0001: users.person_id has no default (MAIN-293)
+local_accounts             # migrations_sqlite 0001: users.person_id has no default (MAIN-293)
+task_visibility            # migrations_sqlite 0001: users.person_id has no default (MAIN-293)
+tenant_ca                  # migrations_sqlite 0001: users.person_id has no default (MAIN-293)
+
+# ── nook-chat has no SQLite migrator (MAIN-294) ──
+nook_chat:main             # nook-chat has no MIGRATOR_SQLITE — EnginePool::pg() panics (MAIN-294)
+
+# ── testkit SQLite pool size (MAIN-295) ──
+auth_search_path           # SQLite bed opens a pool of size 1 (MAIN-295)
+migrations                 # SQLite bed opens a pool of size 1 (MAIN-295)

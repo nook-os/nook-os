@@ -1,0 +1,12 @@
+# Tests that are deliberately Postgres-only (MAIN-270, AC-2).
+#
+# These are NOT pending work and are never deleted, which is why they live apart
+# from scripts/sqlite-ci-allowlist.txt: that file is a work-list that shrinks to
+# empty, and an entry that can never be removed would make it look like it never
+# can. Each line states why the test is engine-specific.
+#
+# Staleness is still checked. If one of these ever PASSES on SQLite the guard
+# goes red, because that means the classification was wrong, not that the
+# problem went away.
+
+nook_db:lib  # dialect.rs `pg_*` tests execute the POSTGRES arm against a real Postgres connection (pool.pg()) — asserting Postgres behaviour is their entire purpose
