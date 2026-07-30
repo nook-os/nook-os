@@ -16,6 +16,17 @@ use nook_types::TenantId;
 use sqlx::PgPool;
 use uuid::Uuid;
 
+/// The CA and node repositories over the bed's pool. Tests keep raw DB access
+/// (the chain's NG-4); these just spell the repositories the migrated `ca::`
+/// functions now take.
+fn cas(bed: &TestBed) -> nook_control::repo::nodes::DbTenantCaRepository {
+    nook_control::repo::nodes::DbTenantCaRepository::new(bed.db())
+}
+
+fn nodes(bed: &TestBed) -> nook_control::repo::nodes::DbNodeRepository {
+    nook_control::repo::nodes::DbNodeRepository::new(bed.db())
+}
+
 fn vault() -> Vault {
     Vault::from_env("test-session-secret-that-is-long-enough-000000").expect("vault")
 }
@@ -61,7 +72,9 @@ async fn issue_client_cert(
     let csr = params.serialize_request(&key).unwrap().pem().unwrap();
 
     let leaf = ca::sign_node_csr(
-        &nook_db::EnginePool::from_pg(pool.clone()),
+        &nook_control::repo::nodes::DbTenantCaRepository::new(nook_db::EnginePool::from_pg(
+            pool.clone(),
+        )),
         &vault(),
         tenant,
         node,
@@ -96,7 +109,7 @@ async fn a_client_certificate_survives_the_handshake_and_identifies_the_node() {
     let _ = rustls::crypto::ring::default_provider().install_default();
 
     let tenant = seed_tenant(&bed.pool).await;
-    ca::generate(&bed.db(), &vault(), tenant, true)
+    ca::generate(&cas(&bed), &vault(), tenant, true)
         .await
         .unwrap();
     let node = seed_node(&bed.pool, tenant).await;
@@ -160,7 +173,9 @@ async fn a_client_certificate_survives_the_handshake_and_identifies_the_node() {
     let presented = server.await.unwrap().expect("server saw a client cert");
 
     // And that certificate resolves to the node we issued it to.
-    let id = ca::verify_node_cert(&bed.db(), &presented).await.unwrap();
+    let id = ca::verify_node_cert(&cas(&bed), &nodes(&bed), &presented)
+        .await
+        .unwrap();
     assert_eq!(id.node_id, node);
     assert_eq!(id.tenant_id, tenant.0);
 

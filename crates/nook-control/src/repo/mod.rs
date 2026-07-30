@@ -13,4 +13,5 @@
 
 pub mod identity;
 pub mod invites;
+pub mod nodes;
 pub mod tasks;

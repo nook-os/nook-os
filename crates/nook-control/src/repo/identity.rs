@@ -160,6 +160,14 @@ pub trait IdentityRepository: Send + Sync {
     /// any single membership.
     async fn person_id_of(&self, user_id: UserId) -> ApiResult<Option<Uuid>>;
 
+    /// The same lookup, scoped to a tenant — what the join flow needs before it
+    /// will hand a node to a person (MAIN-252).
+    async fn person_id_of_in_tenant(
+        &self,
+        user_id: UserId,
+        tenant: TenantId,
+    ) -> ApiResult<Option<Uuid>>;
+
     // ---- users and tenants -------------------------------------------------
 
     async fn get_user(&self, user_id: UserId) -> ApiResult<Option<User>>;
@@ -188,6 +196,13 @@ pub trait IdentityRepository: Send + Sync {
     /// The tenant's owner (falling back to its oldest user) — who a machine
     /// credential acts as for attribution.
     async fn tenant_owner_user_id(&self, tenant: Uuid) -> ApiResult<Option<Uuid>>;
+
+    /// The PERSON behind the tenant's owner-role user — the fallback a node
+    /// enrolment falls back to when its token names no minter (MAIN-252).
+    /// Strictly `role = 'owner'`: unlike [`Self::tenant_owner_user_id`] this
+    /// does NOT settle for any user, because handing a machine to an arbitrary
+    /// member would be worse than handing it to nobody.
+    async fn tenant_owner_person(&self, tenant: TenantId) -> ApiResult<Option<Uuid>>;
 
     /// The org a tenant belongs to, if any.
     async fn org_of(&self, tenant: TenantId) -> ApiResult<Option<Uuid>>;
@@ -598,6 +613,20 @@ impl IdentityRepository for DbIdentityRepository {
             .await?)
     }
 
+    async fn person_id_of_in_tenant(
+        &self,
+        user_id: UserId,
+        tenant: TenantId,
+    ) -> ApiResult<Option<Uuid>> {
+        Ok(self
+            .db
+            .query_scalar_opt(
+                "SELECT person_id FROM users WHERE id = $1 AND tenant_id = $2",
+                params![user_id, tenant],
+            )
+            .await?)
+    }
+
     async fn get_user(&self, user_id: UserId) -> ApiResult<Option<User>> {
         Ok(self
             .db
@@ -682,6 +711,17 @@ impl IdentityRepository for DbIdentityRepository {
             .query_scalar_opt(
                 "SELECT role FROM users WHERE id = $1 AND tenant_id = $2",
                 params![user_id, tenant],
+            )
+            .await?)
+    }
+
+    async fn tenant_owner_person(&self, tenant: TenantId) -> ApiResult<Option<Uuid>> {
+        Ok(self
+            .db
+            .query_scalar_opt(
+                "SELECT person_id FROM users WHERE tenant_id = $1 AND role = 'owner'
+                 ORDER BY created_at LIMIT 1",
+                params![tenant],
             )
             .await?)
     }
@@ -1687,6 +1727,24 @@ impl IdentityRepository for FakeIdentityRepository {
         Ok(st.person_of.get(&user_id).copied())
     }
 
+    async fn person_id_of_in_tenant(
+        &self,
+        user_id: UserId,
+        tenant: TenantId,
+    ) -> ApiResult<Option<Uuid>> {
+        let st = self.inner.lock().unwrap();
+        // The tenant scope is real: a user from another tenant answers None,
+        // the same way the WHERE clause does.
+        if !st
+            .users
+            .iter()
+            .any(|u| u.id == user_id && u.tenant_id == tenant)
+        {
+            return Ok(None);
+        }
+        Ok(st.person_of.get(&user_id).copied())
+    }
+
     async fn get_user(&self, user_id: UserId) -> ApiResult<Option<User>> {
         let st = self.inner.lock().unwrap();
         Ok(st.users.iter().find(|u| u.id == user_id).cloned())
@@ -1746,6 +1804,16 @@ impl IdentityRepository for FakeIdentityRepository {
             .iter()
             .find(|u| u.id == user_id && u.tenant_id == tenant)
             .map(|u| u.role.clone()))
+    }
+
+    async fn tenant_owner_person(&self, tenant: TenantId) -> ApiResult<Option<Uuid>> {
+        let st = self.inner.lock().unwrap();
+        st.users
+            .iter()
+            .filter(|u| u.tenant_id == tenant && u.role == "owner")
+            .min_by_key(|u| u.created_at)
+            .map(|u| Ok(st.person_of.get(&u.id).copied()))
+            .unwrap_or(Ok(None))
     }
 
     async fn tenant_owner_user_id(&self, tenant: Uuid) -> ApiResult<Option<Uuid>> {

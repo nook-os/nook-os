@@ -19,14 +19,6 @@ crates/nook-control/src/services/discovery.rs    # node_workspaces reconcile
 crates/nook-control/src/services/workspace_queries.rs   # split out by MAIN-245, awaits its trait
 crates/nook-control/src/services/workspace_reaper.rs    # tombstoned-checkout reclaim
 
-# ── MAIN-252 · NodeRepository ───────────────────────────────────────────────
-crates/nook-control/src/routes/nodes.rs          # node list/detail/remove
-crates/nook-control/src/routes/join.rs           # enrolment + join tokens
-crates/nook-control/src/routes/tenant_ca.rs      # per-tenant CA rows
-crates/nook-control/src/ca.rs                    # CA issue/sign, keyed by node
-crates/nook-control/src/services/node_queries.rs # split out by MAIN-245, awaits its trait
-crates/nook-control/src/ws/node.rs               # node socket: heartbeat + resources
-
 # ── MAIN-253 · SessionRepository ────────────────────────────────────────────
 crates/nook-control/src/routes/sessions.rs       # session start/list/kill
 crates/nook-control/src/services/session_queries.rs     # split out by MAIN-245, awaits its trait

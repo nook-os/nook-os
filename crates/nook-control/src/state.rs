@@ -22,6 +22,12 @@ pub struct AppState {
     pub tasks: Arc<dyn crate::repo::tasks::TaskRepository>,
     /// Invite data access behind its trait (MAIN-250). Same contract.
     pub invites: Arc<dyn crate::repo::invites::InviteRepository>,
+    /// Nodes: identity, sharing, the liveness lease (MAIN-252). Same contract.
+    pub nodes: Arc<dyn crate::repo::nodes::NodeRepository>,
+    /// Single-use enrolment tokens (MAIN-252).
+    pub join_tokens: Arc<dyn crate::repo::nodes::JoinTokenRepository>,
+    /// The per-tenant certificate authority (MAIN-252).
+    pub tenant_cas: Arc<dyn crate::repo::nodes::TenantCaRepository>,
     pub cfg: Arc<Config>,
     /// OIDC discovery state — configured/usable/degraded, hot-swappable after
     /// boot so an IdP that was down at startup recovers without a restart
@@ -89,6 +95,9 @@ impl AppState {
         Self {
             identity: Arc::new(crate::repo::identity::DbIdentityRepository::new(db.clone())),
             invites: Arc::new(crate::repo::invites::DbInviteRepository::new(db.clone())),
+            nodes: Arc::new(crate::repo::nodes::DbNodeRepository::new(db.clone())),
+            join_tokens: Arc::new(crate::repo::nodes::DbJoinTokenRepository::new(db.clone())),
+            tenant_cas: Arc::new(crate::repo::nodes::DbTenantCaRepository::new(db.clone())),
             kanban: Arc::new(KanbanRegistry::new(tasks.clone())),
             tasks,
             artifacts,

@@ -1,11 +1,10 @@
 use axum::extract::{Path, State};
 use axum::Json;
-use nook_db::{params, Db, Postgres, TypeMapping};
 use nook_types::*;
 
 use crate::auth::AuthCtx;
 use crate::error::{ApiError, ApiResult};
-use crate::services::{node_queries, session_queries};
+use crate::services::session_queries;
 use crate::state::AppState;
 
 /// Which tenant owns a node.
@@ -14,11 +13,7 @@ use crate::state::AppState;
 /// not the caller's — otherwise an operator could only ever act on machines in
 /// their own tenant, which is the opposite of the job.
 pub(crate) async fn node_tenant(state: &AppState, id: NodeId) -> ApiResult<nook_types::TenantId> {
-    let row: Option<(nook_types::TenantId,)> = state
-        .db
-        .query_opt("SELECT tenant_id FROM nodes WHERE id = $1", params![id])
-        .await?;
-    row.map(|(t,)| t).ok_or(ApiError::NotFound)
+    state.nodes.tenant_of(id).await?.ok_or(ApiError::NotFound)
 }
 
 /// Which owner a node listing is scoped to (MAIN-132): `Some(person)` restricts
@@ -44,9 +39,7 @@ async fn visibility_scope(state: &AppState, auth: &AuthCtx) -> ApiResult<Option<
     operation_id = "list_nodes", responses((status = 200, body = [Node])))]
 pub async fn list(State(state): State<AppState>, auth: AuthCtx) -> ApiResult<Json<Vec<Node>>> {
     let scope = visibility_scope(&state, &auth).await?;
-    Ok(Json(
-        node_queries::list_nodes(&state.db, auth.tenant_id, scope).await?,
-    ))
+    Ok(Json(state.nodes.list(auth.tenant_id, scope).await?))
 }
 
 #[utoipa::path(get, path = "/api/v1/nodes/{id}",
@@ -58,16 +51,11 @@ pub async fn get_one(
     auth: AuthCtx,
     Path(id): Path<NodeId>,
 ) -> ApiResult<Json<Node>> {
-    let node: Option<Node> = state
-        .db
-        .query_opt(
-            "SELECT id, tenant_id, name, hostname, platform, capabilities, resources, status,
-                last_seen_at, owner_person_id, shared, created_at, updated_at
-         FROM nodes WHERE tenant_id = $1 AND id = $2",
-            params![auth.tenant_id, id],
-        )
-        .await?;
-    let node = node.ok_or(ApiError::NotFound)?;
+    let node = state
+        .nodes
+        .get(auth.tenant_id, id)
+        .await?
+        .ok_or(ApiError::NotFound)?;
     // A member sees a node they own OR one the team has been given (`shared`,
     // MAIN-135); anything else is a 404, not a 403, so it is indistinguishable
     // from a node that does not exist (MAIN-132's no-existence-oracle rule).
@@ -105,16 +93,10 @@ pub async fn set_shared(
     // A person designates a machine; a node credential is not a person.
     auth.require_user()?;
 
-    let row: Option<(Option<uuid::Uuid>, bool)> = state
-        .db
-        .query_opt(
-            "SELECT owner_person_id, shared FROM nodes WHERE id = $1 AND tenant_id = $2",
-            params![id, auth.tenant_id],
-        )
-        .await?;
-    let Some((owner_person, is_shared)) = row else {
+    let Some(sharing) = state.nodes.sharing(id, auth.tenant_id).await? else {
         return Err(ApiError::NotFound);
     };
+    let (owner_person, is_shared) = (sharing.owner_person_id, sharing.shared);
 
     let me = crate::auth::person_id_of(&state, auth.user_id).await?;
 
@@ -143,18 +125,11 @@ pub async fn set_shared(
         Some(_) => {}
     }
 
-    let node: Node = state
-        .db
-        .query_one(
-            &format!(
-                "UPDATE nodes SET shared = $3, updated_at = {} WHERE id = $1 AND tenant_id = $2
-         RETURNING id, tenant_id, name, hostname, platform, capabilities, resources, status,
-                   last_seen_at, owner_person_id, shared, created_at, updated_at",
-                Postgres.now()
-            ),
-            params![id, auth.tenant_id, req.shared],
-        )
-        .await?;
+    let node = state
+        .nodes
+        .set_shared(id, auth.tenant_id, req.shared)
+        .await?
+        .ok_or(ApiError::NotFound)?;
     Ok(Json(node))
 }
 
@@ -179,17 +154,15 @@ pub async fn authorize(
 ) -> ApiResult<Json<Session>> {
     use crate::auth::perm::{Permission, Scope};
 
-    let row: Option<(Option<uuid::Uuid>, bool, serde_json::Value)> = state
-        .db
-        .query_opt(
-            "SELECT owner_person_id, shared, capabilities FROM nodes WHERE id = $1 AND tenant_id = $2",
-            params![id, auth.tenant_id],
-        )
-        .await?;
     // Unknown/invisible node is a 404, not a 403 — no existence oracle.
-    let Some((_owner, shared, caps)) = row else {
+    let Some((sharing, caps)) = state
+        .nodes
+        .sharing_and_capabilities(id, auth.tenant_id)
+        .await?
+    else {
         return Err(ApiError::NotFound);
     };
+    let shared = sharing.shared;
     let is_operator = caps
         .get("shared_operator")
         .and_then(|v| v.as_bool())
@@ -241,13 +214,7 @@ pub async fn delete(
         crate::auth::perm::Scope::Tenant(tenant),
     )
     .await?;
-    let res = state
-        .db
-        .exec(
-            "DELETE FROM nodes WHERE tenant_id = $1 AND id = $2",
-            params![tenant, id],
-        )
-        .await?;
+    let res = state.nodes.delete(tenant, id).await?;
     if res == 0 {
         return Err(ApiError::NotFound);
     }
@@ -267,14 +234,7 @@ pub async fn rescan(
 ) -> ApiResult<axum::http::StatusCode> {
     // A node rescans itself; asking another to is an instruction, not a report.
     auth.require_node_self(id)?;
-    let owned: Option<(NodeId,)> = state
-        .db
-        .query_opt(
-            "SELECT id FROM nodes WHERE id = $1 AND tenant_id = $2",
-            params![id, auth.tenant_id],
-        )
-        .await?;
-    if owned.is_none() {
+    if !state.nodes.exists_in_tenant(id, auth.tenant_id).await? {
         return Err(ApiError::NotFound);
     }
     if !state
@@ -321,14 +281,7 @@ pub async fn migrate_paths(
     // only for a node in their tenant — exactly the `rescan` authorization. A
     // node token that named a peer would be rewriting another machine's rows.
     auth.require_node_self(id)?;
-    let owned: Option<(NodeId,)> = state
-        .db
-        .query_opt(
-            "SELECT id FROM nodes WHERE id = $1 AND tenant_id = $2",
-            params![id, auth.tenant_id],
-        )
-        .await?;
-    if owned.is_none() {
+    if !state.nodes.exists_in_tenant(id, auth.tenant_id).await? {
         return Err(ApiError::NotFound);
     }
 
@@ -390,14 +343,7 @@ pub async fn update(
         crate::auth::perm::Scope::Tenant(tenant),
     )
     .await?;
-    let owned: Option<(NodeId,)> = state
-        .db
-        .query_opt(
-            "SELECT id FROM nodes WHERE id = $1 AND tenant_id = $2",
-            params![id, tenant],
-        )
-        .await?;
-    if owned.is_none() {
+    if !state.nodes.exists_in_tenant(id, tenant).await? {
         return Err(ApiError::NotFound);
     }
     if !state
