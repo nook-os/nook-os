@@ -22,6 +22,12 @@ pub struct AppState {
     pub tasks: Arc<dyn crate::repo::tasks::TaskRepository>,
     /// Invite data access behind its trait (MAIN-250). Same contract.
     pub invites: Arc<dyn crate::repo::invites::InviteRepository>,
+    /// Workspaces and their checkouts (MAIN-251). Same contract.
+    pub workspaces: Arc<dyn crate::repo::workspaces::WorkspaceRepository>,
+    /// Tenant git credentials (MAIN-251).
+    pub git_credentials: Arc<dyn crate::repo::workspaces::GitCredentialRepository>,
+    /// Sealed per-workspace secret files (MAIN-251).
+    pub workspace_secrets: Arc<dyn crate::repo::workspaces::WorkspaceSecretRepository>,
     pub cfg: Arc<Config>,
     /// OIDC discovery state — configured/usable/degraded, hot-swappable after
     /// boot so an IdP that was down at startup recovers without a restart
@@ -89,6 +95,15 @@ impl AppState {
         Self {
             identity: Arc::new(crate::repo::identity::DbIdentityRepository::new(db.clone())),
             invites: Arc::new(crate::repo::invites::DbInviteRepository::new(db.clone())),
+            workspaces: Arc::new(crate::repo::workspaces::DbWorkspaceRepository::new(
+                db.clone(),
+            )),
+            git_credentials: Arc::new(crate::repo::workspaces::DbGitCredentialRepository::new(
+                db.clone(),
+            )),
+            workspace_secrets: Arc::new(crate::repo::workspaces::DbWorkspaceSecretRepository::new(
+                db.clone(),
+            )),
             kanban: Arc::new(KanbanRegistry::new(tasks.clone())),
             tasks,
             artifacts,
