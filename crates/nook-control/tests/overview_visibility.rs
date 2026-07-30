@@ -5,12 +5,12 @@
 //! Runs against a private `nook_testkit::TestBed`. Set `DATABASE_URL`.
 
 use nook_control::services::overview_queries::overview;
+use nook_db::{params, Db, DbPool};
 use nook_testkit::TestBed;
 use nook_types::*;
-use sqlx::PgPool;
 
 async fn checkout(
-    db: &PgPool,
+    db: &DbPool,
     tenant: TenantId,
     node: NodeId,
     ws: WorkspaceId,
@@ -18,24 +18,18 @@ async fn checkout(
     kind: &str,
 ) -> NodeWorkspaceId {
     let id = NodeWorkspaceId::new();
-    sqlx::query(
+    db.exec(
         "INSERT INTO node_workspaces (id, tenant_id, node_id, workspace_id, path, kind)
          VALUES ($1, $2, $3, $4, $5, $6)",
+        params![id, tenant, node, ws, path, kind],
     )
-    .bind(id)
-    .bind(tenant)
-    .bind(node)
-    .bind(ws)
-    .bind(path)
-    .bind(kind)
-    .execute(db)
     .await
     .expect("checkout");
     id
 }
 
 async fn session(
-    db: &PgPool,
+    db: &DbPool,
     tenant: TenantId,
     ws: WorkspaceId,
     node: NodeId,
@@ -43,18 +37,12 @@ async fn session(
     checkout: NodeWorkspaceId,
 ) -> SessionId {
     let id = SessionId::new();
-    sqlx::query(
+    db.exec(
         "INSERT INTO sessions
              (id, tenant_id, workspace_id, node_id, name, runtime, status, created_by, checkout_id)
          VALUES ($1, $2, $3, $4, 's', 'bash', 'running', $5, $6)",
+        params![id, tenant, ws, node, creator, checkout],
     )
-    .bind(id)
-    .bind(tenant)
-    .bind(ws)
-    .bind(node)
-    .bind(creator)
-    .bind(checkout)
-    .execute(db)
     .await
     .expect("session");
     id
@@ -92,10 +80,10 @@ async fn overview_scopes_checkouts_by_node_and_sessions_by_creator() {
     let node_b = bed.node(tenant, person_b).await;
     let ws = bed.workspace(tenant).await;
 
-    let co_a = checkout(&bed.pool, tenant, node_a, ws, "/srv/a", "clone").await;
-    let co_b = checkout(&bed.pool, tenant, node_b, ws, "/srv/b", "clone").await;
-    let sess_a = session(&bed.pool, tenant, ws, node_a, user_a, co_a).await;
-    let sess_b = session(&bed.pool, tenant, ws, node_b, user_b, co_b).await;
+    let co_a = checkout(&bed.db(), tenant, node_a, ws, "/srv/a", "clone").await;
+    let co_b = checkout(&bed.db(), tenant, node_b, ws, "/srv/b", "clone").await;
+    let sess_a = session(&bed.db(), tenant, ws, node_a, user_a, co_a).await;
+    let sess_b = session(&bed.db(), tenant, ws, node_b, user_b, co_b).await;
 
     // Admin scope (both None): the whole fleet — both checkouts, both sessions.
     let admin = overview(&bed.db(), tenant, None, None, None).await.unwrap();
@@ -135,9 +123,11 @@ async fn overview_scopes_checkouts_by_node_and_sessions_by_creator() {
 
     // Share node B with the team: A now sees B's checkout (own+shared), but STILL
     // not B's session — the two axes are independent.
-    sqlx::query("UPDATE nodes SET shared = true WHERE id = $1")
-        .bind(node_b)
-        .execute(&bed.pool)
+    bed.db()
+        .exec(
+            "UPDATE nodes SET shared = true WHERE id = $1",
+            params![node_b],
+        )
         .await
         .expect("share node B");
     let shared = overview(
@@ -175,9 +165,9 @@ async fn overview_groups_the_hierarchy_and_omits_empty_workspaces() {
     // A second workspace with NO checkouts/sessions → must be omitted.
     let _empty = bed.workspace(tenant).await;
 
-    let clone = checkout(&bed.pool, tenant, node, ws, "/srv/clone", "clone").await;
-    let wt = checkout(&bed.pool, tenant, node, ws, "/srv/wt", "worktree").await;
-    let sess = session(&bed.pool, tenant, ws, node, user, clone).await;
+    let clone = checkout(&bed.db(), tenant, node, ws, "/srv/clone", "clone").await;
+    let wt = checkout(&bed.db(), tenant, node, ws, "/srv/wt", "worktree").await;
+    let sess = session(&bed.db(), tenant, ws, node, user, clone).await;
 
     let ov = overview(&bed.db(), tenant, Some(person), Some(user), Some(user))
         .await
@@ -211,8 +201,9 @@ async fn dev_seed_populates_mission_control() {
     // TestBed's template runs `seed::run` (Config::for_test, tenant slug "test"),
     // which now seeds the Mission Control demo: a repo with a remote, a clone + a
     // worktree, a tombstoned checkout, a bound session, and a loose terminal.
-    let tenant: TenantId = sqlx::query_scalar("SELECT id FROM tenants WHERE slug = 'test'")
-        .fetch_one(&bed.pool)
+    let tenant: TenantId = bed
+        .db()
+        .query_scalar("SELECT id FROM tenants WHERE slug = 'test'", params![])
         .await
         .expect("the seeded dev tenant");
 
@@ -255,30 +246,24 @@ async fn dev_seed_populates_mission_control() {
 
 /// A board with a known key and one column of `col_type`.
 async fn board_with_column(
-    db: &PgPool,
+    db: &DbPool,
     tenant: TenantId,
     key: &str,
     col_type: &str,
 ) -> (BoardId, ColumnId) {
     let board = BoardId::new();
-    sqlx::query(
+    db.exec(
         "INSERT INTO boards (id, tenant_id, name, key, provider) VALUES ($1,$2,'b',$3,'local')",
+        params![board, tenant, key],
     )
-    .bind(board)
-    .bind(tenant)
-    .bind(key)
-    .execute(db)
     .await
     .expect("board");
     let col = ColumnId::new();
-    sqlx::query(
+    db.exec(
         "INSERT INTO board_columns (id, board_id, name, position, type)
          VALUES ($1,$2,'Doing',0,$3)",
+        params![col, board, col_type],
     )
-    .bind(col)
-    .bind(board)
-    .bind(col_type)
-    .execute(db)
     .await
     .expect("column");
     (board, col)
@@ -288,7 +273,7 @@ async fn board_with_column(
 /// session by `session_id` (the fresh-worktree fallback), with a visibility.
 #[allow(clippy::too_many_arguments)]
 async fn task_on(
-    db: &PgPool,
+    db: &DbPool,
     tenant: TenantId,
     board: BoardId,
     col: ColumnId,
@@ -299,22 +284,23 @@ async fn task_on(
     session: Option<SessionId>,
 ) -> TaskId {
     let id = TaskId::new();
-    sqlx::query(
+    db.exec(
         "INSERT INTO tasks (id, tenant_id, board_id, column_id, title, type, number,
                             created_by, visibility, checkout_id, session_id)
          VALUES ($1,$2,$3,$4,$5,'task',$6,$7,$8,$9,$10)",
+        params![
+            id,
+            tenant,
+            board,
+            col,
+            format!("title-{number}"),
+            number,
+            creator,
+            visibility,
+            checkout.map(|v| v.0),
+            session.map(|v| v.0)
+        ],
     )
-    .bind(id)
-    .bind(tenant)
-    .bind(board)
-    .bind(col)
-    .bind(format!("title-{number}"))
-    .bind(number)
-    .bind(creator)
-    .bind(visibility)
-    .bind(checkout)
-    .bind(session)
-    .execute(db)
     .await
     .expect("task");
     id
@@ -342,13 +328,13 @@ async fn a_checkout_names_its_ticket_by_checkout_id_and_by_session_fallback() {
     let (user, person) = bed.user(tenant, "owner").await;
     let ws = bed.workspace(tenant).await;
     let node = bed.node(tenant, person).await;
-    let (board, col) = board_with_column(&bed.pool, tenant, "MAIN", "started").await;
+    let (board, col) = board_with_column(&bed.db(), tenant, "MAIN", "started").await;
 
     // (1) The durable join: discovery has scanned, so the task points at the
     //     checkout directly.
-    let scanned = checkout(&bed.pool, tenant, node, ws, "/srv/a", "worktree").await;
+    let scanned = checkout(&bed.db(), tenant, node, ws, "/srv/a", "worktree").await;
     task_on(
-        &bed.pool,
+        &bed.db(),
         tenant,
         board,
         col,
@@ -364,10 +350,10 @@ async fn a_checkout_names_its_ticket_by_checkout_id_and_by_session_fallback() {
     //     NULL — MAIN-225 never guesses it — so only the session knows where the
     //     work is. Without this join the chip would not appear until the next
     //     scan, which is exactly when you most want it.
-    let fresh = checkout(&bed.pool, tenant, node, ws, "/srv/b", "worktree").await;
-    let sess = session(&bed.pool, tenant, ws, node, user, fresh).await;
+    let fresh = checkout(&bed.db(), tenant, node, ws, "/srv/b", "worktree").await;
+    let sess = session(&bed.db(), tenant, ws, node, user, fresh).await;
     task_on(
-        &bed.pool,
+        &bed.db(),
         tenant,
         board,
         col,
@@ -412,16 +398,18 @@ async fn a_private_card_never_rides_out_on_a_shared_nodes_checkout() {
     // A SHARED node: the member can legitimately see its checkouts, which is
     // what makes this the interesting case rather than a trivially hidden one.
     let node = bed.node(tenant, owner_person).await;
-    sqlx::query("UPDATE nodes SET shared = true WHERE id = $1")
-        .bind(node)
-        .execute(&bed.pool)
+    bed.db()
+        .exec(
+            "UPDATE nodes SET shared = true WHERE id = $1",
+            params![node],
+        )
         .await
         .expect("share the node");
 
-    let (board, col) = board_with_column(&bed.pool, tenant, "MAIN", "started").await;
-    let co = checkout(&bed.pool, tenant, node, ws, "/srv/secret", "worktree").await;
+    let (board, col) = board_with_column(&bed.db(), tenant, "MAIN", "started").await;
+    let co = checkout(&bed.db(), tenant, node, ws, "/srv/secret", "worktree").await;
     task_on(
-        &bed.pool,
+        &bed.db(),
         tenant,
         board,
         col,
@@ -486,10 +474,10 @@ async fn archived_tasks_do_not_label_a_checkout() {
     let (user, person) = bed.user(tenant, "owner").await;
     let ws = bed.workspace(tenant).await;
     let node = bed.node(tenant, person).await;
-    let (board, col) = board_with_column(&bed.pool, tenant, "MAIN", "completed").await;
-    let co = checkout(&bed.pool, tenant, node, ws, "/srv/old", "worktree").await;
+    let (board, col) = board_with_column(&bed.db(), tenant, "MAIN", "completed").await;
+    let co = checkout(&bed.db(), tenant, node, ws, "/srv/old", "worktree").await;
     let t = task_on(
-        &bed.pool,
+        &bed.db(),
         tenant,
         board,
         col,
@@ -506,9 +494,11 @@ async fn archived_tasks_do_not_label_a_checkout() {
         vec!["MAIN-9"]
     );
 
-    sqlx::query("UPDATE tasks SET archived_at = now() WHERE id = $1")
-        .bind(t)
-        .execute(&bed.pool)
+    bed.db()
+        .exec(
+            "UPDATE tasks SET archived_at = now() WHERE id = $1",
+            params![t],
+        )
         .await
         .expect("archive");
 
