@@ -14,16 +14,14 @@
 
 
 
-# ── MAIN-258 · Operator/admin repositories ──────────────────────────────────
-crates/nook-control/src/routes/operator.rs       # operator console actions
-crates/nook-control/src/routes/managed.rs        # managed skill/hook content
-crates/nook-control/src/routes/skills.rs         # taught skills
-crates/nook-control/src/routes/settings.rs       # tenant settings
-crates/nook-control/src/routes/themes.rs         # theme catalogue
-crates/nook-control/src/services/operator_queries.rs    # split out by MAIN-245, awaits its trait
-crates/nook-control/src/services/policy.rs       # visibility policy rows
-crates/nook-control/src/routes/schedule.rs       # scheduled-node lookup
-crates/nook-control/src/services/schedule.rs     # scheduled operator work
+# ── Re-filed by MAIN-258 ────────────────────────────────────────────────────
+# MAIN-258 migrated the five files its "Relevant files" named plus the operator
+# slice of the split shared module. These three sat under its heading but were
+# never in its scope, so they are re-filed here with what they actually are
+# rather than left pointing at a card that has landed without them.
+crates/nook-control/src/services/policy.rs       # org visibility policy rows; the operator pages READ it, no aggregate owns it
+crates/nook-control/src/routes/schedule.rs       # scheduled-node lookup (MAIN-263's surface, not the console's)
+crates/nook-control/src/services/schedule.rs     # scheduled operator work; shares `schedules` with the route above
 
 # ── Cross-cutting reads, no card yet ────────────────────────────────────────
 # These belong to no single aggregate. They need a home decided before they can

@@ -12,6 +12,12 @@ use nook_types::*;
 use sqlx::PgPool;
 use uuid::Uuid;
 
+/// The real repository over the test's pool — the seed rules under test live in
+/// its impl since MAIN-258, and these stay DB-backed (NG-4).
+fn repo(bed: &TestBed) -> nook_control::repo::admin::DbManagedContentRepository {
+    nook_control::repo::admin::DbManagedContentRepository::new(bed.db())
+}
+
 /// A synthetic managed key, unique per test run, so the seed rules can be driven
 /// without touching the real `nookos`/hooks rows other tests and the running
 /// control plane rely on.
@@ -39,7 +45,7 @@ async fn seed_rules_insert_noop_and_refresh() {
     let name = synthetic_name();
 
     // ── Fresh: inserts at version 1, content == default ─────────────────────
-    managed::upsert_default(&bed.db(), "skill", &name, "DEFAULT-V1")
+    managed::upsert_default(&repo(&bed), "skill", &name, "DEFAULT-V1")
         .await
         .unwrap();
     let (content, sha, version, default_sha) = row(&bed.pool, &name).await.expect("seeded");
@@ -48,7 +54,7 @@ async fn seed_rules_insert_noop_and_refresh() {
     assert_eq!(sha, default_sha, "a fresh row's content is its default");
 
     // ── Unchanged default: a re-seed is a no-op ─────────────────────────────
-    managed::upsert_default(&bed.db(), "skill", &name, "DEFAULT-V1")
+    managed::upsert_default(&repo(&bed), "skill", &name, "DEFAULT-V1")
         .await
         .unwrap();
     assert_eq!(row(&bed.pool, &name).await.unwrap().2, 1, "no churn");
@@ -64,7 +70,7 @@ async fn seed_rules_insert_noop_and_refresh() {
     .execute(&bed.pool)
     .await
     .unwrap();
-    managed::upsert_default(&bed.db(), "skill", &name, "DEFAULT-V1")
+    managed::upsert_default(&repo(&bed), "skill", &name, "DEFAULT-V1")
         .await
         .unwrap();
     let (content, _, version, _) = row(&bed.pool, &name).await.unwrap();
@@ -75,7 +81,7 @@ async fn seed_rules_insert_noop_and_refresh() {
     assert_eq!(version, 9, "and must not bump the version");
 
     // ── Newer shipped default: refresh + bump, even over an operator edit ────
-    managed::upsert_default(&bed.db(), "skill", &name, "DEFAULT-V2")
+    managed::upsert_default(&repo(&bed), "skill", &name, "DEFAULT-V2")
         .await
         .unwrap();
     let (content, sha, version, default_sha) = row(&bed.pool, &name).await.unwrap();
@@ -92,7 +98,7 @@ async fn seed_populates_the_real_managed_set() {
         eprintln!("skipping managed seed-real test — no DATABASE_URL");
         return;
     };
-    managed::seed(&bed.db()).await.unwrap();
+    managed::seed(&repo(&bed)).await.unwrap();
 
     // The nookos skill and the hook set are present with a sha and a version.
     let skill: Option<(String, String, i64)> = sqlx::query_as(
@@ -121,7 +127,9 @@ async fn seed_populates_the_real_managed_set() {
     );
 
     // The stored skills express as the InstallSkill payload (AC-4).
-    let payloads = managed::managed_skills_as_install(&bed.db()).await.unwrap();
+    let payloads = managed::managed_skills_as_install(&repo(&bed))
+        .await
+        .unwrap();
     assert!(payloads.iter().any(
         |m| matches!(m, nook_proto::ControlToNode::InstallSkill { name, .. } if name == "nookos")
     ));
@@ -168,7 +176,7 @@ async fn read_endpoints_require_node_manage() {
         return;
     };
     let state = bed.app_state().await;
-    managed::seed(&bed.db()).await.unwrap();
+    managed::seed(&repo(&bed)).await.unwrap();
     let (_tenant, user, ctx) = tenant_user(&bed.pool).await;
 
     // Without a grant: both reads are refused (not a 500, a forbidden). AuthCtx

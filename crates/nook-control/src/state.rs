@@ -49,6 +49,18 @@ pub struct AppState {
     /// The app password, its passkeys, and the notebook's per-note seal
     /// (MAIN-254). Named `vaults` because `vault` is the crypto key holder.
     pub vaults: Arc<dyn crate::repo::notebook::VaultRepository>,
+    /// The operator console: orgs, role bindings, and its four lists
+    /// (MAIN-258).
+    pub operator: Arc<dyn crate::repo::admin::OperatorRepository>,
+    /// The shipped skill and hook set. The content stays immutable; only its
+    /// data access moved (MAIN-258).
+    pub managed: Arc<dyn crate::repo::admin::ManagedContentRepository>,
+    /// What a tenant has taught its fleet (MAIN-258).
+    pub skills: Arc<dyn crate::repo::admin::SkillRepository>,
+    /// Tenant- and user-scoped settings rows (MAIN-258).
+    pub settings: Arc<dyn crate::repo::admin::SettingRepository>,
+    /// The theme catalogue (MAIN-258).
+    pub themes: Arc<dyn crate::repo::admin::ThemeRepository>,
     pub cfg: Arc<Config>,
     /// OIDC discovery state — configured/usable/degraded, hot-swappable after
     /// boot so an IdP that was down at startup recovers without a restart
@@ -139,6 +151,13 @@ impl AppState {
                 db.clone(),
             )),
             vaults: Arc::new(crate::repo::notebook::DbVaultRepository::new(db.clone())),
+            operator: Arc::new(crate::repo::admin::DbOperatorRepository::new(db.clone())),
+            managed: Arc::new(crate::repo::admin::DbManagedContentRepository::new(
+                db.clone(),
+            )),
+            skills: Arc::new(crate::repo::admin::DbSkillRepository::new(db.clone())),
+            settings: Arc::new(crate::repo::admin::DbSettingRepository::new(db.clone())),
+            themes: Arc::new(crate::repo::admin::DbThemeRepository::new(db.clone())),
             kanban: Arc::new(KanbanRegistry::new(tasks.clone())),
             tasks,
             artifacts,

@@ -199,15 +199,18 @@ async fn a_second_boot_over_the_same_file_is_clean() {
 async fn the_managed_upgrade_branch_survives_on_sqlite() {
     let file = ScratchDb::new("managed");
     let db = boot(&file).await;
+    // The seeder speaks to the repository now (MAIN-258); the engine-selected
+    // `now()` this test exists for moved into its impl with it.
+    let repo = nook_control::repo::admin::DbManagedContentRepository::new(db.clone());
 
     // Install at version 1 (the insert branch).
-    nook_control::routes::managed::upsert_default(&db, "skill", "sqlite-probe", "v1 body")
+    nook_control::routes::managed::upsert_default(&repo, "skill", "sqlite-probe", "v1 body")
         .await
         .expect("insert branch");
 
     // Now ship a DIFFERENT default: the sha moves, so the UPDATE branch runs.
     // This is the call that failed before the fix.
-    nook_control::routes::managed::upsert_default(&db, "skill", "sqlite-probe", "v2 body")
+    nook_control::routes::managed::upsert_default(&repo, "skill", "sqlite-probe", "v2 body")
         .await
         .expect("the upgrade branch must not be Postgres-only");
 
@@ -228,7 +231,7 @@ async fn the_managed_upgrade_branch_survives_on_sqlite() {
 
     // Re-running with unchanged content takes the no-op branch and must also
     // survive — this is the ordinary restart.
-    nook_control::routes::managed::upsert_default(&db, "skill", "sqlite-probe", "v2 body")
+    nook_control::routes::managed::upsert_default(&repo, "skill", "sqlite-probe", "v2 body")
         .await
         .expect("no-op branch");
     let version: i64 = sqlx::query_scalar(

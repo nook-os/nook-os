@@ -291,6 +291,12 @@ pub trait WorkspaceRepository: Send + Sync {
         tenant: TenantId,
     ) -> ApiResult<Option<(String, Option<String>)>>;
 
+    /// Just the repository names in a tenant, alphabetical, capped. The
+    /// operator console shows these only when an org has opted in
+    /// (MAIN-76) — names and nothing else, so a widened projection here
+    /// cannot become a leak of branches or paths.
+    async fn names_in_tenant(&self, tenant: TenantId, limit: i64) -> ApiResult<Vec<String>>;
+
     /// Any node holding a checkout of this workspace — where a feedback
     /// session gets started when there is no live one (MAIN-256).
     async fn any_checkout_node(&self, workspace: WorkspaceId) -> ApiResult<Option<NodeId>>;
@@ -956,6 +962,17 @@ impl WorkspaceRepository for DbWorkspaceRepository {
                 params![id, tenant],
             )
             .await?)
+    }
+
+    async fn names_in_tenant(&self, tenant: TenantId, limit: i64) -> ApiResult<Vec<String>> {
+        let rows: Vec<(String,)> = self
+            .db
+            .query_all(
+                "SELECT name FROM workspaces WHERE tenant_id = $1 ORDER BY name LIMIT $2",
+                params![tenant, limit],
+            )
+            .await?;
+        Ok(rows.into_iter().map(|(n,)| n).collect())
     }
 
     async fn any_checkout_node(&self, workspace: WorkspaceId) -> ApiResult<Option<NodeId>> {
@@ -2004,6 +2021,19 @@ impl WorkspaceRepository for FakeWorkspaceRepository {
             .iter()
             .find(|w| w.id == id && w.tenant_id == tenant)
             .map(|w| (w.name.clone(), w.git_remote_normalized.clone())))
+    }
+
+    async fn names_in_tenant(&self, tenant: TenantId, limit: i64) -> ApiResult<Vec<String>> {
+        let st = self.inner.lock().unwrap();
+        let mut names: Vec<String> = st
+            .workspaces
+            .iter()
+            .filter(|w| w.tenant_id == tenant)
+            .map(|w| w.name.clone())
+            .collect();
+        names.sort();
+        names.truncate(limit.max(0) as usize);
+        Ok(names)
     }
 
     async fn any_checkout_node(&self, workspace: WorkspaceId) -> ApiResult<Option<NodeId>> {

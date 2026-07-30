@@ -152,6 +152,17 @@ pub trait TaskRepository: Send + Sync {
     /// Every label attached to any of these tasks, ordered by label name.
     async fn labels_for_tasks(&self, task_ids: &[Uuid]) -> ApiResult<Vec<TaskLabelRow>>;
 
+    /// Recent task titles a deployment operator may be shown, newest first,
+    /// capped.
+    ///
+    /// A `private` task is never included, even when the org has switched the
+    /// policy on (MAIN-76 AC-4). The exclusion lives in the projection because
+    /// the policy is ADDITIVE — it adds titles, it does not filter them — so a
+    /// private card must simply never be selected here. A filter applied by the
+    /// caller instead would fail open the first time somebody forgot it.
+    async fn operator_visible_titles(&self, tenant: TenantId, limit: i64)
+        -> ApiResult<Vec<String>>;
+
     /// Parent number + visibility columns for a set of parents, one query for
     /// the whole batch.
     async fn parent_info(&self, parent_ids: &[Uuid]) -> ApiResult<HashMap<Uuid, ParentInfo>>;
@@ -571,6 +582,23 @@ impl TaskRepository for DbTaskRepository {
             .await?
             .into_iter()
             .collect())
+    }
+
+    async fn operator_visible_titles(
+        &self,
+        tenant: TenantId,
+        limit: i64,
+    ) -> ApiResult<Vec<String>> {
+        let rows: Vec<(String,)> = self
+            .db
+            .query_all(
+                "SELECT title FROM tasks
+             WHERE tenant_id = $1 AND visibility <> 'private'
+             ORDER BY created_at DESC LIMIT $2",
+                params![tenant, limit],
+            )
+            .await?;
+        Ok(rows.into_iter().map(|(t,)| t).collect())
     }
 
     async fn labels_for_tasks(&self, task_ids: &[Uuid]) -> ApiResult<Vec<TaskLabelRow>> {
@@ -2065,6 +2093,25 @@ impl TaskRepository for FakeTaskRepository {
             .iter()
             .filter(|b| board_ids.contains(&b.id.0))
             .map(|b| (b.id.0, b.key.clone()))
+            .collect())
+    }
+
+    async fn operator_visible_titles(
+        &self,
+        tenant: TenantId,
+        limit: i64,
+    ) -> ApiResult<Vec<String>> {
+        let st = self.inner.lock().unwrap();
+        let mut rows: Vec<&TaskItem> = st
+            .tasks
+            .iter()
+            .filter(|t| t.tenant_id == tenant && t.visibility != "private")
+            .collect();
+        rows.sort_by_key(|t| std::cmp::Reverse(t.created_at));
+        Ok(rows
+            .into_iter()
+            .take(limit.max(0) as usize)
+            .map(|t| t.title.clone())
             .collect())
     }
 
