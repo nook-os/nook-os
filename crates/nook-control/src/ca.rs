@@ -20,8 +20,9 @@
 
 use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Duration, Utc};
-use nook_db::{params, Db, DbPool, Postgres, TypeMapping};
-use nook_types::TenantId;
+use nook_types::{NodeId, TenantId};
+
+use crate::repo::nodes::{NodeRepository, TenantCaRepository};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
@@ -72,7 +73,7 @@ fn pem_to_der(pem: &str) -> Result<Vec<u8>> {
 /// immediately, whereas a rotation stages the new CA and promotes it later,
 /// once nodes have had a chance to pick it up.
 pub async fn generate(
-    db: &DbPool,
+    cas: &dyn TenantCaRepository,
     vault: &crate::crypto::Vault,
     tenant: TenantId,
     make_active: bool,
@@ -109,21 +110,8 @@ pub async fn generate(
         .map_err(|e| anyhow::anyhow!("sealing the CA key failed: {e}"))?;
 
     let state = if make_active { "active" } else { "staged" };
-    let row: TenantCa = db
-        .query_one(
-            "INSERT INTO tenant_cas (id, tenant_id, state, cert_pem, key_enc, fingerprint, not_after)
-         VALUES ($1, $2, $3, $4, $5, $6, $7)
-         RETURNING id, tenant_id, state, cert_pem, fingerprint, not_after, created_at",
-            params![
-                Uuid::now_v7(),
-                tenant,
-                state,
-                &cert_pem,
-                key_enc,
-                &fingerprint,
-                not_after
-            ],
-        )
+    let row = cas
+        .insert(tenant, state, &cert_pem, key_enc, &fingerprint, not_after)
         .await?;
     Ok(row)
 }
@@ -134,67 +122,21 @@ pub async fn generate(
 /// you are trying to retire, so enrolment and renewal both return this whole
 /// set. That is what makes rotation a background process rather than a
 /// fleet-wide outage.
-pub async fn trust_bundle(db: &DbPool, tenant: TenantId) -> Result<Vec<TenantCa>> {
-    let rows: Vec<TenantCa> = db
-        .query_all(
-            "SELECT id, tenant_id, state, cert_pem, fingerprint, not_after, created_at
-           FROM tenant_cas WHERE tenant_id = $1 ORDER BY created_at",
-            params![tenant],
-        )
-        .await?;
-    Ok(rows)
+pub async fn trust_bundle(cas: &dyn TenantCaRepository, tenant: TenantId) -> Result<Vec<TenantCa>> {
+    Ok(cas.bundle(tenant).await?)
 }
 
 /// The tenant's signing key, verified before use.
 ///
 /// Returns the CA record plus the decrypted key PEM. Refuses — loudly — if the
 /// stored certificate does not match its recorded fingerprint, rather than
-/// The `tenant_cas` row as sqlx hands it back: the `TenantCa` columns in
-/// declaration order, followed by the encrypted private key.
-///
-/// Named because eight anonymous tuple elements at the use site say nothing
-/// about which is which, and the order has to match the SELECT exactly.
-type CaRow = (
-    Uuid,
-    Uuid,
-    String,
-    String,
-    String,
-    DateTime<Utc>,
-    DateTime<Utc>,
-    Vec<u8>,
-);
-
 /// signing with something that isn't what the tenant enrolled against.
 pub async fn load_signer(
-    db: &DbPool,
+    cas: &dyn TenantCaRepository,
     vault: &crate::crypto::Vault,
     tenant: TenantId,
 ) -> Result<(TenantCa, String)> {
-    let row: Option<(TenantCa, Vec<u8>)> = db
-        .query_opt::<CaRow>(
-            "SELECT id, tenant_id, state, cert_pem, fingerprint, not_after, created_at, key_enc
-           FROM tenant_cas WHERE tenant_id = $1 AND state = 'active'",
-            params![tenant],
-        )
-        .await
-        .map(|o| {
-            o.map(|r: CaRow| {
-                (
-                    TenantCa {
-                        id: r.0,
-                        tenant_id: r.1,
-                        state: r.2,
-                        cert_pem: r.3,
-                        fingerprint: r.4,
-                        not_after: r.5,
-                        created_at: r.6,
-                    },
-                    r.7,
-                )
-            })
-        })?;
-
+    let row = cas.active_signer(tenant).await?;
     let Some((ca, key_enc)) = row else {
         bail!("tenant {tenant} has no active CA");
     };
@@ -247,7 +189,7 @@ pub struct IssuedLeaf {
 /// reads identity off the certificate, which makes this the single point where
 /// "who is this machine" is established.
 pub async fn sign_node_csr(
-    db: &DbPool,
+    cas: &dyn TenantCaRepository,
     vault: &crate::crypto::Vault,
     tenant: TenantId,
     node_id: Uuid,
@@ -258,7 +200,7 @@ pub async fn sign_node_csr(
         PublicKeyData,
     };
 
-    let (ca, ca_key_pem) = load_signer(db, vault, tenant).await?;
+    let (ca, ca_key_pem) = load_signer(cas, vault, tenant).await?;
 
     // Rebuild the issuer from what we stored. `from_ca_cert_pem` keeps the
     // subject and key identifier, so issued certificates chain to the CA the
@@ -333,48 +275,18 @@ fn pem_wrap(label: &str, der: &[u8]) -> String {
 
 /// Promote a staged CA to be the tenant's signer, demoting the current one to
 /// `retiring` — it stays trusted, it just stops issuing.
-pub async fn promote(db: &DbPool, tenant: TenantId, ca_id: Uuid) -> Result<()> {
-    let mut tx = db.begin().await?;
-    // Demote first: the partial unique index allows only one active row, so
-    // the order matters.
-    tx.exec(
-        "UPDATE tenant_cas SET state = 'retiring'
-          WHERE tenant_id = $1 AND state = 'active'",
-        params![tenant],
-    )
-    .await?;
-    let done = tx
-        .exec(
-            "UPDATE tenant_cas SET state = 'active'
-          WHERE id = $1 AND tenant_id = $2 AND state = 'staged'",
-            params![ca_id, tenant],
-        )
-        .await?;
-    if done == 0 {
-        tx.rollback().await?;
+pub async fn promote(cas: &dyn TenantCaRepository, tenant: TenantId, ca_id: Uuid) -> Result<()> {
+    if !cas.promote(tenant, ca_id).await? {
         bail!("no staged CA {ca_id} for this tenant to promote");
     }
-    tx.commit().await?;
     Ok(())
 }
 
 /// How many nodes still hold an unexpired leaf signed by this CA.
 ///
 /// The retirement guard, and the number an admin watches during a rotation.
-pub async fn live_leaves(db: &DbPool, tenant: TenantId, ca_id: Uuid) -> Result<i64> {
-    let n: i64 = db
-        .query_scalar(
-            &format!(
-                "SELECT count(*) FROM nodes
-          WHERE tenant_id = $1 AND ca_id = $2
-            AND revoked_at IS NULL
-            AND cert_not_after IS NOT NULL AND cert_not_after > {now}",
-                now = Postgres.now()
-            ),
-            params![tenant, ca_id],
-        )
-        .await?;
-    Ok(n)
+pub async fn live_leaves(nodes: &dyn NodeRepository, tenant: TenantId, ca_id: Uuid) -> Result<i64> {
+    Ok(nodes.live_leaf_count(tenant, ca_id).await?)
 }
 
 /// Drop a CA from the tenant's trust bundle.
@@ -383,8 +295,13 @@ pub async fn live_leaves(db: &DbPool, tenant: TenantId, ca_id: Uuid) -> Result<i
 /// lock those machines out mid-rotation, which is exactly the outage the
 /// staged/active/retiring dance exists to avoid. A check here rather than a
 /// step in a runbook, because runbooks are not executed at 2am.
-pub async fn retire(db: &DbPool, tenant: TenantId, ca_id: Uuid) -> Result<()> {
-    let live = live_leaves(db, tenant, ca_id).await?;
+pub async fn retire(
+    cas: &dyn TenantCaRepository,
+    nodes: &dyn NodeRepository,
+    tenant: TenantId,
+    ca_id: Uuid,
+) -> Result<()> {
+    let live = live_leaves(nodes, tenant, ca_id).await?;
     if live > 0 {
         bail!(
             "refusing to retire CA {ca_id}: {live} node(s) still hold unexpired \
@@ -392,12 +309,7 @@ pub async fn retire(db: &DbPool, tenant: TenantId, ca_id: Uuid) -> Result<()> {
              retire this one once that count reaches zero."
         );
     }
-    let done = db
-        .exec(
-            "DELETE FROM tenant_cas WHERE id = $1 AND tenant_id = $2 AND state <> 'active'",
-            params![ca_id, tenant],
-        )
-        .await?;
+    let done = cas.retire(ca_id, tenant).await?;
     if done == 0 {
         bail!("no retirable CA {ca_id} for this tenant (the active signer cannot be retired)");
     }
@@ -429,7 +341,11 @@ pub struct NodeIdentity {
 ///    in the certificate. A certificate that claims a node in someone else's
 ///    tenant is rejected even if it is otherwise perfectly valid — the
 ///    certificate proves *who*, the tenant check decides *what*.
-pub async fn verify_node_cert(db: &DbPool, cert_der: &[u8]) -> Result<NodeIdentity> {
+pub async fn verify_node_cert(
+    cas: &dyn TenantCaRepository,
+    nodes: &dyn NodeRepository,
+    cert_der: &[u8],
+) -> Result<NodeIdentity> {
     use x509_parser::prelude::*;
 
     let (_, cert) =
@@ -456,15 +372,10 @@ pub async fn verify_node_cert(db: &DbPool, cert_der: &[u8]) -> Result<NodeIdenti
     // The node record is the authority on which tenant a machine belongs to.
     // Comparing it against the certificate is what stops a valid certificate
     // from one tenant being used to act in another.
-    let row: Option<(Uuid, Option<DateTime<Utc>>)> = db
-        .query_opt(
-            "SELECT tenant_id, revoked_at FROM nodes WHERE id = $1",
-            params![node_id],
-        )
-        .await?;
-    let Some((actual_tenant, revoked_at)) = row else {
+    let Some((actual_tenant, revoked_at)) = nodes.revocation_state(NodeId(node_id)).await? else {
         bail!("certificate names node {node_id}, which does not exist");
     };
+    let actual_tenant = actual_tenant.0;
     if actual_tenant != tenant_id {
         bail!(
             "certificate claims tenant {tenant_id} for node {node_id}, which belongs to {actual_tenant}"
@@ -475,7 +386,7 @@ pub async fn verify_node_cert(db: &DbPool, cert_der: &[u8]) -> Result<NodeIdenti
     }
 
     // Finally the signature, against that tenant's bundle only.
-    let bundle = trust_bundle(db, TenantId(tenant_id)).await?;
+    let bundle = trust_bundle(cas, TenantId(tenant_id)).await?;
     if bundle.is_empty() {
         bail!("tenant {tenant_id} trusts no CA");
     }

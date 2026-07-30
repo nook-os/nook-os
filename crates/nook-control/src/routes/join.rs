@@ -3,7 +3,6 @@
 use axum::extract::State;
 use axum::Json;
 use chrono::{Duration, Utc};
-use nook_db::{params, Db, Postgres, TypeMapping};
 use nook_types::*;
 use rand::distr::Alphanumeric;
 use rand::Rng;
@@ -29,33 +28,17 @@ pub fn random_token(prefix: &str, len: usize) -> String {
 /// token) or the minter's user row is gone. `None` only when the tenant has no
 /// owner-role user to fall back to — the same guarantee the backfill makes.
 async fn owner_person(
-    db: &nook_db::DbPool,
+    identity: &dyn crate::repo::identity::IdentityRepository,
     tenant: TenantId,
     minter: Option<uuid::Uuid>,
 ) -> Option<uuid::Uuid> {
     if let Some(user) = minter {
-        let person: Option<(uuid::Uuid,)> = db
-            .query_opt(
-                "SELECT person_id FROM users WHERE id = $1 AND tenant_id = $2",
-                params![user, tenant],
-            )
-            .await
-            .ok()
-            .flatten();
-        if let Some((p,)) = person {
-            return Some(p);
+        if let Ok(Some(person)) = identity.person_id_of_in_tenant(UserId(user), tenant).await {
+            return Some(person);
         }
     }
     // Fallback: the tenant owner's person.
-    db.query_opt::<(uuid::Uuid,)>(
-        "SELECT person_id FROM users WHERE tenant_id = $1 AND role = 'owner'
-         ORDER BY created_at LIMIT 1",
-        params![tenant],
-    )
-    .await
-    .ok()
-    .flatten()
-    .map(|(p,)| p)
+    identity.tenant_owner_person(tenant).await.ok().flatten()
 }
 
 /// POST /api/v1/nodes/join-tokens — mint a token to enroll a new machine.
@@ -71,17 +54,12 @@ pub async fn create_join_token(
     let token = random_token("nook_join_", 32);
     let expires_at = Utc::now() + Duration::hours(24);
     state
-        .db
-        .exec(
-            "INSERT INTO join_tokens (id, tenant_id, token_hash, name, created_by, expires_at)
-         VALUES ($1, $2, $3, '', $4, $5)",
-            params![
-                JoinTokenId::new(),
-                auth.tenant_id,
-                hash_token(&token),
-                auth.user_id,
-                expires_at
-            ],
+        .join_tokens
+        .issue(
+            auth.tenant_id,
+            &hash_token(&token),
+            auth.user_id,
+            expires_at,
         )
         .await?;
     // Read the serving certificate fresh rather than caching: an operator who
@@ -118,26 +96,15 @@ pub async fn join(
     State(state): State<AppState>,
     Json(req): Json<JoinRequest>,
 ) -> ApiResult<Json<JoinResponse>> {
-    let row: Option<(JoinTokenId, TenantId, Option<uuid::Uuid>)> = state
-        .db
-        .query_opt(
-            &format!(
-                "UPDATE join_tokens SET used_at = {now}
-         WHERE token_hash = $1 AND expires_at > {now}
-         RETURNING id, tenant_id, created_by",
-                now = Postgres.now()
-            ),
-            params![hash_token(&req.token)],
-        )
-        .await?;
-    let Some((_, tenant_id, created_by)) = row else {
+    let Some(spent) = state.join_tokens.consume(&hash_token(&req.token)).await? else {
         return Err(ApiError::Unauthorized);
     };
+    let (tenant_id, created_by) = (spent.tenant, spent.created_by.map(|u| u.0));
 
     // The person who minted the token owns the node (MAIN-119) — recorded, not
     // yet enforced. On a re-join of an existing node COALESCE keeps whatever
     // owner is already recorded, so a re-enroll never silently transfers it.
-    let owner = owner_person(&state.db, tenant_id, created_by).await;
+    let owner = owner_person(&*state.identity, tenant_id, created_by).await;
 
     let name = if req.name.trim().is_empty() {
         req.hostname.clone()
@@ -146,29 +113,16 @@ pub async fn join(
     };
     let node_token = random_token("nook_node_", 40);
 
-    let (node_id,): (NodeId,) = state
-        .db
-        .query_one(
-            &format!("INSERT INTO nodes (id, tenant_id, name, hostname, platform, node_token_hash, status, owner_person_id)
-         VALUES ($1, $2, $3, $4, $5, $6, 'offline', $7)
-         ON CONFLICT (tenant_id, name) DO UPDATE SET
-            hostname = EXCLUDED.hostname,
-            platform = EXCLUDED.platform,
-            node_token_hash = EXCLUDED.node_token_hash,
-            owner_person_id = COALESCE(nodes.owner_person_id, EXCLUDED.owner_person_id),
-            updated_at = {}
-         RETURNING id",
-                Postgres.now()),
-            params![
-                NodeId::new(),
-                tenant_id,
-                &name,
-                &req.hostname,
-                &req.platform,
-                hash_token(&node_token),
-                owner
-            ],
-        )
+    let node_id = state
+        .nodes
+        .upsert_joining(crate::repo::nodes::JoiningNode {
+            tenant: tenant_id,
+            name: name.clone(),
+            hostname: req.hostname.clone(),
+            platform: req.platform.clone(),
+            token_hash: hash_token(&node_token),
+            owner_person_id: owner,
+        })
         .await?;
 
     events::record(
@@ -207,58 +161,39 @@ pub async fn enroll(
 ) -> ApiResult<Json<EnrollResponse>> {
     // Spend the token first: a CSR that fails to sign must not leave a token
     // usable for a second attempt by someone else.
-    let row: Option<(uuid::Uuid, uuid::Uuid, Option<uuid::Uuid>)> = state
-        .db
-        .query_opt(
-            &format!(
-                "UPDATE join_tokens SET used_at = {now}
-         WHERE token_hash = $1 AND expires_at > {now}
-         RETURNING id, tenant_id, created_by",
-                now = Postgres.now()
-            ),
-            params![hash_token(&req.token)],
-        )
-        .await?;
-    let Some((_, tenant_uuid, created_by)) = row else {
+    let Some(spent) = state.join_tokens.consume(&hash_token(&req.token)).await? else {
         return Err(ApiError::Unauthorized);
     };
-    let tenant = TenantId(tenant_uuid);
+    let (tenant, created_by) = (spent.tenant, spent.created_by.map(|u| u.0));
     // The token minter owns the node (MAIN-119), else the tenant owner.
-    let owner = owner_person(&state.db, tenant, created_by).await;
+    let owner = owner_person(&*state.identity, tenant, created_by).await;
 
     // Lazily mint the tenant's CA on first enrolment. Only ever when there is
     // none — never as a silent replacement for one that failed to load.
-    if crate::ca::trust_bundle(&state.db, tenant).await?.is_empty() {
-        crate::ca::generate(&state.db, &state.vault, tenant, true)
+    if crate::ca::trust_bundle(&*state.tenant_cas, tenant)
+        .await?
+        .is_empty()
+    {
+        crate::ca::generate(&*state.tenant_cas, &state.vault, tenant, true)
             .await
             .map_err(ApiError::Internal)?;
     }
 
     let name = req.name.unwrap_or_else(|| "node".to_string());
     let node_id = uuid::Uuid::now_v7();
-    let node_id: uuid::Uuid = state
-        .db
-        .query_scalar(
-            &format!(
-                "INSERT INTO nodes (id, tenant_id, name, node_token_hash, status, owner_person_id)
-         VALUES ($1, $2, $3, $4, 'offline', $5)
-         ON CONFLICT (tenant_id, name) DO UPDATE SET
-            owner_person_id = COALESCE(nodes.owner_person_id, EXCLUDED.owner_person_id),
-            updated_at = {}
-         RETURNING id",
-                Postgres.now()
-            ),
+    let node_id = state
+        .nodes
+        .upsert_enrolling(
+            NodeId(node_id),
+            tenant,
+            &name,
             // The node token stays for now as the transitional credential; the
             // certificate supersedes it once the handshake is wired.
-            params![
-                node_id,
-                tenant,
-                &name,
-                crate::seed::hash_token(&format!("enroll-{node_id}")),
-                owner
-            ],
+            &crate::seed::hash_token(&format!("enroll-{node_id}")),
+            owner,
         )
-        .await?;
+        .await?
+        .0;
 
     issue(&state, tenant, node_id, &req.csr_pem).await
 }
@@ -276,20 +211,14 @@ pub async fn renew(
     State(state): State<AppState>,
     Json(req): Json<RenewRequest>,
 ) -> ApiResult<Json<EnrollResponse>> {
-    let row: Option<(
-        uuid::Uuid,
-        Option<String>,
-        Option<chrono::DateTime<chrono::Utc>>,
-    )> = state
-        .db
-        .query_opt(
-            "SELECT tenant_id, public_key_pem, revoked_at FROM nodes WHERE id = $1",
-            params![req.node_id],
-        )
-        .await?;
-    let Some((tenant_uuid, known_key, revoked_at)) = row else {
+    let Some(identity) = state.nodes.cert_identity(req.node_id).await? else {
         return Err(ApiError::NotFound);
     };
+    let (tenant_uuid, known_key, revoked_at) = (
+        identity.tenant.0,
+        identity.public_key_pem,
+        identity.revoked_at,
+    );
     // Revocation is an explicit act, and it must outrank "my certificate
     // expired" — otherwise a compromised machine simply waits and re-enrols.
     if revoked_at.is_some() {
@@ -326,32 +255,26 @@ async fn issue(
     node_id: uuid::Uuid,
     csr_pem: &str,
 ) -> ApiResult<Json<EnrollResponse>> {
-    let leaf = crate::ca::sign_node_csr(&state.db, &state.vault, tenant, node_id, csr_pem)
+    let leaf = crate::ca::sign_node_csr(&*state.tenant_cas, &state.vault, tenant, node_id, csr_pem)
         .await
         .map_err(ApiError::Internal)?;
 
     // Recording which CA signed it is what lets the retirement guard answer
     // "does this CA still have live leaves?".
     state
-        .db
-        .exec(
-            &format!(
-                "UPDATE nodes SET ca_id = $2, cert_not_after = $3, cert_pem = $4,
-                public_key_pem = $5, updated_at = {}
-          WHERE id = $1",
-                Postgres.now()
-            ),
-            params![
-                node_id,
-                leaf.ca_id,
-                leaf.not_after,
-                &leaf.cert_pem,
-                &leaf.public_key_pem
-            ],
+        .nodes
+        .record_issued_leaf(
+            NodeId(node_id),
+            crate::repo::nodes::IssuedLeaf {
+                ca_id: leaf.ca_id,
+                not_after: leaf.not_after,
+                cert_pem: leaf.cert_pem.clone(),
+                public_key_pem: leaf.public_key_pem.clone(),
+            },
         )
         .await?;
 
-    let ca_bundle = crate::ca::trust_bundle(&state.db, tenant)
+    let ca_bundle = crate::ca::trust_bundle(&*state.tenant_cas, tenant)
         .await?
         .into_iter()
         .map(|c| c.cert_pem)

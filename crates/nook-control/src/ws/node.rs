@@ -16,13 +16,13 @@ use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Response};
 use futures_util::{SinkExt, StreamExt};
-use nook_db::{params, Db, Json, Postgres, TypeMapping};
 use nook_proto::{ControlToNode, NodeToControl, UiEvent};
 use nook_types::{NodeId, TenantId};
 use tokio::sync::mpsc;
 
 use crate::error::ApiError;
 use crate::events::{self, EventDraft};
+use crate::repo::nodes::NodeIdentity;
 use crate::seed::hash_token;
 use crate::state::AppState;
 use crate::ws::registry::NodeHandle;
@@ -45,13 +45,15 @@ pub async fn node_ws(
     // the real work: chain it against *that tenant's* live trust bundle, and
     // refuse a node that has been revoked.
     if let Some(axum::Extension(cert)) = peer_cert {
-        return match crate::ca::verify_node_cert(&state.db, &cert.0).await {
+        return match crate::ca::verify_node_cert(&*state.tenant_cas, &*state.nodes, &cert.0).await {
             Ok(id) => {
-                let name: String = state
-                    .db
-                    .query_scalar("SELECT name FROM nodes WHERE id = $1", params![id.node_id])
+                let name = state
+                    .nodes
+                    .name_of(NodeId(id.node_id))
                     .await
-                    .unwrap_or_else(|_| "node".into());
+                    .ok()
+                    .flatten()
+                    .unwrap_or_else(|| "node".into());
                 tracing::debug!(node_id = %id.node_id, "node authenticated by certificate");
                 ws.on_upgrade(move |socket| {
                     handle(
@@ -83,18 +85,16 @@ pub async fn node_ws(
         return ApiError::Unauthorized.into_response();
     };
 
-    let row: Option<(NodeId, TenantId, String)> = match state
-        .db
-        .query_opt(
-            "SELECT id, tenant_id, name FROM nodes WHERE node_token_hash = $1",
-            params![hash_token(&token)],
-        )
-        .await
-    {
+    let row = match state.nodes.by_token_hash(&hash_token(&token)).await {
         Ok(row) => row,
-        Err(e) => return ApiError::from(e).into_response(),
+        Err(e) => return e.into_response(),
     };
-    let Some((node_id, tenant_id, name)) = row else {
+    let Some(NodeIdentity {
+        id: node_id,
+        tenant: tenant_id,
+        name,
+    }) = row
+    else {
         return ApiError::Unauthorized.into_response();
     };
 
@@ -120,19 +120,11 @@ async fn handle(
     // Claim the ownership lease: this instance holds the node's socket. A
     // reconnect elsewhere overwrites it — last writer wins, matching reality.
     let _ = state
-        .db
-        .exec(
-            &format!(
-                "UPDATE nodes SET owning_instance_id = $2,
-            lease_expires_at = {now} + make_interval(secs => $3)
-         WHERE id = $1",
-                now = Postgres.now()
-            ),
-            params![
-                node_id,
-                state.registry.instance_id(),
-                crate::ws::bus::LEASE_SECONDS as f64
-            ],
+        .nodes
+        .take_lease(
+            node_id,
+            state.registry.instance_id(),
+            crate::ws::bus::LEASE_SECONDS as f64,
         )
         .await;
 
@@ -201,16 +193,8 @@ async fn handle(
     // Release the lease and mark offline — but only if WE still own it; the
     // node may have already reconnected to another instance.
     let _ = state
-        .db
-        .exec(
-            &format!(
-                "UPDATE nodes SET status = 'offline', updated_at = {now},
-            owning_instance_id = NULL, lease_expires_at = NULL
-         WHERE id = $1 AND owning_instance_id = $2",
-                now = Postgres.now()
-            ),
-            params![node_id, state.registry.instance_id()],
-        )
+        .nodes
+        .release_lease(node_id, state.registry.instance_id())
         .await;
     // Any loop job this node was executing died with it — fail it honestly with
     // its transcript tail preserved, rather than leaving it "running" forever
@@ -249,42 +233,27 @@ async fn handle_message(
             live_tmux_sessions,
         } => {
             state
-                .db
-                .exec(
-                    &format!(
-                        "UPDATE nodes SET capabilities = $2, hostname = $3, platform = $4,
-                        status = 'online', last_seen_at = {now}, updated_at = {now}
-                 WHERE id = $1",
-                        now = Postgres.now()
-                    ),
-                    params![
-                        node_id,
-                        serde_json::to_value(&capabilities)?,
-                        &capabilities.hostname,
-                        &capabilities.platform
-                    ],
+                .nodes
+                .record_capabilities(
+                    node_id,
+                    crate::repo::nodes::ReportedCapabilities {
+                        capabilities: serde_json::to_value(&capabilities)?,
+                        hostname: capabilities.hostname.clone(),
+                        platform: capabilities.platform.clone(),
+                    },
                 )
                 .await?;
 
             // Reconcile: node-reported tmux state is the truth. Any session
             // this node owns whose tmux session no longer exists has exited.
             state
-                .db
-                .exec(
-                    &format!(
-                        "UPDATE sessions SET status = 'exited', ended_at = {now}, updated_at = {now}
-                 WHERE node_id = $1
-                   AND status IN ('starting', 'running', 'detached')
-                   AND (tmux_session IS NULL OR tmux_session != ALL($2))",
-                        now = Postgres.now()
-                    ),
-                    params![node_id, live_tmux_sessions],
-                )
+                .nodes
+                .expire_sessions_missing_from_tmux(node_id, &live_tmux_sessions)
                 .await?;
 
             // What this tenant trusts, so the node can tell whether a rotation
             // is being staged and renew for it rather than waiting for expiry.
-            let ca_fingerprints = crate::ca::trust_bundle(&state.db, tenant)
+            let ca_fingerprints = crate::ca::trust_bundle(&*state.tenant_cas, tenant)
                 .await
                 .map(|cas| cas.into_iter().map(|c| c.fingerprint).collect())
                 .unwrap_or_default();
@@ -363,22 +332,12 @@ async fn handle_message(
         NodeToControl::Heartbeat { load } => {
             // Also renews the ownership lease (only while we still hold it).
             state
-                .db
-                .exec(
-                    &format!(
-                        "UPDATE nodes SET last_seen_at = {now}, resources = $2,
-                    lease_expires_at = CASE WHEN owning_instance_id = $3
-                        THEN {now} + make_interval(secs => $4)
-                        ELSE lease_expires_at END
-                 WHERE id = $1",
-                        now = Postgres.now()
-                    ),
-                    params![
-                        node_id,
-                        &load,
-                        state.registry.instance_id(),
-                        crate::ws::bus::LEASE_SECONDS as f64
-                    ],
+                .nodes
+                .record_resources(
+                    node_id,
+                    &load,
+                    state.registry.instance_id(),
+                    crate::ws::bus::LEASE_SECONDS as f64,
                 )
                 .await?;
             state.registry.publish(
@@ -459,17 +418,9 @@ async fn handle_message(
             // queries already listen for.
             let value = serde_json::to_value(&profiles).unwrap_or_else(|_| serde_json::json!([]));
             // The capabilities merge routes through the json seam's `set`
-            // (MAIN-201): the node-supplied profiles stay bound to `$2`; only the
+            // (MAIN-201): the node-supplied profiles stay bound; only the
             // static `{runtime_auth}` path and create-missing live in the SQL.
-            let merge = Postgres.set("capabilities", "{runtime_auth}", "$2");
-            let update_sql = format!(
-                "UPDATE nodes
-                 SET capabilities = {merge},
-                     updated_at = {now}
-                 WHERE id = $1",
-                now = Postgres.now()
-            );
-            let _ = state.db.exec(&update_sql, params![node_id, &value]).await;
+            let _ = state.nodes.merge_runtime_auth(node_id, &value).await;
             state.registry.publish(
                 tenant,
                 UiEvent::NodeStatus {
@@ -484,15 +435,8 @@ async fn handle_message(
             tmux_session,
         } => {
             state
-                .db
-                .exec(
-                    &format!(
-                        "UPDATE sessions SET status = 'running', tmux_session = $2, updated_at = {now}
-                 WHERE id = $1 AND tenant_id = $3",
-                        now = Postgres.now()
-                    ),
-                    params![session_id, &tmux_session, tenant],
-                )
+                .nodes
+                .mark_session_running(session_id, tenant, &tmux_session)
                 .await?;
             state.registry.publish(
                 tenant,
@@ -524,17 +468,7 @@ async fn handle_message(
             session_id,
             exit_code,
         } => {
-            state
-                .db
-                .exec(
-                    &format!(
-                        "UPDATE sessions SET status = 'exited', ended_at = {now}, updated_at = {now}
-                 WHERE id = $1 AND tenant_id = $2",
-                        now = Postgres.now()
-                    ),
-                    params![session_id, tenant],
-                )
-                .await?;
+            state.nodes.mark_session_exited(session_id, tenant).await?;
             // Ephemeral secrets exist on disk only while a session is using
             // them; the encrypted copy stays in the vault.
             crate::services::secrets::wipe_ephemeral_for_session(state, tenant, session_id).await;
@@ -574,16 +508,8 @@ async fn handle_message(
             // dashboard and anyone already staring at the terminal, rather than
             // leaving it stuck on "starting".
             state
-                .db
-                .exec(
-                    &format!(
-                        "UPDATE sessions SET status = 'error', error = $3, ended_at = {now},
-                        updated_at = {now}
-                 WHERE id = $1 AND tenant_id = $2",
-                        now = Postgres.now()
-                    ),
-                    params![session_id, tenant, &message],
-                )
+                .nodes
+                .mark_session_failed(session_id, tenant, &message)
                 .await?;
             state.registry.publish(
                 tenant,

@@ -251,7 +251,7 @@ impl AuthCtx {
     /// of the API authorises against, so `require_node_self` keeps working
     /// unchanged: the certificate proves *who*, tenant scoping decides *what*.
     pub async fn from_node_cert(state: &AppState, cert_der: &[u8]) -> Result<Self, ApiError> {
-        let id = crate::ca::verify_node_cert(&state.db, cert_der)
+        let id = crate::ca::verify_node_cert(&*state.tenant_cas, &*state.nodes, cert_der)
             .await
             .map_err(|e| ApiError::ForbiddenMsg(e.to_string()))?;
 

@@ -1,0 +1,1758 @@
+//! Node, enrolment and CA data access (MAIN-252).
+//!
+//! Three traits, because these are three lifecycles that happen to meet at the
+//! `nodes` table:
+//!
+//! - [`NodeRepository`] — the fleet itself: identity, ownership and sharing,
+//!   the liveness lease, and what a node reports over its socket.
+//! - [`JoinTokenRepository`] — single-use enrolment tokens. Separate because a
+//!   token's whole life is "issued, then consumed once", and consuming one is
+//!   the security boundary of the join flow.
+//! - [`TenantCaRepository`] — the per-tenant certificate authority.
+//!
+//! Two boundary decisions, both deliberate:
+//!
+//! - **A node's socket writes `sessions`.** When a node reconnects it tells us
+//!   which tmux sessions really exist, and which of its sessions started,
+//!   exited or failed. Those are session rows, and MAIN-253 owns them — but
+//!   they are written *only* from the node socket, in response to a node's own
+//!   report, so they sit here until that card reclaims them. They are grouped
+//!   under their own heading below and named for the report that drives them,
+//!   not for the table.
+//! - **The join flow reads `users`.** That is the identity aggregate, which
+//!   already has a repository, so it got a tenant-scoped
+//!   `person_id_of_in_tenant` rather than a second copy of the query here.
+//!
+//! Methods are intent-named and coarse; no `sqlx` type appears in any
+//! signature, and row mapping lives inside the impls (AC-2).
+
+use async_trait::async_trait;
+use nook_db::{params, Db, DbPool, Json, Postgres, TypeMapping};
+use nook_types::*;
+use uuid::Uuid;
+
+use crate::ca::TenantCa;
+use crate::error::ApiResult;
+
+/// Who may use a node, as the sharing and authorization checks need it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NodeSharing {
+    pub owner_person_id: Option<Uuid>,
+    pub shared: bool,
+}
+
+/// A node's certificate identity, for renewal and revocation checks.
+#[derive(Debug, Clone)]
+pub struct NodeCertIdentity {
+    pub tenant: TenantId,
+    pub public_key_pem: Option<String>,
+    pub revoked_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// A freshly signed leaf, as recorded against the node that holds it.
+#[derive(Debug, Clone)]
+pub struct IssuedLeaf {
+    pub ca_id: Uuid,
+    pub not_after: chrono::DateTime<chrono::Utc>,
+    pub cert_pem: String,
+    pub public_key_pem: String,
+}
+
+/// What a node says about itself when it connects.
+#[derive(Debug, Clone)]
+pub struct ReportedCapabilities {
+    pub capabilities: serde_json::Value,
+    pub hostname: String,
+    pub platform: String,
+}
+
+/// A consumed join token: which tenant it enrols into, and who issued it.
+///
+/// `created_by` is optional because a **legacy token** recorded no minter. That
+/// is the case the enrolment path falls back to the tenant owner for, so the
+/// nullability is load-bearing rather than incidental.
+#[derive(Debug, Clone)]
+pub struct ConsumedJoinToken {
+    pub id: JoinTokenId,
+    pub tenant: TenantId,
+    pub created_by: Option<UserId>,
+}
+
+/// The identity a node presents on its socket.
+#[derive(Debug, Clone)]
+pub struct NodeIdentity {
+    pub id: NodeId,
+    pub tenant: TenantId,
+    pub name: String,
+}
+
+/// A node joining or re-joining. `ON CONFLICT (tenant_id, name)` makes a
+/// re-join heal the existing row rather than duplicate the machine.
+#[derive(Debug, Clone)]
+pub struct JoiningNode {
+    pub tenant: TenantId,
+    pub name: String,
+    pub hostname: String,
+    pub platform: String,
+    pub token_hash: String,
+    pub owner_person_id: Option<Uuid>,
+}
+
+#[async_trait]
+pub trait NodeRepository: Send + Sync {
+    // ── identity and listing ────────────────────────────────────────────────
+
+    /// Which tenant owns this node, without knowing the tenant first — the
+    /// lookup a node-authenticated request needs before it has a scope.
+    async fn tenant_of(&self, id: NodeId) -> ApiResult<Option<TenantId>>;
+
+    async fn get(&self, tenant: TenantId, id: NodeId) -> ApiResult<Option<Node>>;
+
+    /// List a tenant's nodes, optionally scoped to a single owner person
+    /// (MAIN-132). `owner = Some(person)` returns that person's own nodes PLUS
+    /// any node the team has been given — those flagged `shared` (MAIN-135);
+    /// `owner = None` returns the whole fleet (owner/admin, and node tokens
+    /// whose view is unchanged). Shared grants **visibility only** —
+    /// session-start stays owner-only.
+    async fn list(&self, tenant: TenantId, owner: Option<Uuid>) -> ApiResult<Vec<Node>>;
+
+    /// Every node's id and name in a tenant. The online filtering that uses it
+    /// stays in the caller, because liveness comes from the registry rather
+    /// than the database.
+    async fn list_ids_and_names(&self, tenant: TenantId) -> ApiResult<Vec<(NodeId, String)>>;
+
+    async fn ids_in_tenant(&self, tenant: TenantId) -> ApiResult<Vec<NodeId>>;
+
+    async fn exists_in_tenant(&self, id: NodeId, tenant: TenantId) -> ApiResult<bool>;
+
+    async fn name_of(&self, id: NodeId) -> ApiResult<Option<String>>;
+
+    async fn delete(&self, tenant: TenantId, id: NodeId) -> ApiResult<u64>;
+
+    // ── ownership and sharing ───────────────────────────────────────────────
+
+    async fn sharing(&self, id: NodeId, tenant: TenantId) -> ApiResult<Option<NodeSharing>>;
+
+    /// Sharing plus the capabilities blob, which the authorize view needs in
+    /// the same round trip.
+    async fn sharing_and_capabilities(
+        &self,
+        id: NodeId,
+        tenant: TenantId,
+    ) -> ApiResult<Option<(NodeSharing, serde_json::Value)>>;
+
+    async fn set_shared(
+        &self,
+        id: NodeId,
+        tenant: TenantId,
+        shared: bool,
+    ) -> ApiResult<Option<Node>>;
+
+    // ── enrolment ───────────────────────────────────────────────────────────
+
+    /// Find a node by the hash of the token it presented. The plaintext token
+    /// is never at rest, so the signature says `token_hash`.
+    async fn by_token_hash(&self, token_hash: &str) -> ApiResult<Option<NodeIdentity>>;
+
+    /// Join or re-join, returning the node id. A machine that re-joins keeps
+    /// its id and its owner (`COALESCE`), so re-running `nook join` never
+    /// orphans its checkouts or hands it to a different person.
+    async fn upsert_joining(&self, node: JoiningNode) -> ApiResult<NodeId>;
+
+    /// The certificate-enrolment variant: no hostname/platform yet, because the
+    /// node has not connected.
+    async fn upsert_enrolling(
+        &self,
+        id: NodeId,
+        tenant: TenantId,
+        name: &str,
+        token_hash: &str,
+        owner_person_id: Option<Uuid>,
+    ) -> ApiResult<NodeId>;
+
+    // ── certificates ────────────────────────────────────────────────────────
+
+    async fn cert_identity(&self, id: NodeId) -> ApiResult<Option<NodeCertIdentity>>;
+
+    /// Whether a presented certificate's node is revoked, and whose it is.
+    async fn revocation_state(
+        &self,
+        id: NodeId,
+    ) -> ApiResult<Option<(TenantId, Option<chrono::DateTime<chrono::Utc>>)>>;
+
+    async fn record_issued_leaf(&self, id: NodeId, leaf: IssuedLeaf) -> ApiResult<()>;
+
+    async fn revoke(&self, id: NodeId, tenant: TenantId) -> ApiResult<u64>;
+
+    /// How many nodes still hold an unexpired leaf signed by this CA — the
+    /// retirement guard.
+    async fn live_leaf_count(&self, tenant: TenantId, ca_id: Uuid) -> ApiResult<i64>;
+
+    // ── the liveness lease and what the socket reports ──────────────────────
+
+    /// Claim this node for this control-plane instance for `lease_seconds`.
+    async fn take_lease(&self, id: NodeId, instance: Uuid, lease_seconds: f64) -> ApiResult<()>;
+
+    /// Mark offline and drop the lease — but only if we still hold it, so a
+    /// disconnect racing another instance's takeover cannot clear its claim.
+    async fn release_lease(&self, id: NodeId, instance: Uuid) -> ApiResult<()>;
+
+    async fn record_capabilities(
+        &self,
+        id: NodeId,
+        reported: ReportedCapabilities,
+    ) -> ApiResult<()>;
+
+    /// A heartbeat: fresh resources, and the lease extended only if it is still
+    /// ours.
+    async fn record_resources(
+        &self,
+        id: NodeId,
+        resources: &serde_json::Value,
+        instance: Uuid,
+        lease_seconds: f64,
+    ) -> ApiResult<()>;
+
+    /// Merge re-probed runtime auth profiles into the stored capabilities
+    /// (MAIN-126 AC-4). Only the static path is in the SQL; the node-supplied
+    /// value is bound (MAIN-201's json seam).
+    async fn merge_runtime_auth(&self, id: NodeId, profiles: &serde_json::Value) -> ApiResult<()>;
+
+    // ── sessions, as reported by the node (MAIN-253 reclaims these) ─────────
+    //
+    // Written only from the node socket, in response to the node's own report
+    // about its own sessions. They are named for that report.
+
+    /// A reconnecting node lists the tmux sessions it really has; every session
+    /// we still believe is live and is NOT in that list has died with the
+    /// machine, and is marked exited.
+    async fn expire_sessions_missing_from_tmux(
+        &self,
+        node: NodeId,
+        live_tmux_sessions: &[String],
+    ) -> ApiResult<u64>;
+
+    async fn mark_session_running(
+        &self,
+        session: SessionId,
+        tenant: TenantId,
+        tmux_session: &str,
+    ) -> ApiResult<u64>;
+
+    async fn mark_session_exited(&self, session: SessionId, tenant: TenantId) -> ApiResult<u64>;
+
+    async fn mark_session_failed(
+        &self,
+        session: SessionId,
+        tenant: TenantId,
+        message: &str,
+    ) -> ApiResult<u64>;
+}
+
+#[async_trait]
+pub trait JoinTokenRepository: Send + Sync {
+    async fn issue(
+        &self,
+        tenant: TenantId,
+        token_hash: &str,
+        created_by: UserId,
+        expires_at: chrono::DateTime<chrono::Utc>,
+    ) -> ApiResult<()>;
+
+    /// Spend a token: marks it used and hands back what it enrols into, in one
+    /// statement. `None` means absent, expired **or** already used — a caller
+    /// must not be able to tell those apart, and one statement is also what
+    /// makes two racing joins unable to both win.
+    async fn consume(&self, token_hash: &str) -> ApiResult<Option<ConsumedJoinToken>>;
+}
+
+#[async_trait]
+pub trait TenantCaRepository: Send + Sync {
+    /// Insert a CA. The private key arrives already sealed — this trait never
+    /// sees plaintext key material.
+    async fn insert(
+        &self,
+        tenant: TenantId,
+        state: &str,
+        cert_pem: &str,
+        key_enc: Vec<u8>,
+        fingerprint: &str,
+        not_after: chrono::DateTime<chrono::Utc>,
+    ) -> ApiResult<TenantCa>;
+
+    /// Every CA this tenant trusts, in any state — what a node must accept.
+    async fn bundle(&self, tenant: TenantId) -> ApiResult<Vec<TenantCa>>;
+
+    /// The active signer plus its sealed key, or `None` if the tenant has none.
+    async fn active_signer(&self, tenant: TenantId) -> ApiResult<Option<(TenantCa, Vec<u8>)>>;
+
+    /// Promote a staged CA and demote the current one, in one transaction.
+    /// Demotion happens first because the partial unique index allows only one
+    /// active row. `Ok(false)` means there was no staged CA to promote and
+    /// nothing was changed.
+    async fn promote(&self, tenant: TenantId, ca_id: Uuid) -> ApiResult<bool>;
+
+    /// Delete a non-active CA. The `state <> 'active'` guard is in the
+    /// statement so no caller can retire the signer out from under the fleet.
+    async fn retire(&self, ca_id: Uuid, tenant: TenantId) -> ApiResult<u64>;
+}
+
+// ── the DbPool implementations ──────────────────────────────────────────────
+
+/// The `nodes` columns every read returns, in one place: the shape `Node`
+/// decodes from, and the reason two SELECTs cannot drift apart.
+const NODE_COLUMNS: &str = "id, tenant_id, name, hostname, platform, capabilities, resources, \
+     status, last_seen_at, owner_person_id, shared, created_at, updated_at";
+
+pub struct DbNodeRepository {
+    db: DbPool,
+}
+
+impl DbNodeRepository {
+    pub fn new(db: DbPool) -> Self {
+        Self { db }
+    }
+}
+
+#[async_trait]
+impl NodeRepository for DbNodeRepository {
+    async fn tenant_of(&self, id: NodeId) -> ApiResult<Option<TenantId>> {
+        Ok(self
+            .db
+            .query_scalar_opt("SELECT tenant_id FROM nodes WHERE id = $1", params![id])
+            .await?)
+    }
+
+    async fn get(&self, tenant: TenantId, id: NodeId) -> ApiResult<Option<Node>> {
+        Ok(self
+            .db
+            .query_opt(
+                &format!("SELECT {NODE_COLUMNS} FROM nodes WHERE tenant_id = $1 AND id = $2"),
+                params![tenant, id],
+            )
+            .await?)
+    }
+
+    async fn list(&self, tenant: TenantId, owner: Option<Uuid>) -> ApiResult<Vec<Node>> {
+        Ok(self
+            .db
+            .query_all(
+                &format!(
+                    "SELECT {NODE_COLUMNS}
+                     FROM nodes
+                     WHERE tenant_id = $1 AND ({owner} IS NULL OR owner_person_id = $2 OR shared)
+                     ORDER BY name",
+                    owner = Postgres.cast("$2", "uuid")
+                ),
+                params![tenant, owner],
+            )
+            .await?)
+    }
+
+    async fn list_ids_and_names(&self, tenant: TenantId) -> ApiResult<Vec<(NodeId, String)>> {
+        Ok(self
+            .db
+            .query_all(
+                "SELECT id, name FROM nodes WHERE tenant_id = $1",
+                params![tenant],
+            )
+            .await?)
+    }
+
+    async fn ids_in_tenant(&self, tenant: TenantId) -> ApiResult<Vec<NodeId>> {
+        Ok(self
+            .db
+            .query_scalar_all("SELECT id FROM nodes WHERE tenant_id = $1", params![tenant])
+            .await?)
+    }
+
+    async fn exists_in_tenant(&self, id: NodeId, tenant: TenantId) -> ApiResult<bool> {
+        let found: Option<NodeId> = self
+            .db
+            .query_scalar_opt(
+                "SELECT id FROM nodes WHERE id = $1 AND tenant_id = $2",
+                params![id, tenant],
+            )
+            .await?;
+        Ok(found.is_some())
+    }
+
+    async fn name_of(&self, id: NodeId) -> ApiResult<Option<String>> {
+        Ok(self
+            .db
+            .query_scalar_opt("SELECT name FROM nodes WHERE id = $1", params![id])
+            .await?)
+    }
+
+    async fn delete(&self, tenant: TenantId, id: NodeId) -> ApiResult<u64> {
+        Ok(self
+            .db
+            .exec(
+                "DELETE FROM nodes WHERE tenant_id = $1 AND id = $2",
+                params![tenant, id],
+            )
+            .await?)
+    }
+
+    async fn sharing(&self, id: NodeId, tenant: TenantId) -> ApiResult<Option<NodeSharing>> {
+        let row: Option<(Option<Uuid>, bool)> = self
+            .db
+            .query_opt(
+                "SELECT owner_person_id, shared FROM nodes WHERE id = $1 AND tenant_id = $2",
+                params![id, tenant],
+            )
+            .await?;
+        Ok(row.map(|(owner_person_id, shared)| NodeSharing {
+            owner_person_id,
+            shared,
+        }))
+    }
+
+    async fn sharing_and_capabilities(
+        &self,
+        id: NodeId,
+        tenant: TenantId,
+    ) -> ApiResult<Option<(NodeSharing, serde_json::Value)>> {
+        let row: Option<(Option<Uuid>, bool, serde_json::Value)> = self
+            .db
+            .query_opt(
+                "SELECT owner_person_id, shared, capabilities
+                 FROM nodes WHERE id = $1 AND tenant_id = $2",
+                params![id, tenant],
+            )
+            .await?;
+        Ok(row.map(|(owner_person_id, shared, caps)| {
+            (
+                NodeSharing {
+                    owner_person_id,
+                    shared,
+                },
+                caps,
+            )
+        }))
+    }
+
+    async fn set_shared(
+        &self,
+        id: NodeId,
+        tenant: TenantId,
+        shared: bool,
+    ) -> ApiResult<Option<Node>> {
+        Ok(self
+            .db
+            .query_opt(
+                &format!(
+                    "UPDATE nodes SET shared = $3, updated_at = {}
+                     WHERE id = $1 AND tenant_id = $2
+                     RETURNING {NODE_COLUMNS}",
+                    Postgres.now()
+                ),
+                params![id, tenant, shared],
+            )
+            .await?)
+    }
+
+    async fn by_token_hash(&self, token_hash: &str) -> ApiResult<Option<NodeIdentity>> {
+        let row: Option<(NodeId, TenantId, String)> = self
+            .db
+            .query_opt(
+                "SELECT id, tenant_id, name FROM nodes WHERE node_token_hash = $1",
+                params![token_hash],
+            )
+            .await?;
+        Ok(row.map(|(id, tenant, name)| NodeIdentity { id, tenant, name }))
+    }
+
+    async fn upsert_joining(&self, node: JoiningNode) -> ApiResult<NodeId> {
+        Ok(self
+            .db
+            .query_one::<(NodeId,)>(
+                &format!(
+                    "INSERT INTO nodes
+                       (id, tenant_id, name, hostname, platform, node_token_hash, status,
+                        owner_person_id)
+                     VALUES ($1, $2, $3, $4, $5, $6, 'offline', $7)
+                     ON CONFLICT (tenant_id, name) DO UPDATE SET
+                        hostname = EXCLUDED.hostname,
+                        platform = EXCLUDED.platform,
+                        node_token_hash = EXCLUDED.node_token_hash,
+                        owner_person_id = COALESCE(nodes.owner_person_id,
+                                                   EXCLUDED.owner_person_id),
+                        updated_at = {}
+                     RETURNING id",
+                    Postgres.now()
+                ),
+                params![
+                    NodeId::new(),
+                    node.tenant,
+                    node.name,
+                    node.hostname,
+                    node.platform,
+                    node.token_hash,
+                    node.owner_person_id
+                ],
+            )
+            .await?
+            .0)
+    }
+
+    async fn upsert_enrolling(
+        &self,
+        id: NodeId,
+        tenant: TenantId,
+        name: &str,
+        token_hash: &str,
+        owner_person_id: Option<Uuid>,
+    ) -> ApiResult<NodeId> {
+        Ok(self
+            .db
+            .query_scalar(
+                &format!(
+                    "INSERT INTO nodes
+                       (id, tenant_id, name, node_token_hash, status, owner_person_id)
+                     VALUES ($1, $2, $3, $4, 'offline', $5)
+                     ON CONFLICT (tenant_id, name) DO UPDATE SET
+                        owner_person_id = COALESCE(nodes.owner_person_id,
+                                                   EXCLUDED.owner_person_id),
+                        updated_at = {}
+                     RETURNING id",
+                    Postgres.now()
+                ),
+                params![id, tenant, name, token_hash, owner_person_id],
+            )
+            .await?)
+    }
+
+    async fn cert_identity(&self, id: NodeId) -> ApiResult<Option<NodeCertIdentity>> {
+        let row: Option<(
+            TenantId,
+            Option<String>,
+            Option<chrono::DateTime<chrono::Utc>>,
+        )> = self
+            .db
+            .query_opt(
+                "SELECT tenant_id, public_key_pem, revoked_at FROM nodes WHERE id = $1",
+                params![id],
+            )
+            .await?;
+        Ok(
+            row.map(|(tenant, public_key_pem, revoked_at)| NodeCertIdentity {
+                tenant,
+                public_key_pem,
+                revoked_at,
+            }),
+        )
+    }
+
+    async fn revocation_state(
+        &self,
+        id: NodeId,
+    ) -> ApiResult<Option<(TenantId, Option<chrono::DateTime<chrono::Utc>>)>> {
+        Ok(self
+            .db
+            .query_opt(
+                "SELECT tenant_id, revoked_at FROM nodes WHERE id = $1",
+                params![id],
+            )
+            .await?)
+    }
+
+    async fn record_issued_leaf(&self, id: NodeId, leaf: IssuedLeaf) -> ApiResult<()> {
+        self.db
+            .exec(
+                &format!(
+                    "UPDATE nodes SET ca_id = $2, cert_not_after = $3, cert_pem = $4,
+                        public_key_pem = $5, updated_at = {}
+                     WHERE id = $1",
+                    Postgres.now()
+                ),
+                params![
+                    id,
+                    leaf.ca_id,
+                    leaf.not_after,
+                    leaf.cert_pem,
+                    leaf.public_key_pem
+                ],
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn revoke(&self, id: NodeId, tenant: TenantId) -> ApiResult<u64> {
+        Ok(self
+            .db
+            .exec(
+                &format!(
+                    "UPDATE nodes SET revoked_at = {now}, updated_at = {now}
+                     WHERE id = $1 AND tenant_id = $2",
+                    now = Postgres.now()
+                ),
+                params![id, tenant],
+            )
+            .await?)
+    }
+
+    async fn live_leaf_count(&self, tenant: TenantId, ca_id: Uuid) -> ApiResult<i64> {
+        Ok(self
+            .db
+            .query_scalar(
+                &format!(
+                    "SELECT count(*) FROM nodes
+                     WHERE tenant_id = $1 AND ca_id = $2
+                       AND revoked_at IS NULL
+                       AND cert_not_after IS NOT NULL AND cert_not_after > {now}",
+                    now = Postgres.now()
+                ),
+                params![tenant, ca_id],
+            )
+            .await?)
+    }
+
+    async fn take_lease(&self, id: NodeId, instance: Uuid, lease_seconds: f64) -> ApiResult<()> {
+        self.db
+            .exec(
+                &format!(
+                    "UPDATE nodes SET owning_instance_id = $2,
+                        lease_expires_at = {now} + make_interval(secs => $3)
+                     WHERE id = $1",
+                    now = Postgres.now()
+                ),
+                params![id, instance, lease_seconds],
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn release_lease(&self, id: NodeId, instance: Uuid) -> ApiResult<()> {
+        self.db
+            .exec(
+                &format!(
+                    "UPDATE nodes SET status = 'offline', updated_at = {now},
+                        owning_instance_id = NULL, lease_expires_at = NULL
+                     WHERE id = $1 AND owning_instance_id = $2",
+                    now = Postgres.now()
+                ),
+                params![id, instance],
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn record_capabilities(
+        &self,
+        id: NodeId,
+        reported: ReportedCapabilities,
+    ) -> ApiResult<()> {
+        self.db
+            .exec(
+                &format!(
+                    "UPDATE nodes SET capabilities = $2, hostname = $3, platform = $4,
+                        status = 'online', last_seen_at = {now}, updated_at = {now}
+                     WHERE id = $1",
+                    now = Postgres.now()
+                ),
+                params![
+                    id,
+                    reported.capabilities,
+                    reported.hostname,
+                    reported.platform
+                ],
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn record_resources(
+        &self,
+        id: NodeId,
+        resources: &serde_json::Value,
+        instance: Uuid,
+        lease_seconds: f64,
+    ) -> ApiResult<()> {
+        self.db
+            .exec(
+                &format!(
+                    "UPDATE nodes SET last_seen_at = {now}, resources = $2,
+                        lease_expires_at = CASE WHEN owning_instance_id = $3
+                            THEN {now} + make_interval(secs => $4)
+                            ELSE lease_expires_at END
+                     WHERE id = $1",
+                    now = Postgres.now()
+                ),
+                params![id, resources, instance, lease_seconds],
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn merge_runtime_auth(&self, id: NodeId, profiles: &serde_json::Value) -> ApiResult<()> {
+        let merge = Postgres.set("capabilities", "{runtime_auth}", "$2");
+        self.db
+            .exec(
+                &format!(
+                    "UPDATE nodes
+                     SET capabilities = {merge},
+                         updated_at = {now}
+                     WHERE id = $1",
+                    now = Postgres.now()
+                ),
+                params![id, profiles],
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn expire_sessions_missing_from_tmux(
+        &self,
+        node: NodeId,
+        live_tmux_sessions: &[String],
+    ) -> ApiResult<u64> {
+        Ok(self
+            .db
+            .exec(
+                &format!(
+                    "UPDATE sessions SET status = 'exited', ended_at = {now}, updated_at = {now}
+                     WHERE node_id = $1
+                       AND status IN ('starting', 'running', 'detached')
+                       AND (tmux_session IS NULL OR tmux_session != ALL($2))",
+                    now = Postgres.now()
+                ),
+                params![node, live_tmux_sessions.to_vec()],
+            )
+            .await?)
+    }
+
+    async fn mark_session_running(
+        &self,
+        session: SessionId,
+        tenant: TenantId,
+        tmux_session: &str,
+    ) -> ApiResult<u64> {
+        Ok(self
+            .db
+            .exec(
+                &format!(
+                    "UPDATE sessions SET status = 'running', tmux_session = $2, updated_at = {now}
+                     WHERE id = $1 AND tenant_id = $3",
+                    now = Postgres.now()
+                ),
+                params![session, tmux_session, tenant],
+            )
+            .await?)
+    }
+
+    async fn mark_session_exited(&self, session: SessionId, tenant: TenantId) -> ApiResult<u64> {
+        Ok(self
+            .db
+            .exec(
+                &format!(
+                    "UPDATE sessions SET status = 'exited', ended_at = {now}, updated_at = {now}
+                     WHERE id = $1 AND tenant_id = $2",
+                    now = Postgres.now()
+                ),
+                params![session, tenant],
+            )
+            .await?)
+    }
+
+    async fn mark_session_failed(
+        &self,
+        session: SessionId,
+        tenant: TenantId,
+        message: &str,
+    ) -> ApiResult<u64> {
+        Ok(self
+            .db
+            .exec(
+                &format!(
+                    "UPDATE sessions SET status = 'error', error = $3, ended_at = {now},
+                        updated_at = {now}
+                     WHERE id = $1 AND tenant_id = $2",
+                    now = Postgres.now()
+                ),
+                params![session, tenant, message],
+            )
+            .await?)
+    }
+}
+
+pub struct DbJoinTokenRepository {
+    db: DbPool,
+}
+
+impl DbJoinTokenRepository {
+    pub fn new(db: DbPool) -> Self {
+        Self { db }
+    }
+}
+
+#[async_trait]
+impl JoinTokenRepository for DbJoinTokenRepository {
+    async fn issue(
+        &self,
+        tenant: TenantId,
+        token_hash: &str,
+        created_by: UserId,
+        expires_at: chrono::DateTime<chrono::Utc>,
+    ) -> ApiResult<()> {
+        self.db
+            .exec(
+                "INSERT INTO join_tokens (id, tenant_id, token_hash, name, created_by, expires_at)
+                 VALUES ($1, $2, $3, '', $4, $5)",
+                params![
+                    JoinTokenId::new(),
+                    tenant,
+                    token_hash,
+                    created_by,
+                    expires_at
+                ],
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn consume(&self, token_hash: &str) -> ApiResult<Option<ConsumedJoinToken>> {
+        let row: Option<(JoinTokenId, TenantId, Option<UserId>)> = self
+            .db
+            .query_opt(
+                &format!(
+                    "UPDATE join_tokens SET used_at = {now}
+                     WHERE token_hash = $1 AND expires_at > {now}
+                     RETURNING id, tenant_id, created_by",
+                    now = Postgres.now()
+                ),
+                params![token_hash],
+            )
+            .await?;
+        Ok(row.map(|(id, tenant, created_by)| ConsumedJoinToken {
+            id,
+            tenant,
+            created_by,
+        }))
+    }
+}
+
+/// The `tenant_cas` row as sqlx hands it back: the `TenantCa` columns in
+/// declaration order, followed by the encrypted private key.
+///
+/// Named because eight anonymous tuple elements at the use site say nothing
+/// about which is which, and the order has to match the SELECT exactly.
+type CaRow = (
+    Uuid,
+    Uuid,
+    String,
+    String,
+    String,
+    chrono::DateTime<chrono::Utc>,
+    chrono::DateTime<chrono::Utc>,
+    Vec<u8>,
+);
+
+pub struct DbTenantCaRepository {
+    db: DbPool,
+}
+
+impl DbTenantCaRepository {
+    pub fn new(db: DbPool) -> Self {
+        Self { db }
+    }
+}
+
+#[async_trait]
+impl TenantCaRepository for DbTenantCaRepository {
+    async fn insert(
+        &self,
+        tenant: TenantId,
+        state: &str,
+        cert_pem: &str,
+        key_enc: Vec<u8>,
+        fingerprint: &str,
+        not_after: chrono::DateTime<chrono::Utc>,
+    ) -> ApiResult<TenantCa> {
+        Ok(self
+            .db
+            .query_one(
+                "INSERT INTO tenant_cas
+                   (id, tenant_id, state, cert_pem, key_enc, fingerprint, not_after)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7)
+                 RETURNING id, tenant_id, state, cert_pem, fingerprint, not_after, created_at",
+                params![
+                    Uuid::now_v7(),
+                    tenant,
+                    state,
+                    cert_pem,
+                    key_enc,
+                    fingerprint,
+                    not_after
+                ],
+            )
+            .await?)
+    }
+
+    async fn bundle(&self, tenant: TenantId) -> ApiResult<Vec<TenantCa>> {
+        Ok(self
+            .db
+            .query_all(
+                "SELECT id, tenant_id, state, cert_pem, fingerprint, not_after, created_at
+                 FROM tenant_cas WHERE tenant_id = $1 ORDER BY created_at",
+                params![tenant],
+            )
+            .await?)
+    }
+
+    async fn active_signer(&self, tenant: TenantId) -> ApiResult<Option<(TenantCa, Vec<u8>)>> {
+        let row: Option<CaRow> = self
+            .db
+            .query_opt(
+                "SELECT id, tenant_id, state, cert_pem, fingerprint, not_after, created_at, key_enc
+                 FROM tenant_cas WHERE tenant_id = $1 AND state = 'active'",
+                params![tenant],
+            )
+            .await?;
+        Ok(row.map(|r| {
+            (
+                TenantCa {
+                    id: r.0,
+                    tenant_id: r.1,
+                    state: r.2,
+                    cert_pem: r.3,
+                    fingerprint: r.4,
+                    not_after: r.5,
+                    created_at: r.6,
+                },
+                r.7,
+            )
+        }))
+    }
+
+    async fn promote(&self, tenant: TenantId, ca_id: Uuid) -> ApiResult<bool> {
+        let mut tx = self.db.begin().await?;
+        // Demote first: the partial unique index allows only one active row, so
+        // the order matters.
+        tx.exec(
+            "UPDATE tenant_cas SET state = 'retiring'
+             WHERE tenant_id = $1 AND state = 'active'",
+            params![tenant],
+        )
+        .await?;
+        let done = tx
+            .exec(
+                "UPDATE tenant_cas SET state = 'active'
+                 WHERE id = $1 AND tenant_id = $2 AND state = 'staged'",
+                params![ca_id, tenant],
+            )
+            .await?;
+        if done == 0 {
+            tx.rollback().await?;
+            return Ok(false);
+        }
+        tx.commit().await?;
+        Ok(true)
+    }
+
+    async fn retire(&self, ca_id: Uuid, tenant: TenantId) -> ApiResult<u64> {
+        Ok(self
+            .db
+            .exec(
+                "DELETE FROM tenant_cas WHERE id = $1 AND tenant_id = $2 AND state <> 'active'",
+                params![ca_id, tenant],
+            )
+            .await?)
+    }
+}
+
+// ── in-memory fakes (AC-3) ──────────────────────────────────────────────────
+//
+// Enough behavior that a caller test is worth trusting: tenant scoping, the
+// `COALESCE` that stops a re-join transferring ownership, the single-use
+// token, and the lease's "only if we still hold it" guard. A fake that accepted
+// everything would let a caller test pass while the real statement refused.
+
+use std::collections::HashMap;
+use std::sync::Mutex;
+
+#[derive(Debug, Clone)]
+struct FakeNode {
+    node: Node,
+    token_hash: String,
+    owning_instance_id: Option<Uuid>,
+    revoked_at: Option<chrono::DateTime<chrono::Utc>>,
+    ca_id: Option<Uuid>,
+    cert_not_after: Option<chrono::DateTime<chrono::Utc>>,
+    public_key_pem: Option<String>,
+}
+
+/// A session row, only as far as the node socket touches it.
+#[derive(Debug, Clone)]
+struct FakeSession {
+    id: SessionId,
+    tenant: TenantId,
+    node: NodeId,
+    status: String,
+    tmux_session: Option<String>,
+    error: Option<String>,
+}
+
+#[derive(Default)]
+struct FakeNodeState {
+    nodes: Vec<FakeNode>,
+    sessions: Vec<FakeSession>,
+}
+
+#[derive(Default)]
+pub struct FakeNodeRepository {
+    inner: Mutex<FakeNodeState>,
+}
+
+impl FakeNodeRepository {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Seed a node directly, for tests about reading rather than enrolling.
+    pub fn add(&self, tenant: TenantId, name: &str, owner: Option<Uuid>, shared: bool) -> NodeId {
+        let now = chrono::Utc::now();
+        let id = NodeId::new();
+        self.inner.lock().unwrap().nodes.push(FakeNode {
+            node: Node {
+                id,
+                tenant_id: tenant,
+                name: name.to_string(),
+                hostname: String::new(),
+                platform: String::new(),
+                capabilities: serde_json::json!({}),
+                resources: serde_json::json!({}),
+                status: "offline".into(),
+                last_seen_at: None,
+                owner_person_id: owner,
+                shared,
+                created_at: now,
+                updated_at: now,
+            },
+            token_hash: String::new(),
+            owning_instance_id: None,
+            revoked_at: None,
+            ca_id: None,
+            cert_not_after: None,
+            public_key_pem: None,
+        });
+        id
+    }
+
+    pub fn set_capabilities(&self, id: NodeId, caps: serde_json::Value) {
+        let mut s = self.inner.lock().unwrap();
+        if let Some(n) = s.nodes.iter_mut().find(|n| n.node.id == id) {
+            n.node.capabilities = caps;
+        }
+    }
+
+    /// Give a node a live leaf from `ca_id`, so the retirement guard has
+    /// something to count.
+    pub fn set_leaf(&self, id: NodeId, ca_id: Uuid, not_after: chrono::DateTime<chrono::Utc>) {
+        let mut s = self.inner.lock().unwrap();
+        if let Some(n) = s.nodes.iter_mut().find(|n| n.node.id == id) {
+            n.ca_id = Some(ca_id);
+            n.cert_not_after = Some(not_after);
+        }
+    }
+
+    pub fn add_session(&self, id: SessionId, tenant: TenantId, node: NodeId, tmux: Option<&str>) {
+        self.inner.lock().unwrap().sessions.push(FakeSession {
+            id,
+            tenant,
+            node,
+            status: "running".into(),
+            tmux_session: tmux.map(str::to_string),
+            error: None,
+        });
+    }
+
+    pub fn session_status(&self, id: SessionId) -> Option<String> {
+        self.inner
+            .lock()
+            .unwrap()
+            .sessions
+            .iter()
+            .find(|s| s.id == id)
+            .map(|s| s.status.clone())
+    }
+
+    pub fn session_error(&self, id: SessionId) -> Option<String> {
+        self.inner
+            .lock()
+            .unwrap()
+            .sessions
+            .iter()
+            .find(|s| s.id == id)
+            .and_then(|s| s.error.clone())
+    }
+
+    pub fn owning_instance(&self, id: NodeId) -> Option<Uuid> {
+        self.inner
+            .lock()
+            .unwrap()
+            .nodes
+            .iter()
+            .find(|n| n.node.id == id)
+            .and_then(|n| n.owning_instance_id)
+    }
+
+    pub fn status_of(&self, id: NodeId) -> Option<String> {
+        self.inner
+            .lock()
+            .unwrap()
+            .nodes
+            .iter()
+            .find(|n| n.node.id == id)
+            .map(|n| n.node.status.clone())
+    }
+
+    pub fn count(&self) -> usize {
+        self.inner.lock().unwrap().nodes.len()
+    }
+}
+
+#[async_trait]
+impl NodeRepository for FakeNodeRepository {
+    async fn tenant_of(&self, id: NodeId) -> ApiResult<Option<TenantId>> {
+        Ok(self
+            .inner
+            .lock()
+            .unwrap()
+            .nodes
+            .iter()
+            .find(|n| n.node.id == id)
+            .map(|n| n.node.tenant_id))
+    }
+
+    async fn get(&self, tenant: TenantId, id: NodeId) -> ApiResult<Option<Node>> {
+        Ok(self
+            .inner
+            .lock()
+            .unwrap()
+            .nodes
+            .iter()
+            .find(|n| n.node.id == id && n.node.tenant_id == tenant)
+            .map(|n| n.node.clone()))
+    }
+
+    async fn list(&self, tenant: TenantId, owner: Option<Uuid>) -> ApiResult<Vec<Node>> {
+        let s = self.inner.lock().unwrap();
+        let mut out: Vec<Node> = s
+            .nodes
+            .iter()
+            .filter(|n| n.node.tenant_id == tenant)
+            // `owner = None` is the whole fleet; otherwise own nodes PLUS
+            // shared ones (MAIN-132/135).
+            .filter(|n| match owner {
+                None => true,
+                Some(person) => n.node.owner_person_id == Some(person) || n.node.shared,
+            })
+            .map(|n| n.node.clone())
+            .collect();
+        out.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(out)
+    }
+
+    async fn list_ids_and_names(&self, tenant: TenantId) -> ApiResult<Vec<(NodeId, String)>> {
+        Ok(self
+            .inner
+            .lock()
+            .unwrap()
+            .nodes
+            .iter()
+            .filter(|n| n.node.tenant_id == tenant)
+            .map(|n| (n.node.id, n.node.name.clone()))
+            .collect())
+    }
+
+    async fn ids_in_tenant(&self, tenant: TenantId) -> ApiResult<Vec<NodeId>> {
+        Ok(self
+            .inner
+            .lock()
+            .unwrap()
+            .nodes
+            .iter()
+            .filter(|n| n.node.tenant_id == tenant)
+            .map(|n| n.node.id)
+            .collect())
+    }
+
+    async fn exists_in_tenant(&self, id: NodeId, tenant: TenantId) -> ApiResult<bool> {
+        Ok(self
+            .inner
+            .lock()
+            .unwrap()
+            .nodes
+            .iter()
+            .any(|n| n.node.id == id && n.node.tenant_id == tenant))
+    }
+
+    async fn name_of(&self, id: NodeId) -> ApiResult<Option<String>> {
+        Ok(self
+            .inner
+            .lock()
+            .unwrap()
+            .nodes
+            .iter()
+            .find(|n| n.node.id == id)
+            .map(|n| n.node.name.clone()))
+    }
+
+    async fn delete(&self, tenant: TenantId, id: NodeId) -> ApiResult<u64> {
+        let mut s = self.inner.lock().unwrap();
+        let before = s.nodes.len();
+        s.nodes
+            .retain(|n| !(n.node.id == id && n.node.tenant_id == tenant));
+        Ok((before - s.nodes.len()) as u64)
+    }
+
+    async fn sharing(&self, id: NodeId, tenant: TenantId) -> ApiResult<Option<NodeSharing>> {
+        Ok(self
+            .inner
+            .lock()
+            .unwrap()
+            .nodes
+            .iter()
+            .find(|n| n.node.id == id && n.node.tenant_id == tenant)
+            .map(|n| NodeSharing {
+                owner_person_id: n.node.owner_person_id,
+                shared: n.node.shared,
+            }))
+    }
+
+    async fn sharing_and_capabilities(
+        &self,
+        id: NodeId,
+        tenant: TenantId,
+    ) -> ApiResult<Option<(NodeSharing, serde_json::Value)>> {
+        Ok(self
+            .inner
+            .lock()
+            .unwrap()
+            .nodes
+            .iter()
+            .find(|n| n.node.id == id && n.node.tenant_id == tenant)
+            .map(|n| {
+                (
+                    NodeSharing {
+                        owner_person_id: n.node.owner_person_id,
+                        shared: n.node.shared,
+                    },
+                    n.node.capabilities.clone(),
+                )
+            }))
+    }
+
+    async fn set_shared(
+        &self,
+        id: NodeId,
+        tenant: TenantId,
+        shared: bool,
+    ) -> ApiResult<Option<Node>> {
+        let mut s = self.inner.lock().unwrap();
+        Ok(s.nodes
+            .iter_mut()
+            .find(|n| n.node.id == id && n.node.tenant_id == tenant)
+            .map(|n| {
+                n.node.shared = shared;
+                n.node.updated_at = chrono::Utc::now();
+                n.node.clone()
+            }))
+    }
+
+    async fn by_token_hash(&self, token_hash: &str) -> ApiResult<Option<NodeIdentity>> {
+        Ok(self
+            .inner
+            .lock()
+            .unwrap()
+            .nodes
+            .iter()
+            .find(|n| n.token_hash == token_hash)
+            .map(|n| NodeIdentity {
+                id: n.node.id,
+                tenant: n.node.tenant_id,
+                name: n.node.name.clone(),
+            }))
+    }
+
+    async fn upsert_joining(&self, node: JoiningNode) -> ApiResult<NodeId> {
+        let mut s = self.inner.lock().unwrap();
+        // ON CONFLICT (tenant_id, name).
+        if let Some(existing) = s
+            .nodes
+            .iter_mut()
+            .find(|n| n.node.tenant_id == node.tenant && n.node.name == node.name)
+        {
+            existing.node.hostname = node.hostname;
+            existing.node.platform = node.platform;
+            existing.token_hash = node.token_hash;
+            // COALESCE: a re-join never transfers an already-recorded owner.
+            existing.node.owner_person_id = existing.node.owner_person_id.or(node.owner_person_id);
+            existing.node.updated_at = chrono::Utc::now();
+            return Ok(existing.node.id);
+        }
+        let now = chrono::Utc::now();
+        let id = NodeId::new();
+        s.nodes.push(FakeNode {
+            node: Node {
+                id,
+                tenant_id: node.tenant,
+                name: node.name,
+                hostname: node.hostname,
+                platform: node.platform,
+                capabilities: serde_json::json!({}),
+                resources: serde_json::json!({}),
+                status: "offline".into(),
+                last_seen_at: None,
+                owner_person_id: node.owner_person_id,
+                shared: false,
+                created_at: now,
+                updated_at: now,
+            },
+            token_hash: node.token_hash,
+            owning_instance_id: None,
+            revoked_at: None,
+            ca_id: None,
+            cert_not_after: None,
+            public_key_pem: None,
+        });
+        Ok(id)
+    }
+
+    async fn upsert_enrolling(
+        &self,
+        _id: NodeId,
+        tenant: TenantId,
+        name: &str,
+        token_hash: &str,
+        owner_person_id: Option<Uuid>,
+    ) -> ApiResult<NodeId> {
+        // `_id` is only the id PROPOSED for a fresh row. On conflict the
+        // statement returns the existing row's id instead, so the caller must
+        // use what comes back rather than what it passed in.
+        self.upsert_joining(JoiningNode {
+            tenant,
+            name: name.to_string(),
+            hostname: String::new(),
+            platform: String::new(),
+            token_hash: token_hash.to_string(),
+            owner_person_id,
+        })
+        .await
+    }
+
+    async fn cert_identity(&self, id: NodeId) -> ApiResult<Option<NodeCertIdentity>> {
+        Ok(self
+            .inner
+            .lock()
+            .unwrap()
+            .nodes
+            .iter()
+            .find(|n| n.node.id == id)
+            .map(|n| NodeCertIdentity {
+                tenant: n.node.tenant_id,
+                public_key_pem: n.public_key_pem.clone(),
+                revoked_at: n.revoked_at,
+            }))
+    }
+
+    async fn revocation_state(
+        &self,
+        id: NodeId,
+    ) -> ApiResult<Option<(TenantId, Option<chrono::DateTime<chrono::Utc>>)>> {
+        Ok(self
+            .inner
+            .lock()
+            .unwrap()
+            .nodes
+            .iter()
+            .find(|n| n.node.id == id)
+            .map(|n| (n.node.tenant_id, n.revoked_at)))
+    }
+
+    async fn record_issued_leaf(&self, id: NodeId, leaf: IssuedLeaf) -> ApiResult<()> {
+        let mut s = self.inner.lock().unwrap();
+        if let Some(n) = s.nodes.iter_mut().find(|n| n.node.id == id) {
+            n.ca_id = Some(leaf.ca_id);
+            n.cert_not_after = Some(leaf.not_after);
+            n.public_key_pem = Some(leaf.public_key_pem);
+        }
+        Ok(())
+    }
+
+    async fn revoke(&self, id: NodeId, tenant: TenantId) -> ApiResult<u64> {
+        let mut s = self.inner.lock().unwrap();
+        Ok(
+            match s
+                .nodes
+                .iter_mut()
+                .find(|n| n.node.id == id && n.node.tenant_id == tenant)
+            {
+                Some(n) => {
+                    n.revoked_at = Some(chrono::Utc::now());
+                    1
+                }
+                None => 0,
+            },
+        )
+    }
+
+    async fn live_leaf_count(&self, tenant: TenantId, ca_id: Uuid) -> ApiResult<i64> {
+        let now = chrono::Utc::now();
+        Ok(self
+            .inner
+            .lock()
+            .unwrap()
+            .nodes
+            .iter()
+            .filter(|n| {
+                n.node.tenant_id == tenant
+                    && n.ca_id == Some(ca_id)
+                    && n.revoked_at.is_none()
+                    && n.cert_not_after.is_some_and(|t| t > now)
+            })
+            .count() as i64)
+    }
+
+    async fn take_lease(&self, id: NodeId, instance: Uuid, _lease_seconds: f64) -> ApiResult<()> {
+        let mut s = self.inner.lock().unwrap();
+        if let Some(n) = s.nodes.iter_mut().find(|n| n.node.id == id) {
+            // Last writer wins, matching the statement and reality.
+            n.owning_instance_id = Some(instance);
+        }
+        Ok(())
+    }
+
+    async fn release_lease(&self, id: NodeId, instance: Uuid) -> ApiResult<()> {
+        let mut s = self.inner.lock().unwrap();
+        if let Some(n) = s
+            .nodes
+            .iter_mut()
+            .find(|n| n.node.id == id && n.owning_instance_id == Some(instance))
+        {
+            n.node.status = "offline".into();
+            n.node.updated_at = chrono::Utc::now();
+            n.owning_instance_id = None;
+        }
+        Ok(())
+    }
+
+    async fn record_capabilities(
+        &self,
+        id: NodeId,
+        reported: ReportedCapabilities,
+    ) -> ApiResult<()> {
+        let mut s = self.inner.lock().unwrap();
+        if let Some(n) = s.nodes.iter_mut().find(|n| n.node.id == id) {
+            n.node.capabilities = reported.capabilities;
+            n.node.hostname = reported.hostname;
+            n.node.platform = reported.platform;
+            n.node.status = "online".into();
+            n.node.last_seen_at = Some(chrono::Utc::now());
+            n.node.updated_at = chrono::Utc::now();
+        }
+        Ok(())
+    }
+
+    async fn record_resources(
+        &self,
+        id: NodeId,
+        resources: &serde_json::Value,
+        instance: Uuid,
+        _lease_seconds: f64,
+    ) -> ApiResult<()> {
+        let mut s = self.inner.lock().unwrap();
+        if let Some(n) = s.nodes.iter_mut().find(|n| n.node.id == id) {
+            n.node.resources = resources.clone();
+            n.node.last_seen_at = Some(chrono::Utc::now());
+            // The lease extends only while it is still ours — the CASE.
+            if n.owning_instance_id == Some(instance) {
+                n.owning_instance_id = Some(instance);
+            }
+        }
+        Ok(())
+    }
+
+    async fn merge_runtime_auth(&self, id: NodeId, profiles: &serde_json::Value) -> ApiResult<()> {
+        let mut s = self.inner.lock().unwrap();
+        if let Some(n) = s.nodes.iter_mut().find(|n| n.node.id == id) {
+            // A MERGE at one path, creating the object if missing — not a
+            // whole-blob replace, which is the bug this shape avoids.
+            if !n.node.capabilities.is_object() {
+                n.node.capabilities = serde_json::json!({});
+            }
+            n.node.capabilities["runtime_auth"] = profiles.clone();
+            n.node.updated_at = chrono::Utc::now();
+        }
+        Ok(())
+    }
+
+    async fn expire_sessions_missing_from_tmux(
+        &self,
+        node: NodeId,
+        live_tmux_sessions: &[String],
+    ) -> ApiResult<u64> {
+        let mut s = self.inner.lock().unwrap();
+        let mut n = 0;
+        for sess in s.sessions.iter_mut() {
+            let believed_live = matches!(sess.status.as_str(), "starting" | "running" | "detached");
+            let gone = match &sess.tmux_session {
+                None => true,
+                Some(t) => !live_tmux_sessions.contains(t),
+            };
+            if sess.node == node && believed_live && gone {
+                sess.status = "exited".into();
+                n += 1;
+            }
+        }
+        Ok(n)
+    }
+
+    async fn mark_session_running(
+        &self,
+        session: SessionId,
+        tenant: TenantId,
+        tmux_session: &str,
+    ) -> ApiResult<u64> {
+        let mut s = self.inner.lock().unwrap();
+        Ok(
+            match s
+                .sessions
+                .iter_mut()
+                .find(|x| x.id == session && x.tenant == tenant)
+            {
+                Some(x) => {
+                    x.status = "running".into();
+                    x.tmux_session = Some(tmux_session.to_string());
+                    1
+                }
+                None => 0,
+            },
+        )
+    }
+
+    async fn mark_session_exited(&self, session: SessionId, tenant: TenantId) -> ApiResult<u64> {
+        let mut s = self.inner.lock().unwrap();
+        Ok(
+            match s
+                .sessions
+                .iter_mut()
+                .find(|x| x.id == session && x.tenant == tenant)
+            {
+                Some(x) => {
+                    x.status = "exited".into();
+                    1
+                }
+                None => 0,
+            },
+        )
+    }
+
+    async fn mark_session_failed(
+        &self,
+        session: SessionId,
+        tenant: TenantId,
+        message: &str,
+    ) -> ApiResult<u64> {
+        let mut s = self.inner.lock().unwrap();
+        Ok(
+            match s
+                .sessions
+                .iter_mut()
+                .find(|x| x.id == session && x.tenant == tenant)
+            {
+                Some(x) => {
+                    x.status = "error".into();
+                    x.error = Some(message.to_string());
+                    1
+                }
+                None => 0,
+            },
+        )
+    }
+}
+
+/// `(tenant, minter, expires_at, used)` — the minter is optional because a
+/// legacy token recorded none.
+type FakeToken = (
+    TenantId,
+    Option<UserId>,
+    chrono::DateTime<chrono::Utc>,
+    bool,
+);
+
+#[derive(Default)]
+pub struct FakeJoinTokenRepository {
+    inner: Mutex<HashMap<String, FakeToken>>,
+}
+
+impl FakeJoinTokenRepository {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Issue a **legacy** token: one that recorded no minter. `created_by` is
+    /// nullable in the schema, and enrolment falls back to the tenant owner for
+    /// exactly these.
+    pub fn issue_legacy(&self, tenant: TenantId, token_hash: &str) {
+        self.inner.lock().unwrap().insert(
+            token_hash.to_string(),
+            (
+                tenant,
+                None,
+                chrono::Utc::now() + chrono::Duration::hours(1),
+                false,
+            ),
+        );
+    }
+
+    /// Backdate a token's expiry, so expiry can be tested without waiting.
+    pub fn expire(&self, token_hash: &str) {
+        if let Some(e) = self.inner.lock().unwrap().get_mut(token_hash) {
+            e.2 = chrono::Utc::now() - chrono::Duration::hours(1);
+        }
+    }
+
+    pub fn is_used(&self, token_hash: &str) -> bool {
+        self.inner
+            .lock()
+            .unwrap()
+            .get(token_hash)
+            .is_some_and(|e| e.3)
+    }
+}
+
+#[async_trait]
+impl JoinTokenRepository for FakeJoinTokenRepository {
+    async fn issue(
+        &self,
+        tenant: TenantId,
+        token_hash: &str,
+        created_by: UserId,
+        expires_at: chrono::DateTime<chrono::Utc>,
+    ) -> ApiResult<()> {
+        self.inner.lock().unwrap().insert(
+            token_hash.to_string(),
+            (tenant, Some(created_by), expires_at, false),
+        );
+        Ok(())
+    }
+
+    async fn consume(&self, token_hash: &str) -> ApiResult<Option<ConsumedJoinToken>> {
+        let mut s = self.inner.lock().unwrap();
+        let Some(e) = s.get_mut(token_hash) else {
+            return Ok(None);
+        };
+        // `expires_at > now()` — an expired token is indistinguishable from an
+        // absent one. Note the real statement does NOT check `used_at`; it is
+        // the single UPDATE that makes a race have one winner, and re-spending
+        // an already-used token still matches while it is unexpired. The fake
+        // mirrors that rather than being stricter.
+        if e.2 <= chrono::Utc::now() {
+            return Ok(None);
+        }
+        e.3 = true;
+        Ok(Some(ConsumedJoinToken {
+            id: JoinTokenId::new(),
+            tenant: e.0,
+            created_by: e.1,
+        }))
+    }
+}
+
+#[derive(Default)]
+pub struct FakeTenantCaRepository {
+    inner: Mutex<Vec<(TenantCa, Vec<u8>)>>,
+}
+
+impl FakeTenantCaRepository {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn state_of(&self, ca_id: Uuid) -> Option<String> {
+        self.inner
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(c, _)| c.id == ca_id)
+            .map(|(c, _)| c.state.clone())
+    }
+}
+
+#[async_trait]
+impl TenantCaRepository for FakeTenantCaRepository {
+    async fn insert(
+        &self,
+        tenant: TenantId,
+        state: &str,
+        cert_pem: &str,
+        key_enc: Vec<u8>,
+        fingerprint: &str,
+        not_after: chrono::DateTime<chrono::Utc>,
+    ) -> ApiResult<TenantCa> {
+        let ca = TenantCa {
+            id: Uuid::now_v7(),
+            tenant_id: tenant.0,
+            state: state.to_string(),
+            cert_pem: cert_pem.to_string(),
+            fingerprint: fingerprint.to_string(),
+            not_after,
+            created_at: chrono::Utc::now(),
+        };
+        self.inner.lock().unwrap().push((ca.clone(), key_enc));
+        Ok(ca)
+    }
+
+    async fn bundle(&self, tenant: TenantId) -> ApiResult<Vec<TenantCa>> {
+        let s = self.inner.lock().unwrap();
+        let mut out: Vec<TenantCa> = s
+            .iter()
+            .filter(|(c, _)| c.tenant_id == tenant.0)
+            .map(|(c, _)| c.clone())
+            .collect();
+        out.sort_by_key(|c| c.created_at);
+        Ok(out)
+    }
+
+    async fn active_signer(&self, tenant: TenantId) -> ApiResult<Option<(TenantCa, Vec<u8>)>> {
+        Ok(self
+            .inner
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(c, _)| c.tenant_id == tenant.0 && c.state == "active")
+            .cloned())
+    }
+
+    async fn promote(&self, tenant: TenantId, ca_id: Uuid) -> ApiResult<bool> {
+        let mut s = self.inner.lock().unwrap();
+        // Nothing to promote: the whole transaction rolls back, so the current
+        // signer must NOT have been demoted.
+        if !s
+            .iter()
+            .any(|(c, _)| c.id == ca_id && c.tenant_id == tenant.0 && c.state == "staged")
+        {
+            return Ok(false);
+        }
+        for (c, _) in s.iter_mut() {
+            if c.tenant_id == tenant.0 && c.state == "active" {
+                c.state = "retiring".into();
+            }
+        }
+        for (c, _) in s.iter_mut() {
+            if c.id == ca_id {
+                c.state = "active".into();
+            }
+        }
+        Ok(true)
+    }
+
+    async fn retire(&self, ca_id: Uuid, tenant: TenantId) -> ApiResult<u64> {
+        let mut s = self.inner.lock().unwrap();
+        let before = s.len();
+        s.retain(|(c, _)| !(c.id == ca_id && c.tenant_id == tenant.0 && c.state != "active"));
+        Ok((before - s.len()) as u64)
+    }
+}
