@@ -1,0 +1,79 @@
+# Files in crates/nook-control that still hold inline SQL, and why (MAIN-260).
+#
+# Generated from the tree as it stood when the guard landed, so the guard is
+# green on its first run. Every entry is a file whose aggregate has not been
+# migrated yet — not a permission to add more SQL. `scripts/check-inline-sql.sh`
+# refuses NEW SQL in any file NOT listed here.
+#
+# PER FILE, never per directory. A directory exemption would let an already
+# migrated file regress silently because a sibling is still pending.
+#
+# When a card migrates a file, DELETE its line. The guard fails on a stale entry
+# for exactly that reason: an exemption that outlives its cause is how the list
+# stops shrinking.
+
+# ── MAIN-250 · InviteRepository ─────────────────────────────────────────────
+crates/nook-control/src/routes/invites.rs        # invite issue/accept/revoke
+
+# ── MAIN-251 · WorkspaceRepository ──────────────────────────────────────────
+crates/nook-control/src/routes/gitops.rs         # clone/worktree/checkout writes
+crates/nook-control/src/routes/workspaces.rs     # workspace + location reads
+crates/nook-control/src/services/discovery.rs    # node_workspaces reconcile
+crates/nook-control/src/services/workspace_queries.rs   # split out by MAIN-245, awaits its trait
+crates/nook-control/src/services/workspace_reaper.rs    # tombstoned-checkout reclaim
+
+# ── MAIN-252 · NodeRepository ───────────────────────────────────────────────
+crates/nook-control/src/routes/nodes.rs          # node list/detail/remove
+crates/nook-control/src/routes/join.rs           # enrolment + join tokens
+crates/nook-control/src/routes/tenant_ca.rs      # per-tenant CA rows
+crates/nook-control/src/ca.rs                    # CA issue/sign, keyed by node
+crates/nook-control/src/services/node_queries.rs # split out by MAIN-245, awaits its trait
+crates/nook-control/src/ws/node.rs               # node socket: heartbeat + resources
+
+# ── MAIN-253 · SessionRepository ────────────────────────────────────────────
+crates/nook-control/src/routes/sessions.rs       # session start/list/kill
+crates/nook-control/src/services/session_queries.rs     # split out by MAIN-245, awaits its trait
+crates/nook-control/src/ws/attach.rs             # terminal attach: session lookup
+crates/nook-control/src/ws/registry.rs           # live agent-state persistence
+crates/nook-control/src/ws/bus.rs                # cross-instance UI fan-out
+
+# ── MAIN-254 · NotebookRepository ───────────────────────────────────────────
+crates/nook-control/src/routes/notebook.rs       # notes CRUD + search
+crates/nook-control/src/routes/vault.rs          # person vault entries
+crates/nook-control/src/services/secrets.rs      # sealed secret storage
+crates/nook-control/src/services/notebook_queries.rs    # split out by MAIN-245, awaits its trait
+
+# ── MAIN-255 · LoopJobRepository ────────────────────────────────────────────
+crates/nook-control/src/services/jobs.rs         # loop-job lifecycle + transcript
+crates/nook-control/src/services/interactions.rs # durable ask/answer
+crates/nook-control/src/services/loops.rs        # the loops.enabled setting read
+
+# ── MAIN-256 · NotificationRepository ───────────────────────────────────────
+crates/nook-control/src/routes/notifications.rs  # inbox + channels
+crates/nook-control/src/routes/feedback.rs       # feedback capture
+crates/nook-control/src/services/notify.rs       # delivery + dedupe
+crates/nook-control/src/services/triggers.rs     # board automation firing
+
+# ── MAIN-258 · Operator/admin repositories ──────────────────────────────────
+crates/nook-control/src/routes/operator.rs       # operator console actions
+crates/nook-control/src/routes/managed.rs        # managed skill/hook content
+crates/nook-control/src/routes/skills.rs         # taught skills
+crates/nook-control/src/routes/settings.rs       # tenant settings
+crates/nook-control/src/routes/themes.rs         # theme catalogue
+crates/nook-control/src/services/operator_queries.rs    # split out by MAIN-245, awaits its trait
+crates/nook-control/src/services/policy.rs       # visibility policy rows
+crates/nook-control/src/services/schedule.rs     # scheduled operator work
+
+# ── Cross-cutting reads, no card yet ────────────────────────────────────────
+# These belong to no single aggregate. They need a home decided before they can
+# move; naming that here is better than pretending a card covers them.
+crates/nook-control/src/events.rs                # the activity-event writer, used by every aggregate
+crates/nook-control/src/services/activity_queries.rs    # the activity feed (split out by MAIN-245)
+crates/nook-control/src/services/overview_queries.rs    # Mission Control read-model, spans 5 aggregates
+crates/nook-control/src/routes/health.rs         # the liveness probe's SELECT 1
+
+# ── Permanently out of scope ────────────────────────────────────────────────
+# Named by MAIN-260 NG-1 as legitimately holding SQL. Listed rather than
+# hard-coded into the script so the exemption is visible where the others are.
+crates/nook-control/src/seed.rs                  # bootstrap data; not an aggregate (NG-1)
+crates/nook-control/src/main.rs                  # boot: migration + restamp wiring (NG-1)
