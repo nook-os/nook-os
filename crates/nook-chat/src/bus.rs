@@ -113,6 +113,20 @@ mod tests {
     /// channel via the event-bus seam, carrying the id/origin/updated we set —
     /// i.e. chat's fan-out rides the trait, not inline `pg_notify`/`LISTEN`.
     /// DB-backed; no-ops without `NOOK_REQUIRE_DB=1`, matching the suite.
+    ///
+    /// **This test reads past notices it did not publish, on purpose** (MAIN-234).
+    /// `NOTIFY_CHANNEL` is database-global, and every sibling test that posts a
+    /// message goes through the real `post` handler, which publishes here — as
+    /// does any `nook-chat` process sharing the database. Taking the *first*
+    /// notice off the stream and asserting it is ours was therefore a race the
+    /// suite lost roughly one run in three: the assertion failed with two v7
+    /// uuids milliseconds apart, one of them a sibling's.
+    ///
+    /// Filtering by our own id is the fix rather than a sleep or a global test
+    /// mutex, because it removes the assumption instead of hiding it — the test
+    /// still proves exactly what it is for (that `publish` rides the seam on the
+    /// channel chat really uses, with the payload we set) while being indifferent
+    /// to traffic it did not create.
     #[tokio::test]
     async fn publish_reaches_a_subscriber_through_the_seam() {
         if std::env::var("NOOK_REQUIRE_DB").ok().as_deref() != Some("1") {
@@ -138,12 +152,81 @@ mod tests {
         let origin = Uuid::now_v7();
         publish(&pool, id, origin, true).await;
 
-        let payload = tokio::time::timeout(Duration::from_secs(3), sub.next())
-            .await
-            .expect("a notice arrives before the timeout")
-            .expect("stream yields the notice");
-        let notice: Notice = serde_json::from_str(&payload).expect("payload is a Notice");
+        // One timeout around the whole search, not per notice: a busy channel
+        // must not be able to extend the test's deadline indefinitely.
+        let notice = tokio::time::timeout(Duration::from_secs(3), async {
+            while let Some(payload) = sub.next().await {
+                let Ok(notice) = serde_json::from_str::<Notice>(&payload) else {
+                    continue; // not a Notice at all — somebody else's payload
+                };
+                if notice.id == id {
+                    return notice;
+                }
+                // A sibling test's post, or another instance's. Not ours; keep reading.
+            }
+            panic!("the subscription ended before our notice arrived")
+        })
+        .await
+        .expect("our notice arrives before the timeout");
+
         assert_eq!(notice.id, id);
+        assert_eq!(notice.origin, origin);
+        assert!(notice.updated);
+    }
+
+    /// The isolation itself, pinned deterministically (MAIN-234 AC-1).
+    ///
+    /// A repeat loop is weak evidence here: the broken version passed 15
+    /// consecutive runs during this investigation before the race happened to
+    /// land. So this reproduces the race *on purpose* — a foreign notice before
+    /// ours and another after it, which is exactly what a sibling test's `post`
+    /// does — and asserts we still receive our own. Against the pre-fix logic
+    /// (take the first notice) this fails every time; a future rewrite that
+    /// reintroduces the assumption fails here rather than one CI run in three.
+    #[tokio::test]
+    async fn a_siblings_notice_does_not_satisfy_this_subscription() {
+        if std::env::var("NOOK_REQUIRE_DB").ok().as_deref() != Some("1") {
+            eprintln!("skipping a_siblings_notice_does_not_satisfy_this_subscription — no NOOK_REQUIRE_DB");
+            return;
+        }
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            return;
+        };
+        let pool = nook_db::connect(&url, 2).await.expect("connect");
+
+        let mut sub = PgEventBus::new(pool.clone())
+            .subscribe(NOTIFY_CHANNEL)
+            .await
+            .expect("subscribe");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Somebody else's post lands first — the sibling this test used to lose to.
+        let foreign_before = Uuid::now_v7();
+        publish(&pool, foreign_before, Uuid::now_v7(), false).await;
+
+        let id = Uuid::now_v7();
+        let origin = Uuid::now_v7();
+        publish(&pool, id, origin, true).await;
+
+        // …and one lands after, so "take the last" would be no better a rule.
+        publish(&pool, Uuid::now_v7(), Uuid::now_v7(), false).await;
+
+        let notice = tokio::time::timeout(Duration::from_secs(3), async {
+            while let Some(payload) = sub.next().await {
+                let Ok(notice) = serde_json::from_str::<Notice>(&payload) else {
+                    continue;
+                };
+                if notice.id == id {
+                    return notice;
+                }
+            }
+            panic!("the subscription ended before our notice arrived")
+        })
+        .await
+        .expect("our notice arrives despite the surrounding traffic");
+
+        assert_eq!(notice.id, id, "we received ours, not the sibling's");
+        assert_ne!(notice.id, foreign_before);
         assert_eq!(notice.origin, origin);
         assert!(notice.updated);
     }
