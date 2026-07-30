@@ -11,7 +11,6 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::Json;
 use chrono::{DateTime, Utc};
-use nook_db::{params, Db, DbPool, Postgres, TypeMapping};
 use nook_types::{
     ChatMessage, ChatMessagePage, ChatReactionAggregate, ChatServerMessage, ChatThread,
     PostChatMessage, UpdateChatMessage,
@@ -19,26 +18,12 @@ use nook_types::{
 use serde::Deserialize;
 use uuid::Uuid;
 
+use crate::repo::messages::{MessageRepository, MessageRow, NewMessage, Page};
 use crate::{AppState, Caller, ChatError};
 
 /// The body a deleted message shows in every payload — the real content is
 /// redacted server-side and never leaves the database (MAIN-116 AC-4).
 const DELETED_PLACEHOLDER: &str = "message deleted";
-
-#[derive(sqlx::FromRow)]
-struct MessageRow {
-    id: Uuid,
-    channel_id: Uuid,
-    author_id: Uuid,
-    author_name: Option<String>,
-    body: String,
-    parent_message_id: Option<Uuid>,
-    reply_count: i64,
-    last_reply_at: Option<DateTime<Utc>>,
-    created_at: DateTime<Utc>,
-    edited_at: Option<DateTime<Utc>>,
-    deleted_at: Option<DateTime<Utc>>,
-}
 
 impl From<MessageRow> for ChatMessage {
     fn from(r: MessageRow) -> Self {
@@ -67,42 +52,19 @@ impl From<MessageRow> for ChatMessage {
     }
 }
 
-/// A reaction row from the aggregate query.
-#[derive(sqlx::FromRow)]
-struct ReactionRow {
-    message_id: Uuid,
-    emoji: String,
-    count: i64,
-    reacted: bool,
-}
-
 /// Aggregate the reactions for a set of messages in ONE query (no N+1). `viewer`
 /// scopes the per-emoji `reacted` flag to a caller; `None` (the bus/broadcast
 /// path, which has no single viewer) yields `reacted = false` everywhere — the
 /// counts are still accurate, and each client overlays its own reacted state.
 async fn load_reactions(
-    pool: &DbPool,
+    repo: &dyn MessageRepository,
     viewer: Option<Uuid>,
     ids: &[Uuid],
 ) -> HashMap<Uuid, Vec<ChatReactionAggregate>> {
     if ids.is_empty() {
         return HashMap::new();
     }
-    let rows: Vec<ReactionRow> = pool
-        .query_all(
-            &format!(
-                "SELECT message_id, emoji, {cnt} AS count,
-                COALESCE(bool_or(user_id = $2), false) AS reacted
-           FROM chat_reactions
-          WHERE message_id = ANY($1)
-          GROUP BY message_id, emoji
-          ORDER BY message_id, emoji",
-                cnt = Postgres.cast("count(*)", "bigint")
-            ),
-            params![ids, viewer],
-        )
-        .await
-        .unwrap_or_default();
+    let rows = repo.reactions_for(ids, viewer).await.unwrap_or_default();
 
     let mut out: HashMap<Uuid, Vec<ChatReactionAggregate>> = HashMap::new();
     for r in rows {
@@ -119,13 +81,17 @@ async fn load_reactions(
 
 /// Attach reactions to a batch of messages for `viewer`. A deleted message keeps
 /// an empty reaction set (its content — and its tally — is gone from view).
-async fn attach_reactions(pool: &DbPool, viewer: Option<Uuid>, messages: &mut [ChatMessage]) {
+async fn attach_reactions(
+    repo: &dyn MessageRepository,
+    viewer: Option<Uuid>,
+    messages: &mut [ChatMessage],
+) {
     let ids: Vec<Uuid> = messages
         .iter()
         .filter(|m| !m.deleted)
         .map(|m| m.id)
         .collect();
-    let mut map = load_reactions(pool, viewer, &ids).await;
+    let mut map = load_reactions(repo, viewer, &ids).await;
     for m in messages.iter_mut() {
         if !m.deleted {
             m.reactions = map.remove(&m.id).unwrap_or_default();
@@ -133,48 +99,13 @@ async fn attach_reactions(pool: &DbPool, viewer: Option<Uuid>, messages: &mut [C
     }
 }
 
-/// Reads carry the author's display name resolved from `public.users` by
-/// `author_id` — so an org channel shows names for authors in other tenants
-/// (MAIN-112 AC-4). `public.` is qualified so the join works on both the running
-/// `chat,public` search_path and the `chat`-only test pool. A LEFT join keeps a
-/// message with a since-deleted author readable (name `None`).
-///
-/// `reply_count`/`last_reply_at` are the cheap constants here — the single-row
-/// reads (`fetch`, and a reply in a thread) don't need thread rollups. Channel
-/// history uses [`SELECT_MESSAGE_WITH_REPLIES`] instead, which fills them in.
-/// A fn (not a const) because the `0`/`NULL` result-column casts route through
-/// the type-mapping seam (MAIN-212), which is a runtime call.
-fn select_message() -> String {
-    format!(
-        "SELECT m.id, m.channel_id, m.author_id, \
-         u.display_name AS author_name, m.body, m.parent_message_id, m.created_at, \
-         m.edited_at, m.deleted_at, \
-         {zero} AS reply_count, {null_ts} AS last_reply_at \
-         FROM chat_messages m LEFT JOIN public.users u ON u.id = m.author_id",
-        zero = Postgres.cast("0", "bigint"),
-        null_ts = Postgres.cast("NULL", "timestamptz"),
-    )
-}
-
-/// As [`select_message`], but with per-parent thread rollups so a parent in
-/// channel history carries its `reply_count` and `last_reply_at` (MAIN-114 AC-3)
-/// in the same query — no N+1. The correlated subqueries hit
-/// `chat_messages_parent_idx`.
-const SELECT_MESSAGE_WITH_REPLIES: &str = "SELECT m.id, m.channel_id, m.author_id, \
-     u.display_name AS author_name, m.body, m.parent_message_id, m.created_at, \
-     m.edited_at, m.deleted_at, \
-     (SELECT count(*) FROM chat_messages r WHERE r.parent_message_id = m.id) AS reply_count, \
-     (SELECT max(r.created_at) FROM chat_messages r WHERE r.parent_message_id = m.id) \
-       AS last_reply_at \
-     FROM chat_messages m LEFT JOIN public.users u ON u.id = m.author_id";
-
 pub async fn post(
     State(state): State<AppState>,
     caller: Caller,
     Path(channel_id): Path<Uuid>,
     Json(req): Json<PostChatMessage>,
 ) -> Result<(StatusCode, Json<ChatMessage>), ChatError> {
-    let scope = crate::channels::access(&state.db, channel_id, &caller).await?;
+    let scope = crate::channels::access(&*state.channels, channel_id, &caller).await?;
     if scope.archived {
         return Err(ChatError::Conflict("this channel is archived".into()));
     }
@@ -187,16 +118,13 @@ pub async fn post(
     // threads are one level deep (MAIN-114 AC-1). Both are the client's error, so
     // 400s with a specific message rather than a silent drop or a 500.
     if let Some(parent_id) = req.parent_message_id {
-        let parent: Option<(Uuid, Option<Uuid>)> = state
-            .db
-            .query_opt(
-                "SELECT channel_id, parent_message_id FROM chat_messages WHERE id = $1",
-                params![parent_id],
-            )
+        let parent = state
+            .messages
+            .parent_of(parent_id)
             .await
-            .map_err(|_| ChatError::Internal)?;
-        let (parent_channel, parents_parent) =
-            parent.ok_or_else(|| ChatError::BadRequest("parent message not found".into()))?;
+            .map_err(|_| ChatError::Internal)?
+            .ok_or_else(|| ChatError::BadRequest("parent message not found".into()))?;
+        let (parent_channel, parents_parent) = (parent.channel_id, parent.parent_message_id);
         if parent_channel != channel_id {
             return Err(ChatError::BadRequest(
                 "parent message is in another channel".into(),
@@ -210,27 +138,14 @@ pub async fn post(
     }
 
     let row = state
-        .db
-        .query_one::<MessageRow>(
-            &format!(
-                "INSERT INTO chat_messages (id, channel_id, author_id, tenant_id, body, parent_message_id)
-         VALUES ($1, $2, $3, $4, $5, $6)
-         RETURNING id, channel_id, author_id,
-             (SELECT display_name FROM public.users WHERE id = author_id) AS author_name,
-             body, parent_message_id, created_at, edited_at, deleted_at,
-             {zero} AS reply_count, {null_ts} AS last_reply_at",
-                zero = Postgres.cast("0", "bigint"),
-                null_ts = Postgres.cast("NULL", "timestamptz"),
-            ),
-            params![
-                Uuid::now_v7(),
-                channel_id,
-                caller.user_id,
-                caller.tenant_id,
-                body,
-                req.parent_message_id
-            ],
-        )
+        .messages
+        .post(NewMessage {
+            channel_id,
+            author_id: caller.user_id,
+            tenant_id: caller.tenant_id,
+            body: body.to_owned(),
+            parent_message_id: req.parent_message_id,
+        })
         .await
         .map_err(|_| ChatError::Internal)?;
     let msg: ChatMessage = row.into(); // no reactions on a brand-new message
@@ -260,7 +175,7 @@ pub async fn history(
 ) -> Result<Json<ChatMessagePage>, ChatError> {
     // Read is allowed on archived channels (history stays readable, AC-1); the
     // scope check still refuses another tenant's channel (AC-5).
-    crate::channels::access(&state.db, channel_id, &caller).await?;
+    crate::channels::access(&*state.channels, channel_id, &caller).await?;
 
     let limit = q.limit.unwrap_or(50).clamp(1, 200);
     // v7 ids are time-ordered, so `id < before` is "older" and `ORDER BY id DESC`
@@ -269,14 +184,13 @@ pub async fn history(
     // only under their parent's thread (MAIN-114 AC-2); each parent carries its
     // reply rollups from the same query (AC-3).
     let rows = state
-        .db
-        .query_all::<MessageRow>(
-            &format!(
-                "{SELECT_MESSAGE_WITH_REPLIES} WHERE m.channel_id = $1 AND m.parent_message_id IS NULL \
-         AND ({cursor} IS NULL OR m.id < $2) ORDER BY m.id DESC LIMIT $3",
-                cursor = Postgres.cast("$2", "uuid")
-            ),
-            params![channel_id, q.before, limit],
+        .messages
+        .history(
+            channel_id,
+            Page {
+                before: q.before,
+                limit,
+            },
         )
         .await
         .map_err(|_| ChatError::Internal)?;
@@ -286,7 +200,7 @@ pub async fn history(
         .then(|| rows.last().map(|m| m.id))
         .flatten();
     let mut messages: Vec<ChatMessage> = rows.into_iter().map(Into::into).collect();
-    attach_reactions(&state.db, Some(caller.user_id), &mut messages).await;
+    attach_reactions(&*state.messages, Some(caller.user_id), &mut messages).await;
     Ok(Json(ChatMessagePage {
         messages,
         next_cursor,
@@ -297,23 +211,20 @@ pub async fn history(
 /// bus listener and the update handlers to build the broadcast payload. Uses the
 /// reply-rollup select so an edited/reacted PARENT keeps its `reply_count` in the
 /// update event (MAIN-116). Redaction + reactions applied.
-pub async fn fetch(pool: &DbPool, id: Uuid) -> Option<ChatMessage> {
-    read_message(pool, None, id).await
+pub async fn fetch(repo: &dyn MessageRepository, id: Uuid) -> Option<ChatMessage> {
+    read_message(repo, None, id).await
 }
 
 /// One message by id with redaction + reactions attached for `viewer`.
-async fn read_message(pool: &DbPool, viewer: Option<Uuid>, id: Uuid) -> Option<ChatMessage> {
-    let row = pool
-        .query_opt::<MessageRow>(
-            &format!("{SELECT_MESSAGE_WITH_REPLIES} WHERE m.id = $1"),
-            params![id],
-        )
-        .await
-        .ok()
-        .flatten()?;
+async fn read_message(
+    repo: &dyn MessageRepository,
+    viewer: Option<Uuid>,
+    id: Uuid,
+) -> Option<ChatMessage> {
+    let row = repo.get(id).await.ok().flatten()?;
     let mut msg: ChatMessage = row.into();
     if !msg.deleted {
-        msg.reactions = load_reactions(pool, viewer, &[id])
+        msg.reactions = load_reactions(repo, viewer, &[id])
             .await
             .remove(&id)
             .unwrap_or_default();
@@ -335,15 +246,12 @@ pub async fn thread(
     // BEFORE revealing anything else — a cross-tenant caller gets 403, not the
     // is-it-a-reply distinction below.
     let parent = state
-        .db
-        .query_opt::<MessageRow>(
-            &format!("{SELECT_MESSAGE_WITH_REPLIES} WHERE m.id = $1"),
-            params![message_id],
-        )
+        .messages
+        .get(message_id)
         .await
         .map_err(|_| ChatError::Internal)?
         .ok_or(ChatError::NotFound)?;
-    crate::channels::access(&state.db, parent.channel_id, &caller).await?;
+    crate::channels::access(&*state.channels, parent.channel_id, &caller).await?;
 
     // A thread hangs off a top-level message; asking for a reply's thread is a
     // 400 — replies are one level deep (AC-1/AC-2).
@@ -355,15 +263,13 @@ pub async fn thread(
 
     let limit = q.limit.unwrap_or(50).clamp(1, 200);
     let rows = state
-        .db
-        .query_all::<MessageRow>(
-            &format!(
-                "{sel} WHERE m.parent_message_id = $1 AND ({cursor} IS NULL OR m.id < $2)
-         ORDER BY m.id DESC LIMIT $3",
-                sel = select_message(),
-                cursor = Postgres.cast("$2", "uuid")
-            ),
-            params![message_id, q.before, limit],
+        .messages
+        .replies(
+            message_id,
+            Page {
+                before: q.before,
+                limit,
+            },
         )
         .await
         .map_err(|_| ChatError::Internal)?;
@@ -374,12 +280,12 @@ pub async fn thread(
     let mut parent: ChatMessage = parent.into();
     let mut replies: Vec<ChatMessage> = rows.into_iter().map(Into::into).collect();
     attach_reactions(
-        &state.db,
+        &*state.messages,
         Some(caller.user_id),
         std::slice::from_mut(&mut parent),
     )
     .await;
-    attach_reactions(&state.db, Some(caller.user_id), &mut replies).await;
+    attach_reactions(&*state.messages, Some(caller.user_id), &mut replies).await;
     Ok(Json(ChatThread {
         parent,
         replies,
@@ -403,23 +309,22 @@ fn valid_emoji(emoji: &str) -> bool {
 
 /// Load a message's `(channel_id, author_id, deleted_at)` for an authz decision.
 async fn message_meta(
-    pool: &DbPool,
+    repo: &dyn MessageRepository,
     id: Uuid,
 ) -> Result<(Uuid, Uuid, Option<DateTime<Utc>>), ChatError> {
-    pool.query_opt::<(Uuid, Uuid, Option<DateTime<Utc>>)>(
-        "SELECT channel_id, author_id, deleted_at FROM chat_messages WHERE id = $1",
-        params![id],
-    )
-    .await
-    .map_err(|_| ChatError::Internal)?
-    .ok_or(ChatError::NotFound)
+    let m = repo
+        .meta(id)
+        .await
+        .map_err(|_| ChatError::Internal)?
+        .ok_or(ChatError::NotFound)?;
+    Ok((m.channel_id, m.author_id, m.deleted_at))
 }
 
 /// Announce a change to an existing message (edit/delete/reaction — AC-5): the
 /// `MessageUpdated` event locally, then the same over the bus so peers re-fetch
 /// and re-deliver. `read_message(None)` gives a viewer-neutral payload.
 async fn broadcast_update(state: &AppState, message_id: Uuid) {
-    if let Some(msg) = read_message(&state.db, None, message_id).await {
+    if let Some(msg) = read_message(&*state.messages, None, message_id).await {
         state
             .registry
             .publish_local(ChatServerMessage::MessageUpdated(msg));
@@ -456,38 +361,31 @@ async fn react(
     if !valid_emoji(emoji) {
         return Err(ChatError::BadRequest("not a supported reaction".into()));
     }
-    let (channel_id, _author, deleted_at) = message_meta(&state.db, message_id).await?;
+    let (channel_id, _author, deleted_at) = message_meta(&*state.messages, message_id).await?;
     // Same visibility gate as reading — a caller who cannot see the channel
     // cannot react in it. A deleted message takes no new reactions.
-    crate::channels::access(&state.db, channel_id, caller).await?;
+    crate::channels::access(&*state.channels, channel_id, caller).await?;
     if deleted_at.is_some() {
         return Err(ChatError::Conflict("this message was deleted".into()));
     }
 
     if add {
         state
-            .db
-            .exec(
-                "INSERT INTO chat_reactions (message_id, user_id, emoji) VALUES ($1, $2, $3)
-             ON CONFLICT DO NOTHING",
-                params![message_id, caller.user_id, emoji],
-            )
+            .messages
+            .add_reaction(message_id, caller.user_id, emoji)
             .await
             .map_err(|_| ChatError::Internal)?;
     } else {
         state
-            .db
-            .exec(
-                "DELETE FROM chat_reactions WHERE message_id = $1 AND user_id = $2 AND emoji = $3",
-                params![message_id, caller.user_id, emoji],
-            )
+            .messages
+            .remove_reaction(message_id, caller.user_id, emoji)
             .await
             .map_err(|_| ChatError::Internal)?;
     }
 
     broadcast_update(state, message_id).await;
     // The acting caller gets a viewer-accurate payload (its own `reacted` flags).
-    read_message(&state.db, Some(caller.user_id), message_id)
+    read_message(&*state.messages, Some(caller.user_id), message_id)
         .await
         .map(Json)
         .ok_or(ChatError::NotFound)
@@ -505,8 +403,8 @@ pub async fn update(
     if body.is_empty() {
         return Err(ChatError::BadRequest("a message needs a body".into()));
     }
-    let (channel_id, author_id, deleted_at) = message_meta(&state.db, message_id).await?;
-    crate::channels::access(&state.db, channel_id, &caller).await?;
+    let (channel_id, author_id, deleted_at) = message_meta(&*state.messages, message_id).await?;
+    crate::channels::access(&*state.channels, channel_id, &caller).await?;
     if author_id != caller.user_id {
         return Err(ChatError::Forbidden);
     }
@@ -517,28 +415,13 @@ pub async fn update(
     // Record the prior content as an audit revision, then update in place. The
     // revision INSERT reads the current body, so it must run before the UPDATE.
     state
-        .db
-        .exec(
-            "INSERT INTO chat_message_revisions (id, message_id, prior_content, action, acted_by)
-         SELECT $1, id, body, 'edit', $2 FROM chat_messages WHERE id = $3",
-            params![Uuid::now_v7(), caller.user_id, message_id],
-        )
-        .await
-        .map_err(|_| ChatError::Internal)?;
-    state
-        .db
-        .exec(
-            &format!(
-                "UPDATE chat_messages SET body = $2, edited_at = {} WHERE id = $1",
-                Postgres.now()
-            ),
-            params![message_id, body],
-        )
+        .messages
+        .edit(message_id, body, caller.user_id)
         .await
         .map_err(|_| ChatError::Internal)?;
 
     broadcast_update(&state, message_id).await;
-    read_message(&state.db, Some(caller.user_id), message_id)
+    read_message(&*state.messages, Some(caller.user_id), message_id)
         .await
         .map(Json)
         .ok_or(ChatError::NotFound)
@@ -552,43 +435,28 @@ pub async fn delete(
     caller: Caller,
     Path(message_id): Path<Uuid>,
 ) -> Result<Json<ChatMessage>, ChatError> {
-    let (channel_id, author_id, deleted_at) = message_meta(&state.db, message_id).await?;
-    crate::channels::access(&state.db, channel_id, &caller).await?;
+    let (channel_id, author_id, deleted_at) = message_meta(&*state.messages, message_id).await?;
+    crate::channels::access(&*state.channels, channel_id, &caller).await?;
     // Author always may; otherwise the caller must be a tenant owner/admin.
     if author_id != caller.user_id {
-        crate::require_admin(&state.db, &caller).await?;
+        crate::require_admin(&*state.channels, &caller).await?;
     }
     if deleted_at.is_some() {
         // Already gone — idempotent success with the current (redacted) state.
-        return read_message(&state.db, Some(caller.user_id), message_id)
+        return read_message(&*state.messages, Some(caller.user_id), message_id)
             .await
             .map(Json)
             .ok_or(ChatError::NotFound);
     }
 
     state
-        .db
-        .exec(
-            "INSERT INTO chat_message_revisions (id, message_id, prior_content, action, acted_by)
-         SELECT $1, id, body, 'delete', $2 FROM chat_messages WHERE id = $3",
-            params![Uuid::now_v7(), caller.user_id, message_id],
-        )
-        .await
-        .map_err(|_| ChatError::Internal)?;
-    state
-        .db
-        .exec(
-            &format!(
-                "UPDATE chat_messages SET deleted_at = {} WHERE id = $1",
-                Postgres.now()
-            ),
-            params![message_id],
-        )
+        .messages
+        .soft_delete(message_id, caller.user_id)
         .await
         .map_err(|_| ChatError::Internal)?;
 
     broadcast_update(&state, message_id).await;
-    read_message(&state.db, Some(caller.user_id), message_id)
+    read_message(&*state.messages, Some(caller.user_id), message_id)
         .await
         .map(Json)
         .ok_or(ChatError::NotFound)
@@ -601,6 +469,7 @@ mod tests {
 
     use axum::extract::{Path, Query};
     use axum::Json;
+    use nook_db::{params, Db, Postgres, TypeMapping};
     use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 
     use super::*;
@@ -628,6 +497,9 @@ mod tests {
         crate::ensure_chat_schema(&db).await.ok()?;
         crate::MIGRATOR.run(db.pg()).await.ok()?;
         Some(AppState {
+            channels: Arc::new(crate::repo::channels::DbChannelRepository::new(db.clone())),
+            messages: Arc::new(crate::repo::messages::DbMessageRepository::new(db.clone())),
+            dms: Arc::new(crate::repo::dms::DbDmRepository::new(db.clone())),
             db,
             registry: Arc::new(crate::registry::Registry::new()),
         })
@@ -1301,5 +1173,116 @@ mod tests {
         )
         .await;
         assert!(matches!(r, Err(ChatError::Conflict(_))));
+    }
+}
+
+/// Read-path behaviour against an in-memory [`FakeMessageRepository`] — no
+/// database (MAIN-257 AC-3).
+///
+/// The three things this file gets wrong most easily are redaction (a deleted
+/// body must never reach a payload), the viewer-neutral broadcast (`viewer =
+/// None` must not mark anybody's reactions), and thread rollups on a parent.
+/// All three are pure functions of the rows, so all three can be proven here.
+#[cfg(test)]
+mod fake_tests {
+    use super::*;
+    use crate::repo::fakes::FakeMessageRepository;
+
+    #[tokio::test]
+    async fn a_deleted_message_is_redacted_and_loses_its_reactions() {
+        let (channel, author, viewer) = (Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7());
+        let gone = Uuid::now_v7();
+        let repo = FakeMessageRepository::new()
+            .with_deleted_message(gone, channel, author)
+            .with_reaction(gone, viewer, "👍");
+
+        let msg = fetch(&repo, gone).await.expect("the row is kept");
+        assert!(msg.deleted);
+        assert_eq!(msg.body, DELETED_PLACEHOLDER, "the real body never leaves");
+        assert!(
+            msg.reactions.is_empty(),
+            "a deleted message's tally goes with it"
+        );
+        assert_eq!(
+            repo.body_of(gone).as_deref(),
+            Some("secret"),
+            "redaction is on read — the row still holds the content for audit"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_broadcast_payload_marks_nobody_as_having_reacted() {
+        let (channel, author) = (Uuid::now_v7(), Uuid::now_v7());
+        let (reader, other) = (Uuid::now_v7(), Uuid::now_v7());
+        let id = Uuid::now_v7();
+        let repo = FakeMessageRepository::new()
+            .with_message(id, channel, author, "hello")
+            .with_reaction(id, reader, "👍")
+            .with_reaction(id, other, "👍");
+
+        // `fetch` is the bus/broadcast path: one payload for every subscriber,
+        // so it must not carry any single reader's `reacted` flag.
+        let broadcast = fetch(&repo, id).await.unwrap();
+        assert_eq!(broadcast.reactions.len(), 1);
+        assert_eq!(
+            broadcast.reactions[0].count, 2,
+            "the tally is still accurate"
+        );
+        assert!(!broadcast.reactions[0].reacted);
+
+        let mine = read_message(&repo, Some(reader), id).await.unwrap();
+        assert!(
+            mine.reactions[0].reacted,
+            "the acting caller sees their own"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_parent_carries_its_reply_rollups() {
+        let (channel, author) = (Uuid::now_v7(), Uuid::now_v7());
+        let parent = Uuid::now_v7();
+        let repo = FakeMessageRepository::new()
+            .with_message(parent, channel, author, "topic")
+            .with_reply(Uuid::now_v7(), parent, channel, author)
+            .with_reply(Uuid::now_v7(), parent, channel, author);
+
+        let msg = fetch(&repo, parent).await.unwrap();
+        assert_eq!(msg.reply_count, 2);
+        assert!(msg.last_reply_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn an_edit_keeps_the_prior_body_as_a_revision() {
+        let (channel, author) = (Uuid::now_v7(), Uuid::now_v7());
+        let id = Uuid::now_v7();
+        let repo = FakeMessageRepository::new().with_message(id, channel, author, "first");
+
+        repo.edit(id, "second", author).await.unwrap();
+        assert_eq!(repo.body_of(id).as_deref(), Some("second"));
+        assert_eq!(
+            repo.revisions_of(id),
+            vec![("edit".to_string(), "first".to_string())],
+            "what is preserved is what was actually stored, not what was sent"
+        );
+        assert!(fetch(&repo, id).await.unwrap().edited_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn attaching_reactions_leaves_deleted_messages_alone() {
+        let (channel, author, viewer) = (Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7());
+        let (live, gone) = (Uuid::now_v7(), Uuid::now_v7());
+        let repo = FakeMessageRepository::new()
+            .with_message(live, channel, author, "here")
+            .with_deleted_message(gone, channel, author)
+            .with_reaction(live, viewer, "🎉")
+            .with_reaction(gone, viewer, "🎉");
+
+        let mut msgs: Vec<ChatMessage> = vec![
+            repo.get(live).await.unwrap().unwrap().into(),
+            repo.get(gone).await.unwrap().unwrap().into(),
+        ];
+        attach_reactions(&repo, Some(viewer), &mut msgs).await;
+        assert_eq!(msgs[0].reactions.len(), 1);
+        assert!(msgs[1].reactions.is_empty());
     }
 }

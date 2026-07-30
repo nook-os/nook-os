@@ -2565,6 +2565,7 @@ name = "nook-chat"
 version = "0.4.22"
 dependencies = [
  "anyhow",
+ "async-trait",
  "axum",
  "axum-extra",
  "chrono",

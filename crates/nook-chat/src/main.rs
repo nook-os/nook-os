@@ -15,6 +15,7 @@ mod config;
 mod dms;
 mod messages;
 mod registry;
+mod repo;
 mod ws;
 
 use std::str::FromStr;
@@ -47,6 +48,12 @@ pub(crate) struct AppState {
     pub(crate) db: DbPool,
     /// Per-channel live fan-out for the delivery websocket (AC-3).
     pub(crate) registry: Arc<registry::Registry>,
+    /// Channels, their categories and read cursors (MAIN-257).
+    pub(crate) channels: Arc<dyn repo::channels::ChannelRepository>,
+    /// Messages, reactions and the revision trail (MAIN-257).
+    pub(crate) messages: Arc<dyn repo::messages::MessageRepository>,
+    /// Direct messages and the person directory that gates them (MAIN-257).
+    pub(crate) dms: Arc<dyn repo::dms::DmRepository>,
 }
 
 #[tokio::main]
@@ -102,9 +109,16 @@ async fn main() -> anyhow::Result<()> {
     // memory — a restart drops subscriptions, and clients reconnect and backfill
     // from history.
     let registry = Arc::new(registry::Registry::new());
-    bus::start(registry.clone(), db.clone());
-
-    let state = AppState { db, registry };
+    let state = AppState {
+        channels: Arc::new(repo::channels::DbChannelRepository::new(db.clone())),
+        messages: Arc::new(repo::messages::DbMessageRepository::new(db.clone())),
+        dms: Arc::new(repo::dms::DbDmRepository::new(db.clone())),
+        db: db.clone(),
+        registry: registry.clone(),
+    };
+    // The listener reads each announced message back through the same
+    // repository the handlers use, so a peer's payload is built exactly once.
+    bus::start(registry, db, state.messages.clone());
     let app = Router::new()
         .route("/healthz", get(healthz))
         .route("/livez", get(livez))
@@ -203,19 +217,15 @@ async fn livez() -> Json<Value> {
 async fn me(State(state): State<AppState>, caller: Caller) -> Result<Json<Value>, ChatError> {
     // The caller's tenant role, so the frontend can gate channel management to
     // admins (MAIN-94 AC-5) — `null` for a caller with no `users` row.
-    let role = tenant_role(&state.db, caller.user_id, caller.tenant_id).await?;
+    let role = tenant_role(&*state.channels, caller.user_id, caller.tenant_id).await?;
     // The caller's PERSON (cross-tenant identity), so the DM UI can name a
     // conversation by its *other* participants (MAIN-113 AC-5). `null` if the
     // user row has no person (pre-MAIN-130 rows).
     let person_id: Option<Uuid> = state
-        .db
-        .query_opt::<(Option<Uuid>,)>(
-            "SELECT person_id FROM users WHERE id = $1",
-            params![caller.user_id],
-        )
+        .dms
+        .person_of(caller.user_id)
         .await
-        .map_err(|_| ChatError::Internal)?
-        .and_then(|(p,)| p);
+        .map_err(|_| ChatError::Internal)?;
     Ok(Json(json!({
         "user_id": caller.user_id,
         "tenant_id": caller.tenant_id,
@@ -230,18 +240,13 @@ async fn me(State(state): State<AppState>, caller: Caller) -> Result<Json<Value>
 /// membership row. This is the ONLY role source chat uses (NG-5): the existing
 /// per-tenant `users.role`, not a new permission catalog.
 pub(crate) async fn tenant_role(
-    db: &DbPool,
+    repo: &dyn repo::channels::ChannelRepository,
     user: Uuid,
     tenant: Uuid,
 ) -> Result<Option<String>, ChatError> {
-    let row: Option<(String,)> = db
-        .query_opt(
-            "SELECT role FROM users WHERE id = $1 AND tenant_id = $2",
-            params![user, tenant],
-        )
+    repo.tenant_role(user, tenant)
         .await
-        .map_err(|_| ChatError::Internal)?;
-    Ok(row.map(|(r,)| r))
+        .map_err(|_| ChatError::Internal)
 }
 
 /// Owner and admin manage channels; everyone else is a member who can read and
@@ -253,8 +258,11 @@ pub(crate) fn role_is_admin(role: Option<&str>) -> bool {
 
 /// Refuse a caller who is not a tenant owner/admin with a 403 — the gate on
 /// every channel-management handler (MAIN-94 AC-5).
-pub(crate) async fn require_admin(db: &DbPool, caller: &Caller) -> Result<(), ChatError> {
-    let role = tenant_role(db, caller.user_id, caller.tenant_id).await?;
+pub(crate) async fn require_admin(
+    repo: &dyn repo::channels::ChannelRepository,
+    caller: &Caller,
+) -> Result<(), ChatError> {
+    let role = tenant_role(repo, caller.user_id, caller.tenant_id).await?;
     if role_is_admin(role.as_deref()) {
         Ok(())
     } else {

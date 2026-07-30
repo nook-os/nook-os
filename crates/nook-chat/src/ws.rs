@@ -53,7 +53,7 @@ async fn pump(
                     // just added is admitted — evaluated per event, so membership
                     // changes take effect live.
                     let channel_id = crate::registry::event_channel(&event);
-                    if channels::access(&state.db, channel_id, &caller).await.is_err() {
+                    if channels::access(&*state.channels, channel_id, &caller).await.is_err() {
                         continue;
                     }
                     let Ok(text) = serde_json::to_string(&event) else { continue };
