@@ -219,3 +219,51 @@ export function jobStateMeta(state: string): {
       return { label: state, tone: "muted" };
   }
 }
+
+/**
+ * Why a queued run is not moving (MAIN-297).
+ *
+ * A run that cannot be placed used to sit on "waiting for an executor…"
+ * indefinitely. The two causes that actually happen each have their fix on a
+ * DIFFERENT page — Settings→Loops, and Nodes→authorize — neither of which is
+ * reachable, or even guessable, from the stuck run.
+ *
+ * The distinction the backend cannot make for us: when `loops.enabled` is off
+ * the dispatcher never polls, so `select_executor` never runs and
+ * `queued_reason` is simply NULL. "No reason recorded" is therefore not
+ * evidence of anything — which is exactly why the page looked like a dead end.
+ * The switch has to be read separately and it WINS: while loops are off nothing
+ * will place this run whatever a stale reason from before the switch was
+ * flipped might still say.
+ */
+export type StuckCause =
+  | { kind: "loops-off" }
+  | { kind: "no-executor"; detail: string }
+  | { kind: "waiting"; detail: string | null };
+
+export function stuckCause(
+  job: LoopJob | null | undefined,
+  /** `undefined` while the settings query is still in flight. */
+  loopsEnabled: boolean | undefined,
+): StuckCause | null {
+  // Only a QUEUED job is stuck. A claimed or running one has an executor, and
+  // saying "loops are off" over a run that is already going would be a lie.
+  if (!job || job.state !== "queued") return null;
+
+  // Only an explicit `false`. Treating "not loaded yet" as off would flash the
+  // wrong diagnosis — and its Turn-on button — on every page load.
+  if (loopsEnabled === false) return { kind: "loops-off" };
+
+  const reason = job.queued_reason ?? null;
+  // The backend's own phrasing (`services/jobs.rs::no_executor_reason`) always
+  // opens with this, and it already distinguishes "no node of yours is online"
+  // from "not authorized" — so the detail is passed through rather than
+  // re-worded here, where it would drift from the source.
+  if (reason && reason.includes("no eligible executor")) {
+    return { kind: "no-executor", detail: reason };
+  }
+  // Anything else stays an honest "waiting", carrying whatever the backend did
+  // say (AC-3): an undiagnosed cause must not be dressed up as one of the two
+  // we know how to fix.
+  return { kind: "waiting", detail: reason };
+}
