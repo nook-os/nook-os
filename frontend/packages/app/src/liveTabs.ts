@@ -45,6 +45,12 @@ export function useLiveTabs(): LiveTabs {
     queryKey: ["workspaces"],
     queryFn: async () => (await api.GET("/api/v1/workspaces")).data ?? [],
   });
+  // Machine names for the per-tab badge (MAIN-323 AC-2). The session rows carry
+  // only `node_id`, and "one repo across four VMs" is unreadable without this.
+  const { data: nodes } = useQuery({
+    queryKey: ["nodes"],
+    queryFn: async () => (await api.GET("/api/v1/nodes")).data ?? [],
+  });
 
   // Whose sessions belong in a tab strip. The control plane already scopes a
   // plain member to the sessions they created, so this only bites an
@@ -57,7 +63,8 @@ export function useLiveTabs(): LiveTabs {
     (s) => !mineId || !s.created_by || s.created_by === mineId,
   );
   const names = Object.fromEntries((workspaces ?? []).map((w) => [w.id, w.name]));
-  const tabs = deriveTabs(mine, names, prefs, selectedWorkspaceId);
+  const nodeNames = Object.fromEntries((nodes ?? []).map((n) => [n.id, n.name]));
+  const tabs = deriveTabs(mine, names, prefs, selectedWorkspaceId, nodeNames);
 
   // Prefs outlive the sessions they name, so drop the dead ones. Keyed on the
   // full live list, not the visible strip, or switching workspace context would

@@ -63,14 +63,19 @@ describe("reorderTabs", () => {
 
 // ── MAIN-322: the strip is the live session list ────────────────────────────
 
-const live = (id: string, workspace_id: string | null = null): LiveSession => ({
+const live = (
+  id: string,
+  workspace_id: string | null = null,
+  node_id = "n1",
+): LiveSession => ({
   id,
   name: `s-${id}`,
   runtime: "bash",
   workspace_id,
+  node_id,
 });
 
-const noPrefs: TabPrefs = { pinned: [], order: [] };
+const noPrefs: TabPrefs = { pinned: [], collapsed: [], order: [] };
 
 describe("deriveTabs — membership comes from the sessions, not from prefs", () => {
   it("shows every live session with no local state at all", () => {
@@ -83,7 +88,7 @@ describe("deriveTabs — membership comes from the sessions, not from prefs", ()
   it("cannot resurrect a session that is gone, however many prefs name it", () => {
     // The inverse, and the reason membership must not be a pref: an ended
     // session leaves the strip even though it is still pinned and ordered.
-    const prefs: TabPrefs = { pinned: ["ghost"], order: ["ghost", "a"] };
+    const prefs: TabPrefs = { pinned: ["ghost"], collapsed: [], order: ["ghost", "a"] };
     expect(ids(deriveTabs([live("a")], {}, prefs))).toEqual(["a"]);
   });
 
@@ -92,7 +97,7 @@ describe("deriveTabs — membership comes from the sessions, not from prefs", ()
     // ORDER of the strip — never in which sessions are on it.
     const sessions = [live("a"), live("b"), live("c")];
     const machineA = deriveTabs(sessions, {}, noPrefs);
-    const machineB = deriveTabs(sessions, {}, { pinned: ["c"], order: ["b", "a"] });
+    const machineB = deriveTabs(sessions, {}, { pinned: ["c"], collapsed: [], order: ["b", "a"] });
     expect(ids(machineB)).toEqual(["c", "b", "a"]); // arranged differently…
     expect(ids(machineA).slice().sort()).toEqual(ids(machineB).slice().sort()); // …same tabs
   });
@@ -108,7 +113,7 @@ describe("deriveTabs — membership comes from the sessions, not from prefs", ()
 
 describe("deriveTabs — view prefs order the strip", () => {
   it("sorts pinned tabs first", () => {
-    const prefs: TabPrefs = { pinned: ["c"], order: [] };
+    const prefs: TabPrefs = { pinned: ["c"], collapsed: [], order: [] };
     expect(ids(deriveTabs([live("a"), live("b"), live("c")], {}, prefs))).toEqual([
       "c",
       "a",
@@ -120,7 +125,7 @@ describe("deriveTabs — view prefs order the strip", () => {
   it("honours a saved drag order, and appends sessions never dragged", () => {
     // A session started after the user arranged their strip must land at the
     // end rather than in the middle of the arrangement.
-    const prefs: TabPrefs = { pinned: [], order: ["c", "a"] };
+    const prefs: TabPrefs = { pinned: [], collapsed: [], order: ["c", "a"] };
     expect(ids(deriveTabs([live("a"), live("b"), live("c")], {}, prefs))).toEqual([
       "c",
       "a",
@@ -146,13 +151,19 @@ describe("deriveTabs — workspace context", () => {
 describe("prune — prefs are dropped only for sessions that are really gone", () => {
   beforeEach(() => {
     localStorage.clear();
-    useSessionTabPrefs.setState({ prefs: { pinned: ["a"], order: ["a", "b"] } });
+    useSessionTabPrefs.setState({
+      prefs: { pinned: ["a"], collapsed: ["w1"], order: ["a", "b"] },
+    });
   });
 
   it("drops the ids of sessions that ended, keeping the live ones", () => {
     useSessionTabPrefs.getState().prune(["a"]);
     expect(useSessionTabPrefs.getState().prefs).toEqual({
       pinned: ["a"],
+      // `collapsed` holds WORKSPACE ids and must survive: a workspace whose
+      // last session just ended still exists, and forgetting that its group
+      // was collapsed every time would make the setting feel random.
+      collapsed: ["w1"],
       order: ["a"],
     });
   });
@@ -164,12 +175,44 @@ describe("prune — prefs are dropped only for sessions that are really gone", (
     useSessionTabPrefs.getState().prune(undefined);
     expect(useSessionTabPrefs.getState().prefs).toEqual({
       pinned: ["a"],
+      collapsed: ["w1"],
       order: ["a", "b"],
     });
   });
 
   it("does clear prefs when every session really is gone", () => {
     useSessionTabPrefs.getState().prune([]);
-    expect(useSessionTabPrefs.getState().prefs).toEqual({ pinned: [], order: [] });
+    expect(useSessionTabPrefs.getState().prefs).toEqual({
+      pinned: [],
+      collapsed: ["w1"],
+      order: [],
+    });
+  });
+});
+
+describe("toggleCollapsed — MAIN-323 AC-3", () => {
+  beforeEach(() => {
+    localStorage.clear();
+    useSessionTabPrefs.setState({ prefs: { pinned: [], collapsed: [], order: [] } });
+  });
+
+  it("collapses, expands, and persists", () => {
+    const { toggleCollapsed } = useSessionTabPrefs.getState();
+    toggleCollapsed("w1");
+    expect(useSessionTabPrefs.getState().prefs.collapsed).toEqual(["w1"]);
+    // It survives a reload: the store writes through to localStorage.
+    expect(JSON.parse(localStorage.getItem(Object.keys(localStorage)[0])!).collapsed).toEqual([
+      "w1",
+    ]);
+    toggleCollapsed("w1");
+    expect(useSessionTabPrefs.getState().prefs.collapsed).toEqual([]);
+  });
+
+  it("does not disturb pin or order", () => {
+    useSessionTabPrefs.setState({ prefs: { pinned: ["a"], collapsed: [], order: ["a"] } });
+    useSessionTabPrefs.getState().toggleCollapsed("w1");
+    const p = useSessionTabPrefs.getState().prefs;
+    expect(p.pinned).toEqual(["a"]);
+    expect(p.order).toEqual(["a"]);
   });
 });
