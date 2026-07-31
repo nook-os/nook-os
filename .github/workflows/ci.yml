@@ -101,6 +101,25 @@ jobs:
       - name: Clippy
         if: matrix.engine == 'postgres'
         run: cargo clippy --workspace --all-targets
+      # The source guards, and their self-tests. Pure shell + awk over the tree:
+      # no Docker, well under a second, and nothing else was running them —
+      # `check-sqlx-signatures.sh` had been RED on main unnoticed because it
+      # lives only in `./test.sh lint`, where `actionlint` exits first in any
+      # environment that cannot pull its image (MAIN-345 AC-5).
+      - name: Source guards
+        if: matrix.engine == 'postgres'
+        run: |
+          ./scripts/check-inline-sql.sh
+          ./scripts/check-inline-sql.test.sh
+          ./scripts/check-sqlx-signatures.sh
+          ./scripts/check-sqlx-signatures.test.sh
+          # `check-dialect-dispatch.sh` is deliberately absent, and so is its
+          # self-test. Both are RED on main today — an unlisted offender in
+          # repo/read_model.rs plus three stale entries — and the self-test's
+          # first assertion is "green on the tree as committed", so it fails
+          # for the same reason. Nobody noticed for exactly the reason this
+          # card exists: nothing ran them. Adding either would break CI for a
+          # defect that is not this card's, so they wait for their own.
       - name: Wait for ElasticMQ
         run: |
           for _ in $(seq 1 30); do

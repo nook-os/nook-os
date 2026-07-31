@@ -31,6 +31,7 @@ crates/nook-chat/src/main.rs                 # PgConnectOptions — chat pins se
 crates/nook-chat/tests/auth_search_path.rs   # the subject IS the search_path pin
 crates/nook-chat/tests/migrations.rs         # its own sqlx::migrate::Migrator into the chat schema
 crates/nook-testkit/tests/teardown.rs        # queries pg_database and DROP DATABASE .. WITH (FORCE)
+crates/nook-control/tests/sqlite_person_id_default.rs  # sqlx::Row to read pragma_table_info on a raw SQLite handle
 
 # ── Awaiting MAIN-268's own AC-1 (the bed.pool removal) ─────────────────────
 crates/nook-testkit/src/lib.rs               # the `pool: PgPool` escape hatch itself
