@@ -28,6 +28,7 @@ import {
 } from "lucide-react";
 import { api, type LoopJob, type LoopJobTranscriptEntry } from "@nookos/api";
 import { Empty, Markdown, Panel } from "@nookos/ui";
+import type { StuckCause } from "../loop";
 import {
   composerMode,
   createLoopJob,
@@ -39,6 +40,7 @@ import {
   loopAction,
   postJobMessage,
   stripAnsi,
+  stuckCause,
   taskJobsKey,
 } from "../loop";
 import { InteractionAnswer } from "../Interactions";
@@ -126,6 +128,110 @@ function Entry({ line }: { line: LoopJobTranscriptEntry }) {
 }
 
 /** The bottom bar in `seed` mode: the opening idea, then start (AC-2). */
+/** The tenant's loop master switch (MAIN-239), read here so a stuck run can say
+ *  the switch is the reason. Shares `["settings"]` with the Settings page, so
+ *  turning it on there repaints this without a reload. */
+function useLoopsEnabled(): boolean | undefined {
+  const { data } = useQuery({
+    queryKey: ["settings"],
+    queryFn: async () => (await api.GET("/api/v1/settings")).data ?? [],
+  });
+  // `undefined` until the query answers — "not loaded" must not read as "off".
+  if (!data) return undefined;
+  return (
+    data.find((x) => x.key === "loops.enabled" && x.scope === "tenant")
+      ?.value === true
+  );
+}
+
+/**
+ * Why this run is not moving, and the fix, where the problem appears (MAIN-297).
+ *
+ * The whole point is that the fix is one click from the stuck run: both causes
+ * are fixed on OTHER pages, which is what made this a dead end — a run blocked
+ * by `loops.enabled=false` is only unblockable from Settings→Loops, and nothing
+ * on the run said so.
+ */
+function StuckNotice({ cause }: { cause: StuckCause }) {
+  const qc = useQueryClient();
+  const [failed, setFailed] = useState<string | null>(null);
+
+  const turnOn = useMutation({
+    mutationFn: async () => {
+      const res = await api.PUT("/api/v1/settings/{key}", {
+        params: { path: { key: "loops.enabled" } },
+        body: { value: true, scope: "tenant" },
+      });
+      // openapi-fetch reports HTTP failures in `error` rather than throwing, so
+      // without this a refused write would look like a success and the notice
+      // would simply sit there (AC-4).
+      if (res.error) throw new Error("could not turn loops on");
+      return res;
+    },
+    onSuccess: () => {
+      setFailed(null);
+      // The switch is read on every poll, so the dispatcher picks the job up
+      // within one interval and `job_changed` repaints this page. Invalidating
+      // both means the notice clears as soon as either lands (AC-2).
+      qc.invalidateQueries({ queryKey: ["settings"] });
+      qc.invalidateQueries({ queryKey: ["jobs"] });
+    },
+    onError: () =>
+      setFailed(
+        "Could not turn loops on — you may not have permission. Ask a workspace owner, or use Settings → Loops.",
+      ),
+  });
+
+  if (cause.kind === "waiting") {
+    return (
+      <div className="lw-stuck" data-testid="stuck-waiting">
+        <span className="faint small">
+          {cause.detail ?? "Waiting for an executor…"}
+        </span>
+      </div>
+    );
+  }
+
+  if (cause.kind === "no-executor") {
+    return (
+      <div className="lw-stuck" data-testid="stuck-no-executor">
+        <div className="bright">This run has nowhere to go.</div>
+        {/* The backend already distinguishes "no node online" from "not
+            authorized"; repeating its sentence keeps one source of truth. */}
+        <div className="faint small">{cause.detail}</div>
+        <Link className="btn small" to="/nodes">
+          Open Nodes
+        </Link>
+      </div>
+    );
+  }
+
+  return (
+    <div className="lw-stuck" data-testid="stuck-loops-off">
+      <div className="bright">Loops are off, so nothing will run this.</div>
+      <div className="faint small">
+        Jobs stay queued until the loop machinery is on — nothing is lost. It
+        takes effect within a poll interval; you can stay on this page.
+      </div>
+      <button
+        className="btn small primary"
+        disabled={turnOn.isPending}
+        onClick={() => turnOn.mutate()}
+      >
+        {turnOn.isPending ? "Turning on…" : "Turn on loops"}
+      </button>
+      <Link className="btn small" to="/settings">
+        Settings → Loops
+      </Link>
+      {failed && (
+        <div className="small err" data-testid="stuck-loops-off-failed">
+          {failed}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function SeedComposer({
   taskId,
   taskType,
@@ -344,6 +450,9 @@ export function LoopPage() {
     if (atBottom) el.scrollTop = el.scrollHeight;
   }, [transcript.length]);
 
+  // Why a queued run is not moving, and where its fix lives (MAIN-297).
+  const loopsEnabled = useLoopsEnabled();
+  const stuck = stuckCause(latest, loopsEnabled);
   const mode = composerMode(latest);
   const meta = latest ? jobStateMeta(latest.state) : null;
   const filed = filedKeys(transcript, task?.key ?? null);
@@ -426,6 +535,10 @@ export function LoopPage() {
             )}
           </div>
         </Panel>
+
+        {/* A queued run that cannot be placed says WHY, and offers the fix
+            here rather than on a page the reader would have to guess at. */}
+        {stuck && <StuckNotice cause={stuck} />}
 
         {/* The agent stopped to ask. Its answer controls belong in the flow of
             the conversation, not in a panel somewhere else on the page. */}

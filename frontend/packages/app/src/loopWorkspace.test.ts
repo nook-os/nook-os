@@ -3,7 +3,7 @@
 // page's decisions are testable without a DOM.
 import { describe, expect, it } from "vitest";
 import type { LoopJob } from "@nookos/api";
-import { composerMode, filedKeys, looksLikeDraft, stripAnsi } from "./loop";
+import { composerMode, filedKeys, looksLikeDraft, stripAnsi, stuckCause } from "./loop";
 
 const job = (state: string): LoopJob =>
   ({ id: "j1", state, kind: "spec" }) as unknown as LoopJob;
@@ -116,5 +116,47 @@ describe("filedKeys", () => {
   it("is empty for an absent transcript", () => {
     expect(filedKeys(undefined, "MAIN-7")).toEqual([]);
     expect(filedKeys(null, "MAIN-7")).toEqual([]);
+  });
+});
+
+describe("stuckCause (MAIN-297)", () => {
+  const queued = (queued_reason: string | null = null) =>
+    ({ state: "queued", queued_reason }) as unknown as LoopJob;
+
+  it("says nothing about a run that is not queued", () => {
+    for (const state of ["claimed", "running", "waiting_on_human", "completed", "failed"]) {
+      const job = { state, queued_reason: null } as unknown as LoopJob;
+      expect(stuckCause(job, false)).toBeNull();
+    }
+    expect(stuckCause(null, false)).toBeNull();
+    expect(stuckCause(undefined, false)).toBeNull();
+  });
+
+  it("loops-off wins over a stale reason from before the switch was flipped", () => {
+    // While loops are off the dispatcher never polls, so whatever reason is on
+    // the row is from an earlier era and pointing at Nodes would send the user
+    // to fix something that is not the problem.
+    expect(
+      stuckCause(queued("no eligible executor: you have no node online"), false),
+    ).toEqual({ kind: "loops-off" });
+    expect(stuckCause(queued(), false)).toEqual({ kind: "loops-off" });
+  });
+
+  it("passes the backend's executor phrasing through untouched", () => {
+    const detail =
+      "no eligible executor: your online node(s) are not authorized for the claude runtime";
+    expect(stuckCause(queued(detail), true)).toEqual({ kind: "no-executor", detail });
+  });
+
+  it("an undiagnosed cause stays an honest wait (AC-3)", () => {
+    expect(stuckCause(queued(), true)).toEqual({ kind: "waiting", detail: null });
+    const odd = "the requester has no person identity";
+    expect(stuckCause(queued(odd), true)).toEqual({ kind: "waiting", detail: odd });
+  });
+
+  it("never claims loops are off while the setting is still loading", () => {
+    // `undefined` is "we have not looked yet". Reading it as off would flash
+    // the wrong diagnosis, and a Turn-on button, on every page load.
+    expect(stuckCause(queued(), undefined)).toEqual({ kind: "waiting", detail: null });
   });
 });

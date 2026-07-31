@@ -30,9 +30,12 @@ const state = vi.hoisted(() => ({
   task: null as Record<string, unknown> | null,
   /** The status the detail endpoint answers when `task` is null. */
   taskStatus: 404,
+  /** The tenant's `loops.enabled` setting, as `/settings` reports it. */
+  loopsOn: false,
 }));
 
 const post = vi.hoisted(() => vi.fn(async () => ({ data: {} })));
+const put = vi.hoisted(() => vi.fn(async () => ({ data: {} }) as Record<string, unknown>));
 
 vi.mock("@nookos/api", () => ({
   api: {
@@ -40,6 +43,10 @@ vi.mock("@nookos/api", () => ({
       if (path === "/api/v1/tasks/{task_id}/jobs") return { data: state.jobs };
       if (path === "/api/v1/jobs/{id}") return { data: state.detail };
       if (path === "/api/v1/interactions") return { data: state.pending };
+      if (path === "/api/v1/settings")
+        return {
+          data: [{ key: "loops.enabled", scope: "tenant", value: state.loopsOn }],
+        };
       if (path === "/api/v1/tasks/{id}")
         return state.task
           ? { data: { task: state.task }, response: { status: 200 } }
@@ -50,6 +57,7 @@ vi.mock("@nookos/api", () => ({
       return { data: null };
     }),
     POST: post,
+    PUT: put,
   },
 }));
 
@@ -131,7 +139,10 @@ beforeEach(() => {
     type: "task",
   };
   state.taskStatus = 404;
+  state.loopsOn = false;
   post.mockClear();
+  put.mockClear();
+  put.mockImplementation(async () => ({ data: {} }));
 });
 afterEach(cleanup);
 
@@ -383,5 +394,99 @@ describe("not-found and empty states (MAIN-296)", () => {
 
     restore();
     expect(errors.join("\n")).not.toContain("Query data cannot be undefined");
+  });
+});
+
+// MAIN-297: a queued run that cannot be placed says WHY, and offers the fix
+// here. Both causes are fixed on OTHER pages, which is what made this a dead
+// end: a run blocked by `loops.enabled=false` is only unblockable from
+// Settings→Loops, and nothing on the run said so.
+describe("stuck-run diagnosis (MAIN-297)", () => {
+  it("loops off: names the cause and turns it on without leaving the page", async () => {
+    state.loopsOn = false;
+    withJob({ state: "queued" }, []);
+    renderPage();
+
+    const notice = await screen.findByTestId("stuck-loops-off");
+    expect(notice.textContent).toMatch(/loops are off/i);
+
+    await userEvent.click(screen.getByRole("button", { name: /turn on loops/i }));
+
+    await waitFor(() => expect(put).toHaveBeenCalled());
+    expect(put).toHaveBeenCalledWith("/api/v1/settings/{key}", {
+      params: { path: { key: "loops.enabled" } },
+      body: { value: true, scope: "tenant" },
+    });
+    // Still on the run — the fix does not navigate away (AC-2).
+    expect(screen.getByTestId("loop-workspace")).toBeTruthy();
+  });
+
+  it("loops off wins over a stale executor reason", async () => {
+    // The dispatcher does not poll while loops are off, so any reason on the
+    // row predates the switch. Pointing at Nodes would send the reader to fix
+    // something that is not the problem.
+    state.loopsOn = false;
+    withJob(
+      {
+        state: "queued",
+        queued_reason: "no eligible executor: you have no node online",
+      },
+      [],
+    );
+    renderPage();
+
+    expect(await screen.findByTestId("stuck-loops-off")).toBeTruthy();
+    expect(screen.queryByTestId("stuck-no-executor")).toBeNull();
+  });
+
+  it("loops on, nothing eligible: shows the backend's reason and a Nodes link", async () => {
+    state.loopsOn = true;
+    const detail =
+      "no eligible executor: your online node(s) are not authorized for the claude runtime";
+    withJob({ state: "queued", queued_reason: detail }, []);
+    renderPage();
+
+    const notice = await screen.findByTestId("stuck-no-executor");
+    // The backend already distinguishes the sub-causes; the page must not
+    // re-word it and drift from the source.
+    expect(notice.textContent).toContain(detail);
+    expect(screen.getByRole("link", { name: /open nodes/i })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /turn on loops/i })).toBeNull();
+  });
+
+  it("an undiagnosed queued run still just waits (AC-3)", async () => {
+    state.loopsOn = true;
+    withJob({ state: "queued", queued_reason: null }, []);
+    renderPage();
+
+    expect(await screen.findByTestId("stuck-waiting")).toBeTruthy();
+    expect(screen.queryByTestId("stuck-loops-off")).toBeNull();
+    expect(screen.queryByTestId("stuck-no-executor")).toBeNull();
+  });
+
+  it("a refused turn-on says who can fix it instead of failing silently (AC-4)", async () => {
+    // openapi-fetch reports HTTP failures in `error` rather than throwing, so a
+    // 403 would otherwise look exactly like success and the notice would just
+    // sit there.
+    state.loopsOn = false;
+    put.mockImplementation(async () => ({ error: { message: "forbidden" } }));
+    withJob({ state: "queued" }, []);
+    renderPage();
+
+    await screen.findByTestId("stuck-loops-off");
+    await userEvent.click(screen.getByRole("button", { name: /turn on loops/i }));
+
+    const failed = await screen.findByTestId("stuck-loops-off-failed");
+    expect(failed.textContent).toMatch(/permission|owner/i);
+  });
+
+  it("says nothing over a run that is already going", async () => {
+    state.loopsOn = false; // off, but this run already has an executor
+    withJob({ state: "running" }, [line()]);
+    renderPage();
+
+    await screen.findByTestId("composer-steer");
+    expect(screen.queryByTestId("stuck-loops-off")).toBeNull();
+    expect(screen.queryByTestId("stuck-waiting")).toBeNull();
   });
 });
