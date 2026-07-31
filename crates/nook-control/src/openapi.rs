@@ -62,6 +62,8 @@ use utoipa::OpenApi;
         crate::routes::gitops::put_secret,
         crate::routes::nodes::list,
         crate::routes::nodes::set_shared,
+        crate::routes::nodes::get_placement,
+        crate::routes::nodes::set_placement,
         crate::routes::nodes::authorize,
         // The sessionless replacement for `nodes::authorize` (MAIN-290). Both
         // are listed until C5 retires the older one.
@@ -268,6 +270,9 @@ use utoipa::OpenApi;
         nook_types::GpuInfo,
         nook_types::Node,
         nook_types::SetSharedRequest,
+        nook_types::NodeTaint,
+        nook_types::NodePlacement,
+        nook_types::SetNodePlacementRequest,
         nook_types::AuthorizeRuntimeRequest,
         nook_types::DevAccount,
         nook_types::DevAccountsResponse,

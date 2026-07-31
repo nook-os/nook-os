@@ -513,8 +513,52 @@ pub struct Node {
     /// shared node is VISIBLE to the whole team; it is not yet usable by them —
     /// session-start stays owner-only until a later unit of the epic.
     pub shared: bool,
+    /// Operator-set labels, `{"key": "value"}` (MAIN-314). The DERIVED `os` and
+    /// `arch` labels are not in here: they are computed from what the node
+    /// reports, so storing them would let them drift from the truth.
+    pub labels: serde_json::Value,
+    /// Operator-set taints, `[{"key": …, "effect": …}]` (MAIN-314).
+    pub taints: serde_json::Value,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+/// A node's refusal to take work unless the work tolerates it (MAIN-314).
+///
+/// The inverse of a label: a label says what a node IS, a taint says what it
+/// will not accept. Keeping them apart is what stops "has X" and "refuses X"
+/// becoming the same question.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct NodeTaint {
+    pub key: String,
+    /// What the taint does to unmatched work. `NoSchedule` today; the field is
+    /// a string rather than an enum so a later effect does not break the wire.
+    pub effect: String,
+}
+
+/// Everything placement reads off a node (MAIN-314). No scheduling here — the
+/// reconciler that consumes this is a later child of the epic.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct NodePlacement {
+    /// Derived labels MERGED over the operator's, which is what a scheduler
+    /// matches on. `os` and `arch` are always present; a custom label of the
+    /// same name loses, because a node cannot be relabelled into another OS.
+    pub labels: std::collections::BTreeMap<String, String>,
+    /// Just the operator's own, so a UI can edit them without stripping the
+    /// derived ones by round-tripping.
+    pub custom_labels: std::collections::BTreeMap<String, String>,
+    pub taints: Vec<NodeTaint>,
+}
+
+/// Replace a node's operator-set labels and taints (MAIN-314). Both fields are
+/// a full replacement, not a patch: a partial update of a set is ambiguous
+/// about deletion.
+#[derive(Debug, Clone, Deserialize, ToSchema)]
+pub struct SetNodePlacementRequest {
+    #[serde(default)]
+    pub labels: std::collections::BTreeMap<String, String>,
+    #[serde(default)]
+    pub taints: Vec<NodeTaint>,
 }
 
 /// Toggle a node's `shared` designation (MAIN-135). Owner-only at the route.

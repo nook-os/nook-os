@@ -161,6 +161,16 @@ pub trait NodeRepository: Send + Sync {
         shared: bool,
     ) -> ApiResult<Option<Node>>;
 
+    /// Replace a node's operator-set labels and taints (MAIN-314). Both are a
+    /// full replacement — a partial update of a set cannot say what was deleted.
+    async fn set_placement(
+        &self,
+        id: NodeId,
+        tenant: TenantId,
+        labels: serde_json::Value,
+        taints: serde_json::Value,
+    ) -> ApiResult<Option<Node>>;
+
     // ── enrolment ───────────────────────────────────────────────────────────
 
     /// Find a node by the hash of the token it presented. The plaintext token
@@ -337,7 +347,7 @@ pub trait TenantCaRepository: Send + Sync {
 /// The `nodes` columns every read returns, in one place: the shape `Node`
 /// decodes from, and the reason two SELECTs cannot drift apart.
 const NODE_COLUMNS: &str = "id, tenant_id, name, hostname, platform, capabilities, resources, \
-     status, last_seen_at, owner_person_id, shared, created_at, updated_at";
+     status, last_seen_at, owner_person_id, shared, created_at, updated_at, labels, taints";
 
 pub struct DbNodeRepository {
     db: DbPool,
@@ -465,6 +475,27 @@ impl NodeRepository for DbNodeRepository {
                 caps,
             )
         }))
+    }
+
+    async fn set_placement(
+        &self,
+        id: NodeId,
+        tenant: TenantId,
+        labels: serde_json::Value,
+        taints: serde_json::Value,
+    ) -> ApiResult<Option<Node>> {
+        Ok(self
+            .db
+            .query_opt(
+                &format!(
+                    "UPDATE nodes SET labels = $3, taints = $4, updated_at = {}
+                     WHERE id = $1 AND tenant_id = $2
+                     RETURNING {NODE_COLUMNS}",
+                    type_mapping(self.db.engine()).now()
+                ),
+                params![id, tenant, labels, taints],
+            )
+            .await?)
     }
 
     async fn set_shared(
@@ -1129,6 +1160,8 @@ impl FakeNodeRepository {
                 shared,
                 created_at: now,
                 updated_at: now,
+                labels: serde_json::json!({}),
+                taints: serde_json::json!([]),
             },
             token_hash: String::new(),
             owning_instance_id: None,
@@ -1215,6 +1248,26 @@ impl FakeNodeRepository {
 
 #[async_trait]
 impl NodeRepository for FakeNodeRepository {
+    async fn set_placement(
+        &self,
+        id: NodeId,
+        tenant: TenantId,
+        labels: serde_json::Value,
+        taints: serde_json::Value,
+    ) -> ApiResult<Option<Node>> {
+        let mut st = self.inner.lock().unwrap();
+        let Some(n) = st
+            .nodes
+            .iter_mut()
+            .find(|n| n.node.id == id && n.node.tenant_id == tenant)
+        else {
+            return Ok(None);
+        };
+        n.node.labels = labels;
+        n.node.taints = taints;
+        Ok(Some(n.node.clone()))
+    }
+
     async fn tenant_of(&self, id: NodeId) -> ApiResult<Option<TenantId>> {
         Ok(self
             .inner
@@ -1412,6 +1465,8 @@ impl NodeRepository for FakeNodeRepository {
                 last_seen_at: None,
                 owner_person_id: node.owner_person_id,
                 shared: false,
+                labels: serde_json::json!({}),
+                taints: serde_json::json!([]),
                 created_at: now,
                 updated_at: now,
             },
