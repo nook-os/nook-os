@@ -32,6 +32,12 @@ export function SessionWindows({ sessionId }: { sessionId: string }) {
     // tmux is the source of truth and the user can also change windows from
     // inside the terminal, so poll gently.
     refetchInterval: 5000,
+    // A session with no live terminal yet (still starting, or its node just
+    // dropped) answers 400. React Query's default is to retry a failure three
+    // times in quick succession — which turned a single dead session into the
+    // request storm this poll is supposed to be the gentle version of. One try
+    // per interval, no burst.
+    retry: false,
   });
 
   const act = async (body: Record<string, unknown>) => {

@@ -304,7 +304,7 @@ export function Shell({ me }: { me: MeResponse }) {
           <span className="cursor" />
         </div>
         <button className="btn primary" onClick={() => showNewWork()}>
-          <Plus size={14} style={{ verticalAlign: "-2px" }} /> New Work
+          <Plus size={14} style={{ verticalAlign: "-2px" }} /> New Workspace
         </button>
         <ControlPlanePill />
         <WorkspaceSwitcher />

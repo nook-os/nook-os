@@ -22,14 +22,41 @@ fn ctx(user: UserId, tenant: TenantId) -> AuthCtx {
     }
 }
 
+/// A present checkout of `workspace` on `node`, returning its row id — the key
+/// the managed-session index now arbitrates on. Idempotent per `path`, so the
+/// same call twice yields the SAME checkout (which is how two replicas race for
+/// one slot).
+async fn a_checkout(
+    bed: &TestBed,
+    tenant: TenantId,
+    node: NodeId,
+    workspace: WorkspaceId,
+    path: &str,
+) -> NodeWorkspaceId {
+    let state = bed.app_state().await;
+    state
+        .workspaces
+        .associate_clone(tenant, node, workspace, path, "repo.git", "repo")
+        .await
+        .expect("associate checkout");
+    state
+        .workspaces
+        .checkout_id_at_path(node, path)
+        .await
+        .expect("read checkout")
+        .expect("checkout present")
+}
+
 /// Create a session, ad-hoc or reconciler-owned. `managed` rides the INSERT,
 /// which is the point: it is what the unique index arbitrates on, before
-/// anything reaches a node.
+/// anything reaches a node. A managed session must carry a `checkout` — the
+/// index keys on it — so the helper takes one.
 async fn a_session(
     bed: &TestBed,
     tenant: TenantId,
     workspace: Option<WorkspaceId>,
     node: NodeId,
+    checkout: Option<NodeWorkspaceId>,
     name: &str,
     managed: bool,
 ) -> nook_control::error::ApiResult<SessionId> {
@@ -44,7 +71,7 @@ async fn a_session(
             name: name.to_string(),
             runtime: "claude".to_string(),
             created_by: None,
-            checkout_id: None,
+            checkout_id: checkout,
             managed,
         })
         .await?
@@ -57,10 +84,11 @@ async fn made(
     tenant: TenantId,
     workspace: Option<WorkspaceId>,
     node: NodeId,
+    checkout: Option<NodeWorkspaceId>,
     name: &str,
     managed: bool,
 ) -> SessionId {
-    a_session(bed, tenant, workspace, node, name, managed)
+    a_session(bed, tenant, workspace, node, checkout, name, managed)
         .await
         .expect("create session")
 }
@@ -80,8 +108,9 @@ async fn only_sessions_the_reconciler_marked_are_visible_to_it() {
     let ws = bed.workspace(tenant).await;
     let state = bed.app_state().await;
 
-    let hand_started = made(&bed, tenant, Some(ws), node, "mine", false).await;
-    let mine = made(&bed, tenant, Some(ws), node, "managed", true).await;
+    let co = a_checkout(&bed, tenant, node, ws, "/w/mine").await;
+    let hand_started = made(&bed, tenant, Some(ws), node, Some(co), "mine", false).await;
+    let mine = made(&bed, tenant, Some(ws), node, Some(co), "managed", true).await;
 
     let seen = state.sessions.live_managed(tenant, ws).await.expect("read");
     assert_eq!(seen.len(), 1, "only the marked one");
@@ -104,7 +133,8 @@ async fn an_ended_managed_session_is_a_gap_not_a_replica() {
     let ws = bed.workspace(tenant).await;
     let state = bed.app_state().await;
 
-    let s = made(&bed, tenant, Some(ws), node, "managed", true).await;
+    let co = a_checkout(&bed, tenant, node, ws, "/w/managed").await;
+    let s = made(&bed, tenant, Some(ws), node, Some(co), "managed", true).await;
     assert_eq!(
         state.sessions.live_managed(tenant, ws).await.unwrap().len(),
         1
@@ -146,16 +176,28 @@ async fn two_replicas_cannot_both_start_the_same_managed_session() {
     let ws = bed.workspace(tenant).await;
     let state = bed.app_state().await;
 
-    let first = made(&bed, tenant, Some(ws), node, "managed", true).await;
+    // Both replicas race for the SAME checkout — that is the slot the index
+    // arbitrates now.
+    let co = a_checkout(&bed, tenant, node, ws, "/w/managed").await;
+    let first = made(&bed, tenant, Some(ws), node, Some(co), "managed", true).await;
 
     // The CREATE must fail, not some later marking step. That ordering is the
     // whole fix: `create_session_at` inserts and then tells the node to start,
     // so a race arbitrated after the insert would already have launched a real
     // tmux session that nothing could ever reconcile.
-    let race = a_session(&bed, tenant, Some(ws), node, "managed-again", true).await;
+    let race = a_session(
+        &bed,
+        tenant,
+        Some(ws),
+        node,
+        Some(co),
+        "managed-again",
+        true,
+    )
+    .await;
     assert!(
         race.is_err(),
-        "a second live managed session on the same (workspace, node) must be refused at INSERT"
+        "a second live managed session on the same checkout must be refused at INSERT"
     );
 
     assert_eq!(
@@ -167,7 +209,7 @@ async fn two_replicas_cannot_both_start_the_same_managed_session() {
     // And once the first ends, the slot is free again — otherwise a crashed
     // session could never be replaced.
     state.sessions.mark_ended(tenant, first).await.unwrap();
-    made(&bed, tenant, Some(ws), node, "replacement", true).await;
+    made(&bed, tenant, Some(ws), node, Some(co), "replacement", true).await;
 
     bed.teardown().await;
 }
@@ -186,9 +228,10 @@ async fn an_ad_hoc_session_is_not_blocked_by_the_managed_index() {
     let ws = bed.workspace(tenant).await;
     let state = bed.app_state().await;
 
-    made(&bed, tenant, Some(ws), node, "managed", true).await;
-    made(&bed, tenant, Some(ws), node, "person-1", false).await;
-    made(&bed, tenant, Some(ws), node, "person-2", false).await;
+    let co = a_checkout(&bed, tenant, node, ws, "/w/managed").await;
+    made(&bed, tenant, Some(ws), node, Some(co), "managed", true).await;
+    made(&bed, tenant, Some(ws), node, None, "person-1", false).await;
+    made(&bed, tenant, Some(ws), node, None, "person-2", false).await;
 
     assert_eq!(
         state.sessions.live_managed(tenant, ws).await.unwrap().len(),
@@ -220,7 +263,9 @@ async fn live_managed_is_scoped_to_its_tenant_and_workspace() {
         (mine, my_other_ws, my_node),
         (theirs, their_ws, their_node),
     ] {
-        made(&bed, t, Some(w), n, "managed", true).await;
+        // A distinct checkout per workspace (path unique per node).
+        let co = a_checkout(&bed, t, n, w, &format!("/w/{}", w.0.simple())).await;
+        made(&bed, t, Some(w), n, Some(co), "managed", true).await;
     }
 
     assert_eq!(
@@ -311,6 +356,54 @@ async fn an_unmanaged_workspace_reports_unmanaged_rather_than_zero_of_zero() {
     .0;
     assert!(!got.managed);
     assert_eq!(got.desired, 0);
+
+    bed.teardown().await;
+}
+
+#[tokio::test]
+async fn reconcile_on_makes_an_unspecced_workspace_managed_by_auto_derive() {
+    // The auto-derive: flipping the tenant switch on makes EVERY workspace
+    // managed toward the default spec, with no per-workspace `session_spec`. The
+    // status endpoint must derive it the same way the loop does — reporting
+    // "unmanaged" here while the loop is about to place a default session is the
+    // exact drift the endpoint exists to prevent.
+    use nook_control::repo::admin::SettingWrite;
+
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let tenant = bed.tenant("recon").await;
+    let (user, _) = bed.user(tenant, "owner").await;
+    let ws = bed.workspace(tenant).await;
+    let state = bed.app_state().await;
+
+    // No spec on the workspace — only the tenant switch.
+    state
+        .settings
+        .put(SettingWrite {
+            tenant,
+            scope: "tenant".into(),
+            user: None,
+            key: nook_control::services::session_reconcile::KEY.into(),
+            value: serde_json::json!(true),
+        })
+        .await
+        .expect("enable reconcile");
+
+    let got = nook_control::routes::workspaces::reconcile_status(
+        axum::extract::State(state.clone()),
+        ctx(user, tenant),
+        axum::extract::Path(ws),
+    )
+    .await
+    .expect("status")
+    .0;
+
+    assert!(got.enabled, "the tenant switch is on");
+    assert!(
+        got.managed,
+        "an on tenant auto-derives a default spec, so the workspace is managed with no session_spec of its own"
+    );
 
     bed.teardown().await;
 }

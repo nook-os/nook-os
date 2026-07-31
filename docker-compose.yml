@@ -231,6 +231,12 @@ services:
       context: .
       dockerfile: deploy/docker/dev-rust.Dockerfile
     entrypoint: ["bash", "deploy/docker/node-dev-entrypoint.sh"]
+    # tini as PID 1 reaps reparented zombies. tmux's `new-session -d` double-forks
+    # a server daemon that reparents to PID 1; the node is a plain binary and never
+    # wait()s on orphans it did not spawn, so without an init they pile up as
+    # <defunct>. The node's OWN pty children are reaped in sessions.rs; this is
+    # only for the daemons tmux orphans onto PID 1.
+    init: true
     working_dir: /app
     environment:
       NOOK_SERVER: http://control-plane:8080
@@ -278,6 +284,9 @@ services:
     build:
       context: .
       dockerfile: deploy/docker/operator-node.Dockerfile
+    # tini as PID 1 — reaps the tmux server daemons that reparent to PID 1 (see
+    # the `node` service). Same reason, same one-line fix.
+    init: true
     environment:
       NOOK_SERVER: http://control-plane:8080
       NOOK_JOIN_TOKEN: ${NOOK_DEV_JOIN_TOKEN:-}

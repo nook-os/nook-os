@@ -83,6 +83,10 @@ pub async fn get_one(
     let mut session = session_for_content(&state, &auth, id).await?;
     session_queries::hydrate_checkouts(&*state.workspaces, std::slice::from_mut(&mut session))
         .await?;
+    // The registry is the truth about a node's liveness — `nodes.status` can say
+    // `online` for a seeded node that never connected. Filling this lets the UI
+    // render a dead/synthetic session honestly instead of retrying its attach.
+    session.node_online = Some(state.registry.node_online(session.node_id));
     Ok(Json(session))
 }
 

@@ -411,7 +411,16 @@ fn drive_streaming(
     use crate::job_adapter::{self, Event, StreamingSession, TurnState};
 
     let args = job_adapter::claude_stream_args(job_id);
-    let mut env: Vec<(&str, &str)> = vec![("NOOK_JOB_ID", job_id)];
+    let mut env: Vec<(&str, &str)> = vec![
+        ("NOOK_JOB_ID", job_id),
+        // The agent runs headless with `--dangerously-skip-permissions`
+        // (job_adapter), which Claude Code refuses under root "for security
+        // reasons" — and the node runs as root. But a per-job worktree on a
+        // confined node genuinely IS a sandbox, and `IS_SANDBOX=1` is exactly
+        // how Claude Code sanctions the flag there. Without it the agent exits 1
+        // on launch and the run fails before it does anything.
+        ("IS_SANDBOX", "1"),
+    ];
     if let Some(s) = seed.filter(|s| !s.trim().is_empty()) {
         env.push(("NOOK_JOB_SEED", s));
     }

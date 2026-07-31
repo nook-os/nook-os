@@ -3938,6 +3938,12 @@ export interface components {
         };
         CreateWorkspaceRequest: {
             description?: string | null;
+            /**
+             * @description The git remote this workspace is a checkout of. With it set, the session
+             *     reconciler's clone-on-demand can materialise the repo on eligible nodes —
+             *     the declarative "New Workspace" path. Omitted for a bare/empty project.
+             */
+            git_remote_url?: string | null;
             name: string;
         };
         /**
@@ -5247,6 +5253,15 @@ export interface components {
             id: components["schemas"]["SessionId"];
             name: string;
             node_id: components["schemas"]["NodeId"];
+            /**
+             * @description Whether the session's node holds a LIVE WebSocket right now — the honest
+             *     signal `nodes.status` cannot give, because a seeded/synthetic node can
+             *     read `online` in the database while never having connected. `None` when
+             *     not computed (list rows); the detail endpoint fills it from the registry
+             *     so the UI can tell "the terminal is streaming" from "its node is gone"
+             *     instead of retrying a dead attach forever. Not stored (`#[db(skip)]`).
+             */
+            node_online?: boolean | null;
             runtime: string;
             status: string;
             tenant_id: components["schemas"]["TenantId"];

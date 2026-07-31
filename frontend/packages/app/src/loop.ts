@@ -7,7 +7,7 @@
 // This module holds the query keys, the fetchers, and the pure action logic the
 // panel and the menu both read, so the two can never disagree about whether a
 // new job may be started or why not.
-import { api, type LoopJob } from "@nookos/api";
+import { api, type LoopJob, type LoopJobTranscriptEntry } from "@nookos/api";
 
 /** A job in one of these states is still in flight — its ticket already has a
  *  loop running, so a second one must not be started on top of it (AC-1). */
@@ -18,7 +18,9 @@ export const ACTIVE_JOB_STATES = [
   "waiting_on_human",
 ] as const;
 
-export function isActiveJob(job: LoopJob | undefined | null): job is LoopJob {
+type ActiveJob = LoopJob & { state: (typeof ACTIVE_JOB_STATES)[number] };
+
+export function isActiveJob(job: LoopJob | undefined | null): job is ActiveJob {
   return !!job && (ACTIVE_JOB_STATES as readonly string[]).includes(job.state);
 }
 
@@ -116,15 +118,19 @@ export async function postJobMessage(jobId: string, body: string) {
  *   button: you are telling the agent what you want before it starts.
  * - `steer` — a job is in flight or paused on a human. The box posts steering
  *   messages (AC-3); a paused job resumes when one lands.
- * - `readonly` — the job reached a terminal state. There is no session left to
- *   talk to, and the server refuses messages, so the UI must not offer a box
- *   that can only fail (AC-5).
+ * - `continue` — the job COMPLETED. Not a dead end: the box is still there, but
+ *   sending it starts a follow-up run so the conversation keeps going. A finished
+ *   spec is a good place to say "also add X".
+ * - `readonly` — the job FAILED or was CANCELED. There is no session to talk to
+ *   and nothing to continue, so the UI must not offer a box that can only fail
+ *   (AC-5); it points at starting a fresh run instead.
  */
-export type ComposerMode = "seed" | "steer" | "readonly";
+export type ComposerMode = "seed" | "steer" | "continue" | "readonly";
 
 export function composerMode(job: LoopJob | null | undefined): ComposerMode {
   if (!job) return "seed";
   if (isActiveJob(job)) return "steer";
+  if (job.state === "completed") return "continue";
   return "readonly";
 }
 
@@ -143,20 +149,74 @@ export function stripAnsi(s: string): string {
 }
 
 /**
- * Does this transcript entry look like a drafted issue rather than narration?
+ * Should this transcript entry render as markdown rather than preformatted text?
  *
- * The skills print their draft into the session before asking for a go-ahead,
- * so it arrives as an ordinary transcript line. There is no marker on the wire
- * saying "this is a draft" — the shape IS the marker: the issue template's own
- * headings. Recognising them is what lets the page render a draft as markdown
- * while leaving raw terminal noise as preformatted text (AC-4).
+ * The skills print real markdown into the session — a full drafted issue, an
+ * interview (Q&A with **bold** options and bulleted choices), research notes, a
+ * fenced ```code``` block. There is no marker on the wire saying "this is
+ * markdown" — the shape IS the marker. Recognising markdown structure is what
+ * lets the page render those beautifully instead of as a wall of literal `##`
+ * and backticks, while short tool markers ("· Bash") and raw terminal output —
+ * which carry none of that structure — stay preformatted (AC-4).
+ *
+ * A full drafted spec (the original signal) still matches: it opens with `##`
+ * headings, so `hasHeading` covers it.
  */
-export function looksLikeDraft(content: string): boolean {
+export function looksLikeMarkdown(content: string): boolean {
   const text = stripAnsi(content);
-  return (
-    /^\s*##\s+Acceptance Criteria\s*$/m.test(text) ||
-    (/^\s*##\s+Problem\s*$/m.test(text) && /^\s*##\s+Non-goals\s*$/m.test(text))
-  );
+  const hasHeading = /^\s{0,3}#{1,6}\s+\S/m.test(text);
+  const hasFence = /^\s*```/m.test(text);
+  const constructs =
+    (/\*\*[^*\n]+\*\*/.test(text) ? 1 : 0) + // **bold**
+    (/^\s*[-*]\s+\S/m.test(text) ? 1 : 0) + // - bullet list
+    (/^\s*\d+\.\s+\S/m.test(text) ? 1 : 0) + // 1. numbered list
+    (/`[^`\n]+`/.test(text) ? 1 : 0); // `inline code`
+  // A heading or a fence is a strong signal on its own; otherwise require two
+  // constructs so an accidental single `- ` or `**` in raw output stays raw.
+  return hasHeading || hasFence || constructs >= 2;
+}
+
+/**
+ * Fold a run of consecutive agent tool-markers (`· Bash`, `· Read`, …) into ONE
+ * activity entry, and drop the empty tool-result placeholders between them — so
+ * the transcript reads "· 7 steps — Bash ×5 · Read ×2" instead of a ladder of
+ * identical lines. This mirrors how Claude Code collapses tool activity into a
+ * single working line rather than printing one per call. Substantive turns — the
+ * agent's prose, a human message, a system note — pass through untouched.
+ */
+export function foldToolActivity(
+  transcript: LoopJobTranscriptEntry[],
+): LoopJobTranscriptEntry[] {
+  const isMarker = (e: LoopJobTranscriptEntry) =>
+    e.source === "agent" && /^·\s+\S/.test(stripAnsi(e.content));
+  const isBlank = (e: LoopJobTranscriptEntry) => stripAnsi(e.content).trim() === "";
+  const out: LoopJobTranscriptEntry[] = [];
+  let run: { first: LoopJobTranscriptEntry; tools: string[] } | null = null;
+  const flush = () => {
+    if (!run) return;
+    const counts = new Map<string, number>();
+    for (const t of run.tools) counts.set(t, (counts.get(t) ?? 0) + 1);
+    const summary = [...counts]
+      .map(([t, n]) => (n > 1 ? `${t} ×${n}` : t))
+      .join(" · ");
+    const label =
+      run.tools.length === 1 ? `· ${summary}` : `· ${run.tools.length} steps — ${summary}`;
+    out.push({ ...run.first, content: label });
+    run = null;
+  };
+  for (const e of transcript) {
+    if (isBlank(e)) continue; // empty tool-result placeholder — nothing to show
+    if (isMarker(e)) {
+      const tool = stripAnsi(e.content).replace(/^·\s+/, "").split(/\s+/)[0];
+      if (!run) run = { first: e, tools: [] };
+      run.tools.push(tool);
+    } else {
+      flush();
+      out.push(e);
+    }
+  }
+  flush();
+  return out;
 }
 
 /**

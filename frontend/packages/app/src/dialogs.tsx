@@ -221,7 +221,7 @@ export function CopyRow({ value }: { value: string }) {
   );
 }
 
-/** Renders the active dialog. Mounted once, next to the New Work host. */
+/** Renders the active dialog. Mounted once, next to the New Workspace host. */
 export function DialogHost() {
   const current = useDialogStore((s) => s.current);
   const close = useDialogStore((s) => s.close);

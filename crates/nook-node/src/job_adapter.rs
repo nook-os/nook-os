@@ -69,6 +69,12 @@ pub fn adapter_for(runtime: &str) -> Adapter {
 ///   stdout for acknowledgment". This is what lets a steering message become a
 ///   transcript entry *when the agent actually received it*, rather than when
 ///   we hopefully wrote it.
+/// - `--dangerously-skip-permissions` — the run is headless: there is no human
+///   to answer a permission prompt, so without it every `nook` / `git` / edit
+///   the agent attempts is denied, and the run can neither drive the board
+///   (`nook whoami` was coming back "denied") nor change code. The agent runs
+///   in a throwaway per-job worktree on a confined node — exactly the case
+///   these autonomous permissions exist for.
 /// - `--session-id` — pins the id so AC-5's resume has something to name.
 pub fn claude_stream_args(session_id: &str) -> Vec<String> {
     [
@@ -79,6 +85,7 @@ pub fn claude_stream_args(session_id: &str) -> Vec<String> {
         "stream-json",
         "--verbose",
         "--replay-user-messages",
+        "--dangerously-skip-permissions",
         "--session-id",
         session_id,
     ]

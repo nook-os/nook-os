@@ -28,7 +28,7 @@ export function DocsPage() {
 
           <h2>Starting work</h2>
           <p>
-            Hit <b>+ New Work</b> (top bar). Pick what to work on — <b>clone a repo</b> (any
+            Hit <b>+ New Workspace</b> (top bar). Pick what to work on — <b>clone a repo</b> (any
             GitHub/GitLab/Bitbucket/raw URL, with an optional saved SSH key for private repos),
             add a <b>new worktree</b>, spin up a <b>new empty project</b>, or open an{" "}
             <b>existing workspace</b> — choose the machine, choose the runtime, go. The work is the

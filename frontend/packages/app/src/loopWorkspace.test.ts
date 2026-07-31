@@ -3,7 +3,7 @@
 // page's decisions are testable without a DOM.
 import { describe, expect, it } from "vitest";
 import type { LoopJob } from "@nookos/api";
-import { composerMode, filedKeys, looksLikeDraft, stripAnsi, stuckCause } from "./loop";
+import { composerMode, filedKeys, looksLikeMarkdown, stripAnsi, stuckCause } from "./loop";
 
 const job = (state: string): LoopJob =>
   ({ id: "j1", state, kind: "spec" }) as unknown as LoopJob;
@@ -20,8 +20,12 @@ describe("composerMode (MAIN-233)", () => {
     }
   });
 
-  it("goes read-only on a terminal job — the server refuses messages there", () => {
-    for (const s of ["completed", "failed", "canceled"]) {
+  it("keeps a completed run open to continue — sending starts a follow-up run", () => {
+    expect(composerMode(job("completed"))).toBe("continue");
+  });
+
+  it("goes read-only on a failed or canceled run — nothing to continue", () => {
+    for (const s of ["failed", "canceled"]) {
       expect(composerMode(job(s))).toBe("readonly");
     }
   });
@@ -41,25 +45,38 @@ describe("stripAnsi", () => {
   });
 });
 
-describe("looksLikeDraft", () => {
+describe("looksLikeMarkdown", () => {
   it("recognises the issue shape the skills print", () => {
     expect(
-      looksLikeDraft("## Problem\n\nx\n\n## Acceptance Criteria\n\n- [ ] AC-1 — y"),
+      looksLikeMarkdown("## Problem\n\nx\n\n## Acceptance Criteria\n\n- [ ] AC-1 — y"),
     ).toBe(true);
     // Problem + Non-goals is the shape too, even without the AC heading in view.
-    expect(looksLikeDraft("## Problem\n\nx\n\n## Non-goals\n\n- NG-1 — y")).toBe(true);
+    expect(looksLikeMarkdown("## Problem\n\nx\n\n## Non-goals\n\n- NG-1 — y")).toBe(true);
   });
 
   it("sees through terminal colour on the heading", () => {
-    expect(looksLikeDraft("\u001b[1m## Acceptance Criteria\u001b[0m\n- [ ] AC-1")).toBe(
+    expect(looksLikeMarkdown("\u001b[1m## Acceptance Criteria\u001b[0m\n- [ ] AC-1")).toBe(
       true,
     );
   });
 
-  it("does not mistake narration or a passing mention for a draft", () => {
-    expect(looksLikeDraft("reading the codebase…")).toBe(false);
-    expect(looksLikeDraft("I will write the Acceptance Criteria next")).toBe(false);
-    expect(looksLikeDraft("## Problem\n\njust the one heading")).toBe(false);
+  it("renders the agent's other markdown too — an interview, a code block, a lone heading", () => {
+    // The interview a spec run prints: a bold question with bulleted options.
+    expect(
+      looksLikeMarkdown("**Q1 — where does it live?**\n- (a) here\n- (b) there"),
+    ).toBe(true);
+    // A fenced code block.
+    expect(looksLikeMarkdown("Research:\n```python\ndef greet(): ...\n```")).toBe(true);
+    // Even a single heading is markdown — render it, don't show a literal `##`.
+    expect(looksLikeMarkdown("## Problem\n\njust the one heading")).toBe(true);
+  });
+
+  it("leaves narration and raw terminal output preformatted", () => {
+    expect(looksLikeMarkdown("reading the codebase…")).toBe(false);
+    expect(looksLikeMarkdown("I will write the Acceptance Criteria next")).toBe(false);
+    // A tool marker, or one accidental construct in a log line, stays raw.
+    expect(looksLikeMarkdown("· Bash")).toBe(false);
+    expect(looksLikeMarkdown("- one lonely bullet in a log line")).toBe(false);
   });
 });
 

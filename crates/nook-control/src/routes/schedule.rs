@@ -25,7 +25,7 @@ pub async fn node(
     auth: AuthCtx,
     Query(q): Query<ScheduleQuery>,
 ) -> ApiResult<Json<ScheduledNode>> {
-    // The New Work "Auto" picker resolves only nodes the session user owns
+    // The New Workspace "Auto" picker resolves only nodes the session user owns
     // (MAIN-131), matching where a session may actually start.
     // The picker only needs the chosen node here; needs-clone is surfaced at
     // dispatch time (MAIN-227), not on this pre-selection.

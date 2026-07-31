@@ -152,7 +152,9 @@ afterEach(cleanup);
 describe("Loop workspace (MAIN-233)", () => {
   it("with no run, offers the seed box and starts the job WITH the typed idea", async () => {
     renderPage();
-    const box = await screen.findByLabelText(/what do you want out of this run/i);
+    // Seed is ChatView's own composer now, not a bespoke box — its textarea is
+    // labelled "Message" and its Send button wears the action label (AC-2).
+    const box = await screen.findByLabelText("Message");
 
     await userEvent.type(box, "focus on the migration path");
     await userEvent.click(screen.getByRole("button", { name: /draft a spec/i }));
@@ -169,8 +171,11 @@ describe("Loop workspace (MAIN-233)", () => {
 
   it("omits the seed entirely when the box is left empty", async () => {
     renderPage();
-    await screen.findByTestId("composer-seed");
-    await userEvent.click(screen.getByRole("button", { name: /draft a spec/i }));
+    // Await the button itself — the composer-seed wrapper mounts before taskId
+    // resolves and the composer un-hides, so grabbing the button synchronously
+    // races the async id. An empty send is legal in seed mode (allowEmpty).
+    const btn = await screen.findByRole("button", { name: /draft a spec/i });
+    await userEvent.click(btn);
 
     await waitFor(() => expect(post).toHaveBeenCalled());
     expect(post).toHaveBeenCalledWith("/api/v1/jobs", {
@@ -326,7 +331,9 @@ describe("Loop workspace (MAIN-233)", () => {
     qc.invalidateQueries({ queryKey: ["task", TASK_ID, "jobs"] });
 
     // The composer notices, because the list it reads is keyed the same way.
-    expect(await screen.findByTestId("composer-readonly")).toBeTruthy();
+    // A completed run stays OPEN to continue (MAIN-233), so it flips to the
+    // continue composer, not a dead read-only footer.
+    expect(await screen.findByTestId("composer-continue")).toBeTruthy();
   });
 
   it("repaints when the live event invalidates the job — no reload", async () => {
@@ -347,14 +354,30 @@ describe("Loop workspace (MAIN-233)", () => {
     expect(await screen.findByText("second")).toBeTruthy();
   });
 
-  it("a completed run is read-only, and a failed one offers a re-run", async () => {
+  it("a completed run stays open to continue; a failed one is read-only with a re-run", async () => {
+    // Completed is NOT a dead end (MAIN-233): the composer stays open, and
+    // sending a follow-up starts a fresh run rather than steering the finished
+    // one. No read-only footer, no re-run button — you just keep talking.
     withJob({ state: "completed" }, [line({ source: "system", content: "done" })]);
     const { unmount } = renderPage();
-    expect(await screen.findByTestId("composer-readonly")).toBeTruthy();
-    expect(screen.queryByLabelText("message the agent")).toBeNull();
-    expect(screen.queryByRole("button", { name: /re-run/i })).toBeNull();
+    expect(await screen.findByTestId("composer-continue")).toBeTruthy();
+    expect(screen.queryByTestId("composer-readonly")).toBeNull();
+
+    const box = await screen.findByLabelText("Message");
+    await userEvent.type(box, "also add a --quiet flag");
+    await userEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(post).toHaveBeenCalled());
+    expect(post).toHaveBeenCalledWith("/api/v1/jobs", {
+      body: {
+        kind: "spec",
+        target_task_id: TASK_ID,
+        seed: "also add a --quiet flag",
+      },
+    });
     unmount();
 
+    // Failed IS a dead end: read-only footer, and re-run starts a fresh job.
+    post.mockClear();
     withJob({ state: "failed" }, [line({ source: "system", content: "boom" })]);
     renderPage();
     await screen.findByTestId("composer-readonly");
@@ -397,7 +420,10 @@ describe("not-found and empty states (MAIN-296)", () => {
     // regression was the message alone.
     expect(await screen.findByText(/no run yet/i)).toBeTruthy();
     expect(screen.queryByTestId("loop-not-found")).toBeNull();
-    expect((screen.getByTestId("loop-foot") as HTMLElement).hidden).toBe(false);
+    // The seed box lives in the panel now (composer-seed above), so the footer
+    // — which is ONLY the readonly closer — is correctly hidden here. What makes
+    // this "not a dead box" is the composer-seed, not a footer bar.
+    expect((screen.getByTestId("loop-foot") as HTMLElement).hidden).toBe(true);
 
     restore();
     expect(errors.join("\n")).not.toContain("Query data cannot be undefined");

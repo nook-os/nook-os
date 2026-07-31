@@ -31,6 +31,10 @@
   /* Fixed control heights so buttons/pills/inputs never nudge row heights
      (not themed — colors come from the vars above). */
   --nook-ctrl: 26px;
+  /* The chat composer runs a touch taller than a panel control: a 13px line
+     needs the room to breathe, and the input + Send button share this one
+     height so they line up exactly. */
+  --nook-chat-ctrl: 34px;
   /* Small controls and pills share ONE height so mixed rows line up. */
   --nook-ctrl-sm: 20px;
   --nook-pill-h: 20px;
@@ -121,6 +125,10 @@ textarea,
 pre,
 code,
 .activity-row .detail,
+/* The chat/loop transcript is a conversation you copy out of — a drafted
+   acceptance criterion into the ticket, a command the agent suggested, an
+   error it hit. The whole log is selectable; the composer inputs already are. */
+.chat-log,
 /* Rendered markdown — task descriptions and comments — is prose you are meant
    to read and copy out (an acceptance criterion into another tool, a command
    from a comment). The chrome around it stays unselectable. */
@@ -2142,7 +2150,7 @@ table.nook-table tr.clickable { cursor: pointer; }
   z-index: 9999;
 }
 
-/* Pasted .env in the New Work modal: monospace, resizable, never wider than
+/* Pasted .env in the New Workspace modal: monospace, resizable, never wider than
    the field (long secret values must scroll, not stretch the modal). */
 textarea.env-paste {
   height: auto;
@@ -4570,6 +4578,17 @@ a.toast-main:hover .toast-title { text-decoration: underline; }
 /* The replies ChatView fills the rest of the panel. */
 .chat-thread-panel .chat-view { flex: 1; min-height: 0; }
 
+/* System lines — dispatched / preparing workspace / launching claude — are
+   plumbing, not the conversation. Mute them to quiet context so the agent's and
+   human's words carry the eye. */
+.chat-msg[data-author="system"] {
+  opacity: 0.5;
+  font-size: 12px;
+}
+.chat-msg[data-author="system"] .chat-author {
+  color: var(--nook-fg-faint);
+  font-weight: 400;
+}
 .chat-composer {
   display: flex;
   gap: 6px;
@@ -4581,8 +4600,15 @@ a.toast-main:hover .toast-title { text-decoration: underline; }
 .chat-input {
   flex: 1;
   resize: none;
+  /* Resting height is pinned to --nook-chat-ctrl and matched EXACTLY by the
+     Send button — not a `min-height` floor, which a rows=1 textarea overshoots
+     (one 13px line + padding is ~32px, taller than the button, which is the
+     mismatch this replaces). border-box makes the border+padding count toward
+     that height; padding is sized so a single line sits centred inside it. */
+  box-sizing: border-box;
+  height: var(--nook-chat-ctrl);
   max-height: 120px;
-  padding: 6px 8px;
+  padding: 7px 10px;
   border: 1px solid var(--nook-border-bright);
   border-radius: var(--nook-radius);
   background: var(--nook-bg);
@@ -4598,7 +4624,11 @@ a.toast-main:hover .toast-title { text-decoration: underline; }
 }
 .chat-input:disabled { opacity: 0.5; }
 .chat-send {
-  height: var(--nook-ctrl);
+  /* border-box so the 1px border counts toward the height — otherwise the
+     button is 2px taller than the border-box input beside it. Both are now
+     exactly `--nook-chat-ctrl`. */
+  box-sizing: border-box;
+  height: var(--nook-chat-ctrl);
   padding: 0 14px;
   border: 1px solid var(--nook-accent);
   border-radius: var(--nook-radius);

@@ -23,7 +23,7 @@
 import React, { useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, Ban, ExternalLink, Play, RotateCcw } from "lucide-react";
+import { ArrowLeft, Ban, ExternalLink, RotateCcw } from "lucide-react";
 import { api, type LoopJob, type LoopJobTranscriptEntry } from "@nookos/api";
 import { ChatView, Empty, Panel, type ChatViewMessage } from "@nookos/ui";
 import type { StuckCause } from "../loop";
@@ -34,7 +34,8 @@ import {
   filedKeys,
   jobKey,
   jobStateMeta,
-  looksLikeDraft,
+  foldToolActivity,
+  looksLikeMarkdown,
   loopAction,
   postJobMessage,
   stripAnsi,
@@ -116,7 +117,7 @@ export function loopMessages(
   transcript: LoopJobTranscriptEntry[],
   asks: { id: string; prompt: string }[] = [],
 ): ChatViewMessage[] {
-  const lines = transcript.map((l) => ({
+  const lines = foldToolActivity(transcript).map((l) => ({
     id: l.id,
     authorId: l.source,
     authorName: l.source,
@@ -124,7 +125,7 @@ export function loopMessages(
     // (MAIN-161 NG-2), exactly as the bespoke renderer did.
     body: stripAnsi(l.content),
     createdAt: l.at,
-    markdown: looksLikeDraft(l.content),
+    markdown: looksLikeMarkdown(l.content),
   }));
   // Appended, not interleaved: an ask is outstanding *now*, so it belongs at the
   // bottom where the reader is, next to the box they answer it in.
@@ -244,70 +245,6 @@ function StuckNotice({ cause }: { cause: StuckCause }) {
   );
 }
 
-function SeedComposer({
-  taskId,
-  taskType,
-  jobs,
-}: {
-  taskId: string;
-  taskType: string | null | undefined;
-  jobs: LoopJob[] | undefined;
-}) {
-  const qc = useQueryClient();
-  const [seed, setSeed] = useState("");
-  const { kind, label, disabled, reason } = loopAction(taskType, jobs);
-
-  const start = useMutation({
-    mutationFn: () => createLoopJob(kind, taskId, seed),
-    onSuccess: () => {
-      setSeed("");
-      qc.invalidateQueries({ queryKey: taskJobsKey(taskId) });
-    },
-  });
-
-  const blocked = disabled || start.isPending;
-  return (
-    <div className="lw-composer" data-testid="composer-seed">
-      <label className="lw-seed-label" htmlFor="lw-seed">
-        The idea — what do you want out of this run?
-      </label>
-      <div className="lw-composer-row">
-        <textarea
-          id="lw-seed"
-          className="lw-seed"
-          rows={3}
-          placeholder={
-            kind === "decompose"
-              ? "e.g. break this down back-to-front; the API slice first"
-              : "e.g. focus on the migration path, not the UI"
-          }
-          value={seed}
-          disabled={blocked}
-          onChange={(e) => setSeed(e.target.value)}
-          onKeyDown={(e) => {
-            // Enter sends, Shift+Enter is a newline — a multi-line brief is
-            // normal here, so the modifier is the one that submits.
-            if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && !blocked) {
-              e.preventDefault();
-              start.mutate();
-            }
-          }}
-        />
-        <button
-          className="btn primary"
-          disabled={blocked}
-          title={reason ?? label}
-          onClick={() => !blocked && start.mutate()}
-        >
-          <Play size={12} /> {label}
-        </button>
-      </div>
-      <div className="faint small">
-        Optional — start with an empty box and the run reads the ticket alone.
-      </div>
-    </div>
-  );
-}
 
 /** The bottom bar in `readonly` mode: the run is over. Say what happened and
  *  offer the only thing that can still be done (AC-5). */
@@ -419,8 +356,44 @@ export function LoopPage() {
       if (taskId) qc.invalidateQueries({ queryKey: taskJobsKey(taskId) });
     },
   });
-  const sending = send.isPending;
-  const onSend = (body: string) => send.mutate(body);
+  const followUp = useMutation({
+    // A completed run is done, but the conversation isn't: sending starts a
+    // follow-up run seeded with the message. It becomes the newest job (jobs[0])
+    // and the page follows it, so the thread continues without the reader ever
+    // touching a mode switch — "also add X" just keeps going.
+    mutationFn: async (body: string) => {
+      if (!taskId) return;
+      return createLoopJob(
+        latest?.kind === "decompose" ? "decompose" : "spec",
+        taskId,
+        body,
+      );
+    },
+    onSuccess: () => {
+      if (taskId) qc.invalidateQueries({ queryKey: taskJobsKey(taskId) });
+    },
+  });
+  // `seed` mode reuses the SAME ChatView composer instead of a bespoke box:
+  // sending it STARTS the run (loopAction picks spec vs decompose off the ticket
+  // type). One chat component for every mode — the only difference is what send
+  // does, which lives here.
+  const seedAction = loopAction(task?.type, jobs);
+  const seedStart = useMutation({
+    mutationFn: async (body: string) => {
+      if (!taskId) return;
+      return createLoopJob(seedAction.kind, taskId, body);
+    },
+    onSuccess: () => {
+      if (taskId) qc.invalidateQueries({ queryKey: taskJobsKey(taskId) });
+    },
+  });
+  const sending = send.isPending || followUp.isPending || seedStart.isPending;
+  const onSend = (body: string) => {
+    const m = composerMode(latest);
+    if (m === "seed") return seedStart.mutate(body);
+    if (m === "continue") return followUp.mutate(body);
+    return send.mutate(body);
+  };
 
   // Why a queued run is not moving, and where its fix lives (MAIN-297).
   const loopsEnabled = useLoopsEnabled();
@@ -500,24 +473,32 @@ export function LoopPage() {
             // stay their own controls below (AC-2).
             <div
               className="lw-chat"
-              data-testid={mode === "steer" ? "composer-steer" : "transcript"}
+              data-testid={mode === "readonly" ? "transcript" : `composer-${mode}`}
             >
               <ChatView
                 messages={loopMessages(transcript, asks)}
                 onSend={onSend}
-                hideComposer={mode !== "steer" || !taskId}
-                disabled={sending}
+                hideComposer={mode === "readonly" || !taskId}
+                disabled={sending || (mode === "seed" && seedAction.disabled)}
+                sendLabel={mode === "seed" ? seedAction.label : "Send"}
+                allowEmpty={mode === "seed"}
                 placeholder={
                   ask
                     ? "Answer the agent…"
-                    : "tell the agent something — scope, a correction, go ahead…"
+                    : mode === "seed"
+                      ? seedAction.kind === "decompose"
+                        ? "e.g. break this down back-to-front; the API slice first"
+                        : "e.g. focus on the migration path, not the UI"
+                      : mode === "continue"
+                        ? "ask a follow-up — refine the spec, add a requirement…"
+                        : "tell the agent something — scope, a correction, go ahead…"
                 }
                 emptyLabel={
                   latest
                     ? "Nothing yet — the transcript fills in as the agent works."
                     : isLoading || taskPending
                       ? "Loading…"
-                      : "No run yet — start a spec or decompose below, and say what you want out of it."
+                      : "No run yet — say what you want out of it in the box below, or send it empty to read the ticket alone."
                 }
                 typing={
                   latest && mode === "steer"
@@ -553,17 +534,15 @@ export function LoopPage() {
         {stuck && <StuckNotice cause={stuck} />}
       </div>
 
-      {/* No footer at all when there is no ticket: an empty `lw-foot` is the
-          dead box this card is about. In `steer` mode the footer is empty too —
-          ChatView's own composer is the box, inside the panel above. */}
+      {/* The footer is now ONLY the readonly (failed/canceled) closer — a re-run
+          affordance for a dead-end run. Every interactive mode — seed, steer,
+          continue — uses ChatView's own composer in the panel above: one shared
+          box, one component, everywhere. */}
       <div
         className="lw-foot"
         data-testid="loop-foot"
-        hidden={!taskId || mode === "steer"}
+        hidden={!taskId || mode !== "readonly"}
       >
-        {taskId && mode === "seed" && (
-          <SeedComposer taskId={taskId} taskType={task?.type} jobs={jobs} />
-        )}
         {taskId && mode === "readonly" && latest && (
           <ClosedComposer taskId={taskId} job={latest} />
         )}

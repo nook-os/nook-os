@@ -89,13 +89,21 @@ pub async fn reconcile_status(
         .ok_or(ApiError::NotFound)?;
     let enabled = recon::enabled(&*state.settings, auth.tenant_id).await;
 
-    // Unmanaged: no spec, so there is nothing to be desired and nothing to
-    // report a shortfall against. Distinct from a spec wanting zero, which is a
-    // real declaration (MAIN-315).
-    let Some(spec) = ws
+    // What the loop reconciles this workspace toward — derived EXACTLY as `pass`
+    // does, or the status lies: an explicit spec wins; otherwise an enabled
+    // tenant auto-derives the default (MAIN-233 follow-up), and a disabled tenant
+    // with no spec is genuinely unmanaged. Reporting "unmanaged" for a workspace
+    // the loop is about to place a default session on is the drift this endpoint
+    // exists to prevent.
+    let explicit = ws
         .session_spec
-        .and_then(|v| serde_json::from_value::<SessionSpec>(v).ok())
-    else {
+        .and_then(|v| serde_json::from_value::<SessionSpec>(v).ok());
+    let spec = match explicit {
+        Some(s) => Some(s),
+        None if enabled => Some(recon::default_spec()),
+        None => None,
+    };
+    let Some(spec) = spec else {
         return Ok(Json(ReconcileStatus {
             enabled,
             managed: false,
@@ -107,18 +115,30 @@ pub async fn reconcile_status(
         }));
     };
 
-    let nodes = recon::node_facts(&state, auth.tenant_id, id).await?;
+    let nodes = recon::node_facts(&state, auth.tenant_id).await?;
+    let checkouts: Vec<recon::CheckoutSlot> = state
+        .workspaces
+        .present_checkouts(auth.tenant_id, id)
+        .await?
+        .into_iter()
+        .map(|c| recon::CheckoutSlot {
+            checkout_id: c.id,
+            node_id: c.node_id,
+            path: c.path,
+        })
+        .collect();
     let actual: Vec<recon::Actual> = state
         .sessions
         .live_managed(auth.tenant_id, id)
         .await?
         .into_iter()
-        .map(|(session_id, node_id)| recon::Actual {
+        .map(|(session_id, checkout_id, node_id)| recon::Actual {
             session_id,
+            checkout_id,
             node_id,
         })
         .collect();
-    let plan = recon::plan(&spec, &nodes, &actual);
+    let plan = recon::plan(&spec, &nodes, &checkouts, &actual);
 
     // Names, so the UI can say "waiting on a clone to dev-box" rather than
     // printing a uuid at somebody.
@@ -432,6 +452,9 @@ pub async fn create(
             &req.name,
             &slugify(&req.name),
             req.description.clone(),
+            req.git_remote_url
+                .as_deref()
+                .filter(|u| !u.trim().is_empty()),
         )
         .await?;
     Ok(Json(workspace))
