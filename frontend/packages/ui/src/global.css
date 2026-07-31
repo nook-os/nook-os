@@ -1657,12 +1657,62 @@ table.nook-table tr.clickable { cursor: pointer; }
 .term-chip-agent { flex: none; margin-right: 3px; vertical-align: -1px; }
 .term-chip-agent.running { color: var(--nook-accent); }
 .term-chip-agent.waiting { color: var(--nook-warn); }
-.session-tab-ws {
-  color: var(--nook-fg-faint);
-  max-width: 110px;
+/* ── Tab groups (MAIN-323) ──────────────────────────────────────────────── */
+
+/* The group chip. `--group-hue` is set inline from the workspace id, so the
+   colour is derived rather than stored — the same repo is the same colour on
+   every machine, with no palette to keep in sync and none to run out of. */
+.tab-group-chip {
+  --group: hsl(var(--group-hue) 60% 58%);
+  all: unset;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex: none;
+  padding: 0 9px;
+  cursor: pointer;
+  font-size: 11px;
+  font-family: var(--nook-font-mono);
+  color: var(--group);
+  border-right: 1px solid var(--nook-border);
+  /* The colour band reads as "this run of tabs belongs together" without
+     boxing them, which a horizontal strip has no room for. */
+  box-shadow: inset 0 -2px 0 var(--group);
+  background: color-mix(in srgb, var(--group) 10%, transparent);
+}
+.tab-group-chip:hover { background: color-mix(in srgb, var(--group) 20%, transparent); }
+.tab-group-chip svg { flex: none; }
+.tab-group-name {
+  max-width: 120px;
   overflow: hidden;
   text-overflow: ellipsis;
+  white-space: nowrap;
 }
+.tab-group-count {
+  padding: 0 4px;
+  border-radius: 6px;
+  font-size: 10px;
+  color: var(--nook-bg);
+  background: var(--group);
+}
+/* Collapsed: the chip is the whole group, so the count carries the weight. */
+.tab-group-chip.collapsed { box-shadow: inset 0 -2px 0 var(--group), inset 2px 0 0 var(--group); }
+
+/* The machine badge. The group chip already names the workspace; this names the
+   VM, which is what tells four checkouts of one repo apart (AC-2). */
+.session-tab-node {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  flex: none;
+  color: var(--nook-fg-faint);
+  font-size: 10px;
+  max-width: 90px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.session-tab.active .session-tab-node { color: var(--nook-fg-dim); }
 .session-tab-name {
   max-width: 160px;
   overflow: hidden;

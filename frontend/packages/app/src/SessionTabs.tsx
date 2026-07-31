@@ -12,13 +12,23 @@
 import React, { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
-import { CircleDot, Loader2, Pin, Plus, SquareTerminal } from "lucide-react";
+import {
+  ChevronDown,
+  ChevronRight,
+  CircleDot,
+  Loader2,
+  Pin,
+  Plus,
+  Server,
+  SquareTerminal,
+} from "lucide-react";
 import { api } from "@nookos/api";
 import { useWorkspaceContext } from "./context";
 import { useLive } from "./live";
 import { useLiveTabs } from "./liveTabs";
 import { useNewWork } from "./newwork";
 import { useSessionTabPrefs } from "./sessionTabsStore";
+import { groupTabs, visibleTabs } from "./tabGroups";
 import { useTabHotkeys } from "./tabHotkeys";
 import { askText, notify } from "./dialogs";
 import { ContextMenuRegion, type ContextMenuItem } from "./contextMenu";
@@ -47,11 +57,18 @@ export function SessionTabs({ activeId }: { activeId?: string }) {
   // "the session the nav opens" cannot disagree).
   const { tabs } = useLiveTabs();
 
+  // Chrome-style groups by workspace (MAIN-323), each collapsible.
+  const groups = groupTabs(tabs, store.prefs.collapsed, activeId);
+  // What is actually on screen. Keyboard switching walks exactly this — landing
+  // on a tab inside a collapsed group would move the terminal to a session the
+  // strip is not showing.
+  const visible = visibleTabs(groups);
+
   // Chrome-style Ctrl+Tab / Ctrl+Cmd-number switching over exactly this visible
   // list (desktop only). Called before the early return so the hook order is
   // stable across renders; with an empty list it simply has nothing to switch.
   useTabHotkeys(
-    tabs.map((t) => t.id),
+    visible.map((t) => t.id),
     activeId,
     navigate,
   );
@@ -94,10 +111,34 @@ export function SessionTabs({ activeId }: { activeId?: string }) {
   return (
     <>
       <div className="session-tabs">
-        {tabs.map((t) => {
+        {groups.map((g) => (
+          <React.Fragment key={g.key}>
+            {/* The group chip: name, count, and the collapse toggle. Coloured
+                from the workspace id, so the same repo is the same colour on
+                every machine with no palette to keep in sync. */}
+            <button
+              className={`tab-group-chip${g.collapsed ? " collapsed" : ""}`}
+              style={
+                {
+                  "--group-hue": g.hue,
+                } as React.CSSProperties
+              }
+              onClick={() => store.toggleCollapsed(g.key)}
+              title={
+                g.collapsed
+                  ? `expand ${g.label} (${g.tabs.length})`
+                  : `collapse ${g.label}`
+              }
+            >
+              {g.collapsed ? <ChevronRight size={11} /> : <ChevronDown size={11} />}
+              <span className="tab-group-name">{g.label}</span>
+              <span className="tab-group-count">{g.tabs.length}</span>
+            </button>
+            {!g.collapsed &&
+              g.tabs.map((t) => {
           const st = sessionStatus[t.id];
           const dead = st === "exited" || st === "error" || st === "killed";
-          const dragged = dragId ? tabs.find((x) => x.id === dragId) : null;
+          const dragged = dragId ? visible.find((x) => x.id === dragId) : null;
           // A drop is only legal within the same pin group (AC-3), so the
           // insertion line and the drop itself are gated on it.
           const sameGroup = dragged ? !!dragged.pinned === !!t.pinned : false;
@@ -145,7 +186,7 @@ export function SessionTabs({ activeId }: { activeId?: string }) {
                 e.preventDefault();
                 const r = e.currentTarget.getBoundingClientRect();
                 const after = e.clientX > r.left + r.width / 2;
-                store.reorder(dragId, t.id, after, tabs);
+                store.reorder(dragId, t.id, after, visible);
                 endDrag();
               }}
               // Fires whether the drag ended in a drop or was released outside
@@ -165,15 +206,23 @@ export function SessionTabs({ activeId }: { activeId?: string }) {
                   className={`session-tab-icon ${dead ? "err" : "ok"}`}
                 />
               )}
-              {!selectedWorkspaceId && t.workspaceName && (
-                <span className="session-tab-ws">{t.workspaceName} /</span>
+              {/* The group chip already names the workspace, so the tab
+                  names the MACHINE instead — which is the thing that tells
+                  four VMs of one repo apart (AC-2). */}
+              {t.nodeName && (
+                <span className="session-tab-node" title={`machine: ${t.nodeName}`}>
+                  <Server size={9} />
+                  {t.nodeName}
+                </span>
               )}
               <span className="session-tab-name">{t.name}</span>
               {t.pinned && <Pin size={10} className="session-tab-pin" />}
             </div>
             </ContextMenuRegion>
           );
-        })}
+              })}
+          </React.Fragment>
+        ))}
         <button
           className="session-tab-new"
           title="new work"

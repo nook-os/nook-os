@@ -31,6 +31,9 @@ export interface SessionTab {
    *  in every context. */
   workspaceId?: string;
   workspaceName?: string;
+  /** The machine it runs on (MAIN-323 AC-2). One repo across four VMs is only
+   *  legible inside a single group if each tab says which VM it is. */
+  nodeName?: string;
   /** Pinned tabs sort first and are a view-only pref (MAIN-322). */
   pinned?: boolean;
 }
@@ -42,12 +45,17 @@ export interface LiveSession {
   name: string;
   runtime: string;
   workspace_id?: string | null;
+  node_id: string;
 }
 
 /** The only client-side state left: how the strip is ORDERED, never what it
  *  contains. Both arrays hold session ids. */
 export interface TabPrefs {
   pinned: string[];
+  /** Workspace ids whose group is collapsed (MAIN-323 AC-3). Beside pin and
+   *  order because it is the same KIND of thing — a view pref that changes how
+   *  the strip is arranged, never which sessions are on it. */
+  collapsed: string[];
   order: string[];
 }
 
@@ -93,6 +101,7 @@ export function deriveTabs(
   workspaceNames: Record<string, string>,
   prefs: TabPrefs,
   selectedWorkspaceId?: string | null,
+  nodeNames: Record<string, string> = {},
 ): SessionTab[] {
   const pinned = new Set(prefs.pinned);
   const rank = new Map(prefs.order.map((id, i) => [id, i]));
@@ -107,6 +116,7 @@ export function deriveTabs(
         runtime: s.runtime,
         workspaceId: s.workspace_id ?? undefined,
         workspaceName: s.workspace_id ? workspaceNames[s.workspace_id] : undefined,
+        nodeName: nodeNames[s.node_id],
         pinned: pinned.has(s.id),
       } satisfies SessionTab,
       // A session the user has never dragged sorts after every one they have,
@@ -125,13 +135,14 @@ function load(): TabPrefs {
       const p = JSON.parse(raw) as Partial<TabPrefs>;
       return {
         pinned: Array.isArray(p.pinned) ? p.pinned : [],
+        collapsed: Array.isArray(p.collapsed) ? p.collapsed : [],
         order: Array.isArray(p.order) ? p.order : [],
       };
     }
   } catch {
     // corrupted prefs — start fresh
   }
-  return { pinned: [], order: [] };
+  return { pinned: [], collapsed: [], order: [] };
 }
 
 function save(prefs: TabPrefs) {
@@ -155,6 +166,8 @@ try {
 interface SessionTabPrefsState {
   prefs: TabPrefs;
   togglePin(id: string): void;
+  /** Collapse or expand one workspace's group (MAIN-323 AC-3). */
+  toggleCollapsed(workspaceKey: string): void;
   /** Drag-reorder: move `id` before/after `targetId` within its pin group,
    *  given the strip as currently displayed. */
   reorder(id: string, targetId: string, after: boolean, visible: SessionTab[]): void;
@@ -175,6 +188,15 @@ export const useSessionTabPrefs = create<SessionTabPrefsState>((set) => ({
         ? s.prefs.pinned.filter((x) => x !== id)
         : [...s.prefs.pinned, id];
       const prefs = { ...s.prefs, pinned };
+      save(prefs);
+      return { prefs };
+    }),
+  toggleCollapsed: (workspaceKey) =>
+    set((s) => {
+      const collapsed = s.prefs.collapsed.includes(workspaceKey)
+        ? s.prefs.collapsed.filter((x) => x !== workspaceKey)
+        : [...s.prefs.collapsed, workspaceKey];
+      const prefs = { ...s.prefs, collapsed };
       save(prefs);
       return { prefs };
     }),
@@ -201,7 +223,11 @@ export const useSessionTabPrefs = create<SessionTabPrefsState>((set) => ({
       if (pinned.length === s.prefs.pinned.length && order.length === s.prefs.order.length) {
         return s;
       }
-      const prefs = { pinned, order };
+      // `collapsed` holds WORKSPACE ids and is deliberately not pruned here: a
+      // workspace with no live sessions still exists, and forgetting that its
+      // group was collapsed every time its last session ends would make the
+      // setting feel random.
+      const prefs = { ...s.prefs, pinned, order };
       save(prefs);
       return { prefs };
     }),
