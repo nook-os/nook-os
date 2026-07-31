@@ -25,6 +25,14 @@ import {
   ContextMenuRegion,
   type ContextMenuItem,
 } from "../contextMenu";
+import {
+  commitPaths,
+  committable,
+  diffFor,
+  isConflict,
+  splitDiffByFile,
+  treeState,
+} from "../gitPanelModel";
 import { useLive } from "../live";
 import { useWorkspaceContext } from "../context";
 import { ScopeChip } from "../layout";
@@ -91,6 +99,31 @@ function DiffView({ diff }: { diff: string }) {
   );
 }
 
+/// One file's slice of the working-tree diff (MAIN-325 AC-2).
+///
+/// A file with no slice is the interesting case, not an edge case: an untracked
+/// file has no diff at all, because git has nothing to compare it against. An
+/// empty box there reads as "no changes", which is the opposite of the truth.
+function FileDiff({
+  file,
+  sections,
+}: {
+  file: { status: string; path: string };
+  sections: Record<string, string>;
+}) {
+  const result = diffFor(file, sections);
+  return (
+    <div className="git-file-diff">
+      <div className="git-file-diff-head mono small">{file.path}</div>
+      {"diff" in result ? (
+        <DiffView diff={result.diff} />
+      ) : (
+        <Empty>{result.reason}</Empty>
+      )}
+    </div>
+  );
+}
+
 // Only rendered when the session has a workspace AND that checkout is a git
 // repository — see `hasGitPanel` — so `workspaceId` is a plain string, not the
 // nullable one off `session`.
@@ -101,14 +134,32 @@ function GitPanel({
   session: Session;
   workspaceId: string;
 }) {
-  const [tab, setTab] = useState<"diff" | "files">("diff");
+  const [tab, setTab] = useState<"diff" | "files">("files");
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState<null | "commit" | "push">(null);
   const [note, setNote] = useState<string | null>(null);
+  // Which file's diff is showing (AC-2), and which files the next commit takes
+  // (AC-1). `staged === null` means "everything", which is what commit did
+  // before it could be told otherwise — an empty Set means the user has
+  // deselected every file, which is a different thing and must not silently
+  // commit the tree.
+  const [openFile, setOpenFile] = useState<string | null>(null);
+  const [staged, setStaged] = useState<Set<string> | null>(null);
   const { data, refetch, isFetching, error } = useGitStatus(
     workspaceId,
     session.node_id,
   );
+
+  const files = data?.files ?? [];
+  const state = treeState(files);
+  const canCommit = committable(files);
+  const sections = React.useMemo(() => splitDiffByFile(data?.diff ?? ""), [data?.diff]);
+  // The selection is over paths that still exist; a file committed or reverted
+  // elsewhere must not keep a vote in the next commit.
+  const selected = staged
+    ? canCommit.filter((f) => staged.has(f.path)).map((f) => f.path)
+    : canCommit.map((f) => f.path);
+  const shown = openFile ? files.find((f) => f.path === openFile) : undefined;
 
   // Commit and push run git on the machine that holds the checkout — the same
   // place the diff above came from. The point is not to reimplement git in a
@@ -121,7 +172,14 @@ function GitPanel({
       what === "commit"
         ? await api.POST("/api/v1/workspaces/{id}/git/commit", {
             params: { path: { id: workspaceId } },
-            body: { node_id: session.node_id, message },
+            body: {
+              node_id: session.node_id,
+              message,
+              // Whole tree → `null` (what every caller sent before selective
+              // staging); anything less → the explicit list. Never
+              // `canCommit.length` here: see `commitPaths`.
+              paths: commitPaths(files, selected),
+            },
           })
         : await api.POST("/api/v1/workspaces/{id}/git/push", {
             params: { path: { id: workspaceId } },
@@ -135,7 +193,12 @@ function GitPanel({
     // The node answers with its own words — "committed 4f2a1c9", or git's
     // explanation of why not. Either way it's the truth, so show it verbatim.
     setNote(result?.message ?? null);
-    if (result?.ok && what === "commit") setMessage("");
+    if (result?.ok && what === "commit") {
+      setMessage("");
+      // The committed files are gone from the tree; a stale selection would
+      // otherwise carry their paths into the next commit.
+      setStaged(null);
+    }
     refetch();
   };
 
@@ -153,8 +216,21 @@ function GitPanel({
       actions={
         <>
           {data && (
-            <Pill tone={data.dirty ? "warn" : "ok"}>
-              {data.dirty ? `${data.files.length} changed` : "clean"}
+            <Pill
+              tone={
+                state === "conflict" ? "err" : state === "uncommitted" ? "warn" : "ok"
+              }
+              title={
+                state === "conflict"
+                  ? "merge conflict — resolve the marked files before committing"
+                  : undefined
+              }
+            >
+              {state === "conflict"
+                ? `${files.filter(isConflict).length} conflicted`
+                : state === "uncommitted"
+                  ? `${files.length} uncommitted`
+                  : "clean"}
             </Pill>
           )}{" "}
           <button
@@ -180,29 +256,50 @@ function GitPanel({
         </>
       }
     >
+      {data && state === "conflict" && (
+        <div className="git-conflict-note small">
+          <b>Merge conflict.</b> {files.filter(isConflict).length} file
+          {files.filter(isConflict).length === 1 ? " has" : "s have"} unresolved
+          markers. Resolve them in the editor — staging a conflicted file from
+          here would mark it resolved with the markers still in it.
+        </div>
+      )}
       {data && (
         <div className="git-commit-bar">
           <input
             className="input"
             placeholder={
-              data.dirty
-                ? `commit message for ${data.files.length} changed file${data.files.length === 1 ? "" : "s"}`
-                : "nothing to commit — working tree is clean"
+              canCommit.length === 0
+                ? state === "conflict"
+                  ? "resolve the conflicts first"
+                  : "nothing to commit — working tree is clean"
+                : selected.length === canCommit.length
+                  ? `commit message for ${canCommit.length} file${canCommit.length === 1 ? "" : "s"}`
+                  : `commit message for ${selected.length} of ${canCommit.length} files`
             }
             value={message}
             onChange={(e) => setMessage(e.target.value)}
             onKeyDown={(e) => {
-              if (e.key === "Enter" && message.trim() && data.dirty) run("commit");
+              if (e.key === "Enter" && message.trim() && selected.length > 0)
+                run("commit");
             }}
-            disabled={!data.dirty || busy !== null}
+            disabled={selected.length === 0 || busy !== null}
           />
           <button
             className="btn primary small"
             onClick={() => run("commit")}
-            disabled={!data.dirty || !message.trim() || busy !== null}
-            title="stage everything and commit on the node"
+            disabled={selected.length === 0 || !message.trim() || busy !== null}
+            title={
+              selected.length === canCommit.length
+                ? "stage everything and commit on the node"
+                : `stage and commit ${selected.length} selected file${selected.length === 1 ? "" : "s"}`
+            }
           >
-            {busy === "commit" ? "committing…" : "commit"}
+            {busy === "commit"
+              ? "committing…"
+              : selected.length === canCommit.length
+                ? "commit"
+                : `commit ${selected.length}`}
           </button>
           <button
             className="btn small"
@@ -230,30 +327,98 @@ function GitPanel({
       ) : !data ? (
         <Empty>Loading…</Empty>
       ) : tab === "diff" ? (
+        /* The whole-tree diff, as before. Per-file lives on the files tab,
+           where the file you clicked is right above it. */
         <DiffView diff={data.diff} />
-      ) : data.files.length === 0 ? (
+      ) : files.length === 0 ? (
         <Empty>No changed files.</Empty>
       ) : (
-        <table className="nook-table">
-          <thead>
-            <tr>
-              <th>St</th>
-              <th>Path</th>
-            </tr>
-          </thead>
-          <tbody>
-            {data.files.map((f) => (
-              <tr key={f.path}>
-                <td className="mono">
-                  <Pill tone={f.status.includes("?") ? "info" : "warn"}>
-                    {f.status.trim() || "·"}
-                  </Pill>
-                </td>
-                <td className="mono">{f.path}</td>
+        <>
+          <table className="nook-table git-files">
+            <thead>
+              <tr>
+                <th style={{ width: 24 }}>
+                  <input
+                    type="checkbox"
+                    title="select every file"
+                    checked={
+                      canCommit.length > 0 && selected.length === canCommit.length
+                    }
+                    ref={(el) => {
+                      // Partially selected reads as neither on nor off, which
+                      // is exactly what it is.
+                      if (el)
+                        el.indeterminate =
+                          selected.length > 0 && selected.length < canCommit.length;
+                    }}
+                    disabled={canCommit.length === 0}
+                    onChange={() =>
+                      setStaged(
+                        selected.length === canCommit.length ? new Set() : null,
+                      )
+                    }
+                  />
+                </th>
+                <th>St</th>
+                <th>Path</th>
               </tr>
-            ))}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              {files.map((f) => {
+                const conflicted = isConflict(f);
+                return (
+                  <tr
+                    key={f.path}
+                    className={`git-file-row${openFile === f.path ? " active" : ""}`}
+                  >
+                    <td>
+                      <input
+                        type="checkbox"
+                        checked={!conflicted && selected.includes(f.path)}
+                        disabled={conflicted}
+                        title={
+                          conflicted
+                            ? "resolve this conflict before committing it"
+                            : "include in the next commit"
+                        }
+                        onChange={() =>
+                          setStaged((prev) => {
+                            const next = new Set(prev ?? canCommit.map((x) => x.path));
+                            if (!next.delete(f.path)) next.add(f.path);
+                            return next;
+                          })
+                        }
+                      />
+                    </td>
+                    <td className="mono">
+                      <Pill
+                        tone={
+                          conflicted ? "err" : f.status.includes("?") ? "info" : "warn"
+                        }
+                      >
+                        {f.status.trim() || "·"}
+                      </Pill>
+                    </td>
+                    {/* AC-2: the path is the control — clicking it opens this
+                        file's diff below, clicking again closes it. */}
+                    <td className="mono">
+                      <button
+                        className="git-file-path"
+                        onClick={() =>
+                          setOpenFile((cur) => (cur === f.path ? null : f.path))
+                        }
+                        title="show this file's diff"
+                      >
+                        {f.path}
+                      </button>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+          {shown && <FileDiff file={shown} sections={sections} />}
+        </>
       )}
       </div>
     </Panel>

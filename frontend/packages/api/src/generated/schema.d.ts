@@ -4149,6 +4149,12 @@ export interface components {
             message: string;
             /** @description Which machine's checkout — a workspace can exist on several. */
             node_id: components["schemas"]["NodeId"];
+            /**
+             * @description Which paths to stage (MAIN-325). `None` stages everything, which is what
+             *     every caller did before selective staging existed — so an old client, or
+             *     one that simply does not care, keeps the behaviour it had.
+             */
+            paths?: string[] | null;
         };
         /** @description A tenant git credential — only the public half is ever returned. */
         GitCredential: {

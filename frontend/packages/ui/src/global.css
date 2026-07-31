@@ -1784,6 +1784,45 @@ table.nook-table tr.clickable { cursor: pointer; }
   margin-top: 6px;
 }
 
+/* MAIN-325: a merge conflict is not a variety of "dirty" — it is a state where
+   committing is the wrong move, so it says so above the commit bar rather than
+   only tinting a pill. */
+.git-conflict-note {
+  padding: 7px 10px;
+  border-bottom: 1px solid var(--nook-border);
+  color: var(--nook-fg-dim);
+  background: color-mix(in srgb, var(--nook-err) 10%, transparent);
+}
+.git-conflict-note b { color: var(--nook-err); }
+
+/* The path is the control that opens a file's diff, so it has to look like one
+   without becoming a button-shaped thing in a dense table. */
+.git-file-path {
+  all: unset;
+  cursor: pointer;
+  color: inherit;
+}
+.git-file-path:hover,
+.git-file-row.active .git-file-path {
+  color: var(--nook-fg-bright);
+  text-decoration: underline;
+}
+.git-files td { vertical-align: middle; }
+
+.git-file-diff {
+  border-top: 1px solid var(--nook-border);
+  margin-top: 4px;
+}
+.git-file-diff-head {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding: 5px 10px;
+  color: var(--nook-fg-bright);
+  background: var(--nook-bg-raised);
+  border-bottom: 1px solid var(--nook-border);
+}
+
 /* ── Runtime picker ─────────────────────────────────────────────────────── */
 
 .runtime-chip {

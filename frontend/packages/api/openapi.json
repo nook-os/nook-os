@@ -9597,6 +9597,16 @@
           "node_id": {
             "$ref": "#/components/schemas/NodeId",
             "description": "Which machine's checkout — a workspace can exist on several."
+          },
+          "paths": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "Which paths to stage (MAIN-325). `None` stages everything, which is what\nevery caller did before selective staging existed — so an old client, or\none that simply does not care, keeps the behaviour it had."
           }
         }
       },

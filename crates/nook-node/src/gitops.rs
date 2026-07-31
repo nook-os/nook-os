@@ -356,13 +356,67 @@ pub fn repair_worktrees(primary: &Path, worktrees: &[PathBuf]) -> Result<(), Str
 /// Staging is deliberately all-or-nothing here — a partial-staging UI is a
 /// different feature, and pretending to offer one from a button labelled
 /// "commit" would quietly leave work behind.
-pub fn commit_all(checkout_path: &str, message: &str) -> OpOutcome {
+/// The success arm both commit paths share: report the short sha, which is what
+/// a person actually checks, falling back to git's own words if it is missing.
+fn committed(checkout_path: &str, dir: &Path, out: String) -> OpOutcome {
+    let sha = run_git(&["rev-parse", "--short", "HEAD"], Some(dir), None)
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    OpOutcome {
+        ok: true,
+        path: Some(checkout_path.to_string()),
+        message: if sha.is_empty() {
+            out.trim().to_string()
+        } else {
+            format!("committed {sha}")
+        },
+    }
+}
+
+/// Reject a path a caller has no business staging (MAIN-325).
+///
+/// These arrive from a browser, and `git add` is happy to be pointed at things:
+/// an absolute path, or one that climbs out with `..`, would stage a file from
+/// outside the checkout. A leading `-` is worse — git would read it as a FLAG
+/// rather than a path. Git rejects most of this itself, but "most" is not a
+/// security argument, and the `--` separator only fixes the last case.
+///
+/// Empty is rejected too: `git add ""` is an error whose message says nothing
+/// useful about where the empty string came from.
+pub(crate) fn staging_path_ok(p: &str) -> bool {
+    !p.is_empty()
+        && !p.starts_with('-')
+        && !p.starts_with('/')
+        && !Path::new(p).is_absolute()
+        && !p.split(['/', '\\']).any(|seg| seg == "..")
+}
+
+/// Stage `paths` (or everything, when `None`) and commit.
+pub fn commit_paths(checkout_path: &str, message: &str, paths: Option<&[String]>) -> OpOutcome {
     let dir = Path::new(checkout_path);
     if !dir.join(".git").exists() {
         return fail("not a git checkout");
     }
     if message.trim().is_empty() {
         return fail("a commit needs a message");
+    }
+    // The selection is checked BEFORE any git runs. A request naming a path
+    // outside the checkout is refused on its own terms, not because some later
+    // git invocation happened to dislike it — and the refusal says which path.
+    match paths {
+        // A selection that names nothing would fall through to `git add -A` and
+        // commit the whole tree — the opposite of what a partial commit asks
+        // for. Refuse rather than guess.
+        Some([]) => return fail("no files selected to commit"),
+        Some(list) => {
+            if let Some(bad) = list.iter().find(|p| !staging_path_ok(p)) {
+                return fail(format!(
+                    "refusing to stage {bad:?} — not a path inside the checkout"
+                ));
+            }
+        }
+        None => {}
     }
 
     // Nothing staged AND nothing to stage means there is nothing to commit;
@@ -376,26 +430,25 @@ pub fn commit_all(checkout_path: &str, message: &str) -> OpOutcome {
         _ => {}
     }
 
-    if let Err(e) = run_git(&["add", "-A"], Some(dir), None) {
-        return fail(format!("git add failed: {e}"));
-    }
-    match run_git(&["commit", "-m", message], Some(dir), None) {
-        Ok(out) => {
-            // "abc1234 message" — the short sha is what a person checks.
-            let sha = run_git(&["rev-parse", "--short", "HEAD"], Some(dir), None)
-                .unwrap_or_default()
-                .trim()
-                .to_string();
-            OpOutcome {
-                ok: true,
-                path: Some(checkout_path.to_string()),
-                message: if sha.is_empty() {
-                    out.trim().to_string()
-                } else {
-                    format!("committed {sha}")
-                },
+    match paths {
+        Some(list) => {
+            // `--` first: after it git cannot mistake any of these for a flag.
+            let mut args: Vec<&str> = vec!["add", "--"];
+            args.extend(list.iter().map(String::as_str));
+            if let Err(e) = run_git(&args, Some(dir), None) {
+                return fail(format!("git add failed: {e}"));
             }
         }
+        None => {
+            if let Err(e) = run_git(&["add", "-A"], Some(dir), None) {
+                return fail(format!("git add failed: {e}"));
+            }
+        }
+    }
+    // Plain `commit`, never `-a`: with a selection, `-a` would sweep up every
+    // other modified file alongside the ones that were named.
+    match run_git(&["commit", "-m", message], Some(dir), None) {
+        Ok(out) => committed(checkout_path, dir, out),
         Err(e) => fail(format!("commit failed: {e}")),
     }
 }
@@ -541,7 +594,7 @@ pub fn read_workspace_file(checkout_path: &str, name: &str) -> Result<Vec<u8>, S
 
 #[cfg(test)]
 mod tests {
-    use super::{add_worktree, repo_path_from_url};
+    use super::{add_worktree, commit_paths, repo_path_from_url, staging_path_ok};
     use std::path::{Path, PathBuf};
     use std::process::Command;
     use std::sync::atomic::{AtomicU32, Ordering};
@@ -686,5 +739,130 @@ mod tests {
             repo_path_from_url("/srv/git/solo.git").as_deref(),
             Some("git/solo")
         );
+    }
+
+    // ── MAIN-325: selective staging ─────────────────────────────────────────
+
+    #[test]
+    fn an_ordinary_repo_relative_path_is_stageable() {
+        for p in [
+            "src/main.rs",
+            "README.md",
+            "a b/c.txt",
+            "deep/nested/dir/file",
+            "..hidden",
+            "src/..foo",
+        ] {
+            assert!(staging_path_ok(p), "{p} should be stageable");
+        }
+    }
+
+    #[test]
+    fn a_path_that_leaves_the_checkout_is_refused() {
+        // These arrive from a browser. `git add` would happily follow them out
+        // of the checkout, and the file it staged would be somebody's ssh key.
+        for p in ["../outside", "a/../../outside", "/etc/passwd", "..", "a/.."] {
+            assert!(!staging_path_ok(p), "{p} must be refused");
+        }
+    }
+
+    #[test]
+    fn a_path_that_would_be_read_as_a_flag_is_refused() {
+        // The one `--` cannot save us from is a caller who gets to choose the
+        // argument BEFORE the separator — so refuse the shape outright.
+        for p in ["--all", "-A", "-"] {
+            assert!(!staging_path_ok(p), "{p} must be refused");
+        }
+    }
+
+    #[test]
+    fn an_empty_path_is_refused() {
+        assert!(!staging_path_ok(""));
+    }
+
+    /// The PATHS git still reports as dirty. Paths, not the raw text: asking
+    /// whether the output "contains" a filename says yes for `unwanted` when
+    /// the file left behind is `wanted`, and a test that passes on a substring
+    /// is not testing what it claims.
+    fn dirty_paths(repo: &Path) -> Vec<String> {
+        String::from_utf8(
+            Command::new("git")
+                .args(["status", "--porcelain"])
+                .current_dir(repo)
+                .output()
+                .expect("git status")
+                .stdout,
+        )
+        .expect("utf8")
+        .lines()
+        .filter(|l| l.len() > 3)
+        .map(|l| l[3..].to_string())
+        .collect()
+    }
+
+    #[test]
+    fn a_selection_commits_only_what_it_named() {
+        // The whole point of AC-1: two files changed, one committed. The other
+        // must still be sitting there afterwards. `git commit -a` — or falling
+        // back to `add -A` — would take both and silently include work the
+        // author did not mean to ship.
+        let base = Scratch::new();
+        let repo = init_repo(&base.0);
+        std::fs::write(repo.join("wanted"), "a").unwrap();
+        std::fs::write(repo.join("unwanted"), "b").unwrap();
+
+        let out = commit_paths(
+            &repo.to_string_lossy(),
+            "just the one",
+            Some(&["wanted".to_string()]),
+        );
+        assert!(out.ok, "{}", out.message);
+        assert!(out.message.starts_with("committed "), "{}", out.message);
+
+        assert_eq!(
+            dirty_paths(&repo),
+            vec!["unwanted".to_string()],
+            "only the file that was NOT named should still be dirty"
+        );
+    }
+
+    #[test]
+    fn no_selection_still_commits_everything() {
+        // The `None` path is what every existing caller sends, and it must keep
+        // meaning what it meant before selective staging existed.
+        let base = Scratch::new();
+        let repo = init_repo(&base.0);
+        std::fs::write(repo.join("one"), "a").unwrap();
+        std::fs::write(repo.join("two"), "b").unwrap();
+
+        let out = commit_paths(&repo.to_string_lossy(), "everything", None);
+        assert!(out.ok, "{}", out.message);
+        assert!(dirty_paths(&repo).is_empty(), "the tree should be clean");
+    }
+
+    #[test]
+    fn an_empty_selection_is_refused_rather_than_committing_everything() {
+        // The dangerous default: `Some([])` falling through to `git add -A`
+        // would commit the whole tree when the user asked for nothing.
+        let dir = std::env::temp_dir().join(format!("nook325-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(dir.join(".git")).expect("fixture");
+        let out = commit_paths(&dir.to_string_lossy(), "m", Some(&[]));
+        assert!(!out.ok);
+        assert!(out.message.contains("no files selected"), "{}", out.message);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_traversing_selection_is_refused_before_git_runs() {
+        let dir = std::env::temp_dir().join(format!("nook325-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(dir.join(".git")).expect("fixture");
+        let out = commit_paths(
+            &dir.to_string_lossy(),
+            "m",
+            Some(&["../../etc/passwd".to_string()]),
+        );
+        assert!(!out.ok);
+        assert!(out.message.contains("refusing to stage"), "{}", out.message);
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
