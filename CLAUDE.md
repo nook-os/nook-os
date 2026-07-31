@@ -118,6 +118,40 @@ strip existing comments: leave them unless you are changing that code.
 - Postgres: 5432. Control plane: 8080. Web (Vite): 5173, proxies `/api` to 8080.
 - Mailpit: SMTP 1025, web inbox `http://localhost:8025` (dev email).
 
+## Boot → test the loop, in one step (MAIN-341)
+
+A clean `./run.sh` now lands in a state the agent loop can actually be exercised
+in, instead of one that needs ~10 manual steps first:
+
+- A **real bare git repo** on the operator node (`/workspace/nook-dogfood.git`),
+  created idempotently by `run.sh`. Local path, so a loop job clones it with no
+  ssh key, no credential and no network.
+- A seeded **`nook-dogfood` workspace** pointing at that path, in the SAME tenant
+  the operator node joins — which is what stops "no eligible executor".
+- A seeded **dev identity** (`dev@nookos.local`, owner) in that same tenant, so
+  signing in through the dev-login hatch lands you beside the operator rather
+  than in a fresh personal tenant.
+- **`loops.enabled = true`** for that tenant only. Off remains the shipped
+  default everywhere else.
+- A **ready ticket** — *"Add a greeting command to the dogfood repo"* — in Todo,
+  linked to the workspace.
+
+So the path is: `./run.sh` → **`./run.sh --claude-login` once** → open the
+ticket's `/loop` page → **Draft a spec**.
+
+**The one manual step is the Claude login, and that is on purpose.** No
+credential is seeded, baked, or automated — not the runtime auth, not the CLI
+token. `run.sh` mints the dev CLI token by *logging in* through the dev-login
+hatch (gated on `AUTH_DEV_MODE`, refused in production) and handing it to `nook
+login`, so `contexts.toml` is valid after every reseed without a secret ever
+being committed. The Claude session lives in `.nook-secrets/claude`, survives
+`docker compose down -v`, and is genuinely a one-time login.
+
+The synthetic Mission Control demo (`example/widgets` on `demo-box`) is
+untouched and still separate: it exists to make the UI look populated, with a
+fake remote on a node that never reports. The dogfood workspace is the opposite
+— everything about it is real. Do not merge the two.
+
 ## Loops are OFF by default (MAIN-239)
 
 - The control plane's job machinery — `job_dispatch`, `job_reaper`,
