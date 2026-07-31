@@ -4155,6 +4155,12 @@ a.toast-main:hover .toast-title { text-decoration: underline; }
   white-space: pre-wrap;
   word-break: break-word;
 }
+/* A markdown body is a rendered document, not a run of typed text: the
+   `pre-wrap` that keeps a chat message's own newlines would double every gap
+   the markdown already produces (MAIN-299). */
+.chat-body.md { white-space: normal; }
+.chat-body.md > :first-child { margin-top: 0; }
+.chat-body.md > :last-child { margin-bottom: 0; }
 .chat-msg.pending .chat-body { opacity: 0.55; }
 .chat-msg.failed .chat-body { color: var(--nook-err); }
 .chat-retry {
@@ -5130,44 +5136,27 @@ a.toast-main:hover .toast-title { text-decoration: underline; }
 .lw-body { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; gap: 6px; }
 .lw-panel { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
 .lw-panel > .nook-panel-body { flex: 1 1 auto; min-height: 0; padding: 0; }
-.lw-scroll { height: 100%; overflow: auto; padding: 6px 8px; }
+/* The conversation is the shared ChatView now (MAIN-299), so this only has to
+   give it the box to fill: ChatView owns its own scrolling, spacing and
+   composer. The bespoke `.lw-entry` / `.lw-draft` / `.lw-asks` rules this
+   replaces WERE the second style the card exists to delete — keeping them
+   would have left the fork in the stylesheet after removing it from the page. */
+.lw-chat {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+  height: 100%;
+}
 .lw-quiet { padding: 8px 2px; }
 
-.lw-entry { padding: 4px 0; border-bottom: 1px solid var(--nook-border-faint, var(--nook-border)); }
-.lw-entry:last-child { border-bottom: none; }
-.lw-entry-head { display: flex; align-items: baseline; gap: 8px; }
-.lw-src {
-  text-transform: uppercase;
-  font-size: 10px;
-  letter-spacing: 0.06em;
-  color: var(--nook-fg-dim);
+/* An ask's choices, sitting with the composer they are an alternative to. */
+.lw-ask-choices {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 6px 10px 0;
 }
-.lw-human .lw-src { color: var(--nook-primary); }
-.lw-draft .lw-src { color: var(--nook-ok, var(--nook-primary)); }
-/* Agent narration is raw PTY output: keep it monospace and wrapped, and let it
-   recede so the human/system turns and the drafts stay legible above it. */
-.lw-entry-body {
-  margin: 2px 0 0;
-  white-space: pre-wrap;
-  word-break: break-word;
-  font-family: inherit;
-  font-size: 12px;
-}
-.lw-agent .lw-entry-body { color: var(--nook-fg-dim); }
-.lw-draft {
-  border-left: 2px solid var(--nook-primary);
-  padding-left: 8px;
-  background: color-mix(in srgb, var(--nook-primary) 5%, transparent);
-}
-.lw-draft-body { margin-top: 4px; }
-
-.lw-asks {
-  flex: 0 0 auto;
-  border: 1px solid var(--nook-warn);
-  padding: 6px 8px;
-  background: color-mix(in srgb, var(--nook-warn) 7%, transparent);
-}
-.lw-asks-h { text-transform: uppercase; font-size: 10px; letter-spacing: 0.06em; margin-bottom: 4px; }
 
 .lw-foot { flex: 0 0 auto; }
 .lw-composer {

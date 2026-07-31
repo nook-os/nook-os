@@ -61,16 +61,19 @@ vi.mock("@nookos/api", () => ({
   },
 }));
 
-// The real UI package pulls fonts and CSS; the page only needs three shapes.
-vi.mock("@nookos/ui", () => ({
+// PARTIAL, on purpose (MAIN-299). The real `ChatView` has to be the thing under
+// test — this page's whole job now is to render through it, and a stubbed one
+// would let the page "pass" while showing something else entirely. Only the two
+// heavy or opaque pieces are replaced: `Panel` (fonts/CSS) and `Markdown`, whose
+// stub is what makes "this entry rendered as a document" assertable at all.
+vi.mock("@nookos/ui", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@nookos/ui")>()),
   Panel: ({ title, children }: { title?: string; children: React.ReactNode }) => (
     <div>
       <div>{title}</div>
       <div className="nook-panel-body">{children}</div>
     </div>
   ),
-  Empty: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
-  Markdown: ({ src }: { src: string }) => <div data-testid="md">{src}</div>,
 }));
 
 import { LoopPage } from "./pages/Loop";
@@ -191,10 +194,11 @@ describe("Loop workspace (MAIN-233)", () => {
   it("posts a steering message to a live run", async () => {
     withJob({ state: "running" }, [line()]);
     renderPage();
-    const box = await screen.findByLabelText("message the agent");
+    // ChatView's composer, not a bespoke one — that IS the change (AC-2).
+    const box = await screen.findByLabelText("Message");
 
     await userEvent.type(box, "actually, skip the CLI");
-    await userEvent.click(screen.getByRole("button", { name: "send message" }));
+    await userEvent.click(screen.getByRole("button", { name: "Send" }));
 
     await waitFor(() => expect(post).toHaveBeenCalled());
     expect(post).toHaveBeenCalledWith("/api/v1/jobs/{id}/messages", {
@@ -223,15 +227,49 @@ describe("Loop workspace (MAIN-233)", () => {
     ];
     renderPage();
 
-    expect(await screen.findByTestId("asks")).toBeTruthy();
-    expect(screen.getByText("Postgres or Redis?")).toBeTruthy();
+    // AC-3: the question is a MESSAGE in the stream, not a strip beside it.
+    const prompt = await screen.findByText("Postgres or Redis?");
+    expect(prompt.closest(".chat-msg")).toBeTruthy();
+    expect(screen.queryByTestId("asks")).toBeNull();
 
+    // Its choices sit with the composer, and picking one answers it.
     await userEvent.click(screen.getByRole("button", { name: "Postgres" }));
     await waitFor(() => expect(post).toHaveBeenCalled());
     expect(post).toHaveBeenCalledWith("/api/v1/interactions/{id}/answer", {
       params: { path: { id: "ixn-1" } },
       body: { response: "Postgres" },
     });
+  });
+
+  it("answers the agent by typing into the same composer (AC-3)", async () => {
+    withJob({ state: "waiting_on_human" }, []);
+    state.pending = [
+      {
+        id: "ixn-1",
+        task_id: TASK_ID,
+        job_id: "job-1",
+        prompt: "Which database?",
+        choices: [],
+        state: "pending",
+      },
+    ];
+    renderPage();
+
+    // One box. With an ask outstanding what you type is the ANSWER to it, and
+    // it must not go out as an unprompted steer.
+    const box = await screen.findByLabelText("Message");
+    await userEvent.type(box, "Postgres, and index the tenant column");
+    await userEvent.click(screen.getByRole("button", { name: "Send" }));
+
+    await waitFor(() => expect(post).toHaveBeenCalled());
+    expect(post).toHaveBeenCalledWith("/api/v1/interactions/{id}/answer", {
+      params: { path: { id: "ixn-1" } },
+      body: { response: "Postgres, and index the tenant column" },
+    });
+    expect(post).not.toHaveBeenCalledWith(
+      "/api/v1/jobs/{id}/messages",
+      expect.anything(),
+    );
   });
 
   it("renders a drafted issue as markdown and links back to what it filed", async () => {
@@ -249,11 +287,21 @@ describe("Loop workspace (MAIN-233)", () => {
     ]);
     renderPage();
 
-    // The draft entry renders through Markdown; the narration line does not.
-    const md = await screen.findByTestId("md");
-    expect(md.textContent).toContain("## Acceptance Criteria");
-    expect(screen.getAllByTestId("md")).toHaveLength(1);
-    expect(screen.getByText(/reading the codebase/)).toBeTruthy();
+    // The draft renders as a DOCUMENT — real markdown through ChatView, so
+    // `## Acceptance Criteria` is a heading rather than two literal hashes.
+    const heading = await screen.findByRole("heading", {
+      name: "Acceptance Criteria",
+    });
+    expect(heading.tagName).toBe("H2");
+    expect(heading.closest(".chat-body")?.className).toContain("md");
+
+    // Narration is NOT a document: it stays plain text in a plain body.
+    const narration = screen.getByText(/reading the codebase/);
+    expect(narration.closest(".chat-body")?.className).not.toContain("md");
+    // Exactly ONE body is a document — the draft. (It has two headings of its
+    // own, `## Problem` and `## Acceptance Criteria`, so counting headings would
+    // measure the fixture rather than the rule.)
+    expect(document.querySelectorAll(".chat-body.md")).toHaveLength(1);
 
     // The filed ticket is a link back; the job's own target is not offered.
     const filed = screen.getByTitle("open MAIN-99");

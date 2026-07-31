@@ -21,6 +21,7 @@
 import React, { useCallback, useLayoutEffect, useRef, useState } from "react";
 import { Copy, MoreHorizontal, Pencil, Reply, SmilePlus, Trash2 } from "lucide-react";
 import { ALLOWED_REACTIONS } from "@nookos/api";
+import { Markdown } from "./Markdown";
 import { useAnchoredMenu } from "./useAnchoredMenu";
 
 /** One emoji's tally on a message: how many reacted and whether the viewer is
@@ -56,6 +57,15 @@ export interface ChatViewMessage {
   /** Soft-deleted (MAIN-116 AC-4): render a placeholder, suppress reactions and
    *  per-message actions. The body already arrives redacted. */
   deleted?: boolean;
+  /** Render the body as markdown rather than plain text (MAIN-299).
+   *
+   *  Off by default, because a chat message is text a person typed and "**" in
+   *  it means asterisks. It is on for the one kind of message that IS a
+   *  document: a loop run's drafted issue, which is a whole spec in markdown and
+   *  is unreadable as a wall of literal `##`. The caller decides — the view has
+   *  no way to tell prose from a draft, and guessing would eventually render
+   *  someone's message wrong. */
+  markdown?: boolean;
 }
 
 export interface ChatViewProps {
@@ -517,8 +527,8 @@ export function ChatView({
                     }}
                   />
                 ) : (
-                  <div className="chat-body">
-                    {m.body}
+                  <div className={`chat-body${m.markdown ? " md" : ""}`}>
+                    {m.markdown ? <Markdown src={m.body} /> : m.body}
                     {m.edited && <span className="chat-edited"> (edited)</span>}
                   </div>
                 )}

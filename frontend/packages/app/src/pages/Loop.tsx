@@ -2,32 +2,30 @@
 //
 // The compact panel in the ticket modal (MAIN-128) is a status light — 420px,
 // no composer, "no transcript yet" and nowhere to type. Speccing needs room, so
-// this is the same job given the whole screen: the transcript is the main
-// column, drafts render as markdown where they land, the agent's questions get
-// their answer controls inline, and a persistent bar at the bottom is where you
-// actually talk to the run.
+// this is the same job given the whole screen.
 //
-// The bar is the point. What it is FOR depends on the job (`composerMode`):
-// before there is one it is the SEED — the opening idea you want the agent to
-// start from (MAIN-231) rather than a bare Play button; while the job runs it
-// posts STEERING MESSAGES; once the job is terminal there is no session left to
-// talk to, so it says so instead of offering a box that can only fail.
+// The conversation IS the shared `ChatView` (MAIN-299) — the same component team
+// chat and `LoopPanel` render. It used to be a bespoke `Entry` row plus three
+// bespoke composers, which meant the loop's main surface looked like a different
+// product from its own panel and every chat improvement had to be built twice.
+// What is left here is the chrome that is genuinely loop-specific:
+//
+// - `seed` — before there is a job, the opening idea you want the agent to start
+//   from (MAIN-231) rather than a bare Play button. Its own control, below the
+//   log, because "start a run" is not a message to anyone.
+// - `steer` — a live run. ChatView's own composer, posting steering messages;
+//   with a question outstanding the same box answers it instead (AC-3).
+// - `readonly` — the job is terminal, so there is no session left to talk to.
+//   Say so, and offer the re-run, instead of a box that could only fail.
 //
 // Everything refetches on the live `job_changed` event, so a run streams in
 // without a reload.
-import React, { useEffect, useRef, useState } from "react";
+import React, { useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import {
-  ArrowLeft,
-  Ban,
-  ExternalLink,
-  Play,
-  RotateCcw,
-  Send,
-} from "lucide-react";
+import { ArrowLeft, Ban, ExternalLink, Play, RotateCcw } from "lucide-react";
 import { api, type LoopJob, type LoopJobTranscriptEntry } from "@nookos/api";
-import { Empty, Markdown, Panel } from "@nookos/ui";
+import { ChatView, Empty, Panel, type ChatViewMessage } from "@nookos/ui";
 import type { StuckCause } from "../loop";
 import {
   composerMode,
@@ -43,7 +41,8 @@ import {
   stuckCause,
   taskJobsKey,
 } from "../loop";
-import { InteractionAnswer } from "../Interactions";
+import { answerInteraction } from "../Interactions";
+import { agentActivityLabel } from "../LoopPanel";
 
 /** The ticket this workspace is anchored to. Keys and uuids both resolve
  *  server-side (MAIN-209), so the route accepts whichever the caller had. */
@@ -94,40 +93,53 @@ function useAsks(id: string | undefined) {
 }
 
 /**
- * One transcript entry.
+ * The run, as chat messages (MAIN-299 AC-1/AC-3).
  *
- * Three shapes, because three different things arrive on this channel: a
- * drafted issue (render the markdown — it is the thing the human has to read
- * and approve), a human/system turn (short prose), and agent narration (raw PTY
- * output, ANSI stripped, kept monospace and muted so it reads as the background
- * hum it is).
+ * This page used to render its own `Entry` rows while `LoopPanel` rendered the
+ * same data through the shared `ChatView`, so the loop's main surface and the
+ * loop's panel looked like two different products and every chat improvement had
+ * to be built twice. One mapping now feeds the one component.
+ *
+ * Three things the mapping carries that a plain `content` string does not:
+ *
+ * - **source is the author.** `system` / `agent` / `human` group exactly as
+ *   people do in team chat, so a run of narration collapses under one header.
+ *   Same rule as `LoopPanel.transcriptMessages`.
+ * - **a drafted issue is a document.** It is the thing a human has to read and
+ *   approve — a whole spec in markdown — so it renders as markdown rather than
+ *   as a wall of literal `##`. That is what `ChatViewMessage.markdown` is for.
+ * - **a pending ask is part of the conversation.** The agent stopping to ask is
+ *   a turn in the stream, not a strip bolted to the side of it (AC-3), and its
+ *   answer goes back through the same composer everything else does.
  */
-function Entry({ line }: { line: LoopJobTranscriptEntry }) {
-  const text = stripAnsi(line.content);
-  const draft = looksLikeDraft(line.content);
-  return (
-    <div
-      className={`lw-entry lw-${line.source}${draft ? " lw-draft" : ""}`}
-      data-testid={`entry-${line.id}`}
-    >
-      <div className="lw-entry-head">
-        <span className="lw-src">{draft ? "draft" : line.source}</span>
-        <span className="faint small">
-          {new Date(line.at).toLocaleTimeString()}
-        </span>
-      </div>
-      {draft ? (
-        <div className="lw-draft-body" data-testid="draft-body">
-          <Markdown src={text} />
-        </div>
-      ) : (
-        <pre className="lw-entry-body">{text}</pre>
-      )}
-    </div>
-  );
+export function loopMessages(
+  transcript: LoopJobTranscriptEntry[],
+  asks: { id: string; prompt: string }[] = [],
+): ChatViewMessage[] {
+  const lines = transcript.map((l) => ({
+    id: l.id,
+    authorId: l.source,
+    authorName: l.source,
+    // ANSI is stripped for the VIEW only; the stored line keeps every escape
+    // (MAIN-161 NG-2), exactly as the bespoke renderer did.
+    body: stripAnsi(l.content),
+    createdAt: l.at,
+    markdown: looksLikeDraft(l.content),
+  }));
+  // Appended, not interleaved: an ask is outstanding *now*, so it belongs at the
+  // bottom where the reader is, next to the box they answer it in.
+  return [
+    ...lines,
+    ...asks.map((a) => ({
+      id: `ask-${a.id}`,
+      authorId: "agent",
+      authorName: "agent",
+      body: a.prompt,
+      createdAt: new Date().toISOString(),
+    })),
+  ];
 }
 
-/** The bottom bar in `seed` mode: the opening idea, then start (AC-2). */
 /** The tenant's loop master switch (MAIN-239), read here so a stuck run can say
  *  the switch is the reason. Shares `["settings"]` with the Settings page, so
  *  turning it on there repaints this without a reload. */
@@ -297,58 +309,6 @@ function SeedComposer({
   );
 }
 
-/** The bottom bar in `steer` mode: say something the agent never asked for
- *  (AC-3). A message to a paused job resumes it, server-side. */
-function MessageComposer({ taskId, jobId }: { taskId: string; jobId: string }) {
-  const qc = useQueryClient();
-  const [text, setText] = useState("");
-
-  const send = useMutation({
-    mutationFn: () => postJobMessage(jobId, text),
-    onSuccess: () => {
-      setText("");
-      qc.invalidateQueries({ queryKey: jobKey(jobId) });
-      qc.invalidateQueries({ queryKey: taskJobsKey(taskId) });
-    },
-  });
-
-  const empty = !text.trim();
-  return (
-    <div className="lw-composer" data-testid="composer-steer">
-      <div className="lw-composer-row">
-        <textarea
-          className="lw-msg"
-          rows={2}
-          aria-label="message the agent"
-          placeholder="tell the agent something — scope, a correction, go ahead…"
-          value={text}
-          disabled={send.isPending}
-          onChange={(e) => setText(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" && !e.shiftKey) {
-              e.preventDefault();
-              if (!empty && !send.isPending) send.mutate();
-            }
-          }}
-        />
-        <button
-          className="btn primary"
-          disabled={empty || send.isPending}
-          onClick={() => send.mutate()}
-          title="send to the run"
-          aria-label="send message"
-        >
-          <Send size={12} />
-        </button>
-      </div>
-      <div className="faint small">
-        Enter sends · Shift+Enter for a newline. A message to a paused run
-        resumes it.
-      </div>
-    </div>
-  );
-}
-
 /** The bottom bar in `readonly` mode: the run is over. Say what happened and
  *  offer the only thing that can still be done (AC-5). */
 function ClosedComposer({
@@ -438,17 +398,29 @@ export function LoopPage() {
     },
   });
 
-  // Follow the tail as the run streams, but only when the reader is already at
-  // the bottom — yanking the view while someone reads back through a draft is
-  // worse than not following at all.
-  const scroller = useRef<HTMLDivElement | null>(null);
+  // Following the tail is ChatView's job now, not this page's — it already
+  // follows an append only when the reader is at the bottom, which is the same
+  // rule the hand-rolled scroller here implemented (MAIN-299 AC-4).
   const transcript = detail?.transcript ?? [];
-  useEffect(() => {
-    const el = scroller.current;
-    if (!el) return;
-    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
-    if (atBottom) el.scrollTop = el.scrollHeight;
-  }, [transcript.length]);
+
+  // The one pending ask, if the agent stopped to ask something. It changes what
+  // the composer MEANS: with an ask outstanding, what you type is the answer to
+  // it; otherwise it is an unprompted steer. Both go out through the same box
+  // (AC-3), so the difference lives here rather than in two components.
+  const ask = asks[0];
+
+  const send = useMutation({
+    mutationFn: async (body: string) => {
+      if (ask) return answerInteraction(qc, ask, body);
+      if (latest) return postJobMessage(latest.id, body);
+    },
+    onSuccess: () => {
+      if (latest) qc.invalidateQueries({ queryKey: jobKey(latest.id) });
+      if (taskId) qc.invalidateQueries({ queryKey: taskJobsKey(taskId) });
+    },
+  });
+  const sending = send.isPending;
+  const onSend = (body: string) => send.mutate(body);
 
   // Why a queued run is not moving, and where its fix lives (MAIN-297).
   const loopsEnabled = useLoopsEnabled();
@@ -504,65 +476,93 @@ export function LoopPage() {
 
       <div className="lw-body">
         <Panel title="transcript" className="lw-panel">
-          <div className="lw-scroll" ref={scroller} data-testid="transcript">
-            {missing || taskFailed ? (
-              // Say which of the two it is. "Not found" for a ticket that is
-              // genuinely not visible; a load failure is a different problem
-              // and must not be reported as a missing ticket.
-              <Empty>
-                <span data-testid="loop-not-found">
-                  {taskFailed
-                    ? `Could not load ${routeParam}.`
-                    : `${routeParam} doesn't exist, or isn't in your workspace.`}
-                </span>{" "}
-                <Link to="/board">Back to the board</Link>
-              </Empty>
-            ) : !latest ? (
-              isLoading || taskPending ? (
-                <div className="faint small">Loading…</div>
-              ) : (
-                <Empty>
-                  No run yet — start a spec or decompose below, and say what you
-                  want out of it.
-                </Empty>
-              )
-            ) : transcript.length === 0 ? (
-              <div className="faint small lw-quiet">
-                Nothing yet — the transcript fills in as the agent works.
-              </div>
-            ) : (
-              transcript.map((l) => <Entry key={l.id} line={l} />)
-            )}
-          </div>
+          {missing || taskFailed ? (
+            // Say which of the two it is. "Not found" for a ticket that is
+            // genuinely not visible; a load failure is a different problem
+            // and must not be reported as a missing ticket.
+            <Empty>
+              <span data-testid="loop-not-found">
+                {taskFailed
+                  ? `Could not load ${routeParam}.`
+                  : `${routeParam} doesn't exist, or isn't in your workspace.`}
+              </span>{" "}
+              <Link to="/board">Back to the board</Link>
+            </Empty>
+          ) : (
+            // ONE chat surface, the same component team chat and the loop panel
+            // render (MAIN-299). It owns the scroll and the follow-the-bottom
+            // behaviour, which is why the bespoke `lw-scroll` ref went with the
+            // bespoke rows.
+            //
+            // The composer is ChatView's ONLY in `steer` mode, because that is
+            // the only mode where there is a live run to talk to. Seeding a run
+            // and reporting a finished one are loop-specific chrome, so they
+            // stay their own controls below (AC-2).
+            <div
+              className="lw-chat"
+              data-testid={mode === "steer" ? "composer-steer" : "transcript"}
+            >
+              <ChatView
+                messages={loopMessages(transcript, asks)}
+                onSend={onSend}
+                hideComposer={mode !== "steer" || !taskId}
+                disabled={sending}
+                placeholder={
+                  ask
+                    ? "Answer the agent…"
+                    : "tell the agent something — scope, a correction, go ahead…"
+                }
+                emptyLabel={
+                  latest
+                    ? "Nothing yet — the transcript fills in as the agent works."
+                    : isLoading || taskPending
+                      ? "Loading…"
+                      : "No run yet — start a spec or decompose below, and say what you want out of it."
+                }
+                typing={
+                  latest && mode === "steer"
+                    ? agentActivityLabel(latest.state)
+                    : null
+                }
+                beforeComposer={
+                  // The ask's CHOICES only. Its prompt is already in the stream
+                  // as a message (AC-3), so repeating it here would say the same
+                  // thing twice; what a reader still needs is the buttons.
+                  ask && (ask.choices ?? []).length > 0 ? (
+                    <div className="lw-ask-choices" data-testid="ask-choices">
+                      {(ask.choices ?? []).map((c) => (
+                        <button
+                          key={c}
+                          className="btn small"
+                          disabled={sending}
+                          onClick={() => void onSend(c)}
+                        >
+                          {c}
+                        </button>
+                      ))}
+                    </div>
+                  ) : null
+                }
+              />
+            </div>
+          )}
         </Panel>
 
         {/* A queued run that cannot be placed says WHY, and offers the fix
             here rather than on a page the reader would have to guess at. */}
         {stuck && <StuckNotice cause={stuck} />}
-
-        {/* The agent stopped to ask. Its answer controls belong in the flow of
-            the conversation, not in a panel somewhere else on the page. */}
-        {asks.length > 0 && (
-          <div className="lw-asks" data-testid="asks">
-            <div className="lw-asks-h">
-              The agent is waiting on you · {asks.length}
-            </div>
-            {asks.map((ixn) => (
-              <InteractionAnswer key={ixn.id} interaction={ixn} />
-            ))}
-          </div>
-        )}
       </div>
 
       {/* No footer at all when there is no ticket: an empty `lw-foot` is the
-          dead box this card is about. The composer belongs to a ticket, and
-          without one there is nothing to seed or steer. */}
-      <div className="lw-foot" data-testid="loop-foot" hidden={!taskId}>
+          dead box this card is about. In `steer` mode the footer is empty too —
+          ChatView's own composer is the box, inside the panel above. */}
+      <div
+        className="lw-foot"
+        data-testid="loop-foot"
+        hidden={!taskId || mode === "steer"}
+      >
         {taskId && mode === "seed" && (
           <SeedComposer taskId={taskId} taskType={task?.type} jobs={jobs} />
-        )}
-        {taskId && mode === "steer" && latest && (
-          <MessageComposer taskId={taskId} jobId={latest.id} />
         )}
         {taskId && mode === "readonly" && latest && (
           <ClosedComposer taskId={taskId} job={latest} />
