@@ -15,5 +15,6 @@ export * from "./TerminalView";
 export * from "./RuntimePicker";
 export * from "./Markdown";
 export * from "./Select";
+export * from "./TypeSelect";
 export * from "./useAnchoredMenu";
 export * from "./ChatView";

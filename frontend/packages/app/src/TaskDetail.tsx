@@ -23,7 +23,7 @@ import {
   MarkdownEditor,
   EditableMarkdown,
   Select,
-  TYPE_META,
+  TypeSelect,
   VISIBILITY_META,
   useAnchoredMenu,
 } from "@nookos/ui";
@@ -617,63 +617,6 @@ export function TaskDetail({
         </aside>
       </div>
     </Shell>
-  );
-}
-
-/**
- * The issue-type control by the title: shows the current type as a badge and
- * opens a menu of the five types, PATCHing on pick (AC-1). The trigger and each
- * option are buttons, so it is keyboard-reachable (AC-5); the menu is portalled
- * for the same reason the selects are — it lives inside `.task-main` (scrolls)
- * inside `.modal` (hides overflow).
- */
-function TypeSelect({
-  value,
-  onChange,
-}: {
-  value: string | null | undefined;
-  onChange: (type: string) => void;
-}) {
-  const [open, setOpen] = useState(false);
-  const close = useCallback(() => setOpen(false), []);
-  const { hostRef, portal } = useAnchoredMenu(open, close, {
-    height: TYPE_META.length * 34 + 42,
-  });
-  const current = value ?? "task";
-  const cur = TYPE_META.find((t) => t.value === current) ?? TYPE_META[0];
-  const menu = portal(
-    <div className="type-menu">
-      <div className="type-menu-head">Change work type</div>
-      {TYPE_META.map((t) => (
-        <button
-          key={t.value}
-          className={`type-menu-item ${t.tone}${t.value === current ? " current" : ""}`}
-          onClick={() => {
-            if (t.value !== current) onChange(t.value);
-            setOpen(false);
-          }}
-        >
-          <t.Icon size={14} className="type-menu-icon" />
-          <span className="type-menu-label">{t.label}</span>
-        </button>
-      ))}
-    </div>,
-    "type-menu-portal",
-  );
-  return (
-    <div ref={hostRef} className="task-type-row">
-      <button
-        className={`type-select-trigger ${cur.tone}`}
-        aria-label={`work type: ${cur.label}`}
-        title={cur.label}
-        aria-haspopup="menu"
-        onClick={() => setOpen((v) => !v)}
-      >
-        <cur.Icon size={14} />
-        <ChevronDown size={11} className="type-select-caret" />
-      </button>
-      {menu}
-    </div>
   );
 }
 
