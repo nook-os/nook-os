@@ -1073,6 +1073,32 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/nodes/{id}/placement": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * `GET /api/v1/nodes/{id}/placement` — the labels and taints placement reads
+         *     (MAIN-314 AC-3). Visible to anyone who can see the node.
+         */
+        get: operations["get_node_placement"];
+        /**
+         * `PUT /api/v1/nodes/{id}/placement` — set them (MAIN-314 AC-3).
+         * @description Owner-gated exactly as sharing is: an operator-set label steers where work
+         *     lands, so it is the machine owner's call and not any teammate's. An
+         *     ownerless node has nobody to ask.
+         */
+        put: operations["set_node_placement"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/nodes/{id}/projects": {
         parameters: {
             query?: never;
@@ -4446,6 +4472,12 @@ export interface components {
             created_at: string;
             hostname: string;
             id: components["schemas"]["NodeId"];
+            /**
+             * @description Operator-set labels, `{"key": "value"}` (MAIN-314). The DERIVED `os` and
+             *     `arch` labels are not in here: they are computed from what the node
+             *     reports, so storing them would let them drift from the truth.
+             */
+            labels: unknown;
             /** Format: date-time */
             last_seen_at?: string | null;
             name: string;
@@ -4465,6 +4497,8 @@ export interface components {
              */
             shared: boolean;
             status: string;
+            /** @description Operator-set taints, `[{"key": …, "effect": …}]` (MAIN-314). */
+            taints: unknown;
             tenant_id: components["schemas"]["TenantId"];
             /** Format: date-time */
             updated_at: string;
@@ -4492,6 +4526,28 @@ export interface components {
         };
         /** Format: uuid */
         NodeId: string;
+        /**
+         * @description Everything placement reads off a node (MAIN-314). No scheduling here — the
+         *     reconciler that consumes this is a later child of the epic.
+         */
+        NodePlacement: {
+            /**
+             * @description Just the operator's own, so a UI can edit them without stripping the
+             *     derived ones by round-tripping.
+             */
+            custom_labels: {
+                [key: string]: string;
+            };
+            /**
+             * @description Derived labels MERGED over the operator's, which is what a scheduler
+             *     matches on. `os` and `arch` are always present; a custom label of the
+             *     same name loses, because a node cannot be relabelled into another OS.
+             */
+            labels: {
+                [key: string]: string;
+            };
+            taints: components["schemas"]["NodeTaint"][];
+        };
         /**
          * @description Everything the "add node" flow needs: what to download, and where the
          *     one-shot installer lives.
@@ -4529,6 +4585,21 @@ export interface components {
             mem_total: number;
             /** Format: int64 */
             mem_used: number;
+        };
+        /**
+         * @description A node's refusal to take work unless the work tolerates it (MAIN-314).
+         *
+         *     The inverse of a label: a label says what a node IS, a taint says what it
+         *     will not accept. Keeping them apart is what stops "has X" and "refuses X"
+         *     becoming the same question.
+         */
+        NodeTaint: {
+            /**
+             * @description What the taint does to unmatched work. `NoSchedule` today; the field is
+             *     a string rather than an enum so a later effect does not break the wire.
+             */
+            effect: string;
+            key: string;
         };
         /**
          * @description A workspace checked out at a path on a particular node — the join table
@@ -5181,6 +5252,17 @@ export interface components {
              */
             instructions?: string | null;
             workspace_id: components["schemas"]["WorkspaceId"];
+        };
+        /**
+         * @description Replace a node's operator-set labels and taints (MAIN-314). Both fields are
+         *     a full replacement, not a patch: a partial update of a set is ambiguous
+         *     about deletion.
+         */
+        SetNodePlacementRequest: {
+            labels?: {
+                [key: string]: string;
+            };
+            taints?: components["schemas"]["NodeTaint"][];
         };
         SetPolicyRequest: {
             enabled: boolean;
@@ -7819,6 +7901,70 @@ export interface operations {
             };
             /** @description a path does not belong to this node */
             400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    get_node_placement: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NodePlacement"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    set_node_placement: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SetNodePlacementRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NodePlacement"];
+                };
+            };
+            403: {
                 headers: {
                     [name: string]: unknown;
                 };

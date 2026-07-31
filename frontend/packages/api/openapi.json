@@ -2103,6 +2103,86 @@
         }
       }
     },
+    "/api/v1/nodes/{id}/placement": {
+      "get": {
+        "tags": [
+          "crate::routes::nodes"
+        ],
+        "summary": "`GET /api/v1/nodes/{id}/placement` — the labels and taints placement reads\n(MAIN-314 AC-3). Visible to anyone who can see the node.",
+        "operationId": "get_node_placement",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NodePlacement"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "crate::routes::nodes"
+        ],
+        "summary": "`PUT /api/v1/nodes/{id}/placement` — set them (MAIN-314 AC-3).",
+        "description": "Owner-gated exactly as sharing is: an operator-set label steers where work\nlands, so it is the machine owner's call and not any teammate's. An\nownerless node has nobody to ask.",
+        "operationId": "set_node_placement",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetNodePlacementRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NodePlacement"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": ""
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      }
+    },
     "/api/v1/nodes/{id}/projects": {
       "post": {
         "tags": [
@@ -10340,6 +10420,8 @@
           "resources",
           "status",
           "shared",
+          "labels",
+          "taints",
           "created_at",
           "updated_at"
         ],
@@ -10354,6 +10436,9 @@
           },
           "id": {
             "$ref": "#/components/schemas/NodeId"
+          },
+          "labels": {
+            "description": "Operator-set labels, `{\"key\": \"value\"}` (MAIN-314). The DERIVED `os` and\n`arch` labels are not in here: they are computed from what the node\nreports, so storing them would let them drift from the truth."
           },
           "last_seen_at": {
             "type": [
@@ -10385,6 +10470,9 @@
           },
           "status": {
             "type": "string"
+          },
+          "taints": {
+            "description": "Operator-set taints, `[{\"key\": …, \"effect\": …}]` (MAIN-314)."
           },
           "tenant_id": {
             "$ref": "#/components/schemas/TenantId"
@@ -10430,6 +10518,43 @@
       "NodeId": {
         "type": "string",
         "format": "uuid"
+      },
+      "NodePlacement": {
+        "type": "object",
+        "description": "Everything placement reads off a node (MAIN-314). No scheduling here — the\nreconciler that consumes this is a later child of the epic.",
+        "required": [
+          "labels",
+          "custom_labels",
+          "taints"
+        ],
+        "properties": {
+          "custom_labels": {
+            "type": "object",
+            "description": "Just the operator's own, so a UI can edit them without stripping the\nderived ones by round-tripping.",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "labels": {
+            "type": "object",
+            "description": "Derived labels MERGED over the operator's, which is what a scheduler\nmatches on. `os` and `arch` are always present; a custom label of the\nsame name loses, because a node cannot be relabelled into another OS.",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "taints": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/NodeTaint"
+            }
+          }
+        }
       },
       "NodeReleases": {
         "type": "object",
@@ -10497,6 +10622,23 @@
             "type": "integer",
             "format": "int64",
             "minimum": 0
+          }
+        }
+      },
+      "NodeTaint": {
+        "type": "object",
+        "description": "A node's refusal to take work unless the work tolerates it (MAIN-314).\n\nThe inverse of a label: a label says what a node IS, a taint says what it\nwill not accept. Keeping them apart is what stops \"has X\" and \"refuses X\"\nbecoming the same question.",
+        "required": [
+          "key",
+          "effect"
+        ],
+        "properties": {
+          "effect": {
+            "type": "string",
+            "description": "What the taint does to unmatched work. `NoSchedule` today; the field is\na string rather than an enum so a later effect does not break the wire."
+          },
+          "key": {
+            "type": "string"
           }
         }
       },
@@ -12060,6 +12202,27 @@
           },
           "workspace_id": {
             "$ref": "#/components/schemas/WorkspaceId"
+          }
+        }
+      },
+      "SetNodePlacementRequest": {
+        "type": "object",
+        "description": "Replace a node's operator-set labels and taints (MAIN-314). Both fields are\na full replacement, not a patch: a partial update of a set is ambiguous\nabout deletion.",
+        "properties": {
+          "labels": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "taints": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/NodeTaint"
+            }
           }
         }
       },

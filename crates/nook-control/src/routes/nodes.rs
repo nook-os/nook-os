@@ -133,6 +133,159 @@ pub async fn set_shared(
     Ok(Json(node))
 }
 
+/// The labels a node has by virtue of what it IS, not what an operator typed
+/// (MAIN-314 AC-1).
+///
+/// Derived at read time rather than stored, so they cannot drift from the
+/// platform the node actually reports. `os` comes from `nodes.platform`, which
+/// is `std::env::consts::OS` as the agent saw it — already exactly
+/// `linux`/`macos`/`windows`; `arch` comes from the capabilities the agent
+/// reports, and is absent if it has not reported any yet.
+fn derived_labels(node: &Node) -> std::collections::BTreeMap<String, String> {
+    let mut out = std::collections::BTreeMap::new();
+    if !node.platform.is_empty() {
+        out.insert("os".to_string(), node.platform.clone());
+    }
+    if let Some(arch) = node
+        .capabilities
+        .get("architecture")
+        .and_then(|v| v.as_str())
+    {
+        out.insert("arch".to_string(), arch.to_string());
+    }
+    out
+}
+
+/// The stored custom labels, ignoring anything that is not a string value —
+/// the column is jsonb and an operator could have written a number through the
+/// API before this route existed.
+fn custom_labels(node: &Node) -> std::collections::BTreeMap<String, String> {
+    node.labels
+        .as_object()
+        .map(|m| {
+            m.iter()
+                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn placement_of(node: &Node) -> NodePlacement {
+    let custom = custom_labels(node);
+    // Derived wins: a node cannot be relabelled into another operating system.
+    let mut labels = custom.clone();
+    labels.extend(derived_labels(node));
+    NodePlacement {
+        labels,
+        custom_labels: custom,
+        taints: serde_json::from_value(node.taints.clone()).unwrap_or_default(),
+    }
+}
+
+/// `GET /api/v1/nodes/{id}/placement` — the labels and taints placement reads
+/// (MAIN-314 AC-3). Visible to anyone who can see the node.
+#[utoipa::path(get, path = "/api/v1/nodes/{id}/placement",
+    operation_id = "get_node_placement",
+    params(("id" = String, Path,)),
+    responses((status = 200, body = NodePlacement), (status = 404)))]
+pub async fn get_placement(
+    State(state): State<AppState>,
+    auth: AuthCtx,
+    Path(id): Path<NodeId>,
+) -> ApiResult<Json<NodePlacement>> {
+    let node = visible_node(&state, &auth, id).await?;
+    Ok(Json(placement_of(&node)))
+}
+
+/// `PUT /api/v1/nodes/{id}/placement` — set them (MAIN-314 AC-3).
+///
+/// Owner-gated exactly as sharing is: an operator-set label steers where work
+/// lands, so it is the machine owner's call and not any teammate's. An
+/// ownerless node has nobody to ask.
+#[utoipa::path(put, path = "/api/v1/nodes/{id}/placement",
+    operation_id = "set_node_placement",
+    params(("id" = String, Path,)),
+    request_body = SetNodePlacementRequest,
+    responses((status = 200, body = NodePlacement), (status = 403), (status = 404)))]
+pub async fn set_placement(
+    State(state): State<AppState>,
+    auth: AuthCtx,
+    Path(id): Path<NodeId>,
+    Json(req): Json<SetNodePlacementRequest>,
+) -> ApiResult<Json<NodePlacement>> {
+    // A person labels a machine; a node credential is not a person.
+    auth.require_user()?;
+    let node = visible_node(&state, &auth, id).await?;
+
+    let me = crate::auth::person_id_of(&state, auth.user_id).await?;
+    match node.owner_person_id {
+        None => {
+            return Err(ApiError::ForbiddenMsg(
+                "this machine has no owner, so no one can set its placement".into(),
+            ))
+        }
+        Some(o) if o != me => {
+            return Err(ApiError::ForbiddenMsg(
+                "only the machine's owner can set its labels and taints".into(),
+            ))
+        }
+        Some(_) => {}
+    }
+
+    for t in &req.taints {
+        if t.key.trim().is_empty() {
+            return Err(ApiError::BadRequest("a taint needs a key".into()));
+        }
+        if t.effect != "NoSchedule" {
+            return Err(ApiError::BadRequest(format!(
+                "{:?} is not a taint effect — expected NoSchedule",
+                t.effect
+            )));
+        }
+    }
+    // Derived labels are computed, never stored: accepting one would let it
+    // drift from the platform the node reports.
+    for k in req.labels.keys() {
+        if k == "os" || k == "arch" {
+            return Err(ApiError::BadRequest(format!(
+                "{k:?} is derived from what the node reports and cannot be set"
+            )));
+        }
+        if k.trim().is_empty() {
+            return Err(ApiError::BadRequest("a label needs a key".into()));
+        }
+    }
+
+    let node = state
+        .nodes
+        .set_placement(
+            id,
+            auth.tenant_id,
+            serde_json::to_value(&req.labels).unwrap_or_else(|_| serde_json::json!({})),
+            serde_json::to_value(&req.taints).unwrap_or_else(|_| serde_json::json!([])),
+        )
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    Ok(Json(placement_of(&node)))
+}
+
+/// The node, if this caller may see it at all — the same visibility rule the
+/// sharing toggle applies, so an invisible node 404s rather than confirming it
+/// exists.
+async fn visible_node(state: &AppState, auth: &AuthCtx, id: NodeId) -> ApiResult<Node> {
+    let node = state
+        .nodes
+        .get(auth.tenant_id, id)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    if let Some(scope_person) = visibility_scope(state, auth).await? {
+        if node.owner_person_id != Some(scope_person) && !node.shared {
+            return Err(ApiError::NotFound);
+        }
+    }
+    Ok(node)
+}
+
 /// `POST /api/v1/nodes/{id}/authorize` — launch a runtime's login flow in a
 /// session on the node so it can be device-authorized from the UI (MAIN-126).
 ///

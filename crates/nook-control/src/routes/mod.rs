@@ -261,6 +261,10 @@ pub fn build_router(state: AppState) -> Router {
         .route("/managed/skills", get(managed::list_skills))
         .route("/managed/hooks", get(managed::get_hooks))
         .route("/nodes/{id}/shared", post(nodes::set_shared))
+        .route(
+            "/nodes/{id}/placement",
+            get(nodes::get_placement).put(nodes::set_placement),
+        )
         .route("/nodes/{id}/authorize", post(nodes::authorize))
         // The sessionless replacement (MAIN-290). Coexists with the line
         // above until C5 retires it.
