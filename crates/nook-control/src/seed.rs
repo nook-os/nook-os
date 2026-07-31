@@ -266,6 +266,24 @@ fn daylight_tokens() -> serde_json::Value {
     .tokens()
 }
 
+/// The seeded ticket's body.
+///
+/// A `const` with explicit `\n`, not a `\`-continued string literal: the
+/// continuation form keeps the source indentation INSIDE the value, and four
+/// leading spaces is markdown for "code block" — so the whole description
+/// rendered as one grey monospace slab.
+const DOGFOOD_TASK_BODY: &str = concat!(
+    "The one-click test of the whole loop.\n",
+    "\n",
+    "Open this card, press **Draft a spec**, and the operator node clones the ",
+    "local `nook-dogfood` repo and runs `/nook-spec` against it. Nothing here ",
+    "needs ssh keys or a network: the repo is a real bare git repo on the ",
+    "node's own disk.\n",
+    "\n",
+    "If the job sits queued saying *no eligible executor*, the fleet has no ",
+    "Claude session — run `./run.sh --claude-login` once.",
+);
+
 /// Where the dogfood repo lives on the operator node (MAIN-341).
 ///
 /// `run.sh` creates the bare repo at exactly this path inside the operator
@@ -562,120 +580,135 @@ pub async fn run(db: &DbPool, cfg: &Config) -> Result<()> {
     // token is minted by a login in `run.sh`, never written here. What this
     // block provisions is scaffolding: an identity, a workspace, a switch, and
     // a ticket.
-    let dogfood_slug = "nook-dogfood";
-    let dogfood_exists: Option<WorkspaceId> = db
-        .query_scalar_opt(
-            "SELECT id FROM workspaces WHERE tenant_id = $1 AND slug = $2",
-            params![tenant.id, dogfood_slug],
-        )
-        .await?;
-
-    // The dev browser identity, in the SAME tenant the join token puts the
-    // operator node in (AC-4). `dev_login` becomes an EXISTING user when the
-    // email matches one, so seeding this row is what makes "sign in as dev"
-    // land in the operator's tenant rather than minting a fresh personal one —
-    // which is the cross-tenant mismatch MAIN-340 is about, sidestepped rather
-    // than fixed (NG-1).
+    // Gated on the dev join token, and that gate is load-bearing (MAIN-239).
     //
-    // An identity, not a credential: no password hash, no token. Signing in
-    // still goes through the dev-login hatch, which is itself gated on
-    // AUTH_DEV_MODE and refused outright in production.
-    let dev_email = "dev@nookos.local";
-    let dev_user: Option<UserId> = db
-        .query_scalar_opt(
-            "SELECT id FROM users WHERE tenant_id = $1 AND email = $2",
-            params![tenant.id, dev_email],
-        )
-        .await?;
-    let dev_user = match dev_user {
-        Some(id) => id,
-        None => {
-            let id = UserId::new();
-            db.exec(
-                "INSERT INTO users (id, tenant_id, display_name, email, role)
-                 VALUES ($1, $2, 'Dev', $3, 'owner')",
-                params![id, tenant.id, dev_email],
+    // `TestBed` migrates AND seeds every private test database, so an
+    // unconditional `loops.enabled = true` row here turned the master switch on
+    // for the whole deployment in every test — `any_enabled` scans all tenants —
+    // and broke the four `loops_switch` tests that exist precisely to pin the
+    // default-off invariant. Turning a documented default on as a side effect of
+    // seeding a demo is the kind of thing those tests are for.
+    //
+    // The token is also the honest signal for the rest of it: it is set by the
+    // compose stack, which is the only place there IS an operator node to run
+    // the dogfood loop on. `Config::for_test()` leaves it `None`, so a test bed
+    // gets no dogfood workspace, no dev identity, and no loops-on row.
+    if cfg.dev_join_token.is_some() {
+        let dogfood_slug = "nook-dogfood";
+        let dogfood_exists: Option<WorkspaceId> = db
+            .query_scalar_opt(
+                "SELECT id FROM workspaces WHERE tenant_id = $1 AND slug = $2",
+                params![tenant.id, dogfood_slug],
             )
             .await?;
-            id
-        }
-    };
-    // Without the membership grant the session resolves and then 403s — a
-    // memberless session (MAIN-98). Idempotent, and never elevating: the role
-    // is the one the user row already carries.
-    db.exec(
-        "INSERT INTO tenant_members (id, tenant_id, principal_type, principal_id, role)
+
+        // The dev browser identity, in the SAME tenant the join token puts the
+        // operator node in (AC-4). `dev_login` becomes an EXISTING user when the
+        // email matches one, so seeding this row is what makes "sign in as dev"
+        // land in the operator's tenant rather than minting a fresh personal one —
+        // which is the cross-tenant mismatch MAIN-340 is about, sidestepped rather
+        // than fixed (NG-1).
+        //
+        // An identity, not a credential: no password hash, no token. Signing in
+        // still goes through the dev-login hatch, which is itself gated on
+        // AUTH_DEV_MODE and refused outright in production.
+        let dev_email = "dev@nookos.local";
+        let dev_user: Option<UserId> = db
+            .query_scalar_opt(
+                "SELECT id FROM users WHERE tenant_id = $1 AND email = $2",
+                params![tenant.id, dev_email],
+            )
+            .await?;
+        let dev_user = match dev_user {
+            Some(id) => id,
+            None => {
+                let id = UserId::new();
+                db.exec(
+                    "INSERT INTO users (id, tenant_id, display_name, email, role)
+                 VALUES ($1, $2, 'Dev', $3, 'owner')",
+                    params![id, tenant.id, dev_email],
+                )
+                .await?;
+                id
+            }
+        };
+        // Without the membership grant the session resolves and then 403s — a
+        // memberless session (MAIN-98). Idempotent, and never elevating: the role
+        // is the one the user row already carries.
+        db.exec(
+            "INSERT INTO tenant_members (id, tenant_id, principal_type, principal_id, role)
          VALUES ($1, $2, 'user', $3, 'owner')
          ON CONFLICT DO NOTHING",
-        params![uuid::Uuid::now_v7(), tenant.id, dev_user],
-    )
-    .await?;
+            params![uuid::Uuid::now_v7(), tenant.id, dev_user],
+        )
+        .await?;
 
-    // Loops ON for this tenant (AC-3). Off is the shipped default and stays the
-    // default everywhere else (MAIN-239) — this is the one tenant where the
-    // whole point is that a job placed against the seeded workspace runs.
-    db.exec(
-        "INSERT INTO settings (id, tenant_id, scope, user_id, key, value)
+        // Loops ON for this tenant (AC-3). Off is the shipped default and stays the
+        // default everywhere else (MAIN-239) — this is the one tenant where the
+        // whole point is that a job placed against the seeded workspace runs.
+        db.exec(
+            "INSERT INTO settings (id, tenant_id, scope, user_id, key, value)
          VALUES ($1, $2, 'tenant', NULL, $3, $4)
          ON CONFLICT (tenant_id, scope, user_id, key) DO UPDATE SET value = EXCLUDED.value",
-        params![
-            uuid::Uuid::now_v7(),
-            tenant.id,
-            crate::services::loops::KEY,
-            serde_json::Value::Bool(true)
-        ],
-    )
-    .await?;
+            params![
+                uuid::Uuid::now_v7(),
+                tenant.id,
+                crate::services::loops::KEY,
+                serde_json::Value::Bool(true)
+            ],
+        )
+        .await?;
 
-    if dogfood_exists.is_none() {
-        // A LOCAL path, not a `git@` remote (AC-2): the operator node clones it
-        // with no ssh key, no credential, and no network. `run.sh` creates the
-        // bare repo at this exact path inside the operator container — the two
-        // have to agree, which is why the path is spelled out in both places
-        // and nowhere else.
-        let ws_id = WorkspaceId::new();
-        db.exec(
+        if dogfood_exists.is_none() {
+            // A LOCAL path, not a `git@` remote (AC-2): the operator node clones it
+            // with no ssh key, no credential, and no network. `run.sh` creates the
+            // bare repo at this exact path inside the operator container — the two
+            // have to agree, which is why the path is spelled out in both places
+            // and nowhere else.
+            let ws_id = WorkspaceId::new();
+            db.exec(
             "INSERT INTO workspaces (id, tenant_id, name, slug, git_remote_url, git_remote_normalized)
              VALUES ($1, $2, 'nook-dogfood', $3, $4, $4)",
             params![ws_id, tenant.id, dogfood_slug, DOGFOOD_REPO_PATH],
         )
         .await?;
 
-        // A ticket ready to open at /loop/<key> and draft a spec against (AC-6).
-        // Todo, not Triage: the loop's pick query excludes backlog columns
-        // (MAIN-80), so a card left in Triage would look ready and never be
-        // takeable.
-        if let Some(board_id) = db
-            .query_scalar_opt::<BoardId>(
-                "SELECT id FROM boards WHERE tenant_id = $1 AND name = 'NookOS Bootstrap'",
-                params![tenant.id],
-            )
-            .await?
-        {
-            let todo: Option<ColumnId> = db
-                .query_scalar_opt(
-                    "SELECT id FROM board_columns WHERE board_id = $1 AND type = 'unstarted'
-                     ORDER BY position LIMIT 1",
-                    params![board_id],
+            // A ticket ready to open at /loop/<key> and draft a spec against (AC-6).
+            // Todo, not Triage: the loop's pick query excludes backlog columns
+            // (MAIN-80), so a card left in Triage would look ready and never be
+            // takeable.
+            if let Some(board_id) = db
+                .query_scalar_opt::<BoardId>(
+                    "SELECT id FROM boards WHERE tenant_id = $1 AND name = 'NookOS Bootstrap'",
+                    params![tenant.id],
                 )
-                .await?;
-            if let Some(column_id) = todo {
-                db.exec(
-                    "INSERT INTO tasks
+                .await?
+            {
+                let todo: Option<ColumnId> = db
+                    .query_scalar_opt(
+                        "SELECT id FROM board_columns WHERE board_id = $1 AND type = 'unstarted'
+                     ORDER BY position LIMIT 1",
+                        params![board_id],
+                    )
+                    .await?;
+                if let Some(column_id) = todo {
+                    db.exec(
+                        "INSERT INTO tasks
                          (id, tenant_id, board_id, column_id, workspace_id, title,
                           description, type, position)
                      VALUES ($1, $2, $3, $4, $5, $6, $7, 'task', 100)",
-                    params![
-                        TaskId::new(),
-                        tenant.id,
-                        board_id,
-                        column_id,
-                        ws_id,
-                        "Add a greeting command to the dogfood repo",
-                        "The one-click test of the whole loop.\n\n                         Open this card, press **Draft a spec**, and the operator node                          clones the local `nook-dogfood` repo and runs `/nook-spec`                          against it. Nothing here needs ssh keys or a network: the repo                          is a real bare git repo on the node's own disk.\n\n                         If the job sits queued saying *no eligible executor*, the fleet                          has no Claude session — run `./run.sh --claude-login` once."
-                    ],
-                )
-                .await?;
+                        params![
+                            TaskId::new(),
+                            tenant.id,
+                            board_id,
+                            column_id,
+                            ws_id,
+                            "Add a greeting command to the dogfood repo",
+                            DOGFOOD_TASK_BODY
+                        ],
+                    )
+                    .await?;
+                }
             }
         }
     }
