@@ -593,9 +593,14 @@ impl TaskRepository for DbTaskRepository {
         let rows: Vec<(String,)> = self
             .db
             .query_all(
-                "SELECT title FROM tasks
-             WHERE tenant_id = $1 AND visibility <> 'private'
+                &format!(
+                    "SELECT title FROM tasks
+             WHERE tenant_id = $1 AND {public}
              ORDER BY created_at DESC LIMIT $2",
+                    // No viewer here on purpose — the digest is not scoped to a
+                    // reader, so every private card drops (MAIN-265).
+                    public = crate::services::tasks::public_only_sql(""),
+                ),
                 params![tenant, limit],
             )
             .await?;
@@ -1221,8 +1226,8 @@ impl TaskRepository for DbTaskRepository {
           -- per-task visibility (MAIN-76): a `private` card is seen only by its
           -- creator or assignee; `team`/`org` are tenant-visible. Same predicate
           -- an agent's claim path enforces, so the list never shows work it
-          -- could not then start.
-          AND (t.visibility <> 'private' OR t.created_by = $16 OR t.assignee_user_id = $16)
+          -- could not then start. ONE definition, shared (MAIN-265).
+          AND {visible}
           -- explicit visibility filter (MAIN-103 AC-3): ANDs with the viewer
           -- predicate above, so it can only NARROW — `visibility=private` still
           -- shows only the caller's own private cards, never a teammate's.
@@ -1266,6 +1271,7 @@ impl TaskRepository for DbTaskRepository {
                     not_labels_arr = Postgres.cast("$9", "text[]"),
                     types_arr = Postgres.cast("$15", "text[]"),
                     vis_arr = Postgres.cast("$19", "text[]"),
+                    visible = crate::services::tasks::visible_sql("t", "$16"),
                 ),
                 params![
                     tenant,
@@ -1804,7 +1810,7 @@ impl TaskRepository for DbTaskRepository {
             .query_all(
                 &format!(
                     "SELECT t.id,
-                    (b.key || '-' || {}) AS key,
+                    (b.key || '-' || {number}) AS key,
                     t.title, t.type, t.priority,
                     bc.type AS column_type,
                     t.archived_at
@@ -1812,9 +1818,10 @@ impl TaskRepository for DbTaskRepository {
              JOIN boards b ON b.id = t.board_id
              JOIN board_columns bc ON bc.id = t.column_id
              WHERE t.parent_task_id = $1
-               AND (t.visibility <> 'private' OR t.created_by = $2 OR t.assignee_user_id = $2)
+               AND {visible}
              ORDER BY CASE WHEN t.priority = 0 THEN 5 ELSE t.priority END, t.created_at",
-                    Postgres.cast("t.number", "text")
+                    number = Postgres.cast("t.number", "text"),
+                    visible = crate::services::tasks::visible_sql("t", "$2"),
                 ),
                 params![parent, viewer],
             )
@@ -1853,7 +1860,8 @@ impl TaskRepository for DbTaskRepository {
         Ok(self
             .db
             .query_all(
-                "SELECT r.id AS relation_id, t.id, t.title,
+                &format!(
+                    "SELECT r.id AS relation_id, t.id, t.title,
                 CASE WHEN b.key IS NOT NULL AND t.number IS NOT NULL
                      THEN b.key || '-' || t.number END AS key,
                 CASE WHEN r.kind = 'blocks' AND r.to_task = $1 THEN 'blocked_by'
@@ -1865,8 +1873,10 @@ impl TaskRepository for DbTaskRepository {
          JOIN boards b ON b.id = t.board_id
          JOIN board_columns c ON c.id = t.column_id
          WHERE (r.from_task = $1 OR r.to_task = $1)
-           AND (t.visibility <> 'private' OR t.created_by = $2 OR t.assignee_user_id = $2)
+           AND {visible}
          ORDER BY t.number",
+                    visible = crate::services::tasks::visible_sql("t", "$2"),
+                ),
                 params![task, viewer],
             )
             .await?)

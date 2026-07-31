@@ -101,9 +101,11 @@ pub async fn overview(
     //                              the one that covers the gap, so work started
     //                              seconds ago still names its ticket.
     //
-    // `task_viewer` is the SAME predicate every other read of a card uses
-    // (`tasks::visible_by_cols`, mirrored here in SQL): `None` means the caller
-    // already sees the whole tenant. Without it this endpoint would be a
+    // `task_viewer` is the SAME predicate every other read of a card uses — not
+    // mirrored here any more but literally the same string, from
+    // `tasks::visible_sql` (MAIN-265). The `IS NULL` leg around it is this
+    // endpoint's own question, not part of the rule: `None` means the caller
+    // already sees the whole tenant, so there is nothing to scope by. Without it this endpoint would be a
     // side-channel around card visibility — a private ticket's key leaking onto
     // a shared node's row is exactly the class of hole MAIN-226's tests exist to
     // catch.
@@ -129,12 +131,10 @@ pub async fn overview(
                   WHERE t.tenant_id = $1
                     AND t.archived_at IS NULL
                     AND COALESCE(t.checkout_id, s.checkout_id) IS NOT NULL
-                    AND ({viewer} IS NULL
-                         OR t.visibility <> 'private'
-                         OR t.created_by = $2
-                         OR t.assignee_user_id = $2)
+                    AND ({viewer} IS NULL OR {visible})
                   ORDER BY key",
-                viewer = Postgres.cast("$2", "uuid")
+                viewer = Postgres.cast("$2", "uuid"),
+                visible = crate::services::tasks::visible_sql("t", "$2"),
             ),
             params![tenant, task_viewer.map(|u| u.0)],
         )
