@@ -36,6 +36,106 @@ pub async fn get_one(
         .ok_or(ApiError::NotFound)
 }
 
+/// `GET /api/v1/workspaces/{id}/session-spec` — the declared desired session
+/// state, or `null` for an unmanaged workspace (MAIN-315 AC-2).
+///
+/// Tenant-scoped only, like every other workspace read: a workspace belongs to
+/// the tenant, not to a person, so there is no owner to gate against here (that
+/// distinction is MAIN-314's, where a NODE has an owner).
+#[utoipa::path(get, path = "/api/v1/workspaces/{id}/session-spec",
+    operation_id = "get_session_spec",
+    params(("id" = String, Path,)),
+    responses((status = 200, body = Option<SessionSpec>), (status = 404)))]
+pub async fn get_session_spec(
+    State(state): State<AppState>,
+    auth: AuthCtx,
+    Path(id): Path<WorkspaceId>,
+) -> ApiResult<Json<Option<SessionSpec>>> {
+    let ws = state
+        .workspaces
+        .get(auth.tenant_id, id)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    // A spec stored before a field was added should not 404 the whole read, so a
+    // value that no longer parses reads as unmanaged rather than as an error.
+    Ok(Json(ws.session_spec.and_then(|v| {
+        serde_json::from_value::<SessionSpec>(v).ok()
+    })))
+}
+
+/// Reject a spec that cannot mean anything (MAIN-315 AC-3).
+///
+/// `replicas >= 0` is free — `count` is a `u32`, so a negative never parses.
+/// What is NOT free is the empty string: a selector key or runtime of `""`
+/// would match nothing and silently strand the workspace, so it is refused
+/// rather than stored.
+fn validate_spec(spec: &SessionSpec) -> ApiResult<()> {
+    if spec.runtime.trim().is_empty() {
+        return Err(ApiError::BadRequest(
+            "a session spec needs a runtime".into(),
+        ));
+    }
+    for (k, v) in &spec.node_selector {
+        if k.trim().is_empty() {
+            return Err(ApiError::BadRequest(
+                "a node-selector key cannot be empty".into(),
+            ));
+        }
+        if v.trim().is_empty() {
+            return Err(ApiError::BadRequest(format!(
+                "node-selector {k:?} has an empty value — it would match nothing"
+            )));
+        }
+    }
+    for t in &spec.tolerations {
+        if t.key.trim().is_empty() {
+            return Err(ApiError::BadRequest("a toleration needs a key".into()));
+        }
+        if t.effect != "NoSchedule" {
+            return Err(ApiError::BadRequest(format!(
+                "{:?} is not a taint effect — expected NoSchedule",
+                t.effect
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// `PUT /api/v1/workspaces/{id}/session-spec` — declare it, or clear it with
+/// `{"spec": null}` to return the workspace to unmanaged (MAIN-315 AC-2).
+#[utoipa::path(put, path = "/api/v1/workspaces/{id}/session-spec",
+    operation_id = "set_session_spec",
+    params(("id" = String, Path,)),
+    request_body = SetSessionSpecRequest,
+    responses((status = 200, body = Option<SessionSpec>), (status = 400), (status = 404)))]
+pub async fn set_session_spec(
+    State(state): State<AppState>,
+    auth: AuthCtx,
+    Path(id): Path<WorkspaceId>,
+    Json(req): Json<SetSessionSpecRequest>,
+) -> ApiResult<Json<Option<SessionSpec>>> {
+    // A person declares desired state; a node credential is not a person.
+    auth.require_user()?;
+    if let Some(spec) = &req.spec {
+        validate_spec(spec)?;
+    }
+    let stored =
+        match &req.spec {
+            Some(spec) => Some(serde_json::to_value(spec).map_err(|_| {
+                ApiError::BadRequest("that session spec could not be stored".into())
+            })?),
+            None => None,
+        };
+    let ws = state
+        .workspaces
+        .set_session_spec(auth.tenant_id, id, stored)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    Ok(Json(ws.session_spec.and_then(|v| {
+        serde_json::from_value::<SessionSpec>(v).ok()
+    })))
+}
+
 #[derive(serde::Deserialize, utoipa::IntoParams)]
 pub struct GitQuery {
     pub node_id: NodeId,

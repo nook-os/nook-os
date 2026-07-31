@@ -42,6 +42,10 @@ pub struct AppState {
     pub tenant_cas: Arc<dyn crate::repo::nodes::TenantCaRepository>,
     /// The notification inbox and its channels (MAIN-256).
     pub notifications: Arc<dyn crate::repo::notifications::NotificationRepository>,
+    /// The cross-cutting read model (MAIN-304): the activity-event writer, the
+    /// activity feed, and the Mission Control overview — three surfaces that
+    /// belong to no single aggregate.
+    pub read_model: Arc<dyn crate::repo::read_model::ReadModelRepository>,
     /// Product feedback and the settings that configure its surface (MAIN-256).
     pub feedback: Arc<dyn crate::repo::notifications::FeedbackRepository>,
     /// Notes and folders — personal notebook and workspace notes (MAIN-254).
@@ -59,6 +63,8 @@ pub struct AppState {
     pub skills: Arc<dyn crate::repo::admin::SkillRepository>,
     /// Tenant- and user-scoped settings rows (MAIN-258).
     pub settings: Arc<dyn crate::repo::admin::SettingRepository>,
+    /// Org-visibility policy rows (MAIN-305).
+    pub org_policy: Arc<dyn crate::repo::admin::OrgPolicyRepository>,
     /// The theme catalogue (MAIN-258).
     pub themes: Arc<dyn crate::repo::admin::ThemeRepository>,
     pub cfg: Arc<Config>,
@@ -157,6 +163,9 @@ impl AppState {
             feedback: Arc::new(crate::repo::notifications::DbFeedbackRepository::new(
                 db.clone(),
             )),
+            read_model: Arc::new(crate::repo::read_model::DbReadModelRepository::new(
+                db.clone(),
+            )),
             vaults: Arc::new(crate::repo::notebook::DbVaultRepository::new(db.clone())),
             operator: Arc::new(crate::repo::admin::DbOperatorRepository::new(db.clone())),
             managed: Arc::new(crate::repo::admin::DbManagedContentRepository::new(
@@ -164,6 +173,7 @@ impl AppState {
             )),
             skills: Arc::new(crate::repo::admin::DbSkillRepository::new(db.clone())),
             settings: Arc::new(crate::repo::admin::DbSettingRepository::new(db.clone())),
+            org_policy: Arc::new(crate::repo::admin::DbOrgPolicyRepository::new(db.clone())),
             themes: Arc::new(crate::repo::admin::DbThemeRepository::new(db.clone())),
             kanban: Arc::new(KanbanRegistry::new(tasks.clone())),
             tasks,

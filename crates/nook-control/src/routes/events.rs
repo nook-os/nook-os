@@ -30,7 +30,7 @@ pub async fn list(
     // Members see their own activity; owner/admin get the full audit feed. The
     // same scope filters the live bus, so page and push agree (MAIN-134).
     let scope = activity_queries::ActivityScope::load(
-        &state.db,
+        &*state.read_model,
         auth.tenant_id,
         &auth,
         state.identity.as_ref(),
@@ -38,7 +38,7 @@ pub async fn list(
     .await?;
     Ok(Json(
         activity_queries::events_page(
-            &state.db,
+            &*state.read_model,
             auth.tenant_id,
             q.workspace_id,
             q.kind,

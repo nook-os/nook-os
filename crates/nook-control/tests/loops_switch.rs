@@ -57,19 +57,22 @@ async fn loops_default_to_off_and_the_switch_flips_at_runtime() {
     };
     let tenant = bed.tenant("loops").await;
     let db = bed.db();
+    // The real settings repository over this bed — the same one AppState
+    // builds, so this still drives production SQL (MAIN-305).
+    let settings = nook_control::repo::admin::DbSettingRepository::new(db.clone());
 
     // The safe default, with nothing stored: a fresh deployment is quiet.
-    assert!(!loops::enabled(&db, tenant).await, "default is OFF");
-    assert!(!loops::any_enabled(&db).await);
+    assert!(!loops::enabled(&settings, tenant).await, "default is OFF");
+    assert!(!loops::any_enabled(&settings).await);
 
     // No restart, no cache: the very next read sees it.
-    loops::set(&db, tenant, true).await.expect("enable");
-    assert!(loops::enabled(&db, tenant).await);
-    assert!(loops::any_enabled(&db).await);
+    loops::set(&settings, tenant, true).await.expect("enable");
+    assert!(loops::enabled(&settings, tenant).await);
+    assert!(loops::any_enabled(&settings).await);
 
-    loops::set(&db, tenant, false).await.expect("disable");
-    assert!(!loops::enabled(&db, tenant).await);
-    assert!(!loops::any_enabled(&db).await);
+    loops::set(&settings, tenant, false).await.expect("disable");
+    assert!(!loops::enabled(&settings, tenant).await);
+    assert!(!loops::any_enabled(&settings).await);
 
     bed.teardown().await;
 }
@@ -84,17 +87,20 @@ async fn the_switch_is_per_tenant_and_any_enabled_is_their_or() {
     let a = bed.tenant("loops-a").await;
     let b = bed.tenant("loops-b").await;
     let db = bed.db();
+    // The real settings repository over this bed — the same one AppState
+    // builds, so this still drives production SQL (MAIN-305).
+    let settings = nook_control::repo::admin::DbSettingRepository::new(db.clone());
 
-    loops::set(&db, a, true).await.expect("enable a");
-    assert!(loops::enabled(&db, a).await);
-    assert!(!loops::enabled(&db, b).await, "b was never enabled");
+    loops::set(&settings, a, true).await.expect("enable a");
+    assert!(loops::enabled(&settings, a).await);
+    assert!(!loops::enabled(&settings, b).await, "b was never enabled");
     assert!(
-        loops::any_enabled(&db).await,
+        loops::any_enabled(&settings).await,
         "one tenant running is enough to make a pass worthwhile"
     );
 
-    loops::set(&db, a, false).await.expect("disable a");
-    assert!(!loops::any_enabled(&db).await, "nobody left running");
+    loops::set(&settings, a, false).await.expect("disable a");
+    assert!(!loops::any_enabled(&settings).await, "nobody left running");
 
     bed.teardown().await;
 }
@@ -122,8 +128,14 @@ async fn a_user_scoped_row_cannot_turn_the_fleet_on() {
     .expect("user-scoped setting");
 
     let db = bed.db();
-    assert!(!loops::enabled(&db, tenant).await, "tenant scope only");
-    assert!(!loops::any_enabled(&db).await, "tenant scope only");
+    // The real settings repository over this bed — the same one AppState
+    // builds, so this still drives production SQL (MAIN-305).
+    let settings = nook_control::repo::admin::DbSettingRepository::new(db.clone());
+    assert!(
+        !loops::enabled(&settings, tenant).await,
+        "tenant scope only"
+    );
+    assert!(!loops::any_enabled(&settings).await, "tenant scope only");
 
     bed.teardown().await;
 }
@@ -141,6 +153,9 @@ async fn a_job_queued_while_off_waits_and_runs_after_enable() {
     let task = target(&bed.pool, tenant, user).await;
     let state = bed.app_state().await;
     let db = bed.db();
+    // The real settings repository over this bed — the same one AppState
+    // builds, so this still drives production SQL (MAIN-305).
+    let settings = nook_control::repo::admin::DbSettingRepository::new(db.clone());
 
     // Loops are off (the default). Creating a job still works — the switch
     // gates the machinery, not the board.
@@ -161,7 +176,7 @@ async fn a_job_queued_while_off_waits_and_runs_after_enable() {
 
     // With loops off the consumer would not even reach this job. Assert the
     // gate it consults, and that the job is untouched.
-    assert!(!loops::any_enabled(&db).await);
+    assert!(!loops::any_enabled(&settings).await);
     let after: LoopJob = sqlx::query_as("SELECT * FROM loop_jobs WHERE id = $1")
         .bind(job.id)
         .fetch_one(&bed.pool)
@@ -181,8 +196,8 @@ async fn a_job_queued_while_off_waits_and_runs_after_enable() {
     .execute(&bed.pool)
     .await
     .expect("an eligible executor");
-    loops::set(&db, tenant, true).await.expect("enable");
-    assert!(loops::any_enabled(&db).await);
+    loops::set(&settings, tenant, true).await.expect("enable");
+    assert!(loops::any_enabled(&settings).await);
 
     // The same placement the consumer performs, now that the gate is open.
     let placed = jobs::select_executor(&state, tenant, job.id)

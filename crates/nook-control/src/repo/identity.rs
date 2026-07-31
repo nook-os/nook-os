@@ -161,6 +161,11 @@ pub trait IdentityRepository: Send + Sync {
     /// any single membership.
     async fn person_id_of(&self, user_id: UserId) -> ApiResult<Option<Uuid>>;
 
+    /// Every tenant under an org (MAIN-305). `tenants.org_id` is identity's
+    /// column, so the org-policy fan-out asks here rather than carrying its own
+    /// copy of the query.
+    async fn tenant_ids_in_org(&self, org: Uuid) -> ApiResult<Vec<TenantId>>;
+
     /// The same lookup, scoped to a tenant — what the join flow needs before it
     /// will hand a node to a person (MAIN-252).
     async fn person_id_of_in_tenant(
@@ -762,6 +767,13 @@ impl IdentityRepository for DbIdentityRepository {
             .query_opt("SELECT org_id FROM tenants WHERE id = $1", params![tenant])
             .await?;
         Ok(row.and_then(|(o,)| o))
+    }
+
+    async fn tenant_ids_in_org(&self, org: Uuid) -> ApiResult<Vec<TenantId>> {
+        Ok(self
+            .db
+            .query_scalar_all("SELECT id FROM tenants WHERE org_id = $1", params![org])
+            .await?)
     }
 
     async fn first_tenant(&self) -> ApiResult<Option<TenantId>> {
@@ -1613,6 +1625,12 @@ impl FakeIdentityRepository {
 
 #[async_trait]
 impl IdentityRepository for FakeIdentityRepository {
+    async fn tenant_ids_in_org(&self, _org: Uuid) -> ApiResult<Vec<TenantId>> {
+        // No org graph in the fake: callers that need one drive the real
+        // repository. Empty is the honest answer, not a pretend one.
+        Ok(Vec::new())
+    }
+
     async fn memberships_of(&self, user_id: UserId) -> ApiResult<Vec<MembershipRow>> {
         let st = self.inner.lock().unwrap();
         let Some(me) = st.person_of.get(&user_id).copied() else {

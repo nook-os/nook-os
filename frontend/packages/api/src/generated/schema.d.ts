@@ -3030,6 +3030,33 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workspaces/{id}/session-spec": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * `GET /api/v1/workspaces/{id}/session-spec` — the declared desired session
+         *     state, or `null` for an unmanaged workspace (MAIN-315 AC-2).
+         * @description Tenant-scoped only, like every other workspace read: a workspace belongs to
+         *     the tenant, not to a person, so there is no owner to gate against here (that
+         *     distinction is MAIN-314's, where a NODE has an owner).
+         */
+        get: operations["get_session_spec"];
+        /**
+         * `PUT /api/v1/workspaces/{id}/session-spec` — declare it, or clear it with
+         *     `{"spec": null}` to return the workspace to unmanaged (MAIN-315 AC-2).
+         */
+        put: operations["set_session_spec"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workspaces/{id}/worktrees": {
         parameters: {
             query?: never;
@@ -5020,6 +5047,25 @@ export interface components {
         ReorderChatCategories: {
             ordered_ids: string[];
         };
+        /**
+         * @description How many sessions a workspace wants (MAIN-315).
+         *
+         *     Tagged rather than a bare integer, because "one per matching node" and
+         *     "exactly one" are different intents a number cannot tell apart — and a
+         *     reconciler that guessed would be wrong on a fleet that grows.
+         */
+        Replicas: {
+            /** Format: int32 */
+            count: number;
+            /** @enum {string} */
+            kind: "count";
+        } | {
+            /** @enum {string} */
+            kind: "single";
+        } | {
+            /** @enum {string} */
+            kind: "all";
+        };
         /** @description A hook reporting what the agent in a session is doing. */
         ReportAgentStateRequest: {
             /** @description `running` | `waiting` | `idle`. */
@@ -5163,6 +5209,24 @@ export interface components {
             status: string;
             text: string;
         };
+        /**
+         * @description A workspace's declared desired session state (MAIN-315) — the Deployment
+         *     analog. Absent entirely means the workspace is unmanaged.
+         */
+        SessionSpec: {
+            /** @description Labels a node must carry to be eligible. Empty matches every node. */
+            node_selector?: {
+                [key: string]: string;
+            };
+            replicas: components["schemas"]["Replicas"];
+            /** @description The runtime every session it manages should run — `claude`, `bash`, … */
+            runtime: string;
+            /**
+             * @description Taints this work accepts. A node whose taint is untolerated is not
+             *     eligible however well its labels match.
+             */
+            tolerations?: components["schemas"]["Toleration"][];
+        };
         /** @description One terminal inside a session (a tmux window). */
         SessionWindow: {
             active: boolean;
@@ -5203,6 +5267,14 @@ export interface components {
         SetPolicyRequest: {
             enabled: boolean;
             field: string;
+        };
+        /**
+         * @description Set or clear a workspace's [`SessionSpec`] (MAIN-315). `spec: null` clears
+         *     it, returning the workspace to unmanaged — which is why the field is an
+         *     explicit Option rather than an absent key meaning "leave alone".
+         */
+        SetSessionSpecRequest: {
+            spec?: null | components["schemas"]["SessionSpec"];
         };
         /** @description Toggle a node's `shared` designation (MAIN-135). Owner-only at the route. */
         SetSharedRequest: {
@@ -5564,6 +5636,17 @@ export interface components {
             spacing?: {
                 [key: string]: string;
             };
+        };
+        /**
+         * @description Work's agreement to run somewhere despite a taint (MAIN-315).
+         *
+         *     Its own type rather than a re-use of the node-side taint: they are the two
+         *     halves of one negotiation, and a shared struct makes it easy to pass one
+         *     where the other belongs. Same fields today, free to diverge later.
+         */
+        Toleration: {
+            effect: string;
+            key: string;
         };
         /** @description Live events pushed to browsers over `/api/v1/ws/ui`. */
         UiEvent: {
@@ -6046,6 +6129,11 @@ export interface components {
             git_remote_url?: string | null;
             id: components["schemas"]["WorkspaceId"];
             name: string;
+            /**
+             * @description The desired session state (MAIN-315), or `None` for an UNMANAGED
+             *     workspace. Nothing reconciles it yet.
+             */
+            session_spec?: unknown;
             slug: string;
             tenant_id: components["schemas"]["TenantId"];
             /** Format: date-time */
@@ -11559,6 +11647,70 @@ export interface operations {
                 };
             };
             403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    get_session_spec: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": null | components["schemas"]["SessionSpec"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    set_session_spec: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SetSessionSpecRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": null | components["schemas"]["SessionSpec"];
+                };
+            };
+            400: {
                 headers: {
                     [name: string]: unknown;
                 };

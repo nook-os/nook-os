@@ -14,7 +14,7 @@ use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
-use nook_db::{params, Db, DbPool, Postgres, TypeMapping};
+use nook_db::DbPool;
 use nook_proto::{AttachServerMessage, ControlToNode, UiEvent};
 use nook_types::{GitFileStatus, NodeId, SessionId, TenantId};
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
@@ -723,25 +723,9 @@ impl Registry {
 
     // ── Bus plumbing (called from bus.rs) ──────────────────────────────────
 
-    /// Refresh the lease mirror from Postgres.
-    pub async fn refresh_lease_cache(&self, pool: &DbPool) {
-        let now = Postgres.now();
-        let epoch = Postgres.cast(
-            &format!("EXTRACT(EPOCH FROM lease_expires_at - {now})"),
-            "float8",
-        );
-        let rows: Vec<(Uuid, Uuid, f64)> = pool
-            .query_all(
-                &format!(
-                    "SELECT id, owning_instance_id,
-                    {epoch}
-             FROM nodes
-             WHERE owning_instance_id IS NOT NULL AND lease_expires_at > {now}",
-                ),
-                params![],
-            )
-            .await
-            .unwrap_or_default();
+    /// Refresh the lease mirror from the node repository (MAIN-305).
+    pub async fn refresh_lease_cache(&self, nodes: &dyn crate::repo::nodes::NodeRepository) {
+        let rows = nodes.live_leases().await.unwrap_or_default();
         self.lease_cache.clear();
         let now = Instant::now();
         for (node, owner, ttl) in rows {

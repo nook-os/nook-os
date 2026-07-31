@@ -103,8 +103,10 @@ fn the_visibility_predicate_is_written_in_exactly_one_file() {
 fn every_known_site_calls_the_shared_definition() {
     let root = src_root();
     let repo = std::fs::read_to_string(root.join("repo/tasks.rs")).expect("repo/tasks.rs");
+    // The overview join moved to the cross-cutting read model (MAIN-304); the
+    // query — and its call to the shared predicate — went with it.
     let overview =
-        std::fs::read_to_string(root.join("services/overview_queries.rs")).expect("overview");
+        std::fs::read_to_string(root.join("repo/read_model.rs")).expect("repo/read_model.rs");
 
     // `visible_sql` is called once per viewer-scoped site: pick_tasks,
     // epic_children, related_tasks in the repository, and the overview join.
@@ -116,7 +118,9 @@ fn every_known_site_calls_the_shared_definition() {
     );
     assert!(
         overview.contains("visible_sql("),
-        "the Mission Control overview join no longer calls visible_sql"
+        "the Mission Control overview join no longer calls visible_sql — if that \
+         query moved again, point this at its new home rather than deleting the \
+         assertion"
     );
     assert!(
         repo.contains("public_only_sql("),

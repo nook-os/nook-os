@@ -5,7 +5,14 @@
 //! the shared predicate and the list. Set `DATABASE_URL`.
 
 use nook_control::auth::{AuthCtx, Principal};
+use nook_control::repo::read_model::DbReadModelRepository;
 use nook_control::services::activity_queries::{self, ActivityScope};
+
+/// The real read-model repository over this bed's pool — the same one
+/// `AppState` builds, so these still exercise production SQL (MAIN-304).
+fn read_model(bed: &nook_testkit::TestBed) -> DbReadModelRepository {
+    DbReadModelRepository::new(bed.db())
+}
 use nook_db::{params, Db, DbPool};
 use nook_testkit::TestBed;
 use nook_types::*;
@@ -193,7 +200,7 @@ async fn events_list_scopes_members_to_their_own_activity() {
 
     // Member: sees the three that are theirs, none of the teammate's.
     let scope = ActivityScope::load(
-        &bed.db(),
+        &read_model(&bed),
         tenant,
         &user_ctx(member, tenant),
         &nook_control::repo::identity::DbIdentityRepository::new(bed.db()),
@@ -204,10 +211,11 @@ async fn events_list_scopes_members_to_their_own_activity() {
         matches!(scope, ActivityScope::Member { .. }),
         "a member resolves to a scoped view"
     );
-    let seen = activity_queries::events_page(&bed.db(), tenant, None, None, None, 200, &scope)
-        .await
-        .expect("list")
-        .events;
+    let seen =
+        activity_queries::events_page(&read_model(&bed), tenant, None, None, None, 200, &scope)
+            .await
+            .expect("list")
+            .events;
     let ids: Vec<EventId> = seen.iter().map(|e| e.id).collect();
     assert!(ids.contains(&e_my_action), "sees their own action");
     assert!(ids.contains(&e_my_node), "sees events on their node");
@@ -223,7 +231,7 @@ async fn events_list_scopes_members_to_their_own_activity() {
 
     // Owner: the full audit feed sees all five.
     let admin_scope = ActivityScope::load(
-        &bed.db(),
+        &read_model(&bed),
         tenant,
         &user_ctx(owner, tenant),
         &nook_control::repo::identity::DbIdentityRepository::new(bed.db()),
@@ -234,11 +242,18 @@ async fn events_list_scopes_members_to_their_own_activity() {
         matches!(admin_scope, ActivityScope::All),
         "an owner resolves to the unfiltered feed"
     );
-    let all_seen =
-        activity_queries::events_page(&bed.db(), tenant, None, None, None, 200, &admin_scope)
-            .await
-            .expect("list")
-            .events;
+    let all_seen = activity_queries::events_page(
+        &read_model(&bed),
+        tenant,
+        None,
+        None,
+        None,
+        200,
+        &admin_scope,
+    )
+    .await
+    .expect("list")
+    .events;
     let all_ids: Vec<EventId> = all_seen.iter().map(|e| e.id).collect();
     for id in [
         e_my_action,
@@ -268,7 +283,7 @@ async fn a_node_credential_resolves_to_the_unfiltered_feed() {
         cookie_session: false,
     };
     let scope = ActivityScope::load(
-        &bed.db(),
+        &read_model(&bed),
         tenant,
         &node_ctx,
         &nook_control::repo::identity::DbIdentityRepository::new(bed.db()),

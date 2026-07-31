@@ -19,8 +19,7 @@
 //! visibility without anything having to insert defaults, and a bug in a
 //! seeding path cannot accidentally open a field.
 
-use nook_db::{params, Db, DbPool};
-use nook_types::{PolicyField, TenantId};
+use nook_types::PolicyField;
 use uuid::Uuid;
 
 use crate::error::{ApiError, ApiResult};
@@ -80,26 +79,25 @@ impl Field {
 /// Is one field currently on for this org?
 ///
 /// The newest row wins; no row means off.
-pub async fn enabled(db: &DbPool, org: Uuid, field: Field) -> ApiResult<bool> {
-    let row: Option<(bool,)> = db
-        .query_opt(
-            "SELECT enabled FROM org_visibility_policy
-         WHERE org_id = $1 AND field = $2
-         ORDER BY changed_at DESC LIMIT 1",
-            params![org, field.key()],
-        )
-        .await?;
-    Ok(row.map(|(e,)| e).unwrap_or(false))
+pub async fn enabled(
+    policy: &dyn crate::repo::admin::OrgPolicyRepository,
+    org: Uuid,
+    field: Field,
+) -> ApiResult<bool> {
+    policy.field_enabled(org, field.key()).await
 }
 
 /// Every field with its current state, for a UI to render.
-pub async fn current(db: &DbPool, org: Uuid) -> ApiResult<Vec<PolicyField>> {
+pub async fn current(
+    policy: &dyn crate::repo::admin::OrgPolicyRepository,
+    org: Uuid,
+) -> ApiResult<Vec<PolicyField>> {
     let mut out = Vec::with_capacity(Field::ALL.len());
     for f in Field::ALL {
         out.push(PolicyField {
             field: f.key().to_string(),
             description: f.describes().to_string(),
-            enabled: enabled(db, org, f).await?,
+            enabled: enabled(policy, org, f).await?,
         });
     }
     Ok(out)
@@ -124,21 +122,15 @@ pub async fn set(
 
     // Appended, never updated: the history IS the feature.
     state
-        .db
-        .exec(
-            "INSERT INTO org_visibility_policy (id, org_id, field, enabled, changed_by)
-         VALUES ($1, $2, $3, $4, $5)",
-            params![Uuid::now_v7(), org, f.key(), enabled_now, by],
-        )
+        .org_policy
+        .set_field(org, f.key(), enabled_now, by)
         .await?;
 
     // Every tenant in the org hears about it, in their own tenant's feed.
-    let tenants: Vec<(TenantId,)> = state
-        .db
-        .query_all("SELECT id FROM tenants WHERE org_id = $1", params![org])
-        .await?;
+    // `tenants.org_id` is identity's column, so it answers (MAIN-305).
+    let tenants = state.identity.tenant_ids_in_org(org).await?;
 
-    for (tenant,) in tenants {
+    for tenant in tenants {
         crate::events::record(
             state,
             tenant,

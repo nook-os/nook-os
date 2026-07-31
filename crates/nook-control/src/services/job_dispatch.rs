@@ -55,7 +55,7 @@ async fn run(state: AppState) {
         // off this is a single indexed lookup and we never touch the queue —
         // which is what "off is genuinely quiet" means: no claiming, no
         // dispatch, and queued jobs simply keep waiting.
-        if !switch.observe("job_dispatch", loops::any_enabled(&state.db).await) {
+        if !switch.observe("job_dispatch", loops::any_enabled(&*state.settings).await) {
             tokio::time::sleep(POLL_INTERVAL).await;
             continue;
         }
@@ -90,7 +90,7 @@ async fn handle(state: &AppState, item: &crate::queue::WorkEnvelope) {
     // may belong to a tenant whose loops are off — so re-arm it exactly as an
     // unplaceable job is re-armed and place nothing. The job keeps its queued
     // state and runs when the switch flips (AC-3: off loses no work).
-    if !loops::enabled(&state.db, tenant).await {
+    if !loops::enabled(&*state.settings, tenant).await {
         let _ = state.queue.ack(item.id).await;
         let _ = state
             .queue
