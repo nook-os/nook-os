@@ -81,6 +81,14 @@ tenant_ca                  # production emits Postgres-only syntax (MAIN-289)
 # ── nook-chat has no SQLite migrator (MAIN-294) ──
 nook_chat:main             # nook-chat has no MIGRATOR_SQLITE — EnginePool::pg() panics (MAIN-294)
 
-# ── testkit SQLite pool size (MAIN-295) ──
-auth_search_path           # SQLite bed opens a pool of size 1 (MAIN-295)
-migrations                 # SQLite bed opens a pool of size 1 (MAIN-295)
+# ── chat tests build a Postgres pool from the sqlite:// URL, re-tagged by MAIN-295 ──
+#
+# These were tagged MAIN-295 ("the SQLite bed opens a pool of size 1") on my own
+# inference, and it was wrong. Neither uses TestBed at all: both call
+# `PgConnectOptions::from_str(DATABASE_URL)` and then `PgPoolOptions::connect_with`,
+# so on a sqlite:// URL they wait for a Postgres server that will never answer and
+# fail as PoolTimedOut. The bed's pool size was never involved — MAIN-295 fixed a
+# real but SEPARATE latent deadlock, and these stayed red, which is what exposed
+# the mistake. Engine-aware pool construction in chat's tests is MAIN-294's work.
+auth_search_path           # builds a Postgres pool from the sqlite:// URL (MAIN-294)
+migrations                 # builds a Postgres pool from the sqlite:// URL (MAIN-294)
