@@ -41,6 +41,12 @@ pub struct NewSession {
     /// restart can return to it. `None` when there is no row yet — discovery
     /// may not have scanned a just-made worktree — or for an ad-hoc `$HOME`.
     pub checkout_id: Option<NodeWorkspaceId>,
+    /// Reconciler-owned (MAIN-316). Set on the INSERT, not by a follow-up
+    /// update, so the unique index arbitrates the multi-replica race BEFORE
+    /// anything is sent to a node. Marking afterwards meant the losing replica
+    /// had already told the node to start: a live, unattributed session the
+    /// reconciler could never see again.
+    pub managed: bool,
 }
 
 /// Which sessions a list call wants.
@@ -109,6 +115,20 @@ pub trait SessionRepository: Send + Sync {
     async fn mark_status_if_live(&self, id: SessionId, status: &str) -> ApiResult<u64>;
 
     async fn delete(&self, id: SessionId, tenant: TenantId) -> ApiResult<u64>;
+
+    /// The LIVE managed sessions of one workspace, as `(session, node)`.
+    ///
+    /// Live only: an exited managed session is a gap the reconciler fills, not
+    /// a replica it already has. Managed only: this is the query that makes
+    /// "ad-hoc sessions are never touched" true rather than intended.
+    async fn live_managed(
+        &self,
+        tenant: TenantId,
+        workspace: WorkspaceId,
+    ) -> ApiResult<Vec<(SessionId, NodeId)>>;
+
+    /// End a managed session — the scale-down half of converging.
+    async fn mark_ended(&self, tenant: TenantId, id: SessionId) -> ApiResult<u64>;
 }
 
 // ── the DbPool implementation ───────────────────────────────────────────────
@@ -177,8 +197,8 @@ impl SessionRepository for DbSessionRepository {
             .query_one(
                 "INSERT INTO sessions
                    (id, tenant_id, workspace_id, node_id, name, runtime, status,
-                    created_by, checkout_id)
-                 VALUES ($1, $2, $3, $4, $5, $6, 'starting', $7, $8) RETURNING *",
+                    created_by, checkout_id, managed)
+                 VALUES ($1, $2, $3, $4, $5, $6, 'starting', $7, $8, $9) RETURNING *",
                 params![
                     SessionId::new(),
                     new.tenant,
@@ -187,7 +207,8 @@ impl SessionRepository for DbSessionRepository {
                     new.name,
                     new.runtime,
                     new.created_by.map(|u| u.0),
-                    new.checkout_id.map(|c| c.0)
+                    new.checkout_id.map(|c| c.0),
+                    new.managed
                 ],
             )
             .await?)
@@ -313,6 +334,38 @@ impl SessionRepository for DbSessionRepository {
             )
             .await?)
     }
+
+    async fn live_managed(
+        &self,
+        tenant: TenantId,
+        workspace: WorkspaceId,
+    ) -> ApiResult<Vec<(SessionId, NodeId)>> {
+        Ok(self
+            .db
+            .query_all(
+                "SELECT id, node_id FROM sessions
+                 WHERE tenant_id = $1 AND workspace_id = $2 AND managed
+                   AND status IN ('starting', 'running', 'detached')
+                 ORDER BY node_id",
+                params![tenant, workspace],
+            )
+            .await?)
+    }
+
+    async fn mark_ended(&self, tenant: TenantId, id: SessionId) -> ApiResult<u64> {
+        Ok(self
+            .db
+            .exec(
+                &format!(
+                    "UPDATE sessions SET status = 'exited', ended_at = {now}, updated_at = {now}
+                     WHERE id = $1 AND tenant_id = $2
+                       AND status IN ('starting', 'running', 'detached')",
+                    now = type_mapping(self.db.engine()).now()
+                ),
+                params![id, tenant],
+            )
+            .await?)
+    }
 }
 
 // ── the in-memory fake (AC-3) ───────────────────────────────────────────────
@@ -326,6 +379,10 @@ use std::sync::Mutex;
 #[derive(Default)]
 pub struct FakeSessionRepository {
     inner: Mutex<Vec<Session>>,
+    /// Which sessions the reconciler owns (MAIN-316). Held beside the rows
+    /// rather than on `Session`, because putting it on the DTO is exposing it
+    /// through the session API — which is MAIN-318's card, not this one.
+    managed: Mutex<std::collections::HashSet<SessionId>>,
 }
 
 impl FakeSessionRepository {
@@ -405,6 +462,24 @@ impl SessionRepository for FakeSessionRepository {
 
     async fn create(&self, new: NewSession) -> ApiResult<Session> {
         let now = chrono::Utc::now();
+        // The real table refuses a second LIVE managed session on the same
+        // (workspace, node) via a unique index, and that refusal is what
+        // arbitrates the reconciler's race. A fake that accepted it would let a
+        // caller test pass against behaviour the database does not have.
+        if new.managed {
+            let rows = self.inner.lock().unwrap();
+            let managed = self.managed.lock().unwrap();
+            if rows.iter().any(|x| {
+                managed.contains(&x.id)
+                    && x.workspace_id == new.workspace_id
+                    && x.node_id == new.node_id
+                    && matches!(x.status.as_str(), "starting" | "running" | "detached")
+            }) {
+                return Err(crate::error::ApiError::Conflict(
+                    "a managed session already exists on that node".into(),
+                ));
+            }
+        }
         let session = Session {
             id: SessionId::new(),
             tenant_id: new.tenant,
@@ -422,6 +497,9 @@ impl SessionRepository for FakeSessionRepository {
             checkout_id: new.checkout_id,
             checkout: None,
         };
+        if new.managed {
+            self.managed.lock().unwrap().insert(session.id);
+        }
         self.inner.lock().unwrap().push(session.clone());
         Ok(session)
     }
@@ -538,5 +616,44 @@ impl SessionRepository for FakeSessionRepository {
         let before = s.len();
         s.retain(|x| !(x.id == id && x.tenant_id == tenant));
         Ok((before - s.len()) as u64)
+    }
+
+    async fn live_managed(
+        &self,
+        tenant: TenantId,
+        workspace: WorkspaceId,
+    ) -> ApiResult<Vec<(SessionId, NodeId)>> {
+        let managed = self.managed.lock().unwrap();
+        let mut out: Vec<(SessionId, NodeId)> = self
+            .inner
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|x| {
+                x.tenant_id == tenant
+                    && x.workspace_id == Some(workspace)
+                    && managed.contains(&x.id)
+                    && matches!(x.status.as_str(), "starting" | "running" | "detached")
+            })
+            .map(|x| (x.id, x.node_id))
+            .collect();
+        out.sort_by_key(|(_, n)| n.0);
+        Ok(out)
+    }
+
+    async fn mark_ended(&self, tenant: TenantId, id: SessionId) -> ApiResult<u64> {
+        let mut rows = self.inner.lock().unwrap();
+        let Some(row) = rows
+            .iter_mut()
+            .find(|x| x.id == id && x.tenant_id == tenant)
+        else {
+            return Ok(0);
+        };
+        if !matches!(row.status.as_str(), "starting" | "running" | "detached") {
+            return Ok(0);
+        }
+        row.status = "exited".to_string();
+        row.ended_at = Some(chrono::Utc::now());
+        Ok(1)
     }
 }

@@ -170,7 +170,9 @@ fn custom_labels(node: &Node) -> std::collections::BTreeMap<String, String> {
         .unwrap_or_default()
 }
 
-fn placement_of(node: &Node) -> NodePlacement {
+/// `pub(crate)` because the reconciler reads it (MAIN-316) — this is the
+/// "inputs placement will read" MAIN-314 was written to supply.
+pub(crate) fn placement_of(node: &Node) -> NodePlacement {
     let custom = custom_labels(node);
     // Derived wins: a node cannot be relabelled into another operating system.
     let mut labels = custom.clone();

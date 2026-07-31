@@ -246,6 +246,8 @@ pub async fn start_work(
         &req.runtime,
         Some(task.title.clone()),
         &worktree_path,
+        // Start-work is a person taking a ticket: ad-hoc, not reconciled.
+        false,
     )
     .await?;
 

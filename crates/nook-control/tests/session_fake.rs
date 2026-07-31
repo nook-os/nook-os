@@ -39,6 +39,7 @@ async fn start(
         runtime: "bash".into(),
         created_by: creator,
         checkout_id: None,
+        managed: false,
     })
     .await
     .unwrap()
@@ -245,6 +246,7 @@ async fn a_sessions_checkout_summary_is_filled_from_its_binding() {
             runtime: "bash".into(),
             created_by: None,
             checkout_id: Some(checkout),
+            managed: false,
         })
         .await
         .unwrap();

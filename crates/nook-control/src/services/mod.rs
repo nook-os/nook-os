@@ -23,6 +23,7 @@ pub mod runtime_auth_flow;
 pub mod schedule;
 pub mod secrets;
 pub mod session_queries;
+pub mod session_reconcile;
 pub mod tasks;
 pub mod taskwork;
 pub mod triggers;

@@ -177,6 +177,12 @@ async fn serve(db: nook_db::DbPool, cfg: Config) -> Result<()> {
     // — and it logs any task still pointing at the reclaimed path.
     nook_control::services::workspace_reaper::start(state.clone());
 
+    // Converge sessions to what workspaces declare (MAIN-316). Every replica
+    // runs it; a partial unique index on live managed sessions per
+    // (workspace, node) is what makes one starter win rather than a lease.
+    // Gated on `sessions.reconcile.enabled`, default off.
+    nook_control::services::session_reconcile::start(state.clone());
+
     // One signal, every listener. A single task watches for SIGTERM/SIGINT and
     // flips a watch channel; the browser door, the agent door, and the grace
     // timer each hold a receiver, so a rolling update drains all of them at once
