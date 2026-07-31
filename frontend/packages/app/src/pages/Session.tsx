@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Link, useNavigate, useParams } from "react-router-dom";
+import { Link, Navigate, useNavigate, useParams } from "react-router-dom";
 import {
   GitBranch,
   Trash2,
@@ -8,6 +8,8 @@ import {
   PanelRightOpen,
   RefreshCw,
   RotateCw,
+  List,
+  SquareTerminal,
 } from "lucide-react";
 import { api, attachSession, type Session } from "@nookos/api";
 import {
@@ -26,6 +28,7 @@ import {
 import { useLive } from "../live";
 import { useWorkspaceContext } from "../context";
 import { ScopeChip } from "../layout";
+import { useLiveTabs } from "../liveTabs";
 import { SessionTabs } from "../SessionTabs";
 import { SessionWindows, SplitButtons } from "../SessionWindows";
 import { SessionOwner } from "../sessionOwner";
@@ -496,6 +499,12 @@ export function SessionPage() {
                 {gitOpen ? <PanelRightClose size={13} /> : <PanelRightOpen size={13} />}
               </button>
             )}
+            {/* AC-3: `/sessions` opens a session now, so the inventory needs a
+                door of its own. Here, because this is the screen the nav
+                actually lands on. */}
+            <Link className="btn small" to="/sessions/list" title="all sessions">
+              <List size={12} /> all
+            </Link>
             <button className="btn danger small" onClick={kill}>
               kill
             </button>
@@ -543,6 +552,55 @@ export function SessionPage() {
         {gitOpen && hasGitPanel && session.workspace_id && (
           <GitPanel session={session} workspaceId={session.workspace_id} />
         )}
+      </div>
+    </div>
+  );
+}
+
+/// What `/sessions` renders now (MAIN-321): the first session, not a list.
+///
+/// Clicking Sessions used to land on an inventory, and the thing you wanted was
+/// always one more click away. "First" is deliberately the FIRST TAB — the same
+/// order the strip renders, from the same hook — so the nav never opens a
+/// session that is visibly not the leftmost tab.
+///
+/// The redirect REPLACES the history entry. Pushing it would put `/sessions`
+/// behind every session you open, so Back would bounce you straight forward
+/// again and the button would look broken.
+export function SessionsIndex() {
+  const { tabs, loaded } = useLiveTabs();
+
+  // Deciding before the list arrives is how you flash "no sessions yet" at
+  // somebody who has ten, so wait for the answer rather than guess at it.
+  if (!loaded) return <div className="session-view" />;
+
+  if (tabs.length > 0) return <Navigate to={`/sessions/${tabs[0].id}`} replace />;
+
+  return (
+    // No <SessionTabs/> here: with no tabs it renders nothing, and mounting it
+    // would only run the same hook a second time.
+    <div className="session-view">
+      <div className="nook-grid" style={{ gridTemplateColumns: "1fr", flex: 1, minHeight: 0 }}>
+        <Panel
+          title="Sessions"
+          actions={
+            <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+              <Link className="btn small" to="/sessions/list">
+                <List size={12} /> all sessions
+              </Link>
+              <ScopeChip />
+            </span>
+          }
+        >
+          <Empty>
+            <span
+              style={{ display: "inline-flex", alignItems: "center", gap: 8 }}
+            >
+              <SquareTerminal size={14} />
+              No running sessions — start one with <b>+ New Work</b>.
+            </span>
+          </Empty>
+        </Panel>
       </div>
     </div>
   );

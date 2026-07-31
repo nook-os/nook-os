@@ -25,7 +25,7 @@ import { checkForUpdate, initDesktop, installUpdate, isDesktop, setControlPlaneA
 import { installLinkHandler, registerNavigator } from "./links";
 import { NodeDetail, NodesPage } from "./pages/Nodes";
 import { Notebook } from "./pages/Notebook";
-import { SessionPage, SessionsPage } from "./pages/Session";
+import { SessionPage, SessionsIndex, SessionsPage } from "./pages/Session";
 import { SettingsPage } from "./pages/Settings";
 import { TeamPage } from "./pages/Team";
 import { VerifyEmailPage } from "./pages/VerifyEmail";
@@ -165,7 +165,8 @@ function AuthGate() {
         <Route path="mission" element={<MissionPage />} />
         <Route path="workspaces" element={<WorkspacesPage />} />
         <Route path="workspaces/:id" element={<WorkspaceDetail />} />
-        <Route path="sessions" element={<SessionsPage />} />
+        <Route path="sessions" element={<SessionsIndex />} />
+        <Route path="sessions/list" element={<SessionsPage />} />
         <Route path="sessions/:id" element={<SessionPage />} />
         <Route path="board" element={<BoardPage />} />
         {/* The Loop workspace (MAIN-233): one ticket's run, full screen. */}

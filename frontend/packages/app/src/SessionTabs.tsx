@@ -9,15 +9,16 @@
 // and differs for managed vs ad-hoc sessions, so MAIN-324 owns it. Until then a
 // session is ended from the session view's kill control or the sessions list,
 // and its tab disappears on its own because the tab was only ever the session.
-import React, { useEffect, useState } from "react";
+import React, { useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQueryClient } from "@tanstack/react-query";
 import { CircleDot, Loader2, Pin, Plus, SquareTerminal } from "lucide-react";
 import { api } from "@nookos/api";
 import { useWorkspaceContext } from "./context";
 import { useLive } from "./live";
+import { useLiveTabs } from "./liveTabs";
 import { useNewWork } from "./newwork";
-import { deriveTabs, useSessionTabPrefs } from "./sessionTabsStore";
+import { useSessionTabPrefs } from "./sessionTabsStore";
 import { useTabHotkeys } from "./tabHotkeys";
 import { askText, notify } from "./dialogs";
 import { ContextMenuRegion, type ContextMenuItem } from "./contextMenu";
@@ -25,7 +26,6 @@ import { ContextMenuRegion, type ContextMenuItem } from "./contextMenu";
 export function SessionTabs({ activeId }: { activeId?: string }) {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
-  const prefs = useSessionTabPrefs((s) => s.prefs);
   const store = useSessionTabPrefs();
   const sessionStatus = useLive((s) => s.sessionStatus);
   const agentState = useLive((s) => s.agentState);
@@ -42,52 +42,10 @@ export function SessionTabs({ activeId }: { activeId?: string }) {
     setDropAt(null);
   };
 
-  // The tab set: every live session, across every node and workspace. Unscoped
-  // on purpose — the workspace context filters the strip below, but the QUERY
-  // must see everything or a tab could not exist for a session on another
-  // machine. The live bus invalidates `["sessions"]` on any session event, so a
-  // session that starts or dies anywhere updates this strip without a reload.
-  const { data: sessions } = useQuery({
-    queryKey: ["sessions", "tabs"],
-    queryFn: async () =>
-      (await api.GET("/api/v1/sessions", { params: { query: { active: true } } }))
-        .data ?? [],
-  });
-  const { data: me } = useQuery({
-    queryKey: ["me"],
-    queryFn: async () => (await api.GET("/api/v1/auth/me")).data ?? null,
-  });
-  // Names for the workspace label; the session rows carry only ids.
-  const { data: workspaces } = useQuery({
-    queryKey: ["workspaces"],
-    queryFn: async () => (await api.GET("/api/v1/workspaces")).data ?? [],
-  });
-
-  // Whose sessions belong in a tab strip. The control plane already scopes a
-  // plain member to the sessions they created, so this only bites an
-  // owner/admin — whose list is the WHOLE tenant, and whose tab strip would
-  // otherwise fill with their team's terminals. An unattributed session (no
-  // creator: started by a node or a job) is kept rather than hidden: it is not
-  // somebody else's, and silently dropping it is how work becomes invisible.
-  const mineId = me?.user?.id;
-  const mine = (sessions ?? []).filter(
-    (s) => !mineId || !s.created_by || s.created_by === mineId,
-  );
-  const names = Object.fromEntries((workspaces ?? []).map((w) => [w.id, w.name]));
-  const tabs = deriveTabs(mine, names, prefs, selectedWorkspaceId);
-
-  // Prefs outlive the sessions they name, so drop the dead ones. Keyed on the
-  // full live list, not the visible strip, or switching workspace context would
-  // read as "those sessions are gone" and discard another context's order.
-  //
-  // Passing `undefined` while the query is pending is load-bearing: an empty
-  // list would read as "every session is gone" and wipe the user's pin/order on
-  // each page load. The store refuses to prune on that.
-  const liveIds = sessions ? mine.map((s) => s.id).join(",") : undefined;
-  const prune = store.prune;
-  useEffect(() => {
-    prune(liveIds === undefined ? undefined : liveIds ? liveIds.split(",") : []);
-  }, [liveIds, prune]);
+  // The tab set — every live session of yours, in your order (MAIN-321
+  // moved this to a hook the `/sessions` redirect shares, so "first tab" and
+  // "the session the nav opens" cannot disagree).
+  const { tabs } = useLiveTabs();
 
   // Chrome-style Ctrl+Tab / Ctrl+Cmd-number switching over exactly this visible
   // list (desktop only). Called before the early return so the hook order is
