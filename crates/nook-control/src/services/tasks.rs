@@ -43,6 +43,44 @@ pub fn visible_by_cols(
     visibility != "private" || owns_fields(created_by, assignee, viewer)
 }
 
+/// The SQL twin of [`visible_by_cols`] — the ONE place the rule is written for a
+/// query (MAIN-265).
+///
+/// It was written out four more times, by hand, in `pick_tasks`,
+/// `epic_children`, `related_tasks` and the Mission Control overview join.
+/// MAIN-261 proved those copies agreed; it could not stop the next one drifting,
+/// and the failure mode of a drifted copy is a LEAK — a private card shown to a
+/// stranger, which is silent rather than a crash.
+///
+/// **Why a Rust fragment and not a view.** The obvious alternative is a database
+/// view carrying the predicate. It does not fit: the rule is parameterised by
+/// the *viewer*, so a view would need the viewer as a column or a session
+/// setting, and these four queries reach `tasks` under different aliases through
+/// different joins (`t` beside `boards`, `board_columns`, `task_relations`,
+/// `sessions`). Every one of them would have to be reshaped around the view —
+/// a far larger change than the drift it prevents, and NG-1 forbids changing
+/// behaviour. A fragment keeps each query exactly the shape it is, and makes the
+/// predicate the only thing they share.
+///
+/// `alias` is the `tasks` alias in the caller's query; `viewer` is the SQL
+/// expression holding the viewer's id — a bind marker (`$2`) at every current
+/// call site. Both are interpolated, so both must be caller-authored literals,
+/// never user input; that is why this takes an alias rather than a whole
+/// predicate string.
+///
+/// Callers that treat "no viewer" as "sees everything" — the overview endpoint —
+/// wrap this in their own `IS NULL` leg. That is a different question (does this
+/// endpoint scope by viewer at all?) from the one answered here (given a viewer,
+/// what may they see?), and keeping them apart is what stops the wrapper being
+/// mistaken for part of the rule.
+pub fn visible_sql(alias: &str, viewer: &str) -> String {
+    format!(
+        "({alias}.visibility <> 'private' \
+         OR {alias}.created_by = {viewer} \
+         OR {alias}.assignee_user_id = {viewer})"
+    )
+}
+
 /// The card's owner set — its creator or its assignee. The single definition
 /// shared by the visibility read predicate above AND the visibility-change gate
 /// (MAIN-85), so "who owns this card" can never come to mean two different
@@ -67,6 +105,32 @@ fn owns_fields(created_by: Option<UserId>, assignee: Option<UserId>, user: UserI
 /// real title otherwise.
 pub fn public_title(task: &TaskItem) -> Option<&str> {
     (task.visibility != "private").then_some(task.title.as_str())
+}
+
+/// The SQL twin of [`public_title`]: keep only cards nobody's privacy covers.
+///
+/// A DIFFERENT rule from [`visible_sql`], and the difference is the whole reason
+/// this exists separately (MAIN-265). That one answers "given a viewer, what may
+/// they see?" and so has a viewer to compare against. This one has none — the
+/// operator digest names cards to a reader who is not being scoped, so every
+/// private card is dropped outright rather than resolved against an owner.
+///
+/// Written out here rather than left inline so that `visibility <> 'private'`
+/// appears in exactly one FILE — the property `tests/visibility_one_definition.rs`
+/// asserts. A bare copy in a query is then unambiguously a mistake, instead of
+/// something a reader has to classify before knowing whether it is one.
+///
+/// `alias` is the `tasks` alias, the same as [`visible_sql`] takes; `""` for a
+/// single-table query that needs no qualifier. Taking the alias rather than a
+/// ready-made `"t."` prefix keeps the two functions the same shape, so a caller
+/// cannot pass the right string to the wrong one.
+pub fn public_only_sql(alias: &str) -> String {
+    let qualifier = if alias.is_empty() {
+        String::new()
+    } else {
+        format!("{alias}.")
+    };
+    format!("{qualifier}visibility <> 'private'")
 }
 
 /// Fill in `key`, `url` and `labels` for a batch of tasks.
