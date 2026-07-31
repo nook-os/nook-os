@@ -18,6 +18,7 @@ pub mod jobs;
 pub mod nodes;
 pub mod notebook;
 pub mod notifications;
+pub mod read_model;
 pub mod sessions;
 pub mod tasks;
 pub mod workspaces;

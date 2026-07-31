@@ -267,6 +267,13 @@ fn daylight_tokens() -> serde_json::Value {
 }
 
 pub async fn run(db: &DbPool, cfg: &Config) -> Result<()> {
+    // Seeding has no `AppState`, so it builds the one repository it needs from
+    // the pool it was handed (MAIN-304). `seed.rs` is a permanent inline-SQL
+    // exemption for its own bootstrap rows; the activity events it records are
+    // not bootstrap data, so they go through the read model like everyone
+    // else's.
+    let events_repo = crate::repo::read_model::DbReadModelRepository::new(db.clone());
+
     // Built-in themes (always seeded, all environments).
     for (name, slug, tokens) in [
         ("Charcoal Gold", "charcoal-gold", charcoal_gold_tokens()),
@@ -552,7 +559,7 @@ pub async fn run(db: &DbPool, cfg: &Config) -> Result<()> {
             ),
         ] {
             crate::events::insert(
-                db,
+                &events_repo,
                 tenant.id,
                 crate::events::EventDraft::new(kind).payload(payload),
             )
@@ -578,6 +585,8 @@ pub async fn run(db: &DbPool, cfg: &Config) -> Result<()> {
 /// whoever happened to be first if the users table were ever rebuilt. A second
 /// operator has to be a deliberate act.
 pub async fn bootstrap_operator(db: &DbPool) {
+    // As in `run`: no AppState here, so the read model is built from the pool.
+    let events_repo = crate::repo::read_model::DbReadModelRepository::new(db.clone());
     let existing: Result<Option<uuid::Uuid>, _> = db
         .query_scalar_opt(
             "SELECT id FROM role_bindings WHERE scope_type = 'deployment' LIMIT 1",
@@ -630,7 +639,7 @@ pub async fn bootstrap_operator(db: &DbPool) {
             // Recorded, because "who became the operator, and when" is the
             // first question anybody audits.
             crate::events::insert(
-                db,
+                &events_repo,
                 tenant_id,
                 crate::events::EventDraft::new("rbac.bootstrap")
                     .actor("user", user_id)

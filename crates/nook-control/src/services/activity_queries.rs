@@ -2,7 +2,6 @@
 //! out of `services/core.rs`; see that file's header for why.
 
 use chrono::{DateTime, Utc};
-use nook_db::{params, Db, DbPool, Postgres, TypeMapping};
 use nook_types::*;
 use uuid::Uuid;
 
@@ -35,11 +34,13 @@ pub enum ActivityScope {
 impl ActivityScope {
     /// Resolve the caller's activity scope from their role and owned resources.
     pub async fn load(
-        db: &DbPool,
+        read_model: &dyn crate::repo::read_model::ReadModelRepository,
         tenant: TenantId,
         auth: &crate::auth::AuthCtx,
-        // The admin check is identity's now (MAIN-246); the activity tables
-        // stay on the pool, so `load` carries both.
+        // The admin check is identity's (MAIN-246), and so are the two `users`
+        // reads below (MAIN-304) — `person_id_of` and `sibling_user_ids` already
+        // exist there, and a second trait touching `users` would be two places
+        // to change when that table does.
         repo: &dyn crate::repo::identity::IdentityRepository,
     ) -> ApiResult<Self> {
         // A node credential is not a person watching a feed — unchanged tenant
@@ -55,28 +56,23 @@ impl ActivityScope {
             return Ok(Self::All);
         }
         // A member: their person's user ids, the nodes that person owns, and the
-        // sessions those user ids created.
-        let person: Uuid = db
-            .query_scalar(
-                "SELECT person_id FROM users WHERE id = $1",
-                params![auth.user_id],
-            )
-            .await?;
-        let user_ids: Vec<Uuid> = db
-            .query_scalar_all("SELECT id FROM users WHERE person_id = $1", params![person])
-            .await?;
-        let node_ids: Vec<Uuid> = db
-            .query_scalar_all(
-                "SELECT id FROM nodes WHERE tenant_id = $1 AND owner_person_id = $2",
-                params![tenant, person],
-            )
-            .await?;
-        let session_ids: Vec<Uuid> = db
-            .query_scalar_all(
-                "SELECT id FROM sessions WHERE tenant_id = $1 AND created_by = ANY($2)",
-                params![tenant, &user_ids[..]],
-            )
-            .await?;
+        // sessions those user ids created. Fails closed — a person with no user
+        // row resolves to empty sets, which means "see nothing", never "all".
+        let Some(person) = repo.person_id_of(auth.user_id).await? else {
+            return Ok(Self::Member {
+                user_ids: Vec::new(),
+                node_ids: Vec::new(),
+                session_ids: Vec::new(),
+            });
+        };
+        let user_ids: Vec<Uuid> = repo
+            .sibling_user_ids(auth.user_id)
+            .await?
+            .into_iter()
+            .map(|u| u.0)
+            .collect();
+        let node_ids = read_model.node_ids_owned_by(tenant, person).await?;
+        let session_ids = read_model.session_ids_created_by(tenant, &user_ids).await?;
         Ok(Self::Member {
             user_ids,
             node_ids,
@@ -104,7 +100,7 @@ impl ActivityScope {
 }
 
 pub async fn events_page(
-    db: &DbPool,
+    read_model: &dyn crate::repo::read_model::ReadModelRepository,
     tenant: TenantId,
     workspace: Option<WorkspaceId>,
     kind_prefix: Option<String>,
@@ -113,32 +109,31 @@ pub async fn events_page(
     scope: &ActivityScope,
 ) -> ApiResult<EventsPage> {
     let limit = limit.clamp(1, 200);
-    // The list filter is the SQL twin of `ActivityScope::allows`, bound from the
-    // same resolved sets — so page and bus enforce one rule (MAIN-134).
-    let mut sql = format!(
-        "SELECT * FROM events
-         WHERE tenant_id = $1
-           AND ({ws} IS NULL OR workspace_id = $2)
-           AND ({kind} IS NULL OR kind LIKE $3 || '%')
-           AND ({before} IS NULL OR occurred_at < $4)",
-        ws = Postgres.cast("$2", "uuid"),
-        before = Postgres.cast("$4", "timestamptz"),
-        kind = Postgres.cast("$3", "text"),
-    );
-    if matches!(scope, ActivityScope::Member { .. }) {
-        sql.push_str(" AND (actor_id = ANY($6) OR node_id = ANY($7) OR session_id = ANY($8))");
-    }
-    sql.push_str(" ORDER BY occurred_at DESC, id DESC LIMIT $5");
-    let mut binds = params![tenant, workspace.map(|w| w.0), kind_prefix, before, limit];
-    if let ActivityScope::Member {
-        user_ids,
-        node_ids,
-        session_ids,
-    } = scope
-    {
-        binds.extend(params![&user_ids[..], &node_ids[..], &session_ids[..]]);
-    }
-    let events: Vec<Event> = db.query_all(&sql, binds).await?;
+    // The scope is handed over as resolved id sets, so the repository binds the
+    // same three arrays that `ActivityScope::allows` matches in memory — page
+    // and bus stay one rule (MAIN-134).
+    let scope_ids = match scope {
+        ActivityScope::All => None,
+        ActivityScope::Member {
+            user_ids,
+            node_ids,
+            session_ids,
+        } => Some(crate::repo::read_model::EventScopeIds {
+            user_ids: user_ids.clone(),
+            node_ids: node_ids.clone(),
+            session_ids: session_ids.clone(),
+        }),
+    };
+    let events = read_model
+        .events_page(crate::repo::read_model::EventsQuery {
+            tenant,
+            workspace,
+            kind_prefix,
+            before,
+            limit,
+            scope: scope_ids,
+        })
+        .await?;
     let next_cursor = if events.len() as i64 == limit {
         events.last().map(|e| e.occurred_at)
     } else {
