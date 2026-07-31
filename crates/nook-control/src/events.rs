@@ -1,7 +1,6 @@
 //! Everything produces events: chronological, searchable, auditable.
 
-use nook_db::{params, Db, DbPool};
-use nook_types::{Event, EventId, NodeId, SessionId, TenantId, WorkspaceId};
+use nook_types::{Event, NodeId, SessionId, TenantId, WorkspaceId};
 use serde_json::Value;
 use uuid::Uuid;
 
@@ -62,7 +61,7 @@ pub async fn record(
     tenant_id: TenantId,
     draft: EventDraft,
 ) -> Option<Event> {
-    let event = insert(&state.db, tenant_id, draft).await;
+    let event = insert(&*state.read_model, tenant_id, draft).await;
     if let Some(event) = &event {
         state.registry.publish(
             tenant_id,
@@ -348,30 +347,35 @@ pub fn notable(base_url: &str, event: &Event) -> Option<crate::services::notify:
 
 /// Insert only (no live publish) — for contexts without an `AppState`, e.g.
 /// seeding.
-pub async fn insert(db: &DbPool, tenant_id: TenantId, draft: EventDraft) -> Option<Event> {
-    let res = db
-        .query_one::<Event>(
-            "INSERT INTO events (id, tenant_id, kind, actor_type, actor_id, workspace_id, node_id, session_id, payload)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-         RETURNING *",
-            params![
-                EventId::new(),
-                tenant_id,
-                draft.kind,
-                draft.actor_type,
-                draft.actor_id,
-                draft.workspace_id.map(|x| x.0),
-                draft.node_id.map(|x| x.0),
-                draft.session_id.map(|x| x.0),
-                &draft.payload
-            ],
+///
+/// Takes the repository rather than a pool (MAIN-304): the INSERT itself lives
+/// on the read model, because an activity event belongs to every aggregate and
+/// so to none of them.
+pub async fn insert(
+    repo: &dyn crate::repo::read_model::ReadModelRepository,
+    tenant_id: TenantId,
+    draft: EventDraft,
+) -> Option<Event> {
+    let kind = draft.kind;
+    let res = repo
+        .record_event(
+            tenant_id,
+            crate::repo::read_model::NewEvent {
+                kind: draft.kind.to_string(),
+                actor_type: draft.actor_type.map(str::to_string),
+                actor_id: draft.actor_id,
+                workspace_id: draft.workspace_id,
+                node_id: draft.node_id,
+                session_id: draft.session_id,
+                payload: draft.payload,
+            },
         )
         .await;
 
     match res {
         Ok(event) => Some(event),
         Err(e) => {
-            tracing::warn!(error = %e, kind = draft.kind, "failed to record event");
+            tracing::warn!(error = %e, kind, "failed to record event");
             None
         }
     }

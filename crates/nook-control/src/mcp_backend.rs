@@ -270,7 +270,7 @@ impl NookBackend for McpBackend {
             None => None,
         };
         let page = activity_queries::events_page(
-            &self.state.db,
+            &*self.state.read_model,
             tenant,
             workspace_id,
             None,

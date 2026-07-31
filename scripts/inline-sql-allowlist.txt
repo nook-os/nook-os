@@ -26,9 +26,12 @@ crates/nook-control/src/services/schedule.rs     # scheduled operator work; shar
 # ── Cross-cutting reads, no card yet ────────────────────────────────────────
 # These belong to no single aggregate. They need a home decided before they can
 # move; naming that here is better than pretending a card covers them.
-crates/nook-control/src/events.rs                # the activity-event writer, used by every aggregate
-crates/nook-control/src/services/activity_queries.rs    # the activity feed (split out by MAIN-245)
-crates/nook-control/src/services/overview_queries.rs    # Mission Control read-model, spans 5 aggregates
+#
+# MAIN-304 homed the three that were genuinely a read model — the activity-event
+# writer, the activity feed and the Mission Control overview — onto
+# `repo/read_model.rs`, and their lines are deleted. What is left below is the
+# straggler set, which MAIN-305 absorbs into the aggregates that already own
+# their tables.
 crates/nook-control/src/routes/health.rs         # the liveness probe's SELECT 1
 crates/nook-control/src/ws/bus.rs                # bus_outbox + pg_notify; no aggregate owns it (re-filed by MAIN-253)
 crates/nook-control/src/ws/registry.rs           # the node lease cache; NodeRepository owns `nodes` but MAIN-252 landed without this one site

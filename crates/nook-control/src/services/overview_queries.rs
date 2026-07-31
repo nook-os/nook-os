@@ -6,12 +6,12 @@
 //! aggregate's card a query about four others. Keeping it separate is what lets
 //! every *other* module map 1:1 onto an aggregate (AC-4).
 
-use chrono::{DateTime, Utc};
-use nook_db::{params, Db, DbPool, Postgres, TypeMapping};
+use nook_db::DbPool;
 use nook_types::*;
 use uuid::Uuid;
 
 use crate::error::ApiResult;
+use crate::repo::read_model::ReadModelRepository;
 use crate::services::session_queries::list_sessions;
 
 /// Mission Control's one aggregate read (MAIN-226): every workspace the caller
@@ -33,45 +33,20 @@ pub async fn overview(
 ) -> ApiResult<Overview> {
     use std::collections::HashMap;
 
+    // Every read below belongs to the cross-cutting read model (MAIN-304) — this
+    // function joins five aggregates, so its queries could never live on one of
+    // them. Built from the pool here rather than injected, exactly as the two
+    // repositories below already were: `overview` is called from routes and from
+    // six test sites with a `DbPool`, and changing that signature is churn this
+    // refactor does not need to buy anything.
+    let read_model = crate::repo::read_model::DbReadModelRepository::new(db.clone());
+
     // Repo identity for every workspace in the tenant; the content joins below
     // decide which actually appear.
-    let workspaces: Vec<Workspace> = db
-        .query_all(
-            "SELECT * FROM workspaces WHERE tenant_id = $1 ORDER BY name",
-            params![tenant],
-        )
-        .await?;
+    let workspaces = read_model.overview_workspaces(tenant).await?;
 
     // Visible checkouts, node-scoped identically to `list_nodes`.
-    #[derive(sqlx::FromRow)]
-    struct CheckoutRow {
-        id: NodeWorkspaceId,
-        workspace_id: WorkspaceId,
-        node_id: NodeId,
-        node_name: String,
-        node_status: String,
-        path: String,
-        git_branch: Option<String>,
-        git_status: serde_json::Value,
-        kind: String,
-        missing_at: Option<DateTime<Utc>>,
-    }
-    let rows: Vec<CheckoutRow> = db
-        .query_all(
-            &format!(
-                "SELECT nw.id, nw.workspace_id, n.id AS node_id, n.name AS node_name,
-                        n.status AS node_status, nw.path, nw.git_branch, nw.git_status,
-                        nw.kind, nw.missing_at
-                 FROM node_workspaces nw
-                 JOIN nodes n ON n.id = nw.node_id
-                 WHERE nw.tenant_id = $1
-                   AND ({owner} IS NULL OR n.owner_person_id = $2 OR n.shared)
-                 ORDER BY n.name, nw.path",
-                owner = Postgres.cast("$2", "uuid")
-            ),
-            params![tenant, node_owner],
-        )
-        .await?;
+    let rows = read_model.overview_checkouts(tenant, node_owner).await?;
 
     // Active sessions, creator-scoped identically to `list_sessions`.
     //
@@ -92,52 +67,10 @@ pub async fn overview(
     )
     .await?;
 
-    // The ticket each checkout is working (MAIN-230), by the two joins that can
-    // know it:
-    //
-    //   tasks.checkout_id          the durable one (MAIN-225), but NULL until
-    //                              discovery scans the fresh worktree;
-    //   tasks.session_id → sessions.checkout_id
-    //                              the one that covers the gap, so work started
-    //                              seconds ago still names its ticket.
-    //
-    // `task_viewer` is the SAME predicate every other read of a card uses — not
-    // mirrored here any more but literally the same string, from
-    // `tasks::visible_sql` (MAIN-265). The `IS NULL` leg around it is this
-    // endpoint's own question, not part of the rule: `None` means the caller
-    // already sees the whole tenant, so there is nothing to scope by. Without it this endpoint would be a
-    // side-channel around card visibility — a private ticket's key leaking onto
-    // a shared node's row is exactly the class of hole MAIN-226's tests exist to
-    // catch.
-    #[derive(sqlx::FromRow)]
-    struct TaskRow {
-        checkout_id: NodeWorkspaceId,
-        key: String,
-        title: String,
-        column_type: String,
-    }
-    let task_rows: Vec<TaskRow> = db
-        .query_all(
-            &format!(
-                "SELECT DISTINCT
-                        COALESCE(t.checkout_id, s.checkout_id) AS checkout_id,
-                        b.key || '-' || t.number AS key,
-                        t.title,
-                        c.type AS column_type
-                   FROM tasks t
-                   JOIN boards b ON b.id = t.board_id
-                   JOIN board_columns c ON c.id = t.column_id
-                   LEFT JOIN sessions s ON s.id = t.session_id
-                  WHERE t.tenant_id = $1
-                    AND t.archived_at IS NULL
-                    AND COALESCE(t.checkout_id, s.checkout_id) IS NOT NULL
-                    AND ({viewer} IS NULL OR {visible})
-                  ORDER BY key",
-                viewer = Postgres.cast("$2", "uuid"),
-                visible = crate::services::tasks::visible_sql("t", "$2"),
-            ),
-            params![tenant, task_viewer.map(|u| u.0)],
-        )
+    // The ticket each checkout is working (MAIN-230). Both joins that can know
+    // it, and the card-visibility predicate, live on the read model now.
+    let task_rows = read_model
+        .overview_checkout_tasks(tenant, task_viewer)
         .await?;
 
     // Bucket by checkout, keeping only checkouts this caller can actually see —

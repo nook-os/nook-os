@@ -42,6 +42,10 @@ pub struct AppState {
     pub tenant_cas: Arc<dyn crate::repo::nodes::TenantCaRepository>,
     /// The notification inbox and its channels (MAIN-256).
     pub notifications: Arc<dyn crate::repo::notifications::NotificationRepository>,
+    /// The cross-cutting read model (MAIN-304): the activity-event writer, the
+    /// activity feed, and the Mission Control overview — three surfaces that
+    /// belong to no single aggregate.
+    pub read_model: Arc<dyn crate::repo::read_model::ReadModelRepository>,
     /// Product feedback and the settings that configure its surface (MAIN-256).
     pub feedback: Arc<dyn crate::repo::notifications::FeedbackRepository>,
     /// Notes and folders — personal notebook and workspace notes (MAIN-254).
@@ -155,6 +159,9 @@ impl AppState {
                 db.clone(),
             )),
             feedback: Arc::new(crate::repo::notifications::DbFeedbackRepository::new(
+                db.clone(),
+            )),
+            read_model: Arc::new(crate::repo::read_model::DbReadModelRepository::new(
                 db.clone(),
             )),
             vaults: Arc::new(crate::repo::notebook::DbVaultRepository::new(db.clone())),

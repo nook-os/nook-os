@@ -27,7 +27,7 @@ async fn handle(state: AppState, auth: AuthCtx, socket: WebSocket) {
     // page's live buffer can't leak what its fetch would hide. If it can't be
     // resolved (a DB blip), close rather than fall open — the UI reconnects.
     let Ok(scope) = crate::services::activity_queries::ActivityScope::load(
-        &state.db,
+        &*state.read_model,
         auth.tenant_id,
         &auth,
         state.identity.as_ref(),
