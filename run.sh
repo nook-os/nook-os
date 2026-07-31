@@ -4,6 +4,11 @@
 #
 #   ./run.sh                  full recreate
 #   ./run.sh --claude-login   only (re-)run the fleet's Claude device login
+#
+# A clean run lands in a state the loop can actually be tested in (MAIN-341):
+# a real bare git repo on the operator node, a seeded workspace pointing at it,
+# loops on, and a ticket ready to draft a spec against. The ONE manual step is
+# the Claude device login below.
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -117,6 +122,127 @@ if [ "${1:-}" = "--claude-login" ]; then
   exit $?
 fi
 
+# ── The dogfood repo (MAIN-341) ──────────────────────────────────────────────
+#
+# A REAL bare git repo on the operator node's own disk, so a loop job clones it
+# with no ssh key, no credential and no network. The seed points the
+# `nook-dogfood` workspace at exactly this path — the two must agree, and the
+# path is defined in `crates/nook-control/src/seed.rs` as `DOGFOOD_REPO_PATH`.
+#
+# Idempotent: a repo that is already there is left alone, so re-running this
+# never discards commits somebody made while testing.
+DOGFOOD_REPO="/workspace/nook-dogfood.git"
+
+provision_dogfood_repo() {
+  if ! docker compose ps --status running --services 2>/dev/null | grep -qx "$CLAUDE_SVC"; then
+    warn "$CLAUDE_SVC is not running — skipping the dogfood repo."
+    echo "  The seeded workspace will have nothing to clone until it is." >&2
+    return 0
+  fi
+  # Piped to the container's shell through a QUOTED heredoc: nothing in here is
+  # expanded by this shell, so the script the container runs is exactly the
+  # script written below — no escaping, no second version to review.
+  if docker compose exec -T "$CLAUDE_SVC" sh -s "$DOGFOOD_REPO" <<'PROVISION'
+set -eu
+REPO="$1"
+[ -d "$REPO" ] && { echo "dogfood repo already present at $REPO"; exit 0; }
+
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+git init -q -b main "$tmp"
+cd "$tmp"
+# Committing needs an identity and the container has none. Local to this
+# throwaway worktree, so it leaks nowhere.
+git config user.email "dev@nookos.local"
+git config user.name "NookOS dev"
+
+cat > README.md <<'DOC'
+# nook-dogfood
+
+A tiny, real repository living on the NookOS operator node, so the agent loop can
+be exercised end to end without ssh keys, credentials, or a network.
+
+Deliberately small, deliberately not empty: `/nook-spec` researches a repository
+before it drafts anything, and there has to be something to read.
+DOC
+
+cat > greet.py <<'DOC'
+"""The one command this project has, so a spec has something to extend."""
+
+
+def greet(name: str) -> str:
+    return f"Hello, {name}!"
+
+
+if __name__ == "__main__":
+    print(greet("world"))
+DOC
+
+git add -A
+git commit -qm "Initial commit: a greeting and a README"
+
+# Bare, because a clone URL should point at one: cloning a non-bare checkout
+# works, but pushing back to its checked-out branch is refused — and the loop
+# pushes.
+#
+# `-b main` is load-bearing. Without it the bare repo's HEAD follows
+# `init.defaultBranch` (`master` on a stock container) while the push lands on
+# `main`, and a clone then checks out NOTHING from a repo that has a commit in
+# it. Verified against the real operator node, both ways.
+git init -q --bare -b main "$REPO"
+git remote add origin "$REPO"
+git push -q origin main
+echo "dogfood repo created at $REPO"
+PROVISION
+  then
+    say "Dogfood repo ready at $DOGFOOD_REPO (on $CLAUDE_SVC)."
+  else
+    warn "Could not provision the dogfood repo — the seeded workspace has nothing to clone."
+  fi
+}
+
+# ── The dev CLI context (MAIN-341) ───────────────────────────────────────────
+#
+# `docker compose down -v` drops the database, so any token in contexts.toml is
+# a 401 on the next boot and `nook` cannot drive dev until somebody notices.
+#
+# This mints a fresh one through a LOGIN — the dev-login hatch, which is gated
+# on AUTH_DEV_MODE and refused outright in production — and hands it to
+# `nook login`. Nothing is baked: no token is committed, and the value exists
+# only in the response and in your own contexts.toml.
+DEV_EMAIL="dev@nookos.local"
+
+refresh_dev_cli_context() {
+  command -v nook >/dev/null 2>&1 || return 0
+
+  local jar token
+  jar="$(mktemp)"
+  # Sign in as the seeded dev identity. The seed puts that user in the same
+  # tenant the operator node joins, which is what makes a placed job find an
+  # executor (AC-4).
+  if ! curl -fsS -c "$jar" -X POST http://localhost:8080/api/v1/auth/dev-login \
+      -H 'Content-Type: application/json' \
+      -d "{\"email\":\"$DEV_EMAIL\"}" >/dev/null 2>&1; then
+    rm -f "$jar"
+    echo "  (dev-login unavailable — leaving the nook CLI context alone)"
+    return 0
+  fi
+  token="$(curl -fsS -b "$jar" -X POST http://localhost:8080/api/v1/tokens \
+      -H 'Content-Type: application/json' -d '{"name":"dev cli"}' 2>/dev/null \
+    | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')"
+  rm -f "$jar"
+
+  if [ -z "$token" ]; then
+    warn "Could not mint a dev CLI token — \`nook\` may 401 against dev."
+    return 0
+  fi
+  if nook login --token "$token" --server http://localhost:8080 >/dev/null 2>&1; then
+    say "nook CLI signed in to dev as $DEV_EMAIL."
+  else
+    warn "Minted a dev token but \`nook login\` refused it."
+  fi
+}
+
 say "Checking prerequisites..."
 command -v docker >/dev/null || { echo "docker is required"; exit 1; }
 docker compose version >/dev/null || { echo "docker compose v2 is required"; exit 1; }
@@ -162,6 +288,11 @@ curl -fsS http://localhost:8080/healthz >/dev/null || { echo "control plane fail
 # operator-node is actually up to run the flow in.
 claude_login_gate
 
+# Everything below is scaffolding, not credentials: a real repo to clone and a
+# CLI token minted through the dev-login hatch.
+provision_dogfood_repo
+refresh_dev_cli_context
+
 say "NookOS is up."
 echo
 echo "  Web UI:        http://localhost:5173"
@@ -171,6 +302,11 @@ echo
 echo "  Fleet Claude login (specs/loops):"
 echo "    ./run.sh --claude-login          # log in, or switch accounts"
 echo "    docker compose exec operator-node claude auth status"
+echo
+echo "  Test the loop end to end (MAIN-341):"
+echo "    1. ./run.sh --claude-login       # once — the only manual step"
+echo "    2. open the board, pick \"Add a greeting command to the dogfood repo\""
+echo "    3. its /loop page → Draft a spec"
 echo
 echo "  Add this machine as a node:"
 echo "    cargo run -p nook-node -- join --server http://localhost:8080 --token <token from UI>"
