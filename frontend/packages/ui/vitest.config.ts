@@ -9,5 +9,13 @@ export default defineConfig({
   test: {
     environment: "jsdom",
     include: ["src/**/*.test.ts"],
+    // Mock hygiene, on for every file (MAIN-303): a `mockImplementation` or
+    // `vi.spyOn` set in one test cannot outlive its `it`. The full account of
+    // the leak this prevents, and why restoring (rather than blanking) an
+    // implementation makes it safe to turn on globally, is in
+    // `packages/app/vitest.config.ts` — kept in one place so the two copies
+    // cannot drift. `src/mockIsolation.test.ts` is what proves it is still on.
+    mockReset: true,
+    restoreMocks: true,
   },
 });
