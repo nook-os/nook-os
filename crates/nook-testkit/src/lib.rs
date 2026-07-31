@@ -371,6 +371,63 @@ impl TestBed {
         }
     }
 
+    /// The SQLite bed's pool (MAIN-295).
+    ///
+    /// Built here rather than through [`nook_db::connect`] because that function
+    /// pins SQLite to **one** connection deliberately — and, being production's
+    /// entry point, it should keep doing so until someone decides otherwise. (It
+    /// ignores its own `max_connections` argument on the SQLite arm, so passing a
+    /// bigger number there would silently do nothing; noted, not changed here.)
+    ///
+    /// A pool of one is a deadlock waiting for a caller: hold a connection — an
+    /// open transaction, a `fetch` still streaming — and ask for a second, and the
+    /// second waits for the first, which waits for the caller, until the acquire
+    /// gives up as `PoolTimedOut`. The Postgres bed has never had this shape, so a
+    /// test that passes there fails here for a reason that has nothing to do with
+    /// the test.
+    ///
+    /// ## Why more than one connection is safe here
+    ///
+    /// The worry with a wider SQLite pool is trading `PoolTimedOut` for `database
+    /// is locked`. Two things stop that, and a third was tried and dropped:
+    ///
+    /// * **`busy_timeout`** — SQLite serialises WRITERS. Without a timeout the loser
+    ///   of a write race fails immediately with `database is locked`; with one it
+    ///   waits. This is what turns a pool of writers from an error generator into a
+    ///   queue, and it is why the bump is safe rather than merely bigger.
+    /// * **A bounded size** — five, not fifty. A test needing a sixth concurrent
+    ///   connection is doing something a test should not, and a small ceiling keeps
+    ///   that visible instead of hiding it behind a large pool.
+    /// * **WAL was tried and is NOT set.** The card offers it for the case where a
+    ///   pool bump alone is insufficient; measured here, the bump is sufficient. No
+    ///   test in this file distinguishes WAL from the default journal — under the
+    ///   rollback journal an uncommitted writer holds only a RESERVED lock, so
+    ///   readers proceed anyway, and the window WAL actually removes (a reader
+    ///   during COMMIT) is a race with no deterministic test. Rather than ship a
+    ///   setting behind a justification nothing checks, it is left off; if a real
+    ///   contention problem shows up, it is one line and it should arrive with the
+    ///   failing case that motivated it.
+    ///
+    /// `foreign_keys` is carried over from `nook_db::connect` deliberately: the beds
+    /// enforce foreign keys today, and quietly dropping that here would change what
+    /// every existing test proves.
+    async fn sqlite_bed_pool(path: &Path) -> nook_db::DbPool {
+        use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+
+        let opts = SqliteConnectOptions::new()
+            .filename(path)
+            .create_if_missing(true)
+            .foreign_keys(true)
+            .busy_timeout(std::time::Duration::from_secs(10));
+
+        let pool = SqlitePoolOptions::new()
+            .max_connections(5)
+            .connect_with(opts)
+            .await
+            .expect("open the private SQLite test database");
+        nook_db::EnginePool::from_sqlite(pool)
+    }
+
     /// SQLite: a unique **file**, migrated through the SQLite track and seeded.
     ///
     /// A file rather than a shared-cache in-memory database, for three reasons.
@@ -392,9 +449,7 @@ impl TestBed {
         // explicit rather than lucky.
         remove_sqlite_files(&path);
 
-        let db = nook_db::connect(&format!("sqlite://{}", path.display()), 1)
-            .await
-            .expect("open the private SQLite test database");
+        let db = Self::sqlite_bed_pool(&path).await;
         // The SQLite track, never the Postgres one (AC-3). Running the wrong
         // dialect's DDL would fail loudly here rather than produce a subtly
         // wrong schema, but selecting it explicitly is what makes that a
