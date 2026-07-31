@@ -48,11 +48,29 @@ import { InteractionAnswer } from "../Interactions";
 function useTask(taskId: string) {
   return useQuery({
     queryKey: ["task", taskId],
-    queryFn: async () =>
+    queryFn: async () => {
       // The detail endpoint wraps the card in `.task` alongside its comments
       // and relations; the header only needs the card.
-      (await api.GET("/api/v1/tasks/{id}", { params: { path: { id: taskId } } }))
-        .data?.task,
+      const res = await api.GET("/api/v1/tasks/{id}", {
+        params: { path: { id: taskId } },
+      });
+      const task = res.data?.task;
+      if (task) return task;
+
+      // `null`, never `undefined`. React Query rejects an `undefined` result
+      // outright ("Query data cannot be undefined") and leaves `data`
+      // undefined — indistinguishable here from "still loading", which is what
+      // made a wrong or cross-tenant id render a dead page: the composer is
+      // gated on a resolved id, so it vanished, while the transcript fell
+      // through to "No run yet". `null` is a RESULT the page can render.
+      const status = res.response?.status;
+      // A ticket in another tenant answers 404, not 403 — no existence oracle —
+      // so both mean the same thing to a reader: it is not yours to see.
+      if (status === undefined || status === 404 || status === 403) return null;
+      // Anything else is a real failure and must not be dressed up as "no such
+      // ticket": React Query marks the query errored and the page says so.
+      throw new Error(`could not load ${taskId} (HTTP ${status})`);
+    },
   });
 }
 
@@ -272,9 +290,17 @@ export function LoopPage() {
   // composer sits in a stale mode. Resolve first, then key on `id`.
   const { taskId: routeParam = "" } = useParams();
   const qc = useQueryClient();
-  const { data: task } = useTask(routeParam);
+  const {
+    data: task,
+    isPending: taskPending,
+    isError: taskFailed,
+  } = useTask(routeParam);
   const taskId = task?.id;
   const asks = useAsks(taskId);
+  // Three states, not two. Until this was separated, "we could not find it" and
+  // "we have not looked yet" were the same value, and the page rendered the
+  // no-run message with no composer under it — a dead box.
+  const missing = !taskPending && !taskFailed && task == null;
 
   const { data: jobs, isLoading } = useQuery({
     queryKey: taskJobsKey(taskId ?? "unresolved"),
@@ -370,8 +396,20 @@ export function LoopPage() {
       <div className="lw-body">
         <Panel title="transcript" className="lw-panel">
           <div className="lw-scroll" ref={scroller} data-testid="transcript">
-            {!latest ? (
-              isLoading ? (
+            {missing || taskFailed ? (
+              // Say which of the two it is. "Not found" for a ticket that is
+              // genuinely not visible; a load failure is a different problem
+              // and must not be reported as a missing ticket.
+              <Empty>
+                <span data-testid="loop-not-found">
+                  {taskFailed
+                    ? `Could not load ${routeParam}.`
+                    : `${routeParam} doesn't exist, or isn't in your workspace.`}
+                </span>{" "}
+                <Link to="/board">Back to the board</Link>
+              </Empty>
+            ) : !latest ? (
+              isLoading || taskPending ? (
                 <div className="faint small">Loading…</div>
               ) : (
                 <Empty>
@@ -403,7 +441,10 @@ export function LoopPage() {
         )}
       </div>
 
-      <div className="lw-foot">
+      {/* No footer at all when there is no ticket: an empty `lw-foot` is the
+          dead box this card is about. The composer belongs to a ticket, and
+          without one there is nothing to seed or steer. */}
+      <div className="lw-foot" data-testid="loop-foot" hidden={!taskId}>
         {taskId && mode === "seed" && (
           <SeedComposer taskId={taskId} taskType={task?.type} jobs={jobs} />
         )}
