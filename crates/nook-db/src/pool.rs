@@ -9,7 +9,9 @@
 //!
 //! The surface is the [`Db`] trait: callers pass SQL text plus an owned,
 //! engine-neutral parameter list ([`DbValue`], usually via [`params!`]), and row
-//! mapping rides `sqlx::FromRow` over both row types. The methods are named to
+//! mapping rides [`crate::FromDbRow`] over an engine-neutral [`crate::DbRow`]
+//! (MAIN-327 — it used to bind `sqlx::FromRow` over both row types, which is
+//! what forced every DTO in the workspace to name sqlx). The methods are named to
 //! NOT collide with sqlx's `Executor` (`query_one`/`exec`/…, never `fetch_one`),
 //! which is what lets the call-site migration run while `DbPool` is still
 //! `PgPool`: `Db` is implemented for `PgPool` too, so a migrated `db.query_one(…)`
@@ -18,9 +20,9 @@
 //! (bit-identical — MAIN-205 AC-3). The SQLite arm is built to *compile* here;
 //! its runtime is proven when the engine + migration track land in MAIN-196.
 
-use sqlx::postgres::{PgArguments, PgPool, PgRow};
-use sqlx::sqlite::{SqliteArguments, SqlitePool, SqliteRow};
-use sqlx::{Arguments, FromRow};
+use sqlx::postgres::{PgArguments, PgPool};
+use sqlx::sqlite::{SqliteArguments, SqlitePool};
+use sqlx::Arguments;
 
 use crate::Engine;
 
@@ -201,13 +203,13 @@ fn sqlite_args(
             DbValue::TextList(_) | DbValue::UuidList(_) | DbValue::I64List(_) => {
                 unreachable!("expand_lists flattens every list parameter")
             }
-            // A `text[]` column value has no SQLite array encoding; MAIN-196
-            // decides its storage shape. Never runs under the Postgres proof.
-            DbValue::OptTextArray(_) => {
-                return Err(sqlx::Error::Encode(
-                    "text[] column parameters on SQLite land in MAIN-196".into(),
-                ))
-            }
+            // A `text[]` column value is stored on SQLite as a JSON array in a
+            // TEXT column (MAIN-327 AC-4); `crate::row` holds the reasoning and
+            // the reading half. NULL stays NULL — an absent array and an empty
+            // one are different answers.
+            DbValue::OptTextArray(x) => a
+                .add(x.as_deref().map(crate::row::text_array_to_json))
+                .map_err(add_err)?,
         }
     }
     Ok((rewritten, a))
@@ -384,37 +386,32 @@ pub trait Db {
     /// `query_*` fetchers instead.
     async fn exec(&self, sql: &str, params: Vec<DbValue>) -> Result<u64, crate::DbError>;
 
-    /// Fetch exactly one row, mapped via `FromRow`.
+    /// Fetch exactly one row, mapped via [`crate::FromDbRow`].
     async fn query_one<T>(&self, sql: &str, params: Vec<DbValue>) -> Result<T, crate::DbError>
     where
-        T: Send + Unpin,
-        T: for<'r> FromRow<'r, PgRow>,
-        T: for<'r> FromRow<'r, SqliteRow>;
+        T: Send + Unpin + crate::FromDbRow;
 
-    /// Fetch at most one row, mapped via `FromRow`.
+    /// Fetch at most one row, mapped via [`crate::FromDbRow`].
     async fn query_opt<T>(
         &self,
         sql: &str,
         params: Vec<DbValue>,
     ) -> Result<Option<T>, crate::DbError>
     where
-        T: Send + Unpin,
-        T: for<'r> FromRow<'r, PgRow>,
-        T: for<'r> FromRow<'r, SqliteRow>;
+        T: Send + Unpin + crate::FromDbRow;
 
-    /// Fetch every row, mapped via `FromRow`.
+    /// Fetch every row, mapped via [`crate::FromDbRow`].
     async fn query_all<T>(&self, sql: &str, params: Vec<DbValue>) -> Result<Vec<T>, crate::DbError>
     where
-        T: Send + Unpin,
-        T: for<'r> FromRow<'r, PgRow>,
-        T: for<'r> FromRow<'r, SqliteRow>;
+        T: Send + Unpin + crate::FromDbRow;
 
     /// Fetch a single scalar (one column of one row), e.g. `SELECT count(*)`.
+    /// Reads column 0, exactly as sqlx's own `query_scalar` did — the bound is
+    /// [`crate::FromDbColumn`] so a domain newtype can come back out of it
+    /// without nook-types naming sqlx (MAIN-327).
     async fn query_scalar<T>(&self, sql: &str, params: Vec<DbValue>) -> Result<T, crate::DbError>
     where
-        T: Send + Unpin,
-        for<'r> T: sqlx::Decode<'r, sqlx::Postgres> + sqlx::Type<sqlx::Postgres>,
-        for<'r> T: sqlx::Decode<'r, sqlx::Sqlite> + sqlx::Type<sqlx::Sqlite>;
+        T: Send + Unpin + crate::FromDbColumn;
 
     /// Fetch a single scalar column from at most one row.
     async fn query_scalar_opt<T>(
@@ -423,9 +420,7 @@ pub trait Db {
         params: Vec<DbValue>,
     ) -> Result<Option<T>, crate::DbError>
     where
-        T: Send + Unpin,
-        for<'r> T: sqlx::Decode<'r, sqlx::Postgres> + sqlx::Type<sqlx::Postgres>,
-        for<'r> T: sqlx::Decode<'r, sqlx::Sqlite> + sqlx::Type<sqlx::Sqlite>;
+        T: Send + Unpin + crate::FromDbColumn;
 
     /// Fetch a single scalar column from every row (`SELECT id FROM …`).
     async fn query_scalar_all<T>(
@@ -434,9 +429,7 @@ pub trait Db {
         params: Vec<DbValue>,
     ) -> Result<Vec<T>, crate::DbError>
     where
-        T: Send + Unpin,
-        for<'r> T: sqlx::Decode<'r, sqlx::Postgres> + sqlx::Type<sqlx::Postgres>,
-        for<'r> T: sqlx::Decode<'r, sqlx::Sqlite> + sqlx::Type<sqlx::Sqlite>;
+        T: Send + Unpin + crate::FromDbColumn;
 }
 
 impl Db for PgPool {
@@ -449,15 +442,11 @@ impl Db for PgPool {
     }
     async fn query_one<T>(&self, sql: &str, params: Vec<DbValue>) -> Result<T, crate::DbError>
     where
-        T: Send + Unpin,
-        T: for<'r> FromRow<'r, PgRow>,
-        T: for<'r> FromRow<'r, SqliteRow>,
+        T: Send + Unpin + crate::FromDbRow,
     {
         let args = pg_args(params)?;
-        sqlx::query_as_with::<sqlx::Postgres, T, _>(sql, args)
-            .fetch_one(self)
-            .await
-            .map_err(Into::into)
+        let row = sqlx::query_with(sql, args).fetch_one(self).await?;
+        T::from_db_row(&crate::DbRow::Pg(row))
     }
     async fn query_opt<T>(
         &self,
@@ -465,39 +454,32 @@ impl Db for PgPool {
         params: Vec<DbValue>,
     ) -> Result<Option<T>, crate::DbError>
     where
-        T: Send + Unpin,
-        T: for<'r> FromRow<'r, PgRow>,
-        T: for<'r> FromRow<'r, SqliteRow>,
+        T: Send + Unpin + crate::FromDbRow,
     {
         let args = pg_args(params)?;
-        sqlx::query_as_with::<sqlx::Postgres, T, _>(sql, args)
-            .fetch_optional(self)
-            .await
-            .map_err(Into::into)
+        let row = sqlx::query_with(sql, args).fetch_optional(self).await?;
+        row.map(|r| T::from_db_row(&crate::DbRow::Pg(r)))
+            .transpose()
     }
     async fn query_all<T>(&self, sql: &str, params: Vec<DbValue>) -> Result<Vec<T>, crate::DbError>
     where
-        T: Send + Unpin,
-        T: for<'r> FromRow<'r, PgRow>,
-        T: for<'r> FromRow<'r, SqliteRow>,
+        T: Send + Unpin + crate::FromDbRow,
     {
         let args = pg_args(params)?;
-        sqlx::query_as_with::<sqlx::Postgres, T, _>(sql, args)
+        sqlx::query_with(sql, args)
             .fetch_all(self)
-            .await
-            .map_err(Into::into)
+            .await?
+            .into_iter()
+            .map(|r| T::from_db_row(&crate::DbRow::Pg(r)))
+            .collect()
     }
     async fn query_scalar<T>(&self, sql: &str, params: Vec<DbValue>) -> Result<T, crate::DbError>
     where
-        T: Send + Unpin,
-        for<'r> T: sqlx::Decode<'r, sqlx::Postgres> + sqlx::Type<sqlx::Postgres>,
-        for<'r> T: sqlx::Decode<'r, sqlx::Sqlite> + sqlx::Type<sqlx::Sqlite>,
+        T: Send + Unpin + crate::FromDbColumn,
     {
         let args = pg_args(params)?;
-        sqlx::query_scalar_with::<sqlx::Postgres, T, _>(sql, args)
-            .fetch_one(self)
-            .await
-            .map_err(Into::into)
+        let row = sqlx::query_with(sql, args).fetch_one(self).await?;
+        crate::DbRow::Pg(row).get_at(0)
     }
     async fn query_scalar_opt<T>(
         &self,
@@ -505,15 +487,11 @@ impl Db for PgPool {
         params: Vec<DbValue>,
     ) -> Result<Option<T>, crate::DbError>
     where
-        T: Send + Unpin,
-        for<'r> T: sqlx::Decode<'r, sqlx::Postgres> + sqlx::Type<sqlx::Postgres>,
-        for<'r> T: sqlx::Decode<'r, sqlx::Sqlite> + sqlx::Type<sqlx::Sqlite>,
+        T: Send + Unpin + crate::FromDbColumn,
     {
         let args = pg_args(params)?;
-        sqlx::query_scalar_with::<sqlx::Postgres, T, _>(sql, args)
-            .fetch_optional(self)
-            .await
-            .map_err(Into::into)
+        let row = sqlx::query_with(sql, args).fetch_optional(self).await?;
+        row.map(|r| crate::DbRow::Pg(r).get_at(0)).transpose()
     }
     async fn query_scalar_all<T>(
         &self,
@@ -521,15 +499,15 @@ impl Db for PgPool {
         params: Vec<DbValue>,
     ) -> Result<Vec<T>, crate::DbError>
     where
-        T: Send + Unpin,
-        for<'r> T: sqlx::Decode<'r, sqlx::Postgres> + sqlx::Type<sqlx::Postgres>,
-        for<'r> T: sqlx::Decode<'r, sqlx::Sqlite> + sqlx::Type<sqlx::Sqlite>,
+        T: Send + Unpin + crate::FromDbColumn,
     {
         let args = pg_args(params)?;
-        sqlx::query_scalar_with::<sqlx::Postgres, T, _>(sql, args)
+        sqlx::query_with(sql, args)
             .fetch_all(self)
-            .await
-            .map_err(Into::into)
+            .await?
+            .into_iter()
+            .map(|r| crate::DbRow::Pg(r).get_at(0))
+            .collect()
     }
 }
 
@@ -543,15 +521,11 @@ impl Db for SqlitePool {
     }
     async fn query_one<T>(&self, sql: &str, params: Vec<DbValue>) -> Result<T, crate::DbError>
     where
-        T: Send + Unpin,
-        T: for<'r> FromRow<'r, PgRow>,
-        T: for<'r> FromRow<'r, SqliteRow>,
+        T: Send + Unpin + crate::FromDbRow,
     {
         let (sql, args) = sqlite_args(sql, params)?;
-        sqlx::query_as_with::<sqlx::Sqlite, T, _>(&sql, args)
-            .fetch_one(self)
-            .await
-            .map_err(Into::into)
+        let row = sqlx::query_with(&sql, args).fetch_one(self).await?;
+        T::from_db_row(&crate::DbRow::Sqlite(row))
     }
     async fn query_opt<T>(
         &self,
@@ -559,39 +533,32 @@ impl Db for SqlitePool {
         params: Vec<DbValue>,
     ) -> Result<Option<T>, crate::DbError>
     where
-        T: Send + Unpin,
-        T: for<'r> FromRow<'r, PgRow>,
-        T: for<'r> FromRow<'r, SqliteRow>,
+        T: Send + Unpin + crate::FromDbRow,
     {
         let (sql, args) = sqlite_args(sql, params)?;
-        sqlx::query_as_with::<sqlx::Sqlite, T, _>(&sql, args)
-            .fetch_optional(self)
-            .await
-            .map_err(Into::into)
+        let row = sqlx::query_with(&sql, args).fetch_optional(self).await?;
+        row.map(|r| T::from_db_row(&crate::DbRow::Sqlite(r)))
+            .transpose()
     }
     async fn query_all<T>(&self, sql: &str, params: Vec<DbValue>) -> Result<Vec<T>, crate::DbError>
     where
-        T: Send + Unpin,
-        T: for<'r> FromRow<'r, PgRow>,
-        T: for<'r> FromRow<'r, SqliteRow>,
+        T: Send + Unpin + crate::FromDbRow,
     {
         let (sql, args) = sqlite_args(sql, params)?;
-        sqlx::query_as_with::<sqlx::Sqlite, T, _>(&sql, args)
+        sqlx::query_with(&sql, args)
             .fetch_all(self)
-            .await
-            .map_err(Into::into)
+            .await?
+            .into_iter()
+            .map(|r| T::from_db_row(&crate::DbRow::Sqlite(r)))
+            .collect()
     }
     async fn query_scalar<T>(&self, sql: &str, params: Vec<DbValue>) -> Result<T, crate::DbError>
     where
-        T: Send + Unpin,
-        for<'r> T: sqlx::Decode<'r, sqlx::Postgres> + sqlx::Type<sqlx::Postgres>,
-        for<'r> T: sqlx::Decode<'r, sqlx::Sqlite> + sqlx::Type<sqlx::Sqlite>,
+        T: Send + Unpin + crate::FromDbColumn,
     {
         let (sql, args) = sqlite_args(sql, params)?;
-        sqlx::query_scalar_with::<sqlx::Sqlite, T, _>(&sql, args)
-            .fetch_one(self)
-            .await
-            .map_err(Into::into)
+        let row = sqlx::query_with(&sql, args).fetch_one(self).await?;
+        crate::DbRow::Sqlite(row).get_at(0)
     }
     async fn query_scalar_opt<T>(
         &self,
@@ -599,15 +566,11 @@ impl Db for SqlitePool {
         params: Vec<DbValue>,
     ) -> Result<Option<T>, crate::DbError>
     where
-        T: Send + Unpin,
-        for<'r> T: sqlx::Decode<'r, sqlx::Postgres> + sqlx::Type<sqlx::Postgres>,
-        for<'r> T: sqlx::Decode<'r, sqlx::Sqlite> + sqlx::Type<sqlx::Sqlite>,
+        T: Send + Unpin + crate::FromDbColumn,
     {
         let (sql, args) = sqlite_args(sql, params)?;
-        sqlx::query_scalar_with::<sqlx::Sqlite, T, _>(&sql, args)
-            .fetch_optional(self)
-            .await
-            .map_err(Into::into)
+        let row = sqlx::query_with(&sql, args).fetch_optional(self).await?;
+        row.map(|r| crate::DbRow::Sqlite(r).get_at(0)).transpose()
     }
     async fn query_scalar_all<T>(
         &self,
@@ -615,15 +578,15 @@ impl Db for SqlitePool {
         params: Vec<DbValue>,
     ) -> Result<Vec<T>, crate::DbError>
     where
-        T: Send + Unpin,
-        for<'r> T: sqlx::Decode<'r, sqlx::Postgres> + sqlx::Type<sqlx::Postgres>,
-        for<'r> T: sqlx::Decode<'r, sqlx::Sqlite> + sqlx::Type<sqlx::Sqlite>,
+        T: Send + Unpin + crate::FromDbColumn,
     {
         let (sql, args) = sqlite_args(sql, params)?;
-        sqlx::query_scalar_with::<sqlx::Sqlite, T, _>(&sql, args)
+        sqlx::query_with(&sql, args)
             .fetch_all(self)
-            .await
-            .map_err(Into::into)
+            .await?
+            .into_iter()
+            .map(|r| crate::DbRow::Sqlite(r).get_at(0))
+            .collect()
     }
 }
 
@@ -702,9 +665,7 @@ impl Db for EnginePool {
     }
     async fn query_one<T>(&self, sql: &str, params: Vec<DbValue>) -> Result<T, crate::DbError>
     where
-        T: Send + Unpin,
-        T: for<'r> FromRow<'r, PgRow>,
-        T: for<'r> FromRow<'r, SqliteRow>,
+        T: Send + Unpin + crate::FromDbRow,
     {
         match &self.0 {
             Arm::Pg(p) => p.query_one(sql, params).await,
@@ -717,9 +678,7 @@ impl Db for EnginePool {
         params: Vec<DbValue>,
     ) -> Result<Option<T>, crate::DbError>
     where
-        T: Send + Unpin,
-        T: for<'r> FromRow<'r, PgRow>,
-        T: for<'r> FromRow<'r, SqliteRow>,
+        T: Send + Unpin + crate::FromDbRow,
     {
         match &self.0 {
             Arm::Pg(p) => p.query_opt(sql, params).await,
@@ -728,9 +687,7 @@ impl Db for EnginePool {
     }
     async fn query_all<T>(&self, sql: &str, params: Vec<DbValue>) -> Result<Vec<T>, crate::DbError>
     where
-        T: Send + Unpin,
-        T: for<'r> FromRow<'r, PgRow>,
-        T: for<'r> FromRow<'r, SqliteRow>,
+        T: Send + Unpin + crate::FromDbRow,
     {
         match &self.0 {
             Arm::Pg(p) => p.query_all(sql, params).await,
@@ -739,9 +696,7 @@ impl Db for EnginePool {
     }
     async fn query_scalar<T>(&self, sql: &str, params: Vec<DbValue>) -> Result<T, crate::DbError>
     where
-        T: Send + Unpin,
-        for<'r> T: sqlx::Decode<'r, sqlx::Postgres> + sqlx::Type<sqlx::Postgres>,
-        for<'r> T: sqlx::Decode<'r, sqlx::Sqlite> + sqlx::Type<sqlx::Sqlite>,
+        T: Send + Unpin + crate::FromDbColumn,
     {
         match &self.0 {
             Arm::Pg(p) => p.query_scalar(sql, params).await,
@@ -754,9 +709,7 @@ impl Db for EnginePool {
         params: Vec<DbValue>,
     ) -> Result<Option<T>, crate::DbError>
     where
-        T: Send + Unpin,
-        for<'r> T: sqlx::Decode<'r, sqlx::Postgres> + sqlx::Type<sqlx::Postgres>,
-        for<'r> T: sqlx::Decode<'r, sqlx::Sqlite> + sqlx::Type<sqlx::Sqlite>,
+        T: Send + Unpin + crate::FromDbColumn,
     {
         match &self.0 {
             Arm::Pg(p) => p.query_scalar_opt(sql, params).await,
@@ -769,9 +722,7 @@ impl Db for EnginePool {
         params: Vec<DbValue>,
     ) -> Result<Vec<T>, crate::DbError>
     where
-        T: Send + Unpin,
-        for<'r> T: sqlx::Decode<'r, sqlx::Postgres> + sqlx::Type<sqlx::Postgres>,
-        for<'r> T: sqlx::Decode<'r, sqlx::Sqlite> + sqlx::Type<sqlx::Sqlite>,
+        T: Send + Unpin + crate::FromDbColumn,
     {
         match &self.0 {
             Arm::Pg(p) => p.query_scalar_all(sql, params).await,
@@ -809,60 +760,54 @@ impl DbTx<'_> {
         }
     }
 
-    /// Fetch exactly one row inside the transaction, mapped via `FromRow`.
+    /// Fetch exactly one row inside the transaction, mapped via [`crate::FromDbRow`].
     pub async fn query_one<T>(
         &mut self,
         sql: &str,
         params: Vec<DbValue>,
     ) -> Result<T, crate::DbError>
     where
-        T: Send + Unpin,
-        T: for<'r> FromRow<'r, PgRow>,
-        T: for<'r> FromRow<'r, SqliteRow>,
+        T: Send + Unpin + crate::FromDbRow,
     {
         match self {
             DbTx::Pg(tx) => {
                 let args = pg_args(params)?;
-                sqlx::query_as_with::<sqlx::Postgres, T, _>(sql, args)
-                    .fetch_one(&mut **tx)
-                    .await
-                    .map_err(Into::into)
+                let row = sqlx::query_with(sql, args).fetch_one(&mut **tx).await?;
+                T::from_db_row(&crate::DbRow::Pg(row))
             }
             DbTx::Sqlite(tx) => {
                 let (sql, args) = sqlite_args(sql, params)?;
-                sqlx::query_as_with::<sqlx::Sqlite, T, _>(&sql, args)
-                    .fetch_one(&mut **tx)
-                    .await
-                    .map_err(Into::into)
+                let row = sqlx::query_with(&sql, args).fetch_one(&mut **tx).await?;
+                T::from_db_row(&crate::DbRow::Sqlite(row))
             }
         }
     }
 
-    /// Fetch at most one row inside the transaction, mapped via `FromRow`.
+    /// Fetch at most one row inside the transaction, mapped via [`crate::FromDbRow`].
     pub async fn query_opt<T>(
         &mut self,
         sql: &str,
         params: Vec<DbValue>,
     ) -> Result<Option<T>, crate::DbError>
     where
-        T: Send + Unpin,
-        T: for<'r> FromRow<'r, PgRow>,
-        T: for<'r> FromRow<'r, SqliteRow>,
+        T: Send + Unpin + crate::FromDbRow,
     {
         match self {
             DbTx::Pg(tx) => {
                 let args = pg_args(params)?;
-                sqlx::query_as_with::<sqlx::Postgres, T, _>(sql, args)
+                let row = sqlx::query_with(sql, args)
                     .fetch_optional(&mut **tx)
-                    .await
-                    .map_err(Into::into)
+                    .await?;
+                row.map(|r| T::from_db_row(&crate::DbRow::Pg(r)))
+                    .transpose()
             }
             DbTx::Sqlite(tx) => {
                 let (sql, args) = sqlite_args(sql, params)?;
-                sqlx::query_as_with::<sqlx::Sqlite, T, _>(&sql, args)
+                let row = sqlx::query_with(&sql, args)
                     .fetch_optional(&mut **tx)
-                    .await
-                    .map_err(Into::into)
+                    .await?;
+                row.map(|r| T::from_db_row(&crate::DbRow::Sqlite(r)))
+                    .transpose()
             }
         }
     }
@@ -874,53 +819,49 @@ impl DbTx<'_> {
         params: Vec<DbValue>,
     ) -> Result<T, crate::DbError>
     where
-        T: Send + Unpin,
-        for<'r> T: sqlx::Decode<'r, sqlx::Postgres> + sqlx::Type<sqlx::Postgres>,
-        for<'r> T: sqlx::Decode<'r, sqlx::Sqlite> + sqlx::Type<sqlx::Sqlite>,
+        T: Send + Unpin + crate::FromDbColumn,
     {
         match self {
             DbTx::Pg(tx) => {
                 let args = pg_args(params)?;
-                sqlx::query_scalar_with::<sqlx::Postgres, T, _>(sql, args)
-                    .fetch_one(&mut **tx)
-                    .await
-                    .map_err(Into::into)
+                let row = sqlx::query_with(sql, args).fetch_one(&mut **tx).await?;
+                crate::DbRow::Pg(row).get_at(0)
             }
             DbTx::Sqlite(tx) => {
                 let (sql, args) = sqlite_args(sql, params)?;
-                sqlx::query_scalar_with::<sqlx::Sqlite, T, _>(&sql, args)
-                    .fetch_one(&mut **tx)
-                    .await
-                    .map_err(Into::into)
+                let row = sqlx::query_with(&sql, args).fetch_one(&mut **tx).await?;
+                crate::DbRow::Sqlite(row).get_at(0)
             }
         }
     }
 
-    /// Fetch every row inside the transaction, mapped via `FromRow`.
+    /// Fetch every row inside the transaction, mapped via [`crate::FromDbRow`].
     pub async fn query_all<T>(
         &mut self,
         sql: &str,
         params: Vec<DbValue>,
     ) -> Result<Vec<T>, crate::DbError>
     where
-        T: Send + Unpin,
-        T: for<'r> FromRow<'r, PgRow>,
-        T: for<'r> FromRow<'r, SqliteRow>,
+        T: Send + Unpin + crate::FromDbRow,
     {
         match self {
             DbTx::Pg(tx) => {
                 let args = pg_args(params)?;
-                sqlx::query_as_with::<sqlx::Postgres, T, _>(sql, args)
+                sqlx::query_with(sql, args)
                     .fetch_all(&mut **tx)
-                    .await
-                    .map_err(Into::into)
+                    .await?
+                    .into_iter()
+                    .map(|r| T::from_db_row(&crate::DbRow::Pg(r)))
+                    .collect()
             }
             DbTx::Sqlite(tx) => {
                 let (sql, args) = sqlite_args(sql, params)?;
-                sqlx::query_as_with::<sqlx::Sqlite, T, _>(&sql, args)
+                sqlx::query_with(&sql, args)
                     .fetch_all(&mut **tx)
-                    .await
-                    .map_err(Into::into)
+                    .await?
+                    .into_iter()
+                    .map(|r| T::from_db_row(&crate::DbRow::Sqlite(r)))
+                    .collect()
             }
         }
     }

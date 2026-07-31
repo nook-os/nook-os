@@ -32,7 +32,7 @@ const CA_VALIDITY_DAYS: i64 = 3650;
 
 /// A tenant CA as stored. The private key is never in this struct; it is
 /// decrypted only inside `load_signer`, which verifies the fingerprint first.
-#[derive(Debug, Clone, sqlx::FromRow)]
+#[derive(Debug, Clone, nook_db::FromDbRow)]
 pub struct TenantCa {
     pub id: Uuid,
     pub tenant_id: Uuid,

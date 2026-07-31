@@ -244,7 +244,7 @@ impl ReadModelRepository for DbReadModelRepository {
         tenant: TenantId,
         node_owner: Option<Uuid>,
     ) -> ApiResult<Vec<OverviewCheckoutRow>> {
-        #[derive(sqlx::FromRow)]
+        #[derive(nook_db::FromDbRow)]
         struct Row {
             id: NodeWorkspaceId,
             workspace_id: WorkspaceId,
@@ -312,7 +312,7 @@ impl ReadModelRepository for DbReadModelRepository {
         // Without it this endpoint would be a side-channel around card
         // visibility — a private ticket's key leaking onto a shared node's row is
         // exactly the class of hole MAIN-226's tests exist to catch.
-        #[derive(sqlx::FromRow)]
+        #[derive(nook_db::FromDbRow)]
         struct Row {
             checkout_id: NodeWorkspaceId,
             key: String,

@@ -9,6 +9,7 @@ use axum::Json;
 use nook_control::auth::{AuthCtx, Principal};
 use nook_control::services::identity::{login_identity, IdentityClaims};
 use nook_control::state::AppState;
+use nook_db::{params, Db};
 use nook_testkit::TestBed;
 use nook_types::*;
 use sqlx::PgPool;
@@ -87,14 +88,12 @@ async fn seed_label(pool: &PgPool, tenant: TenantId, name: &str) {
 /// synchronously in `raise` before spawning delivery, so it is queryable the
 /// moment the route returns.
 async fn notes(pool: &PgPool, tenant: TenantId, kind: &str) -> Vec<Notification> {
-    sqlx::query_as(
+    pool.query_all(
         "SELECT id, tenant_id, user_id, level, title, body, kind, link, payload,
                 read_at, created_at
          FROM notifications WHERE tenant_id = $1 AND kind = $2 ORDER BY created_at",
+        params![tenant, kind],
     )
-    .bind(tenant)
-    .bind(kind)
-    .fetch_all(pool)
     .await
     .expect("notes")
 }

@@ -11973,7 +11973,7 @@
               },
               {
                 "$ref": "#/components/schemas/CheckoutSummary",
-                "description": "Denormalised summary of `checkout_id` for the UI — filled by the session\nendpoints, not a stored column, so it is absent from a raw `FROM sessions`\nrow (hence `sqlx(default)`)."
+                "description": "Denormalised summary of `checkout_id` for the UI — filled by the session\nendpoints, not a stored column, so it is absent from a raw `FROM sessions`\nrow (hence `#[db(skip)]`)."
               }
             ]
           },

@@ -13,6 +13,7 @@
 use nook_control::error::ApiError;
 use nook_control::services::jobs;
 use nook_control::ws::registry::NodeHandle;
+use nook_db::{params, Db};
 use nook_types::*;
 use sqlx::PgPool;
 use tokio::sync::mpsc;
@@ -109,9 +110,9 @@ async fn node_workspace(db: &PgPool, tenant: TenantId, node: NodeId, ws: Workspa
 }
 
 async fn load(db: &PgPool, id: JobId) -> LoopJob {
-    sqlx::query_as("SELECT * FROM loop_jobs WHERE id = $1")
-        .bind(id)
-        .fetch_one(db)
+    // Through the `Db` surface, not raw sqlx: row mapping is `FromDbRow` since
+    // MAIN-327, and a DTO no longer implements sqlx's `FromRow` at all.
+    db.query_one("SELECT * FROM loop_jobs WHERE id = $1", params![id])
         .await
         .expect("load job")
 }

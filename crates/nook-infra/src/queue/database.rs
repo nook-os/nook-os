@@ -28,7 +28,7 @@ pub struct DbQueue {
     db: DbPool,
 }
 
-#[derive(sqlx::FromRow)]
+#[derive(nook_db::FromDbRow)]
 struct WorkRow {
     id: Uuid,
     tenant_id: Uuid,

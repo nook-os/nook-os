@@ -18,7 +18,7 @@ use uuid::Uuid;
 /// `unread_count` is filled only by [`ChannelRepository::list`]; the create,
 /// update and place paths do not run the aggregate, so a freshly created or
 /// renamed channel reports no unread rather than paying for the count.
-#[derive(Debug, Clone, sqlx::FromRow)]
+#[derive(Debug, Clone, nook_db::FromDbRow)]
 pub struct ChannelRow {
     pub id: Uuid,
     pub name: String,
@@ -27,13 +27,13 @@ pub struct ChannelRow {
     pub archived_at: Option<DateTime<Utc>>,
     pub category_id: Option<Uuid>,
     pub position: i32,
-    #[sqlx(default)]
+    #[db(default)]
     pub unread_count: i64,
     pub created_at: DateTime<Utc>,
 }
 
 /// A category row as stored.
-#[derive(Debug, Clone, sqlx::FromRow)]
+#[derive(Debug, Clone, nook_db::FromDbRow)]
 pub struct CategoryRow {
     pub id: Uuid,
     pub name: String,

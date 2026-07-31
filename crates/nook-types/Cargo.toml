@@ -10,5 +10,7 @@ serde_json = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
 utoipa = { workspace = true }
+# Bind-side only since MAIN-327 (`sqlx::Type` on the id newtypes); row mapping
+# is nook-db's `FromDbRow`. Goes when MAIN-267 converts the raw-sqlx tests.
 sqlx = { workspace = true }
 nook-db = { workspace = true }

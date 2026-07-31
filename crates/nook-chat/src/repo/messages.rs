@@ -19,7 +19,7 @@ use uuid::Uuid;
 /// A message row as stored. `deleted_at` is carried, not applied — redaction
 /// happens once in the caller's `From<MessageRow>`, so no read path can forget
 /// it (MAIN-116 AC-4).
-#[derive(Debug, Clone, sqlx::FromRow)]
+#[derive(Debug, Clone, nook_db::FromDbRow)]
 pub struct MessageRow {
     pub id: Uuid,
     pub channel_id: Uuid,
@@ -35,7 +35,7 @@ pub struct MessageRow {
 }
 
 /// One emoji's tally on one message, with whether the viewer is among them.
-#[derive(Debug, Clone, sqlx::FromRow)]
+#[derive(Debug, Clone, nook_db::FromDbRow)]
 pub struct ReactionRow {
     pub message_id: Uuid,
     pub emoji: String,

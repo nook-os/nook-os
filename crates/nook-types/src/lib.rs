@@ -15,6 +15,12 @@ macro_rules! id_type {
                 Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord,
                 Serialize, Deserialize, sqlx::Type, ToSchema,
             )]
+            // The ONLY sqlx left in this crate, and it is not row mapping —
+            // MAIN-327 removed all of that. It is the BIND side, kept because 22
+            // allow-listed integration tests still bind raw sqlx against
+            // `bed.pool` (`.bind(tenant_id)`), and they are MAIN-267's to
+            // convert, not this card's. When that card lands, this derive and
+            // the sqlx dependency go with it and nothing else here changes.
             #[sqlx(transparent)]
             #[schema(value_type = String, format = Uuid)]
             pub struct $name(pub Uuid);
@@ -43,8 +49,8 @@ macro_rules! id_type {
             // Bind as a dispatch parameter (MAIN-205). Implementing nook-db's
             // IntoDbValue (a foreign trait) for this local newtype is allowed by
             // the orphan rule where `From<Id> for DbValue` was not. The newtype
-            // is `#[sqlx(transparent)]` over `Uuid`, so this encodes exactly as
-            // binding the newtype did — `params![id]` needs no `.0` at the site.
+            // wraps a plain `Uuid`, so this encodes exactly as binding the
+            // newtype did — `params![id]` needs no `.0` at the site.
             impl nook_db::IntoDbValue for $name {
                 fn into_db_value(self) -> nook_db::DbValue {
                     nook_db::DbValue::Uuid(Some(self.0))
@@ -53,6 +59,25 @@ macro_rules! id_type {
             impl nook_db::IntoDbValue for &$name {
                 fn into_db_value(self) -> nook_db::DbValue {
                     nook_db::DbValue::Uuid(Some(self.0))
+                }
+            }
+            // Read back out of a row (MAIN-327). The mirror of IntoDbValue, and
+            // the same orphan-rule trick: implementing nook-db's FromDbColumn
+            // here is what lets `#[derive(FromDbRow)]` map a `TenantId` field
+            // without nook-types naming sqlx at all. It delegates to `Uuid`, so
+            // it decodes exactly as the old transparent newtype did.
+            impl nook_db::FromDbColumn for $name {
+                fn from_db_column(
+                    row: &nook_db::DbRow,
+                    name: &str,
+                ) -> Result<Self, nook_db::DbError> {
+                    Ok(Self(row.get::<Uuid>(name)?))
+                }
+                fn from_db_column_at(
+                    row: &nook_db::DbRow,
+                    index: usize,
+                ) -> Result<Self, nook_db::DbError> {
+                    Ok(Self(row.get_at::<Uuid>(index)?))
                 }
             }
             // `Option<$name>` can't impl IntoDbValue here (orphan rule: the local
@@ -89,7 +114,7 @@ id_type!(
 
 // ── Tenancy ──────────────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, nook_db::FromDbRow, ToSchema)]
 pub struct Tenant {
     pub id: TenantId,
     pub name: String,
@@ -99,7 +124,7 @@ pub struct Tenant {
 }
 
 /// Role values: `owner` | `admin` | `member` (TEXT CHECK in the schema).
-#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, nook_db::FromDbRow, ToSchema)]
 pub struct User {
     pub id: UserId,
     pub tenant_id: TenantId,
@@ -132,7 +157,7 @@ pub struct TenantMembership {
 /// `TenantMembership` (a tenant the caller belongs to). Keyed by
 /// `principal_id`, the `users.id`/`tenant_members.principal_id` used to change
 /// the role or remove them.
-#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, nook_db::FromDbRow, ToSchema)]
 pub struct TenantMemberItem {
     pub principal_id: Uuid,
     pub email: String,
@@ -189,7 +214,7 @@ pub struct SwitchTenantRequest {
 
 /// A pending/accepted/revoked invitation into a tenant. `accept_url` is set only
 /// on the create response (the link to hand out); the token is never listed.
-#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, nook_db::FromDbRow, ToSchema)]
 pub struct Invite {
     pub id: Uuid,
     pub email: String,
@@ -201,7 +226,7 @@ pub struct Invite {
     pub expires_at: DateTime<Utc>,
     /// The accept link, returned only when the invite is created (never listed).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[sqlx(default)]
+    #[db(default)]
     pub accept_url: Option<String>,
 }
 
@@ -494,7 +519,7 @@ pub struct NodeResources {
 }
 
 /// Status values: `online` | `offline`.
-#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, nook_db::FromDbRow, ToSchema)]
 pub struct Node {
     pub id: NodeId,
     pub tenant_id: TenantId,
@@ -625,7 +650,7 @@ pub struct SetSharedRequest {
 /// Stored by the control plane rather than pushed and forgotten, so that a node
 /// which was offline when it was taught — or which joins next week — converges
 /// on register instead of quietly being the one machine that never learned it.
-#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, nook_db::FromDbRow, ToSchema)]
 pub struct Skill {
     pub id: uuid::Uuid,
     pub tenant_id: TenantId,
@@ -642,7 +667,7 @@ pub struct Skill {
 
 /// The same thing without its body — a list of twenty skills should not ship
 /// twenty documents to draw a table.
-#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, nook_db::FromDbRow, ToSchema)]
 pub struct SkillSummary {
     pub id: uuid::Uuid,
     pub name: String,
@@ -681,7 +706,7 @@ pub struct TeachResponse {
 /// the managed hook set (MAIN-78). The control plane seeds it from the binary's
 /// embedded defaults and holds it as the source of truth the rest of the
 /// fleet-controlled-skills epic reads from.
-#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, nook_db::FromDbRow, ToSchema)]
 pub struct ManagedContent {
     pub id: uuid::Uuid,
     /// `skill` or `hooks`.
@@ -701,7 +726,7 @@ pub struct ManagedContent {
 
 // ── Workspaces ───────────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, nook_db::FromDbRow, ToSchema)]
 pub struct Workspace {
     pub id: WorkspaceId,
     pub tenant_id: TenantId,
@@ -725,7 +750,7 @@ pub struct Workspace {
 
 /// A workspace checked out at a path on a particular node — the join table
 /// that lets one workspace exist on many machines.
-#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, nook_db::FromDbRow, ToSchema)]
 pub struct NodeWorkspace {
     pub id: NodeWorkspaceId,
     pub tenant_id: TenantId,
@@ -757,7 +782,7 @@ pub struct WorkspaceLocation {
 
 /// Status values: `starting` | `running` | `detached` | `exited` | `error`.
 /// Runtime is an open string: "claude", "hermes", "codex", "bash", "zsh", ...
-#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, nook_db::FromDbRow, ToSchema)]
 pub struct Session {
     pub id: SessionId,
     pub tenant_id: TenantId,
@@ -781,15 +806,15 @@ pub struct Session {
     pub checkout_id: Option<NodeWorkspaceId>,
     /// Denormalised summary of `checkout_id` for the UI — filled by the session
     /// endpoints, not a stored column, so it is absent from a raw `FROM sessions`
-    /// row (hence `sqlx(default)`).
+    /// row (hence `#[db(skip)]`).
     #[serde(default)]
-    #[sqlx(skip)]
+    #[db(skip)]
     pub checkout: Option<CheckoutSummary>,
 }
 
 /// Where a session runs, in the shape the UI needs to show it (MAIN-222 AC-5):
 /// the checkout's id, path, branch, kind, and the node it lives on.
-#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, nook_db::FromDbRow, ToSchema)]
 pub struct CheckoutSummary {
     pub id: NodeWorkspaceId,
     pub path: String,
@@ -803,7 +828,7 @@ pub struct CheckoutSummary {
 
 /// Provider values: `local` | `jira` | `github` | `linear` | `trello`.
 /// External boards remain authoritative; NookOS federates.
-#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, nook_db::FromDbRow, ToSchema)]
 pub struct Board {
     pub id: BoardId,
     pub tenant_id: TenantId,
@@ -824,7 +849,7 @@ pub struct Board {
     pub updated_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, nook_db::FromDbRow, ToSchema)]
 pub struct BoardColumn {
     pub id: ColumnId,
     pub board_id: BoardId,
@@ -855,13 +880,13 @@ fn default_visibility() -> String {
     "team".into()
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, nook_db::FromDbRow, ToSchema)]
 pub struct TaskItem {
     /// Issue type: one of `task`, `bug`, `epic`, `story`, `chore` (MAIN-59).
     /// Named `type_` because `type` is a Rust keyword; the wire/column name is
     /// `type`.
     #[serde(rename = "type", default = "default_task_type")]
-    #[sqlx(rename = "type")]
+    #[db(rename = "type")]
     pub type_: String,
     pub id: TaskId,
     pub tenant_id: TenantId,
@@ -906,7 +931,7 @@ pub struct TaskItem {
     /// caller must clone there before start-work. Set only on the `dispatch`
     /// result; `false` (its default) on every other read.
     #[serde(default)]
-    #[sqlx(skip)]
+    #[db(skip)]
     pub needs_clone: bool,
     /// `0` none, `1` urgent, `2` high, `3` medium, `4` low — Linear's
     /// convention, so values port cleanly. Note `0` sorts LAST: "nobody set a
@@ -921,23 +946,23 @@ pub struct TaskItem {
     /// stored: storing it would let it disagree with the two columns it is
     /// made of.
     #[serde(default)]
-    #[sqlx(skip)]
+    #[db(skip)]
     pub key: Option<String>,
     /// Absolute deep link into the web UI, so an agent reporting "filed
     /// NOOK-42" can give a human something to click.
     #[serde(default)]
-    #[sqlx(skip)]
+    #[db(skip)]
     pub url: Option<String>,
     /// The parent epic's human key (`NOOK-7`), when this task has a parent.
     /// Computed like `key`, so a reader can show "under NOOK-7" without a second
     /// lookup (MAIN-81).
     #[serde(default)]
-    #[sqlx(skip)]
+    #[db(skip)]
     pub parent_key: Option<String>,
     /// Every label on this task. Populated by one query for a whole board
     /// rather than one per task.
     #[serde(default)]
-    #[sqlx(skip)]
+    #[db(skip)]
     pub labels: Vec<Label>,
     /// When this task was archived off the board, or `None` while it is live.
     /// Archived tasks are hidden from the board by default and excluded from the
@@ -953,7 +978,7 @@ pub struct TaskItem {
 /// A tenant-wide label. `agent-ready` is the human approval gate: the one
 /// signal that says an agent may pick this up, and deliberately not something
 /// an agent can apply to itself.
-#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, nook_db::FromDbRow, ToSchema)]
 pub struct Label {
     pub id: Uuid,
     pub tenant_id: TenantId,
@@ -971,7 +996,7 @@ pub struct CreateLabelRequest {
 
 /// Durable discussion on a task: the builder's blocking question, the
 /// reviewer's verdict, the human's answer.
-#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, nook_db::FromDbRow, ToSchema)]
 pub struct TaskComment {
     pub id: Uuid,
     pub tenant_id: TenantId,
@@ -1006,7 +1031,7 @@ pub struct UpdateCommentRequest {
     pub body_md: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, nook_db::FromDbRow, ToSchema)]
 pub struct TaskRelation {
     pub id: Uuid,
     pub tenant_id: TenantId,
@@ -1019,7 +1044,7 @@ pub struct TaskRelation {
 
 /// The other end of a relation, with enough to render it without a second
 /// fetch.
-#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, nook_db::FromDbRow, ToSchema)]
 pub struct RelatedTask {
     pub relation_id: Uuid,
     pub id: TaskId,
@@ -1034,14 +1059,14 @@ pub struct RelatedTask {
 /// One child ticket of an epic, for the epic's detail (MAIN-81). `done`/`total`
 /// is derivable by the reader: a child is done when its `column_type` is
 /// `completed` or `canceled`.
-#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, nook_db::FromDbRow, ToSchema)]
 pub struct EpicChild {
     pub id: TaskId,
     #[serde(default)]
     pub key: Option<String>,
     pub title: String,
     #[serde(rename = "type")]
-    #[sqlx(rename = "type")]
+    #[db(rename = "type")]
     pub type_: String,
     pub priority: i32,
     /// The column TYPE the child sits in — so progress is derivable inline.
@@ -1095,9 +1120,7 @@ pub struct ClaimTaskRequest {
 /// becoming the other person is hard.
 // FromRow is hand-written (see the impls near end of file): `deployment_roles`
 // is a Postgres text[] with no SQLite `Decode`, so the derive can't cover both
-// row types. The PgRow impl reproduces the derive; the SqliteRow impl defers to
-// MAIN-196 (MAIN-205 proves Postgres only).
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, nook_db::FromDbRow, ToSchema)]
 pub struct DevAccount {
     pub email: String,
     pub display_name: String,
@@ -1129,7 +1152,7 @@ pub struct PurgeTestTenantsResponse {
 // ── Orgs, roles, and the operator surface ────────────────────────────────────
 
 /// An org: the layer between a deployment and its tenants.
-#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, nook_db::FromDbRow, ToSchema)]
 pub struct Org {
     pub id: Uuid,
     pub name: String,
@@ -1151,7 +1174,7 @@ pub struct Capability {
     pub org_id: Option<Uuid>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, nook_db::FromDbRow, ToSchema)]
 pub struct OperatorOrg {
     pub id: Uuid,
     pub name: String,
@@ -1166,7 +1189,7 @@ pub struct OperatorOrg {
 /// after is `Option` and stays `None` unless the org opted in — policy ADDS
 /// these fields rather than filtering them out, so forgetting to add one
 /// leaves it absent instead of leaking it.
-#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, nook_db::FromDbRow, ToSchema)]
 pub struct OperatorTenant {
     pub id: TenantId,
     pub slug: String,
@@ -1179,14 +1202,14 @@ pub struct OperatorTenant {
     pub workspaces: i64,
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[sqlx(skip)]
+    #[db(skip)]
     pub repositories: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[sqlx(skip)]
+    #[db(skip)]
     pub task_titles: Option<Vec<String>>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, nook_db::FromDbRow, ToSchema)]
 pub struct OperatorNode {
     pub id: NodeId,
     pub name: String,
@@ -1202,7 +1225,7 @@ pub struct OperatorNode {
 
 /// An audit row. Kinds, actors and times — never payloads, which can carry the
 /// very metadata policy exists to gate.
-#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, nook_db::FromDbRow, ToSchema)]
 pub struct OperatorAuditEntry {
     pub id: EventId,
     pub kind: String,
@@ -1277,7 +1300,7 @@ pub struct MoveTenantRequest {
 }
 
 /// Who holds what, for the roles table.
-#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, nook_db::FromDbRow, ToSchema)]
 pub struct BindingRow {
     pub id: Uuid,
     pub email: String,
@@ -1312,7 +1335,7 @@ pub struct SetPolicyRequest {
 
 /// Something a person should see. Distinct from an `Event`, which is the
 /// complete record of what happened and is never marked read.
-#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, nook_db::FromDbRow, ToSchema)]
 pub struct Notification {
     pub id: Uuid,
     pub tenant_id: TenantId,
@@ -1373,9 +1396,7 @@ pub struct NotifyRequest {
 /// What a person needs to see is that it exists, whether it works, and what it
 /// is filtered to.
 // FromRow hand-written (see impls near end of file): `levels`/`kinds` are
-// Postgres text[] arrays with no SQLite `Decode`. PgRow reproduces the derive;
-// SqliteRow defers to MAIN-196.
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, nook_db::FromDbRow, ToSchema)]
 pub struct NotificationChannel {
     pub id: Uuid,
     pub tenant_id: TenantId,
@@ -1456,7 +1477,7 @@ pub struct NotificationKind {
 
 /// Everything produces events. Kind is an open dotted string:
 /// "node.connected", "session.started", "task.moved", "user.login", ...
-#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, nook_db::FromDbRow, ToSchema)]
 pub struct Event {
     pub id: EventId,
     pub tenant_id: TenantId,
@@ -1473,7 +1494,7 @@ pub struct Event {
 // ── Notes ────────────────────────────────────────────────────────────────────
 
 /// Kind values: `rolling` | `briefing` | `decision` | free-form.
-#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, nook_db::FromDbRow, ToSchema)]
 pub struct Note {
     pub id: NoteId,
     pub tenant_id: TenantId,
@@ -1492,7 +1513,7 @@ pub struct Note {
 // encrypted; only the decrypted `UserNote` carries `content_md`.
 
 /// A folder in a person's notebook. `parent_id: None` is a root folder.
-#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, nook_db::FromDbRow, ToSchema)]
 pub struct UserNoteFolder {
     pub id: UserNoteFolderId,
     #[schema(value_type = String, format = Uuid)]
@@ -1506,7 +1527,7 @@ pub struct UserNoteFolder {
 /// A note's metadata — the tree/list item and the search result. Never carries
 /// the body: that is encrypted at rest and fetched (decrypted) one note at a
 /// time. `path` is the plaintext folder path for display and search.
-#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, nook_db::FromDbRow, ToSchema)]
 pub struct UserNoteSummary {
     pub id: UserNoteId,
     pub folder_id: Option<UserNoteFolderId>,
@@ -1644,7 +1665,7 @@ pub struct ThemeTokens {
     pub effects: std::collections::BTreeMap<String, String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, nook_db::FromDbRow, ToSchema)]
 pub struct Theme {
     pub id: ThemeId,
     /// NULL = built-in theme shipped with NookOS.
@@ -1658,7 +1679,7 @@ pub struct Theme {
 // ── Settings ─────────────────────────────────────────────────────────────────
 
 /// Scope values: `tenant` | `user`.
-#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, nook_db::FromDbRow, ToSchema)]
 pub struct Setting {
     pub id: SettingId,
     pub tenant_id: TenantId,
@@ -2229,7 +2250,7 @@ pub struct CreateUserTokenResponse {
 }
 
 /// A personal access token as listed back — everything except the secret.
-#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, nook_db::FromDbRow, ToSchema)]
 pub struct UserToken {
     pub id: String,
     pub name: String,
@@ -2357,7 +2378,7 @@ pub struct OpResponse {
 }
 
 /// A tenant git credential — only the public half is ever returned.
-#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, nook_db::FromDbRow, ToSchema)]
 pub struct GitCredential {
     pub id: GitCredentialId,
     pub tenant_id: TenantId,
@@ -2377,7 +2398,7 @@ pub struct GitCredential {
 /// A loop job's lifecycle position. `queued` on create; `completed`, `failed`,
 /// and `canceled` are terminal. The service layer enforces which transitions
 /// are legal — the wire type just carries the current value.
-#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, nook_db::FromDbRow, ToSchema)]
 pub struct LoopJob {
     pub id: JobId,
     pub tenant_id: TenantId,
@@ -2408,7 +2429,7 @@ pub struct LoopJob {
 
 /// One append-only transcript line on a job — the conversation/output captured
 /// where the work lives. Written by the executor (MAIN-161); read here.
-#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, nook_db::FromDbRow, ToSchema)]
 pub struct LoopJobTranscriptEntry {
     pub id: JobTranscriptId,
     pub job_id: JobId,
@@ -2462,9 +2483,7 @@ pub struct CreateJobMessageRequest {
 /// A pending/answered/canceled ask for a human. Its subject (a job and/or the
 /// ticket it is anchored to) governs who may see and answer it.
 // FromRow hand-written (see impls near end of file): `choices` is a Postgres
-// text[] array with no SQLite `Decode`. PgRow reproduces the derive; SqliteRow
-// defers to MAIN-196.
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, nook_db::FromDbRow, ToSchema)]
 pub struct Interaction {
     pub id: InteractionId,
     pub tenant_id: TenantId,
@@ -2575,7 +2594,7 @@ pub struct SecretOnDisk {
 }
 
 /// One improvement someone asked for, and what became of it.
-#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, nook_db::FromDbRow, ToSchema)]
 pub struct FeedbackItem {
     pub id: Uuid,
     pub tenant_id: TenantId,
@@ -2959,113 +2978,4 @@ pub enum ChatServerMessage {
     /// reaction-aggregated); the client replaces it in place by `id`. Delivered
     /// on the message's own channel, so a reply update reaches the thread too.
     MessageUpdated(ChatMessage),
-}
-
-// ── Hand-written FromRow for the array-column types (MAIN-205) ────────────────
-//
-// Three DTOs decode a Postgres `text[]` column into a `Vec<String>` field
-// (`DevAccount.deployment_roles`, `NotificationChannel.levels`/`kinds`,
-// `Interaction.choices`). SQLite has no array type, so `Vec<String>` has no
-// `Decode<Sqlite>` and `#[derive(FromRow)]` — which is generic over the row's
-// database — cannot cover `SqliteRow`. The dispatch pool (`nook_db::EnginePool`)
-// bounds its fetch methods on `FromRow` over BOTH row types, so each of these
-// needs a concrete pair: a `PgRow` impl that reproduces exactly what the derive
-// did (by-name `try_get`, bit-identical), and a `SqliteRow` impl deferred to
-// MAIN-196, where SQLite's array-storage shape (JSON-in-TEXT) is decided. The
-// deferred arm returns a clear error rather than panicking; it never runs under
-// MAIN-205's Postgres-only proof.
-
-macro_rules! deferred_sqlite_fromrow {
-    ($t:ty) => {
-        impl<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> for $t {
-            fn from_row(_row: &'r sqlx::sqlite::SqliteRow) -> sqlx::Result<Self> {
-                Err(sqlx::Error::Decode(
-                    concat!(
-                        "SQLite row mapping for array-column type `",
-                        stringify!($t),
-                        "` lands in MAIN-196"
-                    )
-                    .into(),
-                ))
-            }
-        }
-    };
-}
-
-impl<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> for DevAccount {
-    fn from_row(row: &'r sqlx::postgres::PgRow) -> sqlx::Result<Self> {
-        use sqlx::Row;
-        Ok(Self {
-            email: row.try_get("email")?,
-            display_name: row.try_get("display_name")?,
-            tenant_slug: row.try_get("tenant_slug")?,
-            deployment_roles: row.try_get("deployment_roles")?,
-        })
-    }
-}
-deferred_sqlite_fromrow!(DevAccount);
-
-impl<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> for NotificationChannel {
-    fn from_row(row: &'r sqlx::postgres::PgRow) -> sqlx::Result<Self> {
-        use sqlx::Row;
-        Ok(Self {
-            id: row.try_get("id")?,
-            tenant_id: row.try_get("tenant_id")?,
-            kind: row.try_get("kind")?,
-            name: row.try_get("name")?,
-            enabled: row.try_get("enabled")?,
-            levels: row.try_get("levels")?,
-            kinds: row.try_get("kinds")?,
-            last_ok_at: row.try_get("last_ok_at")?,
-            last_error: row.try_get("last_error")?,
-            created_at: row.try_get("created_at")?,
-            updated_at: row.try_get("updated_at")?,
-        })
-    }
-}
-deferred_sqlite_fromrow!(NotificationChannel);
-
-impl<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> for Interaction {
-    fn from_row(row: &'r sqlx::postgres::PgRow) -> sqlx::Result<Self> {
-        use sqlx::Row;
-        Ok(Self {
-            id: row.try_get("id")?,
-            tenant_id: row.try_get("tenant_id")?,
-            job_id: row.try_get("job_id")?,
-            task_id: row.try_get("task_id")?,
-            prompt: row.try_get("prompt")?,
-            choices: row.try_get("choices")?,
-            state: row.try_get("state")?,
-            requested_by_node_id: row.try_get("requested_by_node_id")?,
-            requested_by_session_id: row.try_get("requested_by_session_id")?,
-            answered_by: row.try_get("answered_by")?,
-            response: row.try_get("response")?,
-            created_at: row.try_get("created_at")?,
-            updated_at: row.try_get("updated_at")?,
-            answered_at: row.try_get("answered_at")?,
-        })
-    }
-}
-deferred_sqlite_fromrow!(Interaction);
-
-#[cfg(test)]
-mod dual_row_fromrow {
-    //! MAIN-205: the dispatch pool bounds fetches on FromRow over both row types.
-    //! Guard that the array-column DTOs satisfy both arms (their SqliteRow impl
-    //! is the deferred one from this file), so a regression is a compile failure.
-    use super::*;
-    fn both<T>()
-    where
-        T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow>,
-        T: for<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow>,
-    {
-    }
-    #[test]
-    fn array_column_dtos_map_from_both_rows() {
-        both::<TaskItem>();
-        both::<OperatorTenant>();
-        both::<DevAccount>();
-        both::<NotificationChannel>();
-        both::<Interaction>();
-    }
 }
