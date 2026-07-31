@@ -6931,6 +6931,100 @@
         }
       }
     },
+    "/api/v1/workspaces/{id}/session-spec": {
+      "get": {
+        "tags": [
+          "crate::routes::workspaces"
+        ],
+        "summary": "`GET /api/v1/workspaces/{id}/session-spec` — the declared desired session\nstate, or `null` for an unmanaged workspace (MAIN-315 AC-2).",
+        "description": "Tenant-scoped only, like every other workspace read: a workspace belongs to\nthe tenant, not to a person, so there is no owner to gate against here (that\ndistinction is MAIN-314's, where a NODE has an owner).",
+        "operationId": "get_session_spec",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionSpec"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "crate::routes::workspaces"
+        ],
+        "summary": "`PUT /api/v1/workspaces/{id}/session-spec` — declare it, or clear it with\n`{\"spec\": null}` to return the workspace to unmanaged (MAIN-315 AC-2).",
+        "operationId": "set_session_spec",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetSessionSpecRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionSpec"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": ""
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      }
+    },
     "/api/v1/workspaces/{id}/worktrees": {
       "post": {
         "tags": [
@@ -11492,6 +11586,62 @@
           }
         }
       },
+      "Replicas": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "Exactly `count` sessions, anywhere that matches.",
+            "required": [
+              "count",
+              "kind"
+            ],
+            "properties": {
+              "count": {
+                "type": "integer",
+                "format": "int32",
+                "minimum": 0
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "count"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Exactly one — the common case, spelled so it cannot be typo'd into two.",
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "single"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "One on every node that matches the selector; grows with the fleet.",
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "all"
+                ]
+              }
+            }
+          }
+        ],
+        "description": "How many sessions a workspace wants (MAIN-315).\n\nTagged rather than a bare integer, because \"one per matching node\" and\n\"exactly one\" are different intents a number cannot tell apart — and a\nreconciler that guessed would be wrong on a fleet that grows."
+      },
       "ReportAgentStateRequest": {
         "type": "object",
         "description": "A hook reporting what the agent in a session is doing.",
@@ -11825,6 +11975,40 @@
           }
         }
       },
+      "SessionSpec": {
+        "type": "object",
+        "description": "A workspace's declared desired session state (MAIN-315) — the Deployment\nanalog. Absent entirely means the workspace is unmanaged.",
+        "required": [
+          "runtime",
+          "replicas"
+        ],
+        "properties": {
+          "node_selector": {
+            "type": "object",
+            "description": "Labels a node must carry to be eligible. Empty matches every node.",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "replicas": {
+            "$ref": "#/components/schemas/Replicas"
+          },
+          "runtime": {
+            "type": "string",
+            "description": "The runtime every session it manages should run — `claude`, `bash`, …"
+          },
+          "tolerations": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Toleration"
+            },
+            "description": "Taints this work accepts. A node whose taint is untolerated is not\neligible however well its labels match."
+          }
+        }
+      },
       "SessionWindow": {
         "type": "object",
         "description": "One terminal inside a session (a tmux window).",
@@ -11891,6 +12075,22 @@
           },
           "field": {
             "type": "string"
+          }
+        }
+      },
+      "SetSessionSpecRequest": {
+        "type": "object",
+        "description": "Set or clear a workspace's [`SessionSpec`] (MAIN-315). `spec: null` clears\nit, returning the workspace to unmanaged — which is why the field is an\nexplicit Option rather than an absent key meaning \"leave alone\".",
+        "properties": {
+          "spec": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/SessionSpec"
+              }
+            ]
           }
         }
       },
@@ -12798,6 +12998,22 @@
             "propertyNames": {
               "type": "string"
             }
+          }
+        }
+      },
+      "Toleration": {
+        "type": "object",
+        "description": "Work's agreement to run somewhere despite a taint (MAIN-315).\n\nIts own type rather than a re-use of the node-side taint: they are the two\nhalves of one negotiation, and a shared struct makes it easy to pass one\nwhere the other belongs. Same fields today, free to diverge later.",
+        "required": [
+          "key",
+          "effect"
+        ],
+        "properties": {
+          "effect": {
+            "type": "string"
+          },
+          "key": {
+            "type": "string"
           }
         }
       },
@@ -14060,6 +14276,9 @@
           },
           "name": {
             "type": "string"
+          },
+          "session_spec": {
+            "description": "The desired session state (MAIN-315), or `None` for an UNMANAGED\nworkspace. Nothing reconciles it yet."
           },
           "slug": {
             "type": "string"

@@ -143,6 +143,10 @@ pub fn build_router(state: AppState) -> Router {
                 .delete(workspaces::delete),
         )
         .route("/overview", get(overview::overview))
+        .route(
+            "/workspaces/{id}/session-spec",
+            get(workspaces::get_session_spec).put(workspaces::set_session_spec),
+        )
         .route("/workspaces/{id}/git", get(workspaces::git_status))
         .route("/workspaces/{id}/clone", post(workspaces::clone_to_node))
         .route("/workspaces/{id}/worktrees", post(gitops::add_worktree))

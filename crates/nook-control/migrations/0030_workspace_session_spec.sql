@@ -1,0 +1,16 @@
+-- MAIN-315: a workspace's DESIRED session state — the Deployment analog to
+-- MAIN-314's node labels. Nothing reconciles it yet (NG-1); this is the
+-- declaration a later reconciler will read.
+--
+-- Nullable, and that is the whole design: NULL means UNMANAGED, which must stay
+-- distinct from "managed, wanting zero sessions". A NOT NULL default would
+-- silently enrol every existing workspace into a reconciler that has not been
+-- written, and `{}` cannot express the difference.
+--
+-- Shape, validated at the route rather than by a CHECK (a jsonb CHECK would
+-- reject a field a later child adds, for no gain):
+--   {"runtime": "claude",
+--    "node_selector": {"os": "linux"},
+--    "tolerations": [{"key": "no-linux", "effect": "NoSchedule"}],
+--    "replicas": {"kind": "count", "count": 2} | {"kind": "single"} | {"kind": "all"}}
+ALTER TABLE public.workspaces ADD COLUMN IF NOT EXISTS session_spec jsonb;
