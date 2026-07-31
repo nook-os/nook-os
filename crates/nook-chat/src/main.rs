@@ -41,6 +41,25 @@ use uuid::Uuid;
 /// 0007_chat_read_cursors.
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
+/// The service's own search_path: chat first, `public` behind it.
+///
+/// `chat` first is what puts chat's tables and its `_sqlx_migrations` in its own
+/// schema; `public` behind it is what lets the SHARED `nook-auth` session query —
+/// unqualified `sessions_auth`, `tenant_members`, `user_tokens`, which live only
+/// in `public` — resolve instead of 500ing.
+pub(crate) const CHAT_SEARCH_PATH: &str = "chat,public";
+
+/// `public` alone — for a pool that must write the CONTROL PLANE's schema.
+///
+/// Only the tests use this, and the distinction is load-bearing rather than
+/// cosmetic: running `nook_control::MIGRATOR` over a `chat,public` pool puts the
+/// control plane's tables AND its ledger in the `chat` schema, where they collide
+/// with chat's own. That is not theoretical — it is what reddened CI on this
+/// card, and the shared dev database hid it because both schemas were already
+/// populated there.
+#[cfg(test)]
+pub(crate) const PUBLIC_SEARCH_PATH: &str = "public";
+
 /// Chat's squash manifest (MAIN-235); see `nook_control::SQUASH_MANIFEST`.
 static SQUASH_MANIFEST: &str = include_str!("../migrations/squash-manifest.txt");
 
@@ -81,7 +100,7 @@ async fn main() -> anyhow::Result<()> {
 
     // The engine picks the pool, exactly as nook-control's boot does (MAIN-196
     // AC-2, mirrored here by MAIN-294).
-    let db = open_pool(&cfg.database_url, 10).await?;
+    let db = open_pool(&cfg.database_url, 10, CHAT_SEARCH_PATH).await?;
     // The schema must exist before the migrator creates chat._sqlx_migrations.
     // A no-op on SQLite, which has no schemas — see the function.
     ensure_chat_schema(&db).await?;
@@ -216,10 +235,14 @@ async fn main() -> anyhow::Result<()> {
 /// separate and the ordinary `nook_db::connect` is exactly right. Chat's SQLite
 /// track names its tables `chat_*` outright, which is what makes one namespace
 /// safe to share with the control plane's.
-pub(crate) async fn open_pool(url: &str, max_connections: u32) -> anyhow::Result<nook_db::DbPool> {
+pub(crate) async fn open_pool(
+    url: &str,
+    max_connections: u32,
+    search_path: &str,
+) -> anyhow::Result<nook_db::DbPool> {
     match nook_db::engine_from_url(url)? {
         nook_db::Engine::Postgres => {
-            let opts = PgConnectOptions::from_str(url)?.options([("search_path", "chat,public")]);
+            let opts = PgConnectOptions::from_str(url)?.options([("search_path", search_path)]);
             Ok(nook_db::EnginePool::from_pg(
                 PgPoolOptions::new()
                     .max_connections(max_connections)

@@ -80,10 +80,20 @@ pub(crate) async fn chat_test(what: &str) -> Option<ChatTest> {
             // Two pools, as before: the bootstrap one runs in `public` so the
             // control plane's migrator lands its tables there, then the service's
             // own `chat,public` pool runs chat's migrator into the `chat` schema.
-            let bootstrap = crate::open_pool(&url, 2).await.ok()?;
+            // `public`, NOT the service's `chat,public`: this pool exists to
+            // run the CONTROL PLANE's migrator, and over a chat-first path that
+            // would create the control plane's tables and ledger inside `chat`,
+            // colliding with chat's own. Exactly what the original per-module
+            // bootstrap did, and what CI caught when this helper first collapsed
+            // the two pools onto one constructor.
+            let bootstrap = crate::open_pool(&url, 2, crate::PUBLIC_SEARCH_PATH)
+                .await
+                .ok()?;
             crate::ensure_chat_schema(&bootstrap).await.ok()?;
             nook_control::MIGRATOR.run(bootstrap.pg()).await.ok()?;
-            let db = crate::open_pool(&url, 4).await.ok()?;
+            let db = crate::open_pool(&url, 4, crate::CHAT_SEARCH_PATH)
+                .await
+                .ok()?;
             crate::MIGRATOR.run(db.pg()).await.ok()?;
             Some(ChatTest {
                 state: state_over(db),
