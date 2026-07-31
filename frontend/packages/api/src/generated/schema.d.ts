@@ -2933,6 +2933,31 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workspaces/{id}/reconcile-status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * `GET /api/v1/workspaces/{id}/reconcile-status` — desired vs actual (MAIN-319).
+         * @description Runs the reconciler's OWN planner against the reconciler's own view of the
+         *     fleet. A second implementation would drift, and the first symptom would be a
+         *     UI confidently reporting a placement the loop does not agree with.
+         *
+         *     Tenant-scoped like every other workspace read (AC-4): a workspace in another
+         *     tenant is not found, so this cannot report on somebody else's fleet.
+         */
+        get: operations["get_reconcile_status"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workspaces/{id}/secrets": {
         parameters: {
             query?: never;
@@ -4984,6 +5009,54 @@ export interface components {
              *     never be enough to read one.
              */
             passphrase: string;
+        };
+        /** @description A node the reconciler cannot use yet, and why (MAIN-319). */
+        ReconcileBlocker: {
+            node_id: components["schemas"]["NodeId"];
+            node_name: string;
+            /**
+             * @description `needs_clone` — matches the selector and tolerates the taints, but the
+             *     workspace's checkout is not on it yet (MAIN-317 clones it).
+             */
+            reason: string;
+        };
+        /**
+         * @description Desired versus actual for one workspace (MAIN-319 AC-3).
+         *
+         *     Computed by the SAME planner the reconciler runs, so the number on screen is
+         *     the number the loop is acting on rather than a second opinion about it.
+         */
+        ReconcileStatus: {
+            /** @description Nodes that match but cannot be used yet. */
+            blocked: components["schemas"]["ReconcileBlocker"][];
+            /** Format: int32 */
+            desired: number;
+            /**
+             * Format: int32
+             * @description How many nodes match the selector and tolerate the taints.
+             */
+            eligible: number;
+            /**
+             * @description Whether reconciling is on for this tenant. A workspace can declare a
+             *     spec with the switch off, and then nothing converges — which looks
+             *     identical to "broken" unless the UI says so.
+             */
+            enabled: boolean;
+            /**
+             * @description `false` when the workspace declares no spec at all: unmanaged, which is
+             *     not the same as managed-and-wanting-zero.
+             */
+            managed: boolean;
+            /**
+             * Format: int32
+             * @description Live managed sessions right now.
+             */
+            running: number;
+            /**
+             * Format: int32
+             * @description `desired - placed`: asked for more than the fleet can host.
+             */
+            shortfall: number;
         };
         /**
          * @description Register a local account against a pending invite (MAIN-98). The email is
@@ -11490,6 +11563,33 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["Note"];
                 };
+            };
+        };
+    };
+    get_reconcile_status: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ReconcileStatus"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
         };
     };

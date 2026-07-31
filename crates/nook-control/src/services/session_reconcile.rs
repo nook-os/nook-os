@@ -425,7 +425,11 @@ async fn reconcile_workspace(
 
 /// Facts for every node in the tenant, including whether this workspace's
 /// checkout is already there.
-async fn node_facts(
+///
+/// `pub(crate)` so the status endpoint (MAIN-319) reads the world exactly as
+/// the loop does. A second gatherer would drift, and the first symptom would be
+/// a UI confidently reporting a placement the reconciler does not agree with.
+pub(crate) async fn node_facts(
     state: &AppState,
     tenant: TenantId,
     workspace: WorkspaceId,

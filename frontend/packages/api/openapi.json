@@ -6741,6 +6741,41 @@
         }
       }
     },
+    "/api/v1/workspaces/{id}/reconcile-status": {
+      "get": {
+        "tags": [
+          "crate::routes::workspaces"
+        ],
+        "summary": "`GET /api/v1/workspaces/{id}/reconcile-status` — desired vs actual (MAIN-319).",
+        "description": "Runs the reconciler's OWN planner against the reconciler's own view of the\nfleet. A second implementation would drift, and the first symptom would be a\nUI confidently reporting a placement the loop does not agree with.\n\nTenant-scoped like every other workspace read (AC-4): a workspace in another\ntenant is not found, so this cannot report on somebody else's fleet.",
+        "operationId": "get_reconcile_status",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReconcileStatus"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      }
+    },
     "/api/v1/workspaces/{id}/secrets": {
       "get": {
         "tags": [
@@ -11593,6 +11628,80 @@
           "passphrase": {
             "type": "string",
             "description": "The app password. Required, not optional: a `.env` moves between\nmachines, so it is sealed with something the server never stores\nbefore the app key wraps it. A database dump plus `SECRETS_KEY` must\nnever be enough to read one."
+          }
+        }
+      },
+      "ReconcileBlocker": {
+        "type": "object",
+        "description": "A node the reconciler cannot use yet, and why (MAIN-319).",
+        "required": [
+          "node_id",
+          "node_name",
+          "reason"
+        ],
+        "properties": {
+          "node_id": {
+            "$ref": "#/components/schemas/NodeId"
+          },
+          "node_name": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string",
+            "description": "`needs_clone` — matches the selector and tolerates the taints, but the\nworkspace's checkout is not on it yet (MAIN-317 clones it)."
+          }
+        }
+      },
+      "ReconcileStatus": {
+        "type": "object",
+        "description": "Desired versus actual for one workspace (MAIN-319 AC-3).\n\nComputed by the SAME planner the reconciler runs, so the number on screen is\nthe number the loop is acting on rather than a second opinion about it.",
+        "required": [
+          "enabled",
+          "managed",
+          "desired",
+          "running",
+          "shortfall",
+          "blocked",
+          "eligible"
+        ],
+        "properties": {
+          "blocked": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ReconcileBlocker"
+            },
+            "description": "Nodes that match but cannot be used yet."
+          },
+          "desired": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "eligible": {
+            "type": "integer",
+            "format": "int32",
+            "description": "How many nodes match the selector and tolerate the taints.",
+            "minimum": 0
+          },
+          "enabled": {
+            "type": "boolean",
+            "description": "Whether reconciling is on for this tenant. A workspace can declare a\nspec with the switch off, and then nothing converges — which looks\nidentical to \"broken\" unless the UI says so."
+          },
+          "managed": {
+            "type": "boolean",
+            "description": "`false` when the workspace declares no spec at all: unmanaged, which is\nnot the same as managed-and-wanting-zero."
+          },
+          "running": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Live managed sessions right now.",
+            "minimum": 0
+          },
+          "shortfall": {
+            "type": "integer",
+            "format": "int32",
+            "description": "`desired - placed`: asked for more than the fleet can host.",
+            "minimum": 0
           }
         }
       },

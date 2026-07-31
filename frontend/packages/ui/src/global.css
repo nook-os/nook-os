@@ -1823,6 +1823,36 @@ table.nook-table tr.clickable { cursor: pointer; }
   border-bottom: 1px solid var(--nook-border);
 }
 
+/* ── Declare / placement editors (MAIN-319) ─────────────────────────────── */
+
+.policy-summary { padding: 10px; line-height: 1.7; }
+
+.policy-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 10px;
+}
+.policy-editor label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--nook-fg-dim);
+}
+.policy-editor label .input { width: 180px; }
+
+/* Key/value rows. A grid rather than flex so every row's remove button lines
+   up regardless of how long the values are. */
+.policy-pair {
+  display: grid;
+  grid-template-columns: 1fr 1fr auto;
+  gap: 6px;
+  margin: 6px 0;
+  max-width: 420px;
+}
+
+.policy-actions { display: flex; gap: 8px; }
+
 /* ── Runtime picker ─────────────────────────────────────────────────────── */
 
 .runtime-chip {

@@ -8,6 +8,7 @@ import { AgentVersion, NodeFacts, useControlPlaneVersion } from "../NodeFacts";
 import { askConfirm, notify } from "../dialogs";
 import { useLive } from "../live";
 import { AddNodeModal } from "../AddNodeModal";
+import { NodePlacement } from "../NodePlacement";
 
 export function NodesPage() {
   const [adding, setAdding] = useState(false);
@@ -377,6 +378,10 @@ function AgentAuthPanel({ node }: { node: { id: string; capabilities: unknown } 
 
 export function NodeDetail() {
   const { id } = useParams<{ id: string }>();
+  const { data: me } = useQuery({
+    queryKey: ["me"],
+    queryFn: async () => (await api.GET("/api/v1/auth/me")).data ?? null,
+  });
   const { data: node } = useQuery({
     queryKey: ["nodes", id],
     queryFn: async () =>
@@ -401,6 +406,13 @@ export function NodeDetail() {
       className="nook-grid"
       style={{ gridTemplateColumns: "1.2fr 1fr", gridTemplateRows: "auto 1fr" }}
     >
+      {/* The inputs placement reads (MAIN-319 AC-2). Owner-only to edit — the
+          server enforces it; this only avoids offering a button that 403s. */}
+      <NodePlacement
+        nodeId={node.id}
+        canEdit={!!me?.person_id && node.owner_person_id === me.person_id}
+      />
+
       <Panel
         title={`SSH key · ${node.name}`}
         actions={
