@@ -42,6 +42,23 @@ from a test). The shared `DATABASE_URL` database serves only the running dev
 stack. (Global-count assertions still make no sense — but that's ordinary test
 hygiene now, not a shared-DB workaround.)
 
+## Comments — the exception, not the default
+
+Write code that does not need explaining, then explain only what code cannot say.
+If a comment could be deleted without losing information, delete it.
+
+- **Keep** — the non-obvious WHY: why this way and not the obvious way; a
+  constraint you cannot see from here; the bug this shape prevents (name the
+  card); an invariant a reader could otherwise break.
+- **Cut** — anything the code already says: restating the line below, narrating
+  the next step, section banners, doc comments that re-say the function name, a
+  TODO with no owner.
+
+A comment that can go stale is a liability — prefer a name, a type or a test,
+which cannot. This tree is ~16% comment lines and much of that is narration
+nobody now dares delete; do not add to it. Equally, this is not a licence to
+strip existing comments: leave them unless you are changing that code.
+
 ## Database workflow (bootstrap phase)
 
 - **Migrations are append-only.** `0001_init.sql` is the whole schema and is frozen. Schema changes are NEW numbered files starting at `0002_…`.
