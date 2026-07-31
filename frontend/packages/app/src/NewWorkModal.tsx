@@ -7,7 +7,7 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "react-router-dom";
-import { FolderGit2, Sparkles, X } from "lucide-react";
+import { X } from "lucide-react";
 import { api, type NodeInfo } from "@nookos/api";
 import { defaultRuntime, RuntimePicker } from "@nookos/ui";
 import { useNewWork } from "./newwork";
@@ -41,7 +41,9 @@ function NewWorkModal() {
   const queryClient = useQueryClient();
 
   const taskId = seed.taskId;
-  const [tab, setTab] = useState<Tab>(seed.workspaceId ? "existing" : "new");
+  // Seed-driven, not user-switchable: the tab bar is gone. A workspace-scoped
+  // open (add-worktree, task) shows the existing view; everything else deploys.
+  const [tab] = useState<Tab>(seed.workspaceId ? "existing" : "new");
   const [query, setQuery] = useState(""); // new-tab input (URL or name)
   const [filter, setFilter] = useState(""); // existing-tab filter
   const [selectedId, setSelectedId] = useState<string | null>(seed.workspaceId ?? null);
@@ -137,15 +139,44 @@ function NewWorkModal() {
     ((effectiveNode?.capabilities as Record<string, unknown>)?.runtimes as string[]) ??
     ["bash"];
 
+  // Declarative "New Workspace": you don't pick a node, you declare intent and
+  // the reconciler places it. The runtime choices are therefore the UNION of
+  // what the whole fleet can launch, not one node's — a workspace asking for
+  // `claude` will only land where claude exists (the reconciler's eligibility).
+  const fleetRuntimes = useMemo(() => {
+    const set = new Set<string>();
+    for (const n of nodes ?? [])
+      for (const r of ((n.capabilities as Record<string, unknown>)?.runtimes as
+        | string[]
+        | undefined) ?? [])
+        set.add(r);
+    return set.size ? [...set] : ["bash"];
+  }, [nodes]);
+  // "repo replicas": how many NODES hold a clone. Within each, every checkout
+  // (clone + worktrees) gets a session — the per-worktree half of the model.
+  const [replicaMode, setReplicaMode] = useState<"single" | "all" | "count">("all");
+  const [replicaCount, setReplicaCount] = useState(2);
+  const [selector, setSelector] = useState(""); // "key=val, k2=v2" (optional)
+
+  // The declarative path IS the New tab (unless it's a task-start, which acts on
+  // one node now). You give a repo and how to run it, and the fleet converges —
+  // cloning, worktrees and placement all move server-side (the reconciler). The
+  // fields show as soon as the tab opens, so the model is visible before you
+  // type; the submit needs a real repo URL (canGo gates on it).
+  const declarative = tab === "new" && !taskId;
+  const pickerRuntimes = declarative ? fleetRuntimes : runtimes;
+
   // Starting work here means starting an agent on it: if the node has claude,
   // that's what the session opens with. (A plain shell is one click away in
   // the picker, and `defaultRuntime` still governs new terminals elsewhere,
   // where a shell is the right answer.)
   useEffect(() => {
-    if (!runtimes.includes(runtime)) {
-      setRuntime(runtimes.includes("claude") ? "claude" : defaultRuntime(runtimes));
+    if (!pickerRuntimes.includes(runtime)) {
+      setRuntime(
+        pickerRuntimes.includes("claude") ? "claude" : defaultRuntime(pickerRuntimes),
+      );
     }
-  }, [runtimes.join(",")]);
+  }, [pickerRuntimes.join(",")]);
 
   const resolveNode = async (): Promise<string> => {
     if (nodeId !== AUTO) return nodeId;
@@ -223,10 +254,55 @@ function NewWorkModal() {
     if (data) navigate(`/sessions/${data.id}`);
   };
 
+  /** Parse "os=linux, gpu=yes" into a selector map; blank keys/values dropped. */
+  const parseSelector = (): Record<string, string> => {
+    const out: Record<string, string> = {};
+    for (const pair of selector.split(",")) {
+      const [k, v] = pair.split("=").map((s) => s.trim());
+      if (k && v) out[k] = v;
+    }
+    return out;
+  };
+
+  const replicasSpec = () =>
+    replicaMode === "count"
+      ? { kind: "count", count: Math.max(0, replicaCount) }
+      : { kind: replicaMode };
+
+  /** The declarative path: register the repo and DECLARE how to run it. No node
+   *  pick, no clone here — the reconciler clones onto eligible nodes and starts
+   *  one session per checkout. Returns nothing; navigates to the workspace. */
+  const createDeclarative = async () => {
+    const { data: ws, error } = await api.POST("/api/v1/workspaces", {
+      body: { name: repoLabel(q), git_remote_url: q.trim() },
+    });
+    if (error || !ws) throw new Error(JSON.stringify(error) || "could not create workspace");
+    const { error: specErr } = await api.PUT("/api/v1/workspaces/{id}/session-spec", {
+      params: { path: { id: ws.id } },
+      body: {
+        spec: {
+          runtime,
+          node_selector: parseSelector(),
+          tolerations: [],
+          replicas: replicasSpec() as never,
+        },
+      },
+    });
+    if (specErr) throw new Error(JSON.stringify(specErr));
+    queryClient.invalidateQueries();
+    navigate(`/workspaces/${ws.id}`);
+    hide();
+  };
+
   const go = async () => {
     setBusy(true);
     setStatus(null);
     try {
+      // Declarative "New Workspace" short-circuits the whole imperative flow.
+      if (declarative) {
+        await createDeclarative();
+        return;
+      }
       const node = await resolveNode();
       let ws = selectedWorkspace?.id ?? "";
       // Cloning can take minutes. Kick it off, let the HUD follow it, and
@@ -337,53 +413,50 @@ function NewWorkModal() {
     }
   };
 
-  const canGo =
-    (tab === "new" ? newIntent !== null : !!selectedWorkspace) &&
-    (nodeId !== AUTO || !!autoPick?.node_id || online.length > 0);
+  const canGo = declarative
+    ? // Declarative deploy needs a real repo URL and nothing else — no online
+      // node up front, the reconciler waits for one.
+      looksLikeGitUrl(query)
+    : (tab === "new" ? newIntent !== null : !!selectedWorkspace) &&
+      // Every imperative path (task-start, ad-hoc on an existing workspace)
+      // still needs a machine to act on now.
+      (nodeId !== AUTO || !!autoPick?.node_id || online.length > 0);
 
   return (
     <div className="modal-backdrop" onMouseDown={hide}>
       <div className="modal" onMouseDown={(e) => e.stopPropagation()}>
         <div className="modal-header">
-          <span>{taskId ? "// start work on task" : "// new work"}</span>
+          <span>{taskId ? "// start work on task" : "// new workspace"}</span>
           <button className="btn small" onClick={hide}>
             <X size={13} />
           </button>
         </div>
 
         <div className="modal-body">
-          <div className="mode-tabs">
-            <button
-              className={`mode-tab${tab === "new" ? " active" : ""}`}
-              onClick={() => setTab("new")}
-            >
-              <Sparkles size={14} /> New — clone or create
-            </button>
-            <button
-              className={`mode-tab${tab === "existing" ? " active" : ""}`}
-              onClick={() => setTab("existing")}
-            >
-              <FolderGit2 size={14} /> Existing workspace
-            </button>
-          </div>
-
+          {/* No more "new vs existing" tabs: deploying a repo is declarative and
+              the reconciler owns placement, so there is no hand-run "start a
+              session on an existing workspace" anymore. The workspace-scoped
+              opens (add-worktree from Mission, task start-work) still drive their
+              own view via the seed; there is just no user-facing tab to switch. */}
           {tab === "new" ? (
             <>
               <div className="field">
                 <label>
-                  Repository URL or new project name
-                  {newIntent === "clone" && <span className="intent-chip info">→ clone</span>}
-                  {newIntent === "project" && <span className="intent-chip accent">→ new project</span>}
+                  Repository URL
+                  {newIntent === "clone" && <span className="intent-chip info">→ deploy</span>}
+                  {query.trim() && newIntent !== "clone" && (
+                    <span className="intent-chip">enter a git URL</span>
+                  )}
                 </label>
                 <input
                   className="input mono"
-                  placeholder="https://github.com/org/repo · git@github.com:org/repo.git · my-new-service"
+                  placeholder="https://github.com/org/repo · git@github.com:org/repo.git"
                   value={query}
                   onChange={(e) => setQuery(e.target.value)}
                   autoFocus
                 />
               </div>
-              {newIntent === "clone" && (
+              {newIntent === "clone" && !declarative && (
                 <div className="field">
                   <label>SSH credential (for private repos)</label>
                   <select className="input" value={credentialId} onChange={(e) => setCredentialId(e.target.value)}>
@@ -425,7 +498,7 @@ function NewWorkModal() {
             </div>
           )}
 
-          {!taskId && (
+          {!taskId && !declarative && (
             <label className="check-row">
               <input
                 type="checkbox"
@@ -451,43 +524,106 @@ function NewWorkModal() {
             </div>
           )}
 
-          <div className="field">
-            <label>
-              Where (node)
-              {nodeId === AUTO && effectiveNode && (
-                <span className="faint"> · Auto → {effectiveNode.name}</span>
+          {/* Declarative mode picks the node(s) for you — you declare intent,
+              the reconciler places it. The imperative paths (task-start, ad-hoc
+              on an existing workspace) still pick a machine. */}
+          {!declarative && (
+            <div className="field">
+              <label>
+                Where (node)
+                {nodeId === AUTO && effectiveNode && (
+                  <span className="faint"> · Auto → {effectiveNode.name}</span>
+                )}
+              </label>
+              {(nodes ?? []).length === 0 ? (
+                // No machine to run on — browse-only, so explain rather than
+                // showing an empty picker that can't start anything (MAIN-132).
+                <div className="empty" style={{ height: "auto", padding: 14 }}>
+                  No machines yet — run <span className="mono">nook join</span> on a
+                  computer to add one.
+                </div>
+              ) : (
+                <select className="input" value={nodeId} onChange={(e) => setNodeId(e.target.value)}>
+                  <option value={AUTO}>Auto (best available)</option>
+                  {eligibleNodes.map((n) => {
+                    // A shared node belongs to a teammate — label it so nobody
+                    // mistakes it for their own machine (MAIN-136 AC-3).
+                    const sharedTag =
+                      n.shared && n.owner_person_id !== me?.person_id ? " · shared" : "";
+                    return (
+                      <option key={n.id} value={n.id}>
+                        {n.name} · {n.platform}
+                        {sharedTag}
+                      </option>
+                    );
+                  })}
+                </select>
               )}
-            </label>
-            {(nodes ?? []).length === 0 ? (
-              // No machine to run on — browse-only, so explain rather than
-              // showing an empty picker that can't start anything (MAIN-132).
-              <div className="empty" style={{ height: "auto", padding: 14 }}>
-                No machines yet — run <span className="mono">nook join</span> on a
-                computer to add one.
-              </div>
-            ) : (
-              <select className="input" value={nodeId} onChange={(e) => setNodeId(e.target.value)}>
-                <option value={AUTO}>Auto (best available)</option>
-                {eligibleNodes.map((n) => {
-                  // A shared node belongs to a teammate — label it so nobody
-                  // mistakes it for their own machine (MAIN-136 AC-3).
-                  const sharedTag =
-                    n.shared && n.owner_person_id !== me?.person_id ? " · shared" : "";
-                  return (
-                    <option key={n.id} value={n.id}>
-                      {n.name} · {n.platform}
-                      {sharedTag}
-                    </option>
-                  );
-                })}
-              </select>
-            )}
-          </div>
+            </div>
+          )}
 
           <div className="field">
             <label>Runtime — a session runs an AI agent or a shell, your pick</label>
-            <RuntimePicker available={runtimes} value={runtime} onChange={setRuntime} />
+            <RuntimePicker available={pickerRuntimes} value={runtime} onChange={setRuntime} />
           </div>
+
+          {declarative && (
+            <>
+              <div className="field">
+                <label>
+                  Replicas — how many machines hold a clone of the repo{" "}
+                  <span className="faint">
+                    (each also gets a session per worktree)
+                  </span>
+                </label>
+                <div className="mode-tabs" style={{ marginTop: 2 }}>
+                  <button
+                    className={`mode-tab${replicaMode === "single" ? " active" : ""}`}
+                    onClick={() => setReplicaMode("single")}
+                  >
+                    One node
+                  </button>
+                  <button
+                    className={`mode-tab${replicaMode === "all" ? " active" : ""}`}
+                    onClick={() => setReplicaMode("all")}
+                  >
+                    Every eligible node
+                  </button>
+                  <button
+                    className={`mode-tab${replicaMode === "count" ? " active" : ""}`}
+                    onClick={() => setReplicaMode("count")}
+                  >
+                    A set number
+                  </button>
+                </div>
+                {replicaMode === "count" && (
+                  <input
+                    className="input mono"
+                    style={{ marginTop: 6, maxWidth: 120 }}
+                    type="number"
+                    min={0}
+                    value={replicaCount}
+                    onChange={(e) => setReplicaCount(Number(e.target.value))}
+                  />
+                )}
+              </div>
+
+              <div className="field">
+                <label>
+                  Node selector{" "}
+                  <span className="faint">
+                    (optional — e.g. <span className="mono">os=linux, gpu=yes</span>; blank = anywhere)
+                  </span>
+                </label>
+                <input
+                  className="input mono"
+                  placeholder="os=linux, gpu=yes"
+                  value={selector}
+                  onChange={(e) => setSelector(e.target.value)}
+                />
+              </div>
+            </>
+          )}
 
           <div className="field">
             <label>
@@ -515,10 +651,21 @@ function NewWorkModal() {
 
         <div className="modal-footer">
           <button className="btn primary" onClick={go} disabled={!canGo || busy}>
-            {busy ? "working…" : "start work"}
+            {busy
+              ? "working…"
+              : declarative
+                ? "Create & deploy"
+                : taskId
+                  ? "start work"
+                  : "start work"}
           </button>
           <button className="btn" onClick={hide} disabled={busy}>cancel</button>
           {status && <span className="muted small">{status}</span>}
+          {declarative && !status && (
+            <span className="muted small">
+              the fleet clones it and starts sessions — no machine to pick
+            </span>
+          )}
         </div>
       </div>
     </div>

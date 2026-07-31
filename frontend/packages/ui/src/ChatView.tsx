@@ -81,6 +81,13 @@ export interface ChatViewProps {
   /** Disable the composer (e.g. no channel selected). */
   disabled?: boolean;
   placeholder?: string;
+  /** The submit button's label. Defaults to "Send"; the loop reuses this box to
+   *  START a run, where "Draft a spec" / "Decompose" reads truer than "Send". */
+  sendLabel?: string;
+  /** Allow submitting an empty box. Off by default — an empty steer or reply is
+   *  never meaningful. The loop's SEED mode turns it on: sending an empty seed
+   *  is a real action ("start the run, read the ticket alone"). */
+  allowEmpty?: boolean;
   /** Shown when there are no messages. */
   emptyLabel?: string;
   /** Retry a failed optimistic send. */
@@ -371,6 +378,8 @@ export function ChatView({
   currentUserId,
   disabled = false,
   placeholder = "Message…",
+  sendLabel = "Send",
+  allowEmpty = false,
   emptyLabel = "No messages yet.",
   onRetry,
   onOpenThread,
@@ -445,10 +454,10 @@ export function ChatView({
 
   const submit = useCallback(() => {
     const body = draft.trim();
-    if (!body || disabled) return;
+    if (disabled || (!body && !allowEmpty)) return;
     onSend(body);
     setDraft("");
-  }, [draft, disabled, onSend]);
+  }, [draft, disabled, allowEmpty, onSend]);
 
   const onKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -496,6 +505,7 @@ export function ChatView({
             return (
               <div
                 key={m.id}
+                data-author={m.authorId}
                 className={`chat-msg${head ? " head" : ""}${mine ? " mine" : ""}${
                   m.pending ? " pending" : ""
                 }${m.failed ? " failed" : ""}${m.deleted ? " deleted" : ""}`}
@@ -622,10 +632,10 @@ export function ChatView({
           type="button"
           className="chat-send"
           title="Send message"
-          disabled={disabled || draft.trim().length === 0}
+          disabled={disabled || (draft.trim().length === 0 && !allowEmpty)}
           onClick={submit}
         >
-          Send
+          {sendLabel}
         </button>
       </div>
       )}

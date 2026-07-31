@@ -64,13 +64,13 @@ export function WorkspacesPage() {
         title={`Workspaces (${(workspaces ?? []).length})`}
         actions={
           <button className="btn primary small" onClick={() => showNewWork()}>
-            <Plus size={12} /> New Work
+            <Plus size={12} /> New Workspace
           </button>
         }
       >
         {(workspaces ?? []).length === 0 ? (
           <Empty>
-            No workspaces yet. Hit <b>+ New Work</b> to clone a repo or start a
+            No workspaces yet. Hit <b>+ New Workspace</b> to clone a repo or start a
             new project — or join a node and its repositories appear here.
           </Empty>
         ) : (
@@ -338,7 +338,7 @@ export function WorkspaceDetail() {
     if (!ws?.git_remote_url) {
       await notify(
         "No stored repo URL",
-        "This workspace doesn't know its git remote yet. Clone it once with an explicit URL (+ New Work) and it will remember it.",
+        "This workspace doesn't know its git remote yet. Clone it once with an explicit URL (+ New Workspace) and it will remember it.",
       );
       return;
     }

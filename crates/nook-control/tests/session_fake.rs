@@ -214,7 +214,7 @@ async fn a_sessions_checkout_summary_is_filled_from_its_binding() {
     let node = NodeId::new();
     workspaces.add_node(node, t, "workshop", "online");
     let ws = workspaces
-        .create(t, "widgets", "widgets", None)
+        .create(t, "widgets", "widgets", None, None)
         .await
         .unwrap();
     workspaces
@@ -271,7 +271,7 @@ async fn a_tombstoned_checkout_is_not_offered_to_start_a_session_in() {
     let workspaces = FakeWorkspaceRepository::new();
     let t = tenant();
     let node = NodeId::new();
-    let ws = workspaces.create(t, "w", "w", None).await.unwrap();
+    let ws = workspaces.create(t, "w", "w", None, None).await.unwrap();
     for (path, kind) in [("/srv/w", "clone"), ("/srv/w-feat", "worktree")] {
         workspaces
             .upsert_checkout(CheckoutUpsert {

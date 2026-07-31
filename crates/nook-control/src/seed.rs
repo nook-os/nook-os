@@ -659,6 +659,24 @@ pub async fn run(db: &DbPool, cfg: &Config) -> Result<()> {
         )
         .await?;
 
+        // Session reconcile ON for this tenant too. Off is the shipped default
+        // and stays so everywhere else — but the dogfood tenant is where the
+        // point is that the fleet declaratively holds a live terminal wherever a
+        // workspace is checked out, so the operator node grows a managed bash
+        // session for nook-dogfood without anyone opening "+ New Workspace".
+        db.exec(
+            "INSERT INTO settings (id, tenant_id, scope, user_id, key, value)
+         VALUES ($1, $2, 'tenant', NULL, $3, $4)
+         ON CONFLICT (tenant_id, scope, user_id, key) DO UPDATE SET value = EXCLUDED.value",
+            params![
+                uuid::Uuid::now_v7(),
+                tenant.id,
+                crate::services::session_reconcile::KEY,
+                serde_json::Value::Bool(true)
+            ],
+        )
+        .await?;
+
         if dogfood_exists.is_none() {
             // A LOCAL path, not a `git@` remote (AC-2): the operator node clones it
             // with no ssh key, no credential, and no network. `run.sh` creates the
@@ -666,10 +684,17 @@ pub async fn run(db: &DbPool, cfg: &Config) -> Result<()> {
             // have to agree, which is why the path is spelled out in both places
             // and nowhere else.
             let ws_id = WorkspaceId::new();
+            // The normalized remote MUST be what `discovery::normalize_remote`
+            // produces (it strips `.git` and lowercases), or clone-on-demand's
+            // discovered checkout won't match this workspace — discovery would
+            // instead auto-create a DUPLICATE workspace under the normalized name,
+            // and the dogfood workspace would never grow a managed session.
+            let dogfood_normalized =
+                crate::services::discovery::normalize_remote(DOGFOOD_REPO_PATH);
             db.exec(
             "INSERT INTO workspaces (id, tenant_id, name, slug, git_remote_url, git_remote_normalized)
-             VALUES ($1, $2, 'nook-dogfood', $3, $4, $4)",
-            params![ws_id, tenant.id, dogfood_slug, DOGFOOD_REPO_PATH],
+             VALUES ($1, $2, 'nook-dogfood', $3, $4, $5)",
+            params![ws_id, tenant.id, dogfood_slug, DOGFOOD_REPO_PATH, dogfood_normalized],
         )
         .await?;
 

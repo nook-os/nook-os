@@ -116,7 +116,13 @@ pub trait SessionRepository: Send + Sync {
 
     async fn delete(&self, id: SessionId, tenant: TenantId) -> ApiResult<u64>;
 
-    /// The LIVE managed sessions of one workspace, as `(session, node)`.
+    /// The LIVE managed sessions of one workspace, as `(session, checkout, node)`.
+    ///
+    /// Keyed on the CHECKOUT now, not the node: a node holding a clone plus
+    /// worktrees runs one managed session per checkout, so the reconciler counts
+    /// checkouts. The node rides along because stopping one means killing the
+    /// process on that machine. Managed rows always carry a checkout_id, and a
+    /// stray null one is excluded — it could never be matched to a checkout slot.
     ///
     /// Live only: an exited managed session is a gap the reconciler fills, not
     /// a replica it already has. Managed only: this is the query that makes
@@ -125,7 +131,7 @@ pub trait SessionRepository: Send + Sync {
         &self,
         tenant: TenantId,
         workspace: WorkspaceId,
-    ) -> ApiResult<Vec<(SessionId, NodeId)>>;
+    ) -> ApiResult<Vec<(SessionId, NodeWorkspaceId, NodeId)>>;
 
     /// End a managed session — the scale-down half of converging.
     async fn mark_ended(&self, tenant: TenantId, id: SessionId) -> ApiResult<u64>;
@@ -339,14 +345,15 @@ impl SessionRepository for DbSessionRepository {
         &self,
         tenant: TenantId,
         workspace: WorkspaceId,
-    ) -> ApiResult<Vec<(SessionId, NodeId)>> {
+    ) -> ApiResult<Vec<(SessionId, NodeWorkspaceId, NodeId)>> {
         Ok(self
             .db
             .query_all(
-                "SELECT id, node_id FROM sessions
+                "SELECT id, checkout_id, node_id FROM sessions
                  WHERE tenant_id = $1 AND workspace_id = $2 AND managed
+                   AND checkout_id IS NOT NULL
                    AND status IN ('starting', 'running', 'detached')
-                 ORDER BY node_id",
+                 ORDER BY checkout_id",
                 params![tenant, workspace],
             )
             .await?)
@@ -463,20 +470,22 @@ impl SessionRepository for FakeSessionRepository {
     async fn create(&self, new: NewSession) -> ApiResult<Session> {
         let now = chrono::Utc::now();
         // The real table refuses a second LIVE managed session on the same
-        // (workspace, node) via a unique index, and that refusal is what
-        // arbitrates the reconciler's race. A fake that accepted it would let a
-        // caller test pass against behaviour the database does not have.
+        // CHECKOUT via a unique index, and that refusal is what arbitrates the
+        // reconciler's race. A fake that accepted it would let a caller test pass
+        // against behaviour the database does not have. Null checkout is excluded
+        // exactly as the partial index excludes it.
         if new.managed {
             let rows = self.inner.lock().unwrap();
             let managed = self.managed.lock().unwrap();
-            if rows.iter().any(|x| {
-                managed.contains(&x.id)
-                    && x.workspace_id == new.workspace_id
-                    && x.node_id == new.node_id
-                    && matches!(x.status.as_str(), "starting" | "running" | "detached")
-            }) {
+            if new.checkout_id.is_some()
+                && rows.iter().any(|x| {
+                    managed.contains(&x.id)
+                        && x.checkout_id == new.checkout_id
+                        && matches!(x.status.as_str(), "starting" | "running" | "detached")
+                })
+            {
                 return Err(crate::error::ApiError::Conflict(
-                    "a managed session already exists on that node".into(),
+                    "a managed session already exists on that checkout".into(),
                 ));
             }
         }
@@ -496,6 +505,7 @@ impl SessionRepository for FakeSessionRepository {
             ended_at: None,
             checkout_id: new.checkout_id,
             checkout: None,
+            node_online: None,
         };
         if new.managed {
             self.managed.lock().unwrap().insert(session.id);
@@ -622,9 +632,9 @@ impl SessionRepository for FakeSessionRepository {
         &self,
         tenant: TenantId,
         workspace: WorkspaceId,
-    ) -> ApiResult<Vec<(SessionId, NodeId)>> {
+    ) -> ApiResult<Vec<(SessionId, NodeWorkspaceId, NodeId)>> {
         let managed = self.managed.lock().unwrap();
-        let mut out: Vec<(SessionId, NodeId)> = self
+        let mut out: Vec<(SessionId, NodeWorkspaceId, NodeId)> = self
             .inner
             .lock()
             .unwrap()
@@ -633,11 +643,12 @@ impl SessionRepository for FakeSessionRepository {
                 x.tenant_id == tenant
                     && x.workspace_id == Some(workspace)
                     && managed.contains(&x.id)
+                    && x.checkout_id.is_some()
                     && matches!(x.status.as_str(), "starting" | "running" | "detached")
             })
-            .map(|x| (x.id, x.node_id))
+            .map(|x| (x.id, x.checkout_id.unwrap(), x.node_id))
             .collect();
-        out.sort_by_key(|(_, n)| n.0);
+        out.sort_by_key(|(_, c, _)| c.0);
         Ok(out)
     }
 

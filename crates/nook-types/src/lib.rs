@@ -844,6 +844,15 @@ pub struct Session {
     #[serde(default)]
     #[db(skip)]
     pub checkout: Option<CheckoutSummary>,
+    /// Whether the session's node holds a LIVE WebSocket right now — the honest
+    /// signal `nodes.status` cannot give, because a seeded/synthetic node can
+    /// read `online` in the database while never having connected. `None` when
+    /// not computed (list rows); the detail endpoint fills it from the registry
+    /// so the UI can tell "the terminal is streaming" from "its node is gone"
+    /// instead of retrying a dead attach forever. Not stored (`#[db(skip)]`).
+    #[serde(default)]
+    #[db(skip)]
+    pub node_online: Option<bool>,
 }
 
 /// Where a session runs, in the shape the UI needs to show it (MAIN-222 AC-5):
@@ -1805,6 +1814,11 @@ pub struct OverviewTask {
 pub struct CreateWorkspaceRequest {
     pub name: String,
     pub description: Option<String>,
+    /// The git remote this workspace is a checkout of. With it set, the session
+    /// reconciler's clone-on-demand can materialise the repo on eligible nodes —
+    /// the declarative "New Workspace" path. Omitted for a bare/empty project.
+    #[serde(default)]
+    pub git_remote_url: Option<String>,
 }
 
 /// A new label for a workspace. The name is what people read; the slug, the

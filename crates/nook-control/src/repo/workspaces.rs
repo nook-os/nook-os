@@ -45,6 +45,17 @@ pub struct CheckoutRef {
     pub path: String,
 }
 
+/// A PRESENT checkout as the session reconciler places against it: the row id
+/// (the placement key, one managed session per id), the node it lives on, and
+/// its path (the session's cwd). Present = `missing_at IS NULL`. One per clone
+/// and per worktree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PresentCheckout {
+    pub id: NodeWorkspaceId,
+    pub node_id: NodeId,
+    pub path: String,
+}
+
 /// A checkout the reaper reclaimed, kept so the reference log can be built
 /// after the row is gone.
 #[derive(Debug, Clone)]
@@ -121,15 +132,20 @@ pub trait WorkspaceRepository: Send + Sync {
     async fn all_session_specs(&self)
         -> ApiResult<Vec<(TenantId, WorkspaceId, serde_json::Value)>>;
 
-    /// Create a named workspace. A duplicate name is a `Conflict`, not a
-    /// database error — the mapping lives here so every caller reports it the
-    /// same way.
+    /// Create a named workspace, optionally carrying the git remote it is a
+    /// checkout of. A duplicate name is a `Conflict`, not a database error — the
+    /// mapping lives here so every caller reports it the same way.
+    ///
+    /// `git_remote_url` is what makes a workspace declaratively cloneable: with it
+    /// set, the session reconciler's clone-on-demand can materialise the repo on
+    /// eligible nodes. `None` is a bare/empty workspace, as before.
     async fn create(
         &self,
         tenant: TenantId,
         name: &str,
         slug: &str,
         description: Option<String>,
+        git_remote_url: Option<&str>,
     ) -> ApiResult<Workspace>;
 
     /// Insert a workspace discovered by a scan. `Ok(None)` means the slug was
@@ -256,6 +272,15 @@ pub trait WorkspaceRepository: Send + Sync {
         tenant: TenantId,
         workspace: WorkspaceId,
     ) -> ApiResult<Vec<CheckoutRef>>;
+
+    /// Every PRESENT checkout of a workspace across the tenant's nodes — one per
+    /// clone and per worktree, tombstones excluded. The session reconciler places
+    /// one managed session per row returned here.
+    async fn present_checkouts(
+        &self,
+        tenant: TenantId,
+        workspace: WorkspaceId,
+    ) -> ApiResult<Vec<PresentCheckout>>;
 
     /// Whether this node already knows a checkout at `path`. The scan uses it
     /// to tell a brand-new checkout (which wants the workspace's `.env`
@@ -538,12 +563,26 @@ impl WorkspaceRepository for DbWorkspaceRepository {
         name: &str,
         slug: &str,
         description: Option<String>,
+        git_remote_url: Option<&str>,
     ) -> ApiResult<Workspace> {
+        // Store the normalized remote alongside the raw URL, computed the SAME
+        // way discovery does — so a discovered checkout of this repo matches this
+        // workspace instead of spawning a duplicate (the dogfood-seed bug).
+        let normalized = git_remote_url.map(crate::services::discovery::normalize_remote);
         self.db
             .query_one(
-                "INSERT INTO workspaces (id, tenant_id, name, slug, description)
-                 VALUES ($1, $2, $3, $4, $5) RETURNING *",
-                params![WorkspaceId::new(), tenant, name, slug, description],
+                "INSERT INTO workspaces
+                   (id, tenant_id, name, slug, description, git_remote_url, git_remote_normalized)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *",
+                params![
+                    WorkspaceId::new(),
+                    tenant,
+                    name,
+                    slug,
+                    description,
+                    git_remote_url,
+                    normalized
+                ],
             )
             .await
             .map_err(|e| match &e {
@@ -895,6 +934,26 @@ impl WorkspaceRepository for DbWorkspaceRepository {
         Ok(rows
             .into_iter()
             .map(|(node_id, path)| CheckoutRef { node_id, path })
+            .collect())
+    }
+
+    async fn present_checkouts(
+        &self,
+        tenant: TenantId,
+        workspace: WorkspaceId,
+    ) -> ApiResult<Vec<PresentCheckout>> {
+        let rows: Vec<(NodeWorkspaceId, NodeId, String)> = self
+            .db
+            .query_all(
+                "SELECT id, node_id, path FROM node_workspaces
+                 WHERE tenant_id = $1 AND workspace_id = $2 AND missing_at IS NULL
+                 ORDER BY id",
+                params![tenant, workspace],
+            )
+            .await?;
+        Ok(rows
+            .into_iter()
+            .map(|(id, node_id, path)| PresentCheckout { id, node_id, path })
             .collect())
     }
 
@@ -1556,7 +1615,13 @@ impl FakeWorkspaceRepository {
             .map(|c| c.id)
     }
 
-    fn make(tenant: TenantId, name: &str, slug: &str, description: Option<String>) -> Workspace {
+    fn make(
+        tenant: TenantId,
+        name: &str,
+        slug: &str,
+        description: Option<String>,
+        git_remote_url: Option<&str>,
+    ) -> Workspace {
         let now = chrono::Utc::now();
         Workspace {
             id: WorkspaceId::new(),
@@ -1564,8 +1629,8 @@ impl FakeWorkspaceRepository {
             name: name.to_string(),
             slug: slug.to_string(),
             description,
-            git_remote_url: None,
-            git_remote_normalized: None,
+            git_remote_normalized: git_remote_url.map(crate::services::discovery::normalize_remote),
+            git_remote_url: git_remote_url.map(str::to_string),
             created_at: now,
             updated_at: now,
             session_spec: None,
@@ -1635,6 +1700,7 @@ impl WorkspaceRepository for FakeWorkspaceRepository {
         name: &str,
         slug: &str,
         description: Option<String>,
+        git_remote_url: Option<&str>,
     ) -> ApiResult<Workspace> {
         let mut s = self.inner.lock().unwrap();
         // The constraint is `workspaces_tenant_id_slug_key` — (tenant, SLUG),
@@ -1649,7 +1715,7 @@ impl WorkspaceRepository for FakeWorkspaceRepository {
                 "a workspace with that name already exists".into(),
             ));
         }
-        let w = Self::make(tenant, name, slug, description);
+        let w = Self::make(tenant, name, slug, description, git_remote_url);
         s.workspaces.push(w.clone());
         Ok(w)
     }
@@ -1672,7 +1738,7 @@ impl WorkspaceRepository for FakeWorkspaceRepository {
         }) {
             return Ok(None);
         }
-        let mut w = Self::make(tenant, name, slug, None);
+        let mut w = Self::make(tenant, name, slug, None, None);
         w.git_remote_normalized = git_remote_normalized.map(str::to_string);
         let id = w.id;
         s.workspaces.push(w);
@@ -1978,6 +2044,28 @@ impl WorkspaceRepository for FakeWorkspaceRepository {
                 path: c.path.clone(),
             })
             .collect())
+    }
+
+    async fn present_checkouts(
+        &self,
+        tenant: TenantId,
+        workspace: WorkspaceId,
+    ) -> ApiResult<Vec<PresentCheckout>> {
+        let mut out: Vec<PresentCheckout> = self
+            .inner
+            .lock()
+            .unwrap()
+            .checkouts
+            .iter()
+            .filter(|c| c.tenant == tenant && c.workspace_id == workspace && c.missing_at.is_none())
+            .map(|c| PresentCheckout {
+                id: c.id,
+                node_id: c.node_id,
+                path: c.path.clone(),
+            })
+            .collect();
+        out.sort_by_key(|c| c.id.0);
+        Ok(out)
     }
 
     async fn checkout_id_at_path(

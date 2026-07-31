@@ -9042,6 +9042,13 @@
               "null"
             ]
           },
+          "git_remote_url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The git remote this workspace is a checkout of. With it set, the session\nreconciler's clone-on-demand can materialise the repo on eligible nodes —\nthe declarative \"New Workspace\" path. Omitted for a bare/empty project."
+          },
           "name": {
             "type": "string"
           }
@@ -12143,6 +12150,13 @@
           },
           "node_id": {
             "$ref": "#/components/schemas/NodeId"
+          },
+          "node_online": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Whether the session's node holds a LIVE WebSocket right now — the honest\nsignal `nodes.status` cannot give, because a seeded/synthetic node can\nread `online` in the database while never having connected. `None` when\nnot computed (list rows); the detail endpoint fills it from the registry\nso the UI can tell \"the terminal is streaming\" from \"its node is gone\"\ninstead of retrying a dead attach forever. Not stored (`#[db(skip)]`)."
           },
           "runtime": {
             "type": "string"

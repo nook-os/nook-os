@@ -76,7 +76,7 @@ Everything runs in containers with the source bind-mounted: `cargo watch` rebuil
 
 ## Starting work
 
-Hit **+ New Work** (top bar): clone a repo (GitHub/GitLab/Bitbucket/raw, optional SSH key for private), add a git worktree, spin up a new empty project, or open an existing workspace — then pick the machine and the **runtime** (`bash`/`zsh`/`claude`/`hermes`/`codex` — a session runs whatever you choose, not just a shell) and go. The work is the unit; the machine is where it runs.
+Hit **+ New Workspace** (top bar): clone a repo (GitHub/GitLab/Bitbucket/raw, optional SSH key for private), add a git worktree, spin up a new empty project, or open an existing workspace — then pick the machine and the **runtime** (`bash`/`zsh`/`claude`/`hermes`/`codex` — a session runs whatever you choose, not just a shell) and go. The work is the unit; the machine is where it runs.
 
 **Kanban drives work**, control-plane authoritative. The Board page has a **Backlog** tab (a prioritized refinement queue — nothing runs from it — where epics live too) and a **Board** kanban tab: a task flows **Todo → In Progress → In Review → Done**. From the Backlog, *send to board* moves a task to Todo, or *dispatch* lets the resource-aware scheduler pick the best online node (or you pick); *start work* creates a worktree + session, *submit PR* records the PR, *prune* removes the worktree. Nodes report live CPU/memory/load/session capacity (bars on the Nodes page) so you can see what can take the workload.
 

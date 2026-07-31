@@ -1,6 +1,6 @@
 //! Resource-aware node placement (the "Auto" default). Wraps
 //! `nook_dispatcher::pick_node` with the online-node + workspace-affinity
-//! logic shared by triage dispatch and the New Work "Auto" option.
+//! logic shared by triage dispatch and the New Workspace "Auto" option.
 //!
 //! Placement is confined to the requester's OWN machines (MAIN-131): a session
 //! only ever starts on a node you own (MAIN-130), so auto-dispatch must not
@@ -16,7 +16,7 @@ use crate::error::{ApiError, ApiResult};
 use crate::state::AppState;
 
 /// The result of placement (MAIN-227): an explicit outcome, never a bare node
-/// that might have no checkout. `dispatch` and the New Work "Auto" picker both
+/// that might have no checkout. `dispatch` and the New Workspace "Auto" picker both
 /// consume this instead of guessing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Placement {

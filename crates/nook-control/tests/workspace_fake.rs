@@ -53,7 +53,10 @@ async fn a_workspace_detail_is_its_row_plus_its_locations() {
     let t = tenant();
     let node = NodeId::new();
     repo.add_node(node, t, "workshop", "online");
-    let ws = repo.create(t, "widgets", "widgets", None).await.unwrap();
+    let ws = repo
+        .create(t, "widgets", "widgets", None, None)
+        .await
+        .unwrap();
     scanned(&repo, t, node, ws.id, "/srv/widgets", "clone").await;
 
     let detail = workspace_queries::get_workspace(&repo, t, ws.id)
@@ -70,7 +73,10 @@ async fn a_workspace_detail_is_its_row_plus_its_locations() {
 async fn another_tenants_workspace_is_not_visible() {
     let repo = FakeWorkspaceRepository::new();
     let (mine, theirs) = (tenant(), tenant());
-    let ws = repo.create(theirs, "secret", "secret", None).await.unwrap();
+    let ws = repo
+        .create(theirs, "secret", "secret", None, None)
+        .await
+        .unwrap();
 
     assert!(
         workspace_queries::get_workspace(&repo, mine, ws.id)
@@ -91,7 +97,10 @@ async fn another_tenants_workspace_is_not_visible() {
 async fn a_key_resolves_by_id_then_slug_then_name() {
     let repo = FakeWorkspaceRepository::new();
     let t = tenant();
-    let ws = repo.create(t, "Widgets", "widgets", None).await.unwrap();
+    let ws = repo
+        .create(t, "Widgets", "widgets", None, None)
+        .await
+        .unwrap();
 
     for key in [ws.id.0.to_string(), "widgets".into(), "Widgets".into()] {
         assert_eq!(
@@ -108,10 +117,10 @@ async fn a_key_resolves_by_id_then_slug_then_name() {
 async fn an_ambiguous_name_errors_naming_the_slugs_rather_than_picking_one() {
     let repo = FakeWorkspaceRepository::new();
     let t = tenant();
-    repo.create(t, "services", "acme-services", None)
+    repo.create(t, "services", "acme-services", None, None)
         .await
         .unwrap();
-    repo.create(t, "services", "beta-services", None)
+    repo.create(t, "services", "beta-services", None, None)
         .await
         .unwrap();
 
@@ -144,7 +153,7 @@ async fn a_re_reported_checkout_heals_in_place_keeping_its_id() {
     let repo = FakeWorkspaceRepository::new();
     let t = tenant();
     let node = NodeId::new();
-    let ws = repo.create(t, "w", "w", None).await.unwrap();
+    let ws = repo.create(t, "w", "w", None, None).await.unwrap();
     scanned(&repo, t, node, ws.id, "/srv/w", "clone").await;
     let original = repo.checkout_id(node, "/srv/w").expect("checkout exists");
 
@@ -168,7 +177,7 @@ async fn a_second_scan_does_not_restart_the_retention_clock() {
     let repo = FakeWorkspaceRepository::new();
     let t = tenant();
     let node = NodeId::new();
-    let ws = repo.create(t, "w", "w", None).await.unwrap();
+    let ws = repo.create(t, "w", "w", None, None).await.unwrap();
     scanned(&repo, t, node, ws.id, "/srv/w", "clone").await;
 
     // Missing for a long time already.
@@ -195,7 +204,7 @@ async fn a_freshly_tombstoned_checkout_survives_the_reaper() {
     let repo = FakeWorkspaceRepository::new();
     let t = tenant();
     let node = NodeId::new();
-    let ws = repo.create(t, "w", "w", None).await.unwrap();
+    let ws = repo.create(t, "w", "w", None, None).await.unwrap();
     scanned(&repo, t, node, ws.id, "/srv/w", "clone").await;
     repo.tombstone_checkouts_except(node, &[]).await.unwrap();
 
@@ -217,7 +226,7 @@ async fn a_path_migration_moves_checkouts_and_task_worktrees_together() {
     let repo = FakeWorkspaceRepository::new();
     let t = tenant();
     let node = NodeId::new();
-    let ws = repo.create(t, "w", "w", None).await.unwrap();
+    let ws = repo.create(t, "w", "w", None, None).await.unwrap();
     scanned(&repo, t, node, ws.id, "/old/w", "clone").await;
     repo.add_task_worktree(node, "/old/w");
 
@@ -248,7 +257,7 @@ async fn a_path_that_is_not_this_nodes_checkout_is_refused_before_any_write() {
     let repo = FakeWorkspaceRepository::new();
     let t = tenant();
     let (mine, theirs) = (NodeId::new(), NodeId::new());
-    let ws = repo.create(t, "w", "w", None).await.unwrap();
+    let ws = repo.create(t, "w", "w", None, None).await.unwrap();
     scanned(&repo, t, mine, ws.id, "/srv/mine", "clone").await;
     scanned(&repo, t, theirs, ws.id, "/srv/theirs", "clone").await;
 
@@ -293,11 +302,14 @@ async fn migrating_nothing_is_success() {
 async fn a_remote_already_owned_by_another_workspace_is_not_adopted() {
     let repo = FakeWorkspaceRepository::new();
     let t = tenant();
-    let owner = repo.create(t, "owner", "owner", None).await.unwrap();
+    let owner = repo.create(t, "owner", "owner", None, None).await.unwrap();
     repo.set_normalized_remote(owner.id, "github.com/acme/widgets")
         .await
         .unwrap();
-    let newcomer = repo.create(t, "newcomer", "newcomer", None).await.unwrap();
+    let newcomer = repo
+        .create(t, "newcomer", "newcomer", None, None)
+        .await
+        .unwrap();
 
     let adopted = repo
         .adopt_normalized_remote(newcomer.id, t, "github.com/acme/widgets")
@@ -321,7 +333,7 @@ async fn a_remote_already_owned_by_another_workspace_is_not_adopted() {
 async fn an_existing_remote_url_is_never_clobbered_by_one_checkout() {
     let repo = FakeWorkspaceRepository::new();
     let t = tenant();
-    let ws = repo.create(t, "w", "w", None).await.unwrap();
+    let ws = repo.create(t, "w", "w", None, None).await.unwrap();
 
     assert_eq!(
         repo.adopt_remote_url(ws.id, "https://a/one.git")
@@ -347,7 +359,7 @@ async fn a_hand_picked_name_is_not_requalified() {
     let repo = FakeWorkspaceRepository::new();
     let t = tenant();
     let ws = repo
-        .create(t, "the flaky one", "services", None)
+        .create(t, "the flaky one", "services", None, None)
         .await
         .unwrap();
 
@@ -371,7 +383,7 @@ async fn clone_path_ignores_worktrees_and_tombstones() {
     let repo = FakeWorkspaceRepository::new();
     let t = tenant();
     let node = NodeId::new();
-    let ws = repo.create(t, "w", "w", None).await.unwrap();
+    let ws = repo.create(t, "w", "w", None, None).await.unwrap();
 
     // A worktree scanned first, then the real clone: order must not decide it.
     scanned(&repo, t, node, ws.id, "/srv/w-feature", "worktree").await;
@@ -396,7 +408,7 @@ async fn clone_path_ignores_worktrees_and_tombstones() {
 async fn a_workspace_with_live_sessions_is_refused_and_stays() {
     let repo = FakeWorkspaceRepository::new();
     let t = tenant();
-    let ws = repo.create(t, "w", "w", None).await.unwrap();
+    let ws = repo.create(t, "w", "w", None, None).await.unwrap();
     repo.set_live_sessions(ws.id, 2);
 
     // The route's rule, exercised without a router: refuse before deleting.
@@ -410,7 +422,7 @@ async fn deleting_a_workspace_takes_its_checkouts_with_it() {
     let repo = FakeWorkspaceRepository::new();
     let t = tenant();
     let node = NodeId::new();
-    let ws = repo.create(t, "w", "w", None).await.unwrap();
+    let ws = repo.create(t, "w", "w", None, None).await.unwrap();
     scanned(&repo, t, node, ws.id, "/srv/w", "clone").await;
 
     assert_eq!(repo.delete(ws.id, t).await.unwrap(), 1);
@@ -426,7 +438,7 @@ async fn deleting_a_workspace_takes_its_checkouts_with_it() {
 async fn a_workspace_cannot_be_deleted_through_the_wrong_tenant() {
     let repo = FakeWorkspaceRepository::new();
     let (mine, theirs) = (tenant(), tenant());
-    let ws = repo.create(theirs, "w", "w", None).await.unwrap();
+    let ws = repo.create(theirs, "w", "w", None, None).await.unwrap();
 
     assert_eq!(repo.delete(ws.id, mine).await.unwrap(), 0);
     assert!(repo.get(theirs, ws.id).await.unwrap().is_some());
@@ -463,7 +475,7 @@ async fn a_taken_slug_reports_none_so_the_caller_can_retry() {
 async fn resolve_key_matches_the_enum_the_service_translates() {
     let repo = FakeWorkspaceRepository::new();
     let t = tenant();
-    let ws = repo.create(t, "w", "w-slug", None).await.unwrap();
+    let ws = repo.create(t, "w", "w-slug", None, None).await.unwrap();
 
     assert_eq!(
         repo.resolve_key(t, "w-slug").await.unwrap(),

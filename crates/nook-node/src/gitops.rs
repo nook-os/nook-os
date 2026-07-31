@@ -146,6 +146,19 @@ pub fn clone_repo(
     };
     let dest = Path::new(&root).join(&name);
     if dest.exists() {
+        // Idempotent: a git checkout already sitting at this repo's deterministic
+        // path IS this repo's clone (the path is derived from the URL), so report
+        // success with the path rather than a collision. Clone-on-demand re-issues
+        // on every pass until the checkout is recorded, and each re-issue has to
+        // converge, not fail — a hard error would strand the workspace forever.
+        // A directory that is NOT a git checkout is a real collision and still fails.
+        if dest.join(".git").exists() {
+            return OpOutcome {
+                ok: true,
+                path: Some(dest.to_string_lossy().to_string()),
+                message: format!("already cloned at {}", dest.display()),
+            };
+        }
         return fail(format!("{} already exists", dest.display()));
     }
     // Creates the owner directory too.

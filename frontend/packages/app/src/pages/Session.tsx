@@ -563,6 +563,13 @@ export function SessionPage() {
   };
 
   const dead = status === "exited" || status === "error";
+  // The node holds no live WebSocket — a seeded/synthetic node that reads
+  // `online` in the database but never connected, or a real node that dropped.
+  // The row can still say `running`, so this is the ONLY honest signal that the
+  // terminal cannot stream. Rendering it as a distinct state is what stops the
+  // blank terminal + the `/windows` retry-storm behind it: there is nothing on
+  // the other end to attach to or poll.
+  const offline = !dead && session.node_online === false;
 
   const restart = async () => {
     setLiveStatus("starting");
@@ -641,15 +648,17 @@ export function SessionPage() {
           <span
             style={{ display: "inline-flex", alignItems: "center", gap: 6 }}
           >
-            {!dead && <SessionWindows sessionId={session.id} />}
+            {!dead && !offline && <SessionWindows sessionId={session.id} />}
             <Pill tone="accent">{session.runtime}</Pill>
-            <Pill tone={statusTone(status)}>{status}</Pill>
+            <Pill tone={offline ? "err" : statusTone(status)}>
+              {offline ? "node offline" : status}
+            </Pill>
             {session.checkout && <CheckoutChip checkout={session.checkout} />}
             {dead ? (
               <button className="btn small" onClick={restart} title="restart session">
                 <RotateCw size={12} /> restart
               </button>
-            ) : (
+            ) : offline ? null : (
               <SplitButtons sessionId={session.id} />
             )}
             {/* Nothing to diff — no workspace, or a checkout that is not a
@@ -695,6 +704,28 @@ export function SessionPage() {
               )}
               <button className="btn primary" onClick={restart}>
                 <RotateCw size={13} /> restart session
+              </button>
+            </div>
+          ) : offline ? (
+            // The honest node-offline state. Not a terminal that will never
+            // paint and not a `/windows` poll that only 400s — the node is not
+            // connected, so we say that and stop hammering it. tmux keeps the
+            // session on the node (if there is a real one), so it resumes on
+            // reconnect with no restart.
+            <div className="session-dead">
+              <div className="session-dead-title">This session&apos;s node is offline</div>
+              <p className="muted small">
+                {nodeName ? <><span className="mono">{nodeName}</span> isn&apos;t </> : "Its node isn't "}
+                connected right now, so the terminal can&apos;t stream. Nothing is
+                lost — it resumes on its own when the node comes back.
+              </p>
+              <button
+                className="btn"
+                onClick={() =>
+                  queryClient.invalidateQueries({ queryKey: ["sessions", "one", id] })
+                }
+              >
+                <RotateCw size={13} /> check again
               </button>
             </div>
           ) : (
@@ -762,7 +793,7 @@ export function SessionsIndex() {
               style={{ display: "inline-flex", alignItems: "center", gap: 8 }}
             >
               <SquareTerminal size={14} />
-              No running sessions — start one with <b>+ New Work</b>.
+              No running sessions — start one with <b>+ New Workspace</b>.
             </span>
           </Empty>
         </Panel>

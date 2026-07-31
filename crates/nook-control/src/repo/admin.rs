@@ -720,6 +720,12 @@ pub trait SettingRepository: Send + Sync {
     /// The same key's value across EVERY tenant — what a cross-tenant consumer
     /// asks before doing a pass at all, rather than a query per tenant.
     async fn tenant_values_everywhere(&self, key: &str) -> ApiResult<Vec<serde_json::Value>>;
+
+    /// Every tenant that has this key set, WITH the value — for a reconciler that
+    /// must then act per tenant (list its workspaces, its nodes) rather than only
+    /// answer "is anyone on?". The value rides along so the caller applies the
+    /// same truthiness test as `tenant_value` without a second query.
+    async fn tenants_with_value(&self, key: &str) -> ApiResult<Vec<(TenantId, serde_json::Value)>>;
 }
 
 pub struct DbSettingRepository {
@@ -787,6 +793,16 @@ impl SettingRepository for DbSettingRepository {
             .db
             .query_scalar_all(
                 "SELECT value FROM settings WHERE scope = 'tenant' AND key = $1",
+                params![key],
+            )
+            .await?)
+    }
+
+    async fn tenants_with_value(&self, key: &str) -> ApiResult<Vec<(TenantId, serde_json::Value)>> {
+        Ok(self
+            .db
+            .query_all(
+                "SELECT tenant_id, value FROM settings WHERE scope = 'tenant' AND key = $1",
                 params![key],
             )
             .await?)
@@ -1515,6 +1531,17 @@ impl SettingRepository for FakeSettingRepository {
             .iter()
             .filter(|s| s.scope == "tenant" && s.key == key)
             .map(|s| s.value.clone())
+            .collect())
+    }
+
+    async fn tenants_with_value(&self, key: &str) -> ApiResult<Vec<(TenantId, serde_json::Value)>> {
+        Ok(self
+            .inner
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|s| s.scope == "tenant" && s.key == key)
+            .map(|s| (s.tenant_id, s.value.clone()))
             .collect())
     }
 }
