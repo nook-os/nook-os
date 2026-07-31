@@ -23,6 +23,13 @@ const state = vi.hoisted(() => ({
   jobs: [] as unknown[],
   detail: null as unknown,
   pending: [] as unknown[],
+  // `null` means the detail endpoint 404s — a wrong id, a deleted ticket, or
+  // one in another tenant (which answers 404, not 403, so there is no existence
+  // oracle). MAIN-296.
+  // Populated in `beforeEach` — `vi.hoisted` runs before the consts above.
+  task: null as Record<string, unknown> | null,
+  /** The status the detail endpoint answers when `task` is null. */
+  taskStatus: 404,
   /** The tenant's `loops.enabled` setting, as `/settings` reports it. */
   loopsOn: false,
 }));
@@ -41,11 +48,12 @@ vi.mock("@nookos/api", () => ({
           data: [{ key: "loops.enabled", scope: "tenant", value: state.loopsOn }],
         };
       if (path === "/api/v1/tasks/{id}")
-        return {
-          data: {
-            task: { id: TASK_ID, key: TASK_KEY, title: "Seed and steer", type: "task" },
-          },
-        };
+        return state.task
+          ? { data: { task: state.task }, response: { status: 200 } }
+          : // openapi-fetch returns no `data` and the real Response on an
+            // error status; the page reads the status to tell "not yours to
+            // see" from "the request failed".
+            { data: undefined, response: { status: state.taskStatus } };
       return { data: null };
     }),
     POST: post,
@@ -124,6 +132,13 @@ beforeEach(() => {
   state.jobs = [];
   state.detail = null;
   state.pending = [];
+  state.task = {
+    id: TASK_ID,
+    key: TASK_KEY,
+    title: "Seed and steer",
+    type: "task",
+  };
+  state.taskStatus = 404;
   state.loopsOn = false;
   post.mockClear();
   put.mockClear();
@@ -161,22 +176,12 @@ describe("Loop workspace (MAIN-233)", () => {
   });
 
   it("an epic offers the decomposer, not a spec", async () => {
-    // The page reads the ticket's type; override just that response.
-    const { api } = await import("@nookos/api");
-    (api.GET as ReturnType<typeof vi.fn>).mockImplementation(async (path: string) => {
-      if (path === "/api/v1/tasks/{task_id}/jobs") return { data: state.jobs };
-      if (path === "/api/v1/jobs/{id}") return { data: state.detail };
-      if (path === "/api/v1/interactions") return { data: state.pending };
-      if (path === "/api/v1/settings")
-        return {
-          data: [{ key: "loops.enabled", scope: "tenant", value: state.loopsOn }],
-        };
-      if (path === "/api/v1/tasks/{id}")
-        return {
-          data: { task: { id: TASK_ID, key: TASK_KEY, title: "An epic", type: "epic" } },
-        };
-      return { data: null };
-    });
+    // The page reads the ticket's type, so say what the ticket IS rather than
+    // replacing the whole client. This used to call `mockImplementation` and
+    // never restore it, so every test that ran afterwards silently saw "An
+    // epic" instead of its own fixture — including the not-found tests below,
+    // which is how the leak was found (MAIN-296).
+    state.task = { id: TASK_ID, key: TASK_KEY, title: "An epic", type: "epic" };
     renderPage();
     expect(
       await screen.findByRole("button", { name: /run decomposer/i }),
@@ -310,6 +315,85 @@ describe("Loop workspace (MAIN-233)", () => {
     expect(post).toHaveBeenCalledWith("/api/v1/jobs/{id}/rerun", {
       params: { path: { id: "job-1" } },
     });
+  });
+});
+
+// MAIN-296: the page must never be a dead box.
+//
+// The live defect: the `["task", id]` query returned `undefined` for a wrong or
+// cross-tenant id. React Query rejects that outright, so `data` stayed
+// undefined — indistinguishable from "still loading" — and the composer, which
+// is gated on a resolved id, vanished while the transcript fell through to "No
+// run yet". A PM landing on a bad id got a message with no input under it and
+// no explanation.
+describe("not-found and empty states (MAIN-296)", () => {
+  /** Catch React Query's own complaint, which is only ever a console line. */
+  function watchConsole() {
+    const errors: string[] = [];
+    const spy = vi
+      .spyOn(console, "error")
+      .mockImplementation((...args: unknown[]) => {
+        errors.push(args.map(String).join(" "));
+      });
+    return { errors, restore: () => spy.mockRestore() };
+  }
+
+  it("a valid ticket with no run renders the seed composer (AC-2/AC-3)", async () => {
+    const { errors, restore } = watchConsole();
+    renderPage();
+
+    // The message and the box together — the message alone was the regression.
+    expect(await screen.findByTestId("composer-seed")).toBeTruthy();
+    // Async: the jobs query resolves after the composer mounts, and the point
+    // of this test is that the MESSAGE AND THE BOX appear together — the
+    // regression was the message alone.
+    expect(await screen.findByText(/no run yet/i)).toBeTruthy();
+    expect(screen.queryByTestId("loop-not-found")).toBeNull();
+    expect((screen.getByTestId("loop-foot") as HTMLElement).hidden).toBe(false);
+
+    restore();
+    expect(errors.join("\n")).not.toContain("Query data cannot be undefined");
+  });
+
+  it("a ticket that is not yours shows a clean state, not a dead box (AC-1/AC-4)", async () => {
+    state.task = null; // the detail endpoint 404s
+    const { errors, restore } = watchConsole();
+    renderPage();
+
+    const empty = await screen.findByTestId("loop-not-found");
+    expect(empty.textContent).toMatch(/doesn't exist, or isn't in your workspace/i);
+    // A way out, not just a dead end.
+    expect(screen.getByRole("link", { name: /back to the board/i })).toBeTruthy();
+
+    // No composer for a ticket that does not exist — and no empty bar where one
+    // would have been.
+    expect(screen.queryByTestId("composer-seed")).toBeNull();
+    expect(screen.queryByTestId("composer-steer")).toBeNull();
+    expect(screen.queryByText(/no run yet/i)).toBeNull();
+    // The footer itself is hidden, not merely empty: an empty `lw-foot` still
+    // paints as a bar, which is the dead box this card is named for. Asserting
+    // "no composer" alone would pass with the bar still on screen.
+    expect((screen.getByTestId("loop-foot") as HTMLElement).hidden).toBe(true);
+
+    restore();
+    // AC-1, stated as the thing a reader would actually see in the console.
+    expect(errors.join("\n")).not.toContain("Query data cannot be undefined");
+  });
+
+  it("distinguishes a failed load from a missing ticket (AC-4)", async () => {
+    // A 500 is not "no such ticket", and saying so would send someone hunting
+    // for a ticket that is perfectly fine.
+    state.task = null;
+    state.taskStatus = 500;
+    const { errors, restore } = watchConsole();
+    renderPage();
+
+    const empty = await screen.findByTestId("loop-not-found");
+    expect(empty.textContent).toMatch(/could not load/i);
+    expect(empty.textContent).not.toMatch(/doesn't exist/i);
+
+    restore();
+    expect(errors.join("\n")).not.toContain("Query data cannot be undefined");
   });
 });
 
