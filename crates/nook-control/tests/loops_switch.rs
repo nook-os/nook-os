@@ -8,6 +8,7 @@
 //! Each test owns a private database (MAIN-156 TestBed) and only its own rows.
 
 use nook_control::services::{jobs, loops};
+use nook_db::{params, Db};
 use nook_testkit::TestBed;
 use nook_types::*;
 use sqlx::PgPool;
@@ -177,9 +178,9 @@ async fn a_job_queued_while_off_waits_and_runs_after_enable() {
     // With loops off the consumer would not even reach this job. Assert the
     // gate it consults, and that the job is untouched.
     assert!(!loops::any_enabled(&settings).await);
-    let after: LoopJob = sqlx::query_as("SELECT * FROM loop_jobs WHERE id = $1")
-        .bind(job.id)
-        .fetch_one(&bed.pool)
+    let after: LoopJob = bed
+        .pool
+        .query_one("SELECT * FROM loop_jobs WHERE id = $1", params![job.id])
         .await
         .expect("the job still exists");
     assert_eq!(after.state, "queued", "off did not consume the work");

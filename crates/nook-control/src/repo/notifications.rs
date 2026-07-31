@@ -52,11 +52,13 @@ pub struct NewNotification {
 /// A channel as the dispatcher needs it — including `config` and `secret`,
 /// which is why it is returned only by the two send paths.
 ///
-/// FromRow is hand-written (MAIN-205): `levels`/`kinds` are Postgres text[]
-/// arrays with no SQLite `Decode`, so the derive can't satisfy the SqliteRow
-/// arm the dispatch pool bounds on. The PgRow impl reproduces the derive; the
-/// SqliteRow impl defers to MAIN-196.
-#[derive(Debug, Clone)]
+/// Plainly derived since MAIN-327. It used to carry a hand-written `FromRow`
+/// pair — a real `PgRow` impl and a `SqliteRow` one that returned an error —
+/// because `levels`/`kinds` are Postgres `text[]`, which has no SQLite `Decode`,
+/// and the dispatch pool bound its fetchers on both arms. The engine-neutral
+/// mapper gives `text[]` an actual SQLite representation, so there is nothing
+/// left here to hand-write.
+#[derive(Debug, Clone, nook_db::FromDbRow)]
 pub struct ChannelTarget {
     pub id: Uuid,
     pub kind: String,
@@ -64,27 +66,6 @@ pub struct ChannelTarget {
     pub levels: Vec<String>,
     pub kinds: Vec<String>,
     pub secret: Option<String>,
-}
-
-impl<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> for ChannelTarget {
-    fn from_row(row: &'r sqlx::postgres::PgRow) -> sqlx::Result<Self> {
-        use sqlx::Row;
-        Ok(Self {
-            id: row.try_get("id")?,
-            kind: row.try_get("kind")?,
-            config: row.try_get("config")?,
-            levels: row.try_get("levels")?,
-            kinds: row.try_get("kinds")?,
-            secret: row.try_get("secret")?,
-        })
-    }
-}
-impl<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> for ChannelTarget {
-    fn from_row(_row: &'r sqlx::sqlite::SqliteRow) -> sqlx::Result<Self> {
-        Err(sqlx::Error::Decode(
-            "SQLite row mapping for array-column type `ChannelTarget` lands in MAIN-196".into(),
-        ))
-    }
 }
 
 /// A new channel. `secret` is write-only — no read that the UI calls returns it.
@@ -406,8 +387,13 @@ impl NotificationRepository for DbNotificationRepository {
                     new.kind,
                     new.name,
                     new.config,
-                    new.levels,
-                    new.kinds,
+                    // `Some(..)` deliberately: a bare `Vec<String>` binds as
+                    // `DbValue::TextList`, which is the `= ANY($n)` operand and
+                    // gets expanded into one placeholder per element on SQLite.
+                    // A text[] COLUMN value is the OptTextArray arm — one bind,
+                    // written as JSON on SQLite (MAIN-327 AC-4).
+                    Some(new.levels),
+                    Some(new.kinds),
                     new.secret
                 ],
             )

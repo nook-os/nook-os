@@ -11,6 +11,7 @@
 //! resolution both paths use — directly.
 
 use nook_control::services::taskwork::{present_checkout_at, prune_target};
+use nook_db::{params, Db};
 use nook_testkit::TestBed;
 use nook_types::*;
 use sqlx::PgPool;
@@ -71,9 +72,7 @@ async fn task(
     .execute(db)
     .await
     .expect("task");
-    sqlx::query_as::<_, TaskItem>("SELECT * FROM tasks WHERE id = $1")
-        .bind(id)
-        .fetch_one(db)
+    db.query_one("SELECT * FROM tasks WHERE id = $1", params![id])
         .await
         .expect("load task")
 }

@@ -7,6 +7,9 @@ repository.workspace = true
 
 [dependencies]
 sqlx = { workspace = true }
+# The `#[derive(FromDbRow)]` half of the row mapping (MAIN-327), re-exported
+# from here so callers depend on one crate.
+nook-db-derive = { workspace = true }
 async-trait = { workspace = true }
 futures-util = { workspace = true }
 uuid = { workspace = true }

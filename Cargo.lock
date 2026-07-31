@@ -2656,12 +2656,22 @@ dependencies = [
  "chrono",
  "futures-util",
  "libc",
+ "nook-db-derive",
  "serde_json",
  "sqlx",
  "thiserror 2.0.19",
  "tokio",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "nook-db-derive"
+version = "0.4.22"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
 ]
 
 [[package]]

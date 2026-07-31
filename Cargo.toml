@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/nook-types",
     "crates/nook-db",
+    "crates/nook-db-derive",
     "crates/nook-proto",
     "crates/nook-auth",
     "crates/nook-chat",
@@ -27,6 +28,7 @@ repository = "https://github.com/nookos/nookos"
 nook-errors = { path = "crates/nook-errors" }
 nook-types = { path = "crates/nook-types" }
 nook-db = { path = "crates/nook-db" }
+nook-db-derive = { path = "crates/nook-db-derive" }
 nook-proto = { path = "crates/nook-proto" }
 nook-auth = { path = "crates/nook-auth" }
 nook-infra = { path = "crates/nook-infra" }

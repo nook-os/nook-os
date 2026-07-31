@@ -18,12 +18,13 @@
 # list doing its job: the stale-entry check named all seven the moment #218
 # landed, and refused to pass until they were removed.
 
-# ── Permanent: hand-written FromRow impls ───────────────────────────────────
-# `FromRow` IS sqlx's trait and the row-mapping layer is built on it, so these
-# are not signature cleanups — replacing them is replacing row mapping, and
-# needs its own decision (raised on MAIN-269, unanswered).
-crates/nook-control/src/repo/notifications.rs  # FromRow for ChannelTarget, both engine arms
-crates/nook-types/src/lib.rs                   # FromRow impls for the id newtypes
+# MAIN-327 (this card) freed the two files that were listed here as PERMANENT:
+# `repo/notifications.rs` and `nook-types/src/lib.rs`, both of which named
+# `PgRow`/`SqliteRow` in hand-written `FromRow` impls. The note said replacing
+# them "is replacing row mapping, and needs its own decision" — that decision is
+# what MAIN-327 made: row mapping is now `nook_db::FromDbRow` over an
+# engine-neutral `DbRow`, so those impls do not exist to exempt. Nothing in this
+# list is permanent for the reason "sqlx owns row mapping" any more.
 
 # ── Permanent: the thing under test IS a Postgres feature ───────────────────
 crates/nook-chat/src/main.rs                 # PgConnectOptions — chat pins search_path=chat,public; nook_db::connect has no option for it

@@ -38,6 +38,12 @@ pub use dialect::{
 pub mod pool;
 pub use pool::{Db, DbTx, DbValue, EnginePool, IntoDbValue};
 
+/// Engine-neutral row mapping (MAIN-327) — what the `Db` fetchers bind on, in
+/// place of `sqlx::FromRow` over both engines' row types.
+pub mod row;
+pub use nook_db_derive::FromDbRow;
+pub use row::{DbRow, FromDbColumn, FromDbRow};
+
 /// Boot-time migration runner with dev tolerance for a ledger ahead of the
 /// checked-out migration set (MAIN-224). Both services' boot paths run through
 /// [`migrate::run_with_dev_tolerance`], so they get identical treatment.
