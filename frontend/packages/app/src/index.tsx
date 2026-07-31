@@ -50,10 +50,20 @@ function AuthGate() {
   // Above the auth gate on purpose: a write that fails before you are through
   // it — signing in with a password, say — is exactly as silent otherwise.
   useEffect(() => installWriteFailureToasts(), []);
-  useEffect(() => {
-    if (!isDesktop()) return;
-    return installLinkHandler((path) => navigate(path));
-  }, [navigate]);
+  // Both builds intercept links, differing only in what a link that is NOT ours
+  // should do (MAIN-279). Desktop must keep its single webview on the app, so an
+  // external link goes to the OS browser. The web build leaves external links
+  // entirely alone — there is a URL bar and a tab to open them in — and only
+  // claims its own, so a raw `<a href>` into the app stops reloading the
+  // document and wiping the state the user was looking at.
+  useEffect(
+    () =>
+      installLinkHandler(
+        (path) => navigate(path),
+        isDesktop() ? "os-browser" : "browser-default",
+      ),
+    [navigate],
+  );
 
   // The desktop build has no control plane on its own origin, so the stored
   // endpoint has to be loaded and applied BEFORE the first request goes out —

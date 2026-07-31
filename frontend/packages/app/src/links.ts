@@ -1,10 +1,16 @@
-// Where a clicked link is allowed to take the desktop app.
+// Where a clicked link is allowed to take the app.
 //
-// The web build needs none of this: a link is a link, and the browser already
-// knows what to do with one. The packaged app has a single webview and no
-// address bar, so a link that navigates it is a link that replaces the whole
-// application — and on any origin but its own, Tauri denies every command the
-// app defines. The visible result was an app that reported itself unconfigured
+// The packaged app has a single webview and no address bar, so a link that
+// navigates it is a link that replaces the whole application — and on any
+// origin but its own, Tauri denies every command the app defines.
+//
+// The web build needs this too, for a different reason (MAIN-279). A browser
+// knows perfectly well what to do with an EXTERNAL link and should be left to
+// it. But a raw `<a href>` pointing back into the app reloads the document to
+// reach a route the router already has, throwing away every piece of in-memory
+// state on the way — which is why clicking a notification used to wipe the
+// notification list. So: same interception, and the two builds differ only in
+// what they do with a link that is not ours. The visible result was an app that reported itself unconfigured
 // after clicking a notification, and a device sign-in that could never
 // complete, because both landed on a remote origin where `load_endpoint` and
 // `device_start` come back "not allowed by ACL".
@@ -136,17 +142,49 @@ function isPlainClick(e: MouseEvent): boolean {
 }
 
 /**
- * Intercept every link click in the desktop app. Returns a teardown.
+ * What a click on a link that is NOT one of ours should do.
  *
- * One document-level listener rather than a fixed-up `<a>` in each of the
- * dozen places that render one — including markdown, where the hrefs come from
- * whatever an agent wrote and no call site exists to fix. A rule enforced in
- * one place cannot be forgotten by the next component that renders a link.
+ * The only thing the two builds disagree about (MAIN-279). Internal links
+ * behave identically in both — cancel, and route.
+ */
+export type ExternalLinks =
+  /**
+   * Hand it to the OS browser, cancelling the click. The packaged app has one
+   * webview and no address bar, so a link that navigates it replaces the whole
+   * application with a page where Tauri denies every command the app defines.
+   */
+  | "os-browser"
+  /**
+   * Leave the click completely alone. In a browser an external link is just a
+   * link: there is a URL bar, a back button, and a tab to open it in, and
+   * cancelling the default would break every one of those for no gain.
+   */
+  | "browser-default";
+
+/**
+ * Intercept link clicks. Returns a teardown.
+ *
+ * One document-level listener rather than a fixed-up `<a>` in each of the dozen
+ * places that render one — including markdown, where the hrefs come from
+ * whatever an agent wrote and no call site exists to fix. A rule enforced in one
+ * place cannot be forgotten by the next component that renders a link.
+ *
+ * **Both builds run this** (MAIN-279). It was desktop-only, on the reasoning
+ * that "the web build needs none of this: a link is a link". True of external
+ * links, and wrong about our own: a raw `<a href>` pointing INTO the app still
+ * reloads the whole document, which throws away every piece of in-memory state
+ * the app holds. The visible case was notifications — clicking one wiped the
+ * list you clicked it from — but it costs a full remount on any raw anchor.
+ * React Router's `<Link>` was never the problem; the anchors that are not one
+ * are, and there is no call site to fix for markdown.
  *
  * React Router's own `<Link>` calls `preventDefault` before this listener runs,
  * so its navigations pass straight through untouched.
  */
-export function installLinkHandler(navigate: (path: string) => void): () => void {
+export function installLinkHandler(
+  navigate: (path: string) => void,
+  external: ExternalLinks = "os-browser",
+): () => void {
   const onClick = (e: MouseEvent) => {
     if (!isPlainClick(e)) return;
     const anchor = (e.target as Element | null)?.closest?.("a");
@@ -157,10 +195,18 @@ export function installLinkHandler(navigate: (path: string) => void): () => void
     if (!href || href.startsWith("#") || anchor.hasAttribute("download")) return;
 
     const path = appPathFor(href, getEndpoint().baseUrl);
-    // Either way the webview must not move, so the default is always cancelled.
+    if (path) {
+      // Ours, in both builds: the document must not reload to reach a route the
+      // router already has.
+      e.preventDefault();
+      navigate(path);
+      return;
+    }
+    // Not ours. On the web that means hands off entirely — no preventDefault,
+    // so the browser opens it exactly as it would have without this listener.
+    if (external === "browser-default") return;
     e.preventDefault();
-    if (path) navigate(path);
-    else void openExternal(absolute(href));
+    void openExternal(absolute(href));
   };
 
   document.addEventListener("click", onClick);
