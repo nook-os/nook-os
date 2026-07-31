@@ -19,8 +19,9 @@
 // Everything else (channel list, websockets, dedupe) belongs to the caller.
 
 import React, { useCallback, useLayoutEffect, useRef, useState } from "react";
-import { SmilePlus } from "lucide-react";
+import { Copy, MoreHorizontal, Pencil, Reply, SmilePlus, Trash2 } from "lucide-react";
 import { ALLOWED_REACTIONS } from "@nookos/api";
+import { useAnchoredMenu } from "./useAnchoredMenu";
 
 /** One emoji's tally on a message: how many reacted and whether the viewer is
  *  one of them (so a click toggles it off). Structurally the chat service's
@@ -74,10 +75,10 @@ export interface ChatViewProps {
   emptyLabel?: string;
   /** Retry a failed optimistic send. */
   onRetry?: (message: ChatViewMessage) => void;
-  /** Open a message's thread (MAIN-114). When set, each confirmed message shows
-   *  a "Reply in thread" action, and a "N replies" affordance when it has any.
-   *  Omit it — as the thread panel's own reply list does — to render a plain
-   *  list with no per-message thread actions (no nesting, NG-1). */
+  /** Open a message's thread (MAIN-114). When set, each confirmed message offers
+   *  "Reply in thread" from its hover bar, and a "N replies" affordance under it
+   *  when it has any. Omit it — as the thread panel's own reply list does — to
+   *  render a plain list with no per-message thread actions (no nesting, NG-1). */
   onOpenThread?: (message: ChatViewMessage) => void;
   /** Toggle a reaction (MAIN-116 AC-2). `on` is the desired next state: clicking
    *  an un-highlighted pill or picking from the "add reaction" menu calls it
@@ -137,6 +138,220 @@ function startsGroup(m: ChatViewMessage, prev: ChatViewMessage | undefined): boo
   return new Date(m.createdAt).getTime() - new Date(prev.createdAt).getTime() > GROUP_GAP_MS;
 }
 
+/** Roughly how big each popup is, so it flips upward near the bottom of the log
+ *  and stays clear of the right edge instead of opening off-screen. Both are
+ *  fixed sizes in the stylesheet — keep these in step with `.chat-react-picker`
+ *  and `.chat-more-menu`. The bar's buttons are far narrower than either menu,
+ *  so without the width the clamp has nothing useful to work from. */
+const PICKER_HEIGHT = 76;
+const PICKER_WIDTH = 168;
+const MORE_HEIGHT = 84;
+const MORE_WIDTH = 132;
+
+/** Put a message's text on the clipboard. Best-effort on purpose: a browser that
+ *  refuses (insecure origin, no permission) leaves the body on screen to select
+ *  by hand, which is what the user had before this action existed. */
+function copyText(body: string): void {
+  void navigator.clipboard?.writeText(body)?.catch(() => {});
+}
+
+/**
+ * One message's actions, floating over its upper-right corner (MAIN-300).
+ *
+ * They used to sit in a row UNDER the body — always in flow, so every message
+ * reserved that height whether or not anyone was looking at it, and an
+ * always-present Delete ate row width. The bar is absolutely positioned instead:
+ * at rest it costs no height and no width, which is the whole of the density fix.
+ *
+ * It is its own component because each row owns two popups, and hooks cannot be
+ * called from inside the message `map`. Both popups portal out through
+ * `useAnchoredMenu` — the bar lives inside `.chat-log`, which scrolls, and an
+ * absolutely-positioned menu in there is clipped by its edges.
+ */
+function MessageActions({
+  message,
+  canReact,
+  canReply,
+  canEdit,
+  canDelete,
+  canCopy,
+  onToggleReaction,
+  onBeginEdit,
+  onDeleteMessage,
+  onOpenThread,
+}: {
+  message: ChatViewMessage;
+  canReact: boolean;
+  canReply: boolean;
+  canEdit: boolean;
+  canDelete: boolean;
+  canCopy: boolean;
+  onToggleReaction?: (messageId: string, emoji: string, on: boolean) => void;
+  onBeginEdit: (m: ChatViewMessage) => void;
+  onDeleteMessage?: (messageId: string) => void;
+  onOpenThread?: (m: ChatViewMessage) => void;
+}) {
+  const [picker, setPicker] = useState(false);
+  const [more, setMore] = useState(false);
+  const reactBtn = useRef<HTMLButtonElement>(null);
+  const moreBtn = useRef<HTMLButtonElement>(null);
+
+  const closePicker = useCallback(() => setPicker(false), []);
+  const closeMore = useCallback(() => setMore(false), []);
+  const pick = useAnchoredMenu(picker, closePicker, {
+    height: PICKER_HEIGHT,
+    width: PICKER_WIDTH,
+  });
+  const menu = useAnchoredMenu(more, closeMore, {
+    height: MORE_HEIGHT,
+    width: MORE_WIDTH,
+  });
+
+  // Esc closes and hands focus back to the button that opened it — the menu is
+  // portalled into `document.body`, so without this focus would be stranded at
+  // the end of the document.
+  const dismissOn = (
+    close: () => void,
+    back: React.RefObject<HTMLButtonElement>,
+  ) => (e: React.KeyboardEvent) => {
+    if (e.key !== "Escape") return;
+    e.preventDefault();
+    close();
+    back.current?.focus();
+  };
+
+  // Built as data so the FIRST item — whichever survived the permission checks —
+  // can carry `autoFocus`. Opening has to land focus inside the menu or a
+  // keyboard user reaches the trigger and then has nowhere to go, and Esc has no
+  // focus to hand back (AC-3). It cannot be done from an effect: the portal
+  // renders `null` on the pass that opens it, while it measures where to sit.
+  const moreItems: {
+    key: string;
+    label: string;
+    aria: string;
+    icon: React.ReactNode;
+    danger?: boolean;
+    run: () => void;
+  }[] = [];
+  if (canEdit) {
+    moreItems.push({
+      key: "edit",
+      label: "Edit",
+      aria: "Edit message",
+      icon: <Pencil size={12} />,
+      run: () => onBeginEdit(message),
+    });
+  }
+  if (canCopy) {
+    moreItems.push({
+      key: "copy",
+      label: "Copy text",
+      aria: "Copy text",
+      icon: <Copy size={12} />,
+      run: () => copyText(message.body),
+    });
+  }
+  if (canDelete) {
+    moreItems.push({
+      key: "delete",
+      label: "Delete",
+      aria: "Delete message",
+      icon: <Trash2 size={12} />,
+      danger: true,
+      run: () => onDeleteMessage?.(message.id),
+    });
+  }
+
+  return (
+    // `.open` keeps the bar visible while one of its menus is torn off into the
+    // body portal, where neither `:hover` on the row nor `:focus-within` on the
+    // bar can still see it.
+    <div className={`chat-msg-bar${picker || more ? " open" : ""}`}>
+      {canReact && (
+        <div ref={pick.hostRef} className="chat-bar-wrap">
+          <button
+            ref={reactBtn}
+            type="button"
+            className={`chat-bar-btn${picker ? " on" : ""}`}
+            aria-label="Add reaction"
+            aria-haspopup="menu"
+            aria-expanded={picker}
+            onClick={() => setPicker((v) => !v)}
+          >
+            <SmilePlus size={13} />
+          </button>
+          {pick.portal(
+            ALLOWED_REACTIONS.map((emoji, i) => (
+              <button
+                key={emoji}
+                type="button"
+                className="chat-react-opt"
+                role="menuitem"
+                autoFocus={i === 0}
+                aria-label={`React with ${emoji}`}
+                onClick={() => {
+                  setPicker(false);
+                  onToggleReaction?.(message.id, emoji, true);
+                }}
+              >
+                {emoji}
+              </button>
+            )),
+            "chat-react-picker",
+            { role: "menu", onKeyDown: dismissOn(closePicker, reactBtn) },
+          )}
+        </div>
+      )}
+      {canReply && (
+        <button
+          type="button"
+          className="chat-bar-btn"
+          aria-label="Reply in thread"
+          onClick={() => onOpenThread?.(message)}
+        >
+          <Reply size={13} />
+        </button>
+      )}
+      {moreItems.length > 0 && (
+        <div ref={menu.hostRef} className="chat-bar-wrap">
+          <button
+            ref={moreBtn}
+            type="button"
+            className={`chat-bar-btn${more ? " on" : ""}`}
+            aria-label="More actions"
+            aria-haspopup="menu"
+            aria-expanded={more}
+            onClick={() => setMore((v) => !v)}
+          >
+            <MoreHorizontal size={13} />
+          </button>
+          {menu.portal(
+            moreItems.map((it, i) => (
+              <button
+                key={it.key}
+                type="button"
+                role="menuitem"
+                autoFocus={i === 0}
+                className={`chat-more-item${it.danger ? " danger" : ""}`}
+                aria-label={it.aria}
+                onClick={() => {
+                  setMore(false);
+                  it.run();
+                }}
+              >
+                {it.icon}
+                {it.label}
+              </button>
+            )),
+            "chat-more-menu",
+            { role: "menu", onKeyDown: dismissOn(closeMore, moreBtn) },
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function ChatView({
   messages,
   onSend,
@@ -160,12 +375,11 @@ export function ChatView({
   const scrollRef = useRef<HTMLDivElement>(null);
   const [draft, setDraft] = useState("");
   // Which message's body is being edited inline (MAIN-116 AC-3), and the
-  // in-progress draft; and which message's "add reaction" picker is open.
+  // in-progress draft. Each row's popups own their own open state — see
+  // `MessageActions`.
   const [editing, setEditing] = useState<{ id: string; draft: string } | null>(null);
-  const [pickerFor, setPickerFor] = useState<string | null>(null);
 
   const beginEdit = useCallback((m: ChatViewMessage) => {
-    setPickerFor(null);
     setEditing({ id: m.id, draft: m.body });
   }, []);
   const cancelEdit = useCallback(() => setEditing(null), []);
@@ -259,6 +473,14 @@ export function ChatView({
             // can remove someone else's message, which the backend already allows.
             const canEdit = settled && mine && !!onEditMessage;
             const canDelete = settled && (mine || canDeleteAny) && !!onDeleteMessage;
+            // Replying moved into the hover bar (MAIN-300); the "N replies"
+            // affordance below stays, because it reports state rather than
+            // offering an action — including on a deleted parent, which is still
+            // the only way into a thread hanging off it.
+            const canReply = settled && !!onOpenThread;
+            // Copy needs no caller: the body is already on screen, so this is
+            // offered wherever there is one, read-only surfaces included.
+            const canCopy = settled && m.body.trim().length > 0;
             const isEditing = editing?.id === m.id;
             const reactions = m.reactions ?? [];
             return (
@@ -329,69 +551,26 @@ export function ChatView({
                     ))}
                   </div>
                 )}
-                {!isEditing && (canReact || canEdit || canDelete) && (
-                  <div className="chat-msg-actions">
-                    {canReact && (
-                      <div className="chat-react-wrap">
-                        <button
-                          type="button"
-                          className={`chat-act chat-act-react${
-                            pickerFor === m.id ? " open" : ""
-                          }`}
-                          aria-label="Add reaction"
-                          aria-expanded={pickerFor === m.id}
-                          onClick={() =>
-                            setPickerFor((cur) => (cur === m.id ? null : m.id))
-                          }
-                        >
-                          <SmilePlus size={13} />
-                        </button>
-                        {pickerFor === m.id && (
-                          <div className="chat-react-picker" role="menu">
-                            {ALLOWED_REACTIONS.map((emoji) => (
-                              <button
-                                key={emoji}
-                                type="button"
-                                className="chat-react-opt"
-                                role="menuitem"
-                                aria-label={`React with ${emoji}`}
-                                onClick={() => {
-                                  setPickerFor(null);
-                                  onToggleReaction?.(m.id, emoji, true);
-                                }}
-                              >
-                                {emoji}
-                              </button>
-                            ))}
-                          </div>
-                        )}
-                      </div>
-                    )}
-                    {canEdit && (
-                      <button
-                        type="button"
-                        className="chat-act"
-                        aria-label="Edit message"
-                        onClick={() => beginEdit(m)}
-                      >
-                        Edit
-                      </button>
-                    )}
-                    {canDelete && (
-                      <button
-                        type="button"
-                        className="chat-act chat-act-danger"
-                        aria-label="Delete message"
-                        onClick={() => onDeleteMessage?.(m.id)}
-                      >
-                        Delete
-                      </button>
-                    )}
-                  </div>
-                )}
-                {onOpenThread && !m.pending && !m.failed && (
-                  <div className="chat-msg-thread">
-                    {m.replyCount && m.replyCount > 0 ? (
+                {!isEditing &&
+                  (canReact || canReply || canEdit || canDelete || canCopy) && (
+                    <MessageActions
+                      message={m}
+                      canReact={canReact}
+                      canReply={canReply}
+                      canEdit={canEdit}
+                      canDelete={canDelete}
+                      canCopy={canCopy}
+                      onToggleReaction={onToggleReaction}
+                      onBeginEdit={beginEdit}
+                      onDeleteMessage={onDeleteMessage}
+                      onOpenThread={onOpenThread}
+                    />
+                  )}
+                {onOpenThread &&
+                  !m.pending &&
+                  !m.failed &&
+                  (m.replyCount ?? 0) > 0 && (
+                    <div className="chat-msg-thread">
                       <button
                         type="button"
                         className="chat-thread-count"
@@ -399,18 +578,8 @@ export function ChatView({
                       >
                         {m.replyCount} {m.replyCount === 1 ? "reply" : "replies"}
                       </button>
-                    ) : (
-                      <button
-                        type="button"
-                        className="chat-thread-reply"
-                        onClick={() => onOpenThread(m)}
-                        aria-label="Reply in thread"
-                      >
-                        Reply in thread
-                      </button>
-                    )}
-                  </div>
-                )}
+                    </div>
+                  )}
               </div>
             );
           })

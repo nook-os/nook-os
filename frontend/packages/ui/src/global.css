@@ -4130,7 +4130,9 @@ a.toast-main:hover .toast-title { text-decoration: underline; }
   color: var(--nook-fg-dim);
   font-size: 12px;
 }
-.chat-msg { padding: 0 0 0 2px; }
+/* `relative` so the hover action bar can float over this row's upper-right
+   corner instead of taking a line under it (MAIN-300). */
+.chat-msg { position: relative; padding: 0 0 0 2px; }
 .chat-msg.head { margin-top: 8px; }
 .chat-msg-head {
   display: flex;
@@ -4166,10 +4168,10 @@ a.toast-main:hover .toast-title { text-decoration: underline; }
   text-decoration: underline;
 }
 
-/* ── Reactions + message actions (MAIN-116) ────────────────────────────────
-   Reaction pills sit persistently under a message; the edit/delete/react row
-   stays hidden until hover (like the thread affordance) so a quiet channel
-   isn't noisy. A deleted message is dimmed and italic and carries neither. */
+/* ── Reactions + message actions (MAIN-116, MAIN-300) ──────────────────────
+   Reaction pills sit persistently under a message; the actions live in a bar
+   that floats over its upper-right corner on hover (below). A deleted message
+   is dimmed and italic and carries neither. */
 .chat-msg.deleted .chat-body.deleted,
 .chat-thread-body.deleted {
   color: var(--nook-fg-faint);
@@ -4229,39 +4231,103 @@ a.toast-main:hover .toast-title { text-decoration: underline; }
 .chat-reaction-emoji { font-size: 12px; }
 .chat-reaction-count { font-variant-numeric: tabular-nums; }
 
-.chat-msg-actions {
+/* ── The floating action bar (MAIN-300) ────────────────────────────────────
+   The actions used to be a row UNDER the body: in flow, so every message
+   reserved its height whether or not anyone was looking, and an always-present
+   Delete ate row width. Absolutely positioned, the bar costs nothing at rest —
+   that removal IS the density fix, not a tightened gap.
+
+   `pointer-events` is off while it is invisible so it cannot swallow a click on
+   the message underneath. Keyboard focus ignores `pointer-events`, which is
+   exactly what lets Tab reach the bar and reveal it via `:focus-within`.
+   `.open` holds it up while one of its menus is torn off into the body portal,
+   where neither the row's `:hover` nor `:focus-within` can still see it. */
+.chat-msg-bar {
+  position: absolute;
+  top: -10px;
+  right: 4px;
+  z-index: 3;
   display: flex;
   align-items: center;
-  gap: 4px;
-  margin-top: 2px;
-  opacity: 0;
-  transition: opacity 0.1s;
-}
-.chat-msg:hover .chat-msg-actions,
-.chat-msg-actions:focus-within { opacity: 1; }
-.chat-act {
-  display: inline-flex;
-  align-items: center;
-  gap: 3px;
+  gap: 1px;
+  padding: 1px;
   border: 1px solid var(--nook-border-bright);
   border-radius: var(--nook-radius);
+  background: var(--nook-bg-panel);
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.5);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.1s;
+}
+.chat-msg:hover > .chat-msg-bar,
+.chat-msg-bar:focus-within,
+.chat-msg-bar.open {
+  opacity: 1;
+  pointer-events: auto;
+}
+.chat-bar-wrap { display: inline-flex; }
+.chat-bar-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 20px;
+  padding: 0;
+  border: 0;
+  border-radius: 3px;
   background: transparent;
-  color: var(--nook-fg-faint);
-  font: inherit;
-  font-size: 11px;
-  line-height: 1;
-  padding: 2px 6px;
+  color: var(--nook-fg-dim);
   cursor: pointer;
 }
-.chat-act:hover { color: var(--nook-fg); border-color: var(--nook-accent); }
-.chat-act-danger:hover { color: var(--nook-err); border-color: var(--nook-err); }
-.chat-act-react.open { color: var(--nook-accent); border-color: var(--nook-accent); }
-.chat-react-wrap { position: relative; display: inline-flex; }
+.chat-bar-btn:hover {
+  background: color-mix(in srgb, var(--nook-accent) 16%, transparent);
+  color: var(--nook-fg);
+}
+.chat-bar-btn.on { color: var(--nook-accent); }
+.chat-bar-btn:focus-visible {
+  outline: 1px solid var(--nook-accent);
+  outline-offset: -1px;
+}
+
+/* Both popups are portalled out of the scrolling log by `useAnchoredMenu`, which
+   supplies `position`/`left`/`top` inline — so these only carry the look, and
+   must not re-declare an offset or they would fight it. Same panel look as
+   `.sel-menu`, for the same reason: it is the same kind of thing. */
+.chat-more-menu {
+  position: fixed;
+  z-index: 500;
+  min-width: 132px;
+  padding: 3px;
+  border: 1px solid var(--nook-border-bright);
+  border-radius: var(--nook-radius);
+  background: var(--nook-bg-panel);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.55);
+}
+.chat-more-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 3px 6px;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--nook-fg);
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.4;
+  text-align: left;
+  cursor: pointer;
+}
+.chat-more-item:hover,
+.chat-more-item:focus-visible {
+  outline: none;
+  background: color-mix(in srgb, var(--nook-accent) 18%, transparent);
+}
+.chat-more-item.danger { color: var(--nook-err); }
 .chat-react-picker {
-  position: absolute;
-  bottom: calc(100% + 4px);
-  left: 0;
-  z-index: 20;
+  position: fixed;
+  z-index: 500;
   display: flex;
   flex-wrap: wrap;
   gap: 2px;
@@ -4270,7 +4336,7 @@ a.toast-main:hover .toast-title { text-decoration: underline; }
   border: 1px solid var(--nook-border-bright);
   border-radius: var(--nook-radius);
   background: var(--nook-bg-panel);
-  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.5);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.55);
 }
 .chat-react-opt {
   border: 0;
@@ -4282,16 +4348,18 @@ a.toast-main:hover .toast-title { text-decoration: underline; }
   padding: 3px;
   cursor: pointer;
 }
-.chat-react-opt:hover {
+.chat-react-opt:hover,
+.chat-react-opt:focus-visible {
+  outline: none;
   background: color-mix(in srgb, var(--nook-accent) 18%, transparent);
 }
 
-/* ── Thread affordances (MAIN-114) ─────────────────────────────────────────
-   Per-message reply actions under the body. "Reply in thread" stays quiet
-   (revealed on hover) so a flat channel isn't visually noisy; a message with
-   replies shows its count persistently as the way into the thread. */
+/* ── Thread affordances (MAIN-114, MAIN-300) ───────────────────────────────
+   Replying now lives in the hover bar above; what stays under the body is the
+   count, which reports state rather than offering an action — a message with
+   replies shows it persistently as the way into the thread, and a message
+   without one renders nothing at all, so a flat channel costs no rows. */
 .chat-msg-thread { margin-top: 2px; }
-.chat-thread-reply,
 .chat-thread-count {
   border: 0;
   background: transparent;
@@ -4299,15 +4367,6 @@ a.toast-main:hover .toast-title { text-decoration: underline; }
   font-size: 11px;
   cursor: pointer;
   padding: 0;
-}
-.chat-thread-reply {
-  color: var(--nook-fg-faint);
-  opacity: 0;
-  transition: opacity 0.1s;
-}
-.chat-msg:hover .chat-thread-reply,
-.chat-thread-reply:focus-visible { opacity: 1; }
-.chat-thread-count {
   color: var(--nook-info);
   font-weight: 600;
 }
