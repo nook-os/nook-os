@@ -35,6 +35,13 @@ const EMBEDDED: &[(&str, &str)] = &[
         "nook-epic",
         include_str!("../../../../skills/nook-epic/SKILL.md"),
     ),
+    // The MERGE authority for an epic's children. It was the one loop skill
+    // never embedded, so a node had four fifths of the loop and the pass that
+    // lands work was the missing fifth (MAIN-344).
+    (
+        "nook-epic-runner",
+        include_str!("../../../../skills/nook-epic-runner/SKILL.md"),
+    ),
 ];
 
 /// Where a given agent keeps its skills.
@@ -83,10 +90,29 @@ fn detect_in(h: &Path) -> Vec<Target> {
         });
     }
 
-    if h.join(".claude").is_dir() {
+    // `CLAUDE_CONFIG_DIR` RELOCATES the whole config directory, and skills live
+    // inside it. The operator node sets it (MAIN-238) so the fleet's identity is
+    // separate from anyone's personal login — which meant every skill was being
+    // written to `~/.claude/skills` while the agent read somewhere else
+    // entirely. Verified on the live dev operator: `~/.claude/skills/nookos`
+    // present, `$CLAUDE_CONFIG_DIR/skills` absent (MAIN-344).
+    //
+    // BOTH roots, not a swap: writing to the relocated dir is what fixes the
+    // fleet, and keeping the default means a machine that later unsets the
+    // variable does not silently lose its skills. Writing a second copy costs
+    // one small file.
+    let claude_cfg = std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from);
+    if h.join(".claude").is_dir() || claude_cfg.is_some() {
+        let mut roots = Vec::new();
+        if let Some(dir) = claude_cfg {
+            roots.push(dir.join("skills"));
+        }
+        if h.join(".claude").is_dir() {
+            roots.push(h.join(".claude/skills"));
+        }
         found.push(Target {
             name: "Claude Code",
-            roots: vec![h.join(".claude/skills")],
+            roots,
         });
     }
 
@@ -155,6 +181,50 @@ pub struct Installed {
 /// The name is re-validated here even though the control plane already checked
 /// it. This is the end that turns a wire string into a path, and it should not
 /// be relying on the other end having been careful.
+/// Write the embedded set into every detected agent, quietly, for a node that
+/// is about to start running loop jobs (MAIN-344).
+///
+/// Called on every `nook run`, not once at join. A node joined by an older
+/// binary keeps whatever set that binary shipped — which is how the dev
+/// operator ended up with only `nookos` while four loop skills had been
+/// embedded for cards — and a job that types `/nook-spec` at an agent which has
+/// never heard of it is a silent no-op. Running it at boot means an image
+/// upgrade IS the delivery mechanism.
+///
+/// Idempotent through the same sha-skip as every other write here, and
+/// non-fatal: a node that cannot write a skill file should still come up and
+/// say so, not refuse to run.
+pub fn install_embedded_quietly() -> Vec<String> {
+    let mut written = Vec::new();
+    let Ok(targets) = detect() else {
+        return written;
+    };
+    for t in targets {
+        for root in &t.roots {
+            match write_embedded(root) {
+                Ok(paths) => written.extend(paths.into_iter().map(|p| p.display().to_string())),
+                Err(e) => tracing::warn!(agent = t.name, root = %root.display(), error = %e,
+                    "could not install the embedded skills"),
+            }
+        }
+    }
+    written
+}
+
+/// Whether a skill of this name is installed for any detected agent — the
+/// preflight a loop job runs before typing `/<skill>` at an agent (MAIN-344
+/// AC-5). Typing a command nothing resolves is a silent no-op, and a silent
+/// no-op is the failure mode this whole card exists to remove.
+pub fn is_installed(name: &str) -> bool {
+    detect()
+        .map(|ts| {
+            ts.iter()
+                .flat_map(|t| t.roots.iter())
+                .any(|r| r.join(name).join("SKILL.md").is_file())
+        })
+        .unwrap_or(false)
+}
+
 pub fn install_taught(name: &str, content: &str) -> Result<Installed> {
     let name = safe_name(name)?;
     let mut out = Installed::default();
@@ -247,10 +317,14 @@ mod tests {
     /// here.
     #[test]
     fn the_embedded_skills_look_like_the_real_ones() {
-        // All five ship, in order, and each is a real document rather than an
+        // All six ship, in order, and each is a real document rather than an
         // empty file — an `include_str!` at the wrong path still compiles if the
         // file exists, and an agent handed a stub fails in a way nobody traces
         // back here.
+        //
+        // `nook-epic-runner` joined the set in MAIN-344: it was the one loop
+        // skill never embedded, so a node had four fifths of the loop and the
+        // pass that actually lands work was the missing fifth.
         let names: Vec<&str> = EMBEDDED.iter().map(|(n, _)| *n).collect();
         assert_eq!(
             names,
@@ -259,7 +333,8 @@ mod tests {
                 "nook-spec",
                 "nook-build",
                 "nook-review",
-                "nook-epic"
+                "nook-epic",
+                "nook-epic-runner"
             ]
         );
         for (name, content) in EMBEDDED {
@@ -381,5 +456,59 @@ mod tests {
         assert!(!needs_write(&path, "hello"), "identical content must skip");
         assert!(needs_write(&path, "changed"), "new content must write");
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // ── MAIN-344 ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn claude_config_dir_is_where_the_skills_go() {
+        // The bug this pins: the operator node sets CLAUDE_CONFIG_DIR so the
+        // fleet's identity is separate from anyone's (MAIN-238), and every
+        // skill was being written to `~/.claude/skills` while the agent read
+        // the relocated directory. Verified on the live dev operator before
+        // being fixed here.
+        let tmp = std::env::temp_dir().join(format!("nook344-{}", std::process::id()));
+        std::fs::create_dir_all(tmp.join(".claude")).unwrap();
+        let relocated = tmp.join("elsewhere");
+
+        std::env::set_var("CLAUDE_CONFIG_DIR", &relocated);
+        let targets = detect_in(&tmp);
+        std::env::remove_var("CLAUDE_CONFIG_DIR");
+
+        let claude = targets
+            .iter()
+            .find(|t| t.name == "Claude Code")
+            .expect("claude detected");
+        assert!(
+            claude.roots.contains(&relocated.join("skills")),
+            "the relocated config dir must be a root: {:?}",
+            claude.roots
+        );
+        // And the default is KEPT, so unsetting the variable later does not
+        // silently strand a machine with no skills.
+        assert!(claude.roots.contains(&tmp.join(".claude/skills")));
+
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn a_relocated_config_dir_counts_even_with_no_dot_claude() {
+        // The operator container is exactly this shape: CLAUDE_CONFIG_DIR set,
+        // and no `~/.claude` at all. Detection keyed only on the directory
+        // would find no claude here and install nothing.
+        let tmp = std::env::temp_dir().join(format!("nook344b-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let relocated = tmp.join("nook-claude");
+
+        std::env::set_var("CLAUDE_CONFIG_DIR", &relocated);
+        let targets = detect_in(&tmp);
+        std::env::remove_var("CLAUDE_CONFIG_DIR");
+
+        assert!(
+            targets.iter().any(|t| t.name == "Claude Code"),
+            "a relocated config dir is still Claude Code"
+        );
+
+        std::fs::remove_dir_all(&tmp).ok();
     }
 }

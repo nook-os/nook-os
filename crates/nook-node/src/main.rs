@@ -834,6 +834,12 @@ async fn main() -> Result<()> {
             // to move checkouts while discovery could report a half-moved tree
             // (MAIN-107 AC-2). Removed on clean exit; stale copies are ignored.
             let _pidfile = config::PidFile::write()?;
+            // The loop skills have to BE here before a job types `/nook-spec`
+            // at an agent (MAIN-344). Done on every boot rather than once at
+            // join: a node joined by an older binary keeps that binary's set,
+            // so an image upgrade would otherwise deliver nothing.
+            let installed = wizard::skills::install_embedded_quietly();
+            tracing::info!(count = installed.len(), "embedded skills installed");
             conn::run(cfg).await
         }
         Command::Status => status().await,

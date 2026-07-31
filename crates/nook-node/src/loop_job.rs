@@ -298,6 +298,26 @@ pub fn run(cfg: NodeConfig, out: Sender<NodeToControl>, job: LoopJob) {
     } else {
         "nook-spec"
     };
+    // AC-5: a skill the agent has never heard of makes `/nook-spec` ordinary
+    // prose. The agent reads it, does nothing in particular, and the job
+    // "succeeds" having produced no ticket — the exact silent no-op this card
+    // exists to remove. Refuse before launching anything.
+    if !crate::wizard::skills::is_installed(skill) {
+        finished(
+            &out,
+            &job_id,
+            false,
+            format!(
+                "skill {skill} not installed on this node — the loop skills ship \
+                 with the agent binary and are written on `nook run`; this node \
+                 is running a build that predates them, or could not write its \
+                 agent skill directory"
+            ),
+        );
+        unregister(&dirname);
+        return;
+    }
+
     let tmux_name = job_tmux_name(&job_id);
     note(
         &out,
