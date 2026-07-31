@@ -2,6 +2,7 @@
 // a claim rather than through a rendered panel.
 import { describe, expect, it } from "vitest";
 import {
+  commitPaths,
   committable,
   diffFor,
   isConflict,
@@ -120,5 +121,30 @@ describe("diffFor", () => {
   it("explains a tracked file with no slice as binary or truncated", () => {
     const got = diffFor(f(" M", "image.png"), splitDiffByFile(DIFF));
     expect("reason" in got && got.reason).toMatch(/binary|truncated/);
+  });
+});
+
+describe("commitPaths", () => {
+  it("sends null only when the selection is the whole tree", () => {
+    const files = [f(" M", "a"), f("??", "b")];
+    expect(commitPaths(files, ["a", "b"])).toBeNull();
+    expect(commitPaths(files, ["a"])).toEqual(["a"]);
+  });
+
+  it("NEVER sends null while a conflict exists, however complete the selection", () => {
+    // The defect this exists to prevent: conflicted files are unselectable, so
+    // "everything selectable is selected" is true with a smaller set. Comparing
+    // against the committable files sent `null`, the node ran `git add -A`, and
+    // the conflicted files went into the commit with their markers.
+    const files = [f(" M", "a"), f("UU", "boom")];
+    const selected = committable(files).map((x) => x.path); // a full selection
+    expect(selected).toEqual(["a"]);
+    expect(commitPaths(files, selected)).toEqual(["a"]);
+    expect(commitPaths(files, selected)).not.toBeNull();
+  });
+
+  it("sends an empty list rather than null when nothing is selected", () => {
+    // The API refuses `[]` outright; `null` would commit the whole tree.
+    expect(commitPaths([f(" M", "a")], [])).toEqual([]);
   });
 });

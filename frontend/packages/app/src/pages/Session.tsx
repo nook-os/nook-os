@@ -24,6 +24,7 @@ import {
   type ContextMenuItem,
 } from "../contextMenu";
 import {
+  commitPaths,
   committable,
   diffFor,
   isConflict,
@@ -171,10 +172,10 @@ function GitPanel({
             body: {
               node_id: session.node_id,
               message,
-              // `null` only when every committable file is selected, so the
-              // ordinary case still sends the request it always sent.
-              paths:
-                selected.length === canCommit.length ? null : selected,
+              // Whole tree → `null` (what every caller sent before selective
+              // staging); anything less → the explicit list. Never
+              // `canCommit.length` here: see `commitPaths`.
+              paths: commitPaths(files, selected),
             },
           })
         : await api.POST("/api/v1/workspaces/{id}/git/push", {

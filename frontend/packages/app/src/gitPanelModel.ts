@@ -110,3 +110,19 @@ export function diffFor(
 export function committable(files: GitFile[]): GitFile[] {
   return files.filter((f) => !isConflict(f));
 }
+
+/**
+ * The `paths` a commit should send: `null` only when the selection IS the whole
+ * working tree.
+ *
+ * `null` means "stage everything" to the node — it runs `git add -A`. So the
+ * comparison has to be against EVERY file, not against the committable ones.
+ * Comparing against committable was a real defect: during a merge conflict, the
+ * conflicted files are unselectable, so "everything selectable is selected"
+ * was true with a smaller set, `null` went over the wire, and `git add -A`
+ * staged the conflicted files — markers and all — into the commit. The panel
+ * says in words that it will not do that; this is what makes it true.
+ */
+export function commitPaths(files: GitFile[], selected: string[]): string[] | null {
+  return selected.length === files.length ? null : selected;
+}
