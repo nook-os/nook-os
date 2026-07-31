@@ -16,6 +16,8 @@ mod dms;
 mod messages;
 mod registry;
 mod repo;
+#[cfg(test)]
+mod testdb;
 mod ws;
 
 use std::str::FromStr;
@@ -38,15 +40,6 @@ use uuid::Uuid;
 /// 0004_chat_threads, 0005_chat_reactions, 0006_chat_categories,
 /// 0007_chat_read_cursors.
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
-
-/// Chat's SQLite track, the twin of the set above (MAIN-236 scaffolded it;
-/// MAIN-294 wires it).
-///
-/// It existed as a directory of `.sql` files that nothing ever selected: chat
-/// built a Postgres pool unconditionally and handed `db.pg()` to the migrator,
-/// which panics on the SQLite arm. So chat could not boot on `sqlite://` at all,
-/// while *looking* as though it could.
-static MIGRATOR_SQLITE: sqlx::migrate::Migrator = sqlx::migrate!("./migrations_sqlite");
 
 /// Chat's squash manifest (MAIN-235); see `nook_control::SQUASH_MANIFEST`.
 static SQUASH_MANIFEST: &str = include_str!("../migrations/squash-manifest.txt");
@@ -92,20 +85,38 @@ async fn main() -> anyhow::Result<()> {
     // The schema must exist before the migrator creates chat._sqlx_migrations.
     // A no-op on SQLite, which has no schemas — see the function.
     ensure_chat_schema(&db).await?;
-    // Dev tolerates a chat ledger ahead of this checkout (warns + proceeds);
-    // production stays strictly fatal (MAIN-224). On Postgres the pool's
-    // search_path pins `chat` first, so the orphan check reads
-    // `chat._sqlx_migrations`, and chat's own squash manifest collapses its own
-    // ledger (MAIN-235). The SQLite arm has neither: one file, one ledger, and
-    // no squash to re-stamp.
-    nook_db::migrate::run_boot_migrations_for(
-        &db,
-        cfg.is_production(),
-        &MIGRATOR,
-        &MIGRATOR_SQLITE,
-        SQUASH_MANIFEST,
-    )
-    .await?;
+    // Migrations are POSTGRES-ONLY, and that is the whole shape of MAIN-294.
+    //
+    // On Postgres, chat owns a schema: the pool's search_path pins `chat` first,
+    // so the orphan check reads `chat._sqlx_migrations`, chat's squash manifest
+    // collapses chat's own ledger (MAIN-235), dev tolerates a ledger ahead of
+    // this checkout and production stays strictly fatal (MAIN-224). Unchanged.
+    //
+    // On SQLite there are no schemas. One file is one namespace and ONE
+    // `_sqlx_migrations`, so a second migrator writing it collides with the
+    // control plane's on version numbers — measured as "migration 1 was
+    // previously applied but has been modified", a checksum mismatch, which is
+    // fatal everywhere. Chat's tables therefore live in the control track's
+    // `0001` (they are named `chat_*`, so one namespace is enough for both) and
+    // chat runs nothing here: the control plane owns the single ledger.
+    //
+    // Chat cannot run that track itself even if it wanted to — `nook-control` is
+    // a dev-dependency, not a runtime one, and making the chat service depend on
+    // the whole control plane to boot would be a far larger change than the one
+    // this buys.
+    if db.engine() == nook_db::Engine::Postgres {
+        nook_db::migrate::run_boot_migrations(
+            &MIGRATOR,
+            db.pg(),
+            cfg.is_production(),
+            SQUASH_MANIFEST,
+        )
+        .await?;
+    } else {
+        tracing::info!(
+            "sqlite: chat's tables come from the control plane's merged 0001 — no chat migrator to run",
+        );
+    }
 
     // Live fan-out: a local per-channel broadcast registry, plus a cross-instance
     // bus (nook-db's event-bus seam — Postgres LISTEN/NOTIFY under the hood) so a

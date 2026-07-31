@@ -146,6 +146,11 @@ mod tests {
         let Ok(url) = std::env::var("DATABASE_URL") else {
             return;
         };
+        // LISTEN/NOTIFY is Postgres. There is no SQLite behaviour to assert here
+        // (MAIN-294) — see `crate::testdb::skip_unless_postgres`.
+        if crate::testdb::skip_unless_postgres("the chat event-bus seam test") {
+            return;
+        }
         let pool = nook_db::connect(&url, 2).await.expect("connect");
 
         // Subscribe first (the seam's LISTEN), then publish, then read it back.
@@ -200,6 +205,11 @@ mod tests {
         let Ok(url) = std::env::var("DATABASE_URL") else {
             return;
         };
+        // LISTEN/NOTIFY is Postgres. There is no SQLite behaviour to assert here
+        // (MAIN-294) — see `crate::testdb::skip_unless_postgres`.
+        if crate::testdb::skip_unless_postgres("the chat event-bus seam test") {
+            return;
+        }
         let pool = nook_db::connect(&url, 2).await.expect("connect");
 
         let mut sub = PgEventBus::new(pool.clone())

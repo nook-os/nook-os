@@ -97,6 +97,13 @@ async fn resolve_session_resolves_public_auth_tables_on_the_chat_first_pool() {
     let Ok(url) = std::env::var("DATABASE_URL") else {
         return;
     };
+    // Postgres semantics are the whole subject here — `search_path` resolution
+    // and `information_schema` isolation have no SQLite equivalent — so this
+    // skips rather than pretending to assert something (MAIN-294).
+    if nook_db::engine_from_url(&url).ok() != Some(nook_db::Engine::Postgres) {
+        eprintln!("skipping the chat search_path regression tests — Postgres-only behaviour");
+        return;
+    }
 
     // Provision the control-plane `public` schema this test depends on. The
     // nook-chat crate ships only its own `chat` migrations, so a fresh CI

@@ -15,8 +15,11 @@
 use sqlx::sqlite::SqlitePoolOptions;
 use sqlx::{Row, SqlitePool};
 
+/// The whole SQLite track. Since MAIN-294 that includes nook-chat's tables:
+/// SQLite has no schemas, so one file is one namespace and one
+/// `_sqlx_migrations`, and two migrators writing it collide. Chat's `chat_*`
+/// tables therefore live here and chat runs no migrator on SQLite at all.
 const CONTROL: &str = include_str!("../migrations_sqlite/0001_init.sql");
-const CHAT: &str = include_str!("../../nook-chat/migrations_sqlite/0001_chat_init.sql");
 
 /// Strip `--` comments, so a semicolon inside prose cannot look like the end of
 /// a statement. (It can: a hand-correction note in the file says "…is faithful;
@@ -165,7 +168,7 @@ async fn column_types_follow_the_documented_map() {
 /// syntax error SQLite reports only when that statement runs.
 #[tokio::test]
 async fn mechanical_rewrites_left_no_postgres_isms() {
-    for (name, sql) in [("control", CONTROL), ("chat", CHAT)] {
+    for (name, sql) in [("control", CONTROL)] {
         // Only the SQL matters — the header comment names the constructs it
         // rewrote, and matching on that would be checking the documentation.
         let code = strip_comments(sql);
@@ -186,16 +189,36 @@ async fn mechanical_rewrites_left_no_postgres_isms() {
     }
 }
 
+/// Chat's tables come out of the SAME file as the control plane's (MAIN-294).
+///
+/// This used to apply nook-chat's own `0001_chat_init.sql`. That file is gone:
+/// on SQLite there is one track, because one file cannot carry two ledgers. The
+/// claim worth keeping is that chat's tables are still built — now from here —
+/// and that the merge collided with nothing, which the `chat_` prefix is what
+/// makes true.
 #[tokio::test]
-async fn the_chat_scaffold_builds_its_own_schema() {
-    let pool = apply(CHAT).await;
+async fn the_chat_tables_are_built_by_the_one_sqlite_track() {
+    let pool = apply(CONTROL).await;
     let t = tables(&pool).await;
-    // Chat's tables carry the `chat_` prefix even inside their own schema.
-    for expected in ["chat_channels", "chat_messages", "chat_channel_members"] {
+    for expected in [
+        "chat_channels",
+        "chat_messages",
+        "chat_channel_members",
+        "chat_channel_categories",
+        "chat_channel_participants",
+        "chat_message_revisions",
+        "chat_reactions",
+        "chat_read_cursors",
+    ] {
         assert!(
             t.contains(&expected.to_string()),
             "missing {expected}; got {t:?}"
         );
+    }
+    // The merge is only safe because nothing collided: every chat table is
+    // `chat_`-prefixed, so the control plane's names are untouched.
+    for control_table in ["tenants", "users", "tasks"] {
+        assert!(t.contains(&control_table.to_string()));
     }
 }
 

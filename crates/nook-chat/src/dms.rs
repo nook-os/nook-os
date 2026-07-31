@@ -183,47 +183,17 @@ mod tests {
     use nook_errors::ApiError;
 
     use super::{list, open, people};
-    use crate::{channels, AppState, Caller};
+    use crate::{channels, Caller};
     use axum::extract::{Json, State};
     use nook_db::{params, Db, DbPool};
     use nook_types::OpenDmRequest;
-    use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
-    use std::str::FromStr;
-    use std::sync::Arc;
+
     use uuid::Uuid;
 
-    async fn pool(url: &str, search_path: &str) -> DbPool {
-        let opts = PgConnectOptions::from_str(url)
-            .unwrap()
-            .options([("search_path", search_path)]);
-        nook_db::EnginePool::from_pg(
-            PgPoolOptions::new()
-                .max_connections(4)
-                .connect_with(opts)
-                .await
-                .unwrap(),
-        )
-    }
-
     // DB-backed; a no-op without NOOK_REQUIRE_DB=1, matching the suite convention.
-    async fn setup() -> Option<AppState> {
-        if std::env::var("NOOK_REQUIRE_DB").ok().as_deref() != Some("1") {
-            eprintln!("skipping DM test — no NOOK_REQUIRE_DB");
-            return None;
-        }
-        let url = std::env::var("DATABASE_URL").ok()?;
-        let bootstrap = pool(&url, "public").await;
-        crate::ensure_chat_schema(&bootstrap).await.unwrap();
-        nook_control::MIGRATOR.run(bootstrap.pg()).await.unwrap();
-        let db = pool(&url, "chat,public").await;
-        crate::MIGRATOR.run(db.pg()).await.unwrap();
-        Some(AppState {
-            channels: Arc::new(crate::repo::channels::DbChannelRepository::new(db.clone())),
-            messages: Arc::new(crate::repo::messages::DbMessageRepository::new(db.clone())),
-            dms: Arc::new(crate::repo::dms::DbDmRepository::new(db.clone())),
-            db,
-            registry: Arc::new(crate::registry::Registry::new()),
-        })
+    // Engine-aware since MAIN-294 — see `crate::testdb`.
+    async fn setup() -> Option<crate::testdb::ChatTest> {
+        crate::testdb::chat_test("DM test").await
     }
 
     fn caller(user: Uuid, tenant: Uuid) -> Caller {
@@ -237,7 +207,7 @@ mod tests {
     async fn new_org(db: &DbPool) -> Uuid {
         let id = Uuid::now_v7();
         db.exec(
-            "INSERT INTO public.orgs (id, name, slug) VALUES ($1, $2, $2)",
+            "INSERT INTO orgs (id, name, slug) VALUES ($1, $2, $2)",
             params![id, format!("o-{}", id.simple())],
         )
         .await
@@ -248,7 +218,7 @@ mod tests {
     async fn tenant_in_org(db: &DbPool, org: Uuid) -> Uuid {
         let id = Uuid::now_v7();
         db.exec(
-            "INSERT INTO public.tenants (id, name, slug, org_id) VALUES ($1, $2, $2, $3)",
+            "INSERT INTO tenants (id, name, slug, org_id) VALUES ($1, $2, $2, $3)",
             params![id, format!("t-{}", id.simple()), org],
         )
         .await
@@ -260,7 +230,7 @@ mod tests {
     async fn user(db: &DbPool, tenant: Uuid, person: Uuid, name: &str) -> Uuid {
         let id = Uuid::now_v7();
         db.exec(
-            "INSERT INTO public.users (id, tenant_id, person_id, display_name, email, role)
+            "INSERT INTO users (id, tenant_id, person_id, display_name, email, role)
              VALUES ($1, $2, $3, $4, $5, 'member')",
             params![
                 id,
@@ -324,7 +294,7 @@ mod tests {
         state
             .db
             .exec(
-                "INSERT INTO public.users (id, tenant_id, person_id, display_name, email, role)
+                "INSERT INTO users (id, tenant_id, person_id, display_name, email, role)
              VALUES ($1, $2, $3, 'Cy', $4, 'owner')",
                 params![uc, t, pc, format!("u-{}@example.test", uc.simple())],
             )

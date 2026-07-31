@@ -83,7 +83,7 @@ pub async fn access(
 /// Does the caller's person belong to any tenant under `org`? Resolves the
 /// caller's `person_id` (from their user row) and asks whether that person has a
 /// user in any tenant whose `org_id` matches — the cross-tenant membership rule
-/// (AC-1). Reaches `public.users`/`public.tenants` via the `chat,public`
+/// (AC-1). Reaches `users`/`tenants` via the `chat,public`
 /// search_path, like the existing `tenant_role` lookup.
 async fn person_in_org(
     repo: &dyn crate::repo::channels::ChannelRepository,
@@ -327,9 +327,7 @@ mod tests {
         ChatChannelPlacement, CreateChatCategory, CreateChatChannel, ReorderChatCategories,
         UpdateChatChannel,
     };
-    use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
-    use std::str::FromStr;
-    use std::sync::Arc;
+
     use uuid::Uuid;
 
     #[test]
@@ -347,46 +345,17 @@ mod tests {
     // exactly as the service configures its pool. DB-backed; no-ops without
     // NOOK_REQUIRE_DB=1, matching the suite convention.
 
-    async fn pool(url: &str, search_path: &str) -> DbPool {
-        let opts = PgConnectOptions::from_str(url)
-            .unwrap()
-            .options([("search_path", search_path)]);
-        nook_db::EnginePool::from_pg(
-            PgPoolOptions::new()
-                .max_connections(2)
-                .connect_with(opts)
-                .await
-                .unwrap(),
-        )
-    }
-
-    /// The service's pool, with the `public` auth/user tables and the `chat`
-    /// schema both provisioned — the same bootstrap the search_path regression
-    /// test uses, extended to run chat's own migrations for `chat_channels`.
-    async fn setup() -> Option<AppState> {
-        if std::env::var("NOOK_REQUIRE_DB").ok().as_deref() != Some("1") {
-            eprintln!("skipping channel-admin test — no NOOK_REQUIRE_DB");
-            return None;
-        }
-        let url = std::env::var("DATABASE_URL").ok()?;
-        let bootstrap = pool(&url, "public").await;
-        crate::ensure_chat_schema(&bootstrap).await.unwrap();
-        nook_control::MIGRATOR.run(bootstrap.pg()).await.unwrap();
-        let db = pool(&url, "chat,public").await;
-        crate::MIGRATOR.run(db.pg()).await.unwrap();
-        Some(AppState {
-            channels: Arc::new(crate::repo::channels::DbChannelRepository::new(db.clone())),
-            messages: Arc::new(crate::repo::messages::DbMessageRepository::new(db.clone())),
-            dms: Arc::new(crate::repo::dms::DbDmRepository::new(db.clone())),
-            db,
-            registry: Arc::new(crate::registry::Registry::new()),
-        })
+    /// A database and a wired state on whichever engine `DATABASE_URL` names —
+    /// the service's `chat,public` pool on Postgres, a private migrated bed on
+    /// SQLite (MAIN-294). See `crate::testdb`.
+    async fn setup() -> Option<crate::testdb::ChatTest> {
+        crate::testdb::chat_test("channel-admin test").await
     }
 
     async fn new_tenant(db: &DbPool) -> Uuid {
         let id = Uuid::now_v7();
         db.exec(
-            "INSERT INTO public.tenants (id, name, slug) VALUES ($1, $2, $2)",
+            "INSERT INTO tenants (id, name, slug) VALUES ($1, $2, $2)",
             params![id, format!("t-{}", id.simple())],
         )
         .await
@@ -396,10 +365,19 @@ mod tests {
 
     async fn add_user(db: &DbPool, tenant: Uuid, role: &str) -> Uuid {
         let id = Uuid::now_v7();
+        // The person id is BOUND rather than `gen_random_uuid()`: that function
+        // is Postgres-only, and this test now also runs on SQLite (MAIN-294).
+        // Generating it here is the portable form and reads no worse.
         db.exec(
-            "INSERT INTO public.users (id, tenant_id, person_id, display_name, email, role)
-             VALUES ($1, $2, gen_random_uuid(), 'U', $3, $4)",
-            params![id, tenant, format!("u-{}@example.test", id.simple()), role],
+            "INSERT INTO users (id, tenant_id, person_id, display_name, email, role)
+             VALUES ($1, $2, $3, 'U', $4, $5)",
+            params![
+                id,
+                tenant,
+                Uuid::now_v7(),
+                format!("u-{}@example.test", id.simple()),
+                role
+            ],
         )
         .await
         .unwrap();
@@ -432,7 +410,7 @@ mod tests {
             )
             .await;
         let _ = db
-            .exec("DELETE FROM public.tenants WHERE id = $1", params![tenant])
+            .exec("DELETE FROM tenants WHERE id = $1", params![tenant])
             .await;
     }
 
@@ -441,7 +419,7 @@ mod tests {
     async fn new_org(db: &DbPool) -> Uuid {
         let id = Uuid::now_v7();
         db.exec(
-            "INSERT INTO public.orgs (id, name, slug) VALUES ($1, $2, $2)",
+            "INSERT INTO orgs (id, name, slug) VALUES ($1, $2, $2)",
             params![id, format!("o-{}", id.simple())],
         )
         .await
@@ -452,7 +430,7 @@ mod tests {
     async fn new_tenant_in_org(db: &DbPool, org: Uuid) -> Uuid {
         let id = Uuid::now_v7();
         db.exec(
-            "INSERT INTO public.tenants (id, name, slug, org_id) VALUES ($1, $2, $2, $3)",
+            "INSERT INTO tenants (id, name, slug, org_id) VALUES ($1, $2, $2, $3)",
             params![id, format!("t-{}", id.simple()), org],
         )
         .await
@@ -465,7 +443,7 @@ mod tests {
     async fn add_user_person(db: &DbPool, tenant: Uuid, person: Uuid, role: &str) -> Uuid {
         let id = Uuid::now_v7();
         db.exec(
-            "INSERT INTO public.users (id, tenant_id, person_id, display_name, email, role)
+            "INSERT INTO users (id, tenant_id, person_id, display_name, email, role)
              VALUES ($1, $2, $3, 'U', $4, $5)",
             params![
                 id,
@@ -602,17 +580,17 @@ mod tests {
         for t in [ta, tb, tc] {
             let _ = state
                 .db
-                .exec("DELETE FROM public.users WHERE tenant_id = $1", params![t])
+                .exec("DELETE FROM users WHERE tenant_id = $1", params![t])
                 .await;
             let _ = state
                 .db
-                .exec("DELETE FROM public.tenants WHERE id = $1", params![t])
+                .exec("DELETE FROM tenants WHERE id = $1", params![t])
                 .await;
         }
         for o in [org, other_org] {
             let _ = state
                 .db
-                .exec("DELETE FROM public.orgs WHERE id = $1", params![o])
+                .exec("DELETE FROM orgs WHERE id = $1", params![o])
                 .await;
         }
     }

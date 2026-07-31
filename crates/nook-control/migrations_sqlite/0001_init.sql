@@ -1,10 +1,22 @@
--- NookOS SQLite schema — the control track's frozen 0001.
+-- NookOS SQLite schema — the WHOLE SQLite track's 0001.
 --
 -- SCAFFOLDED ONCE from the schema the Postgres migrations actually produce
 -- (MAIN-236), then hand-corrected and frozen. It is HAND-OWNED from here: the
 -- generator that produced it was deleted in the same PR, and nothing
 -- regenerates over this file. Forward changes are hand-authored SQLite deltas
 -- (0002_…), the twin of the Postgres migration that goes with them.
+--
+-- EDITED ONCE SINCE, deliberately, by MAIN-294: nook-chat's tables were folded
+-- in at the end of this file, because one SQLite file cannot carry two
+-- migration tracks (see the section header down there for the measurement). The
+-- append-only rule this breaks protects APPLIED migrations — a recorded
+-- checksum is what proves the schema in front of you is the schema the repo
+-- describes. Nothing had ever applied this track to a durable database: chat
+-- could not boot on `sqlite://` at all, which is the bug that card fixed, and
+-- every SQLite database that exists is a per-test file created and dropped
+-- inside one test. So there was no ledger anywhere to invalidate. That is why
+-- it was safe, and it is not a licence to do it again — the next change is a
+-- 0002.
 --
 -- Type map (docs/db-dialect-audit.md): uuid / timestamptz / jsonb / text -> TEXT,
 -- bigint & friends -> INTEGER, boolean -> INTEGER (0/1), now() ->
@@ -899,3 +911,119 @@ INSERT INTO role_permissions (role_key, permission_key) VALUES ('member', 'node.
 INSERT INTO role_permissions (role_key, permission_key) VALUES ('operator', 'rbac.grant');
 INSERT INTO role_permissions (role_key, permission_key) VALUES ('org_admin', 'rbac.grant');
 INSERT INTO role_permissions (role_key, permission_key) VALUES ('operator', 'org.manage');
+
+
+-- ── nook-chat's tables (MAIN-294) ──────────────────────────────────────────
+--
+-- On POSTGRES the two services keep separate ledgers, because chat owns a
+-- `chat` schema and its migrator writes `chat._sqlx_migrations` there. SQLite
+-- has no schemas: one file is one namespace and one `_sqlx_migrations`, so two
+-- migrators writing it collide on version numbers — measured as
+-- "migration 1 was previously applied but has been modified", which is fatal
+-- everywhere. Two tracks cannot coexist in one SQLite file.
+--
+-- So on SQLite there is ONE track, and it is this one. Chat's tables are folded
+-- in here rather than kept in a second file nothing could safely run; they are
+-- named `chat_*` outright, so sharing the namespace collides with nothing. Chat
+-- runs no migrator on SQLite at all — see `run_boot_migrations_for` in
+-- nook-chat's main.rs. The per-service ledger isolation the `chat` schema buys
+-- on Postgres is deliberately given up here: with one file and one namespace it
+-- was protecting against a problem this engine does not have.
+--
+-- Translated verbatim from what was nook-chat/migrations_sqlite/0001_chat_init.sql
+-- (MAIN-236 scaffolded it; this card merged it), same type map as above.
+
+CREATE TABLE IF NOT EXISTS chat_channel_categories (
+  id TEXT NOT NULL,
+  owner_type TEXT NOT NULL,
+  owner_id TEXT NOT NULL,
+  name TEXT NOT NULL,
+  "position" INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (id)
+);
+
+CREATE TABLE IF NOT EXISTS chat_channel_members (
+  channel_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  tenant_id TEXT NOT NULL,
+  joined_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (channel_id, user_id),
+  FOREIGN KEY (channel_id) REFERENCES chat_channels (id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS chat_channel_participants (
+  channel_id TEXT NOT NULL,
+  person_id TEXT NOT NULL,
+  PRIMARY KEY (channel_id, person_id),
+  FOREIGN KEY (channel_id) REFERENCES chat_channels (id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS chat_channels (
+  id TEXT NOT NULL,
+  owner_type TEXT NOT NULL,
+  owner_id TEXT NOT NULL,
+  name TEXT NOT NULL,
+  slug TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  archived_at TEXT,
+  category_id TEXT,
+  "position" INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (id),
+  UNIQUE (owner_type, owner_id, slug),
+  CHECK ((owner_type IN ('org', 'tenant', 'dm'))),
+  FOREIGN KEY (category_id) REFERENCES chat_channel_categories (id) ON DELETE SET NULL
+);
+
+CREATE TABLE IF NOT EXISTS chat_message_revisions (
+  id TEXT NOT NULL,
+  message_id TEXT NOT NULL,
+  prior_content TEXT NOT NULL,
+  action TEXT NOT NULL,
+  acted_by TEXT NOT NULL,
+  acted_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (id),
+  CHECK ((action IN ('edit', 'delete'))),
+  FOREIGN KEY (message_id) REFERENCES chat_messages (id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS chat_messages (
+  id TEXT NOT NULL,
+  channel_id TEXT NOT NULL,
+  author_id TEXT NOT NULL,
+  tenant_id TEXT NOT NULL,
+  body TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  parent_message_id TEXT,
+  edited_at TEXT,
+  deleted_at TEXT,
+  PRIMARY KEY (id),
+  FOREIGN KEY (channel_id) REFERENCES chat_channels (id) ON DELETE CASCADE,
+  FOREIGN KEY (parent_message_id) REFERENCES chat_messages (id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS chat_reactions (
+  message_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  emoji TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (message_id, user_id, emoji),
+  FOREIGN KEY (message_id) REFERENCES chat_messages (id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS chat_read_cursors (
+  channel_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  last_read_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (channel_id, user_id),
+  FOREIGN KEY (channel_id) REFERENCES chat_channels (id) ON DELETE CASCADE
+);
+
+-- Indexes.
+CREATE INDEX chat_channel_categories_owner_idx ON chat_channel_categories (owner_type, owner_id, "position");
+CREATE INDEX chat_channel_participants_person_idx ON chat_channel_participants (person_id);
+CREATE INDEX chat_message_revisions_message_idx ON chat_message_revisions (message_id, id);
+CREATE INDEX chat_messages_channel_idx ON chat_messages (channel_id, id);
+CREATE INDEX chat_messages_parent_idx ON chat_messages (parent_message_id, id) WHERE (parent_message_id IS NOT NULL);
+CREATE INDEX chat_reactions_message_idx ON chat_reactions (message_id);
+CREATE INDEX chat_read_cursors_user_idx ON chat_read_cursors (user_id, channel_id);
