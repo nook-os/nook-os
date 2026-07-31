@@ -10,14 +10,19 @@ use nook_control::repo::sessions::NewSession;
 use nook_testkit::TestBed;
 use nook_types::*;
 
+/// Create a session, ad-hoc or reconciler-owned. `managed` rides the INSERT,
+/// which is the point: it is what the unique index arbitrates on, before
+/// anything reaches a node.
 async fn a_session(
     bed: &TestBed,
     tenant: TenantId,
     workspace: Option<WorkspaceId>,
     node: NodeId,
     name: &str,
-) -> SessionId {
-    bed.app_state()
+    managed: bool,
+) -> nook_control::error::ApiResult<SessionId> {
+    Ok(bed
+        .app_state()
         .await
         .sessions
         .create(NewSession {
@@ -28,10 +33,24 @@ async fn a_session(
             runtime: "claude".to_string(),
             created_by: None,
             checkout_id: None,
+            managed,
         })
+        .await?
+        .id)
+}
+
+/// The common case: it must succeed.
+async fn made(
+    bed: &TestBed,
+    tenant: TenantId,
+    workspace: Option<WorkspaceId>,
+    node: NodeId,
+    name: &str,
+    managed: bool,
+) -> SessionId {
+    a_session(bed, tenant, workspace, node, name, managed)
         .await
         .expect("create session")
-        .id
 }
 
 #[tokio::test]
@@ -49,13 +68,8 @@ async fn only_sessions_the_reconciler_marked_are_visible_to_it() {
     let ws = bed.workspace(tenant).await;
     let state = bed.app_state().await;
 
-    let hand_started = a_session(&bed, tenant, Some(ws), node, "mine").await;
-    let mine = a_session(&bed, tenant, Some(ws), node, "managed").await;
-    state
-        .sessions
-        .mark_managed(tenant, mine)
-        .await
-        .expect("mark managed");
+    let hand_started = made(&bed, tenant, Some(ws), node, "mine", false).await;
+    let mine = made(&bed, tenant, Some(ws), node, "managed", true).await;
 
     let seen = state.sessions.live_managed(tenant, ws).await.expect("read");
     assert_eq!(seen.len(), 1, "only the marked one");
@@ -78,8 +92,7 @@ async fn an_ended_managed_session_is_a_gap_not_a_replica() {
     let ws = bed.workspace(tenant).await;
     let state = bed.app_state().await;
 
-    let s = a_session(&bed, tenant, Some(ws), node, "managed").await;
-    state.sessions.mark_managed(tenant, s).await.unwrap();
+    let s = made(&bed, tenant, Some(ws), node, "managed", true).await;
     assert_eq!(
         state.sessions.live_managed(tenant, ws).await.unwrap().len(),
         1
@@ -121,14 +134,16 @@ async fn two_replicas_cannot_both_start_the_same_managed_session() {
     let ws = bed.workspace(tenant).await;
     let state = bed.app_state().await;
 
-    let first = a_session(&bed, tenant, Some(ws), node, "managed").await;
-    state.sessions.mark_managed(tenant, first).await.unwrap();
+    let first = made(&bed, tenant, Some(ws), node, "managed", true).await;
 
-    let second = a_session(&bed, tenant, Some(ws), node, "managed-again").await;
-    let race = state.sessions.mark_managed(tenant, second).await;
+    // The CREATE must fail, not some later marking step. That ordering is the
+    // whole fix: `create_session_at` inserts and then tells the node to start,
+    // so a race arbitrated after the insert would already have launched a real
+    // tmux session that nothing could ever reconcile.
+    let race = a_session(&bed, tenant, Some(ws), node, "managed-again", true).await;
     assert!(
         race.is_err(),
-        "the second live managed session on the same (workspace, node) must be refused"
+        "a second live managed session on the same (workspace, node) must be refused at INSERT"
     );
 
     assert_eq!(
@@ -140,11 +155,7 @@ async fn two_replicas_cannot_both_start_the_same_managed_session() {
     // And once the first ends, the slot is free again — otherwise a crashed
     // session could never be replaced.
     state.sessions.mark_ended(tenant, first).await.unwrap();
-    state
-        .sessions
-        .mark_managed(tenant, second)
-        .await
-        .expect("the slot reopens when the incumbent dies");
+    made(&bed, tenant, Some(ws), node, "replacement", true).await;
 
     bed.teardown().await;
 }
@@ -163,11 +174,9 @@ async fn an_ad_hoc_session_is_not_blocked_by_the_managed_index() {
     let ws = bed.workspace(tenant).await;
     let state = bed.app_state().await;
 
-    let managed = a_session(&bed, tenant, Some(ws), node, "managed").await;
-    state.sessions.mark_managed(tenant, managed).await.unwrap();
-
-    a_session(&bed, tenant, Some(ws), node, "person-1").await;
-    a_session(&bed, tenant, Some(ws), node, "person-2").await;
+    made(&bed, tenant, Some(ws), node, "managed", true).await;
+    made(&bed, tenant, Some(ws), node, "person-1", false).await;
+    made(&bed, tenant, Some(ws), node, "person-2", false).await;
 
     assert_eq!(
         state.sessions.live_managed(tenant, ws).await.unwrap().len(),
@@ -199,8 +208,7 @@ async fn live_managed_is_scoped_to_its_tenant_and_workspace() {
         (mine, my_other_ws, my_node),
         (theirs, their_ws, their_node),
     ] {
-        let s = a_session(&bed, t, Some(w), n, "managed").await;
-        state.sessions.mark_managed(t, s).await.unwrap();
+        made(&bed, t, Some(w), n, "managed", true).await;
     }
 
     assert_eq!(

@@ -98,6 +98,8 @@ pub async fn create_session(
         &req.runtime,
         req.name,
         &workspace_path,
+        // Hand-started: ad-hoc, and the reconciler must never touch it.
+        false,
     )
     .await
 }
@@ -114,6 +116,10 @@ pub async fn create_session_at(
     runtime: &str,
     name: Option<String>,
     workspace_path: &str,
+    // Reconciler-owned (MAIN-316). Carried on the INSERT so the unique index
+    // refuses a duplicate BEFORE `StartSession` goes to the node — marking
+    // afterwards left the losing replica's session running and unattributed.
+    managed: bool,
 ) -> ApiResult<Session> {
     use crate::error::ApiError;
 
@@ -146,6 +152,7 @@ pub async fn create_session_at(
             runtime: runtime.to_string(),
             created_by,
             checkout_id,
+            managed,
         })
         .await?;
 
@@ -205,6 +212,8 @@ pub async fn create_ad_hoc_session(
             runtime: runtime.to_string(),
             created_by,
             checkout_id: None,
+            // Ad-hoc: an $HOME terminal or a runtime-authorize session.
+            managed: false,
         })
         .await?;
 
@@ -267,6 +276,8 @@ pub async fn create_auth_session(
             runtime: runtime.to_string(),
             created_by,
             checkout_id: None,
+            // Ad-hoc: an $HOME terminal or a runtime-authorize session.
+            managed: false,
         })
         .await?;
 

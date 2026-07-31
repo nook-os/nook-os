@@ -124,8 +124,9 @@ pub enum Action {
     /// Start a managed session for this workspace on this node.
     Start { node: NodeId },
     /// Stop a managed session: either surplus after `replicas` dropped, or one
-    /// whose node stopped being eligible.
-    Stop { session: SessionId },
+    /// whose node stopped being eligible. Carries the node because stopping
+    /// means killing the process there, not only ending the row.
+    Stop { session: SessionId, node: NodeId },
 }
 
 /// The desired-vs-actual verdict for one workspace.
@@ -145,8 +146,11 @@ pub struct Plan {
 }
 
 impl Plan {
-    fn stop(&mut self, session: SessionId) {
-        self.actions.push(Action::Stop { session });
+    fn stop(&mut self, a: &Actual) {
+        self.actions.push(Action::Stop {
+            session: a.session_id,
+            node: a.node_id,
+        });
     }
 }
 
@@ -212,7 +216,7 @@ pub fn plan(spec: &SessionSpec, nodes: &[NodeFacts], actual: &[Actual]) -> Plan 
         if placeable_ids.contains(&a.node_id) {
             keep.push(a);
         } else {
-            out.stop(a.session_id);
+            out.stop(a);
         }
     }
     // Deterministic surplus: drop from the end of node order, so every replica
@@ -221,7 +225,7 @@ pub fn plan(spec: &SessionSpec, nodes: &[NodeFacts], actual: &[Actual]) -> Plan 
 
     if keep.len() > desired {
         for a in &keep[desired..] {
-            out.stop(a.session_id);
+            out.stop(a);
         }
         keep.truncate(desired);
     }
@@ -385,7 +389,31 @@ async fn reconcile_workspace(
                     tracing::debug!(%workspace, node = %node, error = %e, "managed start did not win");
                 }
             }
-            Action::Stop { session } => {
+            Action::Stop { session, node } => {
+                // Kill FIRST, and only mark the row ended if the node took it.
+                //
+                // Ending the row alone was a defect, not a shortcut: the tmux
+                // session keeps running, the reconciler can no longer see it —
+                // `live_managed` reads live rows — and the freed index slot lets
+                // the very next pass start a SECOND session on that machine. The
+                // scale-down would have doubled the thing it was scaling down.
+                //
+                // A node that is offline keeps its row live, so the next pass
+                // tries again. That is the honest state: the process is still
+                // out there, and the row saying so is what will eventually stop
+                // it.
+                if !state.registry.send_to_node(
+                    *node,
+                    nook_proto::ControlToNode::KillSession {
+                        session_id: *session,
+                    },
+                ) {
+                    tracing::warn!(
+                        %workspace, session = %session, node = %node,
+                        "cannot stop a managed session — node offline; retrying next pass"
+                    );
+                    continue;
+                }
                 if let Err(e) = state.sessions.mark_ended(tenant, *session).await {
                     tracing::warn!(%workspace, session = %session, error = %e, "managed stop failed");
                 }
@@ -435,7 +463,12 @@ async fn start_managed(
         // reports it as needing a clone.
         return Ok(());
     };
-    let session = crate::services::session_queries::create_session_at(
+    // `managed: true` on the INSERT is the whole race arbitration. It used to be
+    // a follow-up UPDATE, which meant the losing replica had ALREADY inserted an
+    // ad-hoc row and sent `StartSession` — a live session nothing would ever
+    // reconcile. Now the index refuses the row, `create_session_at` returns
+    // before it talks to the node, and the loser really does just lose.
+    crate::services::session_queries::create_session_at(
         state,
         tenant,
         // No creator: the control plane declared this, not a person. MAIN-318
@@ -446,9 +479,9 @@ async fn start_managed(
         &spec.runtime,
         Some(format!("{} (managed)", spec.runtime)),
         &path,
+        true,
     )
     .await?;
-    state.sessions.mark_managed(tenant, session.id).await?;
     Ok(())
 }
 
@@ -500,7 +533,7 @@ mod tests {
         p.actions
             .iter()
             .filter_map(|a| match a {
-                Action::Stop { session } => Some(*session),
+                Action::Stop { session, .. } => Some(*session),
                 _ => None,
             })
             .collect()

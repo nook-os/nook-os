@@ -41,6 +41,12 @@ pub struct NewSession {
     /// restart can return to it. `None` when there is no row yet — discovery
     /// may not have scanned a just-made worktree — or for an ad-hoc `$HOME`.
     pub checkout_id: Option<NodeWorkspaceId>,
+    /// Reconciler-owned (MAIN-316). Set on the INSERT, not by a follow-up
+    /// update, so the unique index arbitrates the multi-replica race BEFORE
+    /// anything is sent to a node. Marking afterwards meant the losing replica
+    /// had already told the node to start: a live, unattributed session the
+    /// reconciler could never see again.
+    pub managed: bool,
 }
 
 /// Which sessions a list call wants.
@@ -109,13 +115,6 @@ pub trait SessionRepository: Send + Sync {
     async fn mark_status_if_live(&self, id: SessionId, status: &str) -> ApiResult<u64>;
 
     async fn delete(&self, id: SessionId, tenant: TenantId) -> ApiResult<u64>;
-
-    /// Mark a session as reconciler-owned (MAIN-316).
-    ///
-    /// A separate write from `create` rather than a field on `NewSession`: the
-    /// create path is shared with every hand-started session, and the default
-    /// that matters — ad-hoc — is the one nobody has to remember to pass.
-    async fn mark_managed(&self, tenant: TenantId, id: SessionId) -> ApiResult<u64>;
 
     /// The LIVE managed sessions of one workspace, as `(session, node)`.
     ///
@@ -198,8 +197,8 @@ impl SessionRepository for DbSessionRepository {
             .query_one(
                 "INSERT INTO sessions
                    (id, tenant_id, workspace_id, node_id, name, runtime, status,
-                    created_by, checkout_id)
-                 VALUES ($1, $2, $3, $4, $5, $6, 'starting', $7, $8) RETURNING *",
+                    created_by, checkout_id, managed)
+                 VALUES ($1, $2, $3, $4, $5, $6, 'starting', $7, $8, $9) RETURNING *",
                 params![
                     SessionId::new(),
                     new.tenant,
@@ -208,7 +207,8 @@ impl SessionRepository for DbSessionRepository {
                     new.name,
                     new.runtime,
                     new.created_by.map(|u| u.0),
-                    new.checkout_id.map(|c| c.0)
+                    new.checkout_id.map(|c| c.0),
+                    new.managed
                 ],
             )
             .await?)
@@ -330,16 +330,6 @@ impl SessionRepository for DbSessionRepository {
             .db
             .exec(
                 "DELETE FROM sessions WHERE id = $1 AND tenant_id = $2",
-                params![id, tenant],
-            )
-            .await?)
-    }
-
-    async fn mark_managed(&self, tenant: TenantId, id: SessionId) -> ApiResult<u64> {
-        Ok(self
-            .db
-            .exec(
-                "UPDATE sessions SET managed = true WHERE id = $1 AND tenant_id = $2",
                 params![id, tenant],
             )
             .await?)
@@ -472,6 +462,24 @@ impl SessionRepository for FakeSessionRepository {
 
     async fn create(&self, new: NewSession) -> ApiResult<Session> {
         let now = chrono::Utc::now();
+        // The real table refuses a second LIVE managed session on the same
+        // (workspace, node) via a unique index, and that refusal is what
+        // arbitrates the reconciler's race. A fake that accepted it would let a
+        // caller test pass against behaviour the database does not have.
+        if new.managed {
+            let rows = self.inner.lock().unwrap();
+            let managed = self.managed.lock().unwrap();
+            if rows.iter().any(|x| {
+                managed.contains(&x.id)
+                    && x.workspace_id == new.workspace_id
+                    && x.node_id == new.node_id
+                    && matches!(x.status.as_str(), "starting" | "running" | "detached")
+            }) {
+                return Err(crate::error::ApiError::Conflict(
+                    "a managed session already exists on that node".into(),
+                ));
+            }
+        }
         let session = Session {
             id: SessionId::new(),
             tenant_id: new.tenant,
@@ -489,6 +497,9 @@ impl SessionRepository for FakeSessionRepository {
             checkout_id: new.checkout_id,
             checkout: None,
         };
+        if new.managed {
+            self.managed.lock().unwrap().insert(session.id);
+        }
         self.inner.lock().unwrap().push(session.clone());
         Ok(session)
     }
@@ -605,15 +616,6 @@ impl SessionRepository for FakeSessionRepository {
         let before = s.len();
         s.retain(|x| !(x.id == id && x.tenant_id == tenant));
         Ok((before - s.len()) as u64)
-    }
-
-    async fn mark_managed(&self, tenant: TenantId, id: SessionId) -> ApiResult<u64> {
-        let rows = self.inner.lock().unwrap();
-        if !rows.iter().any(|x| x.id == id && x.tenant_id == tenant) {
-            return Ok(0);
-        }
-        self.managed.lock().unwrap().insert(id);
-        Ok(1)
     }
 
     async fn live_managed(
