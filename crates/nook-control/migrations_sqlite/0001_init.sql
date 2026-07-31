@@ -691,11 +691,30 @@ CREATE TABLE IF NOT EXISTS users (
   updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   username TEXT,
   password_hash TEXT,
-  -- HAND-CORRECTED (MAIN-236): Postgres defaults this to gen_random_uuid(),
-  -- which SQLite has no equivalent for. The application already supplies a
-  -- person id on every insert, so dropping the default is faithful; a trigger
-  -- faking one would only hide a missing write.
-  person_id TEXT NOT NULL,
+  -- HAND-CORRECTED (MAIN-236, corrected again MAIN-293): Postgres defaults this
+  -- to `gen_random_uuid()`. MAIN-236 dropped the default here, reasoning that
+  -- "the application already supplies a person id on every insert" — measured
+  -- on `sqlite://`, that is false: 26 inserts rely on the Postgres default and
+  -- failed with `NOT NULL constraint failed: users.person_id`.
+  --
+  -- SQLite has no `gen_random_uuid()`, so the uuid is assembled from
+  -- `randomblob`/`random` in the canonical v4 layout: 8-4-4-4-12 lower-case hex,
+  -- the version nibble pinned to `4`, the variant nibble drawn from `8 9 a b`.
+  -- That is `docs/db-dialect-audit.md`'s uuid → TEXT convention, so a row
+  -- created here is indistinguishable from one created on Postgres.
+  --
+  -- The expression is non-deterministic and evaluated PER ROW — verified, not
+  -- assumed: five inserts produce five distinct uuids.
+  person_id TEXT NOT NULL DEFAULT (
+    lower(
+      hex(randomblob(4)) || '-' ||
+      hex(randomblob(2)) || '-4' ||
+      substr(hex(randomblob(2)), 2) || '-' ||
+      substr('89ab', 1 + (abs(random()) % 4), 1) ||
+      substr(hex(randomblob(2)), 2) || '-' ||
+      hex(randomblob(6))
+    )
+  ),
   PRIMARY KEY (id),
   UNIQUE (tenant_id, email),
   CHECK ((role IN ('owner', 'admin', 'member'))),
