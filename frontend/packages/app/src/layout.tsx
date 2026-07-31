@@ -81,7 +81,14 @@ function ContextTabs() {
   const overviewPath = `/workspaces/${selectedWorkspaceId}`;
   const tabs = [
     { to: overviewPath, label: "Overview", icon: Eye, active: location.pathname === overviewPath },
-    { to: "/sessions", label: "Sessions", icon: SquareTerminal, active: location.pathname === "/sessions" },
+    // Prefix, not equality: `/sessions` redirects to a session now (MAIN-321),
+    // so an exact match would mean this tab is never the active one.
+    {
+      to: "/sessions",
+      label: "Sessions",
+      icon: SquareTerminal,
+      active: location.pathname.startsWith("/sessions"),
+    },
     { to: "/board", label: "Board", icon: KanbanSquare, active: location.pathname === "/board" },
     { to: "/activity", label: "Activity", icon: Activity, active: location.pathname === "/activity" },
   ];
@@ -108,12 +115,17 @@ function WorkspaceSwitcher() {
   // Switching context STAYS on the current screen — scoping just updates in
   // place. Only detail routes of another entity re-target: a specific
   // workspace overview follows to the newly selected workspace, and a specific
-  // session (which belongs to the old scope) falls back to the sessions list.
+  // session (which belongs to the old scope) goes back to `/sessions` — which
+  // since MAIN-321 lands on the first session of the NEW scope, or its empty
+  // state, rather than on a list.
   const switchTo = (id: string | null) => {
     select(id);
     setOpen(false);
     const path = location.pathname;
-    if (/^\/sessions\/.+/.test(path)) navigate("/sessions");
+    // `/sessions/list` is excluded on purpose: it is a LIST, which rescopes in
+    // place like every other list, not a detail route belonging to the old
+    // scope. Sending it to `/sessions` would open a session instead.
+    if (/^\/sessions\/.+/.test(path) && path !== "/sessions/list") navigate("/sessions");
     else if (/^\/workspaces\/.+/.test(path) && id) navigate(`/workspaces/${id}`);
   };
   const { data: workspaces } = useQuery({
