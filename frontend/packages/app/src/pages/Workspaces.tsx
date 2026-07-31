@@ -1,17 +1,54 @@
 import React, { useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Link, useParams } from "react-router-dom";
-import { Eye, EyeOff, Lock, Plus, Trash2 } from "lucide-react";
+import { Link, useNavigate, useParams } from "react-router-dom";
+import { Eye, EyeOff, Lock, Plus, Sparkles, Trash2 } from "lucide-react";
 import { api } from "@nookos/api";
 import { Empty, Panel, Pill, StatusDot, statusTone } from "@nookos/ui";
 import { ActivityFeed } from "./Activity";
 import { NotesPanel } from "./Notes";
+import { createSpecDraft } from "../newspec";
 import { useNewWork } from "../newwork";
 import { WorkspaceLocations } from "../WorkspaceLocations";
 import { askChoice, askConfirm, askForm, askText, notify } from "../dialogs";
 import { requireAppPassword, useAppPassword } from "../apppassword";
 import { adoptEnvFromDisk, saveEnv } from "../envvault";
 import { SessionOwner } from "../sessionOwner";
+
+/**
+ * One click from a repo to a Loop page with a seed box (MAIN-298).
+ *
+ * It lives here, on the workspace, because that is where a PM already is when
+ * they have an idea about this repo — the alternative was knowing a task id and
+ * typing a `/loop/` URL, which is the thing this card exists to delete.
+ */
+function NewSpecButton({ workspaceId }: { workspaceId: string }) {
+  const navigate = useNavigate();
+  const queryClient = useQueryClient();
+  const [busy, setBusy] = useState(false);
+
+  const go = async () => {
+    setBusy(true);
+    const ident = await createSpecDraft(workspaceId);
+    setBusy(false);
+    // `null` means it failed and the user has already seen why — stay put, so
+    // the failure is not followed by a Loop page for a ticket that isn't there.
+    if (!ident) return;
+    // The board is now a card behind; it is the one place the draft shows up.
+    queryClient.invalidateQueries({ queryKey: ["boards"] });
+    navigate(`/loop/${ident}`);
+  };
+
+  return (
+    <button
+      className="btn small"
+      title="Draft a spec for this repo — files a backlog ticket and opens its Loop page"
+      onClick={go}
+      disabled={busy}
+    >
+      <Sparkles size={12} /> {busy ? "…" : "new spec"}
+    </button>
+  );
+}
 
 export function WorkspacesPage() {
   const showNewWork = useNewWork((s) => s.show);
@@ -41,6 +78,7 @@ export function WorkspacesPage() {
               <tr>
                 <th style={{ width: "28%" }}>Workspace</th>
                 <th>Where it lives</th>
+                <th style={{ width: 110 }} />
                 <th style={{ width: 40 }} />
               </tr>
             </thead>
@@ -54,6 +92,9 @@ export function WorkspacesPage() {
                   </td>
                   <td>
                     <WorkspaceLocations locations={w.locations} />
+                  </td>
+                  <td>
+                    <NewSpecButton workspaceId={w.id} />
                   </td>
                   <td>
                     <DeleteWorkspaceButton
@@ -345,6 +386,7 @@ export function WorkspaceDetail() {
         title={`Workspace · ${ws.name}`}
         actions={
           <>
+            <NewSpecButton workspaceId={ws.id} />
             <button
               className="btn small"
               title={
