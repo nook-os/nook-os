@@ -1481,6 +1481,27 @@ table.nook-table tr.clickable { cursor: pointer; }
   align-items: center;
   gap: 5px;
 }
+/* The filter row's dropdowns match the shared TypeSelect trigger beside them
+   (MAIN-174 AC-3) — same height, box and border, so the row reads as one set of
+   controls rather than a native select next to an app one. STYLE ONLY: these
+   are the same `<select>` elements with the same options and the same handlers.
+   Scoped to `.filters-field` deliberately: `.task-select` is also worn by the
+   Team page and the backlog toolbar, which this card does not touch. */
+.filters-field .task-select {
+  min-height: 26px;
+  padding: 3px 8px;
+  border-radius: var(--nook-radius);
+  background: var(--nook-bg-raised);
+  font-size: 11px;
+}
+.filters-field .task-select:hover { border-color: var(--nook-accent); }
+/* Multiple-select shows a word, not an icon, so the trigger sizes to the text
+   the way the neighbouring selects do. */
+.type-select-summary {
+  font-size: 11px;
+  line-height: 1;
+  white-space: nowrap;
+}
 .filters-label-search { width: 100%; }
 
 .task-select {

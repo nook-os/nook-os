@@ -62,6 +62,9 @@ vi.mock("@nookos/ui", () => ({
   MarkdownEditor: () => null,
   EditableMarkdown: ({ src }: { src: string }) => <div>{src}</div>,
   Select: () => null,
+  // The type control moved to @nookos/ui (MAIN-174); this file stubs the whole
+  // module, so a new export has to be named here or TaskDetail cannot render.
+  TypeSelect: () => null,
   TYPE_META: [
     { value: "task", label: "Task", Icon: () => null },
     { value: "epic", label: "Epic", Icon: () => null },

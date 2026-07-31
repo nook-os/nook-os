@@ -33,7 +33,7 @@ import {
   Panel,
   Pill,
   TypeBadge,
-  TYPE_META,
+  TypeSelect,
   useAnchoredMenu,
   VisibilityBadge,
   VISIBILITY_META,
@@ -484,14 +484,6 @@ function Filters({
       onChange({ ...value, label: [...value.label, name] });
     }
   };
-  // Each type chip toggles membership; several selected are OR'd (any of them).
-  const toggleType = (t: string) =>
-    onChange({
-      ...value,
-      type: value.type.includes(t)
-        ? value.type.filter((x) => x !== t)
-        : [...value.type, t],
-    });
   // Same shape for visibility: each chip toggles membership, several are OR'd.
   const toggleVisibility = (v: string) =>
     onChange({
@@ -593,25 +585,19 @@ function Filters({
             </div>
           </div>
 
-          <div className="filters-group">
-            <span className="faint small">type</span>
-            <div className="filters-chips">
-              {TYPE_META.map((t) => {
-                const on = value.type.includes(t.value);
-                return (
-                  <button
-                    key={t.value}
-                    className={`task-chip type-chip ${on ? "on" : ""}`}
-                    aria-pressed={on}
-                    onClick={() => toggleType(t.value)}
-                    title={on ? `click to clear ${t.label}` : `filter to ${t.label}`}
-                  >
-                    <TypeBadge type={t.value} compact />
-                    {t.label}
-                  </button>
-                );
-              })}
-            </div>
+          {/* The same control the task modal uses (MAIN-174), in its
+              multiple-select mode: several types are OR'd, exactly as the chip
+              row before it did. */}
+          <div className="filters-group filters-row">
+            <label className="filters-field">
+              <span className="faint small">type</span>
+              <TypeSelect
+                multiple
+                value={value.type}
+                ariaLabel="filter by work type"
+                onChange={(types) => onChange({ ...value, type: types })}
+              />
+            </label>
           </div>
 
           <div className="filters-group">
