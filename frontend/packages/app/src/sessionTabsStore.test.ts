@@ -1,5 +1,12 @@
-import { describe, expect, it } from "vitest";
-import { reorderTabs, type SessionTab } from "./sessionTabsStore";
+import { beforeEach, describe, expect, it } from "vitest";
+import {
+  deriveTabs,
+  reorderTabs,
+  type LiveSession,
+  type SessionTab,
+  type TabPrefs,
+  useSessionTabPrefs,
+} from "./sessionTabsStore";
 
 const tab = (id: string, pinned = false): SessionTab => ({
   id,
@@ -51,5 +58,118 @@ describe("reorderTabs", () => {
     expect(reorderTabs(tabs, "a", "a", false)).toBe(tabs);
     expect(reorderTabs(tabs, "ghost", "a", false)).toBe(tabs);
     expect(reorderTabs(tabs, "a", "ghost", false)).toBe(tabs);
+  });
+});
+
+// ── MAIN-322: the strip is the live session list ────────────────────────────
+
+const live = (id: string, workspace_id: string | null = null): LiveSession => ({
+  id,
+  name: `s-${id}`,
+  runtime: "bash",
+  workspace_id,
+});
+
+const noPrefs: TabPrefs = { pinned: [], order: [] };
+
+describe("deriveTabs — membership comes from the sessions, not from prefs", () => {
+  it("shows every live session with no local state at all", () => {
+    // The point of the card: a browser that has never opened any of these
+    // still shows all of them, because there is no open-set to have missed.
+    const tabs = deriveTabs([live("a"), live("b"), live("c")], {}, noPrefs);
+    expect(ids(tabs)).toEqual(["a", "b", "c"]);
+  });
+
+  it("cannot resurrect a session that is gone, however many prefs name it", () => {
+    // The inverse, and the reason membership must not be a pref: an ended
+    // session leaves the strip even though it is still pinned and ordered.
+    const prefs: TabPrefs = { pinned: ["ghost"], order: ["ghost", "a"] };
+    expect(ids(deriveTabs([live("a")], {}, prefs))).toEqual(["a"]);
+  });
+
+  it("shows the same tabs on any machine, whatever the local prefs are", () => {
+    // AC-2: two browsers with different local histories differ at most in the
+    // ORDER of the strip — never in which sessions are on it.
+    const sessions = [live("a"), live("b"), live("c")];
+    const machineA = deriveTabs(sessions, {}, noPrefs);
+    const machineB = deriveTabs(sessions, {}, { pinned: ["c"], order: ["b", "a"] });
+    expect(ids(machineB)).toEqual(["c", "b", "a"]); // arranged differently…
+    expect(ids(machineA).slice().sort()).toEqual(ids(machineB).slice().sort()); // …same tabs
+  });
+
+  it("hydrates the workspace name and leaves ad-hoc terminals unlabeled", () => {
+    const tabs = deriveTabs([live("a", "w1"), live("b")], { w1: "nook-os" }, noPrefs);
+    expect(tabs[0].workspaceName).toBe("nook-os");
+    expect(tabs[0].workspaceId).toBe("w1");
+    expect(tabs[1].workspaceName).toBeUndefined();
+    expect(tabs[1].workspaceId).toBeUndefined();
+  });
+});
+
+describe("deriveTabs — view prefs order the strip", () => {
+  it("sorts pinned tabs first", () => {
+    const prefs: TabPrefs = { pinned: ["c"], order: [] };
+    expect(ids(deriveTabs([live("a"), live("b"), live("c")], {}, prefs))).toEqual([
+      "c",
+      "a",
+      "b",
+    ]);
+    expect(deriveTabs([live("a"), live("c")], {}, prefs)[0].pinned).toBe(true);
+  });
+
+  it("honours a saved drag order, and appends sessions never dragged", () => {
+    // A session started after the user arranged their strip must land at the
+    // end rather than in the middle of the arrangement.
+    const prefs: TabPrefs = { pinned: [], order: ["c", "a"] };
+    expect(ids(deriveTabs([live("a"), live("b"), live("c")], {}, prefs))).toEqual([
+      "c",
+      "a",
+      "b",
+    ]);
+  });
+});
+
+describe("deriveTabs — workspace context", () => {
+  it("scopes to the selected workspace but keeps ad-hoc terminals", () => {
+    // An ad-hoc terminal belongs to no workspace, so a workspace filter would
+    // otherwise make it reachable from no context at all.
+    const sessions = [live("a", "w1"), live("b", "w2"), live("c")];
+    expect(ids(deriveTabs(sessions, {}, noPrefs, "w1"))).toEqual(["a", "c"]);
+  });
+
+  it("shows every workspace's sessions with no context selected", () => {
+    const sessions = [live("a", "w1"), live("b", "w2")];
+    expect(ids(deriveTabs(sessions, {}, noPrefs, null))).toEqual(["a", "b"]);
+  });
+});
+
+describe("prune — prefs are dropped only for sessions that are really gone", () => {
+  beforeEach(() => {
+    localStorage.clear();
+    useSessionTabPrefs.setState({ prefs: { pinned: ["a"], order: ["a", "b"] } });
+  });
+
+  it("drops the ids of sessions that ended, keeping the live ones", () => {
+    useSessionTabPrefs.getState().prune(["a"]);
+    expect(useSessionTabPrefs.getState().prefs).toEqual({
+      pinned: ["a"],
+      order: ["a"],
+    });
+  });
+
+  it("does NOTHING when the live list is unknown", () => {
+    // The session query is pending (or failed) on every page load. Treating
+    // that as an empty list would wipe the user's pins and order each time the
+    // app starts — the prefs would survive nothing but a warm cache.
+    useSessionTabPrefs.getState().prune(undefined);
+    expect(useSessionTabPrefs.getState().prefs).toEqual({
+      pinned: ["a"],
+      order: ["a", "b"],
+    });
+  });
+
+  it("does clear prefs when every session really is gone", () => {
+    useSessionTabPrefs.getState().prune([]);
+    expect(useSessionTabPrefs.getState().prefs).toEqual({ pinned: [], order: [] });
   });
 });

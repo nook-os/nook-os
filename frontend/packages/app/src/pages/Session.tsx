@@ -28,7 +28,6 @@ import { useWorkspaceContext } from "../context";
 import { ScopeChip } from "../layout";
 import { SessionTabs } from "../SessionTabs";
 import { SessionWindows, SplitButtons } from "../SessionWindows";
-import { useSessionTabs } from "../sessionTabsStore";
 import { SessionOwner } from "../sessionOwner";
 import { askConfirm, notify } from "../dialogs";
 
@@ -334,8 +333,6 @@ export function SessionPage() {
     () => localStorage.getItem(DIFF_PANEL_KEY) !== "closed",
   );
   const sessionStatus = useLive((s) => s.sessionStatus);
-  const openTab = useSessionTabs((s) => s.open);
-  const closeTab = useSessionTabs((s) => s.close);
 
   const { data: session } = useQuery({
     queryKey: ["sessions", "one", id],
@@ -362,20 +359,6 @@ export function SessionPage() {
   });
   const nodeName = nodes?.find((n) => n.id === session?.node_id)?.name;
   const git = useGitStatus(session?.workspace_id ?? null, session?.node_id);
-
-  // Visiting a session opens (or refreshes) its tab, tagged with its
-  // workspace so the strip can scope tabs to the workspace context.
-  useEffect(() => {
-    if (session) {
-      openTab({
-        id: session.id,
-        name: session.name,
-        runtime: session.runtime,
-        workspaceId: session.workspace_id ?? undefined,
-        workspaceName: ws?.name,
-      });
-    }
-  }, [session, ws?.name, openTab]);
 
   // Opening a session from another workspace follows it: the switcher, tab
   // strip, board, and activity all move to that workspace's context. (An
@@ -453,7 +436,9 @@ export function SessionPage() {
       await api.POST("/api/v1/sessions/{id}/kill", {
         params: { path: { id: session.id } },
       });
-      closeTab(session.id);
+      // No tab to close: the strip is the live session list, so refreshing it
+      // is what removes the tab (MAIN-322).
+      queryClient.invalidateQueries({ queryKey: ["sessions"] });
       navigate("/sessions");
     }
   };
@@ -566,7 +551,6 @@ export function SessionPage() {
 export function SessionsPage() {
   const { selectedWorkspaceId, select } = useWorkspaceContext();
   const queryClient = useQueryClient();
-  const closeTab = useSessionTabs((s) => s.close);
   const [filter, setFilter] = useState("");
   const [picked, setPicked] = useState<Set<string>>(new Set());
   const [busy, setBusy] = useState(false);
@@ -635,7 +619,6 @@ export function SessionsPage() {
     setBusy(true);
     for (const id of ids) {
       await api.DELETE("/api/v1/sessions/{id}", { params: { path: { id } } });
-      closeTab(id);
     }
     setBusy(false);
     setPicked(new Set());

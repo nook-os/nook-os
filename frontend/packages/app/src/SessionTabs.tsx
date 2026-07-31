@@ -1,15 +1,23 @@
-// The tab strip above the terminal — VS-Code-style: click to switch, × to
-// close the tab (the session keeps running), right-click for the rest, + to
-// start new work.
-import React, { useState } from "react";
+// The tab strip above the terminal — click to switch, right-click for the rest,
+// + to start new work.
+//
+// MAIN-322: the strip is a VIEW of the live session list, not a per-browser
+// open-set. Every machine signed into the same account shows the same tabs,
+// because the tabs are the sessions. There is deliberately no close control
+// here: closing used to mean "drop this from my local list", and with no local
+// list left, closing can only mean ending the session — which is destructive
+// and differs for managed vs ad-hoc sessions, so MAIN-324 owns it. Until then a
+// session is ended from the session view's kill control or the sessions list,
+// and its tab disappears on its own because the tab was only ever the session.
+import React, { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { useQueryClient } from "@tanstack/react-query";
-import { CircleDot, Loader2, Pin, Plus, SquareTerminal, X } from "lucide-react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { CircleDot, Loader2, Pin, Plus, SquareTerminal } from "lucide-react";
 import { api } from "@nookos/api";
 import { useWorkspaceContext } from "./context";
 import { useLive } from "./live";
 import { useNewWork } from "./newwork";
-import { useSessionTabs } from "./sessionTabsStore";
+import { deriveTabs, useSessionTabPrefs } from "./sessionTabsStore";
 import { useTabHotkeys } from "./tabHotkeys";
 import { askText, notify } from "./dialogs";
 import { ContextMenuRegion, type ContextMenuItem } from "./contextMenu";
@@ -17,8 +25,8 @@ import { ContextMenuRegion, type ContextMenuItem } from "./contextMenu";
 export function SessionTabs({ activeId }: { activeId?: string }) {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
-  const allTabs = useSessionTabs((s) => s.tabs);
-  const store = useSessionTabs();
+  const prefs = useSessionTabPrefs((s) => s.prefs);
+  const store = useSessionTabPrefs();
   const sessionStatus = useLive((s) => s.sessionStatus);
   const agentState = useLive((s) => s.agentState);
   const showNewWork = useNewWork((s) => s.show);
@@ -34,16 +42,52 @@ export function SessionTabs({ activeId }: { activeId?: string }) {
     setDropAt(null);
   };
 
-  // Tabs are scoped to the workspace context; "all workspaces" shows every
-  // tab, labeled with its workspace so cross-workspace tabs stay tellable.
-  // Pinned tabs sort first, like an editor.
-  const tabs = (
-    selectedWorkspaceId
-      ? allTabs.filter((t) => !t.workspaceId || t.workspaceId === selectedWorkspaceId)
-      : allTabs
-  )
-    .slice()
-    .sort((a, b) => Number(!!b.pinned) - Number(!!a.pinned));
+  // The tab set: every live session, across every node and workspace. Unscoped
+  // on purpose — the workspace context filters the strip below, but the QUERY
+  // must see everything or a tab could not exist for a session on another
+  // machine. The live bus invalidates `["sessions"]` on any session event, so a
+  // session that starts or dies anywhere updates this strip without a reload.
+  const { data: sessions } = useQuery({
+    queryKey: ["sessions", "tabs"],
+    queryFn: async () =>
+      (await api.GET("/api/v1/sessions", { params: { query: { active: true } } }))
+        .data ?? [],
+  });
+  const { data: me } = useQuery({
+    queryKey: ["me"],
+    queryFn: async () => (await api.GET("/api/v1/auth/me")).data ?? null,
+  });
+  // Names for the workspace label; the session rows carry only ids.
+  const { data: workspaces } = useQuery({
+    queryKey: ["workspaces"],
+    queryFn: async () => (await api.GET("/api/v1/workspaces")).data ?? [],
+  });
+
+  // Whose sessions belong in a tab strip. The control plane already scopes a
+  // plain member to the sessions they created, so this only bites an
+  // owner/admin — whose list is the WHOLE tenant, and whose tab strip would
+  // otherwise fill with their team's terminals. An unattributed session (no
+  // creator: started by a node or a job) is kept rather than hidden: it is not
+  // somebody else's, and silently dropping it is how work becomes invisible.
+  const mineId = me?.user?.id;
+  const mine = (sessions ?? []).filter(
+    (s) => !mineId || !s.created_by || s.created_by === mineId,
+  );
+  const names = Object.fromEntries((workspaces ?? []).map((w) => [w.id, w.name]));
+  const tabs = deriveTabs(mine, names, prefs, selectedWorkspaceId);
+
+  // Prefs outlive the sessions they name, so drop the dead ones. Keyed on the
+  // full live list, not the visible strip, or switching workspace context would
+  // read as "those sessions are gone" and discard another context's order.
+  //
+  // Passing `undefined` while the query is pending is load-bearing: an empty
+  // list would read as "every session is gone" and wipe the user's pin/order on
+  // each page load. The store refuses to prune on that.
+  const liveIds = sessions ? mine.map((s) => s.id).join(",") : undefined;
+  const prune = store.prune;
+  useEffect(() => {
+    prune(liveIds === undefined ? undefined : liveIds ? liveIds.split(",") : []);
+  }, [liveIds, prune]);
 
   // Chrome-style Ctrl+Tab / Ctrl+Cmd-number switching over exactly this visible
   // list (desktop only). Called before the early return so the hook order is
@@ -56,17 +100,9 @@ export function SessionTabs({ activeId }: { activeId?: string }) {
 
   if (tabs.length === 0) return null;
 
-  const closeTab = (id: string) => {
-    const idx = tabs.findIndex((t) => t.id === id);
-    store.close(id);
-    if (id === activeId) {
-      // Next stop comes from the VISIBLE (filtered) strip.
-      const next = tabs[idx + 1] ?? tabs[idx - 1];
-      navigate(next && next.id !== id ? `/sessions/${next.id}` : "/sessions");
-    }
-  };
-
-  /** Rename the session itself, so every viewer sees it — not just this tab. */
+  /** Rename the session itself, so every viewer sees it — not just this tab.
+   *  With the strip sourced from the session list there is nothing local to
+   *  rename: the PATCH plus a refetch IS the rename. */
   const renameSession = async (id: string, current: string) => {
     const name = await askText({
       title: "Rename session",
@@ -75,13 +111,11 @@ export function SessionTabs({ activeId }: { activeId?: string }) {
       confirmLabel: "rename",
     });
     if (!name || name === current) return;
-    store.rename(id, name); // optimistic
     const { error } = await api.PATCH("/api/v1/sessions/{id}", {
       params: { path: { id } },
       body: { name },
     });
     if (error) {
-      store.rename(id, current);
       await notify("Rename failed", "The control plane rejected the change.");
       return;
     }
@@ -89,44 +123,15 @@ export function SessionTabs({ activeId }: { activeId?: string }) {
   };
 
   // The tab's right-click menu, as items for the shared primitive (MAIN-168).
-  const tabMenu = (t: (typeof tabs)[number]): ContextMenuItem[] => {
-    const idx = tabs.findIndex((x) => x.id === t.id);
-    return [
-      { label: "Close", onSelect: () => closeTab(t.id) },
-      {
-        label: "Close Others",
-        disabled: tabs.length < 2,
-        onSelect: () => {
-          store.closeOthers(t.id);
-          if (activeId !== t.id) navigate(`/sessions/${t.id}`);
-        },
-      },
-      {
-        label: "Close to the Right",
-        disabled: idx >= tabs.length - 1,
-        onSelect: () =>
-          store.closeToTheRight(
-            t.id,
-            tabs.map((x) => x.id),
-          ),
-      },
-      { separator: true },
-      {
-        label: "Close All",
-        onSelect: () => {
-          store.closeAll(tabs.map((x) => x.id));
-          navigate("/sessions");
-        },
-      },
-      { label: t.pinned ? "Unpin" : "Pin", onSelect: () => store.togglePin(t.id) },
-      { label: "Rename Session…", onSelect: () => renameSession(t.id, t.name) },
-      { separator: true },
-      {
-        label: "Copy Session ID",
-        onSelect: () => void navigator.clipboard?.writeText(t.id).catch(() => {}),
-      },
-    ];
-  };
+  const tabMenu = (t: (typeof tabs)[number]): ContextMenuItem[] => [
+    { label: t.pinned ? "Unpin" : "Pin", onSelect: () => store.togglePin(t.id) },
+    { label: "Rename Session…", onSelect: () => renameSession(t.id, t.name) },
+    { separator: true },
+    {
+      label: "Copy Session ID",
+      onSelect: () => void navigator.clipboard?.writeText(t.id).catch(() => {}),
+    },
+  ];
 
   return (
     <>
@@ -161,18 +166,6 @@ export function SessionTabs({ activeId }: { activeId?: string }) {
               draggable
               onClick={() => navigate(`/sessions/${t.id}`)}
               onDoubleClick={() => renameSession(t.id, t.name)}
-              // Middle-click closes the tab, like a browser/VS Code. mousedown
-              // preventDefault stops the middle-click autoscroll circle; the
-              // close fires on auxclick so a plain drag never triggers it.
-              onMouseDown={(e) => {
-                if (e.button === 1) e.preventDefault();
-              }}
-              onAuxClick={(e) => {
-                if (e.button === 1) {
-                  e.preventDefault();
-                  closeTab(t.id);
-                }
-              }}
               onDragStart={(e) => {
                 setDragId(t.id);
                 e.dataTransfer.effectAllowed = "move";
@@ -194,7 +187,7 @@ export function SessionTabs({ activeId }: { activeId?: string }) {
                 e.preventDefault();
                 const r = e.currentTarget.getBoundingClientRect();
                 const after = e.clientX > r.left + r.width / 2;
-                store.reorder(dragId, t.id, after);
+                store.reorder(dragId, t.id, after, tabs);
                 endDrag();
               }}
               // Fires whether the drag ended in a drop or was released outside
@@ -219,16 +212,6 @@ export function SessionTabs({ activeId }: { activeId?: string }) {
               )}
               <span className="session-tab-name">{t.name}</span>
               {t.pinned && <Pin size={10} className="session-tab-pin" />}
-              <button
-                className="session-tab-close"
-                title="close tab (session keeps running)"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  closeTab(t.id);
-                }}
-              >
-                <X size={11} />
-              </button>
             </div>
             </ContextMenuRegion>
           );
