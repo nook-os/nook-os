@@ -74,6 +74,11 @@ lint_in() {
   local image=$1; shift
   if ! docker info >/dev/null 2>&1; then
     say "docker unavailable — skipping $image"
+    # LINT_RAN, on THIS branch too. It is the older and more common skip — a
+    # machine with no daemon at all — and leaving it unset let `pass_if_ran`
+    # fall back to 1 and print the green tick anyway. Fixing the new branch and
+    # not this one would have left the bug alive on the path most people hit.
+    LINT_RAN=0
     return 0
   fi
   if ! docker image inspect "$image" >/dev/null 2>&1 &&
