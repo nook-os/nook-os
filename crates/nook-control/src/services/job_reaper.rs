@@ -33,7 +33,7 @@ async fn run(state: AppState, grace_secs: u64) {
     loop {
         tokio::time::sleep(SCAN_INTERVAL).await;
         // No loops, nothing to reap: there are no runs to strand (MAIN-239).
-        if !switch.observe("job_reaper", loops::any_enabled(&state.db).await) {
+        if !switch.observe("job_reaper", loops::any_enabled(&*state.settings).await) {
             continue;
         }
         match jobs::reap_stale_executors(&state, grace_secs).await {

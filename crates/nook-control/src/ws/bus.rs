@@ -215,11 +215,16 @@ pub(crate) fn start(
     });
 
     // ── Maintenance: lease cache refresh + outbox pruning ──────────────────
+    // The lease read is the node aggregate's (MAIN-305), so this builds the
+    // repository from the pool it already holds. The `bus_outbox` prune below
+    // stays inline: this file is the bus MECHANISM and a permanent inline-SQL
+    // exemption.
+    let lease_nodes = crate::repo::nodes::DbNodeRepository::new(pool.clone());
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(std::time::Duration::from_secs(3));
         loop {
             tick.tick().await;
-            registry.refresh_lease_cache(&pool).await;
+            registry.refresh_lease_cache(&lease_nodes).await;
             let _ = pool
                 .exec(
                     &format!(

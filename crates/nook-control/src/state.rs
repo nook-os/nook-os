@@ -59,6 +59,8 @@ pub struct AppState {
     pub skills: Arc<dyn crate::repo::admin::SkillRepository>,
     /// Tenant- and user-scoped settings rows (MAIN-258).
     pub settings: Arc<dyn crate::repo::admin::SettingRepository>,
+    /// Org-visibility policy rows (MAIN-305).
+    pub org_policy: Arc<dyn crate::repo::admin::OrgPolicyRepository>,
     /// The theme catalogue (MAIN-258).
     pub themes: Arc<dyn crate::repo::admin::ThemeRepository>,
     pub cfg: Arc<Config>,
@@ -164,6 +166,7 @@ impl AppState {
             )),
             skills: Arc::new(crate::repo::admin::DbSkillRepository::new(db.clone())),
             settings: Arc::new(crate::repo::admin::DbSettingRepository::new(db.clone())),
+            org_policy: Arc::new(crate::repo::admin::DbOrgPolicyRepository::new(db.clone())),
             themes: Arc::new(crate::repo::admin::DbThemeRepository::new(db.clone())),
             kanban: Arc::new(KanbanRegistry::new(tasks.clone())),
             tasks,

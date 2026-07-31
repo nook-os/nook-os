@@ -48,7 +48,7 @@ async fn run(state: AppState, retention_secs: u64) {
         // the quiet they asked for.
         if !switch.observe(
             "workspace_reaper",
-            crate::services::loops::any_enabled(&state.db).await,
+            crate::services::loops::any_enabled(&*state.settings).await,
         ) {
             continue;
         }
