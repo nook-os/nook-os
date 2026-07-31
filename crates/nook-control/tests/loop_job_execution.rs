@@ -375,7 +375,7 @@ async fn resolve_repo_prefers_the_executor_then_falls_back() {
     let state = bed.app_state().await;
 
     // The executor's own row wins.
-    let (url, branch) = jobs::resolve_repo(&state, ws, executor)
+    let (url, branch) = jobs::resolve_repo(&state, tenant, ws, executor)
         .await
         .expect("resolve")
         .expect("some");
@@ -384,10 +384,40 @@ async fn resolve_repo_prefers_the_executor_then_falls_back() {
 
     // A node with no row for this workspace falls back to any usable remote.
     let stranger = node(&bed.pool, tenant).await;
-    let fallback = jobs::resolve_repo(&state, ws, stranger)
+    let fallback = jobs::resolve_repo(&state, tenant, ws, stranger)
         .await
         .expect("resolve");
     assert!(fallback.is_some(), "falls back to another node's remote");
+
+    bed.teardown().await;
+}
+
+#[tokio::test]
+async fn resolve_repo_falls_back_to_the_workspace_own_remote() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let tenant = bed.tenant("lje").await;
+    let ws = bed.workspace(tenant).await;
+    // A workspace with a declared remote but NO `node_workspaces` checkout on any
+    // node — the shape a freshly-seeded dogfood workspace has (MAIN-341). Before
+    // this fallback the job died with "no known git remote" for a workspace that
+    // plainly had one; now it resolves to the workspace's own remote, branch
+    // defaulting to `main`.
+    sqlx::query("UPDATE workspaces SET git_remote_url = $1 WHERE id = $2")
+        .bind("/workspace/nook-dogfood.git")
+        .bind(ws)
+        .execute(&bed.pool)
+        .await
+        .expect("set workspace remote");
+    let stranger = node(&bed.pool, tenant).await;
+    let state = bed.app_state().await;
+    let (url, branch) = jobs::resolve_repo(&state, tenant, ws, stranger)
+        .await
+        .expect("resolve")
+        .expect("falls back to the workspace's own remote");
+    assert_eq!(url, "/workspace/nook-dogfood.git");
+    assert_eq!(branch, "main");
 
     bed.teardown().await;
 }
