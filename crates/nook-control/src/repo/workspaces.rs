@@ -112,6 +112,15 @@ pub trait WorkspaceRepository: Send + Sync {
         spec: Option<serde_json::Value>,
     ) -> ApiResult<Option<Workspace>>;
 
+    /// Every workspace that declares a spec, across every tenant (MAIN-316).
+    ///
+    /// Cross-tenant because the reconciler is one loop for the deployment, like
+    /// `job_dispatch`; it checks each tenant's own toggle before acting. Only
+    /// rows with a spec — an unmanaged workspace is not the reconciler's
+    /// business and must not even be listed.
+    async fn all_session_specs(&self)
+        -> ApiResult<Vec<(TenantId, WorkspaceId, serde_json::Value)>>;
+
     /// Create a named workspace. A duplicate name is a `Conflict`, not a
     /// database error — the mapping lives here so every caller reports it the
     /// same way.
@@ -485,6 +494,20 @@ impl WorkspaceRepository for DbWorkspaceRepository {
                     type_mapping(self.db.engine()).now()
                 ),
                 params![tenant, id, spec],
+            )
+            .await?)
+    }
+
+    async fn all_session_specs(
+        &self,
+    ) -> ApiResult<Vec<(TenantId, WorkspaceId, serde_json::Value)>> {
+        Ok(self
+            .db
+            .query_all(
+                "SELECT tenant_id, id, session_spec FROM workspaces
+                 WHERE session_spec IS NOT NULL
+                 ORDER BY id",
+                params![],
             )
             .await?)
     }
@@ -1568,6 +1591,19 @@ impl WorkspaceRepository for FakeWorkspaceRepository {
         };
         w.session_spec = spec;
         Ok(Some(w.clone()))
+    }
+
+    async fn all_session_specs(
+        &self,
+    ) -> ApiResult<Vec<(TenantId, WorkspaceId, serde_json::Value)>> {
+        let st = self.inner.lock().unwrap();
+        let mut out: Vec<(TenantId, WorkspaceId, serde_json::Value)> = st
+            .workspaces
+            .iter()
+            .filter_map(|w| w.session_spec.clone().map(|spec| (w.tenant_id, w.id, spec)))
+            .collect();
+        out.sort_by_key(|(_, id, _)| id.0);
+        Ok(out)
     }
 
     async fn list(&self, tenant: TenantId) -> ApiResult<Vec<Workspace>> {
