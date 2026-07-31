@@ -63,6 +63,92 @@ pub async fn get_session_spec(
     })))
 }
 
+/// `GET /api/v1/workspaces/{id}/reconcile-status` — desired vs actual (MAIN-319).
+///
+/// Runs the reconciler's OWN planner against the reconciler's own view of the
+/// fleet. A second implementation would drift, and the first symptom would be a
+/// UI confidently reporting a placement the loop does not agree with.
+///
+/// Tenant-scoped like every other workspace read (AC-4): a workspace in another
+/// tenant is not found, so this cannot report on somebody else's fleet.
+#[utoipa::path(get, path = "/api/v1/workspaces/{id}/reconcile-status",
+    operation_id = "get_reconcile_status",
+    params(("id" = String, Path,)),
+    responses((status = 200, body = ReconcileStatus), (status = 404)))]
+pub async fn reconcile_status(
+    State(state): State<AppState>,
+    auth: AuthCtx,
+    Path(id): Path<WorkspaceId>,
+) -> ApiResult<Json<ReconcileStatus>> {
+    use crate::services::session_reconcile as recon;
+
+    let ws = state
+        .workspaces
+        .get(auth.tenant_id, id)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    let enabled = recon::enabled(&*state.settings, auth.tenant_id).await;
+
+    // Unmanaged: no spec, so there is nothing to be desired and nothing to
+    // report a shortfall against. Distinct from a spec wanting zero, which is a
+    // real declaration (MAIN-315).
+    let Some(spec) = ws
+        .session_spec
+        .and_then(|v| serde_json::from_value::<SessionSpec>(v).ok())
+    else {
+        return Ok(Json(ReconcileStatus {
+            enabled,
+            managed: false,
+            desired: 0,
+            running: 0,
+            shortfall: 0,
+            blocked: Vec::new(),
+            eligible: 0,
+        }));
+    };
+
+    let nodes = recon::node_facts(&state, auth.tenant_id, id).await?;
+    let actual: Vec<recon::Actual> = state
+        .sessions
+        .live_managed(auth.tenant_id, id)
+        .await?
+        .into_iter()
+        .map(|(session_id, node_id)| recon::Actual {
+            session_id,
+            node_id,
+        })
+        .collect();
+    let plan = recon::plan(&spec, &nodes, &actual);
+
+    // Names, so the UI can say "waiting on a clone to dev-box" rather than
+    // printing a uuid at somebody.
+    let named: std::collections::HashMap<_, _> = state
+        .nodes
+        .list(auth.tenant_id, None)
+        .await?
+        .into_iter()
+        .map(|n| (n.id, n.name))
+        .collect();
+
+    Ok(Json(ReconcileStatus {
+        enabled,
+        managed: true,
+        desired: plan.desired as u32,
+        running: actual.len() as u32,
+        shortfall: plan.shortfall as u32,
+        blocked: plan
+            .needs_clone
+            .iter()
+            .map(|id| ReconcileBlocker {
+                node_id: *id,
+                node_name: named.get(id).cloned().unwrap_or_default(),
+                reason: "needs_clone".to_string(),
+            })
+            .collect(),
+        eligible: (plan.desired.saturating_sub(plan.shortfall)) as u32,
+    }))
+}
+
 /// Reject a spec that cannot mean anything (MAIN-315 AC-3).
 ///
 /// `replicas >= 0` is free — `count` is a `u32`, so a negative never parses.

@@ -629,6 +629,40 @@ pub struct SessionSpec {
     pub replicas: Replicas,
 }
 
+/// A node the reconciler cannot use yet, and why (MAIN-319).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ReconcileBlocker {
+    pub node_id: NodeId,
+    pub node_name: String,
+    /// `needs_clone` — matches the selector and tolerates the taints, but the
+    /// workspace's checkout is not on it yet (MAIN-317 clones it).
+    pub reason: String,
+}
+
+/// Desired versus actual for one workspace (MAIN-319 AC-3).
+///
+/// Computed by the SAME planner the reconciler runs, so the number on screen is
+/// the number the loop is acting on rather than a second opinion about it.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ReconcileStatus {
+    /// Whether reconciling is on for this tenant. A workspace can declare a
+    /// spec with the switch off, and then nothing converges — which looks
+    /// identical to "broken" unless the UI says so.
+    pub enabled: bool,
+    /// `false` when the workspace declares no spec at all: unmanaged, which is
+    /// not the same as managed-and-wanting-zero.
+    pub managed: bool,
+    pub desired: u32,
+    /// Live managed sessions right now.
+    pub running: u32,
+    /// `desired - placed`: asked for more than the fleet can host.
+    pub shortfall: u32,
+    /// Nodes that match but cannot be used yet.
+    pub blocked: Vec<ReconcileBlocker>,
+    /// How many nodes match the selector and tolerate the taints.
+    pub eligible: u32,
+}
+
 /// Set or clear a workspace's [`SessionSpec`] (MAIN-315). `spec: null` clears
 /// it, returning the workspace to unmanaged — which is why the field is an
 /// explicit Option rather than an absent key meaning "leave alone".

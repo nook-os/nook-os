@@ -6,9 +6,21 @@
 //! the same session cannot both win (AC-4). The second is enforced by an index,
 //! and an index is not something you can assert against a fake.
 
+use nook_control::auth::{AuthCtx, Principal};
 use nook_control::repo::sessions::NewSession;
 use nook_testkit::TestBed;
 use nook_types::*;
+use uuid::Uuid;
+
+fn ctx(user: UserId, tenant: TenantId) -> AuthCtx {
+    AuthCtx {
+        session_id: AuthSessionId(Uuid::nil()),
+        user_id: user,
+        tenant_id: tenant,
+        principal: Principal::User,
+        cookie_session: false,
+    }
+}
 
 /// Create a session, ad-hoc or reconciler-owned. `managed` rides the INSERT,
 /// which is the point: it is what the unique index arbitrates on, before
@@ -271,6 +283,104 @@ async fn only_workspaces_that_declare_a_spec_are_listed() {
         .unwrap();
     let listed = state.workspaces.all_session_specs().await.unwrap();
     assert!(listed.iter().all(|(t, _, _)| *t != tenant));
+
+    bed.teardown().await;
+}
+
+// ── MAIN-319: the status read ───────────────────────────────────────────────
+
+#[tokio::test]
+async fn an_unmanaged_workspace_reports_unmanaged_rather_than_zero_of_zero() {
+    // "No policy" and "a policy wanting none" are different answers, and a UI
+    // that renders both as 0/0 tells you nothing about which you are looking at.
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let tenant = bed.tenant("recon").await;
+    let (user, _) = bed.user(tenant, "owner").await;
+    let ws = bed.workspace(tenant).await;
+    let state = bed.app_state().await;
+
+    let got = nook_control::routes::workspaces::reconcile_status(
+        axum::extract::State(state.clone()),
+        ctx(user, tenant),
+        axum::extract::Path(ws),
+    )
+    .await
+    .expect("status")
+    .0;
+    assert!(!got.managed);
+    assert_eq!(got.desired, 0);
+
+    bed.teardown().await;
+}
+
+#[tokio::test]
+async fn a_declared_workspace_reports_desired_and_the_shortfall() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let tenant = bed.tenant("recon").await;
+    let (user, _) = bed.user(tenant, "owner").await;
+    let ws = bed.workspace(tenant).await;
+    let state = bed.app_state().await;
+
+    state
+        .workspaces
+        .set_session_spec(
+            tenant,
+            ws,
+            Some(serde_json::json!({
+                "runtime": "claude",
+                "replicas": {"kind": "count", "count": 3}
+            })),
+        )
+        .await
+        .expect("declare");
+
+    let got = nook_control::routes::workspaces::reconcile_status(
+        axum::extract::State(state.clone()),
+        ctx(user, tenant),
+        axum::extract::Path(ws),
+    )
+    .await
+    .expect("status")
+    .0;
+
+    assert!(got.managed);
+    assert_eq!(got.desired, 3);
+    assert_eq!(got.running, 0);
+    // No online node in the bed, so all three are owed. The number matters less
+    // than that it comes from the reconciler's own planner rather than a second
+    // opinion about it.
+    assert_eq!(got.shortfall, 3);
+    // Reconciling is off by default, and the UI has to be able to say so —
+    // otherwise a declared-but-never-converging workspace looks broken.
+    assert!(!got.enabled);
+
+    bed.teardown().await;
+}
+
+#[tokio::test]
+async fn another_tenants_workspace_has_no_status() {
+    // AC-4: the read is tenant-scoped like every other workspace read, so this
+    // cannot be used to inspect somebody else's fleet.
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let mine = bed.tenant("recon-mine").await;
+    let theirs = bed.tenant("recon-theirs").await;
+    let (user, _) = bed.user(mine, "owner").await;
+    let their_ws = bed.workspace(theirs).await;
+    let state = bed.app_state().await;
+
+    assert!(nook_control::routes::workspaces::reconcile_status(
+        axum::extract::State(state.clone()),
+        ctx(user, mine),
+        axum::extract::Path(their_ws),
+    )
+    .await
+    .is_err());
 
     bed.teardown().await;
 }

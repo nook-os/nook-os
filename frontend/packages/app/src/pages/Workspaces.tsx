@@ -8,6 +8,7 @@ import { ActivityFeed } from "./Activity";
 import { NotesPanel } from "./Notes";
 import { createSpecDraft } from "../newspec";
 import { useNewWork } from "../newwork";
+import { SessionPolicy } from "../SessionPolicy";
 import { WorkspaceLocations } from "../WorkspaceLocations";
 import { askChoice, askConfirm, askForm, askText, notify } from "../dialogs";
 import { requireAppPassword, useAppPassword } from "../apppassword";
@@ -456,6 +457,11 @@ export function WorkspaceDetail() {
           </tbody>
         </table>
       </Panel>
+
+      {/* Declared desired state and how close the fleet is to it (MAIN-319).
+          Above the session list on purpose: the policy is what PRODUCES that
+          list once reconciling is on. */}
+      {id && <SessionPolicy workspaceId={id} />}
 
       <Panel title="Sessions">
         {(sessions ?? []).length === 0 ? (
