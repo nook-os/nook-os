@@ -357,11 +357,109 @@ pub fn materialize_token_json(token: &TokenResponse) -> Result<Vec<u8>, RuntimeA
         .map_err(|e| RuntimeAuthError::Transport(format!("cannot serialize the credential: {e}")))
 }
 
+/// The second real runtime (MAIN-291, C6), and the proof that adding one is a
+/// descriptor addition: this function plus [`materialize_codex_auth_json`] are
+/// the whole control-plane half. [`DeviceFlow`], C2's delivery and C3's
+/// orchestration are untouched.
+///
+/// Endpoints come from the operator exactly as claude's do — codex parameterizes
+/// its own OAuth issuer and client id (its `--experimental_issuer` /
+/// `--experimental_client-id` flags), so there is nothing provider-specific to
+/// hardcode here, and nothing about OpenAI ships in this repo (NG-3).
+pub fn codex_descriptor() -> Option<RuntimeAuthDescriptor> {
+    Some(RuntimeAuthDescriptor {
+        runtime: "codex",
+        device_authorization_endpoint: std::env::var("NOOK_CODEX_DEVICE_AUTH_ENDPOINT").ok()?,
+        token_endpoint: std::env::var("NOOK_CODEX_TOKEN_ENDPOINT").ok()?,
+        client_id: std::env::var("NOOK_CODEX_CLIENT_ID").ok()?,
+        // `openid profile email offline_access` is the standard set for a flow
+        // that must come back with an id_token AND a refresh_token — both of
+        // which codex requires on disk (see the materializer).
+        scopes: std::env::var("NOOK_CODEX_SCOPES")
+            .unwrap_or_else(|_| "openid profile email offline_access".into()),
+        poll_interval: Duration::from_secs(5),
+        materialize: materialize_codex_auth_json,
+    })
+}
+
+/// codex's `auth.json`: the OAuth tokens **wrapped**, not verbatim.
+///
+/// Unlike claude, codex does not store the provider's response as-sent — it
+/// nests the tokens under a `tokens` object beside an `OPENAI_API_KEY` slot for
+/// the API-key style of login. The shape below was confirmed against
+/// **codex-cli 0.145.0** by writing candidates into a scratch `CODEX_HOME` and
+/// asking `codex login status`, rather than inferred:
+///
+/// | written                          | `codex login status`                       |
+/// |----------------------------------|--------------------------------------------|
+/// | all three tokens                 | `Logged in using ChatGPT` (exit 0)          |
+/// | no `refresh_token`               | `missing field \`refresh_token\`` (exit 1)  |
+/// | no `access_token`                | `missing field \`access_token\`` (exit 1)   |
+/// | no `id_token`                    | `missing field \`id_token\`` (exit 1)       |
+/// | `id_token` not a JWT             | `invalid ID token format` (exit 1)          |
+/// | no `account_id` / `last_refresh` | `Logged in using ChatGPT` (exit 0)          |
+///
+/// So all three tokens are **required** and are demanded here: a token response
+/// missing any of them cannot produce a working codex credential, and failing
+/// now beats delivering bytes that make the node report "installed but still
+/// not authorized". `account_id` and `last_refresh` are optional to codex —
+/// `account_id` is emitted only when the provider actually sent one, because
+/// inventing an account identifier is worse than omitting a field codex can
+/// live without.
+///
+/// **A caveat that matters for anyone trusting the probe**: an *empty* `{}`
+/// auth.json also reports `Logged in using ChatGPT` (exit 0) on 0.145.0. The
+/// probe therefore proves a credential is not MALFORMED, not that it is
+/// present — which is why the guard below is on this side, where the shape is
+/// actually known.
+pub fn materialize_codex_auth_json(token: &TokenResponse) -> Result<Vec<u8>, RuntimeAuthError> {
+    let missing: Vec<&str> = [
+        ("id_token", token.id_token.as_deref()),
+        ("access_token", token.access_token.as_deref()),
+        ("refresh_token", token.refresh_token.as_deref()),
+    ]
+    .iter()
+    .filter(|(_, v)| v.is_none_or(str::is_empty))
+    .map(|(k, _)| *k)
+    .collect();
+    if !missing.is_empty() {
+        return Err(RuntimeAuthError::Provider(format!(
+            "codex needs {} in the token response; the provider sent none",
+            missing.join(", ")
+        )));
+    }
+
+    let mut tokens = serde_json::json!({
+        "id_token": token.id_token,
+        "access_token": token.access_token,
+        "refresh_token": token.refresh_token,
+    });
+    // Only when the provider really sent one. codex otherwise reads the account
+    // out of the id_token itself.
+    if let Some(account) = token
+        .raw
+        .get("account_id")
+        .and_then(serde_json::Value::as_str)
+        .filter(|s| !s.is_empty())
+    {
+        tokens["account_id"] = serde_json::Value::String(account.to_string());
+    }
+
+    let doc = serde_json::json!({
+        "OPENAI_API_KEY": serde_json::Value::Null,
+        "tokens": tokens,
+        "last_refresh": chrono::Utc::now().to_rfc3339(),
+    });
+    serde_json::to_vec_pretty(&doc)
+        .map_err(|e| RuntimeAuthError::Transport(format!("cannot serialize the credential: {e}")))
+}
+
 /// Look up a runtime's descriptor. `None` for a runtime we cannot authorize
 /// this way — the caller refuses rather than guessing at endpoints.
 pub fn descriptor_for(runtime: &str) -> Option<RuntimeAuthDescriptor> {
     match runtime {
         "claude" => claude_descriptor(),
+        "codex" => codex_descriptor(),
         _ => None,
     }
 }
