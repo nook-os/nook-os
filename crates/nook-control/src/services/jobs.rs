@@ -594,6 +594,7 @@ async fn task_key(state: &AppState, tenant: TenantId, task_id: TaskId) -> ApiRes
 /// cannot derive it from a `workspace_id` alone.
 pub async fn resolve_repo(
     state: &AppState,
+    tenant: TenantId,
     workspace_id: WorkspaceId,
     node: NodeId,
 ) -> ApiResult<Option<(String, String)>> {
@@ -604,12 +605,25 @@ pub async fn resolve_repo(
     let row = match row {
         Some(r @ (Some(_), _)) => Some(r),
         // The executor has no usable row — take any node's remote for the ws.
-        _ => {
-            state
+        _ => match state
+            .workspaces
+            .any_checkout_repo_and_branch(workspace_id)
+            .await?
+        {
+            Some(r @ (Some(_), _)) => Some(r),
+            // No node holds a checkout of this workspace yet: a freshly-seeded,
+            // never-cloned workspace the loop clones from scratch (MAIN-341's
+            // dogfood is exactly this). Its OWN declared remote is the clone
+            // URL; the branch defaults to `main` below. Without this, a job
+            // dies with "no known git remote" for a workspace that plainly has
+            // one — just no `node_workspaces` row yet.
+            _ => state
                 .workspaces
-                .any_checkout_repo_and_branch(workspace_id)
+                .git_remote_url(workspace_id, tenant)
                 .await?
-        }
+                .flatten()
+                .map(|url| (Some(url), None)),
+        },
     };
     Ok(
         row.and_then(|(url, branch)| {
@@ -632,7 +646,7 @@ pub async fn dispatch_to_node(state: &AppState, tenant: TenantId, job: &LoopJob)
     let Some(workspace_id) = job.workspace_id else {
         return fail_with(state, tenant, job.id, "the job has no workspace to run in").await;
     };
-    let Some((repo_url, branch)) = resolve_repo(state, workspace_id, node).await? else {
+    let Some((repo_url, branch)) = resolve_repo(state, tenant, workspace_id, node).await? else {
         return fail_with(
             state,
             tenant,
