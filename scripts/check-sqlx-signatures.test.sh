@@ -87,6 +87,54 @@ else
 fi
 rm -f "$PROBE"
 
+# ── a BRACE-LESS #[cfg(test)] item does not blind the rest of the file ──────
+#
+# MAIN-345. `#[cfg(test)] mod testdb;` has no body, so the old "latch on the
+# next line containing a `{`" rule kept waiting — and latched on an unrelated
+# `use a::{B, C};` further down, with a test depth nothing ever falls back to.
+# Everything after that point read as test code. In nook-chat/src/main.rs that
+# hid a real `PgConnectOptions`, and the guard then reported the file as a STALE
+# exemption while it plainly held a sqlx type: a wrong answer that reads as an
+# instruction to delete a legitimate entry.
+#
+# The probe reproduces the shape exactly: brace-less item, then a `use` with
+# braces, then the production hit.
+cat > "$PROBE" <<'PROBE_EOF'
+#[cfg(test)]
+mod testdb;
+mod ws;
+
+use std::sync::Arc;
+use axum::extract::{FromRequestParts, State};
+use sqlx::postgres::PgConnectOptions;
+PROBE_EOF
+# Asserted against `--list` for THIS file, not against the guard's overall exit
+# code. A guard that is red for some unrelated reason would make a coarse
+# "is it red?" check pass while the bug is still there — which is exactly what
+# happened when this case was first written.
+if ./$GUARD --list | grep -qx "$PROBE"; then
+  echo "  ✓ a brace-less #[cfg(test)] item does not swallow the rest of the file"
+else
+  echo "  ✗ a sqlx type after a BRACE-LESS #[cfg(test)] item was missed — the MAIN-345 bug" >&2
+  fail=1
+fi
+rm -f "$PROBE"
+
+# …and the attribute on a brace-less item still hides nothing it should hide:
+# there is no body, so there is nothing to skip.
+cat > "$PROBE" <<'PROBE_EOF'
+#[cfg(test)]
+mod testdb;
+pub fn production(_p: &sqlx::PgPool) {}
+PROBE_EOF
+if ./$GUARD --list | grep -qx "$PROBE"; then
+  echo "  ✓ nothing after a brace-less #[cfg(test)] item is treated as test code"
+else
+  echo "  ✗ production code directly after a brace-less #[cfg(test)] item was missed" >&2
+  fail=1
+fi
+rm -f "$PROBE"
+
 # …and the test module alone really is ignored (tests keep raw sqlx, NG-4).
 cat > "$PROBE" <<'PROBE_EOF'
 #[cfg(test)]

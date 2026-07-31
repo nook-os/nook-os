@@ -60,7 +60,12 @@ hits() {
         line = $0
         closes = gsub(/[}]/, "}", line)
 
-        if (!intest && $0 ~ /^[ \t]*#\[cfg\(test\)\]/) pending = 1
+        # `pending` means "an attribute is waiting for the item it guards".
+        # `just_set` keeps the attribute LINE itself from resolving it — that
+        # line is balanced (no braces at all), and the rule below would read
+        # balanced as "the item finished here".
+        just_set = 0
+        if (!intest && $0 ~ /^[ \t]*#\[cfg\(test\)\]/) { pending = 1; just_set = 1 }
 
         # Classify BEFORE moving depth, so the `mod tests {` line itself is
         # still outside the module.
@@ -77,7 +82,25 @@ hits() {
 
         depth += opens - closes
 
-        if (pending && opens > 0) { intest = 1; testdepth = depth - 1; pending = 0 }
+        # Resolve the pending attribute against the item it actually guards.
+        #
+        # The old rule was "latch on the next line containing a `{`", which a
+        # BRACE-LESS item never satisfies. `#[cfg(test)] mod testdb;` left
+        # `pending` armed until some unrelated later line — in
+        # nook-chat/src/main.rs, a `use axum::extract::{…}` eleven lines down — and latched
+        # there with `testdepth = -1`, a depth nothing ever falls back to. The
+        # whole rest of the file then read as test code, so its `PgConnectOptions`
+        # was invisible and the guard reported the file as a STALE exemption
+        # while it plainly held a sqlx type (MAIN-345).
+        #
+        # Balanced braces mean the item completed on this line — `mod x;`,
+        # `use a::{B, C};`, even a one-line `mod t { … }` — so the attribute is
+        # spent and nothing after it is test code. An unbalanced open means a
+        # body started, which is the module (or fn) to skip.
+        if (pending && !just_set) {
+          if (opens > closes) { intest = 1; testdepth = depth - (opens - closes); pending = 0 }
+          else { pending = 0 }
+        }
         else if (intest && depth <= testdepth) { intest = 0 }
       }
     '
