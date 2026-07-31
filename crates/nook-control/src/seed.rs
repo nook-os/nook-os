@@ -692,11 +692,23 @@ pub async fn run(db: &DbPool, cfg: &Config) -> Result<()> {
                     )
                     .await?;
                 if let Some(column_id) = todo {
+                    // Take a number from the board's counter, exactly as create_task
+                    // does (repo/tasks.rs) — a task with a NULL `number` has no key,
+                    // and the loop's dispatch (`key_of`'s `b.key || '-' || t.number`)
+                    // then decodes a NULL scalar and fails the job before it can run.
+                    // MAIN-341 shipped the INSERT without this column.
+                    let number: i32 = db
+                        .query_scalar(
+                            "UPDATE boards SET next_number = next_number + 1
+                             WHERE id = $1 RETURNING next_number - 1",
+                            params![board_id],
+                        )
+                        .await?;
                     db.exec(
                         "INSERT INTO tasks
                          (id, tenant_id, board_id, column_id, workspace_id, title,
-                          description, type, position)
-                     VALUES ($1, $2, $3, $4, $5, $6, $7, 'task', 100)",
+                          description, type, position, number)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, 'task', 100, $8)",
                         params![
                             TaskId::new(),
                             tenant.id,
@@ -704,7 +716,8 @@ pub async fn run(db: &DbPool, cfg: &Config) -> Result<()> {
                             column_id,
                             ws_id,
                             "Add a greeting command to the dogfood repo",
-                            DOGFOOD_TASK_BODY
+                            DOGFOOD_TASK_BODY,
+                            number
                         ],
                     )
                     .await?;
