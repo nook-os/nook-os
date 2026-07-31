@@ -19,7 +19,6 @@
 # slice of the split shared module. These three sat under its heading but were
 # never in its scope, so they are re-filed here with what they actually are
 # rather than left pointing at a card that has landed without them.
-crates/nook-control/src/services/policy.rs       # org visibility policy rows; the operator pages READ it, no aggregate owns it
 crates/nook-control/src/routes/schedule.rs       # scheduled-node lookup (MAIN-263's surface, not the console's)
 crates/nook-control/src/services/schedule.rs     # scheduled operator work; shares `schedules` with the route above
 
@@ -34,9 +33,7 @@ crates/nook-control/src/services/schedule.rs     # scheduled operator work; shar
 # their tables.
 crates/nook-control/src/routes/health.rs         # the liveness probe's SELECT 1
 crates/nook-control/src/ws/bus.rs                # bus_outbox + pg_notify; no aggregate owns it (re-filed by MAIN-253)
-crates/nook-control/src/ws/registry.rs           # the node lease cache; NodeRepository owns `nodes` but MAIN-252 landed without this one site
 crates/nook-control/src/services/secrets.rs      # secret sync: workspace_secrets + node_workspaces + sessions, no notebook data (re-filed by MAIN-254)
-crates/nook-control/src/services/loops.rs        # the loops.enabled setting read — `settings`, no loop-job data (re-filed by MAIN-255)
 
 # ── Permanently out of scope ────────────────────────────────────────────────
 # Named by MAIN-260 NG-1 as legitimately holding SQL. Listed rather than

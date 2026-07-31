@@ -22,7 +22,6 @@
 //! ends there, which is what makes "off" genuinely quiet rather than merely
 //! ineffective.
 
-use nook_db::{params, Db, DbPool};
 use nook_types::TenantId;
 
 use crate::error::ApiResult;
@@ -37,46 +36,42 @@ pub const KEY: &str = "loops.enabled";
 /// because the alternative is a transient blip turning the fleet on when the
 /// operator has said off. A caller that needs to distinguish the two should
 /// query the setting directly.
-pub async fn enabled(db: &DbPool, tenant: TenantId) -> bool {
-    let raw: Option<serde_json::Value> = db
-        .query_scalar_opt(
-            "SELECT value FROM settings
-              WHERE tenant_id = $1 AND scope = 'tenant' AND key = $2",
-            params![tenant, KEY],
-        )
-        .await
-        .unwrap_or(None);
+pub async fn enabled(
+    settings: &dyn crate::repo::admin::SettingRepository,
+    tenant: TenantId,
+) -> bool {
+    let raw = settings.tenant_value(tenant, KEY).await.unwrap_or(None);
     truthy(raw.as_ref())
 }
 
 /// Is ANY tenant running loops? The cheap gate a cross-tenant consumer asks
 /// before doing a pass at all.
-pub async fn any_enabled(db: &DbPool) -> bool {
-    let rows: Vec<serde_json::Value> = db
-        .query_scalar_all(
-            "SELECT value FROM settings WHERE scope = 'tenant' AND key = $1",
-            params![KEY],
-        )
+pub async fn any_enabled(settings: &dyn crate::repo::admin::SettingRepository) -> bool {
+    settings
+        .tenant_values_everywhere(KEY)
         .await
-        .unwrap_or_default();
-    rows.iter().any(|v| truthy(Some(v)))
+        .unwrap_or_default()
+        .iter()
+        .any(|v| truthy(Some(v)))
 }
 
 /// Turn loops on or off for a tenant. Returns the value now stored.
-pub async fn set(db: &DbPool, tenant: TenantId, on: bool) -> ApiResult<bool> {
-    db.exec(
-        "INSERT INTO settings (id, tenant_id, scope, user_id, key, value)
-         VALUES ($1, $2, 'tenant', NULL, $3, $4)
-         ON CONFLICT (tenant_id, scope, user_id, key)
-         DO UPDATE SET value = EXCLUDED.value",
-        params![
-            nook_types::SettingId::new(),
+pub async fn set(
+    settings: &dyn crate::repo::admin::SettingRepository,
+    tenant: TenantId,
+    on: bool,
+) -> ApiResult<bool> {
+    // The generic settings upsert already keys on `(tenant, scope, user, key)`,
+    // which is exactly this write — no reason for a second one.
+    settings
+        .put(crate::repo::admin::SettingWrite {
             tenant,
-            KEY,
-            serde_json::Value::Bool(on)
-        ],
-    )
-    .await?;
+            scope: "tenant".to_string(),
+            user: None,
+            key: KEY.to_string(),
+            value: serde_json::Value::Bool(on),
+        })
+        .await?;
     Ok(on)
 }
 

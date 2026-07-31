@@ -709,6 +709,17 @@ pub trait SettingRepository: Send + Sync {
 
     /// Upsert on `(tenant, scope, user, key)`.
     async fn put(&self, write: SettingWrite) -> ApiResult<Setting>;
+
+    /// One tenant-scoped setting's value, or `None` when unset (MAIN-305).
+    async fn tenant_value(
+        &self,
+        tenant: TenantId,
+        key: &str,
+    ) -> ApiResult<Option<serde_json::Value>>;
+
+    /// The same key's value across EVERY tenant — what a cross-tenant consumer
+    /// asks before doing a pass at all, rather than a query per tenant.
+    async fn tenant_values_everywhere(&self, key: &str) -> ApiResult<Vec<serde_json::Value>>;
 }
 
 pub struct DbSettingRepository {
@@ -754,6 +765,118 @@ impl SettingRepository for DbSettingRepository {
                 ],
             )
             .await?)
+    }
+
+    async fn tenant_value(
+        &self,
+        tenant: TenantId,
+        key: &str,
+    ) -> ApiResult<Option<serde_json::Value>> {
+        Ok(self
+            .db
+            .query_scalar_opt(
+                "SELECT value FROM settings
+              WHERE tenant_id = $1 AND scope = 'tenant' AND key = $2",
+                params![tenant, key],
+            )
+            .await?)
+    }
+
+    async fn tenant_values_everywhere(&self, key: &str) -> ApiResult<Vec<serde_json::Value>> {
+        Ok(self
+            .db
+            .query_scalar_all(
+                "SELECT value FROM settings WHERE scope = 'tenant' AND key = $1",
+                params![key],
+            )
+            .await?)
+    }
+}
+
+// ── org visibility policy ───────────────────────────────────────────────────
+
+/// The org-visibility policy rows (MAIN-305). Appended, never updated — the
+/// history IS the feature — so a read is "the newest row wins".
+#[async_trait]
+pub trait OrgPolicyRepository: Send + Sync {
+    /// The current state of one field, or `false` when no row has ever been
+    /// written. Off is the safe default: a policy nobody set must not be on.
+    async fn field_enabled(&self, org: Uuid, field: &str) -> ApiResult<bool>;
+
+    /// Append a new state for one field.
+    async fn set_field(&self, org: Uuid, field: &str, enabled: bool, by: Uuid) -> ApiResult<()>;
+}
+
+pub struct DbOrgPolicyRepository {
+    db: DbPool,
+}
+
+impl DbOrgPolicyRepository {
+    pub fn new(db: DbPool) -> Self {
+        Self { db }
+    }
+}
+
+#[async_trait]
+impl OrgPolicyRepository for DbOrgPolicyRepository {
+    async fn field_enabled(&self, org: Uuid, field: &str) -> ApiResult<bool> {
+        let row: Option<(bool,)> = self
+            .db
+            .query_opt(
+                "SELECT enabled FROM org_visibility_policy
+         WHERE org_id = $1 AND field = $2
+         ORDER BY changed_at DESC LIMIT 1",
+                params![org, field],
+            )
+            .await?;
+        Ok(row.map(|(e,)| e).unwrap_or(false))
+    }
+
+    async fn set_field(&self, org: Uuid, field: &str, enabled: bool, by: Uuid) -> ApiResult<()> {
+        self.db
+            .exec(
+                "INSERT INTO org_visibility_policy (id, org_id, field, enabled, changed_by)
+         VALUES ($1, $2, $3, $4, $5)",
+                params![Uuid::now_v7(), org, field, enabled, by],
+            )
+            .await?;
+        Ok(())
+    }
+}
+
+/// In-memory [`OrgPolicyRepository`]: the append-and-newest-wins rule, which is
+/// the whole of what callers depend on.
+#[derive(Default)]
+pub struct FakeOrgPolicyRepository {
+    inner: std::sync::Mutex<Vec<(Uuid, String, bool)>>,
+}
+
+impl FakeOrgPolicyRepository {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+#[async_trait]
+impl OrgPolicyRepository for FakeOrgPolicyRepository {
+    async fn field_enabled(&self, org: Uuid, field: &str) -> ApiResult<bool> {
+        Ok(self
+            .inner
+            .lock()
+            .unwrap()
+            .iter()
+            .rev()
+            .find(|(o, f, _)| *o == org && f == field)
+            .map(|(_, _, e)| *e)
+            .unwrap_or(false))
+    }
+
+    async fn set_field(&self, org: Uuid, field: &str, enabled: bool, _by: Uuid) -> ApiResult<()> {
+        self.inner
+            .lock()
+            .unwrap()
+            .push((org, field.to_string(), enabled));
+        Ok(())
     }
 }
 
@@ -1368,6 +1491,31 @@ impl SettingRepository for FakeSettingRepository {
             None => st.push(row.clone()),
         }
         Ok(row)
+    }
+
+    async fn tenant_value(
+        &self,
+        tenant: TenantId,
+        key: &str,
+    ) -> ApiResult<Option<serde_json::Value>> {
+        Ok(self
+            .inner
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|s| s.tenant_id == tenant && s.scope == "tenant" && s.key == key)
+            .map(|s| s.value.clone()))
+    }
+
+    async fn tenant_values_everywhere(&self, key: &str) -> ApiResult<Vec<serde_json::Value>> {
+        Ok(self
+            .inner
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|s| s.scope == "tenant" && s.key == key)
+            .map(|s| s.value.clone())
+            .collect())
     }
 }
 

@@ -131,7 +131,7 @@ const ENRICH_LIMIT: i64 = 50;
 async fn enrich(state: &AppState, row: &mut OperatorTenant) -> ApiResult<()> {
     let Some(org) = row.org_id else { return Ok(()) };
 
-    if policy::enabled(&state.db, org, Field::RepositoryNames).await? {
+    if policy::enabled(&*state.org_policy, org, Field::RepositoryNames).await? {
         row.repositories = Some(
             state
                 .workspaces
@@ -139,7 +139,7 @@ async fn enrich(state: &AppState, row: &mut OperatorTenant) -> ApiResult<()> {
                 .await?,
         );
     }
-    if policy::enabled(&state.db, org, Field::TaskTitles).await? {
+    if policy::enabled(&*state.org_policy, org, Field::TaskTitles).await? {
         // The `private` exclusion lives inside `operator_visible_titles`, not
         // here: the policy is ADDITIVE (it adds titles, it does not filter), so
         // a private card must simply never be selected. A filter applied at this
@@ -225,7 +225,7 @@ pub async fn get_policy(
 ) -> ApiResult<Json<Vec<PolicyField>>> {
     auth.require(&state, Permission::PolicyView, Scope::Org(id))
         .await?;
-    Ok(Json(policy::current(&state.db, id).await?))
+    Ok(Json(policy::current(&*state.org_policy, id).await?))
 }
 
 /// Widen or narrow one field. Recorded, and announced to the people it affects.
@@ -242,7 +242,7 @@ pub async fn set_policy(
     auth.require(&state, Permission::PolicyManage, Scope::Org(id))
         .await?;
     policy::set(&state, id, &req.field, req.enabled, auth.user_id.0).await?;
-    Ok(Json(policy::current(&state.db, id).await?))
+    Ok(Json(policy::current(&*state.org_policy, id).await?))
 }
 
 /// Grant or revoke a role binding.

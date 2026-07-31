@@ -109,6 +109,11 @@ pub struct JoiningNode {
 
 #[async_trait]
 pub trait NodeRepository: Send + Sync {
+    /// Every node whose instance lease is still live, with the seconds left on
+    /// it (MAIN-305). The websocket registry refreshes its lease cache from
+    /// this — the one `nodes` read MAIN-252 landed without.
+    async fn live_leases(&self) -> ApiResult<Vec<(Uuid, Uuid, f64)>>;
+
     // ── identity and listing ────────────────────────────────────────────────
 
     /// Which tenant owns this node, without knowing the tenant first — the
@@ -351,6 +356,26 @@ impl DbNodeRepository {
 
 #[async_trait]
 impl NodeRepository for DbNodeRepository {
+    async fn live_leases(&self) -> ApiResult<Vec<(Uuid, Uuid, f64)>> {
+        let now = Postgres.now();
+        let epoch = Postgres.cast(
+            &format!("EXTRACT(EPOCH FROM lease_expires_at - {now})"),
+            "float8",
+        );
+        Ok(self
+            .db
+            .query_all(
+                &format!(
+                    "SELECT id, owning_instance_id,
+                    {epoch}
+             FROM nodes
+             WHERE owning_instance_id IS NOT NULL AND lease_expires_at > {now}",
+                ),
+                params![],
+            )
+            .await?)
+    }
+
     async fn tenant_of(&self, id: NodeId) -> ApiResult<Option<TenantId>> {
         Ok(self
             .db
@@ -1215,6 +1240,12 @@ impl FakeNodeRepository {
 
 #[async_trait]
 impl NodeRepository for FakeNodeRepository {
+    async fn live_leases(&self) -> ApiResult<Vec<(Uuid, Uuid, f64)>> {
+        // The fake models no lease clock; the registry's cache-refresh path is
+        // exercised against a real database, not here.
+        Ok(Vec::new())
+    }
+
     async fn tenant_of(&self, id: NodeId) -> ApiResult<Option<TenantId>> {
         Ok(self
             .inner

@@ -9,6 +9,12 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+/// The real node repository over this bed — the lease read moved there
+/// (MAIN-305), so this still drives production SQL.
+fn lease_nodes(bed: &nook_testkit::TestBed) -> nook_control::repo::nodes::DbNodeRepository {
+    nook_control::repo::nodes::DbNodeRepository::new(bed.db())
+}
+
 use nook_control::ws::registry::{NodeHandle, OpPayload, Registry};
 use nook_proto::ControlToNode;
 use nook_testkit::TestBed;
@@ -67,15 +73,15 @@ async fn lease_takeover_flips_ownership() {
 
     // Instance A owns the node.
     claim_lease(&bed.pool, node, a.instance_id()).await;
-    a.refresh_lease_cache(&bed.db()).await;
-    b.refresh_lease_cache(&bed.db()).await;
+    a.refresh_lease_cache(&lease_nodes(&bed)).await;
+    b.refresh_lease_cache(&lease_nodes(&bed)).await;
     assert!(a.node_online(node), "owner sees node online");
     assert!(b.node_online(node), "peer sees node online via lease");
 
     // Takeover: the node reconnects to B (last writer wins).
     claim_lease(&bed.pool, node, b.instance_id()).await;
-    a.refresh_lease_cache(&bed.db()).await;
-    b.refresh_lease_cache(&bed.db()).await;
+    a.refresh_lease_cache(&lease_nodes(&bed)).await;
+    b.refresh_lease_cache(&lease_nodes(&bed)).await;
     assert!(a.node_online(node), "peer A sees node online via B's lease");
 
     // Expired lease means offline everywhere.
@@ -84,8 +90,8 @@ async fn lease_takeover_flips_ownership() {
         .execute(&bed.pool)
         .await
         .unwrap();
-    a.refresh_lease_cache(&bed.db()).await;
-    b.refresh_lease_cache(&bed.db()).await;
+    a.refresh_lease_cache(&lease_nodes(&bed)).await;
+    b.refresh_lease_cache(&lease_nodes(&bed)).await;
     assert!(!a.node_online(node), "expired lease reads offline");
     assert!(!b.node_online(node), "expired lease reads offline");
 
@@ -121,7 +127,7 @@ async fn send_to_node_routes_across_instances() {
         },
     );
     claim_lease(&bed.pool, node, b.instance_id()).await;
-    a.refresh_lease_cache(&bed.db()).await;
+    a.refresh_lease_cache(&lease_nodes(&bed)).await;
 
     // A sends; the frame must arrive on B's channel via NOTIFY.
     assert!(a.send_to_node(node, ControlToNode::RescanWorkspaces));
@@ -162,7 +168,7 @@ async fn op_reply_routes_back_to_requester() {
         },
     );
     claim_lease(&bed.pool, node, b.instance_id()).await;
-    a.refresh_lease_cache(&bed.db()).await;
+    a.refresh_lease_cache(&lease_nodes(&bed)).await;
 
     // A asks for a clone on B's node.
     let rx = a
