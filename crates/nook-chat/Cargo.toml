@@ -40,3 +40,6 @@ tower = { workspace = true }
 # so the test does not depend on a database that already has it. No cycle —
 # nook-control does not depend on nook-chat.
 nook-control = { workspace = true }
+# Test-only: the SQLite arm takes a private, migrated bed rather than building a
+# pool by hand (MAIN-294). No cycle — nook-testkit does not depend on nook-chat.
+nook-testkit = { workspace = true }

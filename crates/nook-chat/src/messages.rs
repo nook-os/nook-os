@@ -466,13 +466,10 @@ pub async fn delete(
 
 #[cfg(test)]
 mod tests {
-    use std::str::FromStr;
-    use std::sync::Arc;
 
     use axum::extract::{Path, Query};
     use axum::Json;
     use nook_db::{params, Db, Postgres, TypeMapping};
-    use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 
     use super::*;
 
@@ -480,31 +477,8 @@ mod tests {
     /// a database (the same gate the rest of the suite uses). Channel/message
     /// rows reference tenant/user ids as bare uuids (no cross-schema FK), so
     /// random ids isolate every test without needing real tenant/user rows.
-    async fn state() -> Option<AppState> {
-        if std::env::var("NOOK_REQUIRE_DB").ok().as_deref() != Some("1") {
-            eprintln!("skipping chat db test — no NOOK_REQUIRE_DB");
-            return None;
-        }
-        let url = std::env::var("DATABASE_URL").ok()?;
-        let opts = PgConnectOptions::from_str(&url)
-            .ok()?
-            .options([("search_path", "chat")]);
-        let db = nook_db::EnginePool::from_pg(
-            PgPoolOptions::new()
-                .max_connections(2)
-                .connect_with(opts)
-                .await
-                .ok()?,
-        );
-        crate::ensure_chat_schema(&db).await.ok()?;
-        crate::MIGRATOR.run(db.pg()).await.ok()?;
-        Some(AppState {
-            channels: Arc::new(crate::repo::channels::DbChannelRepository::new(db.clone())),
-            messages: Arc::new(crate::repo::messages::DbMessageRepository::new(db.clone())),
-            dms: Arc::new(crate::repo::dms::DbDmRepository::new(db.clone())),
-            db,
-            registry: Arc::new(crate::registry::Registry::new()),
-        })
+    async fn state() -> Option<crate::testdb::ChatTest> {
+        crate::testdb::chat_test("chat db test").await
     }
 
     fn caller(tenant: Uuid) -> Caller {
@@ -522,7 +496,7 @@ mod tests {
     }
 
     // Insert a channel row directly, rather than through `channels::create` —
-    // these tests run on a `chat`-only pool with no seeded `public.users`, and
+    // these tests run on a `chat`-only pool with no seeded `users`, and
     // create now gates on a tenant admin (MAIN-94), which that query cannot
     // resolve here. The message tests only need a channel to exist, not to
     // exercise create's authorization.
@@ -685,7 +659,7 @@ mod tests {
         .await
         .unwrap();
 
-        // Archive it directly (create/update are admin-gated on a `public.users`
+        // Archive it directly (create/update are admin-gated on a `users`
         // lookup this chat-only pool cannot resolve — MAIN-94; these tests are
         // about posting, not channel-management auth).
         state

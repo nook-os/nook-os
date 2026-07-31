@@ -2576,6 +2576,7 @@ dependencies = [
  "nook-control",
  "nook-db",
  "nook-errors",
+ "nook-testkit",
  "nook-types",
  "serde",
  "serde_json",

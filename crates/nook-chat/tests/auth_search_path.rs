@@ -97,6 +97,13 @@ async fn resolve_session_resolves_public_auth_tables_on_the_chat_first_pool() {
     let Ok(url) = std::env::var("DATABASE_URL") else {
         return;
     };
+    // Postgres semantics are the whole subject here — `search_path` resolution
+    // and `information_schema` isolation have no SQLite equivalent — so this
+    // skips rather than pretending to assert something (MAIN-294).
+    if nook_db::engine_from_url(&url).ok() != Some(nook_db::Engine::Postgres) {
+        eprintln!("skipping the chat search_path regression tests — Postgres-only behaviour");
+        return;
+    }
 
     // Provision the control-plane `public` schema this test depends on. The
     // nook-chat crate ships only its own `chat` migrations, so a fresh CI
@@ -152,29 +159,46 @@ async fn resolve_session_resolves_public_auth_tables_on_the_chat_first_pool() {
 #[test]
 fn the_service_pool_search_path_keeps_public() {
     let src = include_str!("../src/main.rs");
-    // Grab every `("search_path", "…")` value the service configures.
-    let values: Vec<&str> = src
-        .match_indices("\"search_path\"")
+
+    // The search_path used to be an inline literal at the pool construction, and
+    // this guard grepped for it. MAIN-294 made it an ARGUMENT — the same
+    // constructor now builds the service's `chat,public` pool and the tests'
+    // `public` bootstrap — so the values live in named constants and the grep
+    // follows them there. The protection is unchanged: MAIN-87 is that dropping
+    // `public` makes every authenticated request 500 on `sessions_auth`.
+    let values: Vec<(&str, &str)> = src
+        .match_indices("_SEARCH_PATH: &str = \"")
         .filter_map(|(i, _)| {
+            // Back up over the constant's name, for the failure message.
+            let name_end = src[..i].len();
+            let name_start = src[..name_end].rfind(' ')? + 1;
             let rest = &src[i..];
-            // …, "<value>")  — the second quoted string after the key.
-            let mut quotes = rest.match_indices('"').map(|(q, _)| q);
-            let open = quotes.nth(2)?; // 0,1 = the key; 2 = value open
-            let close = quotes.next()?; // 3 = value close
-            Some(&rest[open + 1..close])
+            let open = rest.find('"')?;
+            let close = rest[open + 1..].find('"')? + open + 1;
+            Some((&src[name_start..name_end], &rest[open + 1..close]))
         })
         .collect();
 
     assert!(
         !values.is_empty(),
-        "expected the service to pin a search_path in main.rs"
+        "expected main.rs to declare its search_path as a `*_SEARCH_PATH` \
+         constant — if that shape changed, this guard is no longer reading \
+         anything and MAIN-87 is unprotected"
     );
-    for v in values {
+    for (name, v) in &values {
         assert!(
             v.split(',').any(|s| s.trim() == "public"),
-            "the service search_path {v:?} must include `public`, or the shared \
-             nook-auth tables (sessions_auth/tenant_members/user_tokens) 500 — \
-             this is MAIN-87. Keep `public` in the search_path."
+            "the search_path {name}_SEARCH_PATH = {v:?} must include `public`, or \
+             the shared nook-auth tables (sessions_auth/tenant_members/\
+             user_tokens) 500 — this is MAIN-87. Keep `public` in the search_path."
         );
     }
+
+    // …and the constants must be the ONLY way one is set, or the next edit can
+    // pass a raw literal straight past the check above.
+    assert!(
+        !src.contains("(\"search_path\", \""),
+        "main.rs sets a search_path from an inline literal; route it through a \
+         `*_SEARCH_PATH` constant so the guard above can see it"
+    );
 }

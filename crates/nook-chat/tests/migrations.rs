@@ -35,6 +35,15 @@ async fn chat_migrations_apply_into_an_isolated_schema() {
     let Ok(url) = std::env::var("DATABASE_URL") else {
         return;
     };
+    // Postgres semantics are the whole subject here — `search_path` resolution
+    // and `information_schema` isolation have no SQLite equivalent — so this
+    // skips rather than pretending to assert something (MAIN-294).
+    if nook_db::engine_from_url(&url).ok() != Some(nook_db::Engine::Postgres) {
+        eprintln!(
+            "skipping chat_migrations_apply_into_an_isolated_schema — Postgres-only behaviour"
+        );
+        return;
+    }
 
     // The same connection setup the service uses: search_path pinned to `chat`.
     let opts = PgConnectOptions::from_str(&url)

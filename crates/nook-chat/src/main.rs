@@ -16,6 +16,8 @@ mod dms;
 mod messages;
 mod registry;
 mod repo;
+#[cfg(test)]
+mod testdb;
 mod ws;
 
 use std::str::FromStr;
@@ -38,6 +40,25 @@ use uuid::Uuid;
 /// 0004_chat_threads, 0005_chat_reactions, 0006_chat_categories,
 /// 0007_chat_read_cursors.
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
+
+/// The service's own search_path: chat first, `public` behind it.
+///
+/// `chat` first is what puts chat's tables and its `_sqlx_migrations` in its own
+/// schema; `public` behind it is what lets the SHARED `nook-auth` session query —
+/// unqualified `sessions_auth`, `tenant_members`, `user_tokens`, which live only
+/// in `public` — resolve instead of 500ing.
+pub(crate) const CHAT_SEARCH_PATH: &str = "chat,public";
+
+/// `public` alone — for a pool that must write the CONTROL PLANE's schema.
+///
+/// Only the tests use this, and the distinction is load-bearing rather than
+/// cosmetic: running `nook_control::MIGRATOR` over a `chat,public` pool puts the
+/// control plane's tables AND its ledger in the `chat` schema, where they collide
+/// with chat's own. That is not theoretical — it is what reddened CI on this
+/// card, and the shared dev database hid it because both schemas were already
+/// populated there.
+#[cfg(test)]
+pub(crate) const PUBLIC_SEARCH_PATH: &str = "public";
 
 /// Chat's squash manifest (MAIN-235); see `nook_control::SQUASH_MANIFEST`.
 static SQUASH_MANIFEST: &str = include_str!("../migrations/squash-manifest.txt");
@@ -77,34 +98,44 @@ async fn main() -> anyhow::Result<()> {
         "nook-chat starting",
     );
 
-    // Pin every connection's search_path to `chat,public` (libpq `-c
-    // search_path=chat,public`). `chat` is first, so sqlx creates its ledger as
-    // `chat._sqlx_migrations` and chat's own tables in `chat.*`, independent of
-    // the control plane's `public` schema (AC-5). `public` is the fallback so the
-    // SHARED `nook-auth` session query — unqualified `sessions_auth`,
-    // `tenant_members`, `user_tokens`, which live only in `public` — resolves
-    // instead of 500ing on `chat.sessions_auth does not exist`. No chat table
-    // shares a name with a public one, so `chat` winning first is safe.
-    let opts =
-        PgConnectOptions::from_str(&cfg.database_url)?.options([("search_path", "chat,public")]);
-    // Chat sets a custom `search_path`, so it builds its raw pool here rather than
-    // through `nook_db::connect`, then wraps it in the workspace `EnginePool`
-    // (MAIN-205). Schema creation + migrations run on the Postgres arm.
-    let db = nook_db::EnginePool::from_pg(
-        PgPoolOptions::new()
-            .max_connections(10)
-            .connect_with(opts)
-            .await?,
-    );
+    // The engine picks the pool, exactly as nook-control's boot does (MAIN-196
+    // AC-2, mirrored here by MAIN-294).
+    let db = open_pool(&cfg.database_url, 10, CHAT_SEARCH_PATH).await?;
     // The schema must exist before the migrator creates chat._sqlx_migrations.
+    // A no-op on SQLite, which has no schemas — see the function.
     ensure_chat_schema(&db).await?;
-    // Dev tolerates a chat ledger ahead of this checkout (warns + proceeds);
-    // production stays strictly fatal (MAIN-224). The pool's search_path pins
-    // `chat` first, so the orphan check reads `chat._sqlx_migrations`.
-    // Chat's own squash manifest and its own ledger — the search_path keeps
-    // both in the `chat` schema (MAIN-235).
-    nook_db::migrate::run_boot_migrations(&MIGRATOR, db.pg(), cfg.is_production(), SQUASH_MANIFEST)
+    // Migrations are POSTGRES-ONLY, and that is the whole shape of MAIN-294.
+    //
+    // On Postgres, chat owns a schema: the pool's search_path pins `chat` first,
+    // so the orphan check reads `chat._sqlx_migrations`, chat's squash manifest
+    // collapses chat's own ledger (MAIN-235), dev tolerates a ledger ahead of
+    // this checkout and production stays strictly fatal (MAIN-224). Unchanged.
+    //
+    // On SQLite there are no schemas. One file is one namespace and ONE
+    // `_sqlx_migrations`, so a second migrator writing it collides with the
+    // control plane's on version numbers — measured as "migration 1 was
+    // previously applied but has been modified", a checksum mismatch, which is
+    // fatal everywhere. Chat's tables therefore live in the control track's
+    // `0001` (they are named `chat_*`, so one namespace is enough for both) and
+    // chat runs nothing here: the control plane owns the single ledger.
+    //
+    // Chat cannot run that track itself even if it wanted to — `nook-control` is
+    // a dev-dependency, not a runtime one, and making the chat service depend on
+    // the whole control plane to boot would be a far larger change than the one
+    // this buys.
+    if db.engine() == nook_db::Engine::Postgres {
+        nook_db::migrate::run_boot_migrations(
+            &MIGRATOR,
+            db.pg(),
+            cfg.is_production(),
+            SQUASH_MANIFEST,
+        )
         .await?;
+    } else {
+        tracing::info!(
+            "sqlite: chat's tables come from the control plane's merged 0001 — no chat migrator to run",
+        );
+    }
 
     // Live fan-out: a local per-channel broadcast registry, plus a cross-instance
     // bus (nook-db's event-bus seam — Postgres LISTEN/NOTIFY under the hood) so a
@@ -188,7 +219,48 @@ async fn main() -> anyhow::Result<()> {
 /// then race the `pg_namespace` insert, and the loser gets `23505`
 /// (unique_violation) even though `IF NOT EXISTS` was asked for. The schema
 /// exists either way, so a duplicate is success, not an error.
+/// Chat's pool for `url`, on whichever engine that URL names (MAIN-294).
+///
+/// **Postgres** keeps the bespoke construction chat has always had, because it
+/// needs a `search_path` of `chat,public` that `nook_db::connect` does not set.
+/// `chat` is first, so sqlx creates its ledger as `chat._sqlx_migrations` and
+/// chat's tables in `chat.*`, independent of the control plane's `public`
+/// schema. `public` is the fallback so the SHARED `nook-auth` session query —
+/// unqualified `sessions_auth`, `tenant_members`, `user_tokens`, which live only
+/// in `public` — resolves instead of 500ing on `chat.sessions_auth does not
+/// exist`. No chat table shares a name with a public one, so `chat` winning
+/// first is safe.
+///
+/// **SQLite** has no schemas and no `search_path`, so there is nothing to
+/// separate and the ordinary `nook_db::connect` is exactly right. Chat's SQLite
+/// track names its tables `chat_*` outright, which is what makes one namespace
+/// safe to share with the control plane's.
+pub(crate) async fn open_pool(
+    url: &str,
+    max_connections: u32,
+    search_path: &str,
+) -> anyhow::Result<nook_db::DbPool> {
+    match nook_db::engine_from_url(url)? {
+        nook_db::Engine::Postgres => {
+            let opts = PgConnectOptions::from_str(url)?.options([("search_path", search_path)]);
+            Ok(nook_db::EnginePool::from_pg(
+                PgPoolOptions::new()
+                    .max_connections(max_connections)
+                    .connect_with(opts)
+                    .await?,
+            ))
+        }
+        nook_db::Engine::Sqlite => Ok(nook_db::connect(url, max_connections).await?),
+    }
+}
+
 pub(crate) async fn ensure_chat_schema(pool: &nook_db::DbPool) -> anyhow::Result<()> {
+    // SQLite has no schemas: chat's tables are named `chat_*` in the one
+    // namespace the file has, so there is nothing to create. Returning early
+    // rather than letting `CREATE SCHEMA` fail keeps the caller engine-blind.
+    if pool.engine() == nook_db::Engine::Sqlite {
+        return Ok(());
+    }
     match pool
         .exec("CREATE SCHEMA IF NOT EXISTS chat", params![])
         .await
