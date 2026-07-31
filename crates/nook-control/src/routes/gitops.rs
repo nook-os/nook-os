@@ -380,6 +380,7 @@ pub async fn git_commit(
             request_id,
             checkout_path: path,
             message: req.message.clone(),
+            paths: req.paths.clone(),
         })
         .ok_or_else(|| ApiError::BadRequest("node is offline".into()))?;
     let payload = tokio::time::timeout(std::time::Duration::from_secs(60), rx)

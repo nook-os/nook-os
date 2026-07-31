@@ -435,11 +435,13 @@ pub async fn connect_once(cfg: &NodeConfig) -> Result<()> {
                 request_id,
                 checkout_path,
                 message,
+                paths,
             } => {
                 let tx = out_tx.clone();
                 let roots = cfg.workspace_roots.clone();
                 tokio::task::spawn_blocking(move || {
-                    let outcome = crate::gitops::commit_all(&checkout_path, &message);
+                    let outcome =
+                        crate::gitops::commit_paths(&checkout_path, &message, paths.as_deref());
                     let ok = outcome.ok;
                     let _ = tx.blocking_send(NodeToControl::OpResult {
                         request_id,

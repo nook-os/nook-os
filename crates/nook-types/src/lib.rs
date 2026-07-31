@@ -2162,6 +2162,11 @@ pub struct GitCommitRequest {
     /// Which machine's checkout — a workspace can exist on several.
     pub node_id: NodeId,
     pub message: String,
+    /// Which paths to stage (MAIN-325). `None` stages everything, which is what
+    /// every caller did before selective staging existed — so an old client, or
+    /// one that simply does not care, keeps the behaviour it had.
+    #[serde(default)]
+    pub paths: Option<Vec<String>>,
 }
 
 /// Push a checkout's current branch.

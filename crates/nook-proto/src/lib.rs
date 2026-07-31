@@ -354,11 +354,19 @@ pub enum ControlToNode {
         request_id: uuid::Uuid,
         worktree_path: String,
     },
-    /// Stage everything in a checkout and commit it.
+    /// Stage a checkout and commit it. `paths` names what to stage; `None`
+    /// stages everything (MAIN-325).
+    ///
+    /// `#[serde(default)]` so a node running an older build still parses the
+    /// message — it ignores the field and stages everything, which is exactly
+    /// what it did before. Wrong for a partial commit, but a stale node is a
+    /// deploy problem, not a crash.
     GitCommit {
         request_id: uuid::Uuid,
         checkout_path: String,
         message: String,
+        #[serde(default)]
+        paths: Option<Vec<String>>,
     },
     /// Push the checkout's current branch, setting upstream on first push.
     /// Carries the tenant credential (when there is one) for the same reason

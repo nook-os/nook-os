@@ -329,7 +329,8 @@ async fn mutating_gitops_routes_require_person_may_use_node() {
                     Path(ws),
                     Json(GitCommitRequest {
                         node_id: node,
-                        message: "m".into()
+                        message: "m".into(),
+                        paths: None
                     }),
                 )
                 .await
