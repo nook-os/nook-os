@@ -64,12 +64,19 @@ task_workspace             # production still emits Postgres SQL on this path (M
 taught_skills              # production still emits Postgres SQL on this path (MAIN-289)
 visibility_agreement       # production still emits Postgres SQL on this path (MAIN-289)
 
-# ── migrations_sqlite 0001 defect (MAIN-293) ──
-backlog_invisible          # migrations_sqlite 0001: users.person_id has no default (MAIN-293)
-dev_signin                 # migrations_sqlite 0001: users.person_id has no default (MAIN-293)
-local_accounts             # migrations_sqlite 0001: users.person_id has no default (MAIN-293)
-task_visibility            # migrations_sqlite 0001: users.person_id has no default (MAIN-293)
-tenant_ca                  # migrations_sqlite 0001: users.person_id has no default (MAIN-293)
+# ── still production Postgres SQL, re-tagged by MAIN-293 ──
+#
+# These carried a MAIN-293 tag because that card's evidence was gathered with a
+# pattern matching BOTH `NOT NULL constraint failed: users.person_id` and
+# `no such function: gen_random_uuid` — two different defects. MAIN-293 fixed
+# the first (the missing column default) and every one of those failures is
+# gone; what remains here is the second, which is production emitting Postgres
+# SQL and belongs to the dialect sweep. `local_accounts` passed outright and its
+# line is deleted.
+backlog_invisible          # production calls gen_random_uuid() and a :: cast (MAIN-289)
+dev_signin                 # production emits Postgres-only syntax (MAIN-289)
+task_visibility            # production calls gen_random_uuid() directly — routes/tenants.rs, routes/verify_email.rs (MAIN-289)
+tenant_ca                  # production emits Postgres-only syntax (MAIN-289)
 
 # ── nook-chat has no SQLite migrator (MAIN-294) ──
 nook_chat:main             # nook-chat has no MIGRATOR_SQLITE — EnginePool::pg() panics (MAIN-294)
