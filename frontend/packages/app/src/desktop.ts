@@ -125,8 +125,11 @@ export async function forgetControlPlane(url: string): Promise<void> {
   const call = invoke();
   if (!call) return;
   await call("forget_control_plane", { url });
-  // Its namespaced session tabs go too — nothing left points at that server.
+  // Its namespaced tab state goes too — nothing left points at that server.
+  // Both keys: the live-tab view prefs, and the retired open-set (MAIN-322),
+  // which a browser that has not loaded the app since the change may still hold.
   try {
+    localStorage.removeItem(sessionTabPrefsKey(url));
     localStorage.removeItem(sessionTabsKey(url));
   } catch {
     // ignore
@@ -153,10 +156,19 @@ export async function setControlPlaneAccount(
   await call("set_control_plane_account", { url, account });
 }
 
-/** localStorage key holding the session tabs for one control plane (AC-8). The
- *  web build (empty key) keeps the original un-namespaced key for continuity. */
+/** localStorage key that USED to hold one control plane's open tab set (AC-8).
+ *  Retired by MAIN-322 — the tab set is the live session list now — and kept
+ *  only so the stale key can be deleted where it is still lying around. */
 export function sessionTabsKey(cpKey: string): string {
   return cpKey ? `nook.session-tabs::${cpKey}` : "nook.session-tabs";
+}
+
+/** localStorage key holding one control plane's tab VIEW prefs — pin state and
+ *  drag order (MAIN-322). Namespaced per server for the same reason the tab set
+ *  was: these are session ids, and they mean nothing on another control plane.
+ *  The web build (empty key) uses the un-namespaced key. */
+export function sessionTabPrefsKey(cpKey: string): string {
+  return cpKey ? `nook.session-tab-prefs::${cpKey}` : "nook.session-tab-prefs";
 }
 
 /**

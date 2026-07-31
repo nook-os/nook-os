@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { sessionTabsKey } from "./desktop";
+import { sessionTabPrefsKey, sessionTabsKey } from "./desktop";
 
 // AC-8: session tabs are namespaced per control plane. The key derivation is
 // the pure core of that — two servers must land on distinct storage keys, so a
@@ -23,5 +23,21 @@ describe("sessionTabsKey — per-control-plane tab namespacing", () => {
     expect(sessionTabsKey("https://nook.example.com")).toBe(
       "nook.session-tabs::https://nook.example.com",
     );
+  });
+});
+
+describe("sessionTabPrefsKey — MAIN-322 view prefs", () => {
+  it("is namespaced per control plane, like the tab set it replaces", () => {
+    expect(sessionTabPrefsKey("https://a.example.com")).not.toBe(
+      sessionTabPrefsKey("https://b.example.com"),
+    );
+  });
+
+  it("never collides with the retired open-set key", () => {
+    // They are cleared together on forget, and the prefs loader must not read
+    // an old array of session ids as a prefs object.
+    for (const cp of ["", "https://nook.example.com"]) {
+      expect(sessionTabPrefsKey(cp)).not.toBe(sessionTabsKey(cp));
+    }
   });
 });

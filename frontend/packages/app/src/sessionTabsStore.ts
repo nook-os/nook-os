@@ -3,30 +3,55 @@
 // and the SAME FILE on macOS and Windows, where the import resolved to the
 // wrong one and the frontend would not build at all. CI on Linux was happy;
 // every Mac was not.
-// VS-Code-style session tabs: every session you visit opens a tab; tabs
-// persist across reloads (localStorage) and closing a tab only stops viewing —
-// the tmux session keeps running (like closing a file tab in VS Code).
+//
+// MAIN-322: the tab strip IS the live session list, not a per-browser open-set.
+// It used to be the latter — every session you visited was appended to a
+// localStorage array, so your tabs were whatever *this* browser happened to
+// have opened, and the same account on a second machine showed a different
+// strip. Now the set of tabs is derived from `GET /api/v1/sessions?active=true`,
+// which is the same answer on every machine.
+//
+// What stays client-side is only what the ticket allows: view-only prefs that
+// change the ORDER of the strip, never its membership — which tabs are pinned
+// and the drag-chosen order. A pref for a session that no longer exists cannot
+// bring a tab back, because membership is not a pref.
 import { create } from "zustand";
-import { activeControlPlaneKey, sessionTabsKey } from "./desktop";
+import {
+  activeControlPlaneKey,
+  sessionTabPrefsKey,
+  sessionTabsKey,
+} from "./desktop";
 
 export interface SessionTab {
   id: string;
   name: string;
   runtime: string;
   /** Owning workspace — tabs are filtered by the active workspace context.
-   *  Optional only for tabs persisted before this field existed; they show in
-   *  every context until revisited (which backfills it). */
+   *  Absent for an ad-hoc terminal, which belongs to no workspace and so shows
+   *  in every context. */
   workspaceId?: string;
   workspaceName?: string;
-  /** Pinned tabs sort first and survive "close others" / "close all". */
+  /** Pinned tabs sort first and are a view-only pref (MAIN-322). */
   pinned?: boolean;
 }
 
-// Tabs are namespaced per control plane (AC-8): each server keeps its own tab
-// set, and the webview reload that a switch triggers re-evaluates this at module
-// load so the strip swaps wholesale rather than showing another server's dead
-// session IDs. The web build (empty active key) keeps the original key.
-const KEY = sessionTabsKey(activeControlPlaneKey());
+/** The fields of a live session the strip needs. A subset of the API's
+ *  `Session`, so the derivation can be tested without a control plane. */
+export interface LiveSession {
+  id: string;
+  name: string;
+  runtime: string;
+  workspace_id?: string | null;
+}
+
+/** The only client-side state left: how the strip is ORDERED, never what it
+ *  contains. Both arrays hold session ids. */
+export interface TabPrefs {
+  pinned: string[];
+  order: string[];
+}
+
+const PREFS_KEY = sessionTabPrefsKey(activeControlPlaneKey());
 
 /** Move `id` to just before/after `targetId`, but only WITHIN a pin group.
  *
@@ -52,99 +77,132 @@ export function reorderTabs(
   return [...without.slice(0, at), dragged, ...without.slice(at)];
 }
 
-function load(): SessionTab[] {
-  try {
-    const raw = localStorage.getItem(KEY);
-    if (raw) return JSON.parse(raw) as SessionTab[];
-  } catch {
-    // corrupted store — start fresh
-  }
-  return [];
+/** The visible strip: live sessions, in the user's chosen order.
+ *
+ *  Pure, and the whole rule in one place — membership comes from `sessions`
+ *  alone (AC-1/AC-2), and `prefs` may only reorder what is already there
+ *  (AC-4). A session absent from the live list has no tab no matter what the
+ *  prefs say, which is what makes "the tabs ARE the sessions" true rather than
+ *  merely usually true.
+ *
+ *  Scoping matches the old strip: a workspace context shows that workspace's
+ *  sessions, plus ad-hoc terminals (which have no workspace and would otherwise
+ *  be reachable from no context at all). */
+export function deriveTabs(
+  sessions: LiveSession[],
+  workspaceNames: Record<string, string>,
+  prefs: TabPrefs,
+  selectedWorkspaceId?: string | null,
+): SessionTab[] {
+  const pinned = new Set(prefs.pinned);
+  const rank = new Map(prefs.order.map((id, i) => [id, i]));
+  return sessions
+    .filter(
+      (s) => !selectedWorkspaceId || !s.workspace_id || s.workspace_id === selectedWorkspaceId,
+    )
+    .map((s, i) => ({
+      tab: {
+        id: s.id,
+        name: s.name,
+        runtime: s.runtime,
+        workspaceId: s.workspace_id ?? undefined,
+        workspaceName: s.workspace_id ? workspaceNames[s.workspace_id] : undefined,
+        pinned: pinned.has(s.id),
+      } satisfies SessionTab,
+      // A session the user has never dragged sorts after every one they have,
+      // in the order the server listed it — so a new session appends rather
+      // than landing in the middle of a hand-arranged strip.
+      at: rank.get(s.id) ?? prefs.order.length + i,
+    }))
+    .sort((a, b) => Number(!!b.tab.pinned) - Number(!!a.tab.pinned) || a.at - b.at)
+    .map((r) => r.tab);
 }
 
-function save(tabs: SessionTab[]) {
+function load(): TabPrefs {
   try {
-    localStorage.setItem(KEY, JSON.stringify(tabs));
+    const raw = localStorage.getItem(PREFS_KEY);
+    if (raw) {
+      const p = JSON.parse(raw) as Partial<TabPrefs>;
+      return {
+        pinned: Array.isArray(p.pinned) ? p.pinned : [],
+        order: Array.isArray(p.order) ? p.order : [],
+      };
+    }
   } catch {
-    // storage full/unavailable — tabs just won't persist
+    // corrupted prefs — start fresh
+  }
+  return { pinned: [], order: [] };
+}
+
+function save(prefs: TabPrefs) {
+  try {
+    localStorage.setItem(PREFS_KEY, JSON.stringify(prefs));
+  } catch {
+    // storage full/unavailable — prefs just won't persist
   }
 }
 
-interface SessionTabsState {
-  tabs: SessionTab[];
-  /** Add (or refresh) a tab; visiting a session calls this. */
-  open(tab: SessionTab): void;
-  close(id: string): void;
-  /** Close every tab except `id` (pinned tabs stay). */
-  closeOthers(id: string): void;
-  /** Close tabs after `id` in the given visible order (pinned tabs stay). */
-  closeToTheRight(id: string, visible: string[]): void;
-  /** Close all tabs in `ids` that aren't pinned. */
-  closeAll(ids: string[]): void;
+// Retire the old open-set for real, rather than leaving it to rot: with the
+// strip sourced from the API nothing will ever read this key again, and a stale
+// list of session ids from months ago is only a confusing thing to find in
+// devtools.
+try {
+  localStorage.removeItem(sessionTabsKey(activeControlPlaneKey()));
+} catch {
+  // ignore
+}
+
+interface SessionTabPrefsState {
+  prefs: TabPrefs;
   togglePin(id: string): void;
-  rename(id: string, name: string): void;
-  /** Drag-reorder: move `id` to before/after `targetId`, within its pin group. */
-  reorder(id: string, targetId: string, after: boolean): void;
+  /** Drag-reorder: move `id` before/after `targetId` within its pin group,
+   *  given the strip as currently displayed. */
+  reorder(id: string, targetId: string, after: boolean, visible: SessionTab[]): void;
+  /** Drop prefs for sessions that no longer exist, so the stored ids cannot
+   *  grow without bound as sessions come and go.
+   *
+   *  `undefined` means "the live list is not known yet" and is a no-op — a
+   *  pending or failed session query must not read as "every session is gone"
+   *  and wipe the user's pin/order on page load. */
+  prune(liveIds: string[] | undefined): void;
 }
 
-export const useSessionTabs = create<SessionTabsState>((set) => ({
-  tabs: load(),
-  open: (tab) =>
-    set((s) => {
-      const exists = s.tabs.some((t) => t.id === tab.id);
-      const tabs = exists
-        ? s.tabs.map((t) => (t.id === tab.id ? { ...t, ...tab } : t))
-        : [...s.tabs, tab];
-      save(tabs);
-      return { tabs };
-    }),
-  close: (id) =>
-    set((s) => {
-      const tabs = s.tabs.filter((t) => t.id !== id);
-      save(tabs);
-      return { tabs };
-    }),
-  closeOthers: (id) =>
-    set((s) => {
-      const tabs = s.tabs.filter((t) => t.id === id || t.pinned);
-      save(tabs);
-      return { tabs };
-    }),
-  closeToTheRight: (id, visible) =>
-    set((s) => {
-      const cut = visible.indexOf(id);
-      if (cut < 0) return s;
-      const doomed = new Set(visible.slice(cut + 1));
-      const tabs = s.tabs.filter((t) => !doomed.has(t.id) || t.pinned);
-      save(tabs);
-      return { tabs };
-    }),
-  closeAll: (ids) =>
-    set((s) => {
-      const doomed = new Set(ids);
-      const tabs = s.tabs.filter((t) => !doomed.has(t.id) || t.pinned);
-      save(tabs);
-      return { tabs };
-    }),
+export const useSessionTabPrefs = create<SessionTabPrefsState>((set) => ({
+  prefs: load(),
   togglePin: (id) =>
     set((s) => {
-      const tabs = s.tabs.map((t) =>
-        t.id === id ? { ...t, pinned: !t.pinned } : t,
-      );
-      save(tabs);
-      return { tabs };
+      const pinned = s.prefs.pinned.includes(id)
+        ? s.prefs.pinned.filter((x) => x !== id)
+        : [...s.prefs.pinned, id];
+      const prefs = { ...s.prefs, pinned };
+      save(prefs);
+      return { prefs };
     }),
-  rename: (id, name) =>
+  reorder: (id, targetId, after, visible) =>
     set((s) => {
-      const tabs = s.tabs.map((t) => (t.id === id ? { ...t, name } : t));
-      save(tabs);
-      return { tabs };
+      const moved = reorderTabs(visible, id, targetId, after);
+      if (moved === visible) return s; // rejected/no-op — don't churn storage
+      // The dragged strip is the new truth for the tabs it contains; ids it
+      // does not mention (another workspace's context) keep their old rank.
+      const shown = new Set(moved.map((t) => t.id));
+      const prefs = {
+        ...s.prefs,
+        order: [...moved.map((t) => t.id), ...s.prefs.order.filter((x) => !shown.has(x))],
+      };
+      save(prefs);
+      return { prefs };
     }),
-  reorder: (id, targetId, after) =>
+  prune: (liveIds) =>
     set((s) => {
-      const tabs = reorderTabs(s.tabs, id, targetId, after);
-      if (tabs === s.tabs) return s; // rejected/no-op — don't churn storage
-      save(tabs);
-      return { tabs };
+      if (!liveIds) return s; // list unknown — never prune on a guess
+      const live = new Set(liveIds);
+      const pinned = s.prefs.pinned.filter((id) => live.has(id));
+      const order = s.prefs.order.filter((id) => live.has(id));
+      if (pinned.length === s.prefs.pinned.length && order.length === s.prefs.order.length) {
+        return s;
+      }
+      const prefs = { pinned, order };
+      save(prefs);
+      return { prefs };
     }),
 }));
