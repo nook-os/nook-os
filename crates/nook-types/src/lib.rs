@@ -517,6 +517,57 @@ pub struct Node {
     pub updated_at: DateTime<Utc>,
 }
 
+/// How many sessions a workspace wants (MAIN-315).
+///
+/// Tagged rather than a bare integer, because "one per matching node" and
+/// "exactly one" are different intents a number cannot tell apart — and a
+/// reconciler that guessed would be wrong on a fleet that grows.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Replicas {
+    /// Exactly `count` sessions, anywhere that matches.
+    Count { count: u32 },
+    /// Exactly one — the common case, spelled so it cannot be typo'd into two.
+    Single,
+    /// One on every node that matches the selector; grows with the fleet.
+    All,
+}
+
+/// Work's agreement to run somewhere despite a taint (MAIN-315).
+///
+/// Its own type rather than a re-use of the node-side taint: they are the two
+/// halves of one negotiation, and a shared struct makes it easy to pass one
+/// where the other belongs. Same fields today, free to diverge later.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct Toleration {
+    pub key: String,
+    pub effect: String,
+}
+
+/// A workspace's declared desired session state (MAIN-315) — the Deployment
+/// analog. Absent entirely means the workspace is unmanaged.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct SessionSpec {
+    /// The runtime every session it manages should run — `claude`, `bash`, …
+    pub runtime: String,
+    /// Labels a node must carry to be eligible. Empty matches every node.
+    #[serde(default)]
+    pub node_selector: std::collections::BTreeMap<String, String>,
+    /// Taints this work accepts. A node whose taint is untolerated is not
+    /// eligible however well its labels match.
+    #[serde(default)]
+    pub tolerations: Vec<Toleration>,
+    pub replicas: Replicas,
+}
+
+/// Set or clear a workspace's [`SessionSpec`] (MAIN-315). `spec: null` clears
+/// it, returning the workspace to unmanaged — which is why the field is an
+/// explicit Option rather than an absent key meaning "leave alone".
+#[derive(Debug, Clone, Deserialize, ToSchema)]
+pub struct SetSessionSpecRequest {
+    pub spec: Option<SessionSpec>,
+}
+
 /// Toggle a node's `shared` designation (MAIN-135). Owner-only at the route.
 #[derive(Debug, Clone, Deserialize, ToSchema)]
 pub struct SetSharedRequest {
@@ -621,6 +672,9 @@ pub struct Workspace {
     /// The normalized form of [`Self::git_remote_url`] used to match a discovered
     /// checkout back to its workspace (host+path, scheme/creds/`.git` stripped).
     pub git_remote_normalized: Option<String>,
+    /// The desired session state (MAIN-315), or `None` for an UNMANAGED
+    /// workspace. Nothing reconciles it yet.
+    pub session_spec: Option<serde_json::Value>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

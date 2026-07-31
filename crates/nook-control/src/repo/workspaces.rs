@@ -103,6 +103,15 @@ pub trait WorkspaceRepository: Send + Sync {
 
     async fn get(&self, tenant: TenantId, id: WorkspaceId) -> ApiResult<Option<Workspace>>;
 
+    /// Set or clear a workspace's declared session spec (MAIN-315). `None`
+    /// clears it, returning the workspace to unmanaged.
+    async fn set_session_spec(
+        &self,
+        tenant: TenantId,
+        id: WorkspaceId,
+        spec: Option<serde_json::Value>,
+    ) -> ApiResult<Option<Workspace>>;
+
     /// Create a named workspace. A duplicate name is a `Conflict`, not a
     /// database error — the mapping lives here so every caller reports it the
     /// same way.
@@ -460,6 +469,26 @@ impl DbWorkspaceRepository {
 
 #[async_trait]
 impl WorkspaceRepository for DbWorkspaceRepository {
+    async fn set_session_spec(
+        &self,
+        tenant: TenantId,
+        id: WorkspaceId,
+        spec: Option<serde_json::Value>,
+    ) -> ApiResult<Option<Workspace>> {
+        Ok(self
+            .db
+            .query_opt(
+                &format!(
+                    "UPDATE workspaces SET session_spec = $3, updated_at = {}
+                     WHERE tenant_id = $1 AND id = $2
+                     RETURNING *",
+                    type_mapping(self.db.engine()).now()
+                ),
+                params![tenant, id, spec],
+            )
+            .await?)
+    }
+
     async fn list(&self, tenant: TenantId) -> ApiResult<Vec<Workspace>> {
         Ok(self
             .db
@@ -1516,12 +1545,31 @@ impl FakeWorkspaceRepository {
             git_remote_normalized: None,
             created_at: now,
             updated_at: now,
+            session_spec: None,
         }
     }
 }
 
 #[async_trait]
 impl WorkspaceRepository for FakeWorkspaceRepository {
+    async fn set_session_spec(
+        &self,
+        tenant: TenantId,
+        id: WorkspaceId,
+        spec: Option<serde_json::Value>,
+    ) -> ApiResult<Option<Workspace>> {
+        let mut st = self.inner.lock().unwrap();
+        let Some(w) = st
+            .workspaces
+            .iter_mut()
+            .find(|w| w.id == id && w.tenant_id == tenant)
+        else {
+            return Ok(None);
+        };
+        w.session_spec = spec;
+        Ok(Some(w.clone()))
+    }
+
     async fn list(&self, tenant: TenantId) -> ApiResult<Vec<Workspace>> {
         let s = self.inner.lock().unwrap();
         let mut out: Vec<Workspace> = s
