@@ -118,6 +118,7 @@ run_lint() {
     scripts/check-inline-sql.sh scripts/check-inline-sql.test.sh \
     scripts/check-sqlx-signatures.sh scripts/check-sqlx-signatures.test.sh \
     scripts/check-dialect-dispatch.sh scripts/check-dialect-dispatch.test.sh \
+    scripts/check-nested-dialect.sh scripts/check-nested-dialect.test.sh \
     scripts/check-sqlite-ci.sh scripts/check-sqlite-ci.test.sh \
     scripts/squash-migrations.sh \
     || die "shellcheck"
@@ -146,6 +147,15 @@ run_lint() {
   ./scripts/check-sqlx-signatures.sh || die "sqlx signatures"
   ./scripts/check-sqlx-signatures.test.sh || die "sqlx signature guard self-test"
   pass "sqlx signatures guarded"
+
+  # MAIN-354: and the fragment a seam is HANDED must not itself be Postgres.
+  # Swapping `Postgres.x()` for `time_math(engine).x()` while leaving
+  # `$1::bigint` in the argument ships Postgres SQL through the seam that exists
+  # to stop it — invisible to this leg, which is why the check reads the source.
+  say "nested dialect literals"
+  ./scripts/check-nested-dialect.sh || die "nested dialect literals"
+  ./scripts/check-nested-dialect.test.sh || die "nested-dialect guard self-test"
+  pass "nested dialect literals guarded"
 
   # MAIN-289: production asks the ENGINE for its SQL fragments rather than
   # assuming Postgres. Green for the same reason as the guard above — the

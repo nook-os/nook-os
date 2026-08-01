@@ -113,6 +113,13 @@ jobs:
           ./scripts/check-inline-sql.test.sh
           ./scripts/check-sqlx-signatures.sh
           ./scripts/check-sqlx-signatures.test.sh
+          # MAIN-354. On the POSTGRES leg deliberately: a cast nested inside a
+          # seam call is valid Postgres, so that leg cannot see the defect by
+          # running — only by reading the source. Catching it here is a whole
+          # engine-run earlier than the SQLite leg, and for a binary still on
+          # the exclusion list it is the only place it is caught at all.
+          ./scripts/check-nested-dialect.sh
+          ./scripts/check-nested-dialect.test.sh
           # `check-dialect-dispatch.sh` is deliberately absent, and so is its
           # self-test. Both are RED on main today — an unlisted offender in
           # repo/read_model.rs plus three stale entries — and the self-test's
