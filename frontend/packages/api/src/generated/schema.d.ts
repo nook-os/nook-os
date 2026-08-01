@@ -1849,6 +1849,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/operator/tenants/{id}/switches": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["tenant_switches"];
+        put?: never;
+        post: operations["set_tenant_switch"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/overview": {
         parameters: {
             query?: never;
@@ -4365,6 +4381,7 @@ export interface components {
             revoke?: boolean;
             /** @description `operator` | `org_admin` | … */
             role: string;
+            tenant_id?: null | components["schemas"]["TenantId"];
         };
         /** @description Adopt a file that already exists in a checkout into the vault. */
         ImportSecretRequest: {
@@ -5669,6 +5686,16 @@ export interface components {
         SetSharedRequest: {
             shared: boolean;
         };
+        /** @description Throw one of them. */
+        SetTenantSwitchRequest: {
+            enabled: boolean;
+            /**
+             * @description `loops` or `reconcile` — a closed set, not a settings key, so this
+             *     endpoint can never become a way to write arbitrary settings into
+             *     somebody else's tenant.
+             */
+            switch: string;
+        };
         /** @description Setting or checking the app password. */
         SetVaultPassphraseRequest: {
             passphrase: string;
@@ -6004,6 +6031,28 @@ export interface components {
             /** @description `owner` | `admin` | `member`. */
             role: string;
             slug: string;
+        };
+        /**
+         * @description The switches an operator can throw for a tenant OTHER than the one they are
+         *     acting in.
+         *
+         *     `settings::put` writes to the caller's active tenant, which meant turning
+         *     loops on for somebody else's team required switching into it first — and if
+         *     their team was never set up, nothing ran and nothing said why.
+         */
+        TenantSwitches: {
+            /**
+             * @description `loops.enabled` — whether this tenant dispatches loop jobs at all
+             *     (MAIN-239). Default off, which is why a fresh team's loops never fire.
+             */
+            loops_enabled: boolean;
+            /**
+             * @description `sessions.reconcile.enabled` — whether the reconciler converges this
+             *     tenant's workspaces onto its nodes. Default off.
+             */
+            reconcile_enabled: boolean;
+            tenant_id: components["schemas"]["TenantId"];
+            tenant_name: string;
         };
         Theme: {
             /** Format: date-time */
@@ -9778,6 +9827,82 @@ export interface operations {
         };
         responses: {
             200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    tenant_switches: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TenantSwitches"];
+                };
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    set_tenant_switch: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SetTenantSwitchRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TenantSwitches"];
+                };
+            };
+            400: {
                 headers: {
                     [name: string]: unknown;
                 };

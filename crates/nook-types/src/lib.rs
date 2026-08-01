@@ -1557,6 +1557,42 @@ pub struct GrantRequest {
     pub role: String,
     #[serde(default)]
     pub revoke: bool,
+    /// Grant over ONE tenant instead of the whole deployment.
+    ///
+    /// Absent keeps the old behaviour exactly — deployment scope — so every
+    /// existing caller is unchanged. Present is what lets somebody be the admin
+    /// of one team without being handed the entire deployment, which until now
+    /// was the only thing this endpoint could do.
+    #[serde(default)]
+    pub tenant_id: Option<TenantId>,
+}
+
+/// The switches an operator can throw for a tenant OTHER than the one they are
+/// acting in.
+///
+/// `settings::put` writes to the caller's active tenant, which meant turning
+/// loops on for somebody else's team required switching into it first — and if
+/// their team was never set up, nothing ran and nothing said why.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct TenantSwitches {
+    pub tenant_id: TenantId,
+    pub tenant_name: String,
+    /// `loops.enabled` — whether this tenant dispatches loop jobs at all
+    /// (MAIN-239). Default off, which is why a fresh team's loops never fire.
+    pub loops_enabled: bool,
+    /// `sessions.reconcile.enabled` — whether the reconciler converges this
+    /// tenant's workspaces onto its nodes. Default off.
+    pub reconcile_enabled: bool,
+}
+
+/// Throw one of them.
+#[derive(Debug, Clone, Deserialize, ToSchema)]
+pub struct SetTenantSwitchRequest {
+    /// `loops` or `reconcile` — a closed set, not a settings key, so this
+    /// endpoint can never become a way to write arbitrary settings into
+    /// somebody else's tenant.
+    pub switch: String,
+    pub enabled: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, ToSchema)]

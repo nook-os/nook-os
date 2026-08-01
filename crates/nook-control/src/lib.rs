@@ -38,7 +38,7 @@ pub use state::AppState;
 // 0027_task_checkout_id, 0028_loop_job_seed, 0029_node_labels_taints,
 // 0030_workspace_session_spec, 0031_session_managed,
 // 0032_managed_session_per_checkout, 0033_task_claim_lease,
-// 0034_session_port_leases.
+// 0034_session_port_leases, 0035_operator_tenant_manage.
 pub static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
 /// The SQLite track (MAIN-236 scaffolded it; MAIN-196 boots it). A parallel set,

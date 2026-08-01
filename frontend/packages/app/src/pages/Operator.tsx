@@ -37,6 +37,7 @@ import {
   type DataColumn,
 } from "@nookos/ui";
 import { askConfirm, askForm, askText, notify } from "../dialogs";
+import { TenantSwitches } from "../TenantSwitches";
 
 // Columns for the audit DataList. Module-level: the cells read only the row, so
 // they never close over component state and the array is stable across renders.
@@ -347,6 +348,7 @@ export function OperatorPage() {
   // handlers (moveTenant/stageCa/revoke…) and over `orgs`, so — unlike the
   // static AUDIT_COLUMNS — they cannot be module-level constants.
   const tenantColumns: DataColumn<OperatorTenant>[] = [
+
     { key: "tenant", header: "Tenant", className: "mono bright", cell: (t) => t.slug },
     { key: "members", header: "Members", cell: (t) => t.members },
     { key: "nodes", header: "Nodes", cell: (t) => t.nodes },
@@ -363,6 +365,11 @@ export function OperatorPage() {
           ariaLabel="org"
         />
       ),
+    },
+    {
+      key: "automation",
+      header: "Automation",
+      cell: (t) => <TenantSwitches tenantId={t.id} slug={t.slug} />,
     },
     {
       key: "actions",

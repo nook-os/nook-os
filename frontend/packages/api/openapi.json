@@ -3979,6 +3979,89 @@
         }
       }
     },
+    "/api/v1/operator/tenants/{id}/switches": {
+      "get": {
+        "tags": [
+          "crate::routes::operator"
+        ],
+        "operationId": "tenant_switches",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TenantSwitches"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": ""
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "crate::routes::operator"
+        ],
+        "operationId": "set_tenant_switch",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetTenantSwitchRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TenantSwitches"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": ""
+          },
+          "403": {
+            "description": ""
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      }
+    },
     "/api/v1/overview": {
       "get": {
         "tags": [
@@ -10097,6 +10180,17 @@
           "role": {
             "type": "string",
             "description": "`operator` | `org_admin` | …"
+          },
+          "tenant_id": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/TenantId",
+                "description": "Grant over ONE tenant instead of the whole deployment.\n\nAbsent keeps the old behaviour exactly — deployment scope — so every\nexisting caller is unchanged. Present is what lets somebody be the admin\nof one team without being handed the entire deployment, which until now\nwas the only thing this endpoint could do."
+              }
+            ]
           }
         }
       },
@@ -12923,6 +13017,23 @@
           }
         }
       },
+      "SetTenantSwitchRequest": {
+        "type": "object",
+        "description": "Throw one of them.",
+        "required": [
+          "switch",
+          "enabled"
+        ],
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
+          "switch": {
+            "type": "string",
+            "description": "`loops` or `reconcile` — a closed set, not a settings key, so this\nendpoint can never become a way to write arbitrary settings into\nsomebody else's tenant."
+          }
+        }
+      },
       "SetVaultPassphraseRequest": {
         "type": "object",
         "description": "Setting or checking the app password.",
@@ -13736,6 +13847,32 @@
             "description": "`owner` | `admin` | `member`."
           },
           "slug": {
+            "type": "string"
+          }
+        }
+      },
+      "TenantSwitches": {
+        "type": "object",
+        "description": "The switches an operator can throw for a tenant OTHER than the one they are\nacting in.\n\n`settings::put` writes to the caller's active tenant, which meant turning\nloops on for somebody else's team required switching into it first — and if\ntheir team was never set up, nothing ran and nothing said why.",
+        "required": [
+          "tenant_id",
+          "tenant_name",
+          "loops_enabled",
+          "reconcile_enabled"
+        ],
+        "properties": {
+          "loops_enabled": {
+            "type": "boolean",
+            "description": "`loops.enabled` — whether this tenant dispatches loop jobs at all\n(MAIN-239). Default off, which is why a fresh team's loops never fire."
+          },
+          "reconcile_enabled": {
+            "type": "boolean",
+            "description": "`sessions.reconcile.enabled` — whether the reconciler converges this\ntenant's workspaces onto its nodes. Default off."
+          },
+          "tenant_id": {
+            "$ref": "#/components/schemas/TenantId"
+          },
+          "tenant_name": {
             "type": "string"
           }
         }

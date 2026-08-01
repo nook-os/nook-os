@@ -204,6 +204,10 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route("/operator/orgs/{id}", patch(operator::rename_org))
         .route("/operator/tenants/{id}/org", post(operator::move_tenant))
+        .route(
+            "/operator/tenants/{id}/switches",
+            get(operator::tenant_switches).post(operator::set_tenant_switch),
+        )
         .route("/operator/tenants/{id}/ca", post(operator::stage_ca))
         .route(
             "/operator/tenants/{id}/ca/{ca}/promote",

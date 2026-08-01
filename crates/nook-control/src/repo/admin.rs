@@ -153,6 +153,27 @@ pub trait OperatorRepository: Send + Sync {
         granted_by: Uuid,
     ) -> ApiResult<()>;
 
+    /// Grant a role over ONE tenant rather than the whole deployment.
+    ///
+    /// The operator page could only ever grant at deployment scope, so making
+    /// somebody the admin of a single team meant either giving them the entire
+    /// deployment or editing `role_bindings` by hand. Scope already existed in
+    /// the model and in `has_permission`; only the write was missing.
+    async fn grant_tenant_role(
+        &self,
+        subject: Uuid,
+        role: &str,
+        tenant: TenantId,
+        granted_by: Uuid,
+    ) -> ApiResult<()>;
+
+    async fn revoke_tenant_role(
+        &self,
+        subject: Uuid,
+        role: &str,
+        tenant: TenantId,
+    ) -> ApiResult<()>;
+
     async fn revoke_deployment_role(&self, subject: Uuid, role: &str) -> ApiResult<()>;
 }
 
@@ -394,6 +415,41 @@ impl OperatorRepository for DbOperatorRepository {
                 "DELETE FROM role_bindings
              WHERE subject_id = $1 AND role_key = $2 AND scope_type = 'deployment'",
                 params![subject, role],
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn grant_tenant_role(
+        &self,
+        subject: Uuid,
+        role: &str,
+        tenant: TenantId,
+        granted_by: Uuid,
+    ) -> ApiResult<()> {
+        self.db
+            .exec(
+                "INSERT INTO role_bindings (id, subject_type, subject_id, role_key, scope_type, scope_id, created_by)
+             VALUES ($1, 'user', $2, $3, 'tenant', $4, $5)
+             ON CONFLICT DO NOTHING",
+                params![Uuid::now_v7(), subject, role, tenant, granted_by],
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn revoke_tenant_role(
+        &self,
+        subject: Uuid,
+        role: &str,
+        tenant: TenantId,
+    ) -> ApiResult<()> {
+        self.db
+            .exec(
+                "DELETE FROM role_bindings
+             WHERE subject_id = $1 AND role_key = $2
+               AND scope_type = 'tenant' AND scope_id = $3",
+                params![subject, role, tenant],
             )
             .await?;
         Ok(())
@@ -1205,6 +1261,38 @@ impl OperatorRepository for FakeOperatorRepository {
             .unwrap()
             .deployment_roles
             .retain(|(s, r)| !(*s == subject && r == role));
+        Ok(())
+    }
+
+    async fn grant_tenant_role(
+        &self,
+        subject: Uuid,
+        role: &str,
+        tenant: TenantId,
+        _granted_by: Uuid,
+    ) -> ApiResult<()> {
+        let mut st = self.inner.lock().unwrap();
+        // Keyed on the TENANT too, so the same role at two scopes is two rows —
+        // which is what the table does and what revoking one must not undo.
+        let key = (subject, format!("{role}@{}", tenant.0));
+        if !st.deployment_roles.contains(&key) {
+            st.deployment_roles.push(key);
+        }
+        Ok(())
+    }
+
+    async fn revoke_tenant_role(
+        &self,
+        subject: Uuid,
+        role: &str,
+        tenant: TenantId,
+    ) -> ApiResult<()> {
+        let scoped = format!("{role}@{}", tenant.0);
+        self.inner
+            .lock()
+            .unwrap()
+            .deployment_roles
+            .retain(|(s, r)| !(*s == subject && *r == scoped));
         Ok(())
     }
 }
