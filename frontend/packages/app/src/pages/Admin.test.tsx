@@ -9,7 +9,7 @@
 // mocked — jsdom only, no control plane (NG-2).
 import React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter } from "react-router-dom";
@@ -112,10 +112,13 @@ function renderPage(initial = "/admin") {
   );
 }
 
-/** Open a section through the nav, like a person would. The operator entries
- *  only exist once `me` resolves, so finding is awaited. */
+/** Open a section through the nav, like a person would. Scoped to the nav —
+ *  sortable table headers are buttons too, and "Nodes" names both a section
+ *  and a tenants column. The operator entries only exist once `me` resolves,
+ *  so finding is awaited. */
 const openSection = async (user: ReturnType<typeof userEvent.setup>, title: string) => {
-  await user.click(await screen.findByRole("button", { name: title }));
+  const nav = screen.getByRole("navigation", { name: "sections" });
+  await user.click(await within(nav).findByRole("button", { name: title }));
 };
 
 const tenantGets = () => mock.GET.mock.calls.filter((c) => c[0] === "/api/v1/operator/tenants").length;

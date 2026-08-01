@@ -167,13 +167,64 @@ pub struct TenantMemberItem {
     pub joined_at: DateTime<Utc>,
 }
 
-/// A page of tenant members + the keyset cursor to the next page. Same shape and
-/// mechanism as the operator lists (keyed on the member's UUID v7 `principal_id`),
-/// so a large tenant's members are searchable and paged (MAIN-45).
+/// One page of any paginated list — THE pagination wire contract (QOL sprint
+/// 2026-08). Every list endpoint returns this shape; the request half is
+/// [`PageQuery`]. `next_cursor` is an OPAQUE token: pass it back verbatim as
+/// `after`, never parse it — the opacity is what lets the server pick the
+/// mechanism (keyset vs offset) per request. Null means end of list.
+///
+/// The server half — cursor codec, validation, SQL skeleton — is
+/// `nook_db::paging`; the React half is `usePagedList` + `PagedPanel`.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-pub struct TenantMemberPage {
-    pub rows: Vec<TenantMemberItem>,
-    pub next_cursor: Option<Uuid>,
+pub struct Page<T> {
+    pub rows: Vec<T>,
+    /// Opaque continuation token — pass back verbatim as `after`; null = end.
+    pub next_cursor: Option<String>,
+}
+
+impl<T> From<nook_db::paging::DbPage<T>> for Page<T> {
+    fn from(p: nook_db::paging::DbPage<T>) -> Self {
+        Page {
+            rows: p.rows,
+            next_cursor: p.next_cursor,
+        }
+    }
+}
+
+/// The request half of the pagination contract: one query-string shape for
+/// every list. Which fields `q` searches and which keys `sort` accepts differ
+/// per endpoint and are documented on it; an unknown `sort`, a bad `dir` or a
+/// stale cursor is a 400.
+#[derive(Debug, Clone, Default, Deserialize, utoipa::IntoParams)]
+pub struct PageQuery {
+    /// Case-insensitive substring; the searched fields differ per list.
+    pub q: Option<String>,
+    /// Opaque cursor from the previous page's `next_cursor`.
+    pub after: Option<String>,
+    /// Page size (default 50, clamped 1..=200).
+    pub limit: Option<i64>,
+    /// Sort key from the endpoint's documented set. Absent = newest first.
+    pub sort: Option<String>,
+    /// `asc` | `desc`. Defaults ascending under `sort`, newest-first without.
+    pub dir: Option<String>,
+}
+
+impl PageQuery {
+    /// Validate against a list's sort allowlist (`key -> output column`).
+    /// The error is the caller's 400.
+    pub fn args(
+        &self,
+        sorts: &[(&str, &str)],
+    ) -> Result<nook_db::paging::PageArgs, nook_db::paging::PageError> {
+        nook_db::paging::PageArgs::parse(
+            self.q.as_deref(),
+            self.after.as_deref(),
+            self.limit,
+            self.sort.as_deref(),
+            self.dir.as_deref(),
+            sorts,
+        )
+    }
 }
 
 /// Change a member's role. `member` ↔ `admin` for any owner/admin; `owner`
@@ -1472,40 +1523,8 @@ pub struct OperatorAuditEntry {
     pub occurred_at: DateTime<Utc>,
 }
 
-/// A page of audit rows plus the keyset cursor to reach the next (older) page.
-///
-/// Mirrors [`EventsPage`]'s `{ items, next_cursor }` shape so the two feeds read
-/// the same way, but keys on the row's UUID v7 `id` rather than a timestamp:
-/// v7 ids are creation-ordered and unique, so `id < cursor` walks strictly
-/// older rows with no ties to break (and needs no new column). `next_cursor` is
-/// null at the end of the list.
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-pub struct OperatorAuditPage {
-    pub rows: Vec<OperatorAuditEntry>,
-    /// Pass as `after` to fetch the next (older) page; null at end of list.
-    pub next_cursor: Option<EventId>,
-}
-
-/// A page of operator tenants + the keyset cursor to the next page. Same shape
-/// and mechanism as [`OperatorAuditPage`] (keyed on the row's UUID v7 `id`),
-/// fanned out to the tenants/nodes/bindings lists (MAIN-44).
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-pub struct OperatorTenantPage {
-    pub rows: Vec<OperatorTenant>,
-    pub next_cursor: Option<TenantId>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-pub struct OperatorNodePage {
-    pub rows: Vec<OperatorNode>,
-    pub next_cursor: Option<NodeId>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-pub struct OperatorBindingPage {
-    pub rows: Vec<BindingRow>,
-    pub next_cursor: Option<Uuid>,
-}
+// The per-list `*Page` structs died in the QOL pagination sweep — every list
+// returns [`Page<T>`] now, so a new list cannot invent its own page shape.
 
 /// One policy-gated field with its current state and plain-language meaning.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]

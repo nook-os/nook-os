@@ -19,7 +19,7 @@
 // serves it, and every request 403s server-side regardless of what the UI
 // renders.
 import React from "react";
-import { useInfiniteQuery, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Ban,
   Eye,
@@ -39,14 +39,9 @@ import {
   type OperatorNode,
   type OperatorTenant,
 } from "@nookos/api";
-import {
-  DataList,
-  Panel,
-  SearchInput,
-  Select,
-  type DataColumn,
-} from "@nookos/ui";
+import { PagedPanel, Panel, Select, type DataColumn } from "@nookos/ui";
 import { askConfirm, askForm, askText, notify } from "../dialogs";
+import { usePagedList } from "../paging";
 import { SectionedPage, type PageSection } from "../SectionedPage";
 import { TenantSwitches } from "../TenantSwitches";
 import { ActivityPanel } from "./Activity";
@@ -59,13 +54,15 @@ const AUDIT_COLUMNS: DataColumn<OperatorAuditEntry>[] = [
     key: "when",
     header: "When",
     className: "faint small",
+    sortKey: "time",
     cell: (e) => new Date(e.occurred_at).toLocaleString(),
   },
-  { key: "what", header: "What", className: "mono", cell: (e) => e.kind },
+  { key: "what", header: "What", className: "mono", cell: (e) => e.kind, sortKey: "kind" },
   {
     key: "tenant",
     header: "Tenant",
     className: "mono faint",
+    sortKey: "tenant",
     cell: (e) => e.tenant_slug,
   },
   {
@@ -84,81 +81,38 @@ export function AdminPage() {
     queryFn: async () => (await api.GET("/api/v1/auth/me")).data ?? null,
   });
   const isOperator = !!me?.capability?.operator;
-  // Tenants, nodes and bindings each paginate by keyset cursor and search
-  // server-side (MAIN-44), through the same shared DataList as the audit log.
-  const [tenantSearch, setTenantSearch] = React.useState("");
-  const tenantsQuery = useInfiniteQuery({
-    queryKey: ["operator", "tenants", tenantSearch],
-    initialPageParam: undefined as string | undefined,
-    queryFn: async ({ pageParam }) =>
-      (
-        await api.GET("/api/v1/operator/tenants", {
-          params: { query: { q: tenantSearch || undefined, after: pageParam || undefined, limit: 50 } },
-        })
-      ).data ?? { rows: [], next_cursor: null },
-    getNextPageParam: (last) => last.next_cursor ?? undefined,
+  // The four lists all speak the pagination contract through one hook —
+  // search, sort and cursor walking come with it (MAIN-44, QOL sweep).
+  const tenants = usePagedList({
+    key: ["operator", "tenants"],
+    fetch: async (params) =>
+      (await api.GET("/api/v1/operator/tenants", { params: { query: params } })).data,
     enabled: isOperator,
   });
-  const tenants = tenantsQuery.data?.pages.flatMap((p) => p.rows) ?? [];
-
-  const [nodeSearch, setNodeSearch] = React.useState("");
-  const nodesQuery = useInfiniteQuery({
-    queryKey: ["operator", "nodes", nodeSearch],
-    initialPageParam: undefined as string | undefined,
-    queryFn: async ({ pageParam }) =>
-      (
-        await api.GET("/api/v1/operator/nodes", {
-          params: { query: { q: nodeSearch || undefined, after: pageParam || undefined, limit: 50 } },
-        })
-      ).data ?? { rows: [], next_cursor: null },
-    getNextPageParam: (last) => last.next_cursor ?? undefined,
+  const nodes = usePagedList({
+    key: ["operator", "nodes"],
+    fetch: async (params) =>
+      (await api.GET("/api/v1/operator/nodes", { params: { query: params } })).data,
     enabled: isOperator,
   });
-  const nodes = nodesQuery.data?.pages.flatMap((p) => p.rows) ?? [];
-
-  const [bindingSearch, setBindingSearch] = React.useState("");
-  const bindingsQuery = useInfiniteQuery({
-    queryKey: ["operator", "bindings", bindingSearch],
-    initialPageParam: undefined as string | undefined,
-    queryFn: async ({ pageParam }) =>
-      (
-        await api.GET("/api/v1/operator/bindings", {
-          params: { query: { q: bindingSearch || undefined, after: pageParam || undefined, limit: 50 } },
-        })
-      ).data ?? { rows: [], next_cursor: null },
-    getNextPageParam: (last) => last.next_cursor ?? undefined,
+  const bindings = usePagedList({
+    key: ["operator", "bindings"],
+    fetch: async (params) =>
+      (await api.GET("/api/v1/operator/bindings", { params: { query: params } })).data,
     enabled: isOperator,
   });
-  const bindings = bindingsQuery.data?.pages.flatMap((p) => p.rows) ?? [];
 
   const { data: orgs } = useQuery({
     queryKey: ["operator", "orgs"],
     queryFn: async () => (await api.GET("/api/v1/operator/orgs")).data ?? [],
     enabled: isOperator,
   });
-  // The audit log paginates by keyset cursor and searches server-side (MAIN-43),
-  // so it holds many pages of accumulated rows rather than a single fetch. A new
-  // search string is a new query key, which restarts from the newest page.
-  const [auditSearch, setAuditSearch] = React.useState("");
-  const auditQuery = useInfiniteQuery({
-    queryKey: ["operator", "audit", auditSearch],
-    initialPageParam: undefined as string | undefined,
-    queryFn: async ({ pageParam }) =>
-      (
-        await api.GET("/api/v1/operator/audit", {
-          params: {
-            query: {
-              q: auditSearch || undefined,
-              after: pageParam || undefined,
-              limit: 50,
-            },
-          },
-        })
-      ).data ?? { rows: [], next_cursor: null },
-    getNextPageParam: (last) => last.next_cursor ?? undefined,
+  const audit = usePagedList({
+    key: ["operator", "audit"],
+    fetch: async (params) =>
+      (await api.GET("/api/v1/operator/audit", { params: { query: params } })).data,
     enabled: isOperator,
   });
-  const auditRows = auditQuery.data?.pages.flatMap((p) => p.rows) ?? [];
   const orgId = me?.capability?.org_id ?? null;
   const { data: policy } = useQuery({
     queryKey: ["operator", "policy", orgId],
@@ -339,10 +293,10 @@ export function AdminPage() {
   // static AUDIT_COLUMNS — they cannot be module-level constants.
   const tenantColumns: DataColumn<OperatorTenant>[] = [
 
-    { key: "tenant", header: "Tenant", className: "mono bright", cell: (t) => t.slug },
-    { key: "members", header: "Members", cell: (t) => t.members },
-    { key: "nodes", header: "Nodes", cell: (t) => t.nodes },
-    { key: "sessions", header: "Active sessions", cell: (t) => t.active_sessions },
+    { key: "tenant", header: "Tenant", className: "mono bright", cell: (t) => t.slug, sortKey: "slug" },
+    { key: "members", header: "Members", cell: (t) => t.members, sortKey: "members" },
+    { key: "nodes", header: "Nodes", cell: (t) => t.nodes, sortKey: "nodes" },
+    { key: "sessions", header: "Active sessions", cell: (t) => t.active_sessions, sortKey: "sessions" },
     { key: "workspaces", header: "Workspaces", cell: (t) => t.workspaces },
     {
       key: "org",
@@ -377,19 +331,21 @@ export function AdminPage() {
   ];
 
   const nodeColumns: DataColumn<OperatorNode>[] = [
-    { key: "node", header: "Node", className: "bright", cell: (n) => n.name },
+    { key: "node", header: "Node", className: "bright", cell: (n) => n.name, sortKey: "name" },
     { key: "tenant", header: "Tenant", className: "mono faint", cell: (n) => n.tenant_slug },
-    { key: "platform", header: "Platform", className: "faint", cell: (n) => n.platform },
+    { key: "platform", header: "Platform", className: "faint", cell: (n) => n.platform, sortKey: "platform" },
     {
       key: "status",
       header: "Status",
+      sortKey: "status",
       cell: (n) => <span className={n.status === "online" ? "ok" : "faint"}>{n.status}</span>,
     },
-    { key: "sessions", header: "Sessions", cell: (n) => n.active_sessions },
+    { key: "sessions", header: "Sessions", cell: (n) => n.active_sessions, sortKey: "sessions" },
     {
       key: "seen",
       header: "Last seen",
       className: "faint small",
+      sortKey: "last_seen",
       cell: (n) => (n.last_seen_at ? new Date(n.last_seen_at).toLocaleString() : "—"),
     },
     {
@@ -409,9 +365,9 @@ export function AdminPage() {
   ];
 
   const bindingColumns: DataColumn<BindingRow>[] = [
-    { key: "who", header: "Who", className: "bright", cell: (b) => b.email },
-    { key: "role", header: "Role", className: "mono", cell: (b) => b.role_key },
-    { key: "scope", header: "Scope", className: "faint", cell: (b) => b.scope_type },
+    { key: "who", header: "Who", className: "bright", cell: (b) => b.email, sortKey: "email" },
+    { key: "role", header: "Role", className: "mono", cell: (b) => b.role_key, sortKey: "role" },
+    { key: "scope", header: "Scope", className: "faint", cell: (b) => b.scope_type, sortKey: "scope" },
     { key: "where", header: "Where", className: "mono faint", cell: (b) => b.scope_label ?? "—" },
     {
       key: "actions",
@@ -472,29 +428,15 @@ export function AdminPage() {
       group: "Fleet",
       keywords: ["team", "ca", "certificate", "org", "automation", "loops", "reconcile", "switches", "members"],
       render: () => (
-        <Panel
+        <PagedPanel
           title="Tenants"
-          actions={
-            <SearchInput
-              onSearch={setTenantSearch}
-              placeholder="Search slug or name…"
-              ariaLabel="Search tenants"
-            />
-          }
-        >
-          <DataList
-            columns={tenantColumns}
-            rows={tenants}
-            rowKey={(t) => t.id}
-            loading={tenantsQuery.isLoading}
-            filtered={tenantSearch.length > 0}
-            empty="No tenants."
-            noResults="No matches."
-            hasMore={tenantsQuery.hasNextPage}
-            onLoadMore={() => tenantsQuery.fetchNextPage()}
-            loadingMore={tenantsQuery.isFetchingNextPage}
-          />
-        </Panel>
+          list={tenants}
+          columns={tenantColumns}
+          rowKey={(t) => t.id}
+          searchPlaceholder="Search slug or name…"
+          searchLabel="Search tenants"
+          empty="No tenants."
+        />
       ),
     },
     {
@@ -503,29 +445,15 @@ export function AdminPage() {
       group: "Fleet",
       keywords: ["machine", "revoke", "certificate", "platform", "online", "remove", "last seen"],
       render: () => (
-        <Panel
+        <PagedPanel
           title="Nodes"
-          actions={
-            <SearchInput
-              onSearch={setNodeSearch}
-              placeholder="Search name, status, platform…"
-              ariaLabel="Search nodes"
-            />
-          }
-        >
-          <DataList
-            columns={nodeColumns}
-            rows={nodes}
-            rowKey={(n) => n.id}
-            loading={nodesQuery.isLoading}
-            filtered={nodeSearch.length > 0}
-            empty="No nodes."
-            noResults="No matches."
-            hasMore={nodesQuery.hasNextPage}
-            onLoadMore={() => nodesQuery.fetchNextPage()}
-            loadingMore={nodesQuery.isFetchingNextPage}
-          />
-        </Panel>
+          list={nodes}
+          columns={nodeColumns}
+          rowKey={(n) => n.id}
+          searchPlaceholder="Search name, status, platform…"
+          searchLabel="Search nodes"
+          empty="No nodes."
+        />
       ),
     },
     {
@@ -534,38 +462,20 @@ export function AdminPage() {
       group: "Access",
       keywords: ["binding", "grant", "revoke", "rbac", "permission", "operator", "admin", "appoint"],
       render: () => (
-        <Panel
+        <PagedPanel
           title="Roles"
+          list={bindings}
+          columns={bindingColumns}
+          rowKey={(b) => b.id}
+          searchPlaceholder="Search email, role, scope…"
+          searchLabel="Search roles"
+          empty="No role bindings."
           actions={
-            <span className="op-panel-actions">
-              <SearchInput
-                onSearch={setBindingSearch}
-                placeholder="Search email, role, scope…"
-                ariaLabel="Search roles"
-              />
-              <button className="btn small" onClick={grantRole}>
-                <UserPlus size={12} /> grant
-              </button>
-            </span>
+            <button className="btn small" onClick={grantRole}>
+              <UserPlus size={12} /> grant
+            </button>
           }
-        >
-          <p className="muted small op-note">
-            A binding grants at its scope and everything under it — `deployment`
-            covers every org and tenant. None of them reach session content.
-          </p>
-          <DataList
-            columns={bindingColumns}
-            rows={bindings}
-            rowKey={(b) => b.id}
-            loading={bindingsQuery.isLoading}
-            filtered={bindingSearch.length > 0}
-            empty="No role bindings."
-            noResults="No matches."
-            hasMore={bindingsQuery.hasNextPage}
-            onLoadMore={() => bindingsQuery.fetchNextPage()}
-            loadingMore={bindingsQuery.isFetchingNextPage}
-          />
-        </Panel>
+        />
       ),
     },
     {
@@ -658,29 +568,14 @@ export function AdminPage() {
       group: "Access",
       keywords: ["log", "history", "who looked", "trail", "record"],
       render: () => (
-        <Panel
+        <PagedPanel
           title="Audit · including who looked"
-          actions={
-            <SearchInput
-              onSearch={setAuditSearch}
-              placeholder="Search kind, tenant, actor…"
-              ariaLabel="Search the audit log"
-            />
-          }
-        >
-          <DataList
-            columns={AUDIT_COLUMNS}
-            rows={auditRows}
-            rowKey={(e) => e.id}
-            loading={auditQuery.isLoading}
-            filtered={auditSearch.length > 0}
-            empty="Nothing here yet."
-            noResults="No matches."
-            hasMore={auditQuery.hasNextPage}
-            onLoadMore={() => auditQuery.fetchNextPage()}
-            loadingMore={auditQuery.isFetchingNextPage}
-          />
-        </Panel>
+          list={audit}
+          columns={AUDIT_COLUMNS}
+          rowKey={(e) => e.id}
+          searchPlaceholder="Search kind, tenant, actor…"
+          searchLabel="Search the audit log"
+        />
       ),
     },
     ];

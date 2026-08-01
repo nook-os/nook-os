@@ -25,7 +25,6 @@
 use axum::extract::{Path, Query, State};
 use axum::Json;
 use nook_types::*;
-use serde::Deserialize;
 use uuid::Uuid;
 
 use crate::auth::perm::{Permission, Scope};
@@ -68,17 +67,6 @@ pub async fn orgs(
     Ok(Json(rows))
 }
 
-/// Query for a paginated + searchable operator list. The cursor is the last
-/// `id` seen; all three list ids are uuids, so one struct serves every list.
-#[derive(Deserialize, utoipa::IntoParams)]
-pub struct OperatorListQuery {
-    /// Case-insensitive substring; the searched fields differ per list.
-    pub q: Option<String>,
-    /// Keyset cursor: the last `id` already seen. Returns strictly older rows.
-    pub after: Option<Uuid>,
-    /// Page size (default 50, clamped 1..=200).
-    pub limit: Option<i64>,
-}
 
 /// Tenants, at minimum visibility.
 ///
@@ -91,23 +79,17 @@ pub struct OperatorListQuery {
 /// and then removed.
 #[utoipa::path(get, path = "/api/v1/operator/tenants",
     operation_id = "operator_list_tenants",
-    params(OperatorListQuery),
-    responses((status = 200, body = OperatorTenantPage), (status = 403)))]
+    params(PageQuery),
+    responses((status = 200, body = Page<OperatorTenant>), (status = 403)))]
 pub async fn tenants(
     State(state): State<AppState>,
     auth: AuthCtx,
-    Query(q): Query<OperatorListQuery>,
-) -> ApiResult<Json<OperatorTenantPage>> {
+    Query(q): Query<PageQuery>,
+) -> ApiResult<Json<Page<OperatorTenant>>> {
     auth.require(&state, Permission::TenantView, Scope::Deployment)
         .await?;
 
-    let mut page = operator_queries::operator_tenants_page(
-        &*state.operator,
-        q.q,
-        q.after.map(TenantId),
-        q.limit.unwrap_or(50),
-    )
-    .await?;
+    let mut page = operator_queries::operator_tenants_page(&*state.operator, &q).await?;
 
     // Policy ADDS. Absent unless an org has opted in, and absent by default.
     for row in &mut page.rows {
@@ -157,59 +139,35 @@ async fn enrich(state: &AppState, row: &mut OperatorTenant) -> ApiResult<()> {
 /// Nodes, always visible. Names, status, resources, owner, session count.
 #[utoipa::path(get, path = "/api/v1/operator/nodes",
     operation_id = "operator_list_nodes",
-    params(OperatorListQuery),
-    responses((status = 200, body = OperatorNodePage), (status = 403)))]
+    params(PageQuery),
+    responses((status = 200, body = Page<OperatorNode>), (status = 403)))]
 pub async fn nodes(
     State(state): State<AppState>,
     auth: AuthCtx,
-    Query(q): Query<OperatorListQuery>,
-) -> ApiResult<Json<OperatorNodePage>> {
+    Query(q): Query<PageQuery>,
+) -> ApiResult<Json<Page<OperatorNode>>> {
     auth.require(&state, Permission::NodeView, Scope::Deployment)
         .await?;
-    let page = operator_queries::operator_nodes_page(
-        &*state.operator,
-        q.q,
-        q.after.map(NodeId),
-        q.limit.unwrap_or(50),
-    )
-    .await?;
+    let page = operator_queries::operator_nodes_page(&*state.operator, &q).await?;
     audit(&state, &auth, "nodes", None).await;
     Ok(Json(page))
-}
-
-/// Query for the audit trail: an optional server-side search and a keyset
-/// cursor. Both absent returns the newest page.
-#[derive(Deserialize, utoipa::IntoParams)]
-pub struct AuditQuery {
-    /// Case-insensitive substring matched across kind, tenant slug, and actor.
-    pub q: Option<String>,
-    /// Keyset cursor: the last `id` already seen. Returns strictly older rows.
-    pub after: Option<EventId>,
-    /// Page size (default 50, clamped 1..=200).
-    pub limit: Option<i64>,
 }
 
 /// The audit trail, including operator reads themselves — paged and searchable.
 #[utoipa::path(get, path = "/api/v1/operator/audit",
     operation_id = "operator_audit",
-    params(AuditQuery),
-    responses((status = 200, body = OperatorAuditPage), (status = 403)))]
+    params(PageQuery),
+    responses((status = 200, body = Page<OperatorAuditEntry>), (status = 403)))]
 pub async fn audit_log(
     State(state): State<AppState>,
     auth: AuthCtx,
-    Query(q): Query<AuditQuery>,
-) -> ApiResult<Json<OperatorAuditPage>> {
+    Query(q): Query<PageQuery>,
+) -> ApiResult<Json<Page<OperatorAuditEntry>>> {
     auth.require(&state, Permission::AuditView, Scope::Deployment)
         .await?;
     // Kinds, actors and times — never payloads. The projection and the
     // prefix filter live in `operator_queries::operator_audit_page`, shared with its tests.
-    let page = operator_queries::operator_audit_page(
-        &*state.operator,
-        q.q,
-        q.after,
-        q.limit.unwrap_or(50),
-    )
-    .await?;
+    let page = operator_queries::operator_audit_page(&*state.operator, &q).await?;
     audit(&state, &auth, "audit", None).await;
     Ok(Json(page))
 }
@@ -560,22 +518,16 @@ pub async fn remove_node(
 /// binding you cannot see.
 #[utoipa::path(get, path = "/api/v1/operator/bindings",
     operation_id = "operator_list_bindings",
-    params(OperatorListQuery),
-    responses((status = 200, body = OperatorBindingPage), (status = 403)))]
+    params(PageQuery),
+    responses((status = 200, body = Page<BindingRow>), (status = 403)))]
 pub async fn bindings(
     State(state): State<AppState>,
     auth: AuthCtx,
-    Query(q): Query<OperatorListQuery>,
-) -> ApiResult<Json<OperatorBindingPage>> {
+    Query(q): Query<PageQuery>,
+) -> ApiResult<Json<Page<BindingRow>>> {
     auth.require(&state, Permission::RbacGrant, Scope::Deployment)
         .await?;
-    let page = operator_queries::operator_bindings_page(
-        &*state.operator,
-        q.q,
-        q.after,
-        q.limit.unwrap_or(50),
-    )
-    .await?;
+    let page = operator_queries::operator_bindings_page(&*state.operator, &q).await?;
     audit(&state, &auth, "bindings", None).await;
     Ok(Json(page))
 }

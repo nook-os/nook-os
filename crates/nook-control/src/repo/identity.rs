@@ -32,9 +32,10 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use nook_db::dialect::{ci_match, json, time_math, type_mapping};
+use nook_db::paging::{DbPage, ListSpec, PageArgs};
 use nook_db::{params, Db, DbPool};
 use nook_types::{
-    AuthSessionId, DevAccount, IdentityId, Tenant, TenantId, TenantMemberItem, TenantMemberPage,
+    AuthSessionId, DevAccount, IdentityId, Tenant, TenantId, TenantMemberItem,
     User, UserId, UserToken,
 };
 use serde_json::Value;
@@ -152,10 +153,8 @@ pub trait IdentityRepository: Send + Sync {
     async fn members_page(
         &self,
         tenant: TenantId,
-        q: Option<String>,
-        after: Option<Uuid>,
-        limit: i64,
-    ) -> ApiResult<TenantMemberPage>;
+        args: &PageArgs,
+    ) -> ApiResult<DbPage<TenantMemberItem>>;
 
     /// The person behind a user row — the cross-tenant identity that outlives
     /// any single membership.
@@ -588,42 +587,21 @@ impl IdentityRepository for DbIdentityRepository {
     async fn members_page(
         &self,
         tenant: TenantId,
-        q: Option<String>,
-        after: Option<Uuid>,
-        limit: i64,
-    ) -> ApiResult<TenantMemberPage> {
-        let limit = limit.clamp(1, 200);
-        let q = crate::services::core::search_filter(q);
-        let term = type_mapping(self.db.engine()).cast("$3", "text");
-        let rows: Vec<TenantMemberItem> = self
-            .db
-            .query_all(
-                &format!(
-                    "SELECT m.principal_id, u.email, u.display_name, m.role, m.created_at AS joined_at
-         FROM tenant_members m
-         JOIN users u ON u.id = m.principal_id
-         WHERE m.tenant_id = $1 AND m.principal_type = 'user'
-           AND ({term} IS NULL OR (
-                    {m_email}
-                 OR {m_name}
-                 OR {m_role}))
-           AND ({cursor} IS NULL OR m.principal_id < $4)
-         ORDER BY m.principal_id DESC
-         LIMIT $2",
-                    cursor = type_mapping(self.db.engine()).cast("$4", "uuid"),
-                    m_email = ci_match(self.db.engine()).ci_match("u.email", "'%' || $3 || '%'"),
-                    m_name = ci_match(self.db.engine()).ci_match("u.display_name", "'%' || $3 || '%'"),
-                    m_role = ci_match(self.db.engine()).ci_match("m.role", "'%' || $3 || '%'")
-                ),
-                params![tenant, limit, q, after],
-            )
-            .await?;
-        let next_cursor = if rows.len() as i64 == limit {
-            rows.last().map(|r| r.principal_id)
-        } else {
-            None
-        };
-        Ok(TenantMemberPage { rows, next_cursor })
+        args: &PageArgs,
+    ) -> ApiResult<DbPage<TenantMemberItem>> {
+        Ok(ListSpec {
+            select: "SELECT m.principal_id, u.email, u.display_name, m.role,
+                            m.created_at AS joined_at
+                     FROM tenant_members m
+                     JOIN users u ON u.id = m.principal_id
+                     WHERE m.tenant_id = $4 AND m.principal_type = 'user'",
+            id: "principal_id",
+            search: &["email", "display_name", "role"],
+        }
+        .fetch(&self.db, args, params![tenant], |r: &TenantMemberItem| {
+            r.principal_id
+        })
+        .await?)
     }
 
     async fn person_id_of(&self, user_id: UserId) -> ApiResult<Option<Uuid>> {
@@ -1811,14 +1789,11 @@ impl IdentityRepository for FakeIdentityRepository {
     async fn members_page(
         &self,
         tenant: TenantId,
-        q: Option<String>,
-        after: Option<Uuid>,
-        limit: i64,
-    ) -> ApiResult<TenantMemberPage> {
-        let limit = limit.clamp(1, 200);
+        args: &PageArgs,
+    ) -> ApiResult<DbPage<TenantMemberItem>> {
         let st = self.inner.lock().unwrap();
-        let q = q.map(|s| s.trim().to_lowercase()).filter(|s| !s.is_empty());
-        let mut rows: Vec<TenantMemberItem> = st
+        let q = args.q.as_ref().map(|s| s.to_lowercase());
+        let rows: Vec<TenantMemberItem> = st
             .members
             .iter()
             .filter(|(t, _, _)| *t == tenant)
@@ -1841,18 +1816,18 @@ impl IdentityRepository for FakeIdentityRepository {
                 }
             })
             .collect();
-        // Descending, matching the real query's `ORDER BY … DESC`.
-        rows.sort_by_key(|r| std::cmp::Reverse(r.principal_id));
-        if let Some(after) = after {
-            rows.retain(|r| r.principal_id < after);
-        }
-        rows.truncate(limit as usize);
-        let next_cursor = if rows.len() as i64 == limit {
-            rows.last().map(|r| r.principal_id)
-        } else {
-            None
-        };
-        Ok(TenantMemberPage { rows, next_cursor })
+        Ok(nook_db::paging::page_vec(
+            rows,
+            args,
+            |r| r.principal_id,
+            |col, a, b| match col {
+                "email" => a.email.cmp(&b.email),
+                "display_name" => a.display_name.cmp(&b.display_name),
+                "role" => a.role.cmp(&b.role),
+                "joined_at" => a.joined_at.cmp(&b.joined_at),
+                other => unreachable!("unlisted sort col {other}"),
+            },
+        ))
     }
 
     async fn person_id_of(&self, user_id: UserId) -> ApiResult<Option<Uuid>> {

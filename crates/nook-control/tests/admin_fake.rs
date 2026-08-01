@@ -18,6 +18,16 @@ use nook_control::repo::admin::{
 use nook_control::routes::managed::upsert_default;
 use nook_control::services::operator_queries::{operator_audit_page, operator_tenants_page};
 use nook_types::*;
+
+/// The old call shape as a shim: these tests reason in (q, after, limit).
+fn pq(q: Option<String>, after: Option<String>, limit: i64) -> PageQuery {
+    PageQuery {
+        q,
+        after,
+        limit: Some(limit),
+        ..Default::default()
+    }
+}
 use uuid::Uuid;
 
 fn tenant() -> TenantId {
@@ -290,7 +300,7 @@ async fn a_console_page_walks_its_cursor_without_a_gap_or_an_overlap() {
     let mut seen = Vec::new();
     let mut cursor = None;
     loop {
-        let page = operator_tenants_page(&repo, None, cursor, 2).await.unwrap();
+        let page = operator_tenants_page(&repo, &pq(None, cursor, 2)).await.unwrap();
         seen.extend(page.rows.iter().map(|r| r.id));
         match page.next_cursor {
             Some(c) => cursor = Some(c),
@@ -321,7 +331,7 @@ async fn a_short_page_carries_no_cursor() {
         task_titles: None,
     });
 
-    let page = operator_tenants_page(&repo, None, None, 50).await.unwrap();
+    let page = operator_tenants_page(&repo, &pq(None, None, 50)).await.unwrap();
     assert_eq!(page.rows.len(), 1);
     assert!(page.next_cursor.is_none());
 }
@@ -344,7 +354,7 @@ async fn a_blank_search_is_no_filter() {
     }
 
     for blank in [Some("   ".to_string()), Some(String::new()), None] {
-        let page = operator_audit_page(&repo, blank.clone(), None, 50)
+        let page = operator_audit_page(&repo, &pq(blank.clone(), None, 50))
             .await
             .unwrap();
         assert_eq!(
@@ -354,7 +364,7 @@ async fn a_blank_search_is_no_filter() {
         );
     }
 
-    let hit = operator_audit_page(&repo, Some("RBAC".into()), None, 50)
+    let hit = operator_audit_page(&repo, &pq(Some("RBAC".into()), None, 50))
         .await
         .unwrap();
     assert_eq!(hit.rows.len(), 1, "and a real term is case-insensitive");

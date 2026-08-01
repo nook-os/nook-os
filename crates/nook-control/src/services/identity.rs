@@ -16,7 +16,7 @@
 //! tenant, and `tenant_members` is what will let someone belong to a shared
 //! team tenant as well. Both are written here so the two never disagree.
 
-use nook_types::{Tenant, TenantId, TenantMemberPage, TenantMembership, User, UserId};
+use nook_types::{Page, PageQuery, Tenant, TenantId, TenantMemberItem, TenantMembership, User, UserId};
 use serde_json::Value;
 
 use crate::error::{ApiError, ApiResult};
@@ -971,17 +971,27 @@ mod db_tests {
 /// is identity data, and the repository chain needs it to live with the rest
 /// of the aggregate. Its tests travelled to `operator_queries`, where the
 /// shared keyset behaviour they exercise is covered as one piece.
-/// Tenant members, keyset-paginated + searched (email/name/role), mirroring
-/// `operator_audit_page` (MAIN-45 AC-2). Keyed on the member's UUID v7
-/// `principal_id`; searches only members of `tenant`.
+/// The tenant's sort allowlist — the members list's half of the pagination
+/// contract, beside the service that speaks it.
+pub const MEMBER_SORTS: &[(&str, &str)] = &[
+    ("email", "email"),
+    ("name", "display_name"),
+    ("role", "role"),
+    ("joined", "joined_at"),
+];
+
+/// Tenant members, paged + searched (email/name/role) + sorted per the
+/// pagination contract (MAIN-45 AC-2, reshaped by the QOL sweep). Keyed on the
+/// member's UUID v7 `principal_id`; reaches only members of `tenant`.
 pub async fn tenant_members_page(
     repo: &dyn IdentityRepository,
     tenant: TenantId,
-    q: Option<String>,
-    after: Option<uuid::Uuid>,
-    limit: i64,
-) -> ApiResult<TenantMemberPage> {
-    repo.members_page(tenant, q, after, limit).await
+    wire: &PageQuery,
+) -> ApiResult<Page<TenantMemberItem>> {
+    let args = wire
+        .args(MEMBER_SORTS)
+        .map_err(crate::services::operator_queries::bad_page)?;
+    Ok(repo.members_page(tenant, &args).await?.into())
 }
 
 /// The instance's first tenant — what an MCP token maps to until per-user MCP

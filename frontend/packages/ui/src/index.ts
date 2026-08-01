@@ -8,6 +8,7 @@ import "./global.css";
 
 export * from "./components";
 export * from "./DataList";
+export * from "./PagedPanel";
 export * from "./SearchInput";
 export * from "./debounce";
 export * from "./theme";

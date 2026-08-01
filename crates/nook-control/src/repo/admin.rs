@@ -35,20 +35,41 @@
 //! column this trait writes, and it is named for that.
 
 use async_trait::async_trait;
-use nook_db::dialect::{ci_match, type_mapping};
+use nook_db::dialect::type_mapping;
+use nook_db::paging::{page_vec, DbPage, ListSpec, PageArgs};
 use nook_db::{params, Db, DbPool};
 use nook_types::*;
 use uuid::Uuid;
 
 use crate::error::ApiResult;
 
-/// One page of a console list: `after` is the last id already seen, so rows
-/// come back strictly older. `limit` is clamped by the caller.
-#[derive(Debug, Clone, Copy)]
-pub struct Keyset {
-    pub after: Option<Uuid>,
-    pub limit: i64,
-}
+// The lists' sort allowlists (`public key -> output column of the list's
+// SELECT`). Declared beside the trait because they ARE part of each method's
+// contract: the service validates the wire's `sort` against them, the SQL and
+// the fake both order by the resolved column, and the route doc names the keys.
+pub const AUDIT_SORTS: &[(&str, &str)] =
+    &[("time", "id"), ("kind", "kind"), ("tenant", "tenant_slug")];
+pub const TENANT_SORTS: &[(&str, &str)] = &[
+    ("slug", "slug"),
+    ("members", "members"),
+    ("nodes", "nodes"),
+    ("sessions", "active_sessions"),
+    ("created", "id"),
+];
+pub const NODE_SORTS: &[(&str, &str)] = &[
+    ("name", "name"),
+    ("status", "status"),
+    ("platform", "platform"),
+    ("sessions", "active_sessions"),
+    ("last_seen", "last_seen_at"),
+    ("created", "id"),
+];
+pub const BINDING_SORTS: &[(&str, &str)] = &[
+    ("email", "email"),
+    ("role", "role_key"),
+    ("scope", "scope_type"),
+    ("created", "id"),
+];
 
 /// A managed row as it is stored, reduced to what a node needs to apply it.
 #[derive(Debug, Clone)]
@@ -116,31 +137,27 @@ pub trait OperatorRepository: Send + Sync {
 
     // ── the console's four lists ────────────────────────────────────────────
     //
-    // Each is keyset-paginated on a UUID v7 id walked `id DESC`, and each takes
-    // the same optional case-insensitive search. What differs is which columns
-    // the search reaches — named per method rather than passed in, so no caller
-    // can widen a surface's search into a column it must not expose.
+    // Each speaks the pagination contract (`nook_db::paging`): validated
+    // `PageArgs` in, `DbPage` (rows + opaque cursor) out. What differs is which
+    // columns the search and sort reach — declared per list in the `*_SORTS`
+    // consts above and each impl's `ListSpec`, rather than passed in, so no
+    // caller can widen a surface into a column it must not expose.
 
     /// The operator audit trail: operator, rbac, node and user events only.
     ///
     /// Kinds, actors and times — never payloads, which can carry a branch name
     /// or a task title this surface must not hand over.
-    async fn audit_page(
-        &self,
-        q: Option<String>,
-        page: Keyset,
-    ) -> ApiResult<Vec<OperatorAuditEntry>>;
+    async fn audit_page(&self, args: &PageArgs) -> ApiResult<DbPage<OperatorAuditEntry>>;
 
     /// Tenants at minimum visibility: that it exists, and its member, node,
     /// active-session and workspace counts. The policy-gated fields
     /// (`repositories`, `task_titles`) are NOT selected here — the caller adds
     /// them per opted-in org, so a missed filter cannot leak them.
-    async fn tenants_page(&self, q: Option<String>, page: Keyset)
-        -> ApiResult<Vec<OperatorTenant>>;
+    async fn tenants_page(&self, args: &PageArgs) -> ApiResult<DbPage<OperatorTenant>>;
 
-    async fn nodes_page(&self, q: Option<String>, page: Keyset) -> ApiResult<Vec<OperatorNode>>;
+    async fn nodes_page(&self, args: &PageArgs) -> ApiResult<DbPage<OperatorNode>>;
 
-    async fn bindings_page(&self, q: Option<String>, page: Keyset) -> ApiResult<Vec<BindingRow>>;
+    async fn bindings_page(&self, args: &PageArgs) -> ApiResult<DbPage<BindingRow>>;
 
     // ── role bindings ───────────────────────────────────────────────────────
 
@@ -186,11 +203,6 @@ impl DbOperatorRepository {
         Self { db }
     }
 }
-
-/// `%term%` for a `LIKE`/`ILIKE` bound at `$2`, the shape every console search
-/// uses. Kept as one expression so a surface cannot accidentally anchor its
-/// search differently from its siblings.
-const SEARCH_PATTERN: &str = "'%' || $2 || '%'";
 
 #[async_trait]
 impl OperatorRepository for DbOperatorRepository {
@@ -261,135 +273,73 @@ impl OperatorRepository for DbOperatorRepository {
         Ok(())
     }
 
-    async fn audit_page(
-        &self,
-        q: Option<String>,
-        page: Keyset,
-    ) -> ApiResult<Vec<OperatorAuditEntry>> {
-        let term = type_mapping(self.db.engine()).cast("$2", "text");
-        Ok(self
-            .db
-            .query_all(
-                &format!(
-                    "SELECT e.id, e.kind, e.actor_type, e.actor_id, e.tenant_id,
-                t.slug AS tenant_slug, e.occurred_at
-         FROM events e JOIN tenants t ON t.id = e.tenant_id
-         WHERE (e.kind LIKE 'operator.%' OR e.kind LIKE 'rbac.%'
-                OR e.kind LIKE 'node.%'  OR e.kind LIKE 'user.%')
-           AND ({term} IS NULL OR (
-                    {m_kind}
-                 OR {m_slug}
-                 OR {m_atype}
-                 OR {m_aid}))
-           AND ({cursor} IS NULL OR e.id < $3)
-         ORDER BY e.id DESC
-         LIMIT $1",
-                    cursor = type_mapping(self.db.engine()).cast("$3", "uuid"),
-                    m_kind = ci_match(self.db.engine()).ci_match("e.kind", SEARCH_PATTERN),
-                    m_slug = ci_match(self.db.engine()).ci_match("t.slug", SEARCH_PATTERN),
-                    m_atype = ci_match(self.db.engine()).ci_match("e.actor_type", SEARCH_PATTERN),
-                    m_aid = ci_match(self.db.engine()).ci_match(
-                        &type_mapping(self.db.engine()).cast("e.actor_id", "text"),
-                        SEARCH_PATTERN
-                    )
-                ),
-                params![page.limit, q, page.after],
-            )
-            .await?)
+    async fn audit_page(&self, args: &PageArgs) -> ApiResult<DbPage<OperatorAuditEntry>> {
+        // `actor_text` exists only to be searchable — the wrapper matches
+        // output columns, and the actor id is a uuid until cast.
+        let select = format!(
+            "SELECT e.id, e.kind, e.actor_type, e.actor_id, e.tenant_id,
+                    t.slug AS tenant_slug, e.occurred_at,
+                    {actor_text} AS actor_text
+             FROM events e JOIN tenants t ON t.id = e.tenant_id
+             WHERE e.kind LIKE 'operator.%' OR e.kind LIKE 'rbac.%'
+                OR e.kind LIKE 'node.%'  OR e.kind LIKE 'user.%'",
+            actor_text = type_mapping(self.db.engine()).cast("e.actor_id", "text")
+        );
+        Ok(ListSpec {
+            select: &select,
+            id: "id",
+            search: &["kind", "tenant_slug", "actor_type", "actor_text"],
+        }
+        .fetch(&self.db, args, params![], |r: &OperatorAuditEntry| r.id.0)
+        .await?)
     }
 
-    async fn tenants_page(
-        &self,
-        q: Option<String>,
-        page: Keyset,
-    ) -> ApiResult<Vec<OperatorTenant>> {
-        let term = type_mapping(self.db.engine()).cast("$2", "text");
-        Ok(self
-            .db
-            .query_all(
-                &format!(
-                    "SELECT t.id, t.slug, t.org_id, t.created_at,
+    async fn tenants_page(&self, args: &PageArgs) -> ApiResult<DbPage<OperatorTenant>> {
+        Ok(ListSpec {
+            select: "SELECT t.id, t.slug, t.org_id, t.created_at,
                 (SELECT count(*) FROM users u WHERE u.tenant_id = t.id)    AS members,
                 (SELECT count(*) FROM nodes n WHERE n.tenant_id = t.id)    AS nodes,
                 (SELECT count(*) FROM sessions s
                   WHERE s.tenant_id = t.id
                     AND s.status IN ('starting','running','detached'))     AS active_sessions,
-                (SELECT count(*) FROM workspaces w WHERE w.tenant_id = t.id) AS workspaces
-         FROM tenants t
-         WHERE ({term} IS NULL OR {m_slug} OR {m_name})
-           AND ({cursor} IS NULL OR t.id < $3)
-         ORDER BY t.id DESC
-         LIMIT $1",
-                    cursor = type_mapping(self.db.engine()).cast("$3", "uuid"),
-                    m_slug = ci_match(self.db.engine()).ci_match("t.slug", SEARCH_PATTERN),
-                    m_name = ci_match(self.db.engine()).ci_match("t.name", SEARCH_PATTERN)
-                ),
-                params![page.limit, q, page.after],
-            )
-            .await?)
+                (SELECT count(*) FROM workspaces w WHERE w.tenant_id = t.id) AS workspaces,
+                t.name AS name
+         FROM tenants t",
+            id: "id",
+            search: &["slug", "name"],
+        }
+        .fetch(&self.db, args, params![], |r: &OperatorTenant| r.id.0)
+        .await?)
     }
 
-    async fn nodes_page(&self, q: Option<String>, page: Keyset) -> ApiResult<Vec<OperatorNode>> {
-        let term = type_mapping(self.db.engine()).cast("$2", "text");
-        Ok(self
-            .db
-            .query_all(
-                &format!(
-                    "SELECT n.id, n.name, n.platform, n.status, n.last_seen_at, n.resources,
+    async fn nodes_page(&self, args: &PageArgs) -> ApiResult<DbPage<OperatorNode>> {
+        Ok(ListSpec {
+            select: "SELECT n.id, n.name, n.platform, n.status, n.last_seen_at, n.resources,
                 n.tenant_id, t.slug AS tenant_slug,
                 (SELECT count(*) FROM sessions s
                   WHERE s.node_id = n.id
                     AND s.status IN ('starting','running','detached')) AS active_sessions
-         FROM nodes n JOIN tenants t ON t.id = n.tenant_id
-         WHERE ({term} IS NULL OR (
-                    {m_name}
-                 OR {m_slug}
-                 OR {m_platform}
-                 OR {m_status}))
-           AND ({cursor} IS NULL OR n.id < $3)
-         ORDER BY n.id DESC
-         LIMIT $1",
-                    cursor = type_mapping(self.db.engine()).cast("$3", "uuid"),
-                    m_name = ci_match(self.db.engine()).ci_match("n.name", SEARCH_PATTERN),
-                    m_slug = ci_match(self.db.engine()).ci_match("t.slug", SEARCH_PATTERN),
-                    m_platform = ci_match(self.db.engine()).ci_match("n.platform", SEARCH_PATTERN),
-                    m_status = ci_match(self.db.engine()).ci_match("n.status", SEARCH_PATTERN)
-                ),
-                params![page.limit, q, page.after],
-            )
-            .await?)
+         FROM nodes n JOIN tenants t ON t.id = n.tenant_id",
+            id: "id",
+            search: &["name", "tenant_slug", "platform", "status"],
+        }
+        .fetch(&self.db, args, params![], |r: &OperatorNode| r.id.0)
+        .await?)
     }
 
-    async fn bindings_page(&self, q: Option<String>, page: Keyset) -> ApiResult<Vec<BindingRow>> {
-        let term = type_mapping(self.db.engine()).cast("$2", "text");
-        Ok(self
-            .db
-            .query_all(
-                &format!(
-                    "SELECT b.id, u.email, u.display_name, b.role_key, b.scope_type, b.scope_id,
+    async fn bindings_page(&self, args: &PageArgs) -> ApiResult<DbPage<BindingRow>> {
+        Ok(ListSpec {
+            select: "SELECT b.id, u.email, u.display_name, b.role_key, b.scope_type, b.scope_id,
                 COALESCE(o.slug, t.slug) AS scope_label, b.created_at
          FROM role_bindings b
          JOIN users u ON u.id = b.subject_id
          LEFT JOIN orgs o    ON b.scope_type = 'org'    AND o.id = b.scope_id
-         LEFT JOIN tenants t ON b.scope_type = 'tenant' AND t.id = b.scope_id
-         WHERE ({term} IS NULL OR (
-                    {m_email}
-                 OR {m_role}
-                 OR {m_scope}
-                 OR {m_label}))
-           AND ({cursor} IS NULL OR b.id < $3)
-         ORDER BY b.id DESC
-         LIMIT $1",
-                    cursor = type_mapping(self.db.engine()).cast("$3", "uuid"),
-                    m_email = ci_match(self.db.engine()).ci_match("u.email", SEARCH_PATTERN),
-                    m_role = ci_match(self.db.engine()).ci_match("b.role_key", SEARCH_PATTERN),
-                    m_scope = ci_match(self.db.engine()).ci_match("b.scope_type", SEARCH_PATTERN),
-                    m_label = ci_match(self.db.engine())
-                        .ci_match("COALESCE(o.slug, t.slug)", SEARCH_PATTERN)
-                ),
-                params![page.limit, q, page.after],
-            )
-            .await?)
+         LEFT JOIN tenants t ON b.scope_type = 'tenant' AND t.id = b.scope_id",
+            id: "id",
+            search: &["email", "role_key", "scope_type", "scope_label"],
+        }
+        .fetch(&self.db, args, params![], |r: &BindingRow| r.id)
+        .await?)
     }
 
     async fn grant_deployment_role(
@@ -1011,20 +961,6 @@ impl ThemeRepository for DbThemeRepository {
 
 use std::sync::Mutex;
 
-/// Newest-first on id, then the cursor and limit — the `ORDER BY id DESC`
-/// keyset the four console lists share, applied once so a fake cannot disagree
-/// with its siblings about what a page is.
-fn keyset_page<T, F>(mut rows: Vec<T>, page: Keyset, id_of: F) -> Vec<T>
-where
-    F: Fn(&T) -> Uuid,
-{
-    rows.sort_by_key(|r| std::cmp::Reverse(id_of(r)));
-    rows.into_iter()
-        .filter(|r| page.after.is_none_or(|after| id_of(r) < after))
-        .take(page.limit.max(0) as usize)
-        .collect()
-}
-
 /// Case-insensitive substring, the shape `SEARCH_PATTERN` produces.
 fn matches(haystack: &str, needle: &Option<String>) -> bool {
     needle
@@ -1181,62 +1117,78 @@ impl OperatorRepository for FakeOperatorRepository {
         Ok(())
     }
 
-    async fn audit_page(
-        &self,
-        q: Option<String>,
-        page: Keyset,
-    ) -> ApiResult<Vec<OperatorAuditEntry>> {
+    async fn audit_page(&self, args: &PageArgs) -> ApiResult<DbPage<OperatorAuditEntry>> {
         let st = self.inner.lock().unwrap();
         let rows: Vec<OperatorAuditEntry> = st
             .audit_rows
             .iter()
             .filter(|r| {
-                matches(&r.kind, &q)
-                    || matches(&r.tenant_slug, &q)
-                    || matches(r.actor_type.as_deref().unwrap_or(""), &q)
+                matches(&r.kind, &args.q)
+                    || matches(&r.tenant_slug, &args.q)
+                    || matches(r.actor_type.as_deref().unwrap_or(""), &args.q)
             })
             .cloned()
             .collect();
-        Ok(keyset_page(rows, page, |r| r.id.0))
+        Ok(page_vec(rows, args, |r| r.id.0, |col, a, b| match col {
+            "kind" => a.kind.cmp(&b.kind),
+            "tenant_slug" => a.tenant_slug.cmp(&b.tenant_slug),
+            other => unreachable!("unlisted sort col {other}"),
+        }))
     }
 
-    async fn tenants_page(
-        &self,
-        q: Option<String>,
-        page: Keyset,
-    ) -> ApiResult<Vec<OperatorTenant>> {
+    async fn tenants_page(&self, args: &PageArgs) -> ApiResult<DbPage<OperatorTenant>> {
         let st = self.inner.lock().unwrap();
         let rows: Vec<OperatorTenant> = st
             .tenant_rows
             .iter()
-            .filter(|r| matches(&r.slug, &q))
+            .filter(|r| matches(&r.slug, &args.q))
             .cloned()
             .collect();
-        Ok(keyset_page(rows, page, |r| r.id.0))
+        Ok(page_vec(rows, args, |r| r.id.0, |col, a, b| match col {
+            "slug" => a.slug.cmp(&b.slug),
+            "members" => a.members.cmp(&b.members),
+            "nodes" => a.nodes.cmp(&b.nodes),
+            "active_sessions" => a.active_sessions.cmp(&b.active_sessions),
+            other => unreachable!("unlisted sort col {other}"),
+        }))
     }
 
-    async fn nodes_page(&self, q: Option<String>, page: Keyset) -> ApiResult<Vec<OperatorNode>> {
+    async fn nodes_page(&self, args: &PageArgs) -> ApiResult<DbPage<OperatorNode>> {
         let st = self.inner.lock().unwrap();
         let rows: Vec<OperatorNode> = st
             .node_rows
             .iter()
             .filter(|r| {
-                matches(&r.name, &q) || matches(&r.tenant_slug, &q) || matches(&r.status, &q)
+                matches(&r.name, &args.q)
+                    || matches(&r.tenant_slug, &args.q)
+                    || matches(&r.status, &args.q)
             })
             .cloned()
             .collect();
-        Ok(keyset_page(rows, page, |r| r.id.0))
+        Ok(page_vec(rows, args, |r| r.id.0, |col, a, b| match col {
+            "name" => a.name.cmp(&b.name),
+            "status" => a.status.cmp(&b.status),
+            "platform" => a.platform.cmp(&b.platform),
+            "active_sessions" => a.active_sessions.cmp(&b.active_sessions),
+            "last_seen_at" => a.last_seen_at.cmp(&b.last_seen_at),
+            other => unreachable!("unlisted sort col {other}"),
+        }))
     }
 
-    async fn bindings_page(&self, q: Option<String>, page: Keyset) -> ApiResult<Vec<BindingRow>> {
+    async fn bindings_page(&self, args: &PageArgs) -> ApiResult<DbPage<BindingRow>> {
         let st = self.inner.lock().unwrap();
         let rows: Vec<BindingRow> = st
             .binding_rows
             .iter()
-            .filter(|r| matches(&r.email, &q) || matches(&r.role_key, &q))
+            .filter(|r| matches(&r.email, &args.q) || matches(&r.role_key, &args.q))
             .cloned()
             .collect();
-        Ok(keyset_page(rows, page, |r| r.id))
+        Ok(page_vec(rows, args, |r| r.id, |col, a, b| match col {
+            "email" => a.email.cmp(&b.email),
+            "role_key" => a.role_key.cmp(&b.role_key),
+            "scope_type" => a.scope_type.cmp(&b.scope_type),
+            other => unreachable!("unlisted sort col {other}"),
+        }))
     }
 
     async fn grant_deployment_role(
