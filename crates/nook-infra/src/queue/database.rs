@@ -18,8 +18,8 @@ use std::time::Duration;
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use nook_db::dialect::type_mapping;
-use nook_db::{params, AtomicClaim, Db, DbPool, Postgres, TypeMapping};
+use nook_db::dialect::{atomic_claim, type_mapping};
+use nook_db::{params, Db, DbPool};
 use uuid::Uuid;
 
 use super::{Nack, NewWork, Queue, QueueStats, WorkEnvelope};
@@ -131,8 +131,8 @@ impl Queue for DbQueue {
              ORDER BY enqueued_at \
              {lock} \
              LIMIT $2",
-            tf_cast = Postgres.cast("$1", "text[]"),
-            lock = Postgres.claim_lock_clause(),
+            tf_cast = type_mapping(self.db.engine()).cast("$1", "text[]"),
+            lock = atomic_claim(self.db.engine()).claim_lock_clause(),
         );
         let candidates: Vec<WorkRow> = tx
             .query_all(&claim_sql, params![type_filter, max as i64])

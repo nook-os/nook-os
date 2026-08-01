@@ -276,7 +276,8 @@ pub async fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nook_db::{params, Db, Postgres, TypeMapping};
+    use nook_db::dialect::type_mapping;
+    use nook_db::{params, Db};
     use nook_infra::queue::NewWork;
     use nook_testkit::TestBed;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -511,7 +512,7 @@ mod tests {
                 .query_scalar(
                     &format!(
                         "SELECT locked_until > {} FROM work_queue WHERE id = $1",
-                        Postgres.now()
+                        type_mapping(bed.db().engine()).now()
                     ),
                     params![id],
                 )

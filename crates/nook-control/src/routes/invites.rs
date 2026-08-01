@@ -675,7 +675,8 @@ mod db_tests {
     }
     use super::accept_core;
     use crate::seed::hash_token;
-    use nook_db::{params, Db, DbPool, Json, Postgres, TypeMapping};
+    use nook_db::dialect::{json, type_mapping};
+    use nook_db::{params, Db, DbPool};
     use nook_types::TenantId;
     use sqlx::postgres::PgPoolOptions;
     use uuid::Uuid;
@@ -716,8 +717,8 @@ mod db_tests {
             &format!(
                 "INSERT INTO invites (id,tenant_id,email,role,token_hash,status,expires_at)
              VALUES ($1,$2,$3,'member',$4,'pending', {now} + make_interval(days => {days}))",
-                now = Postgres.now(),
-                days = Postgres.cast("$5", "int")
+                now = type_mapping(db.engine()).now(),
+                days = type_mapping(db.engine()).cast("$5", "int")
             ),
             params![
                 Uuid::new_v4(),
@@ -738,8 +739,8 @@ mod db_tests {
         let sql = format!(
             "INSERT INTO identities (id,user_id,issuer,subject,email,raw_claims,email_verified_at)
              VALUES ($1,$2,'local',$3,$4,{}, {now})",
-            nook_db::Postgres.literal("{}"),
-            now = Postgres.now()
+            json(db.engine()).literal("{}"),
+            now = type_mapping(db.engine()).now()
         );
         db.exec(
             &sql,
