@@ -23,6 +23,22 @@
   --nook-terminal-cursor: #f5b301;
   --nook-font-mono: "JetBrains Mono Variable", "JetBrains Mono", "Cascadia Code", "Cascadia Mono", Consolas, "Segoe UI Symbol", Menlo, "DejaVu Sans Mono", "Noto Sans Mono", "IBM Plex Mono", ui-monospace, monospace;
   --nook-font-ui: "JetBrains Mono Variable", "JetBrains Mono", "Cascadia Code", "Cascadia Mono", Consolas, "IBM Plex Mono", ui-monospace, monospace;
+  /* ── Breakpoints (MAIN-187) ──────────────────────────────────────────
+     THREE widths, and no others. A media query anywhere in this codebase
+     uses one of these numbers or it is a bug: ad-hoc pixel values are how a
+     layout ends up reflowing at six different widths, none of them the one
+     anybody designed for.
+
+       compact  < 640px   phone held upright
+       medium   < 1024px  small laptop, split-screen, tablet landscape
+       full     >= 1024px the desktop console this app is designed as
+
+     CSS cannot read a custom property inside `@media`, so the numbers are
+     repeated in the queries themselves — these tokens exist so JS/TS and any
+     container query read the SAME scale rather than inventing a fourth. */
+  --nook-bp-compact: 640px;
+  --nook-bp-medium: 1024px;
+
   --nook-unit: 4px;
   --nook-panel-gap: 1px;
   --nook-radius: 8px;
@@ -3389,9 +3405,10 @@ textarea.env-area.blurred {
 /* The old single-column attribute grid is gone; the sidebar holds these now. */
 .task-attrs, .task-label-picker, .task-stats, .task-assignee-row { display: none; }
 
-@media (max-width: 900px) {
-  /* One column below this: the sidebar stacks under the work rather than
-     squeezing the prose it exists to describe. */
+@media (max-width: 1024px) {
+  /* One column below MEDIUM (MAIN-187 moved this off its ad-hoc 900px onto
+     the scale): the sidebar stacks under the work rather than squeezing the
+     prose it exists to describe. */
   .task-panes { grid-template-columns: minmax(0, 1fr); }
   .task-side { border-left: 0; border-top: 1px solid var(--nook-border); }
 }
@@ -5418,3 +5435,174 @@ a.toast-main:hover .toast-title { text-decoration: underline; }
 /* On a deck agent chip the key leads, so "what is waiting" is readable before
    the session name. */
 .m-agent-key { font-weight: 600; letter-spacing: 0.02em; }
+
+/* ═══ Responsive shell (MAIN-187) ══════════════════════════════════════════
+   The console reflows; it is never restyled. Same theme, same density, same
+   controls — the grid rearranges and nothing is amputated (NG-3).
+
+   WHY A BOTTOM BAR AND NOT A DRAWER, at compact: the left rail is already an
+   icon-only strip in a fixed order, so rotating it to the bottom keeps every
+   destination in the same sequence and the same shape — the muscle memory
+   survives. A drawer would hide the whole of navigation behind a tap and add
+   a piece of state to get wrong, and "everything is on screen" is most of
+   what makes this feel like a console rather than a web page. It also lands
+   the targets under a thumb, which a left rail on a phone never is. */
+
+/* ── medium: the top bar sheds what is merely nice to have ─────────────── */
+@media (max-width: 1024px) {
+  /* The brand is decoration; the workspace switcher and the actions are not.
+     Dropping it first buys room without costing a destination. */
+  .nook-topbar .nook-brand {
+    display: none;
+  }
+  /* "Coming soon" placeholders are the next thing to go: they are a promise,
+     not a control. */
+  .nook-topbar .nook-tab.soon {
+    display: none;
+  }
+}
+
+/* ── compact: the rail becomes a bottom bar ────────────────────────────── */
+@media (max-width: 640px) {
+  .nook-app {
+    /* One column. The rail leaves the side and becomes a row under the
+       status strip, where a thumb reaches it. */
+    grid-template-columns: 1fr;
+    grid-template-rows: auto 1fr auto auto;
+    grid-template-areas:
+      "topbar"
+      "main"
+      "status"
+      "rail";
+    /* `100vh` is a desktop assumption: mobile browsers count the collapsing
+       URL bar in it, so the last row sits under the chrome and the page grows
+       a scrollbar it should not have. `100dvh` is the visible viewport. */
+    height: 100dvh;
+    width: 100%;
+  }
+
+  .nook-rail {
+    flex-direction: row;
+    justify-content: space-between;
+    align-items: center;
+    gap: 0;
+    padding: 4px 6px;
+    border-right: 0;
+    border-top: 1px solid var(--nook-border);
+    /* More destinations than fit? Scroll the BAR, never the body (AC-3). */
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+  .nook-rail::-webkit-scrollbar {
+    display: none;
+  }
+  /* The rail's flexible spacer pushes Settings to the right on desktop; in a
+     row that would strand the last two icons off-screen. */
+  .nook-rail .spacer {
+    display: none;
+  }
+  .nook-rail-btn {
+    /* ≥40px, the tap-target floor (AC-3). Desktop keeps its 38px. */
+    width: 40px;
+    height: 40px;
+    flex: 0 0 auto;
+  }
+  /* The rail's active marker is a left edge on a vertical strip; on a
+     horizontal one it belongs under the icon. */
+  .nook-rail-btn.active::before {
+    left: 50%;
+    top: auto;
+    bottom: -4px;
+    transform: translateX(-50%);
+    width: 18px;
+    height: 2px;
+  }
+
+  /* The top bar keeps the actions and drops the context strip — those tabs
+     are reachable from the pages themselves, and a wrapping nav is how a
+     40px bar silently becomes 120px. */
+  .nook-topbar {
+    padding: 0 6px;
+    gap: 6px;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+  .nook-topbar::-webkit-scrollbar {
+    display: none;
+  }
+  .nook-topbar .nook-tabs {
+    display: none;
+  }
+  /* Labelled links become their icons; the icon is the whole control, and at
+     this width the words are what push the row off the screen. */
+  .nook-topbar-right .nook-tab {
+    font-size: 0;
+    gap: 0;
+    padding: 0 6px;
+  }
+  .nook-topbar-right .terminal-pill {
+    font-size: 0;
+    gap: 0;
+  }
+  .nook-topbar-right .terminal-pill span {
+    font-size: 11px;
+  }
+  /* Your own name is the least load-bearing text on the bar. */
+  .nook-topbar-right > .bright,
+  .nook-topbar-right > .faint {
+    display: none;
+  }
+  /* Tap targets in the shell (AC-3). */
+  .nook-topbar .btn,
+  .nook-topbar-right .nook-tab,
+  .nook-topbar-right .terminal-pill {
+    min-height: 40px;
+    display: inline-flex;
+    align-items: center;
+  }
+
+  /* The status strip condenses to what changes: liveness, and who you are
+     acting as. Counts and the version are a desktop luxury. */
+  .nook-statusbar {
+    gap: 10px;
+    padding: 0 8px;
+    /* One row that scrolls, never two that wrap: a wrapping strip silently
+       doubles the shell's height and eats the page it sits under. */
+    flex-wrap: nowrap;
+    white-space: nowrap;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+  .nook-statusbar > * {
+    flex: 0 0 auto;
+  }
+  .nook-statusbar::-webkit-scrollbar {
+    display: none;
+  }
+  .nook-statusbar .sep {
+    display: none;
+  }
+
+  /* Panels stack rather than split. Two columns of 180px is not two panels,
+     it is one unreadable one. This is deliberately broad — it catches the
+     pages whose own passes have not landed yet, so the shell never leaves
+     them clipped (AC-5). */
+  .panes,
+  .split,
+  .task-panes {
+    grid-template-columns: minmax(0, 1fr) !important;
+  }
+
+  /* The invariant (AC-3): the BODY never scrolls sideways. Anything too wide
+     scrolls inside its own pane, which the rules above set up. */
+  html,
+  body,
+  #root {
+    max-width: 100%;
+    overflow-x: hidden;
+  }
+  .nook-main {
+    min-width: 0;
+    overflow-x: hidden;
+  }
+}
