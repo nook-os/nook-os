@@ -502,3 +502,77 @@ async fn a_move_that_matches_nothing_reports_zero_rather_than_failing() {
         .unwrap();
     assert_eq!((moved.checkouts, moved.tasks), (0, 0));
 }
+
+// ── placement hosts, absorbed from services::schedule (MAIN-292) ────────────
+
+/// The rule placement depends on, now provable with no database: a node hosts a
+/// workspace only through a PRESENT CLONE. A worktree is not a host — worktrees
+/// branch from a clone, so a node with only a worktree cannot be the one a new
+/// worktree is cut on — and a tombstoned clone is not a host either, because the
+/// directory is gone.
+#[tokio::test]
+async fn only_a_present_clone_makes_a_node_a_placement_host() {
+    let repo = FakeWorkspaceRepository::new();
+    let t = tenant();
+    let (host, worktree_only, gone) = (NodeId::new(), NodeId::new(), NodeId::new());
+    let ws = repo
+        .create(t, "widgets", "widgets", None, None)
+        .await
+        .unwrap();
+
+    scanned(&repo, t, host, ws.id, "/srv/clone", "clone").await;
+    scanned(&repo, t, worktree_only, ws.id, "/srv/wt", "worktree").await;
+    scanned(&repo, t, gone, ws.id, "/srv/gone", "clone").await;
+    // The third node stops reporting its clone: tombstoned, so no longer a host.
+    repo.tombstone_checkouts_except(gone, &[]).await.unwrap();
+
+    let hosts = repo.clone_hosts(t, ws.id).await.unwrap();
+    assert_eq!(
+        hosts.iter().map(|(n, _)| *n).collect::<Vec<_>>(),
+        vec![host],
+        "only the present clone's node is a host"
+    );
+
+    // Another tenant's identically-shaped world is invisible.
+    assert!(repo.clone_hosts(tenant(), ws.id).await.unwrap().is_empty());
+}
+
+/// Whether a workspace has ANY secret is what decides if a new checkout is worth
+/// announcing at all, and the ephemeral names are what a session's end wipes.
+/// Both are per-workspace, and neither may leak across a tenant.
+#[tokio::test]
+async fn secret_presence_and_ephemeral_names_are_scoped_to_their_workspace() {
+    use nook_control::repo::workspaces::{
+        FakeWorkspaceSecretRepository, WorkspaceSecretRepository,
+    };
+
+    let secrets = FakeWorkspaceSecretRepository::new();
+    let t = tenant();
+    let (ws, other) = (WorkspaceId::new(), WorkspaceId::new());
+
+    assert!(!secrets.any(t, ws).await.unwrap(), "nothing stored yet");
+
+    secrets
+        .store(t, ws, ".env", vec![1], vec![2], vec![3], false)
+        .await
+        .unwrap();
+    secrets
+        .store(t, ws, ".env.local", vec![1], vec![2], vec![3], true)
+        .await
+        .unwrap();
+    secrets
+        .store(t, other, ".env.other", vec![1], vec![2], vec![3], true)
+        .await
+        .unwrap();
+
+    assert!(secrets.any(t, ws).await.unwrap());
+    assert!(
+        !secrets.any(TenantId::new(), ws).await.unwrap(),
+        "another tenant sees none of it"
+    );
+    assert_eq!(
+        secrets.ephemeral_names(ws).await.unwrap(),
+        vec![".env.local"],
+        "only the ephemeral one is wiped, and only this workspace's"
+    );
+}

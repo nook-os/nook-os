@@ -143,7 +143,8 @@ async fn clone_hosts_counts_only_present_clones() {
     // A tombstoned clone on `other` — NOT a host.
     checkout(&bed.pool, tenant, other, ws, "/srv/gone", "clone", true).await;
 
-    let hosts = clone_hosts(&bed.db(), tenant, ws).await.unwrap();
+    let repo = nook_control::repo::workspaces::DbWorkspaceRepository::new(bed.db());
+    let hosts = clone_hosts(&repo, tenant, ws).await.unwrap();
     assert_eq!(
         hosts.get(&node),
         Some(&clone),

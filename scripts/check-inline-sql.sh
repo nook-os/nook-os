@@ -149,6 +149,6 @@ fi
 
 if [ "$fail" = "0" ]; then
   n="$(printf '%s\n' "$allowed" | grep -c . || true)"
-  echo "✓ no inline SQL outside repo/ ($n file(s) still allow-listed, pending their card)"
+  echo "✓ no inline SQL outside repo/ ($n file(s) allow-listed as permanent exemptions)"
 fi
 exit "$fail"

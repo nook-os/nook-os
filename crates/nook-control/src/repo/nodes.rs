@@ -238,6 +238,16 @@ pub trait NodeRepository: Send + Sync {
     /// How many shared operator nodes are online — the second half.
     async fn shared_operator_online_count(&self, tenant: TenantId) -> ApiResult<i64>;
 
+    /// This person's nodes with their last reported resource sample — the
+    /// candidate set placement ranks (MAIN-292). The liveness filter is NOT here:
+    /// "online" for scheduling means a live socket in the in-memory registry, not
+    /// the `status` column, so the caller applies it.
+    async fn owned_with_resources(
+        &self,
+        tenant: TenantId,
+        person: Uuid,
+    ) -> ApiResult<Vec<(NodeId, serde_json::Value)>>;
+
     // ── the liveness lease and what the socket reports ──────────────────────
 
     /// Claim this node for this control-plane instance for `lease_seconds`.
@@ -745,6 +755,20 @@ impl NodeRepository for DbNodeRepository {
             .query_scalar::<i64>(
                 "SELECT count(*) FROM nodes
                  WHERE tenant_id = $1 AND owner_person_id = $2 AND status = 'online'",
+                params![tenant, person],
+            )
+            .await?)
+    }
+
+    async fn owned_with_resources(
+        &self,
+        tenant: TenantId,
+        person: Uuid,
+    ) -> ApiResult<Vec<(NodeId, serde_json::Value)>> {
+        Ok(self
+            .db
+            .query_all(
+                "SELECT id, resources FROM nodes WHERE tenant_id = $1 AND owner_person_id = $2",
                 params![tenant, person],
             )
             .await?)
@@ -1658,6 +1682,27 @@ impl NodeRepository for FakeNodeRepository {
                     && n.node.status == "online"
             })
             .count() as i64)
+    }
+
+    async fn owned_with_resources(
+        &self,
+        tenant: TenantId,
+        person: Uuid,
+    ) -> ApiResult<Vec<(NodeId, serde_json::Value)>> {
+        Ok(self
+            .inner
+            .lock()
+            .unwrap()
+            .nodes
+            .iter()
+            .filter(|n| n.node.tenant_id == tenant && n.node.owner_person_id == Some(person))
+            .map(|n| {
+                (
+                    n.node.id,
+                    serde_json::to_value(&n.node.resources).unwrap_or(serde_json::Value::Null),
+                )
+            })
+            .collect())
     }
 
     async fn shared_operator_online_count(&self, tenant: TenantId) -> ApiResult<i64> {

@@ -1,6 +1,5 @@
 use axum::extract::{Query, State};
 use axum::Json;
-use nook_db::{params, Db};
 use nook_types::*;
 use serde::Deserialize;
 
@@ -32,9 +31,13 @@ pub async fn node(
     let node_id = schedule::pick(&state, auth.tenant_id, Some(auth.user_id), q.workspace_id)
         .await?
         .node_id();
-    let node_name = state
-        .db
-        .query_scalar::<String>("SELECT name FROM nodes WHERE id = $1", params![node_id])
-        .await?;
+    // `pick` just read this node out of `nodes`, so the None arm is unreachable;
+    // it stays an internal error rather than a 404 so the status is the one the
+    // inline read gave when its row was missing.
+    let node_name = state.nodes.name_of(node_id).await?.ok_or_else(|| {
+        crate::error::ApiError::Internal(anyhow::anyhow!(
+            "placed node {node_id} vanished before it could be named"
+        ))
+    })?;
     Ok(Json(ScheduledNode { node_id, node_name }))
 }

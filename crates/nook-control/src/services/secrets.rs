@@ -3,7 +3,6 @@
 //! new machine brings its secrets along automatically.
 
 use base64::Engine;
-use nook_db::{params, Db};
 use nook_proto::ControlToNode;
 use nook_types::{NodeId, SessionId, TenantId, WorkspaceId};
 
@@ -27,16 +26,12 @@ pub async fn announce_new_checkout(
     node_id: NodeId,
     checkout_path: &str,
 ) {
-    let has_secrets: Option<(i64,)> = state
-        .db
-        .query_opt(
-            "SELECT count(*) FROM workspace_secrets WHERE tenant_id = $1 AND workspace_id = $2",
-            params![tenant, workspace],
-        )
+    if !state
+        .workspace_secrets
+        .any(tenant, workspace)
         .await
-        .ok()
-        .flatten();
-    if has_secrets.is_none_or(|(n,)| n == 0) {
+        .unwrap_or(false)
+    {
         return;
     }
     crate::events::record(
@@ -58,57 +53,50 @@ pub async fn announce_new_checkout(
 /// vault and comes back on the next sync. Other live sessions in the same
 /// checkout keep their files.
 pub async fn wipe_ephemeral_for_session(state: &AppState, tenant: TenantId, session_id: SessionId) {
-    let Ok(Some((workspace_id, node_id))) = state
-        .db
-        .query_opt::<(WorkspaceId, NodeId)>(
-            "SELECT workspace_id, node_id FROM sessions WHERE id = $1 AND tenant_id = $2",
-            params![session_id, tenant],
-        )
-        .await
-    else {
+    // An ad-hoc terminal has no workspace, so it has no secrets to wipe — the
+    // same outcome the old typed read gave by failing to decode a NULL.
+    let Ok(Some(session)) = state.sessions.get(tenant, session_id).await else {
+        return;
+    };
+    let (Some(workspace_id), node_id) = (session.workspace_id, session.node_id) else {
         return;
     };
 
     // Another live session still needs the files.
-    let still_live: Option<(i64,)> = state
-        .db
-        .query_opt(
-            "SELECT count(*) FROM sessions
-         WHERE workspace_id = $1 AND id <> $2
-           AND status IN ('starting', 'running', 'detached')",
-            params![workspace_id, session_id],
-        )
+    if state
+        .sessions
+        .live_siblings(workspace_id, session_id)
         .await
-        .ok()
-        .flatten();
-    if still_live.is_some_and(|(n,)| n > 0) {
+        .unwrap_or(0)
+        > 0
+    {
         return;
     }
 
-    let names: Vec<(String,)> = state
-        .db
-        .query_all(
-            "SELECT name FROM workspace_secrets WHERE workspace_id = $1 AND ephemeral",
-            params![workspace_id],
-        )
+    let names = state
+        .workspace_secrets
+        .ephemeral_names(workspace_id)
         .await
         .unwrap_or_default();
     if names.is_empty() {
         return;
     }
 
-    let paths: Vec<(String,)> = state
-        .db
-        .query_all(
-            "SELECT path FROM node_workspaces
-             WHERE workspace_id = $1 AND node_id = $2 AND missing_at IS NULL",
-            params![workspace_id, node_id],
-        )
+    // Present checkouts of this workspace ON THIS NODE — the tenant scoping the
+    // repo method adds is implied by the workspace, so the set is the same one
+    // the inline query returned.
+    let paths: Vec<String> = state
+        .workspaces
+        .present_checkouts(tenant, workspace_id)
         .await
-        .unwrap_or_default();
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|c| c.node_id == node_id)
+        .map(|c| c.path)
+        .collect();
 
-    for (path,) in &paths {
-        for (name,) in &names {
+    for path in &paths {
+        for name in &names {
             // An empty write truncates the file to nothing; the node keeps its
             // 0600 handling and we avoid a delete op that could remove more.
             state.registry.send_to_node(
@@ -133,22 +121,18 @@ pub async fn push_one(
     name: &str,
     content: &[u8],
 ) -> usize {
-    let locations: Vec<(NodeId, String)> = state
-        .db
-        .query_all(
-            "SELECT node_id, path FROM node_workspaces
-             WHERE tenant_id = $1 AND workspace_id = $2 AND missing_at IS NULL",
-            params![tenant, workspace],
-        )
+    let locations = state
+        .workspaces
+        .present_checkouts(tenant, workspace)
         .await
         .unwrap_or_default();
 
     let mut pushed = 0;
-    for (node_id, path) in locations {
+    for c in locations {
         if state.registry.send_to_node(
-            node_id,
+            c.node_id,
             ControlToNode::WriteWorkspaceFile {
-                checkout_path: path,
+                checkout_path: c.path,
                 name: name.to_string(),
                 content_b64: b64(content),
             },

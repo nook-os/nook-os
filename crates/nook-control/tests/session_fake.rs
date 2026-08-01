@@ -361,3 +361,39 @@ async fn an_unscoped_lookup_finds_a_session_the_tenant_scoped_one_would_not() {
     assert!(sessions.by_id_unscoped(s.id).await.unwrap().is_some());
     assert!(sessions.get(mine, s.id).await.unwrap().is_none());
 }
+
+// ── the ephemeral-secret wipe's guard, absorbed from services::secrets (MAIN-292)
+
+/// An ending session must not pull an ephemeral secret file out from under a
+/// sibling still running in the same workspace. `live_siblings` is that guard,
+/// so it counts only LIVE sessions, never itself, and never another workspace's.
+#[tokio::test]
+async fn live_siblings_counts_only_other_live_sessions_in_the_workspace() {
+    let repo = FakeSessionRepository::new();
+    let t = tenant();
+    let node = NodeId::new();
+    let (ws, other_ws) = (WorkspaceId::new(), WorkspaceId::new());
+
+    let ending = start(&repo, t, node, Some(ws), None, "ending").await;
+    assert_eq!(
+        repo.live_siblings(ws, ending.id).await.unwrap(),
+        0,
+        "a session is never its own sibling"
+    );
+
+    let live = start(&repo, t, node, Some(ws), None, "still working").await;
+    repo.mark_status_if_live(live.id, "detached").await.unwrap();
+    let dead = start(&repo, t, node, Some(ws), None, "finished").await;
+    repo.mark_status_if_live(dead.id, "exited").await.unwrap();
+    start(&repo, t, node, Some(other_ws), None, "elsewhere").await;
+
+    assert_eq!(
+        repo.live_siblings(ws, ending.id).await.unwrap(),
+        1,
+        "the detached sibling counts; the exited one and the other workspace's do not"
+    );
+
+    // Once the sibling ends too, the last one out may wipe.
+    repo.mark_ended(t, live.id).await.unwrap();
+    assert_eq!(repo.live_siblings(ws, ending.id).await.unwrap(), 0);
+}
