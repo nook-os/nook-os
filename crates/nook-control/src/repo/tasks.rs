@@ -1185,7 +1185,23 @@ impl TaskRepository for DbTaskRepository {
         // The destination is resolved as a scalar subquery over the card's own
         // board, and the matching EXISTS keeps a board with no `unstarted`
         // column out of the set entirely rather than writing a NULL column_id.
-        let rows: Vec<(
+        //
+        // SELECT-then-UPDATE, not `UPDATE … FROM … RETURNING` (MAIN-355). That
+        // spelling is Postgres-only twice over — the alias-without-AS and a
+        // RETURNING list naming the joined tables, neither of which SQLite has —
+        // and it is what kept `claim_lease` red on the SQLite leg, and main with
+        // it. Splitting it costs one round trip per lapsed card, which is a
+        // rounding error on a set that is empty almost every scan.
+        //
+        // EXACTLY-ONCE SURVIVES THE SPLIT because the UPDATE re-checks every
+        // predicate rather than trusting the SELECT. Two replicas can both
+        // choose the same card; only the one whose UPDATE reports a row treats
+        // it as reaped, and the other's matches nothing because
+        // `claim_expires_at` is already NULL. That also closes a window the
+        // single statement never had to think about: a card that left the
+        // `started` column, or whose session came back, between the two
+        // statements is no longer requeued on the strength of a stale read.
+        let candidates: Vec<(
             TaskId,
             TenantId,
             SessionId,
@@ -1195,26 +1211,17 @@ impl TaskRepository for DbTaskRepository {
             .db
             .query_all(
                 &format!(
-                    "UPDATE tasks t
-                    SET column_id = (SELECT tgt.id FROM board_columns tgt
-                                      WHERE tgt.board_id = t.board_id AND tgt.type = 'unstarted'
-                                      ORDER BY tgt.position LIMIT 1),
-                        assigned_node_id = NULL,
-                        session_id = NULL,
-                        claim_expires_at = NULL,
-                        updated_at = {now}
-                   FROM sessions s
-                   JOIN nodes n ON n.id = s.node_id
-                  WHERE t.claim_expires_at IS NOT NULL
-                    AND t.session_id = s.id
-                    AND EXISTS (SELECT 1 FROM board_columns cur
-                                 WHERE cur.id = t.column_id AND cur.type = 'started')
-                    AND EXISTS (SELECT 1 FROM board_columns tgt
-                                 WHERE tgt.board_id = t.board_id AND tgt.type = 'unstarted')
-                    AND (s.status IN ('exited', 'error')
-                         OR (n.last_seen_at IS NOT NULL AND n.last_seen_at < {cutoff}))
-                RETURNING t.id, t.tenant_id, s.id, s.status, n.last_seen_at",
-                    now = type_mapping(self.db.engine()).now(),
+                    "SELECT t.id, t.tenant_id, s.id, s.status, n.last_seen_at
+                       FROM tasks t
+                       JOIN sessions s ON s.id = t.session_id
+                       JOIN nodes n ON n.id = s.node_id
+                      WHERE t.claim_expires_at IS NOT NULL
+                        AND EXISTS (SELECT 1 FROM board_columns cur
+                                     WHERE cur.id = t.column_id AND cur.type = 'started')
+                        AND EXISTS (SELECT 1 FROM board_columns tgt
+                                     WHERE tgt.board_id = t.board_id AND tgt.type = 'unstarted')
+                        AND (s.status IN ('exited', 'error')
+                             OR (n.last_seen_at IS NOT NULL AND n.last_seen_at < {cutoff}))",
                     cutoff = time_math(self.db.engine()).now_minus_scaled(
                         &type_mapping(self.db.engine()).cast("$1", "bigint"),
                         "1 second"
@@ -1223,18 +1230,56 @@ impl TaskRepository for DbTaskRepository {
                 params![session_grace_secs],
             )
             .await?;
-        Ok(rows
-            .into_iter()
-            .map(
-                |(task, tenant, session, session_status, node_last_seen_at)| LapsedClaim {
+
+        let mut reaped = Vec::new();
+        for (task, tenant, session, session_status, node_last_seen_at) in candidates {
+            let changed = self
+                .db
+                .exec(
+                    &format!(
+                        "UPDATE tasks
+                            SET column_id = (SELECT tgt.id FROM board_columns tgt
+                                              WHERE tgt.board_id = tasks.board_id
+                                                AND tgt.type = 'unstarted'
+                                              ORDER BY tgt.position LIMIT 1),
+                                assigned_node_id = NULL,
+                                session_id = NULL,
+                                claim_expires_at = NULL,
+                                updated_at = {now}
+                          WHERE id = $1
+                            AND claim_expires_at IS NOT NULL
+                            AND EXISTS (SELECT 1 FROM board_columns cur
+                                         WHERE cur.id = tasks.column_id
+                                           AND cur.type = 'started')
+                            AND EXISTS (SELECT 1 FROM board_columns tgt
+                                         WHERE tgt.board_id = tasks.board_id
+                                           AND tgt.type = 'unstarted')
+                            AND EXISTS (SELECT 1 FROM sessions s
+                                          JOIN nodes n ON n.id = s.node_id
+                                         WHERE s.id = tasks.session_id
+                                           AND (s.status IN ('exited', 'error')
+                                                OR (n.last_seen_at IS NOT NULL
+                                                    AND n.last_seen_at < {cutoff})))",
+                        now = type_mapping(self.db.engine()).now(),
+                        cutoff = time_math(self.db.engine()).now_minus_scaled(
+                            &type_mapping(self.db.engine()).cast("$2", "bigint"),
+                            "1 second"
+                        )
+                    ),
+                    params![task, session_grace_secs],
+                )
+                .await?;
+            if changed > 0 {
+                reaped.push(LapsedClaim {
                     task,
                     tenant,
                     session,
                     session_status,
                     node_last_seen_at,
-                },
-            )
-            .collect())
+                });
+            }
+        }
+        Ok(reaped)
     }
 
     async fn capped_claims(&self) -> ApiResult<Vec<CappedClaim>> {

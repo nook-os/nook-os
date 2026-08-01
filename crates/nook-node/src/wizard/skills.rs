@@ -63,13 +63,24 @@ fn home() -> Result<PathBuf> {
 /// not read is litter, and creating `~/.something/skills` for a tool that is
 /// not installed is worse — it looks like configuration someone chose.
 fn detect() -> Result<Vec<Target>> {
-    Ok(detect_in(&home()?))
+    Ok(detect_in(
+        &home()?,
+        std::env::var_os("CLAUDE_CONFIG_DIR")
+            .map(PathBuf::from)
+            .as_deref(),
+    ))
 }
 
-/// The detection, with home supplied rather than read from the environment, so
-/// it is testable without mutating a process-global `HOME` that parallel tests
-/// share.
-fn detect_in(h: &Path) -> Vec<Target> {
+/// The detection, with home AND the relocated Claude config dir supplied rather
+/// than read from the environment, so it is testable without mutating
+/// process-globals that parallel tests share.
+///
+/// `claude_cfg` was read from `CLAUDE_CONFIG_DIR` here until MAIN-355. Half a
+/// parameter is no parameter: two tests exercising the relocated and the
+/// default case had to `set_var`/`remove_var` around each other, and under the
+/// parallel runner whichever lost the race read the other's value. It is the
+/// same reason `home` is a parameter, applied to the second global.
+fn detect_in(h: &Path, claude_cfg: Option<&Path>) -> Vec<Target> {
     let mut found = Vec::new();
 
     // Hermes keeps a global set AND a private copy per profile — profiles hold
@@ -101,7 +112,6 @@ fn detect_in(h: &Path) -> Vec<Target> {
     // fleet, and keeping the default means a machine that later unsets the
     // variable does not silently lose its skills. Writing a second copy costs
     // one small file.
-    let claude_cfg = std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from);
     if h.join(".claude").is_dir() || claude_cfg.is_some() {
         let mut roots = Vec::new();
         if let Some(dir) = claude_cfg {
@@ -383,7 +393,7 @@ mod tests {
             std::fs::create_dir_all(h.join(d)).unwrap();
         }
 
-        let found = detect_in(&h);
+        let found = detect_in(&h, None);
         let names: Vec<&str> = found.iter().map(|t| t.name).collect();
         assert!(names.contains(&"Codex"), "codex not detected: {names:?}");
         assert!(names.contains(&"Claude Code"), "{names:?}");
@@ -395,7 +405,7 @@ mod tests {
         // Absent codex → not detected (no litter for a tool that isn't here).
         let bare = h.join("bare");
         std::fs::create_dir_all(bare.join(".claude")).unwrap();
-        assert!(!detect_in(&bare).iter().any(|t| t.name == "Codex"));
+        assert!(!detect_in(&bare, None).iter().any(|t| t.name == "Codex"));
 
         let _ = std::fs::remove_dir_all(&h);
     }
@@ -471,9 +481,7 @@ mod tests {
         std::fs::create_dir_all(tmp.join(".claude")).unwrap();
         let relocated = tmp.join("elsewhere");
 
-        std::env::set_var("CLAUDE_CONFIG_DIR", &relocated);
-        let targets = detect_in(&tmp);
-        std::env::remove_var("CLAUDE_CONFIG_DIR");
+        let targets = detect_in(&tmp, Some(&relocated));
 
         let claude = targets
             .iter()
@@ -500,9 +508,7 @@ mod tests {
         std::fs::create_dir_all(&tmp).unwrap();
         let relocated = tmp.join("nook-claude");
 
-        std::env::set_var("CLAUDE_CONFIG_DIR", &relocated);
-        let targets = detect_in(&tmp);
-        std::env::remove_var("CLAUDE_CONFIG_DIR");
+        let targets = detect_in(&tmp, Some(&relocated));
 
         assert!(
             targets.iter().any(|t| t.name == "Claude Code"),
