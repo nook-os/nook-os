@@ -2222,6 +2222,10 @@ textarea.env-paste {
 
 /* Pinned tabs read as anchored: accent pin, no wasted width. */
 .session-tab-pin { flex: none; color: var(--nook-accent); }
+/* The managed badge (MAIN-324 AC-3). Dimmer than the pin: pin is something you
+   chose, managed is something the fleet is telling you, and the close control
+   beside it is what the distinction is actually for. */
+.session-tab-managed { flex: none; display: inline-flex; color: var(--nook-primary); opacity: 0.75; }
 .session-tab.pinned .session-tab-close { opacity: 0.45; }
 
 /* ── Terminals within a session (tmux windows) ───────────────────────────── */

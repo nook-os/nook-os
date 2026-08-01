@@ -3,16 +3,19 @@
 //
 // MAIN-322: the strip is a VIEW of the live session list, not a per-browser
 // open-set. Every machine signed into the same account shows the same tabs,
-// because the tabs are the sessions. There is deliberately no close control
-// here: closing used to mean "drop this from my local list", and with no local
-// list left, closing can only mean ending the session — which is destructive
-// and differs for managed vs ad-hoc sessions, so MAIN-324 owns it. Until then a
-// session is ended from the session view's kill control or the sessions list,
-// and its tab disappears on its own because the tab was only ever the session.
+// because the tabs are the sessions.
+//
+// MAIN-324 adds the close control that absence was waiting for. With no local
+// list to drop from, closing can only end the session — and that means two
+// different things: an ad-hoc terminal is killed, a MANAGED one is scaled down,
+// because killing it would only pause it until the next reconcile pass. The
+// decision itself lives in `tabClose.ts` as a pure function, so the semantics
+// are tested without a browser.
 import React, { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
 import {
+  Bot,
   ChevronDown,
   ChevronRight,
   CircleDot,
@@ -21,6 +24,7 @@ import {
   Plus,
   Server,
   SquareTerminal,
+  X,
 } from "lucide-react";
 import { api } from "@nookos/api";
 import { useWorkspaceContext } from "./context";
@@ -30,7 +34,8 @@ import { useNewWork } from "./newwork";
 import { useSessionTabPrefs } from "./sessionTabsStore";
 import { groupTabs, visibleTabs } from "./tabGroups";
 import { useTabHotkeys } from "./tabHotkeys";
-import { askText, notify } from "./dialogs";
+import { askConfirm, askText, notify } from "./dialogs";
+import { closePlan, scaledDown } from "./tabClose";
 import { ContextMenuRegion, type ContextMenuItem } from "./contextMenu";
 
 export function SessionTabs({ activeId }: { activeId?: string }) {
@@ -97,6 +102,98 @@ export function SessionTabs({ activeId }: { activeId?: string }) {
     queryClient.invalidateQueries();
   };
 
+  /** Close a tab — which ends its session, one way or the other (MAIN-324).
+   *
+   *  Both branches confirm first (AC-4). The ad-hoc branch also offers a reboot
+   *  afterwards, because "I meant to close the other one" is the mistake this
+   *  control invites and a confirm alone cannot undo a killed process. */
+  const closeTab = async (t: (typeof tabs)[number]) => {
+    const plan = closePlan(t);
+
+    if (plan.kind === "explain") {
+      await notify(plan.title, plan.description);
+      return;
+    }
+
+    if (plan.kind === "kill") {
+      const ok = await askConfirm({
+        title: plan.title,
+        description: plan.description,
+        confirmLabel: plan.confirmLabel,
+        danger: true,
+      });
+      if (!ok) return;
+      const { error } = await api.POST("/api/v1/sessions/{id}/kill", {
+        params: { path: { id: t.id } },
+      });
+      if (error) {
+        await notify("Could not close it", "The control plane refused the kill.");
+        return;
+      }
+      queryClient.invalidateQueries();
+      // The undo half of AC-4. A restart returns the session to the same
+      // checkout, and keeps the ports it was leased (MAIN-301), so this is the
+      // same tab coming back rather than a new one.
+      const again = await askConfirm({
+        title: `Closed ${t.name}`,
+        description:
+          "The session has ended. If that was not what you meant, it can be " +
+          "started again in the same checkout.",
+        confirmLabel: "reboot it",
+      });
+      if (again) {
+        await api.POST("/api/v1/sessions/{id}/restart", {
+          params: { path: { id: t.id } },
+        });
+        queryClient.invalidateQueries();
+      }
+      return;
+    }
+
+    // Managed: edit the declaration, never kill. Read the CURRENT spec and the
+    // reconciler's own count first — scaling down by one means one fewer than
+    // what is actually asked for, and guessing from the tab strip would fight
+    // whatever else changed it.
+    const [spec, status] = await Promise.all([
+      api.GET("/api/v1/workspaces/{id}/session-spec", {
+        params: { path: { id: plan.workspaceId } },
+      }),
+      api.GET("/api/v1/workspaces/{id}/reconcile-status", {
+        params: { path: { id: plan.workspaceId } },
+      }),
+    ]);
+    const current = spec.data ?? undefined;
+    const next = scaledDown(current?.replicas, status.data?.running ?? 0);
+    if (!current || !next) {
+      await notify(
+        "Nothing to scale down",
+        "This workspace has no session declaration to lower — so this session is " +
+          "not being kept alive by one, and closing it here would not stick.",
+      );
+      return;
+    }
+    const ok = await askConfirm({
+      title: plan.title,
+      description: `${plan.description} Replicas will go to ${next.count}.`,
+      confirmLabel: plan.confirmLabel,
+    });
+    if (!ok) return;
+    const { error } = await api.PUT("/api/v1/workspaces/{id}/session-spec", {
+      params: { path: { id: plan.workspaceId } },
+      body: { spec: { ...current, replicas: next } },
+    });
+    if (error) {
+      await notify("Could not scale down", "The control plane rejected the change.");
+      return;
+    }
+    queryClient.invalidateQueries();
+    await notify(
+      "Scaled down",
+      "The declaration now asks for one fewer session. The reconciler stops one " +
+        "on its next pass — the tab goes when it does, not before.",
+    );
+  };
+
   // The tab's right-click menu, as items for the shared primitive (MAIN-168).
   const tabMenu = (t: (typeof tabs)[number]): ContextMenuItem[] => [
     { label: t.pinned ? "Unpin" : "Pin", onSelect: () => store.togglePin(t.id) },
@@ -105,6 +202,14 @@ export function SessionTabs({ activeId }: { activeId?: string }) {
     {
       label: "Copy Session ID",
       onSelect: () => void navigator.clipboard?.writeText(t.id).catch(() => {}),
+    },
+    { separator: true },
+    // Named for what it DOES, not "Close" — a menu item that says the same
+    // word for "kill this terminal" and "ask the fleet for one fewer session"
+    // is the ambiguity AC-3 exists to remove.
+    {
+      label: t.managed ? "Scale Down Workspace…" : "Close Session…",
+      onSelect: () => void closeTab(t),
     },
   ];
 
@@ -216,7 +321,39 @@ export function SessionTabs({ activeId }: { activeId?: string }) {
                 </span>
               )}
               <span className="session-tab-name">{t.name}</span>
+              {/* AC-3: managed vs ad-hoc, on the tab, so the close control
+                  beside it is unambiguous BEFORE it is clicked. Only the
+                  managed case is badged — ad-hoc is every other tab, and a
+                  badge on all of them would say nothing. */}
+              {t.managed && (
+                <span
+                  className="session-tab-managed"
+                  aria-label="managed session"
+                  title="managed — the reconciler keeps this running for the workspace's declaration"
+                >
+                  <Bot size={10} />
+                </span>
+              )}
               {t.pinned && <Pin size={10} className="session-tab-pin" />}
+              {/* Stops the click reaching the tab, which would navigate to the
+                  session we are about to end. */}
+              <button
+                className="session-tab-close"
+                aria-label={
+                  t.managed ? `scale down ${t.name}` : `close ${t.name}`
+                }
+                title={
+                  t.managed
+                    ? "scale down this workspace (killing a managed session only pauses it)"
+                    : "close and end this session"
+                }
+                onClick={(e) => {
+                  e.stopPropagation();
+                  void closeTab(t);
+                }}
+              >
+                <X size={10} />
+              </button>
             </div>
             </ContextMenuRegion>
           );

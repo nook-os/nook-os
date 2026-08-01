@@ -36,6 +36,12 @@ export interface SessionTab {
   nodeName?: string;
   /** Pinned tabs sort first and are a view-only pref (MAIN-322). */
   pinned?: boolean;
+  /** Reconciler-owned, from `Session.managed` (MAIN-318). Decides what closing
+   *  the tab MEANS (MAIN-324): killing a managed session does not close it, the
+   *  next reconcile pass starts another. Never inferred here — a hand-started
+   *  terminal in a managed workspace, on an eligible node, with the spec's
+   *  runtime, is indistinguishable from a replica by inspection. */
+  managed?: boolean;
 }
 
 /** The fields of a live session the strip needs. A subset of the API's
@@ -46,6 +52,11 @@ export interface LiveSession {
   runtime: string;
   workspace_id?: string | null;
   node_id: string;
+  /** Whether the reconciler owns this session (MAIN-318). Optional so the
+   *  derivation can be tested with a bare fixture; absent reads as ad-hoc,
+   *  which is the safe default — it makes closing ask before killing rather
+   *  than silently editing a workspace declaration. */
+  managed?: boolean;
 }
 
 /** The only client-side state left: how the strip is ORDERED, never what it
@@ -118,6 +129,7 @@ export function deriveTabs(
         workspaceName: s.workspace_id ? workspaceNames[s.workspace_id] : undefined,
         nodeName: nodeNames[s.node_id],
         pinned: pinned.has(s.id),
+        managed: s.managed ?? false,
       } satisfies SessionTab,
       // A session the user has never dragged sorts after every one they have,
       // in the order the server listed it — so a new session appends rather
