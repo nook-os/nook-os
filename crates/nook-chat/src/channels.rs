@@ -345,9 +345,10 @@ mod tests {
     // exactly as the service configures its pool. DB-backed; no-ops without
     // NOOK_REQUIRE_DB=1, matching the suite convention.
 
-    /// A database and a wired state on whichever engine `DATABASE_URL` names —
-    /// the service's `chat,public` pool on Postgres, a private migrated bed on
-    /// SQLite (MAIN-294). See `crate::testdb`.
+    /// A PRIVATE database and a wired state on whichever engine the suite runs
+    /// (MAIN-165): the service's `chat,public` pool over a bed on Postgres, the
+    /// bed's own pool on SQLite. Dropped whole afterwards, which is why nothing
+    /// below deletes its own rows. See `crate::testdb`.
     async fn setup() -> Option<crate::testdb::ChatTest> {
         crate::testdb::chat_test("channel-admin test").await
     }
@@ -394,24 +395,6 @@ mod tests {
 
     fn is_forbidden<T>(r: &Result<T, ApiError>) -> bool {
         matches!(r, Err(ApiError::Forbidden))
-    }
-
-    async fn cleanup(db: &DbPool, tenant: Uuid) {
-        let _ = db
-            .exec(
-                "DELETE FROM chat_channels WHERE owner_id = $1",
-                params![tenant],
-            )
-            .await;
-        let _ = db
-            .exec(
-                "DELETE FROM chat_channel_categories WHERE owner_id = $1",
-                params![tenant],
-            )
-            .await;
-        let _ = db
-            .exec("DELETE FROM tenants WHERE id = $1", params![tenant])
-            .await;
     }
 
     // ── Org channels (MAIN-112) ─────────────────────────────────────────────
@@ -567,32 +550,7 @@ mod tests {
             "a non-admin cannot create an org channel, got {denied:?}"
         );
 
-        // Cleanup: channels owned by either org, then users, tenants, orgs.
-        for owner in [org, other_org] {
-            let _ = state
-                .db
-                .exec(
-                    "DELETE FROM chat_channels WHERE owner_id = $1",
-                    params![owner],
-                )
-                .await;
-        }
-        for t in [ta, tb, tc] {
-            let _ = state
-                .db
-                .exec("DELETE FROM users WHERE tenant_id = $1", params![t])
-                .await;
-            let _ = state
-                .db
-                .exec("DELETE FROM tenants WHERE id = $1", params![t])
-                .await;
-        }
-        for o in [org, other_org] {
-            let _ = state
-                .db
-                .exec("DELETE FROM orgs WHERE id = $1", params![o])
-                .await;
-        }
+        state.teardown().await;
     }
 
     #[tokio::test]
@@ -660,7 +618,7 @@ mod tests {
             "a member is refused update, got {denied:?}"
         );
 
-        cleanup(&state.db, tenant).await;
+        state.teardown().await;
     }
 
     #[tokio::test]
@@ -768,7 +726,7 @@ mod tests {
             "unarchived channel is back in the default list"
         );
 
-        cleanup(&state.db, tenant).await;
+        state.teardown().await;
     }
 
     // ── Channel categories (MAIN-178) ───────────────────────────────────────
@@ -829,7 +787,7 @@ mod tests {
         .await;
         assert!(is_forbidden(&denied), "member reorder refused: {denied:?}");
 
-        cleanup(&state.db, tenant).await;
+        state.teardown().await;
     }
 
     /// Deleting a category un-categorizes its channels — it never deletes them,
@@ -924,7 +882,7 @@ mod tests {
             "channel is uncategorized after its category is deleted"
         );
 
-        cleanup(&state.db, tenant).await;
+        state.teardown().await;
     }
 
     /// Reorder persists: the new order is reflected by a subsequent list (AC-2).
@@ -980,7 +938,7 @@ mod tests {
             .collect();
         assert_eq!(persisted, vec![b.id, a.id], "list reflects B before A");
 
-        cleanup(&state.db, tenant).await;
+        state.teardown().await;
     }
 
     // ── Unread counts + read cursors (MAIN-117) ─────────────────────────────
@@ -1070,7 +1028,7 @@ mod tests {
         assert_eq!(unread_of(&state, a, tenant, ch.id).await, 0);
         assert_eq!(unread_of(&state, b, tenant, ch.id).await, 1);
 
-        cleanup(&state.db, tenant).await;
+        state.teardown().await;
     }
 
     /// The cursor boundary is strict: a message exactly at the cursor is read; a
@@ -1103,7 +1061,7 @@ mod tests {
         post_msg(&state.db, ch.id, b, tenant).await;
         assert_eq!(unread_of(&state, a, tenant, ch.id).await, 1);
 
-        cleanup(&state.db, tenant).await;
+        state.teardown().await;
     }
 
     /// The cursor never moves backward: with the cursor pinned in the future,
@@ -1156,7 +1114,7 @@ mod tests {
             "cursor stayed in the future; it did not regress to the present"
         );
 
-        cleanup(&state.db, tenant).await;
+        state.teardown().await;
     }
 
     /// The per-user stream's authorization gate (MAIN-117 AC-6). Each firehose
@@ -1257,12 +1215,7 @@ mod tests {
             "a removed participant stops receiving"
         );
 
-        let _ = state
-            .db
-            .exec("DELETE FROM chat_channels WHERE id = $1", params![dm])
-            .await;
-        cleanup(&state.db, t_a).await;
-        cleanup(&state.db, t_b).await;
+        state.teardown().await;
     }
 }
 

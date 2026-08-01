@@ -94,30 +94,27 @@ async fn resolve_session_resolves_public_auth_tables_on_the_chat_first_pool() {
         eprintln!("skipping chat search_path regression — no NOOK_REQUIRE_DB");
         return;
     }
-    let Ok(url) = std::env::var("DATABASE_URL") else {
+    // A PRIVATE database (MAIN-165), not the shared dev one: this test seeds
+    // tenants/users/sessions into `public`, and doing that on the shared database
+    // is what the whole card exists to stop. The bed arrives with `public`
+    // already migrated by the control track, which is exactly what this test
+    // used to run the control MIGRATOR by hand to get.
+    let Some(mut bed) = nook_testkit::TestBed::new().await else {
         return;
     };
     // Postgres semantics are the whole subject here — `search_path` resolution
     // and `information_schema` isolation have no SQLite equivalent — so this
     // skips rather than pretending to assert something (MAIN-294).
-    if nook_db::engine_from_url(&url).ok() != Some(nook_db::Engine::Postgres) {
+    if !bed.is_postgres() {
         eprintln!("skipping the chat search_path regression tests — Postgres-only behaviour");
+        bed.teardown().await;
         return;
     }
+    let url = bed.database_url().expect("a Postgres bed exposes its URL");
 
-    // Provision the control-plane `public` schema this test depends on. The
-    // nook-chat crate ships only its own `chat` migrations, so a fresh CI
-    // database has no `public.tenants`/`users`/`sessions_auth`/`tenant_members` —
-    // seeding would then fail on `relation "public.tenants" does not exist`.
-    // Running the control plane's own MIGRATOR (idempotent) creates them exactly
-    // as production has them, rather than hand-maintaining table DDL that could
-    // drift. The `chat` schema must also exist for a `chat,public` pool to connect.
+    // The `chat` schema must exist for a `chat,public` pool to connect.
     let bootstrap = pool(&url, "public").await;
     ensure_chat_schema(&bootstrap).await;
-    nook_control::MIGRATOR
-        .run(&bootstrap)
-        .await
-        .expect("control-plane migrations must provision the public auth tables");
     let (tenant, session) = seed(&bootstrap).await;
 
     // EXACTLY the service's pool config (main.rs): `chat` first so chat's own
@@ -142,12 +139,12 @@ async fn resolve_session_resolves_public_auth_tables_on_the_chat_first_pool() {
          that regression is exactly what shipped and 500'd in prod"
     );
 
-    // Cascades to users / sessions_auth / tenant_members via the tenant FK.
-    sqlx::query("DELETE FROM public.tenants WHERE id = $1")
-        .bind(tenant)
-        .execute(&bootstrap)
-        .await
-        .unwrap();
+    // No row deletion: the bed takes the whole database, seeded rows and all.
+    // Close this test's own pools first — the bed only knows about its own.
+    for p in [bootstrap, chat_pool, chat_only] {
+        p.close().await;
+    }
+    bed.teardown().await;
 }
 
 /// The runtime test above uses a `chat,public` pool it builds itself, so it
@@ -161,11 +158,10 @@ fn the_service_pool_search_path_keeps_public() {
     let src = include_str!("../src/main.rs");
 
     // The search_path used to be an inline literal at the pool construction, and
-    // this guard grepped for it. MAIN-294 made it an ARGUMENT — the same
-    // constructor now builds the service's `chat,public` pool and the tests'
-    // `public` bootstrap — so the values live in named constants and the grep
-    // follows them there. The protection is unchanged: MAIN-87 is that dropping
-    // `public` makes every authenticated request 500 on `sessions_auth`.
+    // this guard grepped for it. MAIN-294 made it an ARGUMENT, so the value lives
+    // in a named constant and the grep follows it there. The protection is
+    // unchanged: MAIN-87 is that dropping `public` makes every authenticated
+    // request 500 on `sessions_auth`.
     let values: Vec<(&str, &str)> = src
         .match_indices("_SEARCH_PATH: &str = \"")
         .filter_map(|(i, _)| {

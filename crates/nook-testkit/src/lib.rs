@@ -588,6 +588,25 @@ impl TestBed {
         }
     }
 
+    /// This bed's private database as a connection URL, so a dependent crate can
+    /// open an **additional** pool against it with its own options (MAIN-165).
+    ///
+    /// [`TestBed::db`] is one pool with one configuration, which is all a
+    /// nook-control test wants. nook-chat pins `search_path=chat,public` so that
+    /// its own tables and the control plane's auth tables both resolve — a
+    /// property of the pool, not of the database — so it has to build its own
+    /// against this same bed rather than borrow ours.
+    ///
+    /// `None` on SQLite: one file is one namespace with one ledger, which is
+    /// exactly why chat's tables live in the control track there. Nothing has a
+    /// second configuration to ask for, so there is nothing to hand out.
+    pub fn database_url(&self) -> Option<String> {
+        match &self.arm {
+            Arm::Pg { base_url, db_name } => Some(swap_db(base_url, db_name)),
+            Arm::Sqlite { .. } => None,
+        }
+    }
+
     /// Drop the whole private database (unless `NOOK_KEEP_TEST_DATA`). Idempotent.
     pub async fn teardown(&mut self) {
         if self.dropped || self.keep {
@@ -740,6 +759,36 @@ mod tests {
             swap_db("postgres://u:p@h:5432/base?sslmode=disable", "t"),
             "postgres://u:p@h:5432/t?sslmode=disable"
         );
+    }
+
+    /// A dependent crate opens its own pool from this URL, so it must name the
+    /// bed's PRIVATE database — handing back the base URL would point every such
+    /// pool at the shared dev database, which is the bug the exposure exists to
+    /// prevent (MAIN-165).
+    #[tokio::test]
+    async fn the_exposed_url_names_the_private_database() {
+        let Some(mut bed) = TestBed::new().await else {
+            return;
+        };
+        if !bed.is_postgres() {
+            assert!(
+                bed.database_url().is_none(),
+                "SQLite has no second configuration to hand out"
+            );
+            bed.teardown().await;
+            return;
+        }
+        let url = bed.database_url().expect("a Postgres bed exposes its URL");
+        assert!(
+            url.ends_with(bed.db_name()),
+            "{url} names {}",
+            bed.db_name()
+        );
+        assert!(
+            url.starts_with("postgres://"),
+            "and is a connection URL, not a bare name: {url}"
+        );
+        bed.teardown().await;
     }
 }
 

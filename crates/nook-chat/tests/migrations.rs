@@ -9,12 +9,11 @@ use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
-/// Create the `chat` schema, tolerating the concurrent-creation race (MAIN-93).
-/// `CREATE SCHEMA IF NOT EXISTS` is NOT atomic: this test binary runs alongside
-/// the other chat test binaries, and the loser of a `pg_namespace` insert race
-/// gets `23505` even though the schema now exists. A duplicate is success. (The
-/// service's own `ensure_chat_schema` is `pub(crate)` and unreachable from an
-/// integration test, so this mirrors it locally.)
+/// Create the `chat` schema. Mirrors the service's own `ensure_chat_schema`,
+/// which is `pub(crate)` in a bin crate and so unreachable from here — including
+/// its `23505` tolerance: the database is this test's own now (MAIN-165), so the
+/// `pg_namespace` race with a sibling binary cannot happen, but a helper that
+/// quietly differs from the one it mirrors is worse than one extra arm.
 async fn ensure_chat_schema(db: &sqlx::PgPool) {
     match sqlx::query("CREATE SCHEMA IF NOT EXISTS chat")
         .execute(db)
@@ -28,22 +27,24 @@ async fn ensure_chat_schema(db: &sqlx::PgPool) {
 
 #[tokio::test]
 async fn chat_migrations_apply_into_an_isolated_schema() {
-    if std::env::var("NOOK_REQUIRE_DB").ok().as_deref() != Some("1") {
-        eprintln!("skipping chat_migrations_apply_into_an_isolated_schema — no NOOK_REQUIRE_DB");
-        return;
-    }
-    let Ok(url) = std::env::var("DATABASE_URL") else {
+    // A PRIVATE database (MAIN-165). Running chat's MIGRATOR is the whole point
+    // of this test, and doing it against the shared dev database stamped the
+    // shared `chat._sqlx_migrations` — which is precisely how one branch's chat
+    // migration used to give the next branch a `VersionMismatch`.
+    let Some(mut bed) = nook_testkit::TestBed::new().await else {
         return;
     };
     // Postgres semantics are the whole subject here — `search_path` resolution
     // and `information_schema` isolation have no SQLite equivalent — so this
     // skips rather than pretending to assert something (MAIN-294).
-    if nook_db::engine_from_url(&url).ok() != Some(nook_db::Engine::Postgres) {
+    if !bed.is_postgres() {
         eprintln!(
             "skipping chat_migrations_apply_into_an_isolated_schema — Postgres-only behaviour"
         );
+        bed.teardown().await;
         return;
     }
+    let url = bed.database_url().expect("a Postgres bed exposes its URL");
 
     // The same connection setup the service uses: search_path pinned to `chat`.
     let opts = PgConnectOptions::from_str(&url)
@@ -92,4 +93,7 @@ async fn chat_migrations_apply_into_an_isolated_schema() {
 
     // Re-running is idempotent (no error on a second apply).
     MIGRATOR.run(&db).await.unwrap();
+
+    db.close().await;
+    bed.teardown().await;
 }

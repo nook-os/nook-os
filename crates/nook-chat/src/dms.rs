@@ -279,6 +279,8 @@ mod tests {
         .expect("reopen dm");
         assert_eq!(code2, axum::http::StatusCode::OK);
         assert_eq!(second.0.id, first.0.id, "open-or-create is idempotent");
+
+        state.teardown().await;
     }
 
     #[tokio::test]
@@ -319,6 +321,8 @@ mod tests {
             channels::access(&*state.channels, dm.0.id, &caller(uc, t)).await,
             Err(ApiError::Forbidden)
         ));
+
+        state.teardown().await;
     }
 
     #[tokio::test]
@@ -354,6 +358,8 @@ mod tests {
                 .await
                 .is_ok()
         );
+
+        state.teardown().await;
     }
 
     #[tokio::test]
@@ -387,6 +393,8 @@ mod tests {
         assert!(ids.contains(&pb), "an org peer is offered");
         assert!(!ids.contains(&pout), "a cross-org person is never offered");
         assert!(!ids.contains(&pa), "the caller is not in their own picker");
+
+        state.teardown().await;
     }
 
     #[tokio::test]
@@ -429,6 +437,8 @@ mod tests {
             !channels.iter().any(|c| c.id == dm.0.id),
             "a DM never appears in the channel list"
         );
+
+        state.teardown().await;
     }
 }
 
