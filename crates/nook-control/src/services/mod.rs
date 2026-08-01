@@ -20,6 +20,7 @@ pub mod overview_queries;
 pub mod policy;
 pub mod port_leases;
 pub mod queue;
+pub mod repo_settings;
 pub mod runtime_auth;
 pub mod runtime_auth_flow;
 pub mod schedule;
