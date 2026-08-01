@@ -97,8 +97,13 @@ async fn node(
 }
 
 /// Capabilities reporting the `claude` runtime in the given auth state.
+///
+/// `loop_kinds` is part of the fixture because a node that declares none
+/// accepts none (MAIN-142) — these tests are about the AUTH gate, so they
+/// declare the kinds and let the auth state be the variable.
 fn caps(state: &str, operator: bool) -> serde_json::Value {
     let mut c = json!({
+        "loop_kinds": ["spec", "decompose", "review", "epic-run"],
         "runtime_auth": [
             { "id": "claude", "label": "Claude Code", "runtime": "claude", "state": state }
         ]
@@ -238,6 +243,7 @@ async fn ineligible_runtime_is_skipped() {
     let (state, tenant, _user, person, job) = setup(&bed).await;
     // A node reporting a DIFFERENT runtime authorized, not claude.
     let other = json!({
+        "loop_kinds": ["spec", "decompose"],
         "runtime_auth": [{ "id": "codex", "label": "Codex", "runtime": "codex", "state": "authorized" }]
     });
     let _mine = node(&bed.pool, tenant, Some(person), "online", other).await;
@@ -291,6 +297,206 @@ async fn concurrent_selection_claims_a_job_exactly_once() {
             .unwrap();
     assert_eq!(state_str, "claimed");
     assert_eq!(exec, Some(mine));
+
+    bed.teardown().await;
+}
+
+// ── the loop-job kind wall, against the real SQL (MAIN-142) ─────────────────
+//
+// These run against Postgres deliberately. The in-memory fake compares Rust
+// strings and cannot see how the declared kinds are actually stored: the first
+// version of this query expanded the jsonb array and compared `k.value::text`,
+// which is `"spec"` WITH its quotes and matched nothing. Every fake test passed.
+
+/// Capabilities for a node that is authorized but declares `kinds`.
+fn caps_declaring(kinds: &[&str], operator: bool) -> serde_json::Value {
+    let mut c = json!({
+        "loop_kinds": kinds,
+        "runtime_auth": [
+            { "id": "claude", "label": "Claude Code", "runtime": "claude", "state": "authorized" }
+        ]
+    });
+    if operator {
+        c["shared_operator"] = json!(true);
+    }
+    c
+}
+
+#[tokio::test]
+async fn a_job_of_a_kind_no_node_declares_stays_queued_with_the_reason() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let (state, tenant, _user, person, job) = setup(&bed).await;
+    // Online, authorized, owned — and declares only `decompose`. The job is
+    // `spec`, so this node is not a candidate.
+    node(
+        &bed.pool,
+        tenant,
+        Some(person),
+        "online",
+        caps_declaring(&["decompose"], false),
+    )
+    .await;
+
+    let placed = jobs::select_executor(&state, tenant, job)
+        .await
+        .expect("select");
+    assert_eq!(placed.state, "queued");
+    let reason = placed.queued_reason.unwrap_or_default();
+    assert!(
+        reason.contains("spec"),
+        "the reason names the kind that found no home: {reason}"
+    );
+
+    bed.teardown().await;
+}
+
+#[tokio::test]
+async fn a_node_declaring_the_kind_is_placed() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let (state, tenant, _user, person, job) = setup(&bed).await;
+    let mine = node(
+        &bed.pool,
+        tenant,
+        Some(person),
+        "online",
+        caps_declaring(&["spec"], false),
+    )
+    .await;
+
+    let placed = jobs::select_executor(&state, tenant, job)
+        .await
+        .expect("select");
+    assert_eq!(placed.state, "claimed");
+    assert_eq!(placed.executor_node_id, Some(mine));
+
+    bed.teardown().await;
+}
+
+/// The wall AC-3 is for. A shared operator that declares `build` — the
+/// misconfigured or lying node — is still refused, at the offer and again at
+/// the claim. Its declaration is never consulted for this rule.
+#[tokio::test]
+async fn a_shared_operator_declaring_build_is_still_refused_build_work() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let (state, tenant, _user, person, _job) = setup(&bed).await;
+    let op = node(
+        &bed.pool,
+        tenant,
+        None,
+        "online",
+        caps_declaring(&["spec", "review", "build"], true),
+    )
+    .await;
+
+    // Offer: not a candidate for build, though it is for review.
+    let for_build = state
+        .nodes
+        .eligible_loop_executors(tenant, person, "claude", "build")
+        .await
+        .expect("candidates");
+    assert!(
+        for_build.is_empty(),
+        "a shared operator declaring build is offered none"
+    );
+    let for_review = state
+        .nodes
+        .eligible_loop_executors(tenant, person, "claude", "review")
+        .await
+        .expect("candidates");
+    assert_eq!(for_review, vec![op], "…while review is unaffected");
+
+    // Claim: refused again, independently, with a message naming the rule.
+    let refusal = jobs::kind_wall_refusal(&state, op, "build")
+        .await
+        .expect("wall")
+        .expect("a refusal");
+    assert!(
+        refusal.contains("shared operator"),
+        "the refusal says why: {refusal}"
+    );
+    assert!(
+        jobs::kind_wall_refusal(&state, op, "review")
+            .await
+            .expect("wall")
+            .is_none(),
+        "and it does not refuse what the operator is for"
+    );
+
+    bed.teardown().await;
+}
+
+/// Capacity is a skip, not a failure: the job waits for room rather than being
+/// declared unplaceable.
+#[tokio::test]
+async fn a_node_at_capacity_is_skipped_and_the_job_waits() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let (state, tenant, user, person, job) = setup(&bed).await;
+    let mut caps = caps_declaring(&["spec"], false);
+    caps["max_loop_jobs"] = json!(1);
+    let mine = node(&bed.pool, tenant, Some(person), "online", caps).await;
+
+    // One job already in flight on that node fills its single slot.
+    let target = target_task(&bed.pool, tenant, user).await;
+    let held = queued_job(&bed.pool, tenant, user, target).await;
+    sqlx::query("UPDATE loop_jobs SET state = 'running', executor_node_id = $2 WHERE id = $1")
+        .bind(held)
+        .bind(mine)
+        .execute(&bed.pool)
+        .await
+        .expect("occupy");
+
+    let placed = jobs::select_executor(&state, tenant, job)
+        .await
+        .expect("select");
+    assert_eq!(placed.state, "queued");
+    let reason = placed.queued_reason.clone().unwrap_or_default();
+    assert!(
+        reason.contains("capacity"),
+        "the reason says it is busy, not ineligible: {reason}"
+    );
+
+    // The slot frees; the same job places without anything else changing.
+    sqlx::query("UPDATE loop_jobs SET state = 'completed' WHERE id = $1")
+        .bind(held)
+        .execute(&bed.pool)
+        .await
+        .expect("free");
+    let placed = jobs::select_executor(&state, tenant, job)
+        .await
+        .expect("select again");
+    assert_eq!(placed.state, "claimed");
+    assert_eq!(placed.executor_node_id, Some(mine));
+
+    bed.teardown().await;
+}
+
+/// `max_loop_jobs: 0` is how an operator quiesces a node without deleting it.
+#[tokio::test]
+async fn a_zero_capacity_node_never_claims() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let (state, tenant, _user, person, job) = setup(&bed).await;
+    let mut caps = caps_declaring(&["spec"], false);
+    caps["max_loop_jobs"] = json!(0);
+    node(&bed.pool, tenant, Some(person), "online", caps).await;
+
+    let placed = jobs::select_executor(&state, tenant, job)
+        .await
+        .expect("select");
+    assert_eq!(placed.state, "queued");
+    assert!(placed
+        .queued_reason
+        .unwrap_or_default()
+        .contains("capacity"));
 
     bed.teardown().await;
 }

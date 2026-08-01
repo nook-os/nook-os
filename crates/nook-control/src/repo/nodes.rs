@@ -247,15 +247,34 @@ pub trait NodeRepository: Send + Sync {
     // These are `nodes` queries, so they live with `nodes`. A second copy under
     // "jobs" is exactly how two definitions of "who may run work" drift apart.
 
-    /// The best node to run a loop job on: the requester's own online node
-    /// authorized for `runtime`, else the online authorized shared operator.
-    /// Own-before-shared is the ORDER BY, not the caller's job.
-    async fn pick_loop_executor(
+    /// Nodes that may run a loop job of `kind`, best first: the requester's own
+    /// online nodes authorized for `runtime`, then the online authorized shared
+    /// operator. Own-before-shared is the ORDER BY, not the caller's job.
+    ///
+    /// A LIST rather than one node (MAIN-142), because the last eligibility
+    /// gate — how many jobs a node is already holding — is a `loop_jobs` count,
+    /// and putting that here would make this query span two aggregates. Who
+    /// *may* run work stays one definition; how busy they are is the caller's.
+    ///
+    /// Two filters live here and nowhere else. The node's declared
+    /// `loop_kinds` must contain `kind`, and a `build` job is never offered to
+    /// a shared operator **whatever that node declares** — the wall does not
+    /// consult the node's own configuration, which is the point of it.
+    async fn eligible_loop_executors(
         &self,
         tenant: TenantId,
         person: Uuid,
         runtime: &str,
-    ) -> ApiResult<Option<NodeId>>;
+        kind: &str,
+    ) -> ApiResult<Vec<NodeId>>;
+
+    /// Is this node a shared operator? The wall's own question, asked of the
+    /// stored row rather than of anything a caller passes in (MAIN-142 AC-3/AC-4).
+    async fn is_shared_operator(&self, id: NodeId) -> ApiResult<bool>;
+
+    /// The loop kinds a node declares, and the cap it reports. `None` capacity
+    /// means an older node that never reported one.
+    async fn loop_profile(&self, id: NodeId) -> ApiResult<Option<(Vec<String>, Option<u32>)>>;
 
     /// How many of this person's nodes are online — the first half of phrasing
     /// *why* nothing could be placed.
@@ -768,12 +787,13 @@ impl NodeRepository for DbNodeRepository {
             .await?)
     }
 
-    async fn pick_loop_executor(
+    async fn eligible_loop_executors(
         &self,
         tenant: TenantId,
         person: Uuid,
         runtime: &str,
-    ) -> ApiResult<Option<NodeId>> {
+        kind: &str,
+    ) -> ApiResult<Vec<NodeId>> {
         // `@>` containment tests the operator flag; the EXISTS scans the
         // reported auth profiles for our runtime. jsonb operators route through
         // the json seam (MAIN-201): the runtime_auth array is expanded and its
@@ -784,28 +804,84 @@ impl NodeRepository for DbNodeRepository {
             json(self.db.engine()).get_json("capabilities", "runtime_auth"),
             json(self.db.engine()).literal("[]")
         ));
+        // Containment, not an expanded compare: `jsonb_array_elements` yields
+        // JSON scalars, so `k.value::text` on the string "spec" is `"spec"`
+        // WITH its quotes and never equals a bound `spec`. `@>` against a
+        // JSON-encoded needle is the audited shape and stays parameterized.
+        let declares_kind = json(self.db.engine()).contains(
+            &format!(
+                "COALESCE({}, {})",
+                json(self.db.engine()).get_json("capabilities", "loop_kinds"),
+                json(self.db.engine()).literal("[]")
+            ),
+            &type_mapping(self.db.engine()).cast("$5", "jsonb"),
+        );
+        // The needle, JSON-encoded here rather than in SQL: `to_jsonb(...)` is a
+        // Postgres-only spelling and this keeps the bind a plain string.
+        let kind_json = serde_json::Value::String(kind.to_string()).to_string();
+        // The build wall (AC-3), in the WHERE clause rather than in a caller:
+        // a shared operator drops out of the candidate set for a `build` job
+        // before anything it declared is even read.
         Ok(self
             .db
-            .query_scalar_opt(
+            .query_scalar_all(
                 &format!(
                     "SELECT id FROM nodes
                      WHERE tenant_id = $1
                        AND status = 'online'
                        AND (owner_person_id = $2 OR {operator})
+                       AND NOT ($4 = 'build' AND {operator})
                        AND EXISTS (
                              SELECT 1
                              FROM {runtime_auth} e
                              WHERE {rt} = $3 AND {state} = 'authorized'
                            )
-                     ORDER BY (owner_person_id = $2) DESC NULLS LAST, id
-                     LIMIT 1",
+                       AND {declares_kind}
+                     ORDER BY (owner_person_id = $2) DESC NULLS LAST, id",
                     operator = shared_operator_clause(self.db.engine()),
                     rt = json(self.db.engine()).get_text("e", "runtime"),
                     state = json(self.db.engine()).get_text("e", "state"),
                 ),
-                params![tenant, person, runtime],
+                params![tenant, person, runtime, kind, kind_json],
             )
             .await?)
+    }
+
+    async fn is_shared_operator(&self, id: NodeId) -> ApiResult<bool> {
+        Ok(self
+            .db
+            .query_scalar_opt::<bool>(
+                &format!(
+                    "SELECT {} FROM nodes WHERE id = $1",
+                    shared_operator_clause(self.db.engine())
+                ),
+                params![id],
+            )
+            .await?
+            .unwrap_or(false))
+    }
+
+    async fn loop_profile(&self, id: NodeId) -> ApiResult<Option<(Vec<String>, Option<u32>)>> {
+        let row: Option<(serde_json::Value,)> = self
+            .db
+            .query_opt("SELECT capabilities FROM nodes WHERE id = $1", params![id])
+            .await?;
+        Ok(row.map(|(caps,)| {
+            let kinds = caps
+                .get("loop_kinds")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let cap = caps
+                .get("max_loop_jobs")
+                .and_then(|v| v.as_u64())
+                .map(|n| n as u32);
+            (kinds, cap)
+        }))
     }
 
     async fn owned_online_count(&self, tenant: TenantId, person: Uuid) -> ApiResult<i64> {
@@ -1724,12 +1800,13 @@ impl NodeRepository for FakeNodeRepository {
             .count() as i64)
     }
 
-    async fn pick_loop_executor(
+    async fn eligible_loop_executors(
         &self,
         tenant: TenantId,
         person: Uuid,
         runtime: &str,
-    ) -> ApiResult<Option<NodeId>> {
+        kind: &str,
+    ) -> ApiResult<Vec<NodeId>> {
         let s = self.inner.lock().unwrap();
         let authorized_for = |n: &FakeNode| {
             n.node
@@ -1750,17 +1827,70 @@ impl NodeRepository for FakeNodeRepository {
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false)
         };
+        let declares = |n: &FakeNode| {
+            n.node
+                .capabilities
+                .get("loop_kinds")
+                .and_then(|v| v.as_array())
+                .is_some_and(|ks| ks.iter().any(|k| k.as_str() == Some(kind)))
+        };
         let mut eligible: Vec<&FakeNode> = s
             .nodes
             .iter()
             .filter(|n| n.node.tenant_id == tenant && n.node.status == "online")
             .filter(|n| n.node.owner_person_id == Some(person) || is_operator(n))
+            // The build wall, ahead of anything the node declared (AC-3).
+            .filter(|n| !(kind == "build" && is_operator(n)))
             .filter(|n| authorized_for(n))
+            .filter(|n| declares(n))
             .collect();
         // `ORDER BY (owner_person_id = $2) DESC`: your own node before the
         // shared operator.
         eligible.sort_by_key(|n| (n.node.owner_person_id != Some(person), n.node.id.0));
-        Ok(eligible.first().map(|n| n.node.id))
+        Ok(eligible.iter().map(|n| n.node.id).collect())
+    }
+
+    async fn is_shared_operator(&self, id: NodeId) -> ApiResult<bool> {
+        Ok(self
+            .inner
+            .lock()
+            .unwrap()
+            .nodes
+            .iter()
+            .find(|n| n.node.id == id)
+            .and_then(|n| n.node.capabilities.get("shared_operator"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false))
+    }
+
+    async fn loop_profile(&self, id: NodeId) -> ApiResult<Option<(Vec<String>, Option<u32>)>> {
+        Ok(self
+            .inner
+            .lock()
+            .unwrap()
+            .nodes
+            .iter()
+            .find(|n| n.node.id == id)
+            .map(|n| {
+                let kinds = n
+                    .node
+                    .capabilities
+                    .get("loop_kinds")
+                    .and_then(|v| v.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|v| v.as_str().map(str::to_string))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let cap = n
+                    .node
+                    .capabilities
+                    .get("max_loop_jobs")
+                    .and_then(|v| v.as_u64())
+                    .map(|x| x as u32);
+                (kinds, cap)
+            }))
     }
 
     async fn owned_online_count(&self, tenant: TenantId, person: Uuid) -> ApiResult<i64> {

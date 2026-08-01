@@ -124,6 +124,28 @@ else
   fail=1
 fi
 
+# ── the loop-kind wall's shipped configuration (MAIN-142) ──────────────────
+need "loop kinds env"              '^              value: "spec,decompose,review,epic-run"$' 1
+need "capacity env"                '^            - name: NOOK_MAX_LOOP_JOBS$' 1
+
+# `build` must not ship in the operator's declared kinds. The control plane
+# refuses it regardless, but shipping it would state the opposite of the rule.
+if grep -qE '^              value: "[^"]*build' <<<"$out"; then
+  echo "  FAIL: the operator image declares a build kind"
+  fail=1
+else
+  echo "  ok:   build is not among the shipped kinds"
+fi
+
+# Quiescing an operator is a values change, not a redeploy of something else.
+quiet="$(render "${min[@]}" --set maxLoopJobs=0)"
+if grep -qE '^              value: "0"$' <<<"$quiet"; then
+  echo "  ok:   maxLoopJobs=0 renders (claiming disabled)"
+else
+  echo "  FAIL: maxLoopJobs=0 did not render"
+  fail=1
+fi
+
 if [ "$fail" -ne 0 ]; then
   echo "chart validation FAILED"
   exit 1

@@ -3450,6 +3450,25 @@ export interface components {
             git?: string | null;
             gpus?: components["schemas"]["GpuInfo"][];
             hostname: string;
+            /**
+             * @description Which loop stages this node will execute (MAIN-142): any of `spec`,
+             *     `decompose`, `review`, `epic-run`, `build`. Set by `NOOK_LOOP_KINDS`.
+             *
+             *     **Empty means the node accepts NO loop jobs** — the safe default, so a
+             *     machine that never opted in cannot be handed agent work by an upgrade.
+             *     It is the node's own declaration and the control plane treats it as
+             *     exactly that: a filter it applies, never a permission it trusts. The
+             *     shared-operator build wall does not consult this list at all.
+             */
+            loop_kinds?: string[];
+            /**
+             * Format: int32
+             * @description How many loop jobs this node will hold at once (MAIN-142), from
+             *     `NOOK_MAX_LOOP_JOBS`. `0` disables claiming entirely. Absent from an
+             *     older node's report, which reads as "unspecified" rather than zero —
+             *     see `nook_control::services::jobs::CAPACITY_WHEN_UNREPORTED`.
+             */
+            max_loop_jobs?: number | null;
             /** Format: int64 */
             memory: number;
             platform: string;
@@ -3709,6 +3728,7 @@ export interface components {
              *     without moving.
              */
             column_type?: string | null;
+            session_id?: null | components["schemas"]["SessionId"];
         };
         CloneRequest: {
             /**

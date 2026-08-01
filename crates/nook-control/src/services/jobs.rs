@@ -510,18 +510,57 @@ pub async fn select_executor(
         return set_queued_reason(state, job_id, "the requester has no person identity").await;
     };
 
-    // The best eligible node: owned-and-online-and-authorized first, else the
-    // online authorized shared operator. The selection is a `nodes` query and
-    // lives on NodeRepository, so there is one definition of who may run work.
-    let node: Option<NodeId> = state
+    // Candidates in preference order: owned-and-online-and-authorized first,
+    // then the online authorized shared operator. The selection is a `nodes`
+    // query and lives on NodeRepository, so there is one definition of who may
+    // run work — including the kind filter and the build wall (MAIN-142).
+    let candidates: Vec<NodeId> = state
         .nodes
-        .pick_loop_executor(tenant, person, LOOP_RUNTIME)
+        .eligible_loop_executors(tenant, person, LOOP_RUNTIME, &job.kind)
         .await?;
 
-    let Some(node) = node else {
-        let reason = no_executor_reason(state, tenant, person).await?;
+    // The last gate is how much each candidate is already holding, which is a
+    // `loop_jobs` count rather than a node fact — so it is applied here.
+    let mut chosen: Option<NodeId> = None;
+    let mut blocked_by_capacity = false;
+    for node in candidates {
+        let cap = state
+            .nodes
+            .loop_profile(node)
+            .await?
+            .and_then(|(_, cap)| cap)
+            .unwrap_or(CAPACITY_WHEN_UNREPORTED);
+        if cap == 0 {
+            // A deliberate "stop claiming" rather than a busy node.
+            blocked_by_capacity = true;
+            continue;
+        }
+        let held = state.jobs.in_flight_on_node(node).await?.len() as u32;
+        if held >= cap {
+            blocked_by_capacity = true;
+            continue;
+        }
+        chosen = Some(node);
+        break;
+    }
+
+    let Some(node) = chosen else {
+        let reason = if blocked_by_capacity {
+            "no eligible executor: every eligible node is at its loop-job capacity".to_string()
+        } else {
+            no_executor_reason(state, tenant, person, &job.kind).await?
+        };
         return set_queued_reason(state, job_id, &reason).await;
     };
+
+    // Re-asked at CLAIM, of the stored row, independent of the pick above
+    // (MAIN-142 AC-2/AC-3). The two checks are deliberately not shared code
+    // paths: this one is what holds if a node's report changes between the
+    // query and the claim, or if a future caller reaches the claim by another
+    // route.
+    if let Some(refusal) = kind_wall_refusal(state, node, &job.kind).await? {
+        return set_queued_reason(state, job_id, &refusal).await;
+    }
 
     // Atomic claim: only the caller that flips `queued` -> `claimed` wins.
     let claimed: Option<LoopJob> = state.jobs.claim_for_executor(job_id, node).await?;
@@ -540,23 +579,75 @@ pub async fn select_executor(
     }
 }
 
+/// Capacity assumed for a node that reports none — an agent old enough to
+/// predate `max_loop_jobs` (MAIN-142). The shipped default rather than
+/// unlimited: an unreported cap should behave like the configuration everything
+/// else ships with, not like permission to take every job in the queue.
+pub const CAPACITY_WHEN_UNREPORTED: u32 = 2;
+
+/// The wall, asked of the STORED node row and answered as the refusal message
+/// (MAIN-142 AC-2/AC-3), or `None` when this node may run this kind.
+///
+/// Two rules, and their order is the whole point. The build rule is checked
+/// FIRST and reads only `shared_operator`, so a node declaring
+/// `loop_kinds=build` changes nothing about it — the wall is the control
+/// plane's, and a node cannot configure its way through. Only then is the
+/// node's own declaration consulted, which is a filter we apply on its behalf
+/// rather than a permission we take its word for.
+pub async fn kind_wall_refusal(
+    state: &AppState,
+    node: NodeId,
+    kind: &str,
+) -> ApiResult<Option<String>> {
+    if kind == "build" && state.nodes.is_shared_operator(node).await? {
+        return Ok(Some(format!(
+            "refused: node {node} is a shared operator, and shared operators never run build work"
+        )));
+    }
+    let declared = state
+        .nodes
+        .loop_profile(node)
+        .await?
+        .map(|(kinds, _)| kinds)
+        .unwrap_or_default();
+    if !declared.iter().any(|k| k == kind) {
+        return Ok(Some(format!(
+            "refused: node {node} does not accept {kind} jobs (it accepts: {})",
+            if declared.is_empty() {
+                "none".to_string()
+            } else {
+                declared.join(", ")
+            }
+        )));
+    }
+    Ok(None)
+}
+
 /// Phrase the specific gate that blocked placement (AC-3): distinguishes "no
 /// node of yours is online" from "your online nodes aren't authorized" from "no
 /// operator available", so the UI can tell the PM what to do.
-async fn no_executor_reason(state: &AppState, tenant: TenantId, person: Uuid) -> ApiResult<String> {
+async fn no_executor_reason(
+    state: &AppState,
+    tenant: TenantId,
+    person: Uuid,
+    kind: &str,
+) -> ApiResult<String> {
     let owned_online: i64 = state.nodes.owned_online_count(tenant, person).await?;
     let operator_online: i64 = state.nodes.shared_operator_online_count(tenant).await?;
 
     Ok(match (owned_online, operator_online) {
         (0, 0) => "no eligible executor: you have no node online and no shared operator is available".into(),
+        // Wherever an online node exists, "not authorized" is no longer the only
+        // way to be ineligible — it may simply not accept this kind (MAIN-142).
+        // The reason names both rather than asserting the one it cannot tell.
         (0, _) => format!(
-            "no eligible executor: you have no node online, and the shared operator is not authorized for the {LOOP_RUNTIME} runtime"
+            "no eligible executor: you have no node online, and the shared operator is not authorized for the {LOOP_RUNTIME} runtime or does not accept {kind} jobs"
         ),
         (_, 0) => format!(
-            "no eligible executor: your online node(s) are not authorized for the {LOOP_RUNTIME} runtime, and no shared operator is available"
+            "no eligible executor: your online node(s) are not authorized for the {LOOP_RUNTIME} runtime or do not accept {kind} jobs, and no shared operator is available"
         ),
         _ => format!(
-            "no eligible executor: no online node (yours or the shared operator) is authorized for the {LOOP_RUNTIME} runtime"
+            "no eligible executor: no online node (yours or the shared operator) is authorized for the {LOOP_RUNTIME} runtime, or none of them accepts {kind} jobs"
         ),
     })
 }

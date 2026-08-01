@@ -451,6 +451,16 @@ async fn main() -> Result<()> {
     // machine. Choose explicitly, at the top, before anything can need it.
     let _ = rustls::crypto::ring::default_provider().install_default();
 
+    // Refuse a misspelled loop kind here rather than reporting a shorter list
+    // than the operator configured (MAIN-142 AC-6). Silently dropping it would
+    // leave them believing a stage was enabled — the failure would surface as
+    // jobs queueing forever with no obvious cause.
+    if let Err(e) =
+        capabilities::parse_loop_kinds(&std::env::var("NOOK_LOOP_KINDS").unwrap_or_default())
+    {
+        anyhow::bail!("{e}");
+    }
+
     match Cli::parse().command {
         Command::Setup {
             server,

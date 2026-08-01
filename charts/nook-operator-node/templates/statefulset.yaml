@@ -51,6 +51,11 @@ spec:
             # This IS the shared operator node — reported as capabilities.shared_operator (AC-4).
             - name: NOOK_SHARED_OPERATOR
               value: "1"
+            # The loop stages it runs, and how many at once (MAIN-142).
+            - name: NOOK_LOOP_KINDS
+              value: {{ join "," .Values.loopKinds | quote }}
+            - name: NOOK_MAX_LOOP_JOBS
+              value: {{ .Values.maxLoopJobs | quote }}
             # tmux runtime dir on its own volume (AC-2). tmux honours TMUX_TMPDIR.
             - name: TMUX_TMPDIR
               value: /var/lib/nook/tmux
