@@ -295,7 +295,7 @@ export function Notebook() {
   const effectiveExpanded = searching ? new Set(folders.map((f) => f.id)) : expanded;
 
   return (
-    <div className="nook-grid notebook" style={{ gridTemplateColumns: "300px 1fr" }}>
+    <div className="nook-grid cards notebook" style={{ gridTemplateColumns: "300px 1fr" }}>
       <Panel
         title="Notebook"
         actions={
