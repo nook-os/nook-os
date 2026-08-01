@@ -282,6 +282,16 @@ pub trait WorkspaceRepository: Send + Sync {
         workspace: WorkspaceId,
     ) -> ApiResult<Vec<PresentCheckout>>;
 
+    /// The present **clone** checkouts of a workspace, in discovery order — the
+    /// rows that make a node a placement host (MAIN-292, moved from
+    /// `services::schedule`). A worktree, or a tombstoned clone, is deliberately
+    /// absent: worktrees branch from a clone, so only a live clone can host.
+    async fn clone_hosts(
+        &self,
+        tenant: TenantId,
+        workspace: WorkspaceId,
+    ) -> ApiResult<Vec<(NodeId, NodeWorkspaceId)>>;
+
     /// Whether this node already knows a checkout at `path`. The scan uses it
     /// to tell a brand-new checkout (which wants the workspace's `.env`
     /// announced) from one it is merely re-reporting.
@@ -487,6 +497,15 @@ pub trait WorkspaceSecretRepository: Send + Sync {
 
     async fn exists(&self, tenant: TenantId, workspace: WorkspaceId, name: &str)
         -> ApiResult<bool>;
+
+    /// Does this workspace have ANY secret? What decides whether a new checkout
+    /// is worth announcing at all (MAIN-292, moved from `services::secrets`).
+    async fn any(&self, tenant: TenantId, workspace: WorkspaceId) -> ApiResult<bool>;
+
+    /// The names of the workspace's **ephemeral** secrets — the files wiped from
+    /// a checkout once the last live session in it ends. Names only: the wipe
+    /// truncates by name and never needs content.
+    async fn ephemeral_names(&self, workspace: WorkspaceId) -> ApiResult<Vec<String>>;
 }
 
 // ── the DbPool implementations ──────────────────────────────────────────────
@@ -955,6 +974,23 @@ impl WorkspaceRepository for DbWorkspaceRepository {
             .into_iter()
             .map(|(id, node_id, path)| PresentCheckout { id, node_id, path })
             .collect())
+    }
+
+    async fn clone_hosts(
+        &self,
+        tenant: TenantId,
+        workspace: WorkspaceId,
+    ) -> ApiResult<Vec<(NodeId, NodeWorkspaceId)>> {
+        Ok(self
+            .db
+            .query_all(
+                "SELECT node_id, id FROM node_workspaces
+                 WHERE tenant_id = $1 AND workspace_id = $2
+                   AND kind = 'clone' AND missing_at IS NULL
+                 ORDER BY discovered_at",
+                params![tenant, workspace],
+            )
+            .await?)
     }
 
     async fn checkout_id_at_path(
@@ -1497,6 +1533,28 @@ impl WorkspaceSecretRepository for DbWorkspaceSecretRepository {
             )
             .await?;
         Ok(found.is_some())
+    }
+
+    async fn any(&self, tenant: TenantId, workspace: WorkspaceId) -> ApiResult<bool> {
+        let n: i64 = self
+            .db
+            .query_scalar(
+                "SELECT count(*) FROM workspace_secrets WHERE tenant_id = $1 AND workspace_id = $2",
+                params![tenant, workspace],
+            )
+            .await?;
+        Ok(n > 0)
+    }
+
+    async fn ephemeral_names(&self, workspace: WorkspaceId) -> ApiResult<Vec<String>> {
+        let rows: Vec<(String,)> = self
+            .db
+            .query_all(
+                "SELECT name FROM workspace_secrets WHERE workspace_id = $1 AND ephemeral",
+                params![workspace],
+            )
+            .await?;
+        Ok(rows.into_iter().map(|(n,)| n).collect())
     }
 }
 
@@ -2068,6 +2126,26 @@ impl WorkspaceRepository for FakeWorkspaceRepository {
         Ok(out)
     }
 
+    async fn clone_hosts(
+        &self,
+        tenant: TenantId,
+        workspace: WorkspaceId,
+    ) -> ApiResult<Vec<(NodeId, NodeWorkspaceId)>> {
+        let st = self.inner.lock().unwrap();
+        let mut rows: Vec<&FakeCheckout> = st
+            .checkouts
+            .iter()
+            .filter(|c| {
+                c.tenant == tenant
+                    && c.workspace_id == workspace
+                    && c.kind == "clone"
+                    && c.missing_at.is_none()
+            })
+            .collect();
+        rows.sort_by_key(|c| c.seq);
+        Ok(rows.into_iter().map(|c| (c.node_id, c.id)).collect())
+    }
+
     async fn checkout_id_at_path(
         &self,
         node: NodeId,
@@ -2566,5 +2644,27 @@ impl WorkspaceSecretRepository for FakeWorkspaceSecretRepository {
             .secrets
             .iter()
             .any(|(t, w, n, _)| *t == tenant && *w == workspace && n == name))
+    }
+
+    async fn any(&self, tenant: TenantId, workspace: WorkspaceId) -> ApiResult<bool> {
+        Ok(self
+            .inner
+            .lock()
+            .unwrap()
+            .secrets
+            .iter()
+            .any(|(t, w, _, _)| *t == tenant && *w == workspace))
+    }
+
+    async fn ephemeral_names(&self, workspace: WorkspaceId) -> ApiResult<Vec<String>> {
+        Ok(self
+            .inner
+            .lock()
+            .unwrap()
+            .secrets
+            .iter()
+            .filter(|(_, w, _, row)| *w == workspace && row.ephemeral)
+            .map(|(_, _, n, _)| n.clone())
+            .collect())
     }
 }

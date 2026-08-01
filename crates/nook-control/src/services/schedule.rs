@@ -8,7 +8,6 @@
 //! 403 at start-work. The ownership filter here is the up-front half of that
 //! rule; the spawn guard is the enforcing half.
 
-use nook_db::{params, Db};
 use nook_types::{NodeId, NodeResources, NodeWorkspaceId, TenantId, UserId, WorkspaceId};
 use uuid::Uuid;
 
@@ -52,20 +51,16 @@ impl Placement {
 /// checkout per node, by discovery order). A `worktree` row, or a tombstoned
 /// (`missing_at` set) clone, is deliberately excluded — only a live clone makes a
 /// node a placement host (MAIN-227 AC-2, the worktree-from-clone-only invariant).
+///
+/// The rows come from [`WorkspaceRepository::clone_hosts`] (MAIN-292); the
+/// first-per-node collapse stays here because it is placement's rule, not the
+/// checkout aggregate's.
 pub async fn clone_hosts(
-    db: &nook_db::DbPool,
+    repo: &dyn crate::repo::workspaces::WorkspaceRepository,
     tenant: TenantId,
     workspace: WorkspaceId,
 ) -> ApiResult<std::collections::HashMap<NodeId, NodeWorkspaceId>> {
-    let hosts: Vec<(NodeId, NodeWorkspaceId)> = db
-        .query_all(
-            "SELECT node_id, id FROM node_workspaces
-             WHERE tenant_id = $1 AND workspace_id = $2
-               AND kind = 'clone' AND missing_at IS NULL
-             ORDER BY discovered_at",
-            params![tenant, workspace],
-        )
-        .await?;
+    let hosts = repo.clone_hosts(tenant, workspace).await?;
     let mut map = std::collections::HashMap::new();
     for (node, checkout) in hosts {
         map.entry(node).or_insert(checkout);
@@ -73,32 +68,17 @@ pub async fn clone_hosts(
     Ok(map)
 }
 
-/// The person behind a user — the identity a node's `owner_person_id` is keyed
-/// on. Resolved locally so scheduling carries no dependency on other modules'
-/// identity plumbing.
-async fn person_of(state: &AppState, user: UserId) -> ApiResult<Option<Uuid>> {
-    let row: Option<(Uuid,)> = state
-        .db
-        .query_opt("SELECT person_id FROM users WHERE id = $1", params![user])
-        .await?;
-    Ok(row.map(|(p,)| p))
-}
-
 /// Online nodes **owned by `person`**, with their latest resource sample. The
 /// ownership predicate is the candidate gate (MAIN-131): a node someone else
-/// owns is never a candidate, however well-resourced or idle it is.
+/// owns is never a candidate, however well-resourced or idle it is. "Online"
+/// here is the live socket in the registry, not the `status` column, which is
+/// why the filter sits above the repository rather than inside its query.
 async fn owned_online_nodes(
     state: &AppState,
     tenant: TenantId,
     person: Uuid,
 ) -> ApiResult<Vec<(NodeId, NodeResources)>> {
-    let rows: Vec<(NodeId, serde_json::Value)> = state
-        .db
-        .query_all(
-            "SELECT id, resources FROM nodes WHERE tenant_id = $1 AND owner_person_id = $2",
-            params![tenant, person],
-        )
-        .await?;
+    let rows = state.nodes.owned_with_resources(tenant, person).await?;
     Ok(rows
         .into_iter()
         .filter(|(id, _)| state.registry.node_online(*id))
@@ -129,7 +109,7 @@ pub async fn pick(
     workspace: Option<WorkspaceId>,
 ) -> ApiResult<Placement> {
     let Some(person) = (match actor {
-        Some(u) => person_of(state, u).await?,
+        Some(u) => state.identity.person_id_of(u).await?,
         None => None,
     }) else {
         return Err(no_eligible());
@@ -153,7 +133,7 @@ pub async fn pick(
     // A node HOSTS the workspace only when it has a `kind='clone'`, present
     // checkout of it (MAIN-227 AC-2): a worktree, or a tombstoned clone, is not a
     // placement host — the worktree-from-clone-only invariant.
-    let clone_at = clone_hosts(&state.db, tenant, ws).await?;
+    let clone_at = clone_hosts(state.workspaces.as_ref(), tenant, ws).await?;
 
     // Prefer an owned online node that already hosts a clone; rank only within
     // that set (ownership-filtered `all`).

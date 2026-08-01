@@ -135,6 +135,13 @@ pub trait SessionRepository: Send + Sync {
 
     /// End a managed session — the scale-down half of converging.
     async fn mark_ended(&self, tenant: TenantId, id: SessionId) -> ApiResult<u64>;
+
+    /// How many OTHER live sessions share this workspace (MAIN-292, moved from
+    /// `services::secrets`). Live = `starting`/`running`/`detached`. It is what
+    /// says whether an ending session was the last user of the checkout's
+    /// ephemeral secret files, so wiping them cannot pull the file out from
+    /// under a sibling still running.
+    async fn live_siblings(&self, workspace: WorkspaceId, excluding: SessionId) -> ApiResult<i64>;
 }
 
 // ── the DbPool implementation ───────────────────────────────────────────────
@@ -370,6 +377,18 @@ impl SessionRepository for DbSessionRepository {
                     now = type_mapping(self.db.engine()).now()
                 ),
                 params![id, tenant],
+            )
+            .await?)
+    }
+
+    async fn live_siblings(&self, workspace: WorkspaceId, excluding: SessionId) -> ApiResult<i64> {
+        Ok(self
+            .db
+            .query_scalar(
+                "SELECT count(*) FROM sessions
+                 WHERE workspace_id = $1 AND id <> $2
+                   AND status IN ('starting', 'running', 'detached')",
+                params![workspace, excluding],
             )
             .await?)
     }
@@ -666,5 +685,19 @@ impl SessionRepository for FakeSessionRepository {
         row.status = "exited".to_string();
         row.ended_at = Some(chrono::Utc::now());
         Ok(1)
+    }
+
+    async fn live_siblings(&self, workspace: WorkspaceId, excluding: SessionId) -> ApiResult<i64> {
+        Ok(self
+            .inner
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|x| {
+                x.workspace_id == Some(workspace)
+                    && x.id != excluding
+                    && matches!(x.status.as_str(), "starting" | "running" | "detached")
+            })
+            .count() as i64)
     }
 }
