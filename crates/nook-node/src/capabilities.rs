@@ -88,6 +88,7 @@ pub fn detect() -> Capabilities {
         shared_operator: shared_operator(),
         loop_kinds: loop_kinds(),
         max_loop_jobs: Some(max_loop_jobs()),
+        port_range: port_range(),
         runtime_auth: crate::runtime_auth::probe_all(),
     }
 }
@@ -153,6 +154,27 @@ pub fn parse_max_loop_jobs(raw: &str) -> u32 {
 
 fn max_loop_jobs() -> u32 {
     parse_max_loop_jobs(&std::env::var("NOOK_MAX_LOOP_JOBS").unwrap_or_default())
+}
+
+/// The port range this node offers sessions (MAIN-301), from
+/// `NOOK_PORT_RANGE` as `start-end`.
+///
+/// Unset means NONE, and that is deliberate: a guessed range would hand out
+/// ports something else on the machine is already listening on. An operator
+/// opts in, here or from the Nodes page.
+pub fn parse_port_range(raw: &str) -> Option<(u16, u16)> {
+    let (a, b) = raw.trim().split_once('-')?;
+    let (start, end) = (a.trim().parse().ok()?, b.trim().parse().ok()?);
+    // A backwards or empty range is a typo, not a range. Reporting none is the
+    // safe reading: no ports leased beats ports leased from nowhere.
+    if start == 0 || end < start {
+        return None;
+    }
+    Some((start, end))
+}
+
+fn port_range() -> Option<(u16, u16)> {
+    parse_port_range(&std::env::var("NOOK_PORT_RANGE").unwrap_or_default())
 }
 
 /// Is this the deployment's shared operator node (MAIN-125)? Read from

@@ -142,6 +142,46 @@ pub trait SessionRepository: Send + Sync {
     /// ephemeral secret files, so wiping them cannot pull the file out from
     /// under a sibling still running.
     async fn live_siblings(&self, workspace: WorkspaceId, excluding: SessionId) -> ApiResult<i64>;
+    // ── port leases (MAIN-301) ──────────────────────────────────────────────
+
+    /// Drop every lease held by a session on this node that is no longer live,
+    /// and answer with the ports still held.
+    ///
+    /// One call, because the two halves are the same question asked at the same
+    /// instant: reclaim is LAZY (AC-4), so "which ports are taken" is only
+    /// answerable after the dead ones have gone. Nothing releases a lease when
+    /// a session ends, is killed or is reaped — a dead session's ports come
+    /// back here, at the moment somebody needs one.
+    async fn reclaim_and_held_ports(&self, node: NodeId) -> ApiResult<Vec<i32>>;
+
+    /// Record one lease. `false` means another session took that port between
+    /// the read and this write — the unique index is the arbiter, so the caller
+    /// picks again rather than double-leasing.
+    async fn add_lease(&self, lease: NewPortLease) -> ApiResult<bool>;
+
+    /// Every port a session holds, in requirement-name order.
+    async fn leases_of(&self, session: SessionId) -> ApiResult<Vec<LeasedPort>>;
+
+    /// Every live lease on a node, lowest port first — what the UI lists.
+    async fn leases_on(&self, node: NodeId) -> ApiResult<Vec<PortLease>>;
+
+    /// Hand a session's ports back without ending it (AC-6): the escape hatch
+    /// for a lease a human can see is stuck.
+    ///
+    /// Scoped to the NODE as well as the tenant (MAIN-301 review): the caller
+    /// was authorized as that node's owner, so letting the session id alone
+    /// decide would have let one machine's owner free a port on another's.
+    async fn release_leases(&self, node: NodeId, id: SessionId) -> ApiResult<u64>;
+}
+
+/// A lease to record.
+#[derive(Debug, Clone)]
+pub struct NewPortLease {
+    pub session: SessionId,
+    pub node: NodeId,
+    pub name: String,
+    pub env: String,
+    pub port: i32,
 }
 
 // ── the DbPool implementation ───────────────────────────────────────────────
@@ -392,6 +432,121 @@ impl SessionRepository for DbSessionRepository {
             )
             .await?)
     }
+    async fn reclaim_and_held_ports(&self, node: NodeId) -> ApiResult<Vec<i32>> {
+        // The reclaim, and the only thing that ever frees a lease. A session
+        // that ended, was killed or was reaped left its rows behind on purpose;
+        // they go now, so the ports they held are free to the read below.
+        self.db
+            .exec(
+                "DELETE FROM session_port_leases
+                  WHERE node_id = $1
+                    AND session_id IN (SELECT id FROM sessions
+                                        WHERE status NOT IN ('starting', 'running', 'detached'))",
+                params![node],
+            )
+            .await?;
+        Ok(self
+            .db
+            .query_scalar_all(
+                "SELECT port FROM session_port_leases WHERE node_id = $1 ORDER BY port",
+                params![node],
+            )
+            .await?)
+    }
+
+    async fn add_lease(&self, lease: NewPortLease) -> ApiResult<bool> {
+        // A unique violation here is the RACE, not a bug: another session took
+        // the port between the read and this write. Reported as `false` so the
+        // caller picks again.
+        //
+        // The `(session, name)` index makes a re-lease of the same requirement
+        // idempotent — a restart replaces its own row rather than stacking a
+        // second one — so that conflict updates while a port conflict refuses.
+        match self
+            .db
+            .exec(
+                "INSERT INTO session_port_leases (id, session_id, node_id, name, env, port)
+                 VALUES ($1, $2, $3, $4, $5, $6)
+                 ON CONFLICT (session_id, name)
+                 DO UPDATE SET port = EXCLUDED.port, env = EXCLUDED.env",
+                params![
+                    uuid::Uuid::new_v4(),
+                    lease.session,
+                    lease.node,
+                    lease.name,
+                    lease.env,
+                    lease.port
+                ],
+            )
+            .await
+        {
+            Ok(n) => Ok(n > 0),
+            Err(e) if e.is_unique_violation() => Ok(false),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    async fn leases_of(&self, session: SessionId) -> ApiResult<Vec<LeasedPort>> {
+        let rows: Vec<(String, String, i32)> = self
+            .db
+            .query_all(
+                "SELECT name, env, port FROM session_port_leases
+                  WHERE session_id = $1 ORDER BY name",
+                params![session],
+            )
+            .await?;
+        Ok(rows
+            .into_iter()
+            .map(|(name, env, port)| LeasedPort { name, env, port })
+            .collect())
+    }
+
+    async fn leases_on(&self, node: NodeId) -> ApiResult<Vec<PortLease>> {
+        let rows: Vec<(SessionId, String, String, String, String, i32)> = self
+            .db
+            .query_all(
+                "SELECT s.id, s.name, s.status, l.name, l.env, l.port
+                   FROM session_port_leases l
+                   JOIN sessions s ON s.id = l.session_id
+                  WHERE l.node_id = $1
+                  ORDER BY l.port",
+                params![node],
+            )
+            .await?;
+        Ok(rows
+            .into_iter()
+            .map(
+                |(session_id, session_name, status, name, env, port)| PortLease {
+                    session_id,
+                    session_name,
+                    status,
+                    name,
+                    env,
+                    port,
+                },
+            )
+            .collect())
+    }
+
+    async fn release_leases(&self, node: NodeId, id: SessionId) -> ApiResult<u64> {
+        Ok(self
+            .db
+            .exec(
+                "DELETE FROM session_port_leases WHERE session_id = $1 AND node_id = $2",
+                params![id, node],
+            )
+            .await?)
+    }
+}
+
+/// One row of the fake's lease table.
+#[derive(Debug, Clone)]
+struct FakeLease {
+    session: SessionId,
+    node: NodeId,
+    name: String,
+    env: String,
+    port: i32,
 }
 
 // ── the in-memory fake (AC-3) ───────────────────────────────────────────────
@@ -405,6 +560,10 @@ use std::sync::Mutex;
 #[derive(Default)]
 pub struct FakeSessionRepository {
     inner: Mutex<Vec<Session>>,
+    /// The lease rows, held beside the sessions exactly as the table is held
+    /// beside `sessions` — so the fake can enforce the same two unique indexes
+    /// in the same critical section as the write.
+    leases: Mutex<Vec<FakeLease>>,
 }
 
 impl FakeSessionRepository {
@@ -521,6 +680,7 @@ impl SessionRepository for FakeSessionRepository {
             managed: new.managed,
             checkout: None,
             node_online: None,
+            leased_ports: Vec::new(),
         };
         self.inner.lock().unwrap().push(session.clone());
         Ok(session)
@@ -691,5 +851,96 @@ impl SessionRepository for FakeSessionRepository {
                     && matches!(x.status.as_str(), "starting" | "running" | "detached")
             })
             .count() as i64)
+    }
+    async fn reclaim_and_held_ports(&self, node: NodeId) -> ApiResult<Vec<i32>> {
+        let live: Vec<SessionId> = self
+            .inner
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|x| matches!(x.status.as_str(), "starting" | "running" | "detached"))
+            .map(|x| x.id)
+            .collect();
+        let mut leases = self.leases.lock().unwrap();
+        // The lazy reclaim, same as the real one: a lease whose session is no
+        // longer live simply goes, and nothing had to call anything to free it.
+        leases.retain(|l| l.node != node || live.contains(&l.session));
+        let mut held: Vec<i32> = leases
+            .iter()
+            .filter(|l| l.node == node)
+            .map(|l| l.port)
+            .collect();
+        held.sort_unstable();
+        Ok(held)
+    }
+
+    async fn add_lease(&self, lease: NewPortLease) -> ApiResult<bool> {
+        let mut leases = self.leases.lock().unwrap();
+        // `(node, port)` refuses; `(session, name)` replaces. Both indexes, in
+        // the same critical section as the write, exactly as the table has them.
+        if leases.iter().any(|l| {
+            l.node == lease.node
+                && l.port == lease.port
+                && !(l.session == lease.session && l.name == lease.name)
+        }) {
+            return Ok(false);
+        }
+        leases.retain(|l| !(l.session == lease.session && l.name == lease.name));
+        leases.push(FakeLease {
+            session: lease.session,
+            node: lease.node,
+            name: lease.name,
+            env: lease.env,
+            port: lease.port,
+        });
+        Ok(true)
+    }
+
+    async fn leases_of(&self, session: SessionId) -> ApiResult<Vec<LeasedPort>> {
+        let mut out: Vec<LeasedPort> = self
+            .leases
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|l| l.session == session)
+            .map(|l| LeasedPort {
+                name: l.name.clone(),
+                env: l.env.clone(),
+                port: l.port,
+            })
+            .collect();
+        out.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(out)
+    }
+
+    async fn leases_on(&self, node: NodeId) -> ApiResult<Vec<PortLease>> {
+        let rows = self.inner.lock().unwrap();
+        let mut out: Vec<PortLease> = self
+            .leases
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|l| l.node == node)
+            .filter_map(|l| {
+                let s = rows.iter().find(|x| x.id == l.session)?;
+                Some(PortLease {
+                    session_id: l.session,
+                    session_name: s.name.clone(),
+                    status: s.status.clone(),
+                    name: l.name.clone(),
+                    env: l.env.clone(),
+                    port: l.port,
+                })
+            })
+            .collect();
+        out.sort_by_key(|l| l.port);
+        Ok(out)
+    }
+
+    async fn release_leases(&self, node: NodeId, id: SessionId) -> ApiResult<u64> {
+        let mut leases = self.leases.lock().unwrap();
+        let before = leases.len();
+        leases.retain(|l| !(l.session == id && l.node == node));
+        Ok((before - leases.len()) as u64)
     }
 }

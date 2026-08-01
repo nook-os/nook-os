@@ -239,6 +239,7 @@ pub fn runtime_available(runtime: &str) -> bool {
         .is_ok_and(|o| o.status.success() && !o.stdout.is_empty())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn new_session(
     name: &str,
     cwd: &str,
@@ -246,6 +247,13 @@ pub fn new_session(
     rows: u16,
     command: &str,
     session_id: &str,
+    // The ports the control plane leased this session (MAIN-301), each with
+    // the env var its WORKSPACE declared for it — `PORT`, `API_PORT`,
+    // `NOOK_PORT`, whatever the repo asked for. This end neither chooses nor
+    // recognises the names; it exports what it was handed, which is what keeps
+    // the node as framework-agnostic as the broker. Empty when the node
+    // advertises no range or the workspace declares no listeners.
+    ports: &[nook_types::LeasedPort],
 ) -> Result<()> {
     // Preflight, so the failure names its own cause. tmux's own message for a
     // missing -c directory is terse and arrives with no session attached, and
@@ -257,6 +265,14 @@ pub fn new_session(
     if !runtime_available(command) {
         anyhow::bail!("runtime '{command}' is not installed on this node");
     }
+    let port_s: Vec<(String, String)> = ports
+        .iter()
+        .map(|p| (p.env.clone(), p.port.to_string()))
+        .collect();
+    let extra: Vec<(&str, &str)> = port_s
+        .iter()
+        .map(|(env, port)| (env.as_str(), port.as_str()))
+        .collect();
     spawn(
         name,
         cwd,
@@ -264,7 +280,7 @@ pub fn new_session(
         rows,
         &login_command(command),
         session_id,
-        &[],
+        &extra,
     )
 }
 

@@ -244,6 +244,110 @@ pub async fn set_session_spec(
     })))
 }
 
+/// `GET /api/v1/workspaces/{id}/ports` — the port requirements in force.
+///
+/// Always answers with what WILL be leased, not with the raw column: an
+/// undeclared workspace reports the default listener rather than an empty list,
+/// because "you get NOOK_PORT" and "you get nothing" are different states and a
+/// UI showing an empty table for the first would be lying.
+#[utoipa::path(get, path = "/api/v1/workspaces/{id}/ports",
+    operation_id = "get_port_requirements",
+    params(("id" = String, Path,)),
+    responses((status = 200, body = [PortRequirement]), (status = 404)))]
+pub async fn get_port_requirements(
+    State(state): State<AppState>,
+    auth: AuthCtx,
+    Path(id): Path<WorkspaceId>,
+) -> ApiResult<Json<Vec<PortRequirement>>> {
+    state
+        .workspaces
+        .get(auth.tenant_id, id)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    Ok(Json(
+        crate::services::port_leases::requirements_of(&state, auth.tenant_id, Some(id)).await?,
+    ))
+}
+
+/// `PUT /api/v1/workspaces/{id}/ports` — declare what this repo binds.
+///
+/// The declaration is the workspace's, which is the whole point of MAIN-301's
+/// second cut: the control plane leases numbers and never learns what `PORT`
+/// means to anybody.
+#[utoipa::path(put, path = "/api/v1/workspaces/{id}/ports",
+    operation_id = "set_port_requirements",
+    params(("id" = String, Path,)),
+    request_body = SetPortRequirementsRequest,
+    responses((status = 200, body = [PortRequirement]), (status = 400), (status = 404)))]
+pub async fn set_port_requirements(
+    State(state): State<AppState>,
+    auth: AuthCtx,
+    Path(id): Path<WorkspaceId>,
+    Json(req): Json<SetPortRequirementsRequest>,
+) -> ApiResult<Json<Vec<PortRequirement>>> {
+    // A person declares desired state; a node credential is not a person.
+    auth.require_user()?;
+    if let Some(reqs) = &req.requirements {
+        validate_requirements(reqs)?;
+    }
+    let stored = match &req.requirements {
+        Some(reqs) => Some(serde_json::to_value(reqs).map_err(|_| {
+            ApiError::BadRequest("those port requirements could not be stored".into())
+        })?),
+        None => None,
+    };
+    state
+        .workspaces
+        .set_port_requirements(auth.tenant_id, id, stored)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    Ok(Json(
+        crate::services::port_leases::requirements_of(&state, auth.tenant_id, Some(id)).await?,
+    ))
+}
+
+/// Refuse a declaration that could not be honoured, at the point somebody typed
+/// it — not at the point a session fails to start on a machine they are not
+/// looking at.
+fn validate_requirements(reqs: &[PortRequirement]) -> ApiResult<()> {
+    let mut seen: std::collections::BTreeSet<&str> = Default::default();
+    for r in reqs {
+        if r.name.trim().is_empty() || r.env.trim().is_empty() {
+            return Err(ApiError::BadRequest(
+                "every port requirement needs a name and an env var".into(),
+            ));
+        }
+        // The env var is spliced into the session's environment by the node, so
+        // it has to BE an environment variable name. A value with `=` or a
+        // space in it would either be silently dropped or corrupt its
+        // neighbours, and neither failure would point back here.
+        if !r.env.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+            || r.env.starts_with(|c: char| c.is_ascii_digit())
+        {
+            return Err(ApiError::BadRequest(format!(
+                "`{}` is not a usable environment variable name (letters, digits and underscore, not starting with a digit)",
+                r.env
+            )));
+        }
+        if !matches!(r.protocol.as_str(), "tcp" | "udp") {
+            return Err(ApiError::BadRequest(format!(
+                "`{}` is not a protocol this leases — tcp or udp",
+                r.protocol
+            )));
+        }
+        // Names key the leases, so a duplicate is not a redundancy: the second
+        // would overwrite the first's lease and the workspace would end up with
+        // fewer ports than it declared.
+        if !seen.insert(r.name.as_str()) {
+            return Err(ApiError::BadRequest(format!(
+                "two requirements are both called `{}`",
+                r.name
+            )));
+        }
+    }
+    Ok(())
+}
+
 #[derive(serde::Deserialize, utoipa::IntoParams)]
 pub struct GitQuery {
     pub node_id: NodeId,

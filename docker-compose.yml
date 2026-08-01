@@ -247,6 +247,9 @@ services:
       NOOK_SERVER: http://control-plane:8080
       NOOK_DEV_JOIN_TOKEN: ${NOOK_DEV_JOIN_TOKEN:-}
       NOOK_NODE_NAME: dev-node
+      # Ports this node leases to sessions (MAIN-301) — a different band from
+      # the operator's, so the two dev nodes never advertise the same numbers.
+      NOOK_PORT_RANGE: 4200-4299
       # The dev control plane is plain http:// on the container network, so the
       # node would (correctly) refuse to talk to it. This is the one case the
       # insecure hatch exists for; it is refused outright when APP_ENV=production.
@@ -317,6 +320,13 @@ services:
       # regardless of what is listed here.
       NOOK_LOOP_KINDS: spec,decompose,review,epic-run
       NOOK_MAX_LOOP_JOBS: "2"
+      # The ports this node leases to sessions (MAIN-301). A session gets one
+      # per listener its WORKSPACE declared, each as the env var that workspace
+      # named, so two worktrees of the same app run side by side instead of
+      # fighting over a hardcoded 3000. Unset would mean "lease nothing" —
+      # deliberately, since a guessed range would hand out ports something else
+      # on the machine is already listening on.
+      NOOK_PORT_RANGE: 4100-4199
       # The operator node boots with the dev stack by default (MAIN-140), but it
       # only claims loop work when the loops master switch is ON — which it is
       # NOT by default (MAIN-239). So a fresh stack has an operator standing by

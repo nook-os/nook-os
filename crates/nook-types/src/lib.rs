@@ -480,6 +480,12 @@ pub struct Capabilities {
     /// see `nook_control::services::jobs::CAPACITY_WHEN_UNREPORTED`.
     #[serde(default)]
     pub max_loop_jobs: Option<u32>,
+    /// The port range this node offers sessions, `[start, end]` inclusive
+    /// (MAIN-301). Absent from a node too old to report one, which reads as
+    /// "no ports to lease" rather than a guessed range — inventing one would
+    /// hand out ports something else on that machine is already using.
+    #[serde(default)]
+    pub port_range: Option<(u16, u16)>,
     /// Agent authorization profiles this node reports (MAIN-126): one per
     /// runtime-specific auth target (Claude Code, Hermes → Nous Portal, …), each
     /// with a state probed from the runtime's own CLI — never inferred from a
@@ -570,6 +576,13 @@ pub struct Node {
     #[serde(default)]
     #[db(skip)]
     pub home_tenant: Option<String>,
+    /// An operator's port range for this node, overriding what it advertises
+    /// (MAIN-301). Both `None` means "use the node's own"; the pair is set and
+    /// cleared together, which the API enforces.
+    #[serde(default)]
+    pub port_range_start: Option<i32>,
+    #[serde(default)]
+    pub port_range_end: Option<i32>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -599,6 +612,107 @@ pub struct NodePlacement {
     /// derived ones by round-tripping.
     pub custom_labels: std::collections::BTreeMap<String, String>,
     pub taints: Vec<NodeTaint>,
+}
+
+/// A node's port situation (MAIN-301): the range sessions lease from, where it
+/// came from, and what is currently held.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct NodePorts {
+    /// The range in force — the operator's override if set, else the node's
+    /// own. `None` when neither exists, which is why leasing is optional
+    /// rather than a failure.
+    pub range: Option<PortRange>,
+    /// Where `range` came from, so the UI can say "reported by the node" vs
+    /// "set here" instead of showing two numbers with no provenance.
+    pub source: String,
+    /// The node's own advertisement, kept separate so clearing the override in
+    /// the UI shows what it will fall back to.
+    pub advertised: Option<PortRange>,
+    /// Live sessions holding a port on this node, lowest port first.
+    pub leases: Vec<PortLease>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema)]
+pub struct PortRange {
+    pub start: i32,
+    pub end: i32,
+}
+
+/// One port a workspace needs, by NAME and by the env var its runtime reads
+/// (MAIN-301).
+///
+/// The declaration is the workspace's, not the control plane's. Baking `PORT`
+/// / `NOOK_PORT` / `API_PORT` into the broker would have meant every new
+/// framework needing a change here; instead the repo says what it needs and
+/// the broker only decides *which* numbers satisfy it. That is what lets a
+/// Next.js app, an ASP.NET service and a Rust backend all lease from the same
+/// node without the control plane knowing anything about any of them.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct PortRequirement {
+    /// Stable identity for this listener within the workspace — `web`, `api`,
+    /// `debug`. What a lease is keyed on, so re-leasing is idempotent and a
+    /// renamed env var does not orphan the old lease.
+    pub name: String,
+    /// The environment variable the session's runtime reads the number from.
+    pub env: String,
+    /// `tcp` or `udp`. Carried because a declaration that cannot say which is
+    /// not a description of what the app binds; nothing dispatches on it yet.
+    #[serde(default = "default_protocol")]
+    pub protocol: String,
+    /// Whether the session should refuse to start when this one cannot be
+    /// leased. A `debug` listener is usually optional; the app's own port is
+    /// usually not.
+    #[serde(default)]
+    pub required: bool,
+}
+
+fn default_protocol() -> String {
+    "tcp".into()
+}
+
+/// A port actually leased to a session, as the node is told about it.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct LeasedPort {
+    pub name: String,
+    pub env: String,
+    pub port: i32,
+}
+
+/// One held port: which session has it, which requirement it satisfies, and
+/// enough about that session for a human to decide whether releasing it is
+/// safe.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct PortLease {
+    pub session_id: SessionId,
+    pub session_name: String,
+    pub status: String,
+    /// The requirement's name and env var — so the UI can say *which* listener
+    /// holds the port rather than just that something does.
+    pub name: String,
+    pub env: String,
+    pub port: i32,
+}
+
+/// `PUT /workspaces/{id}/ports` — replace a workspace's port requirements.
+///
+/// A full replacement, not a patch: a partial update of a set is ambiguous
+/// about deletion (the same reason `SetNodePlacementRequest` replaces).
+#[derive(Debug, Clone, Deserialize, ToSchema)]
+pub struct SetPortRequirementsRequest {
+    /// `null` clears the declaration, returning the workspace to the default
+    /// single `NOOK_PORT` listener; an empty list means "this workspace binds
+    /// nothing", which is a different statement and is honoured as one.
+    pub requirements: Option<Vec<PortRequirement>>,
+}
+
+/// `PUT /nodes/{id}/ports` — set or clear the operator's range. Both `None`
+/// clears it back to whatever the node advertises.
+#[derive(Debug, Clone, Deserialize, ToSchema)]
+pub struct SetNodePortsRequest {
+    #[serde(default)]
+    pub start: Option<i32>,
+    #[serde(default)]
+    pub end: Option<i32>,
 }
 
 /// Replace a node's operator-set labels and taints (MAIN-314). Both fields are
@@ -804,6 +918,12 @@ pub struct Workspace {
     /// The desired session state (MAIN-315), or `None` for an UNMANAGED
     /// workspace. Nothing reconciles it yet.
     pub session_spec: Option<serde_json::Value>,
+    /// The workspace's declared port requirements (MAIN-301), as stored JSON —
+    /// `[{"name":"web","env":"PORT",…}]`. `None` means undeclared, which falls
+    /// back to the default single listener; an empty array means "binds
+    /// nothing" and is honoured as the different statement it is.
+    #[serde(default)]
+    pub port_requirements: Option<serde_json::Value>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -879,6 +999,14 @@ pub struct Session {
     /// to offer that button is to know which kind of session this is.
     #[serde(default)]
     pub managed: bool,
+    /// The ports leased to this session (MAIN-301), one per satisfied
+    /// [`PortRequirement`], each delivered into the session as its own env
+    /// var. Empty when the node offers no range or the workspace declares no
+    /// listeners. Not a stored column — the leases are their own rows, joined
+    /// in by the session endpoints.
+    #[serde(default)]
+    #[db(skip)]
+    pub leased_ports: Vec<LeasedPort>,
     /// Denormalised summary of `checkout_id` for the UI — filled by the session
     /// endpoints, not a stored column, so it is absent from a raw `FROM sessions`
     /// row (hence `#[db(skip)]`).

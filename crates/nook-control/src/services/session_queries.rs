@@ -36,6 +36,7 @@ pub async fn list_sessions(
         )
         .await?;
     hydrate_checkouts(workspaces, &mut rows).await?;
+    hydrate_ports(sessions, &mut rows).await?;
     Ok(rows)
 }
 
@@ -50,6 +51,19 @@ pub async fn hydrate_checkouts(
     for s in sessions.iter_mut() {
         let Some(cid) = s.checkout_id else { continue };
         s.checkout = workspaces.checkout_summary(cid).await?;
+    }
+    Ok(())
+}
+
+/// Fill in each session's leased ports (MAIN-301). Not a stored column — a
+/// session holds one row per satisfied requirement — so the endpoints that
+/// return a `Session` join them in here rather than every caller remembering to.
+pub async fn hydrate_ports(
+    repo: &dyn crate::repo::sessions::SessionRepository,
+    sessions: &mut [Session],
+) -> ApiResult<()> {
+    for s in sessions.iter_mut() {
+        s.leased_ports = repo.leases_of(s.id).await?;
     }
     Ok(())
 }
@@ -156,6 +170,27 @@ pub async fn create_session_at(
         })
         .await?;
 
+    // Leased AFTER the row exists (the leases reference it) and BEFORE the node
+    // is told, so the ports reach the session's environment on its first start
+    // rather than a restart. A failure here is a failure to start: the
+    // alternative is a session whose app silently falls back to a hardcoded
+    // port and collides, which is the bug this replaces.
+    let ports = match crate::services::port_leases::lease_for(
+        state,
+        tenant,
+        node_id,
+        Some(workspace_id),
+        session.id,
+    )
+    .await
+    {
+        Ok(p) => p,
+        Err(e) => {
+            state.sessions.mark_failed_to_start(session.id).await?;
+            return Err(e);
+        }
+    };
+
     let sent = state.registry.send_to_node(
         node_id,
         nook_proto::ControlToNode::StartSession {
@@ -164,6 +199,7 @@ pub async fn create_session_at(
             workspace_path: workspace_path.to_string(),
             cols: 120,
             rows: 32,
+            ports: ports.clone(),
         },
     );
     if !sent {
@@ -217,6 +253,19 @@ pub async fn create_ad_hoc_session(
         })
         .await?;
 
+    // No workspace, so nothing declares a listener and nothing is leased — an
+    // $HOME terminal is not a repo.
+    let ports =
+        match crate::services::port_leases::lease_for(state, tenant, node_id, None, session.id)
+            .await
+        {
+            Ok(p) => p,
+            Err(e) => {
+                state.sessions.mark_failed_to_start(session.id).await?;
+                return Err(e);
+            }
+        };
+
     let sent = state.registry.send_to_node(
         node_id,
         nook_proto::ControlToNode::StartSession {
@@ -226,6 +275,7 @@ pub async fn create_ad_hoc_session(
             workspace_path: String::new(),
             cols: 120,
             rows: 32,
+            ports: ports.clone(),
         },
     );
     if !sent {

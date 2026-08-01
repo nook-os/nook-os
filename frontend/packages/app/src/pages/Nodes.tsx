@@ -9,6 +9,7 @@ import { askConfirm, notify } from "../dialogs";
 import { useLive } from "../live";
 import { AddNodeModal } from "../AddNodeModal";
 import { NodePlacement } from "../NodePlacement";
+import { NodePorts } from "../NodePorts";
 
 export function NodesPage() {
   const [adding, setAdding] = useState(false);
@@ -409,6 +410,13 @@ export function NodeDetail() {
       {/* The inputs placement reads (MAIN-319 AC-2). Owner-only to edit — the
           server enforces it; this only avoids offering a button that 403s. */}
       <NodePlacement
+        nodeId={node.id}
+        canEdit={!!me?.person_id && node.owner_person_id === me.person_id}
+      />
+
+      {/* The port range sessions lease from, and who holds what (MAIN-301).
+          Owner-only to edit, same rule and same reason as placement. */}
+      <NodePorts
         nodeId={node.id}
         canEdit={!!me?.person_id && node.owner_person_id === me.person_id}
       />

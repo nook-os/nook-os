@@ -2055,6 +2055,52 @@
         }
       }
     },
+    "/api/v1/nodes/{id}/leases/{session}": {
+      "delete": {
+        "tags": [
+          "crate::routes::nodes"
+        ],
+        "summary": "`DELETE /api/v1/nodes/{id}/leases/{session}` — hand a port back without\nending its session (AC-6).",
+        "description": "The escape hatch, not the mechanism: a lease normally frees itself when its\nsession stops being live. This is for the one a human can see is stuck.",
+        "operationId": "release_node_lease",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "session",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NodePorts"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": ""
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      }
+    },
     "/api/v1/nodes/{id}/migrate-paths": {
       "post": {
         "tags": [
@@ -2173,6 +2219,89 @@
                 }
               }
             }
+          },
+          "403": {
+            "description": ""
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      }
+    },
+    "/api/v1/nodes/{id}/ports": {
+      "get": {
+        "tags": [
+          "crate::routes::nodes"
+        ],
+        "summary": "`GET /api/v1/nodes/{id}/ports` — the range in force, where it came from,\nand the live leases (MAIN-301 AC-5/AC-6). Visible to anyone who can see the\nnode: knowing which ports are busy is the same grade of fact as knowing the\nmachine exists.",
+        "operationId": "get_node_ports",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NodePorts"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "crate::routes::nodes"
+        ],
+        "summary": "`PUT /api/v1/nodes/{id}/ports` — set or clear the operator's range.",
+        "description": "Owner-gated exactly as placement and sharing are: the range decides what\ngets bound on somebody's machine, so it is the machine owner's call.",
+        "operationId": "set_node_ports",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetNodePortsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NodePorts"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": ""
           },
           "403": {
             "description": ""
@@ -6777,6 +6906,93 @@
         }
       }
     },
+    "/api/v1/workspaces/{id}/ports": {
+      "get": {
+        "tags": [
+          "crate::routes::workspaces"
+        ],
+        "summary": "`GET /api/v1/workspaces/{id}/ports` — the port requirements in force.",
+        "description": "Always answers with what WILL be leased, not with the raw column: an\nundeclared workspace reports the default listener rather than an empty list,\nbecause \"you get NOOK_PORT\" and \"you get nothing\" are different states and a\nUI showing an empty table for the first would be lying.",
+        "operationId": "get_port_requirements",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/PortRequirement"
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "crate::routes::workspaces"
+        ],
+        "summary": "`PUT /api/v1/workspaces/{id}/ports` — declare what this repo binds.",
+        "description": "The declaration is the workspace's, which is the whole point of MAIN-301's\nsecond cut: the control plane leases numbers and never learns what `PORT`\nmeans to anybody.",
+        "operationId": "set_port_requirements",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetPortRequirementsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/PortRequirement"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": ""
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      }
+    },
     "/api/v1/workspaces/{id}/reconcile-status": {
       "get": {
         "tags": [
@@ -7938,6 +8154,26 @@
           },
           "platform": {
             "type": "string"
+          },
+          "port_range": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": false,
+            "prefixItems": [
+              {
+                "type": "integer",
+                "format": "int32",
+                "minimum": 0
+              },
+              {
+                "type": "integer",
+                "format": "int32",
+                "minimum": 0
+              }
+            ],
+            "description": "The port range this node offers sessions, `[start, end]` inclusive\n(MAIN-301). Absent from a node too old to report one, which reads as\n\"no ports to lease\" rather than a guessed range — inventing one would\nhand out ports something else on that machine is already using."
           },
           "runtime_auth": {
             "type": "array",
@@ -10166,6 +10402,27 @@
           }
         }
       },
+      "LeasedPort": {
+        "type": "object",
+        "description": "A port actually leased to a session, as the node is told about it.",
+        "required": [
+          "name",
+          "env",
+          "port"
+        ],
+        "properties": {
+          "env": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "port": {
+            "type": "integer",
+            "format": "int32"
+          }
+        }
+      },
       "LocalAuthStatus": {
         "type": "object",
         "required": [
@@ -10591,6 +10848,21 @@
           "platform": {
             "type": "string"
           },
+          "port_range_end": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "port_range_start": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "An operator's port range for this node, overriding what it advertises\n(MAIN-301). Both `None` means \"use the node's own\"; the pair is set and\ncleared together, which the API enforces."
+          },
           "resources": {
             "description": "Latest heartbeat resource sample (see `NodeResources`); `{}` until first."
           },
@@ -10683,6 +10955,49 @@
             "items": {
               "$ref": "#/components/schemas/NodeTaint"
             }
+          }
+        }
+      },
+      "NodePorts": {
+        "type": "object",
+        "description": "A node's port situation (MAIN-301): the range sessions lease from, where it\ncame from, and what is currently held.",
+        "required": [
+          "source",
+          "leases"
+        ],
+        "properties": {
+          "advertised": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/PortRange",
+                "description": "The node's own advertisement, kept separate so clearing the override in\nthe UI shows what it will fall back to."
+              }
+            ]
+          },
+          "leases": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PortLease"
+            },
+            "description": "Live sessions holding a port on this node, lowest port first."
+          },
+          "range": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/PortRange",
+                "description": "The range in force — the operator's override if set, else the node's\nown. `None` when neither exists, which is why leasing is optional\nrather than a failure."
+              }
+            ]
+          },
+          "source": {
+            "type": "string",
+            "description": "Where `range` came from, so the UI can say \"reported by the node\" vs\n\"set here\" instead of showing two numbers with no provenance."
           }
         }
       },
@@ -11663,6 +11978,83 @@
           }
         }
       },
+      "PortLease": {
+        "type": "object",
+        "description": "One held port: which session has it, which requirement it satisfies, and\nenough about that session for a human to decide whether releasing it is\nsafe.",
+        "required": [
+          "session_id",
+          "session_name",
+          "status",
+          "name",
+          "env",
+          "port"
+        ],
+        "properties": {
+          "env": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string",
+            "description": "The requirement's name and env var — so the UI can say *which* listener\nholds the port rather than just that something does."
+          },
+          "port": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "session_id": {
+            "$ref": "#/components/schemas/SessionId"
+          },
+          "session_name": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          }
+        }
+      },
+      "PortRange": {
+        "type": "object",
+        "required": [
+          "start",
+          "end"
+        ],
+        "properties": {
+          "end": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "start": {
+            "type": "integer",
+            "format": "int32"
+          }
+        }
+      },
+      "PortRequirement": {
+        "type": "object",
+        "description": "One port a workspace needs, by NAME and by the env var its runtime reads\n(MAIN-301).\n\nThe declaration is the workspace's, not the control plane's. Baking `PORT`\n/ `NOOK_PORT` / `API_PORT` into the broker would have meant every new\nframework needing a change here; instead the repo says what it needs and\nthe broker only decides *which* numbers satisfy it. That is what lets a\nNext.js app, an ASP.NET service and a Rust backend all lease from the same\nnode without the control plane knowing anything about any of them.",
+        "required": [
+          "name",
+          "env"
+        ],
+        "properties": {
+          "env": {
+            "type": "string",
+            "description": "The environment variable the session's runtime reads the number from."
+          },
+          "name": {
+            "type": "string",
+            "description": "Stable identity for this listener within the workspace — `web`, `api`,\n`debug`. What a lease is keyed on, so re-leasing is idempotent and a\nrenamed env var does not orphan the old lease."
+          },
+          "protocol": {
+            "type": "string",
+            "description": "`tcp` or `udp`. Carried because a declaration that cannot say which is\nnot a description of what the app binds; nothing dispatches on it yet."
+          },
+          "required": {
+            "type": "boolean",
+            "description": "Whether the session should refuse to start when this one cannot be\nleased. A `debug` listener is usually optional; the app's own port is\nusually not."
+          }
+        }
+      },
       "PostChatMessage": {
         "type": "object",
         "description": "Post a message to a channel. `parent_message_id`, when set, makes this a\nthreaded reply (MAIN-114) — the parent must be in the same channel and must\nnot itself be a reply (one level, no nesting).",
@@ -12223,6 +12615,13 @@
           "id": {
             "$ref": "#/components/schemas/SessionId"
           },
+          "leased_ports": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/LeasedPort"
+            },
+            "description": "The ports leased to this session (MAIN-301), one per satisfied\n[`PortRequirement`], each delivered into the session as its own env\nvar. Empty when the node offers no range or the workspace declares no\nlisteners. Not a stored column — the leases are their own rows, joined\nin by the session endpoints."
+          },
           "managed": {
             "type": "boolean",
             "description": "Who owns this session: the reconciler (`true`, started for the\nworkspace's [`SessionSpec`]) or a person (`false`, hand-started).\n\nStored since MAIN-316 and surfaced here by MAIN-318, because it is the\none thing about a session a caller cannot work out for itself — a\nhand-started terminal in a managed workspace, on an eligible node, with\nthe spec's runtime, looks exactly like a replica.\n\nIt decides which removal a UI may offer. Killing a managed session is\nnot removing it: the next reconcile pass sees a checkout with no live\nmanaged session and starts another. Removing one means editing the\ndeclaration — lower the workspace's replicas — and the only honest way\nto offer that button is to know which kind of session this is."
@@ -12441,6 +12840,26 @@
           }
         }
       },
+      "SetNodePortsRequest": {
+        "type": "object",
+        "description": "`PUT /nodes/{id}/ports` — set or clear the operator's range. Both `None`\nclears it back to whatever the node advertises.",
+        "properties": {
+          "end": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "start": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          }
+        }
+      },
       "SetPolicyRequest": {
         "type": "object",
         "required": [
@@ -12453,6 +12872,22 @@
           },
           "field": {
             "type": "string"
+          }
+        }
+      },
+      "SetPortRequirementsRequest": {
+        "type": "object",
+        "description": "`PUT /workspaces/{id}/ports` — replace a workspace's port requirements.\n\nA full replacement, not a patch: a partial update of a set is ambiguous\nabout deletion (the same reason `SetNodePlacementRequest` replaces).",
+        "properties": {
+          "requirements": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/PortRequirement"
+            },
+            "description": "`null` clears the declaration, returning the workspace to the default\nsingle `NOOK_PORT` listener; an empty list means \"this workspace binds\nnothing\", which is a different statement and is honoured as one."
           }
         }
       },
@@ -14662,6 +15097,9 @@
           },
           "name": {
             "type": "string"
+          },
+          "port_requirements": {
+            "description": "The workspace's declared port requirements (MAIN-301), as stored JSON —\n`[{\"name\":\"web\",\"env\":\"PORT\",…}]`. `None` means undeclared, which falls\nback to the default single listener; an empty array means \"binds\nnothing\" and is honoured as the different statement it is."
           },
           "session_spec": {
             "description": "The desired session state (MAIN-315), or `None` for an UNMANAGED\nworkspace. Nothing reconciles it yet."
