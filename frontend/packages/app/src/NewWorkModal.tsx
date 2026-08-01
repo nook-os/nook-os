@@ -11,6 +11,7 @@ import { X } from "lucide-react";
 import { api, type NodeInfo } from "@nookos/api";
 import { defaultRuntime, RuntimePicker } from "@nookos/ui";
 import { useNewWork } from "./newwork";
+import { PORT_CAP_SENTENCE } from "./PortSafetyNotice";
 import { onJobFinish, useJobs } from "./jobs";
 import { WorkspaceLocations } from "./WorkspaceLocations";
 import { adoptEnvFromDisk, saveEnv } from "./envvault";
@@ -456,6 +457,17 @@ function NewWorkModal() {
                   autoFocus
                 />
               </div>
+              {/* Said BEFORE they finish (MAIN-361 AC-5), not discovered later
+                  as an unexplained refusal to start a second session. The
+                  sentence is shared with the workspace banner so the two cannot
+                  drift into describing the same rule differently. */}
+              {query.trim() !== "" && (
+                <div className="faint small" style={{ marginTop: -4, marginBottom: 6 }}>
+                  {PORT_CAP_SENTENCE} Add a{" "}
+                  <span className="mono">.nook.toml</span> to the repo (or declare
+                  its ports on the workspace afterwards) and the limit lifts.
+                </div>
+              )}
               {newIntent === "clone" && !declarative && (
                 <div className="field">
                   <label>SSH credential (for private repos)</label>

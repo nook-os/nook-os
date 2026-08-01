@@ -110,6 +110,9 @@ pub async fn reconcile_status(
             desired: 0,
             running: 0,
             shortfall: 0,
+            // An unmanaged workspace has no reconciler-run sessions to cap, so
+            // the flag is about nothing here — false rather than "unknown".
+            port_capped: false,
             blocked: Vec::new(),
             eligible: 0,
         }));
@@ -138,7 +141,11 @@ pub async fn reconcile_status(
             node_id,
         })
         .collect();
-    let plan = recon::plan(&spec, &nodes, &checkouts, &actual);
+    // The same question the reconciler asks, asked the same way (MAIN-361), so
+    // the number on screen is the number the loop is acting on rather than a
+    // second opinion about it.
+    let ports = recon::port_safety(&state, auth.tenant_id, id).await?;
+    let plan = recon::plan(&spec, &nodes, &checkouts, &actual, ports);
 
     // Names, so the UI can say "waiting on a clone to dev-box" rather than
     // printing a uuid at somebody.
@@ -158,6 +165,7 @@ pub async fn reconcile_status(
         desired: plan.desired as u32,
         running: actual.len() as u32,
         shortfall: plan.shortfall as u32,
+        port_capped: plan.capped,
         blocked: plan
             .needs_clone
             .iter()

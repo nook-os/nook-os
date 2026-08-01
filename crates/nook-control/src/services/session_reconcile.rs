@@ -169,6 +169,11 @@ pub struct Plan {
     /// `desired - placed`: asked for more than the fleet can host. Reported,
     /// not corrected — stacking two sessions on one node is not the answer.
     pub shortfall: usize,
+    /// The workspace declared no ports, so it is held to one session per node
+    /// (MAIN-361). Reported so a shortfall reads as "this is why" rather than as
+    /// an unexplained failure to converge — the cap is deliberate, and it is a
+    /// different condition from a pending clone or an ineligible fleet.
+    pub capped: bool,
 }
 
 impl Plan {
@@ -220,11 +225,28 @@ fn eligible(spec: &SessionSpec, node: &NodeFacts) -> bool {
 /// planning the same instant produce the same plan. That is not cosmetic — it
 /// is what stops replica A starting on node 1 while replica B starts on node 2
 /// for the same single-replica spec.
+/// Whether the workspace has said what ports it binds (MAIN-361).
+///
+/// A parameter rather than a field on the spec, and not defaulted: every caller
+/// has to answer it. An `Unsafe` workspace whose planner forgot to ask would
+/// start a second session that binds the same hardcoded port as the first, and
+/// the failure reads as the app's fault rather than nook's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PortSafety {
+    /// A declaration exists — including an explicit empty one, which is the repo
+    /// saying it binds nothing.
+    Declared,
+    /// No declaration at all. Nook does not know what this repo binds, so it
+    /// must assume two sessions would collide.
+    Undeclared,
+}
+
 pub fn plan(
     spec: &SessionSpec,
     nodes: &[NodeFacts],
     checkouts: &[CheckoutSlot],
     actual: &[Actual],
+    ports: PortSafety,
 ) -> Plan {
     let has_checkout = |id: NodeId| checkouts.iter().any(|c| c.node_id == id);
     // Eligible nodes, checkout-holders first so a bounded replica count prefers
@@ -253,6 +275,30 @@ pub fn plan(
         .filter(|c| chosen.contains(&c.node_id))
         .collect();
     slots.sort_by_key(|c| c.checkout_id.0);
+
+    // THE CAP (MAIN-361 AC-3). A workspace that has not said what it binds gets
+    // ONE session per node, whatever its spec asks for — because the second one
+    // would bind whatever the app hardcoded, and so would the first.
+    //
+    // Per NODE, not per fleet: the collision is between processes on one
+    // machine, so `Replicas::All` over three nodes still gets three sessions,
+    // one each. Nothing here inspects the repo (NG-2); "no declaration" is the
+    // whole detection.
+    //
+    // Applied AFTER the sort, so the surviving slot per node is deterministic —
+    // two replicas planning the same instant must keep the same one.
+    let capped = ports == PortSafety::Undeclared;
+    if capped {
+        let mut seen: Vec<NodeId> = Vec::new();
+        slots.retain(|c| {
+            if seen.contains(&c.node_id) {
+                false
+            } else {
+                seen.push(c.node_id);
+                true
+            }
+        });
+    }
 
     // A chosen node with NO checkout wants a clone — one pending slot each.
     let needs_clone: Vec<NodeId> = chosen
@@ -294,6 +340,7 @@ pub fn plan(
     out.placed = slots.len();
     out.desired = slots.len() + needs_clone.len() + unmet_nodes;
     out.shortfall = needs_clone.len() + unmet_nodes;
+    out.capped = capped;
     out
 }
 
@@ -456,6 +503,40 @@ async fn managed_workspaces(
     Ok(out)
 }
 
+/// Has this workspace said what ports it binds (MAIN-361 AC-1/AC-2)?
+///
+/// DERIVED ON READ, never stored. A stored flag would drift the moment a
+/// declaration landed — the same reasoning `nook-types` already gives for
+/// `is_blocked`, and the reason AC-8 needs nothing cleared: the cap lifts
+/// because the next read computes a different answer, not because anybody
+/// remembered to.
+///
+/// The check is on the STORED DECLARATION, not on whether a `.nook.toml`
+/// exists. A workspace configured by hand through the API or the UI is safe
+/// with no file in its repo, which is what keeps this independent of the file
+/// card. And an explicit EMPTY declaration is SAFE: the repo said it binds
+/// nothing, and that statement is exactly as good as naming a listener.
+pub async fn port_safety(
+    state: &AppState,
+    tenant: TenantId,
+    workspace: WorkspaceId,
+) -> crate::error::ApiResult<PortSafety> {
+    let declared = state
+        .workspaces
+        .get(tenant, workspace)
+        .await?
+        .and_then(|w| w.port_requirements)
+        // A stored `null` is not a declaration — the column's absence and the
+        // JSON null mean the same thing here.
+        .filter(|v| !v.is_null())
+        .is_some();
+    Ok(if declared {
+        PortSafety::Declared
+    } else {
+        PortSafety::Undeclared
+    })
+}
+
 async fn reconcile_workspace(
     state: &AppState,
     tenant: TenantId,
@@ -485,7 +566,11 @@ async fn reconcile_workspace(
         })
         .collect();
 
-    let plan = plan(spec, &nodes, &checkouts, &actual);
+    // The workspace's own answer about what it binds (MAIN-361). Derived from
+    // the stored declaration on every pass, never cached: a declaration landing
+    // must lift the cap by itself on the next pass, with nothing to clear.
+    let ports = port_safety(state, tenant, workspace).await?;
+    let plan = plan(spec, &nodes, &checkouts, &actual, ports);
 
     // AC-4's "logs desired-vs-actual". One line per workspace per pass, and
     // only when there is something to say — a converged workspace is silent, or
@@ -713,6 +798,18 @@ async fn start_managed(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The planner as it behaves for a workspace that HAS declared its ports —
+    /// which every case below is about except the cap's own tests. Keeps those
+    /// cases reading as they did before MAIN-361 added the parameter.
+    fn plan_safe(
+        spec: &SessionSpec,
+        nodes: &[NodeFacts],
+        checkouts: &[CheckoutSlot],
+        actual: &[Actual],
+    ) -> Plan {
+        plan(spec, nodes, checkouts, actual, PortSafety::Declared)
+    }
     use nook_types::{NodeTaint, Toleration};
     use uuid::Uuid;
 
@@ -811,7 +908,7 @@ mod tests {
         let unknown = node(3, &[], &[]); // runtimes: vec![] — unknown
 
         // `spec()` asks for "claude". Each node holds its clone.
-        let p = plan(
+        let p = plan_safe(
             &spec(Replicas::All),
             &[has.clone(), lacks, unknown.clone()],
             &[co(1), co(2), co(3)],
@@ -833,7 +930,7 @@ mod tests {
         // many NODES hold the repo; within a node it is one per checkout.
         let nodes = [node(1, &[], &[])];
         let checkouts = [checkout(10, 1), checkout(11, 1)]; // clone + worktree on node 1
-        let p = plan(&spec(Replicas::Single), &nodes, &checkouts, &[]);
+        let p = plan_safe(&spec(Replicas::Single), &nodes, &checkouts, &[]);
         assert_eq!(start_checkouts(&p).len(), 2, "one session per checkout");
         assert_eq!(starts(&p), vec![nodes[0].id, nodes[0].id], "both on node 1");
         assert_eq!(p.desired, 2);
@@ -843,7 +940,7 @@ mod tests {
     #[test]
     fn an_empty_selector_matches_every_node() {
         let nodes = [node(1, &[], &[]), node(2, &[], &[])];
-        let p = plan(&spec(Replicas::All), &nodes, &[co(1), co(2)], &[]);
+        let p = plan_safe(&spec(Replicas::All), &nodes, &[co(1), co(2)], &[]);
         assert_eq!(starts(&p).len(), 2);
         assert_eq!(p.shortfall, 0);
     }
@@ -860,7 +957,7 @@ mod tests {
             node(3, &[("os", "macos"), ("gpu", "yes")], &[]), // wrong os
         ];
         assert_eq!(
-            starts(&plan(&s, &nodes, &[co(1), co(2), co(3)], &[])),
+            starts(&plan_safe(&s, &nodes, &[co(1), co(2), co(3)], &[])),
             vec![nodes[1].id]
         );
     }
@@ -869,7 +966,7 @@ mod tests {
     fn an_untolerated_taint_refuses_however_well_the_labels_match() {
         let s = spec(Replicas::All);
         let nodes = [node(1, &[], &[("no-loops", "NoSchedule")])];
-        let p = plan(&s, &nodes, &[co(1)], &[]);
+        let p = plan_safe(&s, &nodes, &[co(1)], &[]);
         assert!(starts(&p).is_empty());
         assert_eq!(p.desired, 0, "an ineligible node is not a desired slot");
     }
@@ -886,15 +983,15 @@ mod tests {
         }];
         let tolerated = [node(1, &[], &[("gpu", "NoSchedule")])];
         let other_effect = [node(2, &[], &[("gpu", "NoExecute")])];
-        assert_eq!(starts(&plan(&s, &tolerated, &[co(1)], &[])).len(), 1);
-        assert!(starts(&plan(&s, &other_effect, &[co(2)], &[])).is_empty());
+        assert_eq!(starts(&plan_safe(&s, &tolerated, &[co(1)], &[])).len(), 1);
+        assert!(starts(&plan_safe(&s, &other_effect, &[co(2)], &[])).is_empty());
     }
 
     #[test]
     fn an_offline_node_is_not_a_placement() {
         let mut n = node(1, &[], &[]);
         n.online = false;
-        let p = plan(&spec(Replicas::Single), &[n], &[co(1)], &[]);
+        let p = plan_safe(&spec(Replicas::Single), &[n], &[co(1)], &[]);
         assert!(starts(&p).is_empty());
         assert_eq!(p.shortfall, 1, "the desired session is still owed");
     }
@@ -906,7 +1003,7 @@ mod tests {
         // point of a spread. Each node holds one checkout, so this is one
         // session per node.
         let nodes = [node(1, &[], &[]), node(2, &[], &[])];
-        let p = plan(
+        let p = plan_safe(
             &spec(Replicas::Count { count: 5 }),
             &nodes,
             &[co(1), co(2)],
@@ -924,7 +1021,7 @@ mod tests {
         // clone-on-demand will clone it, but until then the workspace is not
         // getting what it asked for. Only node 1 has a checkout here.
         let nodes = [node(1, &[], &[]), node(2, &[], &[])];
-        let p = plan(&spec(Replicas::Count { count: 2 }), &nodes, &[co(1)], &[]);
+        let p = plan_safe(&spec(Replicas::Count { count: 2 }), &nodes, &[co(1)], &[]);
         assert_eq!(starts(&p).len(), 1);
         assert_eq!(p.needs_clone, vec![NodeId(Uuid::from_u128(2))]);
         assert_eq!(p.shortfall, 1);
@@ -935,7 +1032,7 @@ mod tests {
         // `All` means every eligible node holds the repo. If a chosen node has no
         // checkout, the target does not quietly shrink to hide it.
         let nodes = [node(1, &[], &[]), node(2, &[], &[])];
-        let p = plan(&spec(Replicas::All), &nodes, &[co(1)], &[]);
+        let p = plan_safe(&spec(Replicas::All), &nodes, &[co(1)], &[]);
         assert_eq!(p.desired, 2);
         assert_eq!(p.placed, 1);
         assert_eq!(p.shortfall, 1);
@@ -947,7 +1044,7 @@ mod tests {
         // twice must not do anything the first run did not.
         let nodes = [node(1, &[], &[]), node(2, &[], &[])];
         let actual = [running(1, 1, 1), running(2, 2, 2)];
-        let p = plan(
+        let p = plan_safe(
             &spec(Replicas::Count { count: 2 }),
             &nodes,
             &[co(1), co(2)],
@@ -963,7 +1060,7 @@ mod tests {
         // simply an actual that is no longer there — and the gap is filled. The
         // session on checkout 2 is gone, so it is restarted.
         let nodes = [node(1, &[], &[]), node(2, &[], &[])];
-        let p = plan(
+        let p = plan_safe(
             &spec(Replicas::Count { count: 2 }),
             &nodes,
             &[co(1), co(2)],
@@ -978,7 +1075,7 @@ mod tests {
         // the other two nodes' checkouts are stopped.
         let nodes = [node(1, &[], &[]), node(2, &[], &[]), node(3, &[], &[])];
         let actual = [running(1, 1, 1), running(2, 2, 2), running(3, 3, 3)];
-        let p = plan(
+        let p = plan_safe(
             &spec(Replicas::Single),
             &nodes,
             &[co(1), co(2), co(3)],
@@ -1000,7 +1097,7 @@ mod tests {
         let mut s = spec(Replicas::Single);
         s.node_selector = [("os".into(), "linux".into())].into_iter().collect();
         let nodes = [node(1, &[("os", "macos")], &[])];
-        let p = plan(&s, &nodes, &[co(1)], &[running(1, 1, 1)]);
+        let p = plan_safe(&s, &nodes, &[co(1)], &[running(1, 1, 1)]);
         assert_eq!(stops(&p).len(), 1);
         assert_eq!(p.shortfall, 1, "and the workspace is now owed one");
     }
@@ -1014,8 +1111,8 @@ mod tests {
         let b = [node(1, &[], &[]), node(2, &[], &[]), node(3, &[], &[])];
         let cos = [co(1), co(2), co(3)];
         assert_eq!(
-            starts(&plan(&spec(Replicas::Single), &a, &cos, &[])),
-            starts(&plan(&spec(Replicas::Single), &b, &cos, &[]))
+            starts(&plan_safe(&spec(Replicas::Single), &a, &cos, &[])),
+            starts(&plan_safe(&spec(Replicas::Single), &b, &cos, &[]))
         );
     }
 
@@ -1024,7 +1121,7 @@ mod tests {
         // MAIN-315 made "managed, wanting none" expressible on purpose. It has
         // to mean something here, and what it means is: stop them.
         let nodes = [node(1, &[], &[])];
-        let p = plan(
+        let p = plan_safe(
             &spec(Replicas::Count { count: 0 }),
             &nodes,
             &[co(1)],
@@ -1032,6 +1129,158 @@ mod tests {
         );
         assert!(starts(&p).is_empty());
         assert_eq!(stops(&p).len(), 1);
+    }
+
+    // ── the port-safety cap (MAIN-361) ──────────────────────────────────────
+
+    /// AC-3, and the case the card is named for: `All` over three nodes gives
+    /// one session per NODE, not one in total. The collision is between
+    /// processes on one machine, so the fleet still spreads.
+    #[test]
+    fn an_undeclared_workspace_gets_one_session_per_node_not_one_in_total() {
+        let nodes = [node(1, &[], &[]), node(2, &[], &[]), node(3, &[], &[])];
+        let cos = [co(1), co(2), co(3)];
+        let p = plan(
+            &spec(Replicas::All),
+            &nodes,
+            &cos,
+            &[],
+            PortSafety::Undeclared,
+        );
+        assert_eq!(starts(&p).len(), 3, "one per node, all three nodes");
+        assert!(p.capped);
+    }
+
+    /// The cap is per node, so several worktrees on ONE machine collapse to one
+    /// — which is exactly the collision it exists to prevent.
+    #[test]
+    fn several_worktrees_on_one_node_collapse_to_a_single_session() {
+        let nodes = [node(1, &[], &[])];
+        // Three checkouts, all on node 1.
+        let cos = [
+            CheckoutSlot {
+                checkout_id: NodeWorkspaceId(Uuid::from_u128(10)),
+                node_id: nodes[0].id,
+                path: "/a".into(),
+            },
+            CheckoutSlot {
+                checkout_id: NodeWorkspaceId(Uuid::from_u128(11)),
+                node_id: nodes[0].id,
+                path: "/b".into(),
+            },
+            CheckoutSlot {
+                checkout_id: NodeWorkspaceId(Uuid::from_u128(12)),
+                node_id: nodes[0].id,
+                path: "/c".into(),
+            },
+        ];
+        let declared = plan(
+            &spec(Replicas::All),
+            &nodes,
+            &cos,
+            &[],
+            PortSafety::Declared,
+        );
+        assert_eq!(starts(&declared).len(), 3, "declared: one per worktree");
+
+        let capped = plan(
+            &spec(Replicas::All),
+            &nodes,
+            &cos,
+            &[],
+            PortSafety::Undeclared,
+        );
+        assert_eq!(starts(&capped).len(), 1, "undeclared: one for the machine");
+        assert!(capped.capped);
+    }
+
+    /// A big `Count` is capped just as `All` is — the spec does not buy its way
+    /// out (AC-3).
+    #[test]
+    fn a_count_of_five_is_capped_the_same_way() {
+        let nodes = [node(1, &[], &[]), node(2, &[], &[])];
+        let cos = [co(1), co(2)];
+        let p = plan(
+            &spec(Replicas::Count { count: 5 }),
+            &nodes,
+            &cos,
+            &[],
+            PortSafety::Undeclared,
+        );
+        assert_eq!(starts(&p).len(), 2, "two nodes, one session each");
+        // The ask is still reported honestly: desired reflects the spec, so the
+        // UI can say 5 wanted / 2 placed and name the cap as the reason.
+        assert_eq!(p.desired, 5);
+        assert_eq!(p.shortfall, 3);
+    }
+
+    /// The cap chooses the SAME slot on every replica, or two of them would
+    /// start different sessions for the same machine.
+    #[test]
+    fn which_worktree_survives_the_cap_is_deterministic() {
+        let nodes = [node(1, &[], &[])];
+        let a = CheckoutSlot {
+            checkout_id: NodeWorkspaceId(Uuid::from_u128(20)),
+            node_id: nodes[0].id,
+            path: "/a".into(),
+        };
+        let b = CheckoutSlot {
+            checkout_id: NodeWorkspaceId(Uuid::from_u128(21)),
+            node_id: nodes[0].id,
+            path: "/b".into(),
+        };
+        let one = plan(
+            &spec(Replicas::All),
+            &nodes,
+            &[a.clone(), b.clone()],
+            &[],
+            PortSafety::Undeclared,
+        );
+        let other = plan(
+            &spec(Replicas::All),
+            &nodes,
+            &[b, a],
+            &[],
+            PortSafety::Undeclared,
+        );
+        assert_eq!(one.actions, other.actions);
+    }
+
+    /// AC-8: the cap lifts because the next plan computes a different answer.
+    /// Nothing is closed, cleared or remembered — the same inputs with a
+    /// declaration simply produce the uncapped plan.
+    #[test]
+    fn declaring_lifts_the_cap_with_nothing_else_changing() {
+        let nodes = [node(1, &[], &[])];
+        let cos = [
+            CheckoutSlot {
+                checkout_id: NodeWorkspaceId(Uuid::from_u128(30)),
+                node_id: nodes[0].id,
+                path: "/a".into(),
+            },
+            CheckoutSlot {
+                checkout_id: NodeWorkspaceId(Uuid::from_u128(31)),
+                node_id: nodes[0].id,
+                path: "/b".into(),
+            },
+        ];
+        let before = plan(
+            &spec(Replicas::All),
+            &nodes,
+            &cos,
+            &[],
+            PortSafety::Undeclared,
+        );
+        let after = plan(
+            &spec(Replicas::All),
+            &nodes,
+            &cos,
+            &[],
+            PortSafety::Declared,
+        );
+        assert_eq!(starts(&before).len(), 1);
+        assert_eq!(starts(&after).len(), 2);
+        assert!(before.capped && !after.capped);
     }
 
     #[test]

@@ -5290,6 +5290,17 @@ export interface components {
              */
             managed: boolean;
             /**
+             * @description This workspace declares no ports, so it is held to one session per node
+             *     (MAIN-361), whatever its spec asks for.
+             *
+             *     Carried separately from `blocked` because it is a different condition
+             *     with a different fix: `needs_clone` clears itself when a clone lands and
+             *     an ineligible fleet clears when a node matches, but this one clears only
+             *     when somebody says what the repo binds. A UI that folded them together
+             *     would offer "wait" for a state that never resolves on its own.
+             */
+            port_capped?: boolean;
+            /**
              * Format: int32
              * @description Live managed sessions right now.
              */

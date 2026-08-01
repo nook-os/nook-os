@@ -12168,6 +12168,10 @@
             "type": "boolean",
             "description": "`false` when the workspace declares no spec at all: unmanaged, which is\nnot the same as managed-and-wanting-zero."
           },
+          "port_capped": {
+            "type": "boolean",
+            "description": "This workspace declares no ports, so it is held to one session per node\n(MAIN-361), whatever its spec asks for.\n\nCarried separately from `blocked` because it is a different condition\nwith a different fix: `needs_clone` clears itself when a clone lands and\nan ineligible fleet clears when a node matches, but this one clears only\nwhen somebody says what the repo binds. A UI that folded them together\nwould offer \"wait\" for a state that never resolves on its own."
+          },
           "running": {
             "type": "integer",
             "format": "int32",
