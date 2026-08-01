@@ -732,11 +732,12 @@ pub(crate) async fn node_facts(
     tenant: TenantId,
 ) -> crate::error::ApiResult<Vec<NodeFacts>> {
     let mut out = Vec::new();
-    // `None` owner: the reconciler places across the whole tenant fleet, not one
-    // person's machines.
-    // Home-tenant only: reconcile places managed sessions for a tenant's own
-    // workspaces (MAIN-353 NG-3).
-    for node in state.nodes.list(tenant, None, None).await? {
+    // The tenant's own nodes PLUS any node owned by one of its members, wherever
+    // homed. MAIN-353 made a person's machines reachable from every org they
+    // belong to on the SEE and USE paths and deliberately left placement behind
+    // (NG-3); this closes that half, because "my own nodes" that a second org's
+    // work never reaches is not what owning them was for.
+    for node in state.nodes.placement_candidates(tenant).await? {
         let placement = crate::routes::nodes::placement_of(&node);
         // Runtimes are stored as `capabilities.runtimes` (a jsonb array) — the
         // same value the node reported at register. Absent/malformed reads as an

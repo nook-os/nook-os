@@ -147,6 +147,22 @@ pub trait NodeRepository: Send + Sync {
         own_person: Option<Uuid>,
     ) -> ApiResult<Vec<Node>>;
 
+    /// Every node a tenant's workspaces may be placed on: the tenant's own
+    /// nodes, PLUS any node owned by a person who is a member of it, wherever
+    /// that node is homed.
+    ///
+    /// The second half is the point. A person's machines are theirs across every
+    /// org they belong to (MAIN-353), so a workspace in a tenant they joined
+    /// should reach those machines — otherwise "my own nodes" means "my own
+    /// nodes, in one org", and joining a second team silently leaves your
+    /// laptops out of it.
+    ///
+    /// Deliberately NOT a visibility query: this decides where the reconciler
+    /// may CLONE and START work, and nothing here is returned to a browser. The
+    /// see-path rule (`list`) is unchanged and still hides other people's
+    /// machines.
+    async fn placement_candidates(&self, tenant: TenantId) -> ApiResult<Vec<Node>>;
+
     /// A node by id with NO tenant scope, for the two callers that must ask
     /// "is this the caller's own machine?" before they know which tenant it
     /// lives in (MAIN-353). Every caller applies its own visibility rule to the
@@ -493,6 +509,24 @@ impl NodeRepository for DbNodeRepository {
                     own = type_mapping(self.db.engine()).cast("$3", "uuid")
                 ),
                 params![tenant, owner, own_person],
+            )
+            .await?)
+    }
+
+    async fn placement_candidates(&self, tenant: TenantId) -> ApiResult<Vec<Node>> {
+        Ok(self
+            .db
+            .query_all(
+                &format!(
+                    "SELECT {NODE_COLUMNS}
+                     FROM nodes
+                     WHERE tenant_id = $1
+                        OR owner_person_id IN (
+                             SELECT u.person_id FROM users u WHERE u.tenant_id = $1
+                           )
+                     ORDER BY name"
+                ),
+                params![tenant],
             )
             .await?)
     }
@@ -1546,6 +1580,24 @@ impl NodeRepository for FakeNodeRepository {
             .iter()
             .map(|t| (t.0, format!("tenant-{}", &t.0.simple().to_string()[..8])))
             .collect())
+    }
+
+    async fn placement_candidates(&self, tenant: TenantId) -> ApiResult<Vec<Node>> {
+        // The tenant half only. The member half — nodes owned by a person who
+        // belongs to this tenant but whose machine is homed elsewhere — needs a
+        // `users` table to resolve, and this fake holds nodes. That behaviour is
+        // pinned against a real database in `tests/placement_across_tenants.rs`;
+        // a fake that guessed at it would let a caller test pass against a rule
+        // the database does not have.
+        let s = self.inner.lock().unwrap();
+        let mut out: Vec<Node> = s
+            .nodes
+            .iter()
+            .filter(|n| n.node.tenant_id == tenant)
+            .map(|n| n.node.clone())
+            .collect();
+        out.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(out)
     }
 
     async fn list(

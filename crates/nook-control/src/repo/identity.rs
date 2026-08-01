@@ -1033,7 +1033,32 @@ impl IdentityRepository for DbIdentityRepository {
              FROM role_bindings b
              JOIN role_permissions rp ON rp.role_key = b.role_key
              WHERE b.subject_type = 'user'
-               AND b.subject_id = $1
+               -- Matched by PERSON, not by the one user row the grant named.
+               --
+               -- `users` is unique per (tenant, email), so a human in two orgs
+               -- is two rows with two ids. A binding stores one of them, which
+               -- meant every grant silently stopped applying the moment its
+               -- holder acted in another tenant — including a DEPLOYMENT-scoped
+               -- one, whose entire meaning is `everywhere`. An operator with
+               -- deployment scope was refused `node.manage` in a tenant they had
+               -- just been added to, which reads as a permissions bug in the
+               -- other tenant rather than as the grant not travelling.
+               --
+               -- Ownership already learned this: `nodes.owner_person_id` is a
+               -- PERSON precisely because a person outlives one membership
+               -- (MAIN-119, MAIN-353). This is the same rule for grants.
+               --
+               -- SCOPE is untouched and still decides WHERE: a tenant-scoped
+               -- binding matches only its own tenant however many rows the
+               -- person has. This widens WHO the grant belongs to, never what
+               -- it covers.
+               -- `users.person_id` is NOT NULL, so this always includes the
+               -- caller's own row; no `OR u.id = $1` fallback is needed and one
+               -- would only suggest a NULL case that cannot happen.
+               AND b.subject_id IN (
+                     SELECT u.id FROM users u
+                      WHERE u.person_id = (SELECT person_id FROM users WHERE id = $1)
+                   )
                AND rp.permission_key = $2
                AND (
                      -- Deployment covers everything below it.
