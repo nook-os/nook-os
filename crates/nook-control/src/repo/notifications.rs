@@ -28,7 +28,7 @@
 
 use async_trait::async_trait;
 use nook_db::dialect::type_mapping;
-use nook_db::{params, Db, DbPool, Postgres, TypeMapping};
+use nook_db::{params, Db, DbPool};
 use nook_types::*;
 use serde_json::Value;
 use uuid::Uuid;
@@ -252,7 +252,7 @@ impl NotificationRepository for DbNotificationRepository {
                        AND (NOT {} OR read_at IS NULL)
                      ORDER BY created_at DESC
                      LIMIT $4",
-                    Postgres.cast("$3", "bool")
+                    type_mapping(self.db.engine()).cast("$3", "bool")
                 ),
                 params![tenant, user.0, filter.unread_only, filter.limit],
             )

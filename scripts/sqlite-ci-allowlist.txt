@@ -56,7 +56,6 @@ task_checkout_ids          # raw sqlx / bed.pool in the test itself (MAIN-268)
 tenant_isolation           # raw sqlx / bed.pool in the test itself (MAIN-268)
 
 # ── production still emits Postgres SQL (MAIN-289, the dialect sweep) ──
-mcp_notebook               # production still emits Postgres SQL on this path (MAIN-289)
 node_enrolment             # production still emits Postgres SQL on this path (MAIN-289)
 session_reconcile          # associate_clone emits '{}'::jsonb — Postgres SQL on this path (MAIN-289); pre-existing on main since #253/v0.5.0
 node_owner                 # production still emits Postgres SQL on this path (MAIN-289)

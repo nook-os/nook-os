@@ -27,8 +27,8 @@
 //! signature, and row mapping lives inside the impls (AC-2).
 
 use async_trait::async_trait;
-use nook_db::dialect::type_mapping;
-use nook_db::{params, CiMatch, Db, DbPool, Postgres, TypeMapping};
+use nook_db::dialect::{ci_match, type_mapping};
+use nook_db::{params, Db, DbPool};
 use nook_types::*;
 use uuid::Uuid;
 
@@ -395,9 +395,11 @@ impl NotebookRepository for DbNotebookRepository {
                OR {path_match})
         ORDER BY n.updated_at DESC
         "#,
-                    name_cast = Postgres.cast("name", "text"),
-                    title_match = Postgres.ci_match("n.title", "'%' || $2 || '%'"),
-                    path_match = Postgres.ci_match("COALESCE(fp.path, '')", "'%' || $2 || '%'"),
+                    name_cast = type_mapping(self.db.engine()).cast("name", "text"),
+                    title_match =
+                        ci_match(self.db.engine()).ci_match("n.title", "'%' || $2 || '%'"),
+                    path_match = ci_match(self.db.engine())
+                        .ci_match("COALESCE(fp.path, '')", "'%' || $2 || '%'"),
                 ),
                 params![person, q],
             )
