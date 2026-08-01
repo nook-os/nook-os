@@ -13,7 +13,9 @@
 
 use nook_control::repo::sessions::{NewSession, SessionFilter};
 use nook_control::repo::workspaces::CheckoutUpsert;
-use nook_control::services::session_reconcile::{plan, Action, Actual, CheckoutSlot, NodeFacts};
+use nook_control::services::session_reconcile::{
+    plan, Action, Actual, CheckoutSlot, NodeFacts, PortSafety,
+};
 use nook_testkit::TestBed;
 use nook_types::*;
 
@@ -189,6 +191,7 @@ async fn killing_a_managed_session_is_not_removing_it() {
         &[facts(node)],
         &slots,
         &actual(&bed, tenant, ws).await,
+        PortSafety::Declared,
     );
     assert!(
         converged.actions.is_empty(),
@@ -207,6 +210,7 @@ async fn killing_a_managed_session_is_not_removing_it() {
         &[facts(node)],
         &slots,
         &actual(&bed, tenant, ws).await,
+        PortSafety::Declared,
     );
     assert_eq!(
         after.actions,
@@ -247,6 +251,7 @@ async fn lowering_the_replicas_is_what_removes_one() {
         &[facts(node)],
         &slots,
         &actual(&bed, tenant, ws).await,
+        PortSafety::Declared,
     );
     assert_eq!(p.actions, vec![Action::Stop { session, node }]);
 
@@ -281,6 +286,7 @@ async fn an_ad_hoc_session_is_neither_a_replica_nor_a_victim() {
         &[facts(node)],
         &slots,
         &actual(&bed, tenant, ws).await,
+        PortSafety::Declared,
     );
     assert_eq!(
         wanted.actions,
@@ -297,6 +303,7 @@ async fn an_ad_hoc_session_is_neither_a_replica_nor_a_victim() {
         &[facts(node)],
         &slots,
         &actual(&bed, tenant, ws).await,
+        PortSafety::Declared,
     );
     assert!(
         dropped.actions.is_empty(),

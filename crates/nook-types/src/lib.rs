@@ -797,6 +797,16 @@ pub struct ReconcileStatus {
     pub running: u32,
     /// `desired - placed`: asked for more than the fleet can host.
     pub shortfall: u32,
+    /// This workspace declares no ports, so it is held to one session per node
+    /// (MAIN-361), whatever its spec asks for.
+    ///
+    /// Carried separately from `blocked` because it is a different condition
+    /// with a different fix: `needs_clone` clears itself when a clone lands and
+    /// an ineligible fleet clears when a node matches, but this one clears only
+    /// when somebody says what the repo binds. A UI that folded them together
+    /// would offer "wait" for a state that never resolves on its own.
+    #[serde(default)]
+    pub port_capped: bool,
     /// Nodes that match but cannot be used yet.
     pub blocked: Vec<ReconcileBlocker>,
     /// How many nodes match the selector and tolerate the taints.

@@ -8,6 +8,7 @@ import { ActivityFeed } from "./Activity";
 import { NotesPanel } from "./Notes";
 import { createSpecDraft } from "../newspec";
 import { useNewWork } from "../newwork";
+import { PortSafetyNotice } from "../PortSafetyNotice";
 import { SessionPolicy } from "../SessionPolicy";
 import { WorkspaceLocations } from "../WorkspaceLocations";
 import { askChoice, askConfirm, askForm, askText, notify } from "../dialogs";
@@ -461,6 +462,11 @@ export function WorkspaceDetail() {
       {/* Declared desired state and how close the fleet is to it (MAIN-319).
           Above the session list on purpose: the policy is what PRODUCES that
           list once reconciling is on. */}
+      {/* The cap, where somebody living with it will see it (MAIN-361 AC-6).
+          Above the session policy on purpose: the policy's replica count is the
+          number the cap is overriding. */}
+      {id && <PortSafetyNotice workspaceId={id} workspaceName={ws.name} />}
+
       {id && <SessionPolicy workspaceId={id} />}
 
       <Panel title="Sessions">
