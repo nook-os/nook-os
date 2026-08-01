@@ -29,12 +29,19 @@ export default defineConfig({
         // Tell it how the browser actually got here, same as a prod proxy.
         headers: { "x-forwarded-host": "localhost:5173", "x-forwarded-proto": "http" },
       },
-      "/chat": {
+      // PROXY API PREFIXES, NEVER PAGE ROUTES (MAIN-173). `/chat` is also the
+      // SPA's Chat route, so a proxy on the bare prefix swallowed the browser's
+      // document request and every visit or refresh of /chat 404'd from the
+      // chat service. The API actually lives under `/chat/api` (see
+      // `CHAT_PREFIX`), websocket included, so that is what is forwarded — and
+      // `/chat` itself falls through to the SPA shell. The prod nginx is
+      // narrowed identically, in the same commit, so the two cannot drift.
+      "/chat/api": {
         target: chatTarget,
         changeOrigin: true,
         ws: true,
-        // nook-chat serves /healthz, /livez, /api/me at the root, so drop the
-        // /chat prefix before forwarding — same strip the prod nginx does.
+        // nook-chat serves its routes at the root, so drop the `/chat` prefix
+        // before forwarding: `/chat/api/me` → `/api/me`.
         rewrite: (path) => path.replace(/^\/chat/, ""),
         headers: { "x-forwarded-host": "localhost:5173", "x-forwarded-proto": "http" },
       },

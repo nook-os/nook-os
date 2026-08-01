@@ -39,6 +39,13 @@ server {
     # a pass-through would 404 every request. Reuses the $connection_upgrade map
     # above; the long read timeout is for the live socket.
     #
+    # PROXY API PREFIXES, NEVER PAGE ROUTES (MAIN-173). This matched the bare
+    # `/chat/` for a while, which is ALSO the SPA's Chat route — so the browser
+    # asking for the page got the chat service's 404 instead of the app shell,
+    # on every visit and every refresh. Matching `/chat/api` leaves `/chat` to
+    # fall through to the SPA fallback above. The Vite dev proxy is narrowed the
+    # same way in the same commit; if you widen one, widen neither.
+    #
     # The upstream is passed through a runtime variable, not a literal, so nginx
     # resolves it per request instead of at config load. That keeps this web
     # image booting on deployments that have no chat container yet (the Helm
@@ -48,7 +55,7 @@ server {
     # http://chat:8082) and ${DNS_RESOLVER} (default 127.0.0.11, Docker's
     # embedded DNS) are substituted by the nginx image's envsubst entrypoint,
     # like ${CONTROL_PLANE_ORIGIN}.
-    location /chat/ {
+    location /chat/api {
         resolver ${DNS_RESOLVER} valid=10s;
         set $chat_upstream ${CHAT_ORIGIN};
         rewrite ^/chat/(.*)$ /$1 break;
