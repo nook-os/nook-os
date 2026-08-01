@@ -300,7 +300,9 @@ async fn a_console_page_walks_its_cursor_without_a_gap_or_an_overlap() {
     let mut seen = Vec::new();
     let mut cursor = None;
     loop {
-        let page = operator_tenants_page(&repo, &pq(None, cursor, 2)).await.unwrap();
+        let page = operator_tenants_page(&repo, &pq(None, cursor, 2))
+            .await
+            .unwrap();
         seen.extend(page.rows.iter().map(|r| r.id));
         match page.next_cursor {
             Some(c) => cursor = Some(c),
@@ -331,7 +333,9 @@ async fn a_short_page_carries_no_cursor() {
         task_titles: None,
     });
 
-    let page = operator_tenants_page(&repo, &pq(None, None, 50)).await.unwrap();
+    let page = operator_tenants_page(&repo, &pq(None, None, 50))
+        .await
+        .unwrap();
     assert_eq!(page.rows.len(), 1);
     assert!(page.next_cursor.is_none());
 }

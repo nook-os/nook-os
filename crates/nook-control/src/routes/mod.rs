@@ -136,6 +136,7 @@ pub fn build_router(state: AppState) -> Router {
             "/workspaces",
             get(workspaces::list).post(workspaces::create),
         )
+        .route("/workspaces/page", get(workspaces::page))
         .route(
             "/workspaces/{id}",
             get(workspaces::get_one)

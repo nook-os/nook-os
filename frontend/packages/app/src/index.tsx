@@ -28,7 +28,7 @@ import { SessionPage, SessionsIndex, SessionsPage } from "./pages/Session";
 import { SettingsPage } from "./pages/Settings";
 import { TeamPage } from "./pages/Team";
 import { VerifyEmailPage } from "./pages/VerifyEmail";
-import { WorkspaceDetail } from "./pages/Workspaces";
+import { WorkspaceDetail, WorkspacesPage } from "./pages/Workspaces";
 import { MissionPage } from "./pages/Mission";
 import { LoopPage } from "./pages/Loop";
 
@@ -169,7 +169,7 @@ function AuthGate() {
       <Route element={<Shell me={me} />}>
         <Route index element={<Dashboard />} />
         <Route path="mission" element={<MissionPage />} />
-        <Route path="workspaces" element={<Navigate to="/admin?section=workspaces" replace />} />
+        <Route path="workspaces" element={<WorkspacesPage />} />
         <Route path="workspaces/:id" element={<WorkspaceDetail />} />
         <Route path="sessions" element={<SessionsIndex />} />
         <Route path="sessions/list" element={<SessionsPage />} />

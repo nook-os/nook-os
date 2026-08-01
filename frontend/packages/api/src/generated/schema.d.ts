@@ -2895,6 +2895,27 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workspaces/page": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The paged twin of the whole-list read — the table view's endpoint. The
+         *     whole list stays for the pickers (workspace switcher, dispatch target),
+         *     which genuinely want everything.
+         */
+        get: operations["workspaces_page"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workspaces/{id}": {
         parameters: {
             query?: never;
@@ -5271,6 +5292,23 @@ export interface components {
                 /** @description `owner` | `admin` | `member`. */
                 role: string;
             }[];
+        };
+        /**
+         * @description One page of any paginated list — THE pagination wire contract (QOL sprint
+         *     2026-08). Every list endpoint returns this shape; the request half is
+         *     [`PageQuery`]. `next_cursor` is an OPAQUE token: pass it back verbatim as
+         *     `after`, never parse it — the opacity is what lets the server pick the
+         *     mechanism (keyset vs offset) per request. Null means end of list.
+         *
+         *     The server half — cursor codec, validation, SQL skeleton — is
+         *     `nook_db::paging`; the React half is `usePagedList` + `PagedPanel`.
+         */
+        Page_WorkspaceDetail: {
+            /** @description Opaque continuation token — pass back verbatim as `after`; null = end. */
+            next_cursor?: string | null;
+            rows: (components["schemas"]["Workspace"] & {
+                locations: components["schemas"]["WorkspaceLocation"][];
+            })[];
         };
         /**
          * @description A person the caller may address in a DM (MAIN-113 AC-4): the stable
@@ -11984,6 +12022,36 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["Workspace"];
+                };
+            };
+        };
+    };
+    workspaces_page: {
+        parameters: {
+            query?: {
+                /** @description Case-insensitive substring; the searched fields differ per list. */
+                q?: string | null;
+                /** @description Opaque cursor from the previous page's `next_cursor`. */
+                after?: string | null;
+                /** @description Page size (default 50, clamped 1..=200). */
+                limit?: number | null;
+                /** @description Sort key from the endpoint's documented set. Absent = newest first. */
+                sort?: string | null;
+                /** @description `asc` | `desc`. Defaults ascending under `sort`, newest-first without. */
+                dir?: string | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Page_WorkspaceDetail"];
                 };
             };
         };

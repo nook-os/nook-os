@@ -16,7 +16,9 @@
 //! tenant, and `tenant_members` is what will let someone belong to a shared
 //! team tenant as well. Both are written here so the two never disagree.
 
-use nook_types::{Page, PageQuery, Tenant, TenantId, TenantMemberItem, TenantMembership, User, UserId};
+use nook_types::{
+    Page, PageQuery, Tenant, TenantId, TenantMemberItem, TenantMembership, User, UserId,
+};
 use serde_json::Value;
 
 use crate::error::{ApiError, ApiResult};

@@ -428,9 +428,16 @@ mod db_tests {
         assert!(page.next_cursor.is_none(), "a short page ends the list");
 
         // Paging strictly past our row returns no error (empty of our id).
-        let past = operator_audit_page(&operator_repo(&db), &pq(None, Some(nook_db::paging::Cursor::Keyset(only.0).encode()), 50))
-            .await
-            .unwrap();
+        let past = operator_audit_page(
+            &operator_repo(&db),
+            &pq(
+                None,
+                Some(nook_db::paging::Cursor::Keyset(only.0).encode()),
+                50,
+            ),
+        )
+        .await
+        .unwrap();
         assert!(
             !past.rows.iter().any(|r| r.id == only),
             "the cursor excludes the row it points at"
@@ -498,9 +505,10 @@ mod db_tests {
         assert!(p1.rows.len() <= 2 && p1.next_cursor.is_some());
 
         // Search by (distinctive) name reaches the needle on a later page.
-        let by_name = operator_nodes_page(&operator_repo(&db), &pq(Some("ODDBALL".into()), None, 2))
-            .await
-            .unwrap();
+        let by_name =
+            operator_nodes_page(&operator_repo(&db), &pq(Some("ODDBALL".into()), None, 2))
+                .await
+                .unwrap();
         assert!(by_name.rows.iter().any(|r| r.id == NodeId(needle)));
         // Search by status matches the whole set of that status.
         let online = operator_nodes_page(&operator_repo(&db), &pq(Some("online".into()), None, 50))
@@ -533,9 +541,10 @@ mod db_tests {
         assert!(p1.rows.len() <= 2 && p1.next_cursor.is_some());
 
         // Search by email reaches the needle beyond page 1.
-        let by_email = operator_bindings_page(&operator_repo(&db), &pq(Some("NEEDLE@".into()), None, 2))
-            .await
-            .unwrap();
+        let by_email =
+            operator_bindings_page(&operator_repo(&db), &pq(Some("NEEDLE@".into()), None, 2))
+                .await
+                .unwrap();
         assert!(by_email.rows.iter().any(|r| r.id == needle));
         // Search by role narrows to that role.
         let operators =

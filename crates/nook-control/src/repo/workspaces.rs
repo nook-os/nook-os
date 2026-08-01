@@ -33,6 +33,7 @@
 
 use async_trait::async_trait;
 use nook_db::dialect::{json, time_math, type_mapping};
+use nook_db::paging::{DbPage, ListSpec, PageArgs};
 use nook_db::{params, Db, DbPool};
 use nook_types::*;
 
@@ -106,11 +107,19 @@ pub enum KeyMatch {
     Ambiguous(Vec<String>),
 }
 
+/// The workspaces list's sort allowlist — part of the paged endpoint's
+/// contract (see `nook_db::paging`).
+pub const WORKSPACE_SORTS: &[(&str, &str)] = &[("name", "name"), ("created", "id")];
+
 #[async_trait]
 pub trait WorkspaceRepository: Send + Sync {
     // ── the workspaces table ────────────────────────────────────────────────
 
     async fn list(&self, tenant: TenantId) -> ApiResult<Vec<Workspace>>;
+
+    /// The same rows as [`list`], through the pagination contract — searched
+    /// (name/slug/remote), sorted, cursor-walked.
+    async fn page(&self, tenant: TenantId, args: &PageArgs) -> ApiResult<DbPage<Workspace>>;
 
     async fn get(&self, tenant: TenantId, id: WorkspaceId) -> ApiResult<Option<Workspace>>;
 
@@ -593,6 +602,16 @@ impl WorkspaceRepository for DbWorkspaceRepository {
                 params![tenant],
             )
             .await?)
+    }
+
+    async fn page(&self, tenant: TenantId, args: &PageArgs) -> ApiResult<DbPage<Workspace>> {
+        Ok(ListSpec {
+            select: "SELECT * FROM workspaces WHERE tenant_id = $4",
+            id: "id",
+            search: &["name", "slug", "git_remote_url"],
+        }
+        .fetch(&self.db, args, params![tenant], |w: &Workspace| w.id.0)
+        .await?)
     }
 
     async fn get(&self, tenant: TenantId, id: WorkspaceId) -> ApiResult<Option<Workspace>> {
@@ -1776,6 +1795,36 @@ impl WorkspaceRepository for FakeWorkspaceRepository {
             .collect();
         out.sort_by_key(|(_, id, _)| id.0);
         Ok(out)
+    }
+
+    async fn page(&self, tenant: TenantId, args: &PageArgs) -> ApiResult<DbPage<Workspace>> {
+        let st = self.inner.lock().unwrap();
+        let q = args.q.as_ref().map(|s| s.to_lowercase());
+        let rows: Vec<Workspace> = st
+            .workspaces
+            .iter()
+            .filter(|w| w.tenant_id == tenant)
+            .filter(|w| match &q {
+                None => true,
+                Some(q) => {
+                    w.name.to_lowercase().contains(q)
+                        || w.slug.to_lowercase().contains(q)
+                        || w.git_remote_url
+                            .as_deref()
+                            .is_some_and(|u| u.to_lowercase().contains(q))
+                }
+            })
+            .cloned()
+            .collect();
+        Ok(nook_db::paging::page_vec(
+            rows,
+            args,
+            |w| w.id.0,
+            |col, a, b| match col {
+                "name" => a.name.cmp(&b.name),
+                other => unreachable!("unlisted sort col {other}"),
+            },
+        ))
     }
 
     async fn list(&self, tenant: TenantId) -> ApiResult<Vec<Workspace>> {

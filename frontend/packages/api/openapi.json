@@ -6725,6 +6725,90 @@
         }
       }
     },
+    "/api/v1/workspaces/page": {
+      "get": {
+        "tags": [
+          "crate::routes::workspaces"
+        ],
+        "summary": "The paged twin of the whole-list read — the table view's endpoint. The\nwhole list stays for the pickers (workspace switcher, dispatch target),\nwhich genuinely want everything.",
+        "operationId": "workspaces_page",
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "description": "Case-insensitive substring; the searched fields differ per list.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "after",
+            "in": "query",
+            "description": "Opaque cursor from the previous page's `next_cursor`.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Page size (default 50, clamped 1..=200).",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64"
+            }
+          },
+          {
+            "name": "sort",
+            "in": "query",
+            "description": "Sort key from the endpoint's documented set. Absent = newest first.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "dir",
+            "in": "query",
+            "description": "`asc` | `desc`. Defaults ascending under `sort`, newest-first without.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page_WorkspaceDetail"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/workspaces/{id}": {
       "get": {
         "tags": [
@@ -12373,6 +12457,46 @@
                   "description": "`owner` | `admin` | `member`."
                 }
               }
+            }
+          }
+        }
+      },
+      "Page_WorkspaceDetail": {
+        "type": "object",
+        "description": "One page of any paginated list — THE pagination wire contract (QOL sprint\n2026-08). Every list endpoint returns this shape; the request half is\n[`PageQuery`]. `next_cursor` is an OPAQUE token: pass it back verbatim as\n`after`, never parse it — the opacity is what lets the server pick the\nmechanism (keyset vs offset) per request. Null means end of list.\n\nThe server half — cursor codec, validation, SQL skeleton — is\n`nook_db::paging`; the React half is `usePagedList` + `PagedPanel`.",
+        "required": [
+          "rows"
+        ],
+        "properties": {
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Opaque continuation token — pass back verbatim as `after`; null = end."
+          },
+          "rows": {
+            "type": "array",
+            "items": {
+              "allOf": [
+                {
+                  "$ref": "#/components/schemas/Workspace"
+                },
+                {
+                  "type": "object",
+                  "required": [
+                    "locations"
+                  ],
+                  "properties": {
+                    "locations": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/WorkspaceLocation"
+                      }
+                    }
+                  }
+                }
+              ]
             }
           }
         }

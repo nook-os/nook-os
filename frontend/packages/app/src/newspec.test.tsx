@@ -45,6 +45,8 @@ vi.mock("@nookos/api", () => ({
     GET: vi.fn(async (path: string) => {
       if (path === "/api/v1/boards") return { data: state.boards };
       if (path === "/api/v1/workspaces") return { data: state.workspaces };
+      if (path === "/api/v1/workspaces/page")
+        return { data: { rows: state.workspaces, next_cursor: null } };
       return { data: null };
     }),
     POST: post,
@@ -63,7 +65,7 @@ vi.mock("./dialogs", () => ({
 }));
 
 import { boardForWorkspace, SPEC_DRAFT_TITLE } from "./newspec";
-import { WorkspacesPanel } from "./pages/Workspaces";
+import { WorkspacesPage } from "./pages/Workspaces";
 
 const board = (id: string, workspace_id: string | null = null): Board =>
   ({ id, name: id, provider: "local", workspace_id }) as unknown as Board;
@@ -83,7 +85,7 @@ function renderPage() {
     <QueryClientProvider client={qc}>
       <MemoryRouter initialEntries={["/workspaces"]}>
         <Routes>
-          <Route path="/workspaces" element={<WorkspacesPanel />} />
+          <Route path="/workspaces" element={<WorkspacesPage />} />
           {/* Stands in for the Loop page: rendering it IS the proof we landed. */}
           <Route path="/loop/:taskId" element={<LoopStub />} />
         </Routes>

@@ -35,6 +35,32 @@ pub async fn list_workspaces(
     Ok(out)
 }
 
+/// The workspaces table, through the pagination contract: searched
+/// (name/slug/remote), sorted (name/created), cursor-walked — each page row
+/// enriched with its locations, same as the whole-list read.
+pub async fn workspaces_page(
+    repo: &dyn WorkspaceRepository,
+    tenant: TenantId,
+    wire: &PageQuery,
+) -> ApiResult<Page<WorkspaceDetail>> {
+    let args = wire
+        .args(crate::repo::workspaces::WORKSPACE_SORTS)
+        .map_err(crate::services::operator_queries::bad_page)?;
+    let page = repo.page(tenant, &args).await?;
+    let mut rows = Vec::with_capacity(page.rows.len());
+    for workspace in page.rows {
+        let locations = repo.locations(tenant, workspace.id).await?;
+        rows.push(WorkspaceDetail {
+            workspace,
+            locations,
+        });
+    }
+    Ok(Page {
+        rows,
+        next_cursor: page.next_cursor,
+    })
+}
+
 pub async fn get_workspace(
     repo: &dyn WorkspaceRepository,
     tenant: TenantId,

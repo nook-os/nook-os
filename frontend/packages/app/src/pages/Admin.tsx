@@ -45,7 +45,6 @@ import { usePagedList } from "../paging";
 import { SectionedPage, type PageSection } from "../SectionedPage";
 import { TenantSwitches } from "../TenantSwitches";
 import { ActivityPanel } from "./Activity";
-import { WorkspacesPanel } from "./Workspaces";
 
 // Columns for the audit DataList. Module-level: the cells read only the row, so
 // they never close over component state and the array is stable across renders.
@@ -401,13 +400,6 @@ export function AdminPage() {
   // entries. Team first: it is what every visitor may see; the operator groups
   // exist only when the binding does.
   const sections: PageSection[] = [
-    {
-      id: "workspaces",
-      title: "Workspaces",
-      group: "Team",
-      keywords: ["repo", "worktree", "checkout", "spec", "delete", "clone", "table"],
-      render: () => <WorkspacesPanel />,
-    },
     {
       id: "activity",
       title: "Activity",

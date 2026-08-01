@@ -35,8 +35,8 @@ use nook_db::dialect::{ci_match, json, time_math, type_mapping};
 use nook_db::paging::{DbPage, ListSpec, PageArgs};
 use nook_db::{params, Db, DbPool};
 use nook_types::{
-    AuthSessionId, DevAccount, IdentityId, Tenant, TenantId, TenantMemberItem,
-    User, UserId, UserToken,
+    AuthSessionId, DevAccount, IdentityId, Tenant, TenantId, TenantMemberItem, User, UserId,
+    UserToken,
 };
 use serde_json::Value;
 use uuid::Uuid;

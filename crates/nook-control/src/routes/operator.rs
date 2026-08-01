@@ -67,7 +67,6 @@ pub async fn orgs(
     Ok(Json(rows))
 }
 
-
 /// Tenants, at minimum visibility.
 ///
 /// Always visible, per the model: that a tenant exists, its member count, and

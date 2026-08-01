@@ -2,12 +2,13 @@ import React, { useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { Eye, EyeOff, Lock, Plus, Sparkles, Trash2 } from "lucide-react";
-import { api } from "@nookos/api";
-import { Empty, Panel, Pill, StatusDot, statusTone } from "@nookos/ui";
+import { api, type WorkspaceDetail as WsDetail } from "@nookos/api";
+import { Empty, PagedPanel, Panel, Pill, StatusDot, statusTone, type DataColumn } from "@nookos/ui";
 import { ActivityFeed } from "./Activity";
 import { NotesPanel } from "./Notes";
 import { createSpecDraft } from "../newspec";
 import { useNewWork } from "../newwork";
+import { usePagedList } from "../paging";
 import { PortSafetyNotice } from "../PortSafetyNotice";
 import { SessionPolicy } from "../SessionPolicy";
 import { WorkspaceLocations } from "../WorkspaceLocations";
@@ -52,67 +53,71 @@ function NewSpecButton({ workspaceId }: { workspaceId: string }) {
   );
 }
 
-/** The all-workspaces table as a mountable panel — an Admin-page section now.
- *  Day-to-day navigation goes through the top-bar workspace switcher and the
- *  dashboard; this table is the management view (spec buttons, delete). */
-export function WorkspacesPanel() {
+/** The all-workspaces table, on the pagination contract: searched
+ *  (name/slug/remote), sorted (name/created), cursor-walked. Back on the left
+ *  rail as its own page — workspaces are what the app is ABOUT, and burying
+ *  the table in Admin read as hiding the product from itself. */
+export function WorkspacesPage() {
   const showNewWork = useNewWork((s) => s.show);
-  const { data: workspaces } = useQuery({
-    queryKey: ["workspaces"],
-    queryFn: async () => (await api.GET("/api/v1/workspaces")).data ?? [],
+  const list = usePagedList({
+    key: ["workspaces", "page"],
+    fetch: async (params) =>
+      (await api.GET("/api/v1/workspaces/page", { params: { query: params } })).data,
   });
 
+  const columns: DataColumn<WsDetail>[] = [
+    {
+      key: "name",
+      header: "Workspace",
+      sortKey: "name",
+      className: "ws-name-col",
+      cell: (w) => (
+        <Link className="bright" to={`/workspaces/${w.id}`}>
+          {w.name}
+        </Link>
+      ),
+    },
+    {
+      key: "where",
+      header: "Where it lives",
+      cell: (w) => <WorkspaceLocations locations={w.locations} />,
+    },
+    {
+      key: "spec",
+      header: "",
+      cell: (w) => <NewSpecButton workspaceId={w.id} />,
+    },
+    {
+      key: "delete",
+      header: "",
+      cell: (w) => (
+        <DeleteWorkspaceButton id={w.id} name={w.name} checkouts={w.locations.length} />
+      ),
+    },
+  ];
+
   return (
-      <Panel
-        title={`Workspaces (${(workspaces ?? []).length})`}
+    <div className="nook-grid cards">
+      <PagedPanel
+        title="Workspaces"
+        list={list}
+        columns={columns}
+        rowKey={(w) => w.id}
+        searchPlaceholder="Search name or remote…"
+        searchLabel="Search workspaces"
+        empty={
+          <>
+            No workspaces yet. Hit <b>+ New Workspace</b> to clone a repo or start a
+            new project — or join a node and its repositories appear here.
+          </>
+        }
         actions={
           <button className="btn primary small" onClick={() => showNewWork()}>
             <Plus size={12} /> New Workspace
           </button>
         }
-      >
-        {(workspaces ?? []).length === 0 ? (
-          <Empty>
-            No workspaces yet. Hit <b>+ New Workspace</b> to clone a repo or start a
-            new project — or join a node and its repositories appear here.
-          </Empty>
-        ) : (
-          <table className="nook-table">
-            <thead>
-              <tr>
-                <th style={{ width: "28%" }}>Workspace</th>
-                <th>Where it lives</th>
-                <th style={{ width: 110 }} />
-                <th style={{ width: 40 }} />
-              </tr>
-            </thead>
-            <tbody>
-              {(workspaces ?? []).map((w) => (
-                <tr key={w.id}>
-                  <td>
-                    <Link className="bright" to={`/workspaces/${w.id}`}>
-                      {w.name}
-                    </Link>
-                  </td>
-                  <td>
-                    <WorkspaceLocations locations={w.locations} />
-                  </td>
-                  <td>
-                    <NewSpecButton workspaceId={w.id} />
-                  </td>
-                  <td>
-                    <DeleteWorkspaceButton
-                      id={w.id}
-                      name={w.name}
-                      checkouts={w.locations.length}
-                    />
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
-      </Panel>
+      />
+    </div>
   );
 }
 

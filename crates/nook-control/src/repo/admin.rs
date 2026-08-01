@@ -1129,11 +1129,16 @@ impl OperatorRepository for FakeOperatorRepository {
             })
             .cloned()
             .collect();
-        Ok(page_vec(rows, args, |r| r.id.0, |col, a, b| match col {
-            "kind" => a.kind.cmp(&b.kind),
-            "tenant_slug" => a.tenant_slug.cmp(&b.tenant_slug),
-            other => unreachable!("unlisted sort col {other}"),
-        }))
+        Ok(page_vec(
+            rows,
+            args,
+            |r| r.id.0,
+            |col, a, b| match col {
+                "kind" => a.kind.cmp(&b.kind),
+                "tenant_slug" => a.tenant_slug.cmp(&b.tenant_slug),
+                other => unreachable!("unlisted sort col {other}"),
+            },
+        ))
     }
 
     async fn tenants_page(&self, args: &PageArgs) -> ApiResult<DbPage<OperatorTenant>> {
@@ -1144,13 +1149,18 @@ impl OperatorRepository for FakeOperatorRepository {
             .filter(|r| matches(&r.slug, &args.q))
             .cloned()
             .collect();
-        Ok(page_vec(rows, args, |r| r.id.0, |col, a, b| match col {
-            "slug" => a.slug.cmp(&b.slug),
-            "members" => a.members.cmp(&b.members),
-            "nodes" => a.nodes.cmp(&b.nodes),
-            "active_sessions" => a.active_sessions.cmp(&b.active_sessions),
-            other => unreachable!("unlisted sort col {other}"),
-        }))
+        Ok(page_vec(
+            rows,
+            args,
+            |r| r.id.0,
+            |col, a, b| match col {
+                "slug" => a.slug.cmp(&b.slug),
+                "members" => a.members.cmp(&b.members),
+                "nodes" => a.nodes.cmp(&b.nodes),
+                "active_sessions" => a.active_sessions.cmp(&b.active_sessions),
+                other => unreachable!("unlisted sort col {other}"),
+            },
+        ))
     }
 
     async fn nodes_page(&self, args: &PageArgs) -> ApiResult<DbPage<OperatorNode>> {
@@ -1165,14 +1175,19 @@ impl OperatorRepository for FakeOperatorRepository {
             })
             .cloned()
             .collect();
-        Ok(page_vec(rows, args, |r| r.id.0, |col, a, b| match col {
-            "name" => a.name.cmp(&b.name),
-            "status" => a.status.cmp(&b.status),
-            "platform" => a.platform.cmp(&b.platform),
-            "active_sessions" => a.active_sessions.cmp(&b.active_sessions),
-            "last_seen_at" => a.last_seen_at.cmp(&b.last_seen_at),
-            other => unreachable!("unlisted sort col {other}"),
-        }))
+        Ok(page_vec(
+            rows,
+            args,
+            |r| r.id.0,
+            |col, a, b| match col {
+                "name" => a.name.cmp(&b.name),
+                "status" => a.status.cmp(&b.status),
+                "platform" => a.platform.cmp(&b.platform),
+                "active_sessions" => a.active_sessions.cmp(&b.active_sessions),
+                "last_seen_at" => a.last_seen_at.cmp(&b.last_seen_at),
+                other => unreachable!("unlisted sort col {other}"),
+            },
+        ))
     }
 
     async fn bindings_page(&self, args: &PageArgs) -> ApiResult<DbPage<BindingRow>> {
@@ -1183,12 +1198,17 @@ impl OperatorRepository for FakeOperatorRepository {
             .filter(|r| matches(&r.email, &args.q) || matches(&r.role_key, &args.q))
             .cloned()
             .collect();
-        Ok(page_vec(rows, args, |r| r.id, |col, a, b| match col {
-            "email" => a.email.cmp(&b.email),
-            "role_key" => a.role_key.cmp(&b.role_key),
-            "scope_type" => a.scope_type.cmp(&b.scope_type),
-            other => unreachable!("unlisted sort col {other}"),
-        }))
+        Ok(page_vec(
+            rows,
+            args,
+            |r| r.id,
+            |col, a, b| match col {
+                "email" => a.email.cmp(&b.email),
+                "role_key" => a.role_key.cmp(&b.role_key),
+                "scope_type" => a.scope_type.cmp(&b.scope_type),
+                other => unreachable!("unlisted sort col {other}"),
+            },
+        ))
     }
 
     async fn grant_deployment_role(

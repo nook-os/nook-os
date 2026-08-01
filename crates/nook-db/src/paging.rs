@@ -484,9 +484,11 @@ mod tests {
         );
         let cur = p1.next_cursor.unwrap();
         assert_eq!(Cursor::decode(&cur), Ok(Cursor::Offset(2)));
-        let args2 =
-            PageArgs::parse(None, Some(&cur), Some(2), Some("slug"), None, SORTS).unwrap();
+        let args2 = PageArgs::parse(None, Some(&cur), Some(2), Some("slug"), None, SORTS).unwrap();
         let p2 = page_vec(data, &args2, |r| r.id, by_col);
-        assert_eq!(p2.rows.iter().map(|r| r.slug).collect::<Vec<_>>(), ["charlie"]);
+        assert_eq!(
+            p2.rows.iter().map(|r| r.slug).collect::<Vec<_>>(),
+            ["charlie"]
+        );
     }
 }

@@ -138,8 +138,8 @@ describe("Admin page assembly", () => {
   it("opens on the Team half and reaches every operator section through the nav", async () => {
     const user = userEvent.setup();
     renderPage();
-    // Workspaces is the default section — the tenant's own tables come first.
-    expect(await screen.findByText(/Workspaces \(0\)/)).toBeTruthy();
+    // Activity is the default section — the tenant's own table comes first.
+    expect(await screen.findByText("Activity timeline")).toBeTruthy();
     expect(screen.queryByText("alpha")).toBeNull();
 
     await openSection(user, "Tenants");
@@ -216,7 +216,7 @@ describe("Admin page assembly", () => {
   it("a member sees only the Team half, and no operator request is even sent", async () => {
     seedApi({ user: { email: "m@nook.test" }, capability: { operator: false } });
     renderPage();
-    expect(await screen.findByText(/Workspaces \(0\)/)).toBeTruthy();
+    expect(await screen.findByText("Activity timeline")).toBeTruthy();
 
     // The nav simply has no operator entries — not disabled, absent.
     expect(screen.queryByRole("button", { name: "Tenants" })).toBeNull();

@@ -109,8 +109,7 @@ pub async fn list_members(
     // paged, not fetched whole (MAIN-45 AC-2). The keyset order (newest member
     // first) replaces the old owner-first display sort.
     let page =
-        crate::services::identity::tenant_members_page(state.identity.as_ref(), tenant, &q)
-            .await?;
+        crate::services::identity::tenant_members_page(state.identity.as_ref(), tenant, &q).await?;
     Ok(Json(page))
 }
 

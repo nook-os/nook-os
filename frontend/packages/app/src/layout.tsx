@@ -43,6 +43,7 @@ import { FeedbackModalHost, useFeedbackModal } from "./FeedbackModal";
 const SECTIONS = [
   { to: "/", label: "Dashboard", icon: LayoutDashboard, end: true },
   { to: "/mission", label: "Mission Control", icon: Radar },
+  { to: "/workspaces", label: "Workspaces", icon: FolderGit2 },
   { to: "/sessions", label: "Sessions", icon: SquareTerminal },
   { to: "/board", label: "Board", icon: KanbanSquare },
   { to: "/chat", label: "Chat", icon: MessageSquare },
@@ -52,11 +53,10 @@ const SECTIONS = [
   { to: "/notebook", label: "Notes", icon: NotebookText },
 ];
 
-/// The management surface — the old Workspaces and Activity tables live here as
-/// sections now, alongside the operator's fleet views. Shown to a tenant
-/// admin/owner or an operator; a plain member's day-to-day never needed the
-/// tables (the top-bar switcher and the dashboard cover it), and shrinking the
-/// rail was the point.
+/// The management surface — the Activity table lives here as a section now,
+/// alongside the operator's fleet views. Shown to a tenant admin/owner or an
+/// operator. (Workspaces went back to the rail after a day here: they are what
+/// the app is ABOUT, and hiding the product inside Admin was the wrong read.)
 ///
 /// Absent rather than disabled: a greyed-out door still tells you there is a
 /// room, and for the operator half the room is other people's fleets.
