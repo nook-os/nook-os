@@ -55,7 +55,8 @@ pub async fn suggest(
         None,
     )
     .await?;
-    let nodes = state.nodes.list(auth.tenant_id, None).await?;
+    let nodes = // No owner leg: placement stays home-tenant (MAIN-353 NG-2).
+    state.nodes.list(auth.tenant_id, None, None).await?;
 
     let suggestion = state
         .dispatcher

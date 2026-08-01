@@ -10527,6 +10527,13 @@
             "type": "string",
             "format": "date-time"
           },
+          "home_tenant": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The name of this node's HOME tenant, set only when that is not the\ntenant you are acting in (MAIN-353) — your own machine, reached from\nanother of your orgs. `None` for the ordinary case, so a UI can render\nthe badge on presence rather than by comparing ids.\n\nComputed per response, never stored: it is a fact about the *viewer's*\nposition, not about the node."
+          },
           "hostname": {
             "type": "string"
           },

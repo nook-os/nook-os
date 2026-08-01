@@ -315,6 +315,16 @@ pub trait IdentityRepository: Send + Sync {
         tenant: TenantId,
     ) -> ApiResult<Option<(Option<Uuid>, bool)>>;
 
+    /// A node's owner with NO tenant scope (MAIN-353). The owner leg of node
+    /// authorization travels across a person's orgs — `owner_person_id` is a
+    /// PERSON precisely because a person outlives one membership (MAIN-119) —
+    /// so the lookup that answers "is this mine?" cannot be tenant-scoped.
+    ///
+    /// `Some(None)` is a node that exists and is ownerless; `None` is no such
+    /// node. Callers must keep that distinction: it is what makes an
+    /// unreachable node a 404 rather than an existence oracle.
+    async fn node_owner_person_unscoped(&self, node_id: Uuid) -> ApiResult<Option<Option<Uuid>>>;
+
     /// `(node_id, tenant_id)` for a presented node token hash.
     async fn node_by_token_hash(&self, hash: &str) -> ApiResult<Option<(Uuid, Uuid)>>;
 
@@ -1066,6 +1076,17 @@ impl IdentityRepository for DbIdentityRepository {
                 params![node_id, tenant],
             )
             .await?)
+    }
+
+    async fn node_owner_person_unscoped(&self, node_id: Uuid) -> ApiResult<Option<Option<Uuid>>> {
+        Ok(self
+            .db
+            .query_opt::<(Option<Uuid>,)>(
+                "SELECT owner_person_id FROM nodes WHERE id = $1",
+                params![node_id],
+            )
+            .await?
+            .map(|(o,)| o))
     }
 
     async fn node_by_token_hash(&self, hash: &str) -> ApiResult<Option<(Uuid, Uuid)>> {
@@ -2088,6 +2109,15 @@ impl IdentityRepository for FakeIdentityRepository {
             .iter()
             .find(|(id, t, _, _, _)| *id == node_id && *t == tenant)
             .map(|(_, _, owner, shared, _)| (*owner, *shared)))
+    }
+
+    async fn node_owner_person_unscoped(&self, node_id: Uuid) -> ApiResult<Option<Option<Uuid>>> {
+        let st = self.inner.lock().unwrap();
+        Ok(st
+            .nodes
+            .iter()
+            .find(|(id, _, _, _, _)| *id == node_id)
+            .map(|(_, _, owner, _, _)| *owner))
     }
 
     async fn node_by_token_hash(&self, hash: &str) -> ApiResult<Option<(Uuid, Uuid)>> {
