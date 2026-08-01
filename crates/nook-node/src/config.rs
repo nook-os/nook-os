@@ -56,6 +56,15 @@ pub struct NodeConfig {
     /// node has no sessions worth keeping.
     #[serde(default)]
     pub tmux_socket: Option<String>,
+
+    /// The slug of the tenant this node enrolled into (MAIN-347). The default
+    /// workspace root is scoped by it (`~/.nook/workspace/<tenant_slug>`), so two
+    /// tenants on one control-plane host never share a checkout tree. `None` on a
+    /// pre-347 `node.toml` — the root then falls back to the host slug (MAIN-58).
+    /// Forward-only: a fresh enrolment records it; an existing config keeps the
+    /// root it already has.
+    #[serde(default)]
+    pub tenant_slug: Option<String>,
 }
 
 impl NodeConfig {
@@ -298,8 +307,17 @@ pub fn cp_slug(server_url: &str) -> String {
     let host = authority.rsplit('@').next().unwrap_or(authority);
     let host = host.split(':').next().unwrap_or(host);
 
-    let mut out = String::with_capacity(host.len());
-    for ch in host.chars() {
+    sanitize_dir_segment(host).unwrap_or_else(|| "control-plane".to_string())
+}
+
+/// Reduce a string to a single filesystem-safe directory segment: lowercase,
+/// characters outside `[a-z0-9.-]` become `-`, leading/trailing separators
+/// trimmed. `None` when nothing usable remains, so each caller supplies its own
+/// fallback. Shared by [`cp_slug`] (a server host) and the tenant path segment
+/// (MAIN-347) so the two can never sanitize differently.
+fn sanitize_dir_segment(s: &str) -> Option<String> {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
         let lower = ch.to_ascii_lowercase();
         if lower.is_ascii_alphanumeric() || lower == '.' || lower == '-' {
             out.push(lower);
@@ -309,20 +327,26 @@ pub fn cp_slug(server_url: &str) -> String {
     }
     let trimmed = out.trim_matches(|c| c == '-' || c == '.');
     if trimmed.is_empty() {
-        "control-plane".into()
+        None
     } else {
-        trimmed.to_string()
+        Some(trimmed.to_string())
     }
 }
 
 /// The workspace root a fresh enrollment gets when none is set explicitly:
-/// `~/.nook/workspace/<cp-slug>` (MAIN-58 AC-1). Because the control plane's
-/// slug is part of the root *string*, two nodes on one machine that belong to
-/// different control planes never share a checkout tree (AC-5) — while the
-/// layout under the root (`<owner>/<repo>`, worktrees, discovery) is unchanged
-/// (AC-4). Only the default; an explicit root always wins (AC-2).
-pub fn default_workspace_root(server_url: &str) -> String {
-    format!("~/.nook/workspace/{}", cp_slug(server_url))
+/// `~/.nook/workspace/<tenant-slug>` (MAIN-347). Scoping by the enrolling node's
+/// tenant — not the control-plane host (MAIN-58's `cp-slug`) — is what lets two
+/// tenants sharing ONE control-plane host keep separate checkout trees; the
+/// layout under the root (`<owner>/<repo>`, worktrees, discovery) is unchanged.
+/// An older control plane that sends no slug (or one that sanitizes to nothing)
+/// falls back to the host slug rather than a rootless `~/.nook/workspace/`, so
+/// boot never yields a bare root. Only the default; an explicit root always
+/// wins.
+pub fn default_workspace_root(tenant_slug: Option<&str>, server_url: &str) -> String {
+    let segment = tenant_slug
+        .and_then(sanitize_dir_segment)
+        .unwrap_or_else(|| cp_slug(server_url));
+    format!("~/.nook/workspace/{segment}")
 }
 
 /// The private tmux server name a fresh node enrolls with (MAIN-108):
@@ -373,12 +397,72 @@ mod slug_tests {
     }
 
     #[test]
-    fn different_control_planes_get_distinct_roots() {
-        let a = default_workspace_root("https://nook.hein.network");
-        let b = default_workspace_root("https://other.example.com");
-        assert_eq!(a, "~/.nook/workspace/nook.hein.network");
-        assert_eq!(b, "~/.nook/workspace/other.example.com");
+    fn tenant_slug_scopes_the_root() {
+        // The tenant slug is the top segment (MAIN-347): a fresh enrol into
+        // tenant `hein` lands checkouts under `~/.nook/workspace/hein`.
+        assert_eq!(
+            default_workspace_root(Some("hein"), "https://nook.hein.network"),
+            "~/.nook/workspace/hein"
+        );
+    }
+
+    #[test]
+    fn different_tenants_on_one_host_get_distinct_roots() {
+        // The collision this fixes: two tenants sharing ONE control-plane host.
+        // The server URL is identical; only the tenant differs, and the roots
+        // are disjoint (AC-5).
+        let server = "https://nook.hein.network";
+        let a = default_workspace_root(Some("hein"), server);
+        let b = default_workspace_root(Some("acme"), server);
+        assert_eq!(a, "~/.nook/workspace/hein");
+        assert_eq!(b, "~/.nook/workspace/acme");
         assert_ne!(a, b);
+    }
+
+    #[test]
+    fn tenant_slug_is_sanitized_and_idempotent() {
+        // A slug with unsafe characters is lowercased and cleaned the same way a
+        // host is (AC-3); slugging the result again is a no-op.
+        let root = default_workspace_root(Some("Acme_Corp~1"), "https://x");
+        assert_eq!(root, "~/.nook/workspace/acme-corp-1");
+        let seg = root.rsplit('/').next().unwrap();
+        assert_eq!(
+            default_workspace_root(Some(seg), "https://x"),
+            root,
+            "idempotent"
+        );
+    }
+
+    #[test]
+    fn no_tenant_falls_back_to_host_slug() {
+        // An older control plane sends no slug, or one that sanitizes to nothing.
+        // The root falls back to the host slug rather than a rootless
+        // `~/.nook/workspace/` (AC-7).
+        assert_eq!(
+            default_workspace_root(None, "https://nook.hein.network"),
+            "~/.nook/workspace/nook.hein.network"
+        );
+        assert_eq!(
+            default_workspace_root(Some("  "), "https://nook.hein.network"),
+            "~/.nook/workspace/nook.hein.network"
+        );
+    }
+
+    #[test]
+    fn node_toml_without_tenant_slug_still_deserializes() {
+        // A pre-347 node.toml has no `tenant_slug` line; `#[serde(default)]`
+        // must let it load as `None` rather than fail the node's boot (AC-2).
+        let cfg: NodeConfig = toml::from_str(
+            r#"
+            server = "https://nook.hein.network"
+            node_id = "n1"
+            node_name = "box"
+            node_token = "t"
+            workspace_roots = ["~/.nook/workspace/nook.hein.network"]
+            "#,
+        )
+        .expect("legacy node.toml deserializes");
+        assert_eq!(cfg.tenant_slug, None);
     }
 
     #[test]

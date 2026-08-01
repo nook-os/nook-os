@@ -960,7 +960,7 @@ pub async fn migrate_workspaces(apply: bool) -> Result<()> {
     // The target is this control plane's per-node slugged root; the legacy root
     // is the flat default it replaced — the slugged root's own parent.
     let slugged = std::path::PathBuf::from(crate::config::expand_path(
-        &crate::config::default_workspace_root(&cfg.server),
+        &crate::config::default_workspace_root(cfg.tenant_slug.as_deref(), &cfg.server),
     ));
     let legacy = slugged
         .parent()
@@ -1117,7 +1117,8 @@ pub async fn migrate_workspaces(apply: bool) -> Result<()> {
     // AC-5: point node.toml at the slugged root so the next connect converges.
     // The flat legacy root (and any pre-existing slug entry) becomes the slug;
     // a custom explicit root is left exactly as it is.
-    let slugged_cfg = crate::config::default_workspace_root(&cfg.server);
+    let slugged_cfg =
+        crate::config::default_workspace_root(cfg.tenant_slug.as_deref(), &cfg.server);
     let mut roots: Vec<String> = Vec::new();
     for r in &cfg.workspace_roots {
         let expanded = std::path::PathBuf::from(crate::config::expand_path(r));

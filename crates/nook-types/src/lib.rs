@@ -2076,6 +2076,12 @@ pub struct JoinResponse {
     pub node_name: String,
     /// Long-lived node credential; shown once, stored hashed.
     pub node_token: String,
+    /// The slug of the tenant this node joined. The node scopes its default
+    /// workspace root by it so a `nook join` lands checkouts under the tenant
+    /// directory from the very first config, before enrolment (MAIN-347). Empty
+    /// only from a control plane predating this field.
+    #[serde(default)]
+    pub tenant_slug: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -2279,6 +2285,13 @@ pub struct EnrollResponse {
     /// is what turns a rotation into an outage.
     pub ca_bundle: Vec<String>,
     pub not_after: DateTime<Utc>,
+    /// The slug of the tenant this node enrolled into. The node scopes its
+    /// default workspace root by it (`~/.nook/workspace/<tenant_slug>/…`) so two
+    /// tenants sharing one control-plane host never collide on disk. Empty only
+    /// from an older control plane that predates this field; the node falls back
+    /// to its host slug then (MAIN-347).
+    #[serde(default)]
+    pub tenant_slug: String,
 }
 
 /// Asking for a personal access token.

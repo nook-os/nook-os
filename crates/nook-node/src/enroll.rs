@@ -102,6 +102,12 @@ pub async fn enroll(
     // "I cannot tell" as "renew".
     save_expiry(issued.not_after)?;
 
+    // Empty only from a control plane predating MAIN-347; normalize to `None` so
+    // the root falls back to the host slug rather than scoping under "".
+    let tenant_slug = Some(issued.tenant_slug.trim())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+
     // Record the identity so `nook run` finds it. Keep whatever else was
     // already configured — enrolling must not undo `nook setup`.
     let mut cfg = existing.unwrap_or(NodeConfig {
@@ -109,10 +115,13 @@ pub async fn enroll(
         node_id: issued.node_id.to_string(),
         node_name: hostname.clone(),
         node_token: String::new(),
-        // A fresh enrollment defaults to a per-control-plane root so nodes on one
-        // machine never share a checkout tree (MAIN-58 AC-1). An `existing` config
-        // is kept verbatim — this branch only runs for a first enrollment (AC-3).
-        workspace_roots: vec![crate::config::default_workspace_root(&server)],
+        // A fresh enrollment defaults to a tenant-scoped root so two tenants on
+        // one machine never share a checkout tree (MAIN-347). An `existing`
+        // config is kept verbatim — this branch only runs for a first enrollment.
+        workspace_roots: vec![crate::config::default_workspace_root(
+            tenant_slug.as_deref(),
+            &server,
+        )],
         ssh_key_path: None,
         server_fingerprint: None,
         agent_server: None,
@@ -122,6 +131,9 @@ pub async fn enroll(
         // this fresh-config branch sets it — an `existing` node keeps the default
         // server until its operator opts in.
         tmux_socket: Some(crate::config::derived_tmux_socket(&server)),
+        // Scopes the root above; recorded so the fallbacks in `conn`/`cli` derive
+        // the same tenant root when `workspace_roots` is somehow empty (MAIN-347).
+        tenant_slug: tenant_slug.clone(),
     });
     // The agent endpoint is where the certificate is actually used; the API
     // may well live elsewhere, so record it separately rather than moving

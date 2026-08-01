@@ -66,16 +66,22 @@ pub async fn setup(args: SetupArgs) -> Result<()> {
         }
     };
 
-    let workspace_root = {
-        // An existing root is kept as the prompt default (AC-3); a fresh node
-        // defaults to a per-control-plane root (MAIN-58 AC-1). Either is
-        // overridable at the prompt (AC-2).
-        let d = existing
-            .as_ref()
-            .and_then(|c| c.workspace_roots.first().cloned())
-            .unwrap_or_else(|| crate::config::default_workspace_root(&server));
-        t.text("Workspace root (repos live under this directory)", Some(&d))?
-    };
+    // An existing root is kept as the prompt default (AC-3); a fresh node has not
+    // enrolled yet, so its tenant is unknown here and the default falls back to
+    // the host slug (MAIN-347). Either is overridable at the prompt (AC-2).
+    let workspace_root_default = existing
+        .as_ref()
+        .and_then(|c| c.workspace_roots.first().cloned())
+        .unwrap_or_else(|| {
+            crate::config::default_workspace_root(
+                existing.as_ref().and_then(|c| c.tenant_slug.as_deref()),
+                &server,
+            )
+        });
+    let workspace_root = t.text(
+        "Workspace root (repos live under this directory)",
+        Some(&workspace_root_default),
+    )?;
 
     // ---- credential
     let token = match args.token {
@@ -123,7 +129,13 @@ pub async fn setup(args: SetupArgs) -> Result<()> {
 
     // Keep whatever else was configured; only the workspace root changed here.
     let mut cfg = NodeConfig::load().context("setup did not produce a config")?;
-    cfg.workspace_roots = vec![workspace_root];
+    // Enrolment just above established a tenant-scoped root for a fresh node
+    // (MAIN-347). If the operator kept the pre-enrolment default at the prompt,
+    // respect that enrolment root rather than overwriting it with the stale,
+    // host-slug default; only an explicit override replaces it.
+    if workspace_root != workspace_root_default || cfg.workspace_roots.is_empty() {
+        cfg.workspace_roots = vec![workspace_root];
+    }
     cfg.save()?;
 
     // ---- tmux, before anything that depends on it

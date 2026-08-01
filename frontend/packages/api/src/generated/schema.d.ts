@@ -4089,6 +4089,14 @@ export interface components {
             node_id: components["schemas"]["NodeId"];
             /** Format: date-time */
             not_after: string;
+            /**
+             * @description The slug of the tenant this node enrolled into. The node scopes its
+             *     default workspace root by it (`~/.nook/workspace/<tenant_slug>/…`) so two
+             *     tenants sharing one control-plane host never collide on disk. Empty only
+             *     from an older control plane that predates this field; the node falls back
+             *     to its host slug then (MAIN-347).
+             */
+            tenant_slug?: string;
         };
         /**
          * @description One child ticket of an epic, for the epic's detail (MAIN-81). `done`/`total`
@@ -4328,6 +4336,13 @@ export interface components {
             node_name: string;
             /** @description Long-lived node credential; shown once, stored hashed. */
             node_token: string;
+            /**
+             * @description The slug of the tenant this node joined. The node scopes its default
+             *     workspace root by it so a `nook join` lands checkouts under the tenant
+             *     directory from the very first config, before enrolment (MAIN-347). Empty
+             *     only from a control plane predating this field.
+             */
+            tenant_slug?: string;
         };
         /**
          * @description A tenant-wide label. `agent-ready` is the human approval gate: the one

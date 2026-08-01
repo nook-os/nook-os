@@ -1483,9 +1483,15 @@ async fn join(spec: JoinSpec) -> Result<()> {
         anyhow::bail!("tmux is required — install tmux and re-run `nook join`");
     }
 
+    // Empty only from a control plane predating MAIN-347; normalize to `None` so
+    // the default root falls back to the host slug rather than scoping under "".
+    let tenant_slug = Some(joined.tenant_slug.trim())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+
     // An explicit root (--workspace-root, a config file's workspace_roots, or the
     // docker entrypoint's NOOK_WORKSPACE_ROOT → --workspace-root) always wins;
-    // only the DEFAULT becomes per-control-plane (MAIN-58 AC-1/AC-2).
+    // only the DEFAULT becomes tenant-scoped (MAIN-347).
     let workspace_roots = if !spec.workspace_roots.is_empty() {
         // An explicit root (flag / config file / NOOK_WORKSPACE_ROOT) always wins.
         spec.workspace_roots
@@ -1495,13 +1501,16 @@ async fn join(spec: JoinSpec) -> Result<()> {
     {
         // Re-joining an already-configured node with no explicit root: carry the
         // roots the previous config established. A bare `nook join` must NOT
-        // rebuild node.toml onto the per-cp default and silently relocate the
-        // root out from under every existing checkout (data-orphaning bug).
+        // rebuild node.toml onto the default and silently relocate the root out
+        // from under every existing checkout (data-orphaning bug).
         existing.workspace_roots
     } else {
-        // A genuine first join with no explicit root: the per-control-plane
-        // default (MAIN-58 AC-1/AC-2).
-        vec![crate::config::default_workspace_root(&server)]
+        // A genuine first join with no explicit root: the tenant-scoped default
+        // (MAIN-347), falling back to the host slug when the CP sent no tenant.
+        vec![crate::config::default_workspace_root(
+            tenant_slug.as_deref(),
+            &server,
+        )]
     };
     // Forward-only, like workspace_roots (MAIN-108 AC-1): a re-join KEEPS the
     // node's existing socket — a pre-108 node's `None` stays `None` (byte-
@@ -1526,6 +1535,11 @@ async fn join(spec: JoinSpec) -> Result<()> {
         agent_server: NodeConfig::load().ok().and_then(|c| c.agent_server),
         service: NodeConfig::load().ok().and_then(|c| c.service),
         tmux_socket,
+        // The tenant this node joined, scoping the root above. Keep a
+        // previously-recorded slug if this CP sent none (forward-only).
+        tenant_slug: tenant_slug
+            .clone()
+            .or_else(|| NodeConfig::load().ok().and_then(|c| c.tenant_slug)),
     };
     cfg.save()?;
 
