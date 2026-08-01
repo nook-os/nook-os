@@ -37,7 +37,7 @@ export function Dashboard() {
 
   return (
     <div
-      className="nook-grid"
+      className="nook-grid cards"
       style={{ gridTemplateColumns: "1fr 1fr 1.4fr", gridTemplateRows: "1fr 1fr" }}
     >
       <Panel title={`Nodes (${(nodes ?? []).length})`}>

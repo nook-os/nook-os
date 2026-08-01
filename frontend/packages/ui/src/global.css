@@ -3865,16 +3865,27 @@ a.toast-main:hover .toast-title { text-decoration: underline; }
    section's content on the right, a finder on top of the nav. Nav is sticky so
    long section content scrolls under it, and the whole thing collapses to a
    single column at the shared medium breakpoint. */
-.spage-wrap { display: grid; gap: 10px; align-content: start; }
+/* Fills `.nook-main` completely: padded at the edges, the nav rail running the
+   FULL height like the app's own icon rail, and the content column scrolling
+   independently underneath a nav that never moves. A short nav floating in
+   empty background read as a lost dialog, not as the page's spine. */
+.spage-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  height: 100%;
+  min-height: 0;
+  padding: 10px;
+  overflow: hidden;
+}
 .spage {
+  flex: 1;
+  min-height: 0;
   display: grid;
   grid-template-columns: 220px minmax(0, 1fr);
   gap: 10px;
-  align-items: start;
 }
 .spage-nav {
-  position: sticky;
-  top: 0;
   display: flex;
   flex-direction: column;
   gap: 1px;
@@ -3882,6 +3893,8 @@ a.toast-main:hover .toast-title { text-decoration: underline; }
   background: var(--nook-bg-panel);
   border: 1px solid var(--nook-border);
   border-radius: var(--nook-radius);
+  overflow-y: auto;
+  min-height: 0;
 }
 .spage-find { margin-bottom: 6px; }
 .spage-group {
@@ -3930,10 +3943,42 @@ a.toast-main:hover .toast-title { text-decoration: underline; }
 }
 .spage-item.active .spage-badge { color: var(--nook-accent); border-color: color-mix(in srgb, var(--nook-accent) 45%, transparent); }
 .spage-empty { display: flex; align-items: center; gap: 6px; padding: 6px 8px; }
-.spage-content { min-width: 0; display: grid; gap: 10px; align-content: start; }
+.spage-content {
+  min-width: 0;
+  min-height: 0;
+  display: grid;
+  /* One full-height track per section child: the panel frames the whole column
+     top to bottom, twin to the nav rail beside it, and long content scrolls
+     INSIDE the panel body exactly as it does everywhere else in the app —
+     which is also why there is no overflow here (one scrollbar, not two). */
+  grid-auto-rows: minmax(0, 1fr);
+  gap: 10px;
+}
+/* THE CARD LOOK, defined once. Panels outside a seam-grid carry the same
+   rounded border the nav rail does, so a page reads as one system instead of a
+   framed rail beside floating tables. Covers every panel in a sectioned page —
+   content AND the standing intro banner above the nav — plus any `.nook-grid`
+   that opts in with `cards`. One rule, because "choose one style" only stays
+   chosen if there is exactly one place the style lives. */
+.spage-wrap .nook-panel,
+.nook-grid.cards > .nook-panel {
+  border: 1px solid var(--nook-border);
+  border-radius: var(--nook-radius);
+  overflow: hidden;
+}
+/* A seam-grid that opted into cards: the seams go (transparent gaps instead of
+   border-colored background), and the page gets the same edge padding the
+   sectioned pages have. */
+.nook-grid.cards {
+  background: transparent;
+  gap: 10px;
+  padding: 10px;
+}
 @media (max-width: 1024px) {
-  .spage { grid-template-columns: 1fr; }
-  .spage-nav { position: static; }
+  /* One column: the nav sizes to its content on top, and the content row takes
+     the rest — the rail must not eat half a small screen. */
+  .spage { grid-template-columns: 1fr; grid-template-rows: auto minmax(0, 1fr); }
+  .spage-nav { overflow-y: visible; }
 }
 
 /* ── Operator surface ───────────────────────────────────────────────────── */
@@ -4169,9 +4214,14 @@ a.toast-main:hover .toast-title { text-decoration: underline; }
 /* ── Team chat ─────────────────────────────────────────────────────────────
    Full-height, two-panel: channel list + the reusable ChatView. Amber-CRT,
    dense, edge-to-edge like the rest of the console. */
+/* Card layout, matching the sectioned pages: a bordered rounded rail beside a
+   bordered rounded room, padded at the page edge — instead of the edge-to-edge
+   seam the page shipped with. Same reason as `.spage`: one style, everywhere. */
 .chat-page {
   display: grid;
-  grid-template-columns: 200px 1fr;
+  grid-template-columns: 200px minmax(0, 1fr);
+  gap: 10px;
+  padding: 10px;
   height: 100%;
   min-height: 0;
   background: var(--nook-bg);
@@ -4179,9 +4229,11 @@ a.toast-main:hover .toast-title { text-decoration: underline; }
 .chat-channels {
   display: flex;
   flex-direction: column;
-  border-right: 1px solid var(--nook-border);
+  border: 1px solid var(--nook-border);
+  border-radius: var(--nook-radius);
   background: var(--nook-bg-panel);
   overflow-y: auto;
+  min-height: 0;
 }
 .chat-channels-head {
   height: var(--nook-titlebar-h);
@@ -4356,6 +4408,9 @@ a.toast-main:hover .toast-title { text-decoration: underline; }
   flex-direction: column;
   min-width: 0;
   min-height: 0;
+  border: 1px solid var(--nook-border);
+  border-radius: var(--nook-radius);
+  overflow: hidden;
 }
 .chat-main-head {
   height: var(--nook-titlebar-h);
