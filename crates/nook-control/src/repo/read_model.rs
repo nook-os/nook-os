@@ -28,7 +28,8 @@
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use nook_db::{params, Db, DbPool, Postgres, TypeMapping};
+use nook_db::dialect::type_mapping;
+use nook_db::{params, Db, DbPool};
 use nook_types::*;
 use uuid::Uuid;
 
@@ -204,9 +205,9 @@ impl ReadModelRepository for DbReadModelRepository {
            AND ({ws} IS NULL OR workspace_id = $2)
            AND ({kind} IS NULL OR kind LIKE $3 || '%')
            AND ({before} IS NULL OR occurred_at < $4)",
-            ws = Postgres.cast("$2", "uuid"),
-            before = Postgres.cast("$4", "timestamptz"),
-            kind = Postgres.cast("$3", "text"),
+            ws = type_mapping(self.db.engine()).cast("$2", "uuid"),
+            before = type_mapping(self.db.engine()).cast("$4", "timestamptz"),
+            kind = type_mapping(self.db.engine()).cast("$3", "text"),
         );
         if q.scope.is_some() {
             sql.push_str(" AND (actor_id = ANY($6) OR node_id = ANY($7) OR session_id = ANY($8))");
@@ -269,7 +270,7 @@ impl ReadModelRepository for DbReadModelRepository {
                  WHERE nw.tenant_id = $1
                    AND ({owner} IS NULL OR n.owner_person_id = $2 OR n.shared)
                  ORDER BY n.name, nw.path",
-                    owner = Postgres.cast("$2", "uuid")
+                    owner = type_mapping(self.db.engine()).cast("$2", "uuid")
                 ),
                 params![tenant, node_owner],
             )
@@ -337,7 +338,7 @@ impl ReadModelRepository for DbReadModelRepository {
                     AND COALESCE(t.checkout_id, s.checkout_id) IS NOT NULL
                     AND ({viewer} IS NULL OR {visible})
                   ORDER BY key",
-                    viewer = Postgres.cast("$2", "uuid"),
+                    viewer = type_mapping(self.db.engine()).cast("$2", "uuid"),
                     visible = crate::services::tasks::visible_sql("t", "$2"),
                 ),
                 params![tenant, task_viewer.map(|u| u.0)],

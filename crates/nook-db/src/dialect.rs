@@ -30,6 +30,20 @@ pub trait AtomicClaim {
     /// The row-locking clause placed after `ORDER BY` and before `LIMIT` in a
     /// claim SELECT. Postgres: `FOR UPDATE SKIP LOCKED`.
     fn claim_lock_clause(&self) -> &'static str;
+
+    /// The row lock that makes a second writer **wait** rather than skip —
+    /// Postgres `FOR UPDATE` without `SKIP LOCKED` (MAIN-349).
+    ///
+    /// A deliberately separate method, not a flag on the one above, because the
+    /// two are opposites at the only point that matters. A queue consumer wants
+    /// the contended row skipped so another worker takes it; a counter
+    /// allocation (`boards.next_number`) wants the contender to wait, because
+    /// skipping would return no row and fail the create. Sharing one clause
+    /// between them is how a `SKIP LOCKED` reaches a site that must not have it.
+    ///
+    /// Empty on SQLite, which serialises writers for the whole transaction
+    /// anyway — the wait is the engine's, not the statement's.
+    fn row_lock_clause(&self) -> &'static str;
 }
 
 // ── json ────────────────────────────────────────────────────────────────────
@@ -161,6 +175,9 @@ impl AtomicClaim for Postgres {
     fn claim_lock_clause(&self) -> &'static str {
         "FOR UPDATE SKIP LOCKED"
     }
+    fn row_lock_clause(&self) -> &'static str {
+        "FOR UPDATE"
+    }
 }
 
 impl Json for Postgres {
@@ -229,6 +246,18 @@ impl CiMatch for Postgres {
 /// `ILIKE`, so case-insensitivity rides `LIKE … COLLATE NOCASE`.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Sqlite;
+
+impl AtomicClaim for Sqlite {
+    // SQLite takes a write lock for the whole transaction, so neither clause has
+    // an equivalent — and neither needs one: the serialisation Postgres asks for
+    // per row, SQLite already applies per transaction.
+    fn claim_lock_clause(&self) -> &'static str {
+        ""
+    }
+    fn row_lock_clause(&self) -> &'static str {
+        ""
+    }
+}
 
 impl CiMatch for Sqlite {
     fn ci_match(&self, col: &str, pattern: &str) -> String {
@@ -348,6 +377,18 @@ mod tests {
     #[test]
     fn atomic_claim_clause_is_pg_skip_locked() {
         assert_eq!(Postgres.claim_lock_clause(), "FOR UPDATE SKIP LOCKED");
+    }
+
+    /// The two row locks are opposites where it counts, so the guard is that
+    /// they never collapse into each other: a counter allocation that inherited
+    /// `SKIP LOCKED` would return no row under contention instead of waiting.
+    #[test]
+    fn the_waiting_row_lock_is_not_the_skipping_one() {
+        assert_eq!(Postgres.row_lock_clause(), "FOR UPDATE");
+        assert_ne!(Postgres.row_lock_clause(), Postgres.claim_lock_clause());
+        // SQLite has neither; its transaction is the lock.
+        assert_eq!(Sqlite.row_lock_clause(), "");
+        assert_eq!(Sqlite.claim_lock_clause(), "");
     }
 
     #[test]
@@ -574,6 +615,22 @@ pub fn type_mapping(engine: crate::Engine) -> &'static dyn TypeMapping {
 
 /// The [`TimeMath`] arm for `engine`.
 pub fn time_math(engine: crate::Engine) -> &'static dyn TimeMath {
+    match engine {
+        crate::Engine::Postgres => &Postgres,
+        crate::Engine::Sqlite => &Sqlite,
+    }
+}
+
+/// The [`AtomicClaim`] arm for `engine`.
+pub fn atomic_claim(engine: crate::Engine) -> &'static dyn AtomicClaim {
+    match engine {
+        crate::Engine::Postgres => &Postgres,
+        crate::Engine::Sqlite => &Sqlite,
+    }
+}
+
+/// The [`CiMatch`] arm for `engine`.
+pub fn ci_match(engine: crate::Engine) -> &'static dyn CiMatch {
     match engine {
         crate::Engine::Postgres => &Postgres,
         crate::Engine::Sqlite => &Sqlite,

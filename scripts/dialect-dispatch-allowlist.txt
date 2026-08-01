@@ -32,7 +32,6 @@ crates/nook-control/src/repo/nodes.rs
 crates/nook-control/src/repo/notebook.rs
 crates/nook-control/src/repo/notifications.rs
 crates/nook-control/src/repo/sessions.rs
-crates/nook-control/src/repo/tasks.rs
 crates/nook-control/src/routes/auth.rs
 crates/nook-control/src/services/activity_queries.rs
 crates/nook-control/src/services/overview_queries.rs
