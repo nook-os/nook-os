@@ -158,6 +158,11 @@ pub fn catalog() -> Vec<nook_types::NotificationKind> {
             "A node could not apply the managed hook set.",
         ),
         k(
+            "workspace.settings_invalid",
+            "Repo settings unreadable",
+            "A repo's .nook.toml could not be believed, so the stored declaration was kept.",
+        ),
+        k(
             "job.created",
             "Loop job created",
             "A spec or decompose job was queued.",
@@ -285,6 +290,13 @@ pub fn notable(base_url: &str, event: &Event) -> Option<crate::services::notify:
             .level("error")
             .body(text("error").unwrap_or_default().to_string()),
         "hooks.install_failed" => Draft::new("A node could not apply the managed hooks")
+            .level("error")
+            .body(text("error").unwrap_or_default().to_string()),
+        // A broken `.nook.toml` is notable precisely BECAUSE nothing changed
+        // (MAIN-359 AC-4): the stored ports still apply, so the only symptom is
+        // an edit that silently did not take. Without this the author would find
+        // out at the next session start, on a machine they are not looking at.
+        "workspace.settings_invalid" => Draft::new("A repo's .nook.toml could not be read")
             .level("error")
             .body(text("error").unwrap_or_default().to_string()),
         // A loop job whose target is a PRIVATE card is not notable: the

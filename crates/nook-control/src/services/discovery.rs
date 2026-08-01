@@ -45,6 +45,8 @@ pub async fn reconcile(
     discovered: Vec<DiscoveredWorkspace>,
 ) -> ApiResult<()> {
     let mut reported_paths: Vec<String> = Vec::with_capacity(discovered.len());
+    // Workspaces whose `.nook.toml` this scan has already read.
+    let mut synced: std::collections::BTreeSet<WorkspaceId> = Default::default();
 
     for d in &discovered {
         reported_paths.push(d.path.clone());
@@ -153,6 +155,26 @@ pub async fn reconcile(
         // the unlock, which is what actually delivers the file.
         if is_new_checkout {
             crate::services::secrets::announce_new_checkout(
+                state,
+                tenant,
+                workspace_id,
+                node_id,
+                &d.path,
+            )
+            .await;
+        }
+
+        // The repo's own answer about the ports it binds (MAIN-359 AC-3), read
+        // off this checkout and stored on the workspace, so the API, the UI and
+        // the broker all read one field rather than two sources.
+        //
+        // Re-read on EVERY scan, not only a new checkout: the file is committed,
+        // so it changes on a pull, and the whole reason for committing it is that
+        // the repo's answer wins. Once per workspace per scan — several
+        // worktrees of one repo carry the same file, and asking each of them the
+        // same question would multiply a round trip by the worktree count.
+        if synced.insert(workspace_id) {
+            crate::services::repo_settings::sync_from_checkout(
                 state,
                 tenant,
                 workspace_id,

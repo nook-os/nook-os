@@ -1,0 +1,27 @@
+# What this repo tells nook about itself (MAIN-359).
+#
+# A general settings file that currently has one section. Unknown top-level
+# keys are IGNORED rather than rejected, so a future `[build]` or `[sessions]`
+# section is additive and an older control plane reading a newer file keeps
+# working.
+#
+# This is a DECLARATION, not a detection: nothing scans the source for
+# hardcoded ports. What this file says is what nook believes.
+
+# The ports a session in this repo needs. The control plane leases a free
+# number per entry from the node's range and exports it as `env`, so N
+# worktrees of this repo run side by side instead of fighting over one port.
+#
+# An app in a session binds `$NOOK_PORT`, never a literal — that is the
+# convention CLAUDE.md documents, and this file is now where it is stated.
+#
+# `required` is false here on purpose: most sessions in this repo are a shell
+# or an agent, not a server, and a node that has run out of ports should not
+# stop somebody opening a terminal. A repo whose session IS its server wants
+# `required = true`, so that exhaustion fails loudly instead of starting an app
+# that then collides on a hardcoded default.
+[[ports]]
+name = "web"
+env = "NOOK_PORT"
+protocol = "tcp"
+required = false
