@@ -498,7 +498,8 @@ mod db_tests {
         invalidate_person_tenants, member_user_in_tenant, memberships_for,
     };
     use crate::cache::memory::MemoryCache;
-    use nook_db::{params, Db, DbPool, Postgres, TypeMapping};
+    use nook_db::dialect::type_mapping;
+    use nook_db::{params, Db, DbPool};
     use nook_types::{TenantId, UserId};
     use sqlx::postgres::PgPoolOptions;
     use uuid::Uuid;
@@ -789,7 +790,7 @@ mod db_tests {
         db.exec(
             &format!(
                 "UPDATE identities SET email_verified_at = {} WHERE user_id = $1",
-                Postgres.now()
+                type_mapping(db.engine()).now()
             ),
             params![oidc.0],
         )

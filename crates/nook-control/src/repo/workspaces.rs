@@ -32,7 +32,7 @@
 //! signature, and row mapping lives inside the impl (AC-2).
 
 use async_trait::async_trait;
-use nook_db::dialect::{time_math, type_mapping};
+use nook_db::dialect::{json, time_math, type_mapping};
 use nook_db::{params, Db, DbPool};
 use nook_types::*;
 
@@ -1196,15 +1196,16 @@ impl WorkspaceRepository for DbWorkspaceRepository {
                     "INSERT INTO node_workspaces
                        (id, tenant_id, node_id, workspace_id, path, git_remote_url,
                         git_remote_normalized, git_status, kind)
-                     VALUES ($1, $2, $3, $4, $5, $6, $7, '{{}}'::jsonb, 'clone')
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, {empty_json}, 'clone')
                      ON CONFLICT (node_id, path) DO UPDATE SET
                        workspace_id = EXCLUDED.workspace_id,
                        git_remote_url = EXCLUDED.git_remote_url,
                        git_remote_normalized = EXCLUDED.git_remote_normalized,
                        kind = EXCLUDED.kind,
                        missing_at = NULL,
-                       last_scanned_at = {}",
-                    type_mapping(self.db.engine()).now()
+                       last_scanned_at = {now}",
+                    empty_json = json(self.db.engine()).literal("{}"),
+                    now = type_mapping(self.db.engine()).now()
                 ),
                 params![
                     NodeWorkspaceId::new(),

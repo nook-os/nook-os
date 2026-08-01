@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use nook_db::{params, Db, Postgres, TypeMapping};
+use nook_db::dialect::type_mapping;
+use nook_db::{params, Db};
 use tracing_subscriber::EnvFilter;
 
 use nook_control::{routes, AppState, Config, MIGRATOR, SQUASH_MANIFEST};
@@ -291,7 +292,7 @@ async fn serve(db: nook_db::DbPool, cfg: Config) -> Result<()> {
                     "UPDATE nodes SET status = 'offline', updated_at = {now},
                 owning_instance_id = NULL, lease_expires_at = NULL
              WHERE owning_instance_id = $1",
-                    now = Postgres.now()
+                    now = type_mapping(shutdown_db.engine()).now()
                 ),
                 params![instance],
             )

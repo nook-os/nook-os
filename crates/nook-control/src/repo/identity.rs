@@ -19,7 +19,7 @@
 //! with row mapping inside it. There is no per-engine branch here and no
 //! dialect dispatch: that layer is underneath us (MAIN-189), and a per-engine
 //! impl is a later, hotspot-proven escape hatch (NG-1, NG-3). The `type_mapping(self.db.engine()).now()`
-//! and `Postgres.cast()` calls that came in with the moved SQL are unchanged —
+//! and `type_mapping(self.db.engine()).cast()` calls that came in with the moved SQL are unchanged —
 //! they were already there, and replacing them is the dialect sweep's job, not
 //! this card's.
 //!
@@ -31,8 +31,8 @@
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use nook_db::dialect::{time_math, type_mapping};
-use nook_db::{params, CiMatch, Db, DbPool, Json, Postgres, TypeMapping};
+use nook_db::dialect::{ci_match, json, time_math, type_mapping};
+use nook_db::{params, Db, DbPool};
 use nook_types::{
     AuthSessionId, DevAccount, IdentityId, Tenant, TenantId, TenantMemberItem, TenantMemberPage,
     User, UserId, UserToken,
@@ -594,7 +594,7 @@ impl IdentityRepository for DbIdentityRepository {
     ) -> ApiResult<TenantMemberPage> {
         let limit = limit.clamp(1, 200);
         let q = crate::services::core::search_filter(q);
-        let term = Postgres.cast("$3", "text");
+        let term = type_mapping(self.db.engine()).cast("$3", "text");
         let rows: Vec<TenantMemberItem> = self
             .db
             .query_all(
@@ -610,10 +610,10 @@ impl IdentityRepository for DbIdentityRepository {
            AND ({cursor} IS NULL OR m.principal_id < $4)
          ORDER BY m.principal_id DESC
          LIMIT $2",
-                    cursor = Postgres.cast("$4", "uuid"),
-                    m_email = Postgres.ci_match("u.email", "'%' || $3 || '%'"),
-                    m_name = Postgres.ci_match("u.display_name", "'%' || $3 || '%'"),
-                    m_role = Postgres.ci_match("m.role", "'%' || $3 || '%'")
+                    cursor = type_mapping(self.db.engine()).cast("$4", "uuid"),
+                    m_email = ci_match(self.db.engine()).ci_match("u.email", "'%' || $3 || '%'"),
+                    m_name = ci_match(self.db.engine()).ci_match("u.display_name", "'%' || $3 || '%'"),
+                    m_role = ci_match(self.db.engine()).ci_match("m.role", "'%' || $3 || '%'")
                 ),
                 params![tenant, limit, q, after],
             )
@@ -850,7 +850,7 @@ impl IdentityRepository for DbIdentityRepository {
          VALUES ($1, $2, 'local', $3, $4, {}, {now})
          ON CONFLICT (issuer, subject)
            DO UPDATE SET email_verified_at = COALESCE(identities.email_verified_at, {now})",
-            Postgres.literal("{\"verified_via\":\"local\"}"),
+            json(self.db.engine()).literal("{\"verified_via\":\"local\"}"),
             now = type_mapping(self.db.engine()).now()
         );
         self.db
@@ -1229,7 +1229,7 @@ impl IdentityRepository for DbIdentityRepository {
                 &format!(
                     "SELECT {}, name, last_used_at, expires_at, created_at
          FROM user_tokens WHERE user_id = $1 ORDER BY created_at DESC",
-                    Postgres.cast("id", "text")
+                    type_mapping(self.db.engine()).cast("id", "text")
                 ),
                 params![user_id],
             )
@@ -1395,10 +1395,11 @@ impl IdentityRepository for DbIdentityRepository {
     ) -> ApiResult<(Vec<DevAccount>, i64)> {
         // `$1` matches any of the three columns; a NULL `$1` matches all rows.
         let filter = format!(
-            "($1::text IS NULL OR {} OR {} OR {})",
-            Postgres.ci_match("u.email", "$1"),
-            Postgres.ci_match("u.display_name", "$1"),
-            Postgres.ci_match("t.slug", "$1"),
+            "({term} IS NULL OR {email} OR {name} OR {slug})",
+            term = type_mapping(self.db.engine()).cast("$1", "text"),
+            email = ci_match(self.db.engine()).ci_match("u.email", "$1"),
+            name = ci_match(self.db.engine()).ci_match("u.display_name", "$1"),
+            slug = ci_match(self.db.engine()).ci_match("t.slug", "$1"),
         );
         let total: i64 = self
             .db
