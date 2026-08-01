@@ -14,6 +14,7 @@ import { PORT_CAP_SENTENCE, PortSafetyNotice } from "../PortSafetyNotice";
 import { hasPortDeclaration } from "../portSafety";
 import { SessionPolicy } from "../SessionPolicy";
 import { WorkspaceLocations } from "../WorkspaceLocations";
+import { WorkspacePorts } from "../WorkspacePorts";
 import { SectionedPage, type PageSection } from "../SectionedPage";
 import { askChoice, askConfirm, askForm, askText, notify } from "../dialogs";
 import { requireAppPassword, useAppPassword } from "../apppassword";
@@ -633,6 +634,15 @@ export function WorkspaceDetail() {
           </div>
         </div>
       ),
+    },
+    {
+      // Beside the session policy on purpose: both are declarations about what
+      // runs here, and this one decides what those sessions can bind.
+      id: "ports",
+      title: "Ports",
+      group: "Work",
+      keywords: ["ports", "listener", "env", "PORT", "declaration", "lease"],
+      render: () => (id ? <WorkspacePorts workspaceId={id} declaredRaw={ws.port_requirements} /> : null),
     },
     {
       id: "notes",
