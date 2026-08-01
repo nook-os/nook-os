@@ -16,3 +16,23 @@ It joins the control plane once at first boot using the join token in Secret
 
 3. Identity, checkouts, and the tmux runtime live on PersistentVolumeClaims, so a
    pod restart keeps them. Deleting the PVCs makes it re-join as a fresh node.
+{{ if .Values.networkPolicy.enabled }}
+4. Egress is confined by a NetworkPolicy: DNS, the public internet, and nothing
+   on a private address. Ingress is denied entirely — the node dials the control
+   plane, and the control plane never dials back, so it needs no inbound.
+{{- if not .Values.networkPolicy.controlPlane.enabled }}
+{{- if not .Values.networkPolicy.additionalAllowedCIDRs }}
+
+   If your control plane is IN this cluster, or on a private address, the node
+   cannot reach it yet. Set networkPolicy.controlPlane.enabled=true (in-cluster)
+   or networkPolicy.additionalAllowedCIDRs (private IP) — see the chart README.
+{{- end }}
+{{- end }}
+
+   Enforcement requires a NetworkPolicy-capable CNI; without one this restricts
+   nothing and Kubernetes will not warn you.
+{{- else }}
+
+4. Egress confinement is OFF (networkPolicy.enabled=false): this node can reach
+   anything the cluster network allows.
+{{- end }}

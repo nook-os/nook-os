@@ -87,6 +87,11 @@ services:
       - "8025:8025" # Web UI — open http://localhost:8025 to read dev mail
 
   control-plane:
+    # On BOTH networks: the default one it shares with postgres/web/node, and
+    # the `operator` one, which is the operator node's only way out (MAIN-141).
+    networks:
+      - default
+      - operator
     build:
       context: .
       dockerfile: deploy/docker/dev-rust.Dockerfile
@@ -281,6 +286,17 @@ services:
   # (via NOOK_DEV_JOIN_TOKEN, seeded by the control plane from .env); identity,
   # checkouts, and tmux live on named volumes so a restart re-attaches (AC-5).
   operator-node:
+    # ONLY the `operator` network (MAIN-141): the agent workloads this node runs
+    # can reach the control plane and the public internet, and cannot resolve —
+    # let alone reach — postgres, mailpit, web, or the plain node. That is the
+    # dev mirror of the chart's NetworkPolicy.
+    #
+    # ACCEPTED DEV-ONLY GAP: Docker still NATs this network to the host, so the
+    # host LAN remains reachable from inside the container. Closing that would
+    # need iptables in the container (NG-3); Kubernetes is the enforced surface,
+    # and the chart's policy subtracts every private range there.
+    networks:
+      - operator
     build:
       context: .
       dockerfile: deploy/docker/operator-node.Dockerfile
@@ -345,6 +361,12 @@ services:
     depends_on:
       control-plane:
         condition: service_healthy
+
+# One extra network beside the implicit default (MAIN-141). Every other service
+# stays on the default, so only the two services below can see each other here.
+networks:
+  default:
+  operator:
 
 volumes:
   pgdata:
