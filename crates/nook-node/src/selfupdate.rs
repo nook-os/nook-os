@@ -134,6 +134,7 @@ mod tests {
             agent_server: None,
             service: service.map(str::to_string),
             tmux_socket: None,
+            tenant_slug: None,
         }
     }
 

@@ -9354,6 +9354,10 @@
           "not_after": {
             "type": "string",
             "format": "date-time"
+          },
+          "tenant_slug": {
+            "type": "string",
+            "description": "The slug of the tenant this node enrolled into. The node scopes its\ndefault workspace root by it (`~/.nook/workspace/<tenant_slug>/…`) so two\ntenants sharing one control-plane host never collide on disk. Empty only\nfrom an older control plane that predates this field; the node falls back\nto its host slug then (MAIN-347)."
           }
         }
       },
@@ -10062,6 +10066,10 @@
           "node_token": {
             "type": "string",
             "description": "Long-lived node credential; shown once, stored hashed."
+          },
+          "tenant_slug": {
+            "type": "string",
+            "description": "The slug of the tenant this node joined. The node scopes its default\nworkspace root by it so a `nook join` lands checkouts under the tenant\ndirectory from the very first config, before enrolment (MAIN-347). Empty\nonly from a control plane predating this field."
           }
         }
       },

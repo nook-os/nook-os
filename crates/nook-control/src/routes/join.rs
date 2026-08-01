@@ -135,10 +135,18 @@ pub async fn join(
     )
     .await;
 
+    let tenant_slug = state
+        .operator
+        .tenant_org_and_slug(tenant_id)
+        .await?
+        .map(|(_, slug)| slug)
+        .unwrap_or_default();
+
     Ok(Json(JoinResponse {
         node_id,
         node_name: name,
         node_token,
+        tenant_slug,
     }))
 }
 
@@ -280,6 +288,17 @@ async fn issue(
         .map(|c| c.cert_pem)
         .collect();
 
+    // The node scopes its default workspace root by this slug (MAIN-347). A
+    // missing tenant here would be a serious inconsistency (we just signed a
+    // leaf for it), so treat absence as empty and let the node fall back to its
+    // host slug rather than fail the enrolment over a directory name.
+    let tenant_slug = state
+        .operator
+        .tenant_org_and_slug(tenant)
+        .await?
+        .map(|(_, slug)| slug)
+        .unwrap_or_default();
+
     events::record(
         state,
         tenant,
@@ -294,5 +313,6 @@ async fn issue(
         cert_pem: leaf.cert_pem,
         ca_bundle,
         not_after: leaf.not_after,
+        tenant_slug,
     }))
 }

@@ -358,11 +358,9 @@ pub async fn connect_once(cfg: &NodeConfig) -> Result<()> {
                 ssh_key,
             } => {
                 let tx = out_tx.clone();
-                let root = cfg
-                    .workspace_roots
-                    .first()
-                    .cloned()
-                    .unwrap_or_else(|| crate::config::default_workspace_root(&cfg.server));
+                let root = cfg.workspace_roots.first().cloned().unwrap_or_else(|| {
+                    crate::config::default_workspace_root(cfg.tenant_slug.as_deref(), &cfg.server)
+                });
                 let roots = cfg.workspace_roots.clone();
                 tokio::task::spawn_blocking(move || {
                     let outcome = crate::gitops::clone_repo(
@@ -537,11 +535,9 @@ pub async fn connect_once(cfg: &NodeConfig) -> Result<()> {
             }
             ControlToNode::InitProject { request_id, name } => {
                 let tx = out_tx.clone();
-                let root = cfg
-                    .workspace_roots
-                    .first()
-                    .cloned()
-                    .unwrap_or_else(|| crate::config::default_workspace_root(&cfg.server));
+                let root = cfg.workspace_roots.first().cloned().unwrap_or_else(|| {
+                    crate::config::default_workspace_root(cfg.tenant_slug.as_deref(), &cfg.server)
+                });
                 let roots = cfg.workspace_roots.clone();
                 tokio::task::spawn_blocking(move || {
                     let outcome = crate::gitops::init_project(&root, &name);
