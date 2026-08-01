@@ -52,7 +52,10 @@ function NewSpecButton({ workspaceId }: { workspaceId: string }) {
   );
 }
 
-export function WorkspacesPage() {
+/** The all-workspaces table as a mountable panel — an Admin-page section now.
+ *  Day-to-day navigation goes through the top-bar workspace switcher and the
+ *  dashboard; this table is the management view (spec buttons, delete). */
+export function WorkspacesPanel() {
   const showNewWork = useNewWork((s) => s.show);
   const { data: workspaces } = useQuery({
     queryKey: ["workspaces"],
@@ -60,7 +63,6 @@ export function WorkspacesPage() {
   });
 
   return (
-    <div className="nook-grid" style={{ gridTemplateColumns: "1fr" }}>
       <Panel
         title={`Workspaces (${(workspaces ?? []).length})`}
         actions={
@@ -111,7 +113,6 @@ export function WorkspacesPage() {
           </table>
         )}
       </Panel>
-    </div>
   );
 }
 

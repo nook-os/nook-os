@@ -1,11 +1,12 @@
-// Assembly test for the Operator page (MAIN-56).
+// Assembly test for the Admin page (MAIN-56, then the Operator→Admin merge).
 //
 // The individual pieces — DataList, SearchInput, debounce, the operator queries
 // — are unit-tested elsewhere. What was only ever a manual click-through is the
 // *assembled* page: that search reaches the server, that "load more" carries the
-// keyset cursor, and that an action fires the right request and refetches. This
-// renders the real <OperatorPage/> under react-query with `@nookos/api` and the
-// dialog helpers mocked — jsdom only, no control plane (NG-2).
+// keyset cursor, that an action fires the right request and refetches, and that
+// the operator half exists only for an operator. This renders the real
+// <AdminPage/> under react-query with `@nookos/api` and the dialog helpers
+// mocked — jsdom only, no control plane (NG-2).
 import React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
@@ -24,7 +25,7 @@ vi.mock("../dialogs", () => ({
   notify: vi.fn(async () => undefined),
 }));
 
-import { OperatorPage } from "./Operator";
+import { AdminPage } from "./Admin";
 import { api } from "@nookos/api";
 
 // The stub's methods at the loose shape the tests drive them with — the real
@@ -35,7 +36,7 @@ const mock = api as unknown as {
   DELETE: ReturnType<typeof vi.fn>;
 };
 
-const me = { user: { email: "op@nook.test" }, capability: { operator: true } };
+const operatorMe = { user: { email: "op@nook.test" }, capability: { operator: true } };
 const tenant = (slug: string) => ({
   id: `t-${slug}`,
   slug,
@@ -51,12 +52,17 @@ const listPage = (rows: unknown[], next_cursor: string | null = null) => ({
 
 // Route each GET to a fixture, branching tenants on the search term and cursor so
 // one seed exercises the plain load, a search, and paging.
-function seedApi() {
+function seedApi(me: unknown = operatorMe) {
   mock.GET.mockImplementation(async (path: string, opts?: { params?: { query?: Record<string, unknown> } }) => {
     const query = opts?.params?.query ?? {};
     switch (path) {
       case "/api/v1/auth/me":
         return { data: me };
+      // The Team sections' data — present so the default section renders.
+      case "/api/v1/workspaces":
+        return { data: [] };
+      case "/api/v1/events":
+        return { data: { events: [] } };
       case "/api/v1/operator/orgs":
         return { data: [{ id: "o-acme", slug: "acme", name: "acme" }] };
       case "/api/v1/operator/tenants":
@@ -95,20 +101,21 @@ function seedApi() {
 // section lives in the URL, so the render needs a router and the tests need a
 // way to open a section. `initial` deep-links one, exactly as a person's
 // bookmark would.
-function renderPage(initial = "/operator") {
+function renderPage(initial = "/admin") {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
     <MemoryRouter initialEntries={[initial]}>
       <QueryClientProvider client={qc}>
-        <OperatorPage />
+        <AdminPage />
       </QueryClientProvider>
     </MemoryRouter>,
   );
 }
 
-/** Open a section through the nav, like a person would. */
+/** Open a section through the nav, like a person would. The operator entries
+ *  only exist once `me` resolves, so finding is awaited. */
 const openSection = async (user: ReturnType<typeof userEvent.setup>, title: string) => {
-  await user.click(screen.getByRole("button", { name: title }));
+  await user.click(await screen.findByRole("button", { name: title }));
 };
 
 const tenantGets = () => mock.GET.mock.calls.filter((c) => c[0] === "/api/v1/operator/tenants").length;
@@ -124,11 +131,15 @@ beforeEach(() => {
 // the next test and queries match duplicates.
 afterEach(() => cleanup());
 
-describe("Operator page assembly", () => {
-  it("shows tenants first and reaches every other section through the nav", async () => {
+describe("Admin page assembly", () => {
+  it("opens on the Team half and reaches every operator section through the nav", async () => {
     const user = userEvent.setup();
     renderPage();
-    // Tenants is the default section.
+    // Workspaces is the default section — the tenant's own tables come first.
+    expect(await screen.findByText(/Workspaces \(0\)/)).toBeTruthy();
+    expect(screen.queryByText("alpha")).toBeNull();
+
+    await openSection(user, "Tenants");
     expect(await screen.findByText("alpha")).toBeTruthy();
     // One section at a time: nodes are NOT on screen until their section is.
     expect(screen.queryByText("beelink")).toBeNull();
@@ -146,7 +157,7 @@ describe("Operator page assembly", () => {
 
   it("a deep link lands on its section, and the finder narrows the nav", async () => {
     const user = userEvent.setup();
-    renderPage("/operator?section=audit");
+    renderPage("/admin?section=audit");
     expect(await screen.findByText("ca.rotate")).toBeTruthy();
 
     // The finder matches keywords, not only titles: "machine" is not in any
@@ -158,7 +169,7 @@ describe("Operator page assembly", () => {
 
   it("search wires q to the server and swaps in the searched rows (AC-4)", async () => {
     const user = userEvent.setup();
-    renderPage();
+    renderPage("/admin?section=tenants");
     await screen.findByText("alpha");
 
     await user.type(screen.getByLabelText("Search tenants"), "globex");
@@ -178,7 +189,7 @@ describe("Operator page assembly", () => {
 
   it("load more wires the keyset cursor and appends the next page (AC-5)", async () => {
     const user = userEvent.setup();
-    renderPage();
+    renderPage("/admin?section=tenants");
     await screen.findByText("alpha");
     const before = tenantGets();
 
@@ -199,9 +210,22 @@ describe("Operator page assembly", () => {
     expect(screen.getByText("alpha")).toBeTruthy();
   });
 
+  it("a member sees only the Team half, and no operator request is even sent", async () => {
+    seedApi({ user: { email: "m@nook.test" }, capability: { operator: false } });
+    renderPage();
+    expect(await screen.findByText(/Workspaces \(0\)/)).toBeTruthy();
+
+    // The nav simply has no operator entries — not disabled, absent.
+    expect(screen.queryByRole("button", { name: "Tenants" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Audit" })).toBeNull();
+    // And the queries are `enabled:`-gated, so a member produces no 403 noise.
+    expect(tenantGets()).toBe(0);
+    expect(nodeGets()).toBe(0);
+  });
+
   it("a write action calls the API and invalidates the operator lists (AC-6)", async () => {
     const user = userEvent.setup();
-    renderPage("/operator?section=nodes");
+    renderPage("/admin?section=nodes");
     await screen.findByText("beelink");
     const before = nodeGets();
 

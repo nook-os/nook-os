@@ -63,7 +63,7 @@ vi.mock("./dialogs", () => ({
 }));
 
 import { boardForWorkspace, SPEC_DRAFT_TITLE } from "./newspec";
-import { WorkspacesPage } from "./pages/Workspaces";
+import { WorkspacesPanel } from "./pages/Workspaces";
 
 const board = (id: string, workspace_id: string | null = null): Board =>
   ({ id, name: id, provider: "local", workspace_id }) as unknown as Board;
@@ -83,7 +83,7 @@ function renderPage() {
     <QueryClientProvider client={qc}>
       <MemoryRouter initialEntries={["/workspaces"]}>
         <Routes>
-          <Route path="/workspaces" element={<WorkspacesPage />} />
+          <Route path="/workspaces" element={<WorkspacesPanel />} />
           {/* Stands in for the Loop page: rendering it IS the proof we landed. */}
           <Route path="/loop/:taskId" element={<LoopStub />} />
         </Routes>

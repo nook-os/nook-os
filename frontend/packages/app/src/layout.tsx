@@ -43,24 +43,26 @@ import { FeedbackModalHost, useFeedbackModal } from "./FeedbackModal";
 const SECTIONS = [
   { to: "/", label: "Dashboard", icon: LayoutDashboard, end: true },
   { to: "/mission", label: "Mission Control", icon: Radar },
-  { to: "/workspaces", label: "Workspaces", icon: FolderGit2 },
   { to: "/sessions", label: "Sessions", icon: SquareTerminal },
   { to: "/board", label: "Board", icon: KanbanSquare },
   { to: "/chat", label: "Chat", icon: MessageSquare },
-  { to: "/activity", label: "Activity", icon: Activity },
   { to: "/nodes", label: "Nodes", icon: Server },
   // Person-global, not workspace-scoped: your private notebook follows you
   // across every org you belong to (MAIN-101).
   { to: "/notebook", label: "Notes", icon: NotebookText },
 ];
 
-/// Shown only to somebody holding an operator binding.
+/// The management surface — the old Workspaces and Activity tables live here as
+/// sections now, alongside the operator's fleet views. Shown to a tenant
+/// admin/owner or an operator; a plain member's day-to-day never needed the
+/// tables (the top-bar switcher and the dashboard cover it), and shrinking the
+/// rail was the point.
 ///
 /// Absent rather than disabled: a greyed-out door still tells you there is a
-/// room, and on this surface the room is other people's fleets.
-const OPERATOR_SECTION = {
-  to: "/operator",
-  label: "Operator",
+/// room, and for the operator half the room is other people's fleets.
+const ADMIN_SECTION = {
+  to: "/admin",
+  label: "Admin",
   icon: ShieldCheck,
   end: false,
 };
@@ -90,7 +92,12 @@ function ContextTabs() {
       active: location.pathname.startsWith("/sessions"),
     },
     { to: "/board", label: "Board", icon: KanbanSquare, active: location.pathname === "/board" },
-    { to: "/activity", label: "Activity", icon: Activity, active: location.pathname === "/activity" },
+    {
+      to: "/admin?section=activity",
+      label: "Activity",
+      icon: Activity,
+      active: location.pathname === "/admin" && location.search.includes("section=activity"),
+    },
   ];
   return (
     <>
@@ -283,10 +290,10 @@ export function Shell({ me }: { me: MeResponse }) {
     window.location.href = "/";
   };
 
-  // Absent unless held — see OPERATOR_SECTION.
-  const sections = me.capability?.operator
-    ? [...SECTIONS, OPERATOR_SECTION]
-    : SECTIONS;
+  // Absent unless held — see ADMIN_SECTION.
+  const isAdmin =
+    !!me.capability?.operator || me.user.role === "owner" || me.user.role === "admin";
+  const sections = isAdmin ? [...SECTIONS, ADMIN_SECTION] : SECTIONS;
 
   return (
     <div className="nook-app">

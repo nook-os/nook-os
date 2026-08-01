@@ -1,13 +1,23 @@
-// The operator surface.
+// The admin surface — the tenant's table views and the operator's fleet views,
+// one sectioned page.
 //
-// Everything here reads `/api/v1/operator/*` and nothing else. That is the
-// frontend half of the rule the backend enforces: session content is not
-// reachable from this page because there is no endpoint under that prefix that
-// serves it, and a component here that fetched `/sessions/{id}` would be as
-// visible in review as the route would be.
+// This absorbed the Workspaces and Activity rail pages: they are management
+// tables, and three rail entries (Workspaces, Activity, Operator) for what is
+// one kind of surface was rail clutter. Day-to-day navigation never needed the
+// tables — the top-bar workspace switcher and the dashboard cover it — so the
+// tables live here, as sections, findable by the same nav and finder as
+// everything else.
 //
-// The page exists only for someone holding an operator binding — the rail entry
-// is hidden otherwise, and every request 403s regardless.
+// TWO AUDIENCES, ONE PAGE. The Team group is tenant data any member may see;
+// the Fleet and Access groups exist only for someone holding an operator
+// binding — their sections are not rendered without it and their queries are
+// not even sent (`enabled:` gates below), so a member who lands here from an
+// old /activity bookmark produces no 403 noise.
+//
+// The operator half still reads `/api/v1/operator/*` and nothing else: session
+// content is unreachable from this page because no endpoint under that prefix
+// serves it, and every request 403s server-side regardless of what the UI
+// renders.
 import React from "react";
 import { useInfiniteQuery, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
@@ -39,6 +49,8 @@ import {
 import { askConfirm, askForm, askText, notify } from "../dialogs";
 import { SectionedPage, type PageSection } from "../SectionedPage";
 import { TenantSwitches } from "../TenantSwitches";
+import { ActivityPanel } from "./Activity";
+import { WorkspacesPanel } from "./Workspaces";
 
 // Columns for the audit DataList. Module-level: the cells read only the row, so
 // they never close over component state and the array is stable across renders.
@@ -64,13 +76,14 @@ const AUDIT_COLUMNS: DataColumn<OperatorAuditEntry>[] = [
   },
 ];
 
-export function OperatorPage() {
+export function AdminPage() {
   const qc = useQueryClient();
 
   const { data: me } = useQuery({
     queryKey: ["me"],
     queryFn: async () => (await api.GET("/api/v1/auth/me")).data ?? null,
   });
+  const isOperator = !!me?.capability?.operator;
   // Tenants, nodes and bindings each paginate by keyset cursor and search
   // server-side (MAIN-44), through the same shared DataList as the audit log.
   const [tenantSearch, setTenantSearch] = React.useState("");
@@ -84,6 +97,7 @@ export function OperatorPage() {
         })
       ).data ?? { rows: [], next_cursor: null },
     getNextPageParam: (last) => last.next_cursor ?? undefined,
+    enabled: isOperator,
   });
   const tenants = tenantsQuery.data?.pages.flatMap((p) => p.rows) ?? [];
 
@@ -98,6 +112,7 @@ export function OperatorPage() {
         })
       ).data ?? { rows: [], next_cursor: null },
     getNextPageParam: (last) => last.next_cursor ?? undefined,
+    enabled: isOperator,
   });
   const nodes = nodesQuery.data?.pages.flatMap((p) => p.rows) ?? [];
 
@@ -112,12 +127,14 @@ export function OperatorPage() {
         })
       ).data ?? { rows: [], next_cursor: null },
     getNextPageParam: (last) => last.next_cursor ?? undefined,
+    enabled: isOperator,
   });
   const bindings = bindingsQuery.data?.pages.flatMap((p) => p.rows) ?? [];
 
   const { data: orgs } = useQuery({
     queryKey: ["operator", "orgs"],
     queryFn: async () => (await api.GET("/api/v1/operator/orgs")).data ?? [],
+    enabled: isOperator,
   });
   // The audit log paginates by keyset cursor and searches server-side (MAIN-43),
   // so it holds many pages of accumulated rows rather than a single fetch. A new
@@ -139,6 +156,7 @@ export function OperatorPage() {
         })
       ).data ?? { rows: [], next_cursor: null },
     getNextPageParam: (last) => last.next_cursor ?? undefined,
+    enabled: isOperator,
   });
   const auditRows = auditQuery.data?.pages.flatMap((p) => p.rows) ?? [];
   const orgId = me?.capability?.org_id ?? null;
@@ -150,7 +168,7 @@ export function OperatorPage() {
           params: { path: { id: orgId! } },
         })
       ).data ?? [],
-    enabled: !!orgId,
+    enabled: !!orgId && isOperator,
   });
 
   const bust = () => qc.invalidateQueries({ queryKey: ["operator"] });
@@ -316,35 +334,6 @@ export function OperatorPage() {
     qc.invalidateQueries({ queryKey: ["operator"] });
   };
 
-  // Not holding the binding is a legitimate state, not an error — but empty
-  // tables read as "this deployment has nothing in it", which is a different
-  // and wrong claim. Say which it is.
-  if (me && !me.capability?.operator) {
-    return (
-      <div className="nook-grid" style={{ gridTemplateColumns: "1fr" }}>
-        <Panel title="Operator">
-          <div className="op-intro">
-            <ShieldCheck size={14} />
-            <div>
-              <div className="bright">
-                You do not hold an operator role on this deployment.
-              </div>
-              <div className="muted small">
-                Signed in as <span className="mono">{me.user.email}</span>. This
-                page shows what the person running this deployment can see —
-                tenants, nodes and audit, never session content. Grant yourself
-                the role with:
-                <div className="op-code mono">
-                  nook operator grant {me.user.email}
-                </div>
-              </div>
-            </div>
-          </div>
-        </Panel>
-      </div>
-    );
-  }
-
   // Column defs live inside the component: their action cells close over the
   // handlers (moveTenant/stageCa/revoke…) and over `orgs`, so — unlike the
   // static AUDIT_COLUMNS — they cannot be module-level constants.
@@ -436,7 +425,7 @@ export function OperatorPage() {
     },
   ];
 
-  const intro = (
+  const intro = !isOperator ? undefined : (
     <Panel title="Operator · what this deployment is doing">
       <div className="op-intro">
         <ShieldCheck size={14} />
@@ -452,10 +441,31 @@ export function OperatorPage() {
     </Panel>
   );
 
-  // The registry replaces one long scroll of stacked tables. Each section is a
-  // panel with its own server-side row search; the shell's finder on the left
-  // answers the different question of WHICH table you want.
+  // The registry replaces one long scroll of stacked tables — and three rail
+  // entries. Team first: it is what every visitor may see; the operator groups
+  // exist only when the binding does.
   const sections: PageSection[] = [
+    {
+      id: "workspaces",
+      title: "Workspaces",
+      group: "Team",
+      keywords: ["repo", "worktree", "checkout", "spec", "delete", "clone", "table"],
+      render: () => <WorkspacesPanel />,
+    },
+    {
+      id: "activity",
+      title: "Activity",
+      group: "Team",
+      keywords: ["events", "timeline", "feed", "log", "history", "who did what"],
+      render: () => <ActivityPanel />,
+    },
+    ...(!isOperator
+      ? []
+      : operatorSections()),
+  ];
+
+  function operatorSections(): PageSection[] {
+    return [
     {
       id: "tenants",
       title: "Tenants",
@@ -673,7 +683,8 @@ export function OperatorPage() {
         </Panel>
       ),
     },
-  ];
+    ];
+  }
 
   return <SectionedPage sections={sections} placeholder="find…" intro={intro} />;
 }
