@@ -274,6 +274,17 @@ pub enum ControlToNode {
         workspace_path: String,
         cols: u16,
         rows: u16,
+        /// The ports leased to this session (MAIN-301), each carrying the env
+        /// var its workspace declared for it — so an app in a worktree binds
+        /// somewhere free instead of a hardcoded 3000, and an app with a web
+        /// port AND an api port gets both. Empty when the node advertises no
+        /// range or the workspace declares no listeners; the session still
+        /// starts, it just has nothing to offer.
+        ///
+        /// The NAMES come from the workspace, never from this end — that is
+        /// what keeps the node as ignorant of frameworks as the broker is.
+        #[serde(default)]
+        ports: Vec<nook_types::LeasedPort>,
     },
     /// Install a runtime credential this node did not obtain (MAIN-283).
     ///

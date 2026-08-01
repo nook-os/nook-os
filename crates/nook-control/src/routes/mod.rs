@@ -151,6 +151,10 @@ pub fn build_router(state: AppState) -> Router {
             "/workspaces/{id}/session-spec",
             get(workspaces::get_session_spec).put(workspaces::set_session_spec),
         )
+        .route(
+            "/workspaces/{id}/ports",
+            get(workspaces::get_port_requirements).put(workspaces::set_port_requirements),
+        )
         .route("/workspaces/{id}/git", get(workspaces::git_status))
         .route("/workspaces/{id}/clone", post(workspaces::clone_to_node))
         .route("/workspaces/{id}/worktrees", post(gitops::add_worktree))
@@ -268,6 +272,14 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/nodes/{id}/placement",
             get(nodes::get_placement).put(nodes::set_placement),
+        )
+        .route(
+            "/nodes/{id}/ports",
+            get(nodes::get_ports).put(nodes::set_ports),
+        )
+        .route(
+            "/nodes/{id}/leases/{session}",
+            delete_route(nodes::release_lease),
         )
         .route("/nodes/{id}/authorize", post(nodes::authorize))
         // The sessionless replacement (MAIN-290). Coexists with the line

@@ -18,6 +18,7 @@ pub mod notify;
 pub mod operator_queries;
 pub mod overview_queries;
 pub mod policy;
+pub mod port_leases;
 pub mod queue;
 pub mod runtime_auth;
 pub mod runtime_auth_flow;

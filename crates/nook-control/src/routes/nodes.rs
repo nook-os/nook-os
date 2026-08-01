@@ -326,6 +326,136 @@ pub async fn set_placement(
     Ok(Json(placement_of(&node)))
 }
 
+/// `GET /api/v1/nodes/{id}/ports` — the range in force, where it came from,
+/// and the live leases (MAIN-301 AC-5/AC-6). Visible to anyone who can see the
+/// node: knowing which ports are busy is the same grade of fact as knowing the
+/// machine exists.
+#[utoipa::path(get, path = "/api/v1/nodes/{id}/ports",
+    operation_id = "get_node_ports",
+    params(("id" = String, Path,)),
+    responses((status = 200, body = NodePorts), (status = 404)))]
+pub async fn get_ports(
+    State(state): State<AppState>,
+    auth: AuthCtx,
+    Path(id): Path<NodeId>,
+) -> ApiResult<Json<NodePorts>> {
+    let node = visible_node(&state, &auth, id).await?;
+    Ok(Json(ports_of(&state, &node).await?))
+}
+
+/// `PUT /api/v1/nodes/{id}/ports` — set or clear the operator's range.
+///
+/// Owner-gated exactly as placement and sharing are: the range decides what
+/// gets bound on somebody's machine, so it is the machine owner's call.
+#[utoipa::path(put, path = "/api/v1/nodes/{id}/ports",
+    operation_id = "set_node_ports",
+    params(("id" = String, Path,)),
+    request_body = SetNodePortsRequest,
+    responses((status = 200, body = NodePorts), (status = 400), (status = 403), (status = 404)))]
+pub async fn set_ports(
+    State(state): State<AppState>,
+    auth: AuthCtx,
+    Path(id): Path<NodeId>,
+    Json(req): Json<SetNodePortsRequest>,
+) -> ApiResult<Json<NodePorts>> {
+    // A person sets a range; a node credential is not a person.
+    auth.require_user()?;
+    let node = visible_node(&state, &auth, id).await?;
+    require_owner(&state, &auth, &node, "set its port range").await?;
+
+    // Both or neither. A half-set range has no meaning, and accepting one would
+    // leave the node in a state nothing can lease from and nothing explains.
+    let (start, end) = match (req.start, req.end) {
+        (None, None) => (None, None),
+        (Some(s), Some(e)) => {
+            if s < 1024 {
+                return Err(ApiError::BadRequest(
+                    "start below 1024 is a privileged port — pick a range above it".into(),
+                ));
+            }
+            if e < s {
+                return Err(ApiError::BadRequest(
+                    "the range ends before it starts".into(),
+                ));
+            }
+            // The wire carries a port as u16 (MAIN-301 review). Without this
+            // ceiling a range ending above 65535 stores fine, leases fine, and
+            // then WRAPS on its way to the node — a session told to bind 4 when
+            // it was leased 65540. Refused here, where the number a human typed
+            // is still the number being discussed.
+            if e > 65535 {
+                return Err(ApiError::BadRequest(
+                    "65535 is the highest port there is — pick an end at or below it".into(),
+                ));
+            }
+            (Some(s), Some(e))
+        }
+        _ => {
+            return Err(ApiError::BadRequest(
+                "give both start and end, or neither to clear the range".into(),
+            ))
+        }
+    };
+
+    let node = state
+        .nodes
+        .set_port_range(id, auth.tenant_id, start, end)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    Ok(Json(ports_of(&state, &node).await?))
+}
+
+/// `DELETE /api/v1/nodes/{id}/leases/{session}` — hand a port back without
+/// ending its session (AC-6).
+///
+/// The escape hatch, not the mechanism: a lease normally frees itself when its
+/// session stops being live. This is for the one a human can see is stuck.
+#[utoipa::path(delete, path = "/api/v1/nodes/{id}/leases/{session}",
+    operation_id = "release_node_lease",
+    params(("id" = String, Path,), ("session" = String, Path,)),
+    responses((status = 200, body = NodePorts), (status = 403), (status = 404)))]
+pub async fn release_lease(
+    State(state): State<AppState>,
+    auth: AuthCtx,
+    Path((id, session)): Path<(NodeId, SessionId)>,
+) -> ApiResult<Json<NodePorts>> {
+    auth.require_user()?;
+    let node = visible_node(&state, &auth, id).await?;
+    require_owner(&state, &auth, &node, "release its port leases").await?;
+
+    // Bound to the node in the PATH, not merely to the tenant (MAIN-301
+    // review). The caller was authorized as THIS machine's owner; scoping the
+    // delete by session id alone let that owner free a port held on somebody
+    // else's machine in the same tenant — a cross-owner collision, granted by
+    // an authorization check that had passed for a different node.
+    state.sessions.release_leases(node.id, session).await?;
+    Ok(Json(ports_of(&state, &node).await?))
+}
+
+/// The owner gate shared by the port surfaces, phrased with what was refused.
+async fn require_owner(state: &AppState, auth: &AuthCtx, node: &Node, what: &str) -> ApiResult<()> {
+    let me = crate::auth::person_id_of(state, auth.user_id).await?;
+    match node.owner_person_id {
+        None => Err(ApiError::ForbiddenMsg(format!(
+            "this machine has no owner, so no one can {what}"
+        ))),
+        Some(o) if o != me => Err(ApiError::ForbiddenMsg(format!(
+            "only the machine's owner can {what}"
+        ))),
+        Some(_) => Ok(()),
+    }
+}
+
+async fn ports_of(state: &AppState, node: &Node) -> ApiResult<NodePorts> {
+    let (range, source) = crate::services::port_leases::range_of(state, node.id).await?;
+    Ok(NodePorts {
+        range,
+        source,
+        advertised: crate::services::port_leases::advertised(&node.capabilities),
+        leases: state.sessions.leases_on(node.id).await?,
+    })
+}
+
 /// The node, if this caller may see it at all — the same visibility rule the
 /// sharing toggle applies, so an invisible node 404s rather than confirming it
 /// exists.

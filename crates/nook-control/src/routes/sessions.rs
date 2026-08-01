@@ -83,6 +83,7 @@ pub async fn get_one(
     let mut session = session_for_content(&state, &auth, id).await?;
     session_queries::hydrate_checkouts(&*state.workspaces, std::slice::from_mut(&mut session))
         .await?;
+    session_queries::hydrate_ports(&*state.sessions, std::slice::from_mut(&mut session)).await?;
     // The registry is the truth about a node's liveness — `nodes.status` can say
     // `online` for a seeded node that never connected. Filling this lets the UI
     // render a dead/synthetic session honestly instead of retrying its attach.
@@ -107,6 +108,7 @@ pub async fn create(
         session_queries::create_session(&state, auth.tenant_id, Some(auth.user_id), req).await?;
     session_queries::hydrate_checkouts(&*state.workspaces, std::slice::from_mut(&mut session))
         .await?;
+    session_queries::hydrate_ports(&*state.sessions, std::slice::from_mut(&mut session)).await?;
     Ok(Json(session))
 }
 
@@ -450,6 +452,11 @@ pub async fn restart(
             workspace_path,
             cols: 120,
             rows: 32,
+            // The SAME ports it already holds (MAIN-301). A restart is the
+            // same session coming back, so re-leasing would hand it different
+            // numbers and break every URL and config that pointed at the old
+            // ones. Its leases outlive the process for exactly this reason.
+            ports: state.sessions.leases_of(id).await?,
         },
     );
     if !sent {
@@ -459,6 +466,7 @@ pub async fn restart(
     let mut session: Session = state.sessions.mark_restarting(id).await?;
     session_queries::hydrate_checkouts(&*state.workspaces, std::slice::from_mut(&mut session))
         .await?;
+    session_queries::hydrate_ports(&*state.sessions, std::slice::from_mut(&mut session)).await?;
     state.registry.publish(
         auth.tenant_id,
         UiEvent::SessionStatus {

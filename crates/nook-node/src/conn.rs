@@ -298,6 +298,7 @@ pub async fn connect_once(cfg: &NodeConfig) -> Result<()> {
                 workspace_path,
                 cols,
                 rows,
+                ports,
             } => {
                 // An empty path is the control plane's signal for an ad-hoc
                 // terminal: a shell with no workspace, run in this machine's
@@ -307,7 +308,7 @@ pub async fn connect_once(cfg: &NodeConfig) -> Result<()> {
                 } else {
                     workspace_path
                 };
-                manager.start(session_id, &runtime, &cwd, cols, rows)
+                manager.start(session_id, &runtime, &cwd, cols, rows, &ports)
             }
             ControlToNode::StartAuthSession {
                 session_id,

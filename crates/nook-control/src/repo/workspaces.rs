@@ -123,6 +123,15 @@ pub trait WorkspaceRepository: Send + Sync {
         spec: Option<serde_json::Value>,
     ) -> ApiResult<Option<Workspace>>;
 
+    /// Set or clear a workspace's declared port requirements (MAIN-301).
+    /// `None` clears the declaration, returning it to the default listener.
+    async fn set_port_requirements(
+        &self,
+        tenant: TenantId,
+        id: WorkspaceId,
+        requirements: Option<serde_json::Value>,
+    ) -> ApiResult<Option<Workspace>>;
+
     /// Every workspace that declares a spec, across every tenant (MAIN-316).
     ///
     /// Cross-tenant because the reconciler is one loop for the deployment, like
@@ -538,6 +547,26 @@ impl WorkspaceRepository for DbWorkspaceRepository {
                     type_mapping(self.db.engine()).now()
                 ),
                 params![tenant, id, spec],
+            )
+            .await?)
+    }
+
+    async fn set_port_requirements(
+        &self,
+        tenant: TenantId,
+        id: WorkspaceId,
+        requirements: Option<serde_json::Value>,
+    ) -> ApiResult<Option<Workspace>> {
+        Ok(self
+            .db
+            .query_opt(
+                &format!(
+                    "UPDATE workspaces SET port_requirements = $3, updated_at = {}
+                     WHERE tenant_id = $1 AND id = $2
+                     RETURNING *",
+                    type_mapping(self.db.engine()).now()
+                ),
+                params![tenant, id, requirements],
             )
             .await?)
     }
@@ -1692,6 +1721,7 @@ impl FakeWorkspaceRepository {
             git_remote_url: git_remote_url.map(str::to_string),
             created_at: now,
             updated_at: now,
+            port_requirements: None,
             session_spec: None,
         }
     }
@@ -1714,6 +1744,24 @@ impl WorkspaceRepository for FakeWorkspaceRepository {
             return Ok(None);
         };
         w.session_spec = spec;
+        Ok(Some(w.clone()))
+    }
+
+    async fn set_port_requirements(
+        &self,
+        tenant: TenantId,
+        id: WorkspaceId,
+        requirements: Option<serde_json::Value>,
+    ) -> ApiResult<Option<Workspace>> {
+        let mut st = self.inner.lock().unwrap();
+        let Some(w) = st
+            .workspaces
+            .iter_mut()
+            .find(|w| w.id == id && w.tenant_id == tenant)
+        else {
+            return Ok(None);
+        };
+        w.port_requirements = requirements;
         Ok(Some(w.clone()))
     }
 

@@ -1039,6 +1039,28 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/nodes/{id}/leases/{session}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * `DELETE /api/v1/nodes/{id}/leases/{session}` — hand a port back without
+         *     ending its session (AC-6).
+         * @description The escape hatch, not the mechanism: a lease normally frees itself when its
+         *     session stops being live. This is for the one a human can see is stuck.
+         */
+        delete: operations["release_node_lease"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/nodes/{id}/migrate-paths": {
         parameters: {
             query?: never;
@@ -1092,6 +1114,33 @@ export interface paths {
          *     ownerless node has nobody to ask.
          */
         put: operations["set_node_placement"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/nodes/{id}/ports": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * `GET /api/v1/nodes/{id}/ports` — the range in force, where it came from,
+         *     and the live leases (MAIN-301 AC-5/AC-6). Visible to anyone who can see the
+         *     node: knowing which ports are busy is the same grade of fact as knowing the
+         *     machine exists.
+         */
+        get: operations["get_node_ports"];
+        /**
+         * `PUT /api/v1/nodes/{id}/ports` — set or clear the operator's range.
+         * @description Owner-gated exactly as placement and sharing are: the range decides what
+         *     gets bound on somebody's machine, so it is the machine owner's call.
+         */
+        put: operations["set_node_ports"];
         post?: never;
         delete?: never;
         options?: never;
@@ -2949,6 +2998,35 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workspaces/{id}/ports": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * `GET /api/v1/workspaces/{id}/ports` — the port requirements in force.
+         * @description Always answers with what WILL be leased, not with the raw column: an
+         *     undeclared workspace reports the default listener rather than an empty list,
+         *     because "you get NOOK_PORT" and "you get nothing" are different states and a
+         *     UI showing an empty table for the first would be lying.
+         */
+        get: operations["get_port_requirements"];
+        /**
+         * `PUT /api/v1/workspaces/{id}/ports` — declare what this repo binds.
+         * @description The declaration is the workspace's, which is the whole point of MAIN-301's
+         *     second cut: the control plane leases numbers and never learns what `PORT`
+         *     means to anybody.
+         */
+        put: operations["set_port_requirements"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workspaces/{id}/reconcile-status": {
         parameters: {
             query?: never;
@@ -3472,6 +3550,16 @@ export interface components {
             /** Format: int64 */
             memory: number;
             platform: string;
+            /**
+             * @description The port range this node offers sessions, `[start, end]` inclusive
+             *     (MAIN-301). Absent from a node too old to report one, which reads as
+             *     "no ports to lease" rather than a guessed range — inventing one would
+             *     hand out ports something else on that machine is already using.
+             */
+            port_range?: [
+                number,
+                number
+            ] | null;
             /**
              * @description Agent authorization profiles this node reports (MAIN-126): one per
              *     runtime-specific auth target (Claude Code, Hermes → Nous Portal, …), each
@@ -4394,6 +4482,13 @@ export interface components {
             name: string;
             tenant_id: components["schemas"]["TenantId"];
         };
+        /** @description A port actually leased to a session, as the node is told about it. */
+        LeasedPort: {
+            env: string;
+            name: string;
+            /** Format: int32 */
+            port: number;
+        };
         LocalAuthStatus: {
             /** @description Local sign-in is possible: the tenant is undecided, or already local. */
             available: boolean;
@@ -4586,6 +4681,15 @@ export interface components {
              */
             owner_person_id?: string | null;
             platform: string;
+            /** Format: int32 */
+            port_range_end?: number | null;
+            /**
+             * Format: int32
+             * @description An operator's port range for this node, overriding what it advertises
+             *     (MAIN-301). Both `None` means "use the node's own"; the pair is set and
+             *     cleared together, which the API enforces.
+             */
+            port_range_start?: number | null;
             /** @description Latest heartbeat resource sample (see `NodeResources`); `{}` until first. */
             resources: unknown;
             /**
@@ -4645,6 +4749,21 @@ export interface components {
                 [key: string]: string;
             };
             taints: components["schemas"]["NodeTaint"][];
+        };
+        /**
+         * @description A node's port situation (MAIN-301): the range sessions lease from, where it
+         *     came from, and what is currently held.
+         */
+        NodePorts: {
+            advertised?: null | components["schemas"]["PortRange"];
+            /** @description Live sessions holding a port on this node, lowest port first. */
+            leases: components["schemas"]["PortLease"][];
+            range?: null | components["schemas"]["PortRange"];
+            /**
+             * @description Where `range` came from, so the UI can say "reported by the node" vs
+             *     "set here" instead of showing two numbers with no provenance.
+             */
+            source: string;
         };
         /**
          * @description Everything the "add node" flow needs: what to download, and where the
@@ -5048,6 +5167,62 @@ export interface components {
             field: string;
         };
         /**
+         * @description One held port: which session has it, which requirement it satisfies, and
+         *     enough about that session for a human to decide whether releasing it is
+         *     safe.
+         */
+        PortLease: {
+            env: string;
+            /**
+             * @description The requirement's name and env var — so the UI can say *which* listener
+             *     holds the port rather than just that something does.
+             */
+            name: string;
+            /** Format: int32 */
+            port: number;
+            session_id: components["schemas"]["SessionId"];
+            session_name: string;
+            status: string;
+        };
+        PortRange: {
+            /** Format: int32 */
+            end: number;
+            /** Format: int32 */
+            start: number;
+        };
+        /**
+         * @description One port a workspace needs, by NAME and by the env var its runtime reads
+         *     (MAIN-301).
+         *
+         *     The declaration is the workspace's, not the control plane's. Baking `PORT`
+         *     / `NOOK_PORT` / `API_PORT` into the broker would have meant every new
+         *     framework needing a change here; instead the repo says what it needs and
+         *     the broker only decides *which* numbers satisfy it. That is what lets a
+         *     Next.js app, an ASP.NET service and a Rust backend all lease from the same
+         *     node without the control plane knowing anything about any of them.
+         */
+        PortRequirement: {
+            /** @description The environment variable the session's runtime reads the number from. */
+            env: string;
+            /**
+             * @description Stable identity for this listener within the workspace — `web`, `api`,
+             *     `debug`. What a lease is keyed on, so re-leasing is idempotent and a
+             *     renamed env var does not orphan the old lease.
+             */
+            name: string;
+            /**
+             * @description `tcp` or `udp`. Carried because a declaration that cannot say which is
+             *     not a description of what the app binds; nothing dispatches on it yet.
+             */
+            protocol?: string;
+            /**
+             * @description Whether the session should refuse to start when this one cannot be
+             *     leased. A `debug` listener is usually optional; the app's own port is
+             *     usually not.
+             */
+            required?: boolean;
+        };
+        /**
          * @description Post a message to a channel. `parent_message_id`, when set, makes this a
          *     threaded reply (MAIN-114) — the parent must be in the same channel and must
          *     not itself be a reply (one level, no nesting).
@@ -5313,6 +5488,14 @@ export interface components {
             error?: string | null;
             id: components["schemas"]["SessionId"];
             /**
+             * @description The ports leased to this session (MAIN-301), one per satisfied
+             *     [`PortRequirement`], each delivered into the session as its own env
+             *     var. Empty when the node offers no range or the workspace declares no
+             *     listeners. Not a stored column — the leases are their own rows, joined
+             *     in by the session endpoints.
+             */
+            leased_ports?: components["schemas"]["LeasedPort"][];
+            /**
              * @description Who owns this session: the reconciler (`true`, started for the
              *     workspace's [`SessionSpec`]) or a person (`false`, hand-started).
              *
@@ -5435,9 +5618,33 @@ export interface components {
             };
             taints?: components["schemas"]["NodeTaint"][];
         };
+        /**
+         * @description `PUT /nodes/{id}/ports` — set or clear the operator's range. Both `None`
+         *     clears it back to whatever the node advertises.
+         */
+        SetNodePortsRequest: {
+            /** Format: int32 */
+            end?: number | null;
+            /** Format: int32 */
+            start?: number | null;
+        };
         SetPolicyRequest: {
             enabled: boolean;
             field: string;
+        };
+        /**
+         * @description `PUT /workspaces/{id}/ports` — replace a workspace's port requirements.
+         *
+         *     A full replacement, not a patch: a partial update of a set is ambiguous
+         *     about deletion (the same reason `SetNodePlacementRequest` replaces).
+         */
+        SetPortRequirementsRequest: {
+            /**
+             * @description `null` clears the declaration, returning the workspace to the default
+             *     single `NOOK_PORT` listener; an empty list means "this workspace binds
+             *     nothing", which is a different statement and is honoured as one.
+             */
+            requirements?: components["schemas"]["PortRequirement"][] | null;
         };
         /**
          * @description Set or clear a workspace's [`SessionSpec`] (MAIN-315). `spec: null` clears
@@ -6308,6 +6515,13 @@ export interface components {
             git_remote_url?: string | null;
             id: components["schemas"]["WorkspaceId"];
             name: string;
+            /**
+             * @description The workspace's declared port requirements (MAIN-301), as stored JSON —
+             *     `[{"name":"web","env":"PORT",…}]`. `None` means undeclared, which falls
+             *     back to the default single listener; an empty array means "binds
+             *     nothing" and is honoured as the different statement it is.
+             */
+            port_requirements?: unknown;
             /**
              * @description The desired session state (MAIN-315), or `None` for an UNMANAGED
              *     workspace. Nothing reconciles it yet.
@@ -8055,6 +8269,40 @@ export interface operations {
             };
         };
     };
+    release_node_lease: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+                session: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NodePorts"];
+                };
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
     migrate_node_paths: {
         parameters: {
             query?: never;
@@ -8142,6 +8390,76 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["NodePlacement"];
                 };
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    get_node_ports: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NodePorts"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    set_node_ports: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SetNodePortsRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NodePorts"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             403: {
                 headers: {
@@ -11698,6 +12016,70 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["Note"];
                 };
+            };
+        };
+    };
+    get_port_requirements: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PortRequirement"][];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    set_port_requirements: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SetPortRequirementsRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PortRequirement"][];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
         };
     };

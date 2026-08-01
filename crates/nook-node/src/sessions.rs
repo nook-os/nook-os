@@ -62,6 +62,7 @@ impl Manager {
         workspace_path: &str,
         cols: u16,
         rows: u16,
+        ports: &[nook_types::LeasedPort],
     ) {
         // The runtime string is the executable to launch. Restrict to the
         // known set so the control plane can't run arbitrary commands.
@@ -76,7 +77,8 @@ impl Manager {
             // The canonical (hyphenated) uuid, not the tmux name's simple form,
             // so `GET /api/v1/sessions/{id}` inside the session resolves.
             let sid = session_id.0.to_string();
-            if let Err(e) = tmux::new_session(&tmux_name, workspace_path, cols, rows, runtime, &sid)
+            if let Err(e) =
+                tmux::new_session(&tmux_name, workspace_path, cols, rows, runtime, &sid, ports)
             {
                 return self.session_failed(session_id, e.to_string());
             }

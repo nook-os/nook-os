@@ -292,6 +292,20 @@ pub trait NodeRepository: Send + Sync {
         tenant: TenantId,
         person: Uuid,
     ) -> ApiResult<Vec<(NodeId, serde_json::Value)>>;
+    /// A node by id with no tenant scope — the port broker knows only the node
+    /// the session is starting on (MAIN-301). Returns the row for reading, not
+    /// as a visibility decision; every caller of the port API gates separately.
+    async fn by_id_any_tenant_or_none(&self, id: NodeId) -> ApiResult<Option<Node>>;
+
+    /// Set or clear an operator's port range for a node (MAIN-301). Both `None`
+    /// clears it, falling back to whatever the node advertises.
+    async fn set_port_range(
+        &self,
+        id: NodeId,
+        tenant: TenantId,
+        start: Option<i32>,
+        end: Option<i32>,
+    ) -> ApiResult<Option<Node>>;
 
     // ── the liveness lease and what the socket reports ──────────────────────
 
@@ -407,7 +421,8 @@ pub trait TenantCaRepository: Send + Sync {
 /// The `nodes` columns every read returns, in one place: the shape `Node`
 /// decodes from, and the reason two SELECTs cannot drift apart.
 const NODE_COLUMNS: &str = "id, tenant_id, name, hostname, platform, capabilities, resources, \
-     status, last_seen_at, owner_person_id, shared, created_at, updated_at, labels, taints";
+     status, last_seen_at, owner_person_id, shared, created_at, updated_at, labels, taints, \
+     port_range_start, port_range_end";
 
 pub struct DbNodeRepository {
     db: DbPool,
@@ -908,6 +923,37 @@ impl NodeRepository for DbNodeRepository {
             )
             .await?)
     }
+    async fn by_id_any_tenant_or_none(&self, id: NodeId) -> ApiResult<Option<Node>> {
+        Ok(self
+            .db
+            .query_opt(
+                &format!("SELECT {NODE_COLUMNS} FROM nodes WHERE id = $1"),
+                params![id],
+            )
+            .await?)
+    }
+
+    async fn set_port_range(
+        &self,
+        id: NodeId,
+        tenant: TenantId,
+        start: Option<i32>,
+        end: Option<i32>,
+    ) -> ApiResult<Option<Node>> {
+        Ok(self
+            .db
+            .query_opt(
+                &format!(
+                    "UPDATE nodes SET port_range_start = $3, port_range_end = $4,
+                            updated_at = {now}
+                      WHERE id = $1 AND tenant_id = $2
+                  RETURNING {NODE_COLUMNS}",
+                    now = type_mapping(self.db.engine()).now()
+                ),
+                params![id, tenant, start, end],
+            )
+            .await?)
+    }
 
     async fn shared_operator_online_count(&self, tenant: TenantId) -> ApiResult<i64> {
         Ok(self
@@ -1346,6 +1392,8 @@ impl FakeNodeRepository {
                 labels: serde_json::json!({}),
                 taints: serde_json::json!([]),
                 home_tenant: None,
+                port_range_start: None,
+                port_range_end: None,
             },
             token_hash: String::new(),
             owning_instance_id: None,
@@ -1692,6 +1740,8 @@ impl NodeRepository for FakeNodeRepository {
                 labels: serde_json::json!({}),
                 taints: serde_json::json!([]),
                 home_tenant: None,
+                port_range_start: None,
+                port_range_end: None,
                 created_at: now,
                 updated_at: now,
             },
@@ -1927,6 +1977,37 @@ impl NodeRepository for FakeNodeRepository {
                 )
             })
             .collect())
+    }
+
+    async fn by_id_any_tenant_or_none(&self, id: NodeId) -> ApiResult<Option<Node>> {
+        Ok(self
+            .inner
+            .lock()
+            .unwrap()
+            .nodes
+            .iter()
+            .find(|n| n.node.id == id)
+            .map(|n| n.node.clone()))
+    }
+
+    async fn set_port_range(
+        &self,
+        id: NodeId,
+        tenant: TenantId,
+        start: Option<i32>,
+        end: Option<i32>,
+    ) -> ApiResult<Option<Node>> {
+        let mut st = self.inner.lock().unwrap();
+        let Some(n) = st
+            .nodes
+            .iter_mut()
+            .find(|n| n.node.id == id && n.node.tenant_id == tenant)
+        else {
+            return Ok(None);
+        };
+        n.node.port_range_start = start;
+        n.node.port_range_end = end;
+        Ok(Some(n.node.clone()))
     }
 
     async fn shared_operator_online_count(&self, tenant: TenantId) -> ApiResult<i64> {
