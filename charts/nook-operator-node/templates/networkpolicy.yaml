@@ -1,0 +1,78 @@
+{{- if .Values.networkPolicy.enabled }}
+{{- /*
+Egress confinement for the operator node (MAIN-141).
+
+The node runs agent workloads with a full toolchain, so what it can REACH is
+the security boundary. Two halves:
+
+INGRESS: deny-all, expressed as `policyTypes: [Ingress]` with no `ingress:`
+rules at all. This is not a guess about what is safe — a node DIALS the control
+plane and holds that one outbound connection open; the control plane never
+dials a node. So nothing legitimate ever arrives, and an empty rule list is the
+whole truth rather than a restriction to revisit.
+
+EGRESS: DNS, optionally an in-cluster control plane, and the public internet
+with every private range subtracted. The `except` list is what stops a
+compromised agent from reaching the cluster's other pods, the nodes' own
+subnet, the cloud metadata endpoint (169.254.169.254 — inside 169.254.0.0/16),
+and the carrier-grade NAT range some clusters use.
+*/}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "nook-operator-node.fullname" . }}
+  labels:
+    {{- include "nook-operator-node.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "nook-operator-node.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+    - Egress
+  # No `ingress:` key: nothing may dial the node. See the note above.
+  egress:
+    # Name resolution. Without this the pod cannot resolve the control plane's
+    # address, so it is the one in-cluster allowance that is never optional.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.dns.namespaceLabels | nindent 14 }}
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    {{- if .Values.networkPolicy.controlPlane.enabled }}
+    # An in-cluster control plane, reached by pod selector rather than by IP —
+    # a pod's IP changes on every reschedule, so a CIDR hole would go stale.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.controlPlane.namespace }}
+          podSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.controlPlane.podSelector | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.networkPolicy.controlPlane.port }}
+    {{- end }}
+    {{- range .Values.networkPolicy.additionalAllowedCIDRs }}
+    # An explicit hole for something the deny list would otherwise sever —
+    # typically a control plane that is only reachable on a private address.
+    - to:
+        - ipBlock:
+            cidr: {{ . | quote }}
+    {{- end }}
+    # Everything else: the public internet, minus every private range. Agents
+    # clone from forges and install packages, so this cannot simply be closed.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            {{- with .Values.networkPolicy.deniedCIDRs }}
+            except:
+              {{- range . }}
+              - {{ . | quote }}
+              {{- end }}
+            {{- end }}
+{{- end }}

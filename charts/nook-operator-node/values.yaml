@@ -56,6 +56,53 @@ persistence:
     size: 1Gi
     storageClass: ""
 
+# Egress confinement (MAIN-141). The node runs agent workloads, so what it can
+# REACH is the security boundary — it needs no inbound at all, because it dials
+# the control plane and the control plane never dials back.
+networkPolicy:
+  # On by default: a node that cannot reach the cluster's other pods is the
+  # shipped posture, not an opt-in hardening step. ENFORCEMENT NEEDS A
+  # NETWORKPOLICY-CAPABLE CNI (Calico, Cilium, Antrea, …) — under a CNI that
+  # ignores policy the object still applies cleanly and restricts NOTHING, with
+  # no warning from Kubernetes. See the chart README.
+  enabled: true
+
+  # Private ranges subtracted from the `0.0.0.0/0` egress allowance. The
+  # defaults cover RFC1918, link-local (which is where the cloud metadata
+  # endpoint 169.254.169.254 lives) and the carrier-grade NAT range some
+  # clusters allocate pod IPs from. Tighten or loosen deliberately.
+  deniedCIDRs:
+    - 10.0.0.0/8
+    - 172.16.0.0/12
+    - 192.168.0.0/16
+    - 169.254.0.0/16
+    - 100.64.0.0/10
+
+  # Holes punched back through the deny list above, by address. Use this when
+  # the control plane is reachable only on a private IP — the defaults would
+  # otherwise sever the node from it. Example: ["10.20.0.5/32"].
+  additionalAllowedCIDRs: []
+
+  # Cluster DNS. Selected by namespace label rather than address because a
+  # kube-dns/CoreDNS Service IP is cluster-specific. Override the label if your
+  # DNS does not live in a namespace labelled `kubernetes.io/metadata.name:
+  # kube-system` — without a working rule here the node resolves nothing.
+  dns:
+    namespaceLabels:
+      kubernetes.io/metadata.name: kube-system
+
+  # An IN-CLUSTER control plane. Off by default: the common shape is a control
+  # plane outside the cluster, already covered by the public-internet rule.
+  # Selected by pod label, not by IP, because a pod's address changes on every
+  # reschedule and a CIDR hole would silently go stale.
+  controlPlane:
+    enabled: false
+    namespace: nook
+    podSelector:
+      app.kubernetes.io/name: nook-control
+    # The agent listener's port — the one nodes dial, not the browser API's.
+    port: 8081
+
 # Extra environment for the node process (e.g. RUST_LOG overrides).
 extraEnv: []
 

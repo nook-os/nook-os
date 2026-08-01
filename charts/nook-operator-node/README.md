@@ -50,6 +50,72 @@ it re-join as a brand-new node rather than half-reusing state.
 > interactive sessions do not resume — the volume preserves the socket dir and
 > on-disk state, not running processes.
 
+## Network confinement (MAIN-141)
+
+The node runs agent workloads with a full toolchain, so **what it can reach is
+the security boundary**. The chart ships a NetworkPolicy, on by default.
+
+### It never needs inbound
+
+Traffic is one-way by design: a node **dials** the control plane and holds that
+outbound connection open, and the control plane answers on it. The control
+plane never dials a node. So the policy denies ingress completely — expressed
+as `policyTypes: [Ingress]` with no `ingress:` rules at all — and that costs
+nothing, because nothing legitimate ever arrives.
+
+### Egress: DNS, your control plane, and the public internet
+
+Everything else is denied, including every private range:
+
+| Allowed | Why |
+|---|---|
+| cluster DNS (UDP+TCP 53) | without it the node resolves nothing |
+| the public internet | agents clone from forges and install packages |
+| your control plane | see the two patterns below |
+
+`networkPolicy.deniedCIDRs` is subtracted from the internet allowance and
+defaults to `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `169.254.0.0/16`,
+`100.64.0.0/10`. That last pair matters as much as the RFC1918 three: link-local
+is where the **cloud metadata endpoint** (`169.254.169.254`) lives, and some
+clusters allocate pod IPs from the carrier-grade NAT range.
+
+> **Enforcement needs a NetworkPolicy-capable CNI** — Calico, Cilium, Antrea and
+> friends. Under a CNI that ignores policy (plain kubenet, some managed
+> defaults) the object still applies cleanly and restricts **nothing**, with no
+> warning from Kubernetes. Check your CNI before treating this as a control.
+
+### Reaching your control plane
+
+**In-cluster** — select it by pod label, so a reschedule cannot stale the rule:
+
+```yaml
+networkPolicy:
+  controlPlane:
+    enabled: true
+    namespace: nook
+    podSelector:
+      app.kubernetes.io/name: nook-control
+    port: 8081          # the agent listener, not the browser API
+```
+
+**Outside the cluster on a public address** — nothing to do; the internet rule
+already covers it.
+
+**Outside the cluster on a private address** — the deny list would sever the
+node from it, so punch a hole back through, narrowly:
+
+```yaml
+networkPolicy:
+  additionalAllowedCIDRs:
+    - 10.20.0.5/32      # the control plane, and nothing else in 10/8
+```
+
+If your DNS does not live in a namespace labelled
+`kubernetes.io/metadata.name: kube-system`, set
+`networkPolicy.dns.namespaceLabels` to whatever does.
+
+Turn the whole thing off with `--set networkPolicy.enabled=false`.
+
 ## What it is not
 
 - **Unauthenticated.** The CLIs ship without credentials (NG-1); agent

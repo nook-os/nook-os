@@ -70,6 +70,60 @@ else
   fail=1
 fi
 
+# ── egress confinement (MAIN-141) ──────────────────────────────────────────
+#
+# Rendered-manifest assertions, because CI has no cluster to enforce against.
+# What they protect is the SHAPE: an ingress rule list that stays empty, the
+# five private ranges staying subtracted, and the two escape hatches rendering
+# when asked for.
+need "NetworkPolicy present"       '^kind: NetworkPolicy$' 1
+need "both policy types"           '^    - (Ingress|Egress)$' 2
+need "five denied CIDRs"           '^              - "(10\.0\.0\.0/8|172\.16\.0\.0/12|192\.168\.0\.0/16|169\.254\.0\.0/16|100\.64\.0\.0/10)"$' 5
+need "public egress base"          '^            cidr: 0\.0\.0\.0/0$' 1
+need "DNS on both protocols"       '^        - protocol: (UDP|TCP)$' 2
+
+# Deny-all ingress is the absence of a key, so assert the absence — a future
+# edit that adds an `ingress:` list would open the node to being dialled.
+if grep -qE '^  ingress:' <<<"$out"; then
+  echo "  FAIL: an ingress rule list appeared — the node must never be dialled"
+  fail=1
+else
+  echo "  ok:   ingress is deny-all (no rule list)"
+fi
+
+# The toggle removes the object entirely rather than rendering an empty one.
+off="$(render "${min[@]}" --set networkPolicy.enabled=false)"
+if grep -q '^kind: NetworkPolicy$' <<<"$off"; then
+  echo "  FAIL: networkPolicy.enabled=false still rendered a policy"
+  fail=1
+else
+  echo "  ok:   networkPolicy.enabled=false removes the policy"
+fi
+
+# The in-cluster control plane is selected by POD LABEL, not by address.
+cp="$(render "${min[@]}" --set networkPolicy.controlPlane.enabled=true)"
+if grep -q 'app.kubernetes.io/name: nook-control' <<<"$cp" && grep -qE '^          port: 8081$' <<<"$cp"; then
+  echo "  ok:   in-cluster control-plane allowance renders"
+else
+  echo "  FAIL: controlPlane.enabled=true did not render its selector and port"
+  fail=1
+fi
+if grep -q 'app.kubernetes.io/name: nook-control' <<<"$out"; then
+  echo "  FAIL: the control-plane allowance rendered while disabled"
+  fail=1
+else
+  echo "  ok:   control-plane allowance is off by default"
+fi
+
+# A private-IP control plane needs a hole punched back through the deny list.
+extra="$(render "${min[@]}" --set 'networkPolicy.additionalAllowedCIDRs={10.20.0.5/32}')"
+if grep -qE '^            cidr: "10\.20\.0\.5/32"$' <<<"$extra"; then
+  echo "  ok:   additionalAllowedCIDRs renders an extra ipBlock"
+else
+  echo "  FAIL: additionalAllowedCIDRs did not render"
+  fail=1
+fi
+
 if [ "$fail" -ne 0 ]; then
   echo "chart validation FAILED"
   exit 1
