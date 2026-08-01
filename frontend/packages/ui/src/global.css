@@ -5606,3 +5606,108 @@ a.toast-main:hover .toast-title { text-decoration: underline; }
     overflow-x: hidden;
   }
 }
+
+/* ═══ Task picker + dependencies (MAIN-194) ════════════════════════════════ */
+
+.task-picker {
+  position: relative;
+  margin-top: 4px;
+}
+
+.task-picker-input {
+  width: 100%;
+}
+
+.task-picker-results {
+  margin-top: 2px;
+  border: 1px solid var(--nook-border-bright);
+  border-radius: var(--nook-radius);
+  background: var(--nook-bg-raised);
+  max-height: 260px;
+  overflow-y: auto;
+}
+
+.task-picker-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 5px 8px;
+  border: 0;
+  background: transparent;
+  color: var(--nook-fg);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.task-picker-row:hover:not(.disabled) {
+  background: var(--nook-selection);
+}
+
+/* Disabled rows stay READABLE — the point is to show that the ticket exists
+   and is already accounted for, not to hide it. */
+.task-picker-row.disabled {
+  cursor: default;
+  color: var(--nook-fg-dim);
+}
+
+.task-picker-key {
+  flex: 0 0 auto;
+  color: var(--nook-fg-dim);
+}
+
+.task-picker-title {
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.task-picker-why {
+  flex: 0 0 auto;
+}
+
+.task-picker-done {
+  flex: 0 0 auto;
+  padding: 0 5px;
+  border: 1px solid var(--nook-border-bright);
+  border-radius: 999px;
+  color: var(--nook-fg-dim);
+  font-size: 10px;
+  line-height: 16px;
+}
+
+.task-picker-empty,
+.task-picker-note {
+  padding: 5px 8px;
+}
+
+.task-picker-note {
+  border-top: 1px solid var(--nook-border);
+}
+
+.task-dep-group {
+  margin-bottom: 6px;
+}
+
+.task-dep-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 2px;
+}
+
+.task-dep-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 0;
+}
+
+.task-dep-title {
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
