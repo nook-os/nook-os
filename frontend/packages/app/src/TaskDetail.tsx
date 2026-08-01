@@ -15,6 +15,7 @@ import {
   Link2,
   MoreHorizontal,
   ChevronDown,
+  Plus,
 } from "lucide-react";
 import { api, type TaskLabel, type RelatedTask } from "@nookos/api";
 import {
@@ -28,6 +29,7 @@ import {
   useAnchoredMenu,
 } from "@nookos/ui";
 import { PRIORITIES } from "./taskmeta";
+import { TaskPicker, isDone, type PickerTask } from "./TaskPicker";
 import { toggleTaskCheckbox } from "./taskCheckbox";
 import { TaskInteractions } from "./Interactions";
 import { LoopPanel } from "./LoopPanel";
@@ -98,6 +100,43 @@ export function TaskDetail({
       bust();
     },
   });
+
+  // ── Dependencies (MAIN-194) ─────────────────────────────────────────────
+  //
+  // ONE server contract, `BLOCKER blocks DEPENDENT`, reached from two entry
+  // points. The direction is resolved here, once, so no caller ever reasons
+  // about argument order — a reversed relation silently inverts the loop's
+  // build order, which is the failure this mapping exists to make impossible.
+  //
+  //   "Blocked by X"  → X is the blocker  → POST /tasks/X/relations {to: this}
+  //   "Blocks X"      → this is the blocker → POST /tasks/this/relations {to: X}
+  const [addingDep, setAddingDep] = useState<null | "blocked_by" | "blocks">(null);
+
+  const linkBlocking = async (
+    direction: "blocked_by" | "blocks",
+    other: PickerTask,
+    // The RESOLVED uuid, never the `taskId` prop: the board opens this modal by
+    // KEY (`?task=NOOK-1`), the path param accepts either, but `to_task` is a
+    // uuid and a key there is rejected. Same handoff MAIN-209 pinned for the
+    // loop panel — and it failed silently here until a live click proved it.
+    thisTaskId: string,
+  ) => {
+    const [blocker, dependent] =
+      direction === "blocked_by" ? [other.id, thisTaskId] : [thisTaskId, other.id];
+    await api.POST("/api/v1/tasks/{id}/relations", {
+      params: { path: { id: blocker } },
+      body: { to_task: dependent, kind: "blocks" },
+    });
+    setAddingDep(null);
+    bust();
+  };
+
+  const unlink = async (relationId: string) => {
+    await api.DELETE("/api/v1/relations/{id}", {
+      params: { path: { id: relationId } },
+    });
+    bust();
+  };
 
   const toggleLabel = async (label: TaskLabel, on: boolean) => {
     const path = { params: { path: { id: taskId, label: label.name } } };
@@ -369,29 +408,93 @@ export function TaskDetail({
             />
           </div>
 
-          {linked.length > 0 && (
-            <div className="task-section">
-              <div className="task-section-h">linked work items</div>
-              {(
-                [
-                  ["blocked by", blocked_by],
-                  ["blocking", blocking],
-                  ["related", related],
-                ] as [string, RelatedTask[]][]
-              ).map(([label, list]) =>
-                list.length === 0 ? null : (
-                  <div key={label} className="task-rel-row">
-                    <span className="faint small">{label}</span>
-                    {list.map((r) => (
-                      <span key={r.relation_id} className="task-rel">
-                        <Link2 size={10} />
-                        <span className="mono">{r.key ?? "—"}</span> {r.title}
-                        {r.column_type === "completed" && <span className="ok"> ✓</span>}
-                      </span>
-                    ))}
+          {/* Dependencies (MAIN-194): the two BLOCKING directions, editable.
+              `related`/`duplicates` stay read-only below — a later card adds
+              kinds to this same section (NG-1). They are listed there and not
+              here so no relation appears twice. */}
+          <div className="task-section">
+            <div className="task-section-h">dependencies</div>
+            {(
+              [
+                ["blocked by", "blocked_by", blocked_by],
+                ["blocks", "blocks", blocking],
+              ] as [string, "blocked_by" | "blocks", RelatedTask[]][]
+            ).map(([label, direction, list]) => (
+              <div key={direction} className="task-dep-group">
+                <div className="task-dep-head">
+                  <span className="faint small">{label}</span>
+                  <button
+                    type="button"
+                    className="btn small"
+                    title={
+                      direction === "blocked_by"
+                        ? "add a ticket that blocks this one"
+                        : "add a ticket this one blocks"
+                    }
+                    onClick={() => setAddingDep(addingDep === direction ? null : direction)}
+                  >
+                    <Plus size={11} /> Add
+                  </button>
+                </div>
+                {list.length === 0 && addingDep !== direction && (
+                  <span className="faint small">none</span>
+                )}
+                {list.map((r) => (
+                  <div key={r.relation_id} className="task-dep-row">
+                    <Link2 size={10} />
+                    <span className="mono">{r.key ?? "—"}</span>
+                    <span className="task-dep-title">{r.title}</span>
+                    <span className="faint small">{r.column_type}</span>
+                    {isDone({ id: r.id, key: r.key ?? null, title: r.title, column_type: r.column_type }) && (
+                      <span className="task-picker-done">Done</span>
+                    )}
+                    <button
+                      type="button"
+                      className="btn small"
+                      title="remove this dependency"
+                      aria-label={`remove ${r.key ?? r.title}`}
+                      onClick={() => unlink(r.relation_id)}
+                    >
+                      <X size={11} />
+                    </button>
                   </div>
-                ),
-              )}
+                ))}
+                {addingDep === direction && (
+                  <TaskPicker
+                    placeholder={
+                      direction === "blocked_by"
+                        ? "which ticket blocks this one?"
+                        : "which ticket does this one block?"
+                    }
+                    // Every type, epics included — the server drops epics
+                    // unless the filter names them (MAIN-80/181).
+                    types={["task", "bug", "story", "chore", "epic"]}
+                    disabledIds={{
+                      [task.id]: "this ticket",
+                      ...Object.fromEntries(linked.map((r) => [r.id, "already linked"])),
+                    }}
+                    doneNote="done — won't gate anything"
+                    onPick={(t) => linkBlocking(direction, t, task.id)}
+                    onCancel={() => setAddingDep(null)}
+                  />
+                )}
+              </div>
+            ))}
+          </div>
+
+          {related.length > 0 && (
+            <div className="task-section">
+              <div className="task-section-h">related work items</div>
+              <div className="task-rel-row">
+                <span className="faint small">related</span>
+                {related.map((r) => (
+                  <span key={r.relation_id} className="task-rel">
+                    <Link2 size={10} />
+                    <span className="mono">{r.key ?? "—"}</span> {r.title}
+                    {r.column_type === "completed" && <span className="ok"> ✓</span>}
+                  </span>
+                ))}
+              </div>
             </div>
           )}
 
