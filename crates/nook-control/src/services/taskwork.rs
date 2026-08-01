@@ -271,6 +271,10 @@ pub async fn start_work(
                 session_id: Some(session.id.0),
                 column_id: in_progress,
                 checkout_id: checkout_id.map(|c| c.0),
+                // The lease that makes this an agent claim (MAIN-229): the
+                // backstop cap, not a renewal interval — session liveness is
+                // what actually renews it.
+                claim_ttl_secs: state.cfg.max_claim_secs as i64,
             },
         )
         .await?;
@@ -383,6 +387,57 @@ pub async fn prune_worktree(
     )
     .await;
     Ok(updated)
+}
+
+/// Push a claim's backstop out to `max_claim_secs` from now (MAIN-229 AC-5).
+///
+/// A **seam, not a requirement**: session liveness is what actually keeps a card
+/// alive (AC-3), and nothing in the build/review skills has to call this. It
+/// exists so a future supervisor can extend the cap on a card it is actively
+/// shepherding, rather than watch it get escalated for being slow.
+///
+/// Authorized to the claim holder, at the same grade as claiming it: the
+/// assignee themself, or the node the work was placed on acting for itself.
+pub async fn renew_claim(
+    state: &AppState,
+    tenant: TenantId,
+    viewer: UserId,
+    principal: crate::auth::Principal,
+    task_id: TaskId,
+) -> ApiResult<TaskItem> {
+    let task = load_task(state, tenant, task_id).await?;
+    if !crate::services::tasks::visible_to(&task, viewer) {
+        return Err(ApiError::NotFound);
+    }
+    let Some(holder) = task.assignee_user_id else {
+        return Err(ApiError::BadRequest(
+            "task is not claimed — nothing to renew".into(),
+        ));
+    };
+    let held_by_caller = match principal {
+        crate::auth::Principal::User => holder == viewer,
+        crate::auth::Principal::Node(node) => task.assigned_node_id == Some(node),
+    };
+    if !held_by_caller {
+        return Err(ApiError::ForbiddenMsg(
+            "only the claim holder can renew this claim".into(),
+        ));
+    }
+
+    match state
+        .tasks
+        .renew_claim(task_id, tenant, state.cfg.max_claim_secs as i64)
+        .await?
+    {
+        Some(Some(renewed)) => Ok(renewed),
+        // The row is there but carries no lease — a card that reached In
+        // Progress by hand, or one already requeued. Renewing it would mint a
+        // lease the reaper never granted, so it is refused rather than created.
+        Some(None) => Err(ApiError::Conflict(
+            "task carries no claim lease — only an agent claim can be renewed".into(),
+        )),
+        None => Err(ApiError::NotFound),
+    }
 }
 
 /// Move a task to a named column (drives the board from MCP/AI).

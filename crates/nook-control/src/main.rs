@@ -171,6 +171,11 @@ async fn serve(db: nook_db::DbPool, cfg: Config) -> Result<()> {
     // conditional UPDATE keeps them from double-failing a job.
     nook_control::services::job_reaper::start(state.clone());
 
+    // The same safety at the board-card layer (MAIN-229): requeue a card whose
+    // claim holder is provably gone, escalate one held past the cap. Fenced to
+    // leased cards, so a card a human put In Progress is never touched.
+    nook_control::services::claim_reaper::start(state.clone());
+
     // Reclaim checkouts that have stayed tombstoned past the retention window
     // (MAIN-220): reconcile now marks a vanished checkout missing instead of
     // deleting it, so this is the only background path that hard-deletes the row

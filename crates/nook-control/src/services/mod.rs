@@ -2,6 +2,7 @@
 //! the two surfaces can never drift apart.
 
 pub mod activity_queries;
+pub mod claim_reaper;
 pub mod core;
 pub mod discovery;
 pub mod identity;

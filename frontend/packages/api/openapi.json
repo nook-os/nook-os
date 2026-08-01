@@ -5008,6 +5008,42 @@
         }
       }
     },
+    "/api/v1/tasks/{id}/claim/renew": {
+      "post": {
+        "tags": [
+          "crate::routes::taskwork"
+        ],
+        "operationId": "task_renew_claim",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TaskItem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "not the claim holder"
+          },
+          "409": {
+            "description": "no claim lease to renew"
+          }
+        }
+      }
+    },
     "/api/v1/tasks/{id}/comments": {
       "get": {
         "tags": [
@@ -12820,6 +12856,14 @@
                 "description": "The checkout this task's working directory **is** (MAIN-225) — id is\nidentity, path is an attribute. Set to the worktree's `node_workspaces`\nrow once discovery has scanned it; `NULL` until then, or with no worktree.\nWritten alongside the legacy `worktree_path`/`worktree_node_id`, which\nitem 7 will retire."
               }
             ]
+          },
+          "claim_expires_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When this card's **agent** claim lapses (MAIN-229). Set only by the agent\nclaim / start-work path; `None` for a card a human put in progress by\nhand, and that `None` is the fence the claim reaper is confined to — an\nunleased card is never examined, moved or labelled by it."
           },
           "column_id": {
             "$ref": "#/components/schemas/ColumnId"

@@ -968,6 +968,12 @@ pub struct TaskItem {
     /// item 7 will retire.
     pub checkout_id: Option<NodeWorkspaceId>,
     pub session_id: Option<SessionId>,
+    /// When this card's **agent** claim lapses (MAIN-229). Set only by the agent
+    /// claim / start-work path; `None` for a card a human put in progress by
+    /// hand, and that `None` is the fence the claim reaper is confined to — an
+    /// unleased card is never examined, moved or labelled by it.
+    #[serde(default)]
+    pub claim_expires_at: Option<DateTime<Utc>>,
     pub pr_url: Option<String>,
     /// Transient dispatch signal (MAIN-227), not a stored column: `true` when the
     /// just-assigned node has no clone checkout of the task's workspace, so the

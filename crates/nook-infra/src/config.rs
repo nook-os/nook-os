@@ -213,6 +213,20 @@ pub struct Config {
     /// operator container cannot strand work forever. Default 180.
     pub job_reap_grace_secs: u64,
 
+    // ── Board-card claim leases (MAIN-229) ──────────────────────────────
+    /// How many seconds a card's bound session's node may be unseen before the
+    /// claim reaper treats the worker as gone and requeues the card. Shorter
+    /// than `job_reap_grace_secs` because a board card is cheap to requeue and
+    /// nothing is lost by doing it early. Default 120.
+    pub claim_session_grace_secs: u64,
+    /// The hard backstop: how long an agent claim may hold a card before the
+    /// reaper escalates it to a human. Not a kill switch — a card past this cap
+    /// with a live session is labelled and notified, never moved. Default 14400
+    /// (4 hours).
+    pub max_claim_secs: u64,
+    /// How often the claim reaper scans. Default 30.
+    pub claim_reap_scan_secs: u64,
+
     // ── Workspace discovery ─────────────────────────────────────────────
     /// How many seconds a checkout may stay tombstoned (`node_workspaces
     /// .missing_at`) before the retention sweep hard-deletes it (MAIN-220). A
@@ -343,6 +357,16 @@ impl Config {
             job_reap_grace_secs: env_opt("NOOK_JOB_REAP_GRACE_SECS")
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(180),
+
+            claim_session_grace_secs: env_opt("NOOK_CLAIM_SESSION_GRACE_SECS")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(120),
+            max_claim_secs: env_opt("NOOK_MAX_CLAIM_SECS")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(14_400),
+            claim_reap_scan_secs: env_opt("NOOK_CLAIM_REAP_SCAN_SECS")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(30),
 
             workspace_missing_retention_secs: env_opt("NOOK_WORKSPACE_MISSING_RETENTION_SECS")
                 .and_then(|v| v.parse().ok())
@@ -480,6 +504,9 @@ impl Config {
             mail_max_per_day: None,
             trusted_proxies: Vec::new(),
             job_reap_grace_secs: 180,
+            claim_session_grace_secs: 120,
+            max_claim_secs: 14_400,
+            claim_reap_scan_secs: 30,
             workspace_missing_retention_secs: 604_800,
         }
     }

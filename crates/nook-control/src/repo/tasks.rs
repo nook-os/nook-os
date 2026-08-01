@@ -27,7 +27,7 @@
 //! moved SQL unchanged; replacing them is the dialect sweep's job.
 
 use async_trait::async_trait;
-use nook_db::dialect::type_mapping;
+use nook_db::dialect::{time_math, type_mapping};
 use nook_db::{params, CiMatch, Db, DbPool, Postgres, TypeMapping};
 use nook_types::*;
 use std::collections::HashMap;
@@ -105,6 +105,28 @@ pub struct StartedWork {
     /// Bound as a bare uuid, exactly as the call site did — the checkout may
     /// legitimately be absent.
     pub checkout_id: Option<Uuid>,
+    /// The lease this claim carries (MAIN-229), in seconds from now.
+    pub claim_ttl_secs: i64,
+}
+
+/// One card the claim reaper requeued, with the evidence that its worker was
+/// gone — enough to write the card comment without a second read.
+#[derive(Debug, Clone)]
+pub struct LapsedClaim {
+    pub task: TaskId,
+    pub tenant: TenantId,
+    pub session: SessionId,
+    pub session_status: String,
+    pub node_last_seen_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// One card whose claim ran past `max_claim_secs` while its worker still looked
+/// alive — escalated to a human, never moved.
+#[derive(Debug, Clone)]
+pub struct CappedClaim {
+    pub task: TaskId,
+    pub tenant: TenantId,
+    pub claim_expires_at: chrono::DateTime<chrono::Utc>,
 }
 
 /// Everything the pick query filters on, already validated and resolved by the
@@ -275,7 +297,44 @@ pub trait TaskRepository: Send + Sync {
     /// Forget the worktree — both the checkout id and the legacy string pair.
     async fn clear_worktree(&self, id: TaskId) -> ApiResult<TaskItem>;
 
+    /// Move a card to `column`. Leaving a `started` column clears the claim
+    /// lease (MAIN-229 AC-2) — the destination's type decides, in the same
+    /// statement, so every mover (drag, `/move`, bulk) is covered by one rule.
     async fn set_column(&self, id: TaskId, column: ColumnId) -> ApiResult<TaskItem>;
+
+    // ---- claim leases (MAIN-229) ------------------------------------------
+
+    /// Push a leased card's expiry out to `ttl_secs` from now. `None` when the
+    /// card does not exist in the tenant; `Some(None)` when it exists but is
+    /// unleased, which the route turns into a 409.
+    async fn renew_claim(
+        &self,
+        id: TaskId,
+        tenant: TenantId,
+        ttl_secs: i64,
+    ) -> ApiResult<Option<Option<TaskItem>>>;
+
+    /// Requeue every **leased** card in a `started` column whose worker is
+    /// provably gone — its bound session exited/errored, or that session's node
+    /// has not been seen for `session_grace_secs`. One guarded `UPDATE …
+    /// RETURNING`, so replicas cannot double-requeue and a card whose lease was
+    /// cleared between scan and update falls out of the guard untouched.
+    async fn reap_lapsed_claims(&self, session_grace_secs: i64) -> ApiResult<Vec<LapsedClaim>>;
+
+    /// Leased cards in a `started` column past their cap that the reap above did
+    /// NOT take — the wedged-but-alive shape. Read-only: escalation labels and
+    /// notifies, it never moves the card.
+    async fn capped_claims(&self) -> ApiResult<Vec<CappedClaim>>;
+
+    /// Attach `name` to `task`, reporting whether THIS call is the one that
+    /// attached it. The `(task_id, label_id)` primary key makes that the
+    /// exactly-once fence for escalation across replicas.
+    async fn attach_label_once(
+        &self,
+        tenant: TenantId,
+        task_id: TaskId,
+        name: &str,
+    ) -> ApiResult<bool>;
 
     // ---- comments and labels ----------------------------------------------
 
@@ -376,19 +435,25 @@ pub trait TaskRepository: Send + Sync {
     /// still tests "unassigned", so two agents racing cannot both win. `None`
     /// means the row did not match — the caller distinguishes a lost race from a
     /// missing task by reading the current assignee.
+    ///
+    /// `lease_secs` is `Some` only when the claim also moves the card into a
+    /// `started` column — that is what makes it an agent claim carrying a lease
+    /// (MAIN-229 AC-2). `None` leaves `claim_expires_at` exactly as it was.
     async fn claim_task(
         &self,
         id: TaskId,
         tenant: TenantId,
         assignee: UserId,
         column: Option<ColumnId>,
+        lease_secs: Option<i64>,
     ) -> ApiResult<Option<TaskItem>>;
 
     async fn assignee_of(&self, id: TaskId, tenant: TenantId) -> ApiResult<Option<Option<UserId>>>;
 
-    /// Clear the assignee, reporting the row when there was one. Used by both
-    /// the single-task release and the bulk unassign; the latter ignores the
-    /// returned row.
+    /// Clear the assignee — and with it the claim lease, since an unclaimed card
+    /// is by definition not held (MAIN-229 AC-2). Reports the row when there was
+    /// one. Used by both the single-task release and the bulk unassign; the
+    /// latter ignores the returned row.
     async fn release_assignment(&self, id: TaskId, tenant: TenantId)
         -> ApiResult<Option<TaskItem>>;
 
@@ -939,7 +1004,8 @@ impl TaskRepository for DbTaskRepository {
             .db
             .query_one(
                 &format!(
-                    "UPDATE tasks SET assignee_user_id = NULL, updated_at = {now}
+                    "UPDATE tasks SET assignee_user_id = NULL, claim_expires_at = NULL,
+                updated_at = {now}
              WHERE id = $1 AND tenant_id = $2 RETURNING *",
                     now = type_mapping(self.db.engine()).now()
                 ),
@@ -993,9 +1059,14 @@ impl TaskRepository for DbTaskRepository {
                 &format!(
                     "UPDATE tasks SET workspace_id = $2, assigned_node_id = $3, branch = $4,
                 worktree_path = $5, worktree_node_id = $3, session_id = $6,
-                column_id = $7, checkout_id = $8, updated_at = {}
+                column_id = $7, checkout_id = $8, claim_expires_at = {lease},
+                updated_at = {now}
          WHERE id = $1 RETURNING *",
-                    type_mapping(self.db.engine()).now()
+                    lease = time_math(self.db.engine()).now_plus_scaled(
+                        &type_mapping(self.db.engine()).cast("$9", "bigint"),
+                        "1 second"
+                    ),
+                    now = type_mapping(self.db.engine()).now()
                 ),
                 params![
                     id,
@@ -1005,7 +1076,8 @@ impl TaskRepository for DbTaskRepository {
                     &work.worktree_path,
                     work.session_id,
                     work.column_id,
-                    work.checkout_id
+                    work.checkout_id,
+                    work.claim_ttl_secs
                 ],
             )
             .await?)
@@ -1016,7 +1088,8 @@ impl TaskRepository for DbTaskRepository {
             .db
             .query_one(
                 &format!(
-                    "UPDATE tasks SET pr_url = $2, column_id = $3, updated_at = {}
+                    "UPDATE tasks SET pr_url = $2, column_id = $3, claim_expires_at = NULL,
+                updated_at = {}
          WHERE id = $1 RETURNING *",
                     type_mapping(self.db.engine()).now()
                 ),
@@ -1041,16 +1114,171 @@ impl TaskRepository for DbTaskRepository {
     }
 
     async fn set_column(&self, id: TaskId, column: ColumnId) -> ApiResult<TaskItem> {
+        // The lease dies with the move UNLESS the destination is itself a
+        // `started` column — one statement, so no mover can forget it and a card
+        // requeued or sent to review never keeps a claim it no longer has.
         Ok(self
             .db
             .query_one(
                 &format!(
-                    "UPDATE tasks SET column_id = $2, updated_at = {} WHERE id = $1 RETURNING *",
+                    "UPDATE tasks SET column_id = $2,
+                claim_expires_at = CASE
+                    WHEN (SELECT type FROM board_columns WHERE id = $2) = 'started'
+                    THEN claim_expires_at ELSE NULL END,
+                updated_at = {}
+         WHERE id = $1 RETURNING *",
                     type_mapping(self.db.engine()).now()
                 ),
                 params![id, column],
             )
             .await?)
+    }
+
+    async fn renew_claim(
+        &self,
+        id: TaskId,
+        tenant: TenantId,
+        ttl_secs: i64,
+    ) -> ApiResult<Option<Option<TaskItem>>> {
+        let renewed: Option<TaskItem> = self
+            .db
+            .query_opt(
+                &format!(
+                    "UPDATE tasks SET claim_expires_at = {lease}, updated_at = {now}
+         WHERE id = $1 AND tenant_id = $2 AND claim_expires_at IS NOT NULL
+         RETURNING *",
+                    lease = time_math(self.db.engine()).now_plus_scaled(
+                        &type_mapping(self.db.engine()).cast("$3", "bigint"),
+                        "1 second"
+                    ),
+                    now = type_mapping(self.db.engine()).now()
+                ),
+                params![id, tenant, ttl_secs],
+            )
+            .await?;
+        if renewed.is_some() {
+            return Ok(Some(renewed));
+        }
+        // No row matched: either the card is unleased (exists → `Some(None)`) or
+        // it is not this tenant's at all (→ `None`).
+        let exists: Option<Uuid> = self
+            .db
+            .query_scalar_opt(
+                "SELECT id FROM tasks WHERE id = $1 AND tenant_id = $2",
+                params![id, tenant],
+            )
+            .await?;
+        Ok(exists.map(|_| None))
+    }
+
+    async fn reap_lapsed_claims(&self, session_grace_secs: i64) -> ApiResult<Vec<LapsedClaim>> {
+        // `claim_expires_at IS NOT NULL` is both the fence (AC-7: an unleased
+        // card is never in the candidate set) and the exactly-once guard — the
+        // UPDATE clears it, so a second replica's scan matches nothing.
+        //
+        // The destination is resolved as a scalar subquery over the card's own
+        // board, and the matching EXISTS keeps a board with no `unstarted`
+        // column out of the set entirely rather than writing a NULL column_id.
+        let rows: Vec<(
+            TaskId,
+            TenantId,
+            SessionId,
+            String,
+            Option<chrono::DateTime<chrono::Utc>>,
+        )> = self
+            .db
+            .query_all(
+                &format!(
+                    "UPDATE tasks t
+                    SET column_id = (SELECT tgt.id FROM board_columns tgt
+                                      WHERE tgt.board_id = t.board_id AND tgt.type = 'unstarted'
+                                      ORDER BY tgt.position LIMIT 1),
+                        assigned_node_id = NULL,
+                        session_id = NULL,
+                        claim_expires_at = NULL,
+                        updated_at = {now}
+                   FROM sessions s
+                   JOIN nodes n ON n.id = s.node_id
+                  WHERE t.claim_expires_at IS NOT NULL
+                    AND t.session_id = s.id
+                    AND EXISTS (SELECT 1 FROM board_columns cur
+                                 WHERE cur.id = t.column_id AND cur.type = 'started')
+                    AND EXISTS (SELECT 1 FROM board_columns tgt
+                                 WHERE tgt.board_id = t.board_id AND tgt.type = 'unstarted')
+                    AND (s.status IN ('exited', 'error')
+                         OR (n.last_seen_at IS NOT NULL AND n.last_seen_at < {cutoff}))
+                RETURNING t.id, t.tenant_id, s.id, s.status, n.last_seen_at",
+                    now = type_mapping(self.db.engine()).now(),
+                    cutoff = time_math(self.db.engine()).now_minus_scaled(
+                        &type_mapping(self.db.engine()).cast("$1", "bigint"),
+                        "1 second"
+                    )
+                ),
+                params![session_grace_secs],
+            )
+            .await?;
+        Ok(rows
+            .into_iter()
+            .map(
+                |(task, tenant, session, session_status, node_last_seen_at)| LapsedClaim {
+                    task,
+                    tenant,
+                    session,
+                    session_status,
+                    node_last_seen_at,
+                },
+            )
+            .collect())
+    }
+
+    async fn capped_claims(&self) -> ApiResult<Vec<CappedClaim>> {
+        let rows: Vec<(TaskId, TenantId, chrono::DateTime<chrono::Utc>)> = self
+            .db
+            .query_all(
+                &format!(
+                    "SELECT t.id, t.tenant_id, t.claim_expires_at
+                       FROM tasks t
+                      WHERE t.claim_expires_at IS NOT NULL
+                        AND t.claim_expires_at < {now}
+                        AND EXISTS (SELECT 1 FROM board_columns cur
+                                     WHERE cur.id = t.column_id AND cur.type = 'started')",
+                    now = type_mapping(self.db.engine()).now()
+                ),
+                params![],
+            )
+            .await?;
+        Ok(rows
+            .into_iter()
+            .map(|(task, tenant, claim_expires_at)| CappedClaim {
+                task,
+                tenant,
+                claim_expires_at,
+            })
+            .collect())
+    }
+
+    async fn attach_label_once(
+        &self,
+        tenant: TenantId,
+        task_id: TaskId,
+        name: &str,
+    ) -> ApiResult<bool> {
+        let label_id: Uuid = self
+            .db
+            .query_scalar(
+                "INSERT INTO labels (id, tenant_id, name) VALUES ($1, $2, $3)
+             ON CONFLICT (tenant_id, name) DO UPDATE SET name = EXCLUDED.name RETURNING id",
+                params![Uuid::now_v7(), tenant, name],
+            )
+            .await?;
+        let inserted = self
+            .db
+            .exec(
+                "INSERT INTO task_labels (task_id, label_id) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+                params![task_id, label_id],
+            )
+            .await?;
+        Ok(inserted > 0)
     }
 
     async fn insert_agent_comment(
@@ -1369,6 +1597,7 @@ impl TaskRepository for DbTaskRepository {
         tenant: TenantId,
         assignee: UserId,
         column: Option<ColumnId>,
+        lease_secs: Option<i64>,
     ) -> ApiResult<Option<TaskItem>> {
         Ok(self
             .db
@@ -1377,12 +1606,18 @@ impl TaskRepository for DbTaskRepository {
                     "UPDATE tasks SET
              assignee_user_id = $1,
              column_id = coalesce($2, column_id),
-             updated_at = {}
+             claim_expires_at = CASE WHEN {ttl} IS NULL THEN claim_expires_at ELSE {lease} END,
+             updated_at = {now}
          WHERE id = $3 AND tenant_id = $4 AND assignee_user_id IS NULL
          RETURNING *",
-                    type_mapping(self.db.engine()).now()
+                    ttl = type_mapping(self.db.engine()).cast("$5", "bigint"),
+                    lease = time_math(self.db.engine()).now_plus_scaled(
+                        &type_mapping(self.db.engine()).cast("$5", "bigint"),
+                        "1 second"
+                    ),
+                    now = type_mapping(self.db.engine()).now()
                 ),
-                params![assignee, column.map(|c| c.0), id, tenant],
+                params![assignee, column.map(|c| c.0), id, tenant, lease_secs],
             )
             .await?)
     }
@@ -1406,7 +1641,8 @@ impl TaskRepository for DbTaskRepository {
             .db
             .query_opt(
                 &format!(
-                    "UPDATE tasks SET assignee_user_id = NULL, updated_at = {}
+                    "UPDATE tasks SET assignee_user_id = NULL, claim_expires_at = NULL,
+                updated_at = {}
          WHERE id = $1 AND tenant_id = $2 RETURNING *",
                     type_mapping(self.db.engine()).now()
                 ),
@@ -2366,6 +2602,7 @@ impl TaskRepository for FakeTaskRepository {
             workspace_id: new.workspace_id.map(WorkspaceId),
             parent_task_id: new.parent_task_id.map(TaskId),
             assigned_node_id: None,
+            claim_expires_at: None,
             branch: None,
             worktree_path: None,
             worktree_node_id: None,
@@ -2454,6 +2691,7 @@ impl TaskRepository for FakeTaskRepository {
             .find(|t| t.id == id && t.tenant_id == tenant)
             .expect("task exists");
         t.assignee_user_id = None;
+        t.claim_expires_at = None;
         t.updated_at = chrono::Utc::now();
         Ok(t.clone())
     }
@@ -2508,6 +2746,8 @@ impl TaskRepository for FakeTaskRepository {
         t.session_id = work.session_id.map(SessionId);
         t.column_id = work.column_id;
         t.checkout_id = work.checkout_id.map(NodeWorkspaceId);
+        t.claim_expires_at =
+            Some(chrono::Utc::now() + chrono::Duration::seconds(work.claim_ttl_secs));
         t.updated_at = chrono::Utc::now();
         Ok(t.clone())
     }
@@ -2521,6 +2761,7 @@ impl TaskRepository for FakeTaskRepository {
             .expect("task exists");
         t.pr_url = Some(url.into());
         t.column_id = column;
+        t.claim_expires_at = None;
         t.updated_at = chrono::Utc::now();
         Ok(t.clone())
     }
@@ -2541,14 +2782,71 @@ impl TaskRepository for FakeTaskRepository {
 
     async fn set_column(&self, id: TaskId, column: ColumnId) -> ApiResult<TaskItem> {
         let mut st = self.inner.lock().unwrap();
+        let started = st
+            .columns
+            .iter()
+            .any(|c| c.id == column && c.r#type == "started");
         let t = st
             .tasks
             .iter_mut()
             .find(|t| t.id == id)
             .expect("task exists");
         t.column_id = column;
+        if !started {
+            t.claim_expires_at = None;
+        }
         t.updated_at = chrono::Utc::now();
         Ok(t.clone())
+    }
+
+    async fn renew_claim(
+        &self,
+        id: TaskId,
+        tenant: TenantId,
+        ttl_secs: i64,
+    ) -> ApiResult<Option<Option<TaskItem>>> {
+        let mut st = self.inner.lock().unwrap();
+        let Some(t) = st
+            .tasks
+            .iter_mut()
+            .find(|t| t.id == id && t.tenant_id == tenant)
+        else {
+            return Ok(None);
+        };
+        if t.claim_expires_at.is_none() {
+            return Ok(Some(None));
+        }
+        t.claim_expires_at = Some(chrono::Utc::now() + chrono::Duration::seconds(ttl_secs));
+        t.updated_at = chrono::Utc::now();
+        Ok(Some(Some(t.clone())))
+    }
+
+    // The fake has no sessions or nodes to judge liveness by, so the reaper's two
+    // scans are only exercised against a real database (`tests/claim_lease.rs`).
+    async fn reap_lapsed_claims(&self, _session_grace_secs: i64) -> ApiResult<Vec<LapsedClaim>> {
+        Ok(Vec::new())
+    }
+
+    async fn capped_claims(&self) -> ApiResult<Vec<CappedClaim>> {
+        Ok(Vec::new())
+    }
+
+    async fn attach_label_once(
+        &self,
+        _tenant: TenantId,
+        task_id: TaskId,
+        name: &str,
+    ) -> ApiResult<bool> {
+        let mut st = self.inner.lock().unwrap();
+        if st
+            .task_labels
+            .iter()
+            .any(|(t, n)| *t == task_id.0 && n == name)
+        {
+            return Ok(false);
+        }
+        st.task_labels.push((task_id.0, name.into()));
+        Ok(true)
     }
 
     async fn insert_agent_comment(
@@ -2807,6 +3105,7 @@ impl TaskRepository for FakeTaskRepository {
         tenant: TenantId,
         assignee: UserId,
         column: Option<ColumnId>,
+        lease_secs: Option<i64>,
     ) -> ApiResult<Option<TaskItem>> {
         let mut st = self.inner.lock().unwrap();
         let Some(t) = st
@@ -2825,6 +3124,9 @@ impl TaskRepository for FakeTaskRepository {
         t.assignee_user_id = Some(assignee);
         if let Some(c) = column {
             t.column_id = c;
+        }
+        if let Some(secs) = lease_secs {
+            t.claim_expires_at = Some(chrono::Utc::now() + chrono::Duration::seconds(secs));
         }
         t.updated_at = chrono::Utc::now();
         Ok(Some(t.clone()))
@@ -2853,6 +3155,7 @@ impl TaskRepository for FakeTaskRepository {
             return Ok(None);
         };
         t.assignee_user_id = None;
+        t.claim_expires_at = None;
         t.updated_at = chrono::Utc::now();
         Ok(Some(t.clone()))
     }
