@@ -3860,6 +3860,82 @@ a.toast-main:hover .toast-title { text-decoration: underline; }
 
 .chan-empty { display: flex; align-items: center; gap: 6px; padding: 4px 0; }
 
+/* ── Sectioned pages (Settings, Operator) ───────────────────────────────────
+   The shell that replaced the panel-grid soup: a grouped nav on the left, one
+   section's content on the right, a finder on top of the nav. Nav is sticky so
+   long section content scrolls under it, and the whole thing collapses to a
+   single column at the shared medium breakpoint. */
+.spage-wrap { display: grid; gap: 10px; align-content: start; }
+.spage {
+  display: grid;
+  grid-template-columns: 220px minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+}
+.spage-nav {
+  position: sticky;
+  top: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 8px;
+  background: var(--nook-bg-panel);
+  border: 1px solid var(--nook-border);
+  border-radius: var(--nook-radius);
+}
+.spage-find { margin-bottom: 6px; }
+.spage-group {
+  margin: 8px 6px 3px;
+  font-size: 10px;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--nook-fg-faint);
+}
+.spage-group:first-of-type { margin-top: 2px; }
+.spage-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 5px 8px;
+  background: transparent;
+  border: none;
+  border-radius: calc(var(--nook-radius) - 2px);
+  color: var(--nook-fg-dim);
+  cursor: pointer;
+  text-align: left;
+  font: inherit;
+}
+.spage-item:hover { background: var(--nook-bg-raised); color: var(--nook-fg-bright); }
+.spage-item.active {
+  background: var(--nook-bg-raised);
+  color: var(--nook-accent);
+}
+.spage-item-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* The blast radius, on the nav itself — "team"/"org"/"fleet" says who a
+   section affects BEFORE it is opened. Dim, not alarming: it is a fact, not a
+   warning. */
+.spage-badge {
+  margin-left: auto;
+  flex: none;
+  font-size: 10px;
+  padding: 0 5px;
+  border: 1px solid var(--nook-border);
+  border-radius: 3px;
+  color: var(--nook-fg-faint);
+}
+.spage-item.active .spage-badge { color: var(--nook-accent); border-color: color-mix(in srgb, var(--nook-accent) 45%, transparent); }
+.spage-empty { display: flex; align-items: center; gap: 6px; padding: 6px 8px; }
+.spage-content { min-width: 0; display: grid; gap: 10px; align-content: start; }
+@media (max-width: 1024px) {
+  .spage { grid-template-columns: 1fr; }
+  .spage-nav { position: static; }
+}
+
 /* ── Operator surface ───────────────────────────────────────────────────── */
 
 .op-intro {

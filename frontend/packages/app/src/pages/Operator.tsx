@@ -37,6 +37,7 @@ import {
   type DataColumn,
 } from "@nookos/ui";
 import { askConfirm, askForm, askText, notify } from "../dialogs";
+import { SectionedPage, type PageSection } from "../SectionedPage";
 import { TenantSwitches } from "../TenantSwitches";
 
 // Columns for the audit DataList. Module-level: the cells read only the row, so
@@ -435,190 +436,244 @@ export function OperatorPage() {
     },
   ];
 
-  return (
-    <div className="nook-grid" style={{ gridTemplateColumns: "1fr" }}>
-      <Panel title="Operator · what this deployment is doing">
-        <div className="op-intro">
-          <ShieldCheck size={14} />
-          <div>
-            <div className="bright">You can see metadata, never content.</div>
-            <div className="muted small">
-              Terminals, prompts and code belong to the tenant that owns them.
-              That is not a setting on this page — there is no permission for it,
-              and every session route refuses an operator by construction.
-            </div>
+  const intro = (
+    <Panel title="Operator · what this deployment is doing">
+      <div className="op-intro">
+        <ShieldCheck size={14} />
+        <div>
+          <div className="bright">You can see metadata, never content.</div>
+          <div className="muted small">
+            Terminals, prompts and code belong to the tenant that owns them.
+            That is not a setting on this page — there is no permission for it,
+            and every session route refuses an operator by construction.
           </div>
         </div>
-
-        <div className="op-section-head">
-          <span className="op-section-h">Tenants</span>
-          <SearchInput
-            onSearch={setTenantSearch}
-            placeholder="Search slug or name…"
-            ariaLabel="Search tenants"
-          />
-        </div>
-        <DataList
-          columns={tenantColumns}
-          rows={tenants}
-          rowKey={(t) => t.id}
-          loading={tenantsQuery.isLoading}
-          filtered={tenantSearch.length > 0}
-          empty="No tenants."
-          noResults="No matches."
-          hasMore={tenantsQuery.hasNextPage}
-          onLoadMore={() => tenantsQuery.fetchNextPage()}
-          loadingMore={tenantsQuery.isFetchingNextPage}
-        />
-
-        <div className="op-section-head">
-          <span className="op-section-h">Nodes</span>
-          <SearchInput
-            onSearch={setNodeSearch}
-            placeholder="Search name, status, platform…"
-            ariaLabel="Search nodes"
-          />
-        </div>
-        <DataList
-          columns={nodeColumns}
-          rows={nodes}
-          rowKey={(n) => n.id}
-          loading={nodesQuery.isLoading}
-          filtered={nodeSearch.length > 0}
-          empty="No nodes."
-          noResults="No matches."
-          hasMore={nodesQuery.hasNextPage}
-          onLoadMore={() => nodesQuery.fetchNextPage()}
-          loadingMore={nodesQuery.isFetchingNextPage}
-        />
-      </Panel>
-
-      <Panel title="Visibility policy">
-        <div className="op-policy">
-          <p className="muted small">
-            What operators may see of a tenant's work. Everything is off until
-            somebody turns it on, every change is recorded with a timestamp, and
-            everyone in the organization is told when it changes. None of these
-            can reach terminal content.
-          </p>
-          {(policy ?? []).map((f) => (
-            <div key={f.field} className="op-policy-row">
-              <button
-                className={`task-chip ${f.enabled ? "on" : ""}`}
-                onClick={() => toggle(f.field, !f.enabled, f.description)}
-                title={f.enabled ? "visible — click to hide" : "hidden — click to reveal"}
-              >
-                {f.enabled ? <Eye size={11} /> : <EyeOff size={11} />}
-                {f.enabled ? "visible" : "hidden"}
-              </button>
-              <span className={f.enabled ? "bright" : "faint"}>{f.description}</span>
-            </div>
-          ))}
-          {(policy ?? []).some((f) => f.enabled) && (
-            <div className="op-warn">
-              <TriangleAlert size={12} /> Some fields are visible to operators.
-              Everyone in this organization can see which, in their own settings.
-            </div>
-          )}
-        </div>
-      </Panel>
-
-      <Panel
-        title="Roles"
-        actions={
-          <span className="op-panel-actions">
-            <SearchInput
-              onSearch={setBindingSearch}
-              placeholder="Search email, role, scope…"
-              ariaLabel="Search roles"
-            />
-            <button className="btn small" onClick={grantRole}>
-              <UserPlus size={12} /> grant
-            </button>
-          </span>
-        }
-      >
-        <p className="muted small op-note">
-          A binding grants at its scope and everything under it — `deployment`
-          covers every org and tenant. None of them reach session content.
-        </p>
-        <DataList
-          columns={bindingColumns}
-          rows={bindings}
-          rowKey={(b) => b.id}
-          loading={bindingsQuery.isLoading}
-          filtered={bindingSearch.length > 0}
-          empty="No role bindings."
-          noResults="No matches."
-          hasMore={bindingsQuery.hasNextPage}
-          onLoadMore={() => bindingsQuery.fetchNextPage()}
-          loadingMore={bindingsQuery.isFetchingNextPage}
-        />
-      </Panel>
-
-      <Panel
-        title="Orgs"
-        actions={
-          <button className="btn small" onClick={createOrg}>
-            <Plus size={12} /> org
-          </button>
-        }
-      >
-        <div className="op-table-wrap">
-          <table className="op-table">
-            <thead>
-              <tr>
-                <th>Name</th>
-                <th>Slug</th>
-                <th>Tenants</th>
-                <th></th>
-              </tr>
-            </thead>
-            <tbody>
-              {(orgs ?? []).map((o) => (
-                <tr key={o.id}>
-                  <td className="bright">{o.name}</td>
-                  <td className="mono faint">{o.slug}</td>
-                  <td>{o.tenants}</td>
-                  <td style={{ textAlign: "right" }}>
-                    <button
-                      className="btn small icon"
-                      title={`rename ${o.name}`}
-                      onClick={() => renameOrg(o.id, o.name)}
-                    >
-                      <Pencil size={12} />
-                    </button>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      </Panel>
-
-      <Panel
-        title="Audit · including who looked"
-        actions={
-          <SearchInput
-            onSearch={setAuditSearch}
-            placeholder="Search kind, tenant, actor…"
-            ariaLabel="Search the audit log"
-          />
-        }
-      >
-        <DataList
-          columns={AUDIT_COLUMNS}
-          rows={auditRows}
-          rowKey={(e) => e.id}
-          loading={auditQuery.isLoading}
-          filtered={auditSearch.length > 0}
-          empty="Nothing here yet."
-          noResults="No matches."
-          hasMore={auditQuery.hasNextPage}
-          onLoadMore={() => auditQuery.fetchNextPage()}
-          loadingMore={auditQuery.isFetchingNextPage}
-        />
-      </Panel>
-    </div>
+      </div>
+    </Panel>
   );
+
+  // The registry replaces one long scroll of stacked tables. Each section is a
+  // panel with its own server-side row search; the shell's finder on the left
+  // answers the different question of WHICH table you want.
+  const sections: PageSection[] = [
+    {
+      id: "tenants",
+      title: "Tenants",
+      group: "Fleet",
+      keywords: ["team", "ca", "certificate", "org", "automation", "loops", "reconcile", "switches", "members"],
+      render: () => (
+        <Panel
+          title="Tenants"
+          actions={
+            <SearchInput
+              onSearch={setTenantSearch}
+              placeholder="Search slug or name…"
+              ariaLabel="Search tenants"
+            />
+          }
+        >
+          <DataList
+            columns={tenantColumns}
+            rows={tenants}
+            rowKey={(t) => t.id}
+            loading={tenantsQuery.isLoading}
+            filtered={tenantSearch.length > 0}
+            empty="No tenants."
+            noResults="No matches."
+            hasMore={tenantsQuery.hasNextPage}
+            onLoadMore={() => tenantsQuery.fetchNextPage()}
+            loadingMore={tenantsQuery.isFetchingNextPage}
+          />
+        </Panel>
+      ),
+    },
+    {
+      id: "nodes",
+      title: "Nodes",
+      group: "Fleet",
+      keywords: ["machine", "revoke", "certificate", "platform", "online", "remove", "last seen"],
+      render: () => (
+        <Panel
+          title="Nodes"
+          actions={
+            <SearchInput
+              onSearch={setNodeSearch}
+              placeholder="Search name, status, platform…"
+              ariaLabel="Search nodes"
+            />
+          }
+        >
+          <DataList
+            columns={nodeColumns}
+            rows={nodes}
+            rowKey={(n) => n.id}
+            loading={nodesQuery.isLoading}
+            filtered={nodeSearch.length > 0}
+            empty="No nodes."
+            noResults="No matches."
+            hasMore={nodesQuery.hasNextPage}
+            onLoadMore={() => nodesQuery.fetchNextPage()}
+            loadingMore={nodesQuery.isFetchingNextPage}
+          />
+        </Panel>
+      ),
+    },
+    {
+      id: "roles",
+      title: "Roles",
+      group: "Access",
+      keywords: ["binding", "grant", "revoke", "rbac", "permission", "operator", "admin", "appoint"],
+      render: () => (
+        <Panel
+          title="Roles"
+          actions={
+            <span className="op-panel-actions">
+              <SearchInput
+                onSearch={setBindingSearch}
+                placeholder="Search email, role, scope…"
+                ariaLabel="Search roles"
+              />
+              <button className="btn small" onClick={grantRole}>
+                <UserPlus size={12} /> grant
+              </button>
+            </span>
+          }
+        >
+          <p className="muted small op-note">
+            A binding grants at its scope and everything under it — `deployment`
+            covers every org and tenant. None of them reach session content.
+          </p>
+          <DataList
+            columns={bindingColumns}
+            rows={bindings}
+            rowKey={(b) => b.id}
+            loading={bindingsQuery.isLoading}
+            filtered={bindingSearch.length > 0}
+            empty="No role bindings."
+            noResults="No matches."
+            hasMore={bindingsQuery.hasNextPage}
+            onLoadMore={() => bindingsQuery.fetchNextPage()}
+            loadingMore={bindingsQuery.isFetchingNextPage}
+          />
+        </Panel>
+      ),
+    },
+    {
+      id: "visibility",
+      title: "Visibility policy",
+      group: "Access",
+      keywords: ["privacy", "policy", "see", "hidden", "widen", "fields"],
+      render: () => (
+        <Panel title="Visibility policy">
+          <div className="op-policy">
+            <p className="muted small">
+              What operators may see of a tenant's work. Everything is off until
+              somebody turns it on, every change is recorded with a timestamp, and
+              everyone in the organization is told when it changes. None of these
+              can reach terminal content.
+            </p>
+            {(policy ?? []).map((f) => (
+              <div key={f.field} className="op-policy-row">
+                <button
+                  className={`task-chip ${f.enabled ? "on" : ""}`}
+                  onClick={() => toggle(f.field, !f.enabled, f.description)}
+                  title={f.enabled ? "visible — click to hide" : "hidden — click to reveal"}
+                >
+                  {f.enabled ? <Eye size={11} /> : <EyeOff size={11} />}
+                  {f.enabled ? "visible" : "hidden"}
+                </button>
+                <span className={f.enabled ? "bright" : "faint"}>{f.description}</span>
+              </div>
+            ))}
+            {(policy ?? []).some((f) => f.enabled) && (
+              <div className="op-warn">
+                <TriangleAlert size={12} /> Some fields are visible to operators.
+                Everyone in this organization can see which, in their own settings.
+              </div>
+            )}
+          </div>
+        </Panel>
+      ),
+    },
+    {
+      id: "orgs",
+      title: "Orgs",
+      group: "Fleet",
+      keywords: ["organization", "rename", "create", "slug"],
+      render: () => (
+        <Panel
+          title="Orgs"
+          actions={
+            <button className="btn small" onClick={createOrg}>
+              <Plus size={12} /> org
+            </button>
+          }
+        >
+          <div className="op-table-wrap">
+            <table className="op-table">
+              <thead>
+                <tr>
+                  <th>Name</th>
+                  <th>Slug</th>
+                  <th>Tenants</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody>
+                {(orgs ?? []).map((o) => (
+                  <tr key={o.id}>
+                    <td className="bright">{o.name}</td>
+                    <td className="mono faint">{o.slug}</td>
+                    <td>{o.tenants}</td>
+                    <td style={{ textAlign: "right" }}>
+                      <button
+                        className="btn small icon"
+                        title={`rename ${o.name}`}
+                        onClick={() => renameOrg(o.id, o.name)}
+                      >
+                        <Pencil size={12} />
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </Panel>
+      ),
+    },
+    {
+      id: "audit",
+      title: "Audit",
+      group: "Access",
+      keywords: ["log", "history", "who looked", "trail", "record"],
+      render: () => (
+        <Panel
+          title="Audit · including who looked"
+          actions={
+            <SearchInput
+              onSearch={setAuditSearch}
+              placeholder="Search kind, tenant, actor…"
+              ariaLabel="Search the audit log"
+            />
+          }
+        >
+          <DataList
+            columns={AUDIT_COLUMNS}
+            rows={auditRows}
+            rowKey={(e) => e.id}
+            loading={auditQuery.isLoading}
+            filtered={auditSearch.length > 0}
+            empty="Nothing here yet."
+            noResults="No matches."
+            hasMore={auditQuery.hasNextPage}
+            onLoadMore={() => auditQuery.fetchNextPage()}
+            loadingMore={auditQuery.isFetchingNextPage}
+          />
+        </Panel>
+      ),
+    },
+  ];
+
+  return <SectionedPage sections={sections} placeholder="find…" intro={intro} />;
 }

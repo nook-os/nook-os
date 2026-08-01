@@ -11,6 +11,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { MemoryRouter } from "react-router-dom";
 
 // The page talks to exactly these two modules; stub both.
 vi.mock("@nookos/api", () => ({
@@ -90,14 +91,25 @@ function seedApi() {
   mock.DELETE.mockResolvedValue({ data: {}, error: undefined });
 }
 
-function renderPage() {
+// The page is sectioned now (one table on screen at a time) and the selected
+// section lives in the URL, so the render needs a router and the tests need a
+// way to open a section. `initial` deep-links one, exactly as a person's
+// bookmark would.
+function renderPage(initial = "/operator") {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
-    <QueryClientProvider client={qc}>
-      <OperatorPage />
-    </QueryClientProvider>,
+    <MemoryRouter initialEntries={[initial]}>
+      <QueryClientProvider client={qc}>
+        <OperatorPage />
+      </QueryClientProvider>
+    </MemoryRouter>,
   );
 }
+
+/** Open a section through the nav, like a person would. */
+const openSection = async (user: ReturnType<typeof userEvent.setup>, title: string) => {
+  await user.click(screen.getByRole("button", { name: title }));
+};
 
 const tenantGets = () => mock.GET.mock.calls.filter((c) => c[0] === "/api/v1/operator/tenants").length;
 const nodeGets = () => mock.GET.mock.calls.filter((c) => c[0] === "/api/v1/operator/nodes").length;
@@ -113,13 +125,35 @@ beforeEach(() => {
 afterEach(() => cleanup());
 
 describe("Operator page assembly", () => {
-  it("renders the tenants, nodes, bindings and audit lists", async () => {
+  it("shows tenants first and reaches every other section through the nav", async () => {
+    const user = userEvent.setup();
     renderPage();
-    expect(await screen.findByText("alpha")).toBeTruthy(); // tenants
-    expect(await screen.findByText("beelink")).toBeTruthy(); // nodes
-    expect(await screen.findByText("ca.rotate")).toBeTruthy(); // audit kind
-    // bindings: the deployment binding's email is rendered in its row.
+    // Tenants is the default section.
+    expect(await screen.findByText("alpha")).toBeTruthy();
+    // One section at a time: nodes are NOT on screen until their section is.
+    expect(screen.queryByText("beelink")).toBeNull();
+
+    await openSection(user, "Nodes");
+    expect(await screen.findByText("beelink")).toBeTruthy();
+    expect(screen.queryByText("alpha")).toBeNull();
+
+    await openSection(user, "Roles");
     expect(screen.getAllByText("op@nook.test").length).toBeGreaterThan(0);
+
+    await openSection(user, "Audit");
+    expect(await screen.findByText("ca.rotate")).toBeTruthy();
+  });
+
+  it("a deep link lands on its section, and the finder narrows the nav", async () => {
+    const user = userEvent.setup();
+    renderPage("/operator?section=audit");
+    expect(await screen.findByText("ca.rotate")).toBeTruthy();
+
+    // The finder matches keywords, not only titles: "machine" is not in any
+    // section name, but it is what somebody would type looking for Nodes.
+    await user.type(screen.getByLabelText("find a section"), "machine");
+    expect(await screen.findByText("beelink")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Tenants" })).toBeNull();
   });
 
   it("search wires q to the server and swaps in the searched rows (AC-4)", async () => {
@@ -167,7 +201,7 @@ describe("Operator page assembly", () => {
 
   it("a write action calls the API and invalidates the operator lists (AC-6)", async () => {
     const user = userEvent.setup();
-    renderPage();
+    renderPage("/operator?section=nodes");
     await screen.findByText("beelink");
     const before = nodeGets();
 
