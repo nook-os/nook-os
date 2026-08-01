@@ -386,10 +386,6 @@ use std::sync::Mutex;
 #[derive(Default)]
 pub struct FakeSessionRepository {
     inner: Mutex<Vec<Session>>,
-    /// Which sessions the reconciler owns (MAIN-316). Held beside the rows
-    /// rather than on `Session`, because putting it on the DTO is exposing it
-    /// through the session API — which is MAIN-318's card, not this one.
-    managed: Mutex<std::collections::HashSet<SessionId>>,
 }
 
 impl FakeSessionRepository {
@@ -476,10 +472,9 @@ impl SessionRepository for FakeSessionRepository {
         // exactly as the partial index excludes it.
         if new.managed {
             let rows = self.inner.lock().unwrap();
-            let managed = self.managed.lock().unwrap();
             if new.checkout_id.is_some()
                 && rows.iter().any(|x| {
-                    managed.contains(&x.id)
+                    x.managed
                         && x.checkout_id == new.checkout_id
                         && matches!(x.status.as_str(), "starting" | "running" | "detached")
                 })
@@ -504,12 +499,10 @@ impl SessionRepository for FakeSessionRepository {
             updated_at: now,
             ended_at: None,
             checkout_id: new.checkout_id,
+            managed: new.managed,
             checkout: None,
             node_online: None,
         };
-        if new.managed {
-            self.managed.lock().unwrap().insert(session.id);
-        }
         self.inner.lock().unwrap().push(session.clone());
         Ok(session)
     }
@@ -633,7 +626,6 @@ impl SessionRepository for FakeSessionRepository {
         tenant: TenantId,
         workspace: WorkspaceId,
     ) -> ApiResult<Vec<(SessionId, NodeWorkspaceId, NodeId)>> {
-        let managed = self.managed.lock().unwrap();
         let mut out: Vec<(SessionId, NodeWorkspaceId, NodeId)> = self
             .inner
             .lock()
@@ -642,7 +634,7 @@ impl SessionRepository for FakeSessionRepository {
             .filter(|x| {
                 x.tenant_id == tenant
                     && x.workspace_id == Some(workspace)
-                    && managed.contains(&x.id)
+                    && x.managed
                     && x.checkout_id.is_some()
                     && matches!(x.status.as_str(), "starting" | "running" | "detached")
             })

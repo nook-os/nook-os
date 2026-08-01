@@ -5266,6 +5266,22 @@ export interface components {
             /** @description Why the session failed to start, when it did. */
             error?: string | null;
             id: components["schemas"]["SessionId"];
+            /**
+             * @description Who owns this session: the reconciler (`true`, started for the
+             *     workspace's [`SessionSpec`]) or a person (`false`, hand-started).
+             *
+             *     Stored since MAIN-316 and surfaced here by MAIN-318, because it is the
+             *     one thing about a session a caller cannot work out for itself — a
+             *     hand-started terminal in a managed workspace, on an eligible node, with
+             *     the spec's runtime, looks exactly like a replica.
+             *
+             *     It decides which removal a UI may offer. Killing a managed session is
+             *     not removing it: the next reconcile pass sees a checkout with no live
+             *     managed session and starts another. Removing one means editing the
+             *     declaration — lower the workspace's replicas — and the only honest way
+             *     to offer that button is to know which kind of session this is.
+             */
+            managed?: boolean;
             name: string;
             node_id: components["schemas"]["NodeId"];
             /**

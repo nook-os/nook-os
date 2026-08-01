@@ -12153,6 +12153,10 @@
           "id": {
             "$ref": "#/components/schemas/SessionId"
           },
+          "managed": {
+            "type": "boolean",
+            "description": "Who owns this session: the reconciler (`true`, started for the\nworkspace's [`SessionSpec`]) or a person (`false`, hand-started).\n\nStored since MAIN-316 and surfaced here by MAIN-318, because it is the\none thing about a session a caller cannot work out for itself — a\nhand-started terminal in a managed workspace, on an eligible node, with\nthe spec's runtime, looks exactly like a replica.\n\nIt decides which removal a UI may offer. Killing a managed session is\nnot removing it: the next reconcile pass sees a checkout with no live\nmanaged session and starts another. Removing one means editing the\ndeclaration — lower the workspace's replicas — and the only honest way\nto offer that button is to know which kind of session this is."
+          },
           "name": {
             "type": "string"
           },
