@@ -544,6 +544,16 @@ pub struct Node {
     pub labels: serde_json::Value,
     /// Operator-set taints, `[{"key": …, "effect": …}]` (MAIN-314).
     pub taints: serde_json::Value,
+    /// The name of this node's HOME tenant, set only when that is not the
+    /// tenant you are acting in (MAIN-353) — your own machine, reached from
+    /// another of your orgs. `None` for the ordinary case, so a UI can render
+    /// the badge on presence rather than by comparing ids.
+    ///
+    /// Computed per response, never stored: it is a fact about the *viewer's*
+    /// position, not about the node.
+    #[serde(default)]
+    #[db(skip)]
+    pub home_tenant: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

@@ -144,7 +144,9 @@ pub async fn reconcile_status(
     // printing a uuid at somebody.
     let named: std::collections::HashMap<_, _> = state
         .nodes
-        .list(auth.tenant_id, None)
+        // Home-tenant only: this names nodes in a reconcile plan, which is
+        // tenant-local work (MAIN-353 NG-2/NG-3).
+        .list(auth.tenant_id, None, None)
         .await?
         .into_iter()
         .map(|n| (n.id, n.name))

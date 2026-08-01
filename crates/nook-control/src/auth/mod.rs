@@ -434,19 +434,45 @@ pub async fn require_person_owns_node(
                 .into(),
         ));
     };
-    let owner = state.identity.node_owner_person(node_id.0, tenant).await?;
-    let Some(owner) = owner else {
-        return Err(ApiError::NotFound);
-    };
+    // Unscoped (MAIN-353): ownership is keyed on the PERSON, so "is this my
+    // machine?" is answerable from any org that person belongs to.
+    let owner = state.identity.node_owner_person_unscoped(node_id.0).await?;
     let person = person_id_of(state, actor).await?;
-    match owner {
-        Some(o) if o == person => Ok(()),
-        // Ownerless, or owned by someone else — either way, not yours. The
-        // message names the rule so a mis-dispatch (MAIN-131 handing over an
-        // unowned node) reads as exactly this and is debuggable (AC-6).
-        _ => Err(ApiError::ForbiddenMsg(
-            "sessions start only on your own machines".into(),
-        )),
+    if let Some(Some(o)) = owner {
+        if o == person {
+            return Ok(());
+        }
+    }
+    // Only reached on refusal, so the extra lookup costs nothing in the common
+    // case; it exists solely to pick the status.
+    let in_caller_tenant = state
+        .identity
+        .node_owner_and_shared(node_id.0, tenant)
+        .await?
+        .is_some();
+    Err(refusal(
+        in_caller_tenant,
+        "sessions start only on your own machines",
+    ))
+}
+
+/// Which refusal a not-yours node earns: `403` inside the caller's own tenant,
+/// `404` everywhere else (MAIN-353 AC-8).
+///
+/// Before MAIN-353 this fell out of the lookup being tenant-scoped — a foreign
+/// node simply was not found. Widening the owner leg to unscoped removed that
+/// for free, and a plain `Forbidden` on the wider lookup turns reachability into
+/// an existence oracle: from org B you could probe any id and read 403 as "that
+/// machine exists in an org you cannot see".
+///
+/// Inside the caller's tenant a 403 leaks nothing — they can already list the
+/// node — and it stays the honest, debuggable answer, so a mis-dispatch onto an
+/// unowned node still reads as "not yours" rather than "no such machine".
+fn refusal(in_caller_tenant: bool, msg: &str) -> ApiError {
+    if in_caller_tenant {
+        ApiError::ForbiddenMsg(msg.into())
+    } else {
+        ApiError::NotFound
     }
 }
 
@@ -476,26 +502,34 @@ pub async fn require_person_may_use_node(
                 .into(),
         ));
     };
+    // The SHARED leg stays tenant-local (MAIN-353 AC-5): sharing is a grant to
+    // *this* team, and a person carrying it into another org would be handing
+    // someone else's machine to an org its owner never consented to. So this
+    // lookup keeps its tenant scope.
     let row = state
         .identity
         .node_owner_and_shared(node_id.0, tenant)
         .await?;
-    let Some((owner, shared)) = row else {
-        return Err(ApiError::NotFound);
-    };
-    // Shared is a team grant: any member of the tenant may run here. (A node
-    // with no owner cannot be shared — 0017's invariant — so `shared` already
-    // implies a consenting owner.)
-    if shared {
+    if let Some((_, true)) = row {
+        // Shared is a team grant: any member of the tenant may run here. (A node
+        // with no owner cannot be shared — 0017's invariant — so `shared` already
+        // implies a consenting owner.)
         return Ok(());
     }
+    // The OWNER leg travels. Asked unscoped, so the owner reaches their own
+    // machine from any of their orgs.
+    let owner = state.identity.node_owner_person_unscoped(node_id.0).await?;
     let person = person_id_of(state, actor).await?;
-    match owner {
-        Some(o) if o == person => Ok(()),
-        _ => Err(ApiError::ForbiddenMsg(
-            "sessions start only on your own or shared machines".into(),
-        )),
+    if let Some(Some(o)) = owner {
+        if o == person {
+            return Ok(());
+        }
     }
+    // `row` already answered "is it in the caller's tenant?" — no second query.
+    Err(refusal(
+        row.is_some(),
+        "sessions start only on your own or shared machines",
+    ))
 }
 
 impl FromRequestParts<AppState> for AuthCtx {

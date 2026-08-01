@@ -649,7 +649,9 @@ pub(crate) async fn node_facts(
     let mut out = Vec::new();
     // `None` owner: the reconciler places across the whole tenant fleet, not one
     // person's machines.
-    for node in state.nodes.list(tenant, None).await? {
+    // Home-tenant only: reconcile places managed sessions for a tenant's own
+    // workspaces (MAIN-353 NG-3).
+    for node in state.nodes.list(tenant, None, None).await? {
         let placement = crate::routes::nodes::placement_of(&node);
         // Runtimes are stored as `capabilities.runtimes` (a jsonb array) — the
         // same value the node reported at register. Absent/malformed reads as an

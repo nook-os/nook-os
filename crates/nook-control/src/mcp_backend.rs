@@ -120,7 +120,9 @@ impl NookBackend for McpBackend {
     async fn list_nodes(&self) -> anyhow::Result<Vec<Node>> {
         let tenant = self.tenant().await?;
         // MCP acts for the tenant, not a single member — the whole fleet.
-        Ok(self.state.nodes.list(tenant, None).await?)
+        // No owner leg: MCP has no per-user identity to own anything with
+        // (MAIN-102), so it sees the tenant's fleet and nothing else.
+        Ok(self.state.nodes.list(tenant, None, None).await?)
     }
 
     async fn list_sessions(&self, active_only: bool) -> anyhow::Result<Vec<Session>> {

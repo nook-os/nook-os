@@ -35,11 +35,51 @@ async fn visibility_scope(state: &AppState, auth: &AuthCtx) -> ApiResult<Option<
     ))
 }
 
+/// The caller's own person, for the cross-org owner leg (MAIN-353) — `None`
+/// for a node token, which is a machine and owns nothing.
+///
+/// Separate from [`visibility_scope`] on purpose. That answers "how much of
+/// THIS tenant may they see", and an admin gets `None` there meaning *the whole
+/// fleet*. Feeding that `None` into the owner leg would turn "my own machines"
+/// into "everyone's", which is exactly the leak AC-3 names.
+async fn own_person(state: &AppState, auth: &AuthCtx) -> Option<uuid::Uuid> {
+    if !matches!(auth.principal, crate::auth::Principal::User) {
+        return None;
+    }
+    crate::auth::person_id_of(state, auth.user_id).await.ok()
+}
+
+/// Label each node that is homed somewhere other than the tenant being acted
+/// in, so the UI can say "your machine, over in Acme" rather than showing a
+/// stranger's-looking row.
+async fn label_foreign_homes(
+    state: &AppState,
+    acting: TenantId,
+    nodes: &mut [Node],
+) -> ApiResult<()> {
+    let foreign: Vec<TenantId> = nodes
+        .iter()
+        .map(|n| n.tenant_id)
+        .filter(|t| *t != acting)
+        .collect();
+    if foreign.is_empty() {
+        return Ok(());
+    }
+    let names = state.nodes.tenant_names(&foreign).await?;
+    for n in nodes.iter_mut().filter(|n| n.tenant_id != acting) {
+        n.home_tenant = names.get(&n.tenant_id.0).cloned();
+    }
+    Ok(())
+}
+
 #[utoipa::path(get, path = "/api/v1/nodes",
     operation_id = "list_nodes", responses((status = 200, body = [Node])))]
 pub async fn list(State(state): State<AppState>, auth: AuthCtx) -> ApiResult<Json<Vec<Node>>> {
     let scope = visibility_scope(&state, &auth).await?;
-    Ok(Json(state.nodes.list(auth.tenant_id, scope).await?))
+    let mine = own_person(&state, &auth).await;
+    let mut nodes = state.nodes.list(auth.tenant_id, scope, mine).await?;
+    label_foreign_homes(&state, auth.tenant_id, &mut nodes).await?;
+    Ok(Json(nodes))
 }
 
 #[utoipa::path(get, path = "/api/v1/nodes/{id}",
@@ -51,19 +91,34 @@ pub async fn get_one(
     auth: AuthCtx,
     Path(id): Path<NodeId>,
 ) -> ApiResult<Json<Node>> {
-    let node = state
+    // Read unscoped, then apply the visibility rule here — the caller may own
+    // this machine in another of their orgs (MAIN-353), which a tenant-scoped
+    // read could not even find. Nothing is returned before the rule runs.
+    let mut node = state
         .nodes
-        .get(auth.tenant_id, id)
+        .by_id_any_tenant(id)
         .await?
         .ok_or(ApiError::NotFound)?;
-    // A member sees a node they own OR one the team has been given (`shared`,
-    // MAIN-135); anything else is a 404, not a 403, so it is indistinguishable
-    // from a node that does not exist (MAIN-132's no-existence-oracle rule).
-    if let Some(person) = visibility_scope(&state, &auth).await? {
+    let mine = own_person(&state, &auth).await;
+    let is_mine = mine.is_some() && node.owner_person_id == mine;
+
+    if node.tenant_id != auth.tenant_id {
+        // Foreign-home: reachable ONLY by its owner. No admin, operator or
+        // teammate of either tenant gets here, and the refusal is a 404 so the
+        // node's existence is not disclosed (AC-8).
+        if !is_mine {
+            return Err(ApiError::NotFound);
+        }
+    } else if let Some(person) = visibility_scope(&state, &auth).await? {
+        // A member sees a node they own OR one the team has been given
+        // (`shared`, MAIN-135); anything else is a 404, not a 403, so it is
+        // indistinguishable from a node that does not exist (MAIN-132's
+        // no-existence-oracle rule).
         if node.owner_person_id != Some(person) && !node.shared {
             return Err(ApiError::NotFound);
         }
     }
+    label_foreign_homes(&state, auth.tenant_id, std::slice::from_mut(&mut node)).await?;
     Ok(Json(node))
 }
 

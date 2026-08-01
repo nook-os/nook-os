@@ -30,6 +30,7 @@ use async_trait::async_trait;
 use nook_db::dialect::type_mapping;
 use nook_db::{params, Db, DbPool, Json, Postgres, TypeMapping};
 use nook_types::*;
+use std::collections::HashMap;
 use uuid::Uuid;
 
 use crate::ca::TenantCa;
@@ -128,7 +129,30 @@ pub trait NodeRepository: Send + Sync {
     /// `owner = None` returns the whole fleet (owner/admin, and node tokens
     /// whose view is unchanged). Shared grants **visibility only** —
     /// session-start stays owner-only.
-    async fn list(&self, tenant: TenantId, owner: Option<Uuid>) -> ApiResult<Vec<Node>>;
+    /// The caller's node list: their active tenant's nodes under today's rules
+    /// (`owner` scopes a member to their own + shared), UNION the nodes
+    /// `own_person` owns in ANY tenant (MAIN-353).
+    ///
+    /// The second leg is owner-only and person-keyed on purpose: it is the
+    /// caller's own machine following the caller's own identity, not a share.
+    /// It is passed separately from `owner` because the two are different
+    /// questions — an admin's fleet view sets `owner = None` and must NOT
+    /// thereby inherit everyone's foreign machines.
+    async fn list(
+        &self,
+        tenant: TenantId,
+        owner: Option<Uuid>,
+        own_person: Option<Uuid>,
+    ) -> ApiResult<Vec<Node>>;
+
+    /// A node by id with NO tenant scope, for the two callers that must ask
+    /// "is this the caller's own machine?" before they know which tenant it
+    /// lives in (MAIN-353). Every caller applies its own visibility rule to the
+    /// result; none of them may return it unfiltered.
+    async fn by_id_any_tenant(&self, id: NodeId) -> ApiResult<Option<Node>>;
+
+    /// Tenant display names by id — what labels a foreign-home node.
+    async fn tenant_names(&self, ids: &[TenantId]) -> ApiResult<HashMap<Uuid, String>>;
 
     /// Every node's id and name in a tenant, BY NAME. The online filtering that
     /// uses it stays in the caller, because liveness comes from the registry
@@ -413,20 +437,53 @@ impl NodeRepository for DbNodeRepository {
             .await?)
     }
 
-    async fn list(&self, tenant: TenantId, owner: Option<Uuid>) -> ApiResult<Vec<Node>> {
+    async fn list(
+        &self,
+        tenant: TenantId,
+        owner: Option<Uuid>,
+        own_person: Option<Uuid>,
+    ) -> ApiResult<Vec<Node>> {
         Ok(self
             .db
             .query_all(
                 &format!(
                     "SELECT {NODE_COLUMNS}
                      FROM nodes
-                     WHERE tenant_id = $1 AND ({owner} IS NULL OR owner_person_id = $2 OR shared)
+                     WHERE (tenant_id = $1
+                            AND ({owner} IS NULL OR owner_person_id = $2 OR shared))
+                        OR ({own} IS NOT NULL AND owner_person_id = $3)
                      ORDER BY name",
-                    owner = Postgres.cast("$2", "uuid")
+                    owner = Postgres.cast("$2", "uuid"),
+                    own = Postgres.cast("$3", "uuid")
                 ),
-                params![tenant, owner],
+                params![tenant, owner, own_person],
             )
             .await?)
+    }
+
+    async fn by_id_any_tenant(&self, id: NodeId) -> ApiResult<Option<Node>> {
+        Ok(self
+            .db
+            .query_opt(
+                &format!("SELECT {NODE_COLUMNS} FROM nodes WHERE id = $1"),
+                params![id],
+            )
+            .await?)
+    }
+
+    async fn tenant_names(&self, ids: &[TenantId]) -> ApiResult<HashMap<Uuid, String>> {
+        if ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let raw: Vec<Uuid> = ids.iter().map(|t| t.0).collect();
+        let rows: Vec<(Uuid, String)> = self
+            .db
+            .query_all(
+                "SELECT id, name FROM tenants WHERE id = ANY($1)",
+                params![raw],
+            )
+            .await?;
+        Ok(rows.into_iter().collect())
     }
 
     async fn list_ids_and_names(&self, tenant: TenantId) -> ApiResult<Vec<(NodeId, String)>> {
@@ -1149,7 +1206,6 @@ impl TenantCaRepository for DbTenantCaRepository {
 // token, and the lease's "only if we still hold it" guard. A fake that accepted
 // everything would let a caller test pass while the real statement refused.
 
-use std::collections::HashMap;
 use std::sync::Mutex;
 
 #[derive(Debug, Clone)]
@@ -1211,6 +1267,7 @@ impl FakeNodeRepository {
                 updated_at: now,
                 labels: serde_json::json!({}),
                 taints: serde_json::json!([]),
+                home_tenant: None,
             },
             token_hash: String::new(),
             owning_instance_id: None,
@@ -1345,18 +1402,52 @@ impl NodeRepository for FakeNodeRepository {
             .map(|n| n.node.clone()))
     }
 
-    async fn list(&self, tenant: TenantId, owner: Option<Uuid>) -> ApiResult<Vec<Node>> {
+    async fn by_id_any_tenant(&self, id: NodeId) -> ApiResult<Option<Node>> {
+        Ok(self
+            .inner
+            .lock()
+            .unwrap()
+            .nodes
+            .iter()
+            .find(|n| n.node.id == id)
+            .map(|n| n.node.clone()))
+    }
+
+    async fn tenant_names(&self, ids: &[TenantId]) -> ApiResult<HashMap<Uuid, String>> {
+        // The fake has no tenants table; a stable synthetic name is enough for
+        // callers asserting that a foreign node is LABELLED at all.
+        Ok(ids
+            .iter()
+            .map(|t| (t.0, format!("tenant-{}", &t.0.simple().to_string()[..8])))
+            .collect())
+    }
+
+    async fn list(
+        &self,
+        tenant: TenantId,
+        owner: Option<Uuid>,
+        own_person: Option<Uuid>,
+    ) -> ApiResult<Vec<Node>> {
         let s = self.inner.lock().unwrap();
+        let in_active_tenant = |n: &&FakeNode| {
+            n.node.tenant_id == tenant
+                // `owner = None` is the whole fleet; otherwise own nodes PLUS
+                // shared ones (MAIN-132/135).
+                && match owner {
+                    None => true,
+                    Some(person) => n.node.owner_person_id == Some(person) || n.node.shared,
+                }
+        };
+        // The owner leg (MAIN-353): the caller's OWN machines, whatever tenant
+        // they are homed in. Never widened by `owner = None`.
+        let mine = |n: &&FakeNode| match own_person {
+            Some(p) => n.node.owner_person_id == Some(p),
+            None => false,
+        };
         let mut out: Vec<Node> = s
             .nodes
             .iter()
-            .filter(|n| n.node.tenant_id == tenant)
-            // `owner = None` is the whole fleet; otherwise own nodes PLUS
-            // shared ones (MAIN-132/135).
-            .filter(|n| match owner {
-                None => true,
-                Some(person) => n.node.owner_person_id == Some(person) || n.node.shared,
-            })
+            .filter(|n| in_active_tenant(n) || mine(n))
             .map(|n| n.node.clone())
             .collect();
         out.sort_by(|a, b| a.name.cmp(&b.name));
@@ -1522,6 +1613,7 @@ impl NodeRepository for FakeNodeRepository {
                 shared: false,
                 labels: serde_json::json!({}),
                 taints: serde_json::json!([]),
+                home_tenant: None,
                 created_at: now,
                 updated_at: now,
             },

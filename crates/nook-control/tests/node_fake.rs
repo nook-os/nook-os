@@ -48,12 +48,12 @@ async fn a_member_sees_their_own_nodes_plus_shared_ones_and_an_admin_sees_all() 
     let names = |v: Vec<Node>| v.into_iter().map(|n| n.name).collect::<Vec<_>>();
 
     assert_eq!(
-        names(repo.list(t, Some(alice)).await.unwrap()),
+        names(repo.list(t, Some(alice), Some(alice)).await.unwrap()),
         vec!["alice-box", "operator"],
         "own nodes plus the shared one — never a teammate's private machine"
     );
     assert_eq!(
-        names(repo.list(t, None).await.unwrap()),
+        names(repo.list(t, None, None).await.unwrap()),
         vec!["alice-box", "bob-box", "operator"],
         "the unscoped view is the whole fleet"
     );
@@ -547,4 +547,92 @@ async fn revocation_is_visible_to_the_renewal_path() {
         "renewal must outrank 'my certificate expired' — else a compromised \
          machine just waits and re-enrols"
     );
+}
+
+// ── your own machine, from any of your orgs (MAIN-353) ──────────────────────
+//
+// The rule is one line — a node is reachable by the person who owns it, in any
+// tenant that person is a member of — and its whole risk is the edge below:
+// this must widen for the OWNER and for nobody else, ever.
+
+/// The see path (AC-2): ryan's machine homed in A shows up while he is acting
+/// in B, and A's own view is unchanged.
+#[tokio::test]
+async fn your_own_node_follows_you_into_your_other_org() {
+    let repo = FakeNodeRepository::new();
+    let (a, b) = (tenant(), tenant());
+    let ryan = Uuid::now_v7();
+    let n = repo.add(a, "ryan-box", Some(ryan), false);
+
+    let names = |v: Vec<Node>| v.into_iter().map(|x| x.name).collect::<Vec<_>>();
+
+    // Acting in B, where he has no nodes of his own at all.
+    assert_eq!(
+        names(repo.list(b, Some(ryan), Some(ryan)).await.unwrap()),
+        vec!["ryan-box"],
+        "his own machine is reachable from his other org"
+    );
+    // Acting in A: exactly as before.
+    assert_eq!(
+        names(repo.list(a, Some(ryan), Some(ryan)).await.unwrap()),
+        vec!["ryan-box"]
+    );
+    // And it is still homed in A — the widening moves no rows.
+    assert_eq!(
+        repo.by_id_any_tenant(n).await.unwrap().unwrap().tenant_id,
+        a,
+        "reachability is authorization, not a change of home"
+    );
+}
+
+/// AC-3, the edge that turns a reachability feature into a leak. A tenant-B
+/// ADMIN — whose in-tenant view is the whole fleet (`owner = None`) — must not
+/// thereby see a foreign machine belonging to someone else.
+#[tokio::test]
+async fn another_orgs_admin_never_sees_someone_elses_foreign_node() {
+    let repo = FakeNodeRepository::new();
+    let (a, b) = (tenant(), tenant());
+    let (ryan, admin_of_b, member_of_b) = (Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7());
+    repo.add(a, "ryan-box", Some(ryan), false);
+    repo.add(b, "b-box", Some(admin_of_b), false);
+
+    let names = |v: Vec<Node>| v.into_iter().map(|x| x.name).collect::<Vec<_>>();
+
+    // The admin's fleet view of B: `owner = None` is "the whole fleet OF B".
+    assert_eq!(
+        names(repo.list(b, None, Some(admin_of_b)).await.unwrap()),
+        vec!["b-box"],
+        "the fleet view is the fleet of THIS tenant — ryan's machine is not in it"
+    );
+    // A plain member of B, likewise.
+    assert_eq!(
+        names(
+            repo.list(b, Some(member_of_b), Some(member_of_b))
+                .await
+                .unwrap()
+        ),
+        Vec::<String>::new()
+    );
+    // And a shared machine in A does not travel either — sharing is a grant to
+    // A's team, not a passport (AC-5's sibling on the see path).
+    repo.add(a, "a-shared", Some(ryan), true);
+    assert_eq!(
+        names(repo.list(b, None, Some(admin_of_b)).await.unwrap()),
+        vec!["b-box"],
+        "a node shared with org A is not shared with org B"
+    );
+}
+
+/// The owner leg must not be widened by the fleet view. An admin acting with
+/// `owner = None` and no person still gets only their tenant.
+#[tokio::test]
+async fn the_owner_leg_is_never_widened_by_a_fleet_view() {
+    let repo = FakeNodeRepository::new();
+    let (a, b) = (tenant(), tenant());
+    let ryan = Uuid::now_v7();
+    repo.add(a, "ryan-box", Some(ryan), false);
+
+    // No person at all (a node token): nothing foreign, whatever the scope.
+    assert!(repo.list(b, None, None).await.unwrap().is_empty());
+    assert!(repo.list(b, Some(ryan), None).await.unwrap().is_empty());
 }
