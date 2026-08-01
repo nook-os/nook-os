@@ -1,0 +1,8 @@
+# Files that still nest a Postgres literal inside a dialect seam call
+# (MAIN-354). EVERY LINE NAMES THE CARD THAT OWNS THE FIX; the list shrinks as
+# those land and the guard fails on a stale entry.
+#
+# Empty is the goal, and empty is where it starts: the tree was clean when the
+# guard landed. MAIN-350 shipped the one instance this card was written for and
+# MAIN-355 converted it (claim_lease + the reaper), so there was nothing left to
+# list. A line here means somebody added one back.
