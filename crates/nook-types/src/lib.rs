@@ -464,6 +464,22 @@ pub struct Capabilities {
     /// container; false everywhere else.
     #[serde(default)]
     pub shared_operator: bool,
+    /// Which loop stages this node will execute (MAIN-142): any of `spec`,
+    /// `decompose`, `review`, `epic-run`, `build`. Set by `NOOK_LOOP_KINDS`.
+    ///
+    /// **Empty means the node accepts NO loop jobs** — the safe default, so a
+    /// machine that never opted in cannot be handed agent work by an upgrade.
+    /// It is the node's own declaration and the control plane treats it as
+    /// exactly that: a filter it applies, never a permission it trusts. The
+    /// shared-operator build wall does not consult this list at all.
+    #[serde(default)]
+    pub loop_kinds: Vec<String>,
+    /// How many loop jobs this node will hold at once (MAIN-142), from
+    /// `NOOK_MAX_LOOP_JOBS`. `0` disables claiming entirely. Absent from an
+    /// older node's report, which reads as "unspecified" rather than zero —
+    /// see `nook_control::services::jobs::CAPACITY_WHEN_UNREPORTED`.
+    #[serde(default)]
+    pub max_loop_jobs: Option<u32>,
     /// Agent authorization profiles this node reports (MAIN-126): one per
     /// runtime-specific auth target (Claude Code, Hermes → Nous Portal, …), each
     /// with a state probed from the runtime's own CLI — never inferred from a
@@ -1185,6 +1201,12 @@ pub struct ClaimTaskRequest {
     /// assigning work; agents omit it.
     #[serde(default)]
     pub assignee_user_id: Option<UserId>,
+    /// The session this claim was made from (MAIN-142 AC-4), so the control
+    /// plane can refuse a build-loop claim running on a shared operator. The
+    /// CLI fills it from `NOOK_SESSION_ID` when it has one; a claim made
+    /// outside a session simply has none, and is out of the check's reach.
+    #[serde(default)]
+    pub session_id: Option<SessionId>,
 }
 
 /// One account you can sign in as, in dev mode only.

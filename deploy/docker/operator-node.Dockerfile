@@ -84,4 +84,12 @@ LABEL org.opencontainers.image.title="nook-operator-node" \
 # This image IS the shared operator node — the entrypoint reads this to report
 # the designation (capabilities.shared_operator, MAIN-125 AC-4).
 ENV NOOK_SHARED_OPERATOR=1
+
+# Which loop stages this node runs (MAIN-142). Deliberately NOT `build`: shared
+# substrate reviews, specs, decomposes and runs epics; building is a person's
+# own machine. Naming `build` here would change nothing anyway — the control
+# plane refuses build work on any shared operator whatever it declares.
+ENV NOOK_LOOP_KINDS=spec,decompose,review,epic-run
+# How many loop jobs it holds at once. `0` would stop it claiming entirely.
+ENV NOOK_MAX_LOOP_JOBS=2
 ENTRYPOINT ["node-entrypoint.sh"]

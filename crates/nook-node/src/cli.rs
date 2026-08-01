@@ -1988,10 +1988,19 @@ pub async fn claim(key: &str, column_type: Option<&str>, any_workspace: bool) ->
         }
     }
 
-    let body = match column_type {
+    let mut body = match column_type {
         Some(c) => serde_json::json!({ "column_type": c }),
         None => serde_json::json!({}),
     };
+    // Which session this claim comes from (MAIN-142 AC-4). The control plane
+    // uses it to refuse the build loop on a shared operator — a wall it can
+    // only apply if it knows where the claim was typed. Absent outside a
+    // session, which the server treats as "unknown", never as "allowed anyway".
+    if let Ok(sid) = std::env::var("NOOK_SESSION_ID") {
+        if !sid.is_empty() {
+            body["session_id"] = serde_json::json!(sid);
+        }
+    }
     match client
         .post(&format!("/api/v1/tasks/{key}/claim"), body)
         .await

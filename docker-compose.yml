@@ -312,6 +312,11 @@ services:
       # service uses; refused outright when APP_ENV=production.
       NOOK_INSECURE: "1"
       NOOK_SHARED_OPERATOR: "1"
+      # The loop stages this node runs (MAIN-142). No `build`: shared substrate
+      # never runs the build loop, and the control plane enforces that wall
+      # regardless of what is listed here.
+      NOOK_LOOP_KINDS: spec,decompose,review,epic-run
+      NOOK_MAX_LOOP_JOBS: "2"
       # The operator node boots with the dev stack by default (MAIN-140), but it
       # only claims loop work when the loops master switch is ON — which it is
       # NOT by default (MAIN-239). So a fresh stack has an operator standing by

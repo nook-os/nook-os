@@ -190,7 +190,7 @@ async fn a_job_queued_while_off_waits_and_runs_after_enable() {
     let node = bed.node(tenant, person).await;
     sqlx::query(
         "UPDATE nodes SET status = 'online',
-             capabilities = '{\"runtime_auth\":[{\"runtime\":\"claude\",\"state\":\"authorized\"}]}'::jsonb
+             capabilities = '{\"loop_kinds\":[\"spec\",\"decompose\"],\"runtime_auth\":[{\"runtime\":\"claude\",\"state\":\"authorized\"}]}'::jsonb
          WHERE id = $1",
     )
     .bind(node)

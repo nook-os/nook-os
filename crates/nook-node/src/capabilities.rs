@@ -86,8 +86,73 @@ pub fn detect() -> Capabilities {
                 .as_deref(),
         ),
         shared_operator: shared_operator(),
+        loop_kinds: loop_kinds(),
+        max_loop_jobs: Some(max_loop_jobs()),
         runtime_auth: crate::runtime_auth::probe_all(),
     }
+}
+
+/// Every loop stage a node may be configured to run (MAIN-142). `build` is
+/// listed so it can be *validated* — a node may name it, and the control plane
+/// will still refuse to place build work on a shared operator.
+pub const KNOWN_LOOP_KINDS: &[&str] = &["spec", "decompose", "review", "epic-run", "build"];
+
+/// Which loop stages this node accepts, from `NOOK_LOOP_KINDS` (CSV).
+///
+/// Unset or empty means NONE — a node opts in, and an upgrade never opts one in
+/// by accident. An unrecognised kind is a hard error rather than a silent drop:
+/// a typo would otherwise leave the operator believing a stage was enabled.
+pub fn parse_loop_kinds(raw: &str) -> Result<Vec<String>, String> {
+    let mut out = Vec::new();
+    for part in raw.split(',') {
+        let k = part.trim().to_ascii_lowercase();
+        if k.is_empty() {
+            continue;
+        }
+        if !KNOWN_LOOP_KINDS.contains(&k.as_str()) {
+            return Err(format!(
+                "NOOK_LOOP_KINDS: unknown loop kind {k:?} — expected any of {}",
+                KNOWN_LOOP_KINDS.join(", ")
+            ));
+        }
+        if !out.contains(&k) {
+            out.push(k);
+        }
+    }
+    Ok(out)
+}
+
+fn loop_kinds() -> Vec<String> {
+    let raw = std::env::var("NOOK_LOOP_KINDS").unwrap_or_default();
+    match parse_loop_kinds(&raw) {
+        Ok(kinds) => kinds,
+        // Reported as none rather than guessed. The boot check in `main` is what
+        // makes this loud; this arm exists so a mid-run re-report cannot panic.
+        Err(e) => {
+            tracing::error!("{e} — reporting no loop kinds");
+            Vec::new()
+        }
+    }
+}
+
+/// Default concurrent loop jobs when `NOOK_MAX_LOOP_JOBS` is unset. Two, so an
+/// operator can review one ticket while another runs, without a single slow job
+/// stalling the queue.
+pub const DEFAULT_MAX_LOOP_JOBS: u32 = 2;
+
+/// How many loop jobs this node holds at once, from `NOOK_MAX_LOOP_JOBS`. `0`
+/// disables claiming; an unparseable value falls back to the default rather
+/// than to zero, because silently disabling a node is the worse failure.
+pub fn parse_max_loop_jobs(raw: &str) -> u32 {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return DEFAULT_MAX_LOOP_JOBS;
+    }
+    raw.parse().unwrap_or(DEFAULT_MAX_LOOP_JOBS)
+}
+
+fn max_loop_jobs() -> u32 {
+    parse_max_loop_jobs(&std::env::var("NOOK_MAX_LOOP_JOBS").unwrap_or_default())
 }
 
 /// Is this the deployment's shared operator node (MAIN-125)? Read from
@@ -108,7 +173,7 @@ fn env_truthy(v: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::env_truthy;
+    use super::{env_truthy, parse_loop_kinds, parse_max_loop_jobs, DEFAULT_MAX_LOOP_JOBS};
 
     #[test]
     fn shared_operator_flag_reads_truthy_env_only() {
@@ -118,5 +183,55 @@ mod tests {
         for off in ["", "0", "false", "no", "off", "  "] {
             assert!(!env_truthy(off), "{off:?} should be false");
         }
+    }
+
+    /// Opting in is explicit: no configuration means the node runs nothing.
+    /// The alternative — an empty list meaning "all" — would enrol every
+    /// existing machine in agent work the moment this shipped.
+    #[test]
+    fn no_configuration_means_no_loop_kinds() {
+        assert_eq!(parse_loop_kinds("").unwrap(), Vec::<String>::new());
+        assert_eq!(parse_loop_kinds("  , ,").unwrap(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn kinds_parse_case_and_space_insensitively_without_duplicates() {
+        assert_eq!(
+            parse_loop_kinds(" Spec, decompose ,SPEC, epic-run").unwrap(),
+            vec!["spec", "decompose", "epic-run"]
+        );
+    }
+
+    /// A typo must not read as "that stage is off" — the operator would believe
+    /// they had enabled it. Refused at parse, and the boot check makes it loud.
+    #[test]
+    fn an_unknown_kind_is_refused_rather_than_dropped() {
+        let err = parse_loop_kinds("spec,reviewww").expect_err("unknown kind");
+        assert!(
+            err.contains("reviewww"),
+            "the message names the typo: {err}"
+        );
+        assert!(
+            err.contains("epic-run"),
+            "and lists what was expected: {err}"
+        );
+    }
+
+    /// `build` parses — a node may declare it. The wall that stops a shared
+    /// operator running build work is the control plane's, not this list's.
+    #[test]
+    fn build_is_a_valid_kind_to_declare() {
+        assert_eq!(parse_loop_kinds("build").unwrap(), vec!["build"]);
+    }
+
+    /// Zero is a real answer (stop claiming); junk is not, and falling back to
+    /// zero would silently take a node out of service.
+    #[test]
+    fn capacity_defaults_rather_than_zeroes_on_junk() {
+        assert_eq!(parse_max_loop_jobs(""), DEFAULT_MAX_LOOP_JOBS);
+        assert_eq!(parse_max_loop_jobs("  "), DEFAULT_MAX_LOOP_JOBS);
+        assert_eq!(parse_max_loop_jobs("not-a-number"), DEFAULT_MAX_LOOP_JOBS);
+        assert_eq!(parse_max_loop_jobs("0"), 0);
+        assert_eq!(parse_max_loop_jobs(" 5 "), 5);
     }
 }

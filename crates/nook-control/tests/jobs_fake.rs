@@ -401,10 +401,12 @@ async fn your_own_authorized_node_beats_the_shared_operator() {
     let me = uuid::Uuid::now_v7();
 
     let authorized = serde_json::json!({
+        "loop_kinds": ["spec", "decompose"],
         "runtime_auth": [{ "runtime": "claude", "state": "authorized" }]
     });
     let operator = serde_json::json!({
         "shared_operator": true,
+        "loop_kinds": ["spec", "decompose"],
         "runtime_auth": [{ "runtime": "claude", "state": "authorized" }]
     });
 
@@ -427,7 +429,12 @@ async fn your_own_authorized_node_beats_the_shared_operator() {
     }
 
     assert_eq!(
-        nodes.pick_loop_executor(t, me, "claude").await.unwrap(),
+        nodes
+            .eligible_loop_executors(t, me, "claude", "spec")
+            .await
+            .unwrap()
+            .first()
+            .copied(),
         Some(mine),
         "own-before-shared is the ORDER BY, not the caller's job"
     );
@@ -444,6 +451,7 @@ async fn an_unauthorized_node_is_not_an_executor_however_online_it_is() {
             mine,
             nook_control::repo::nodes::ReportedCapabilities {
                 capabilities: serde_json::json!({
+                    "loop_kinds": ["spec"],
                     "runtime_auth": [{ "runtime": "claude", "state": "not_authorized" }]
                 }),
                 hostname: "h".into(),
@@ -453,10 +461,11 @@ async fn an_unauthorized_node_is_not_an_executor_however_online_it_is() {
         .await
         .unwrap();
 
-    assert_eq!(
-        nodes.pick_loop_executor(t, me, "claude").await.unwrap(),
-        None
-    );
+    assert!(nodes
+        .eligible_loop_executors(t, me, "claude", "spec")
+        .await
+        .unwrap()
+        .is_empty());
     assert_eq!(
         nodes.owned_online_count(t, me).await.unwrap(),
         1,
@@ -475,12 +484,214 @@ async fn an_offline_node_is_never_picked() {
     // Seeded `offline`; give it authorization but never bring it online.
     nodes.set_capabilities(
         mine,
-        serde_json::json!({ "runtime_auth": [{ "runtime": "claude", "state": "authorized" }] }),
+        serde_json::json!({
+            "loop_kinds": ["spec"],
+            "runtime_auth": [{ "runtime": "claude", "state": "authorized" }]
+        }),
     );
 
-    assert_eq!(
-        nodes.pick_loop_executor(t, me, "claude").await.unwrap(),
-        None
-    );
+    assert!(nodes
+        .eligible_loop_executors(t, me, "claude", "spec")
+        .await
+        .unwrap()
+        .is_empty());
     assert_eq!(nodes.owned_online_count(t, me).await.unwrap(), 0);
+}
+
+// ── the loop-job kind wall (MAIN-142) ───────────────────────────────────────
+
+/// Fixture: an ONLINE, claude-authorized node declaring `kinds`. `add` seeds a
+/// node offline, and `record_capabilities` is what brings it online — so both
+/// steps are here rather than at each call site.
+async fn online_declaring(
+    nodes: &FakeNodeRepository,
+    t: TenantId,
+    name: &str,
+    owner: Option<uuid::Uuid>,
+    operator: bool,
+    caps: serde_json::Value,
+) -> NodeId {
+    let id = nodes.add(t, name, owner, operator);
+    nodes.set_capabilities(id, caps.clone());
+    nodes
+        .record_capabilities(
+            id,
+            nook_control::repo::nodes::ReportedCapabilities {
+                capabilities: caps,
+                hostname: "h".into(),
+                platform: "linux".into(),
+            },
+        )
+        .await
+        .unwrap();
+    id
+}
+
+fn declaring(kinds: &[&str], operator: bool) -> serde_json::Value {
+    serde_json::json!({
+        "shared_operator": operator,
+        "loop_kinds": kinds,
+        "runtime_auth": [{ "runtime": "claude", "state": "authorized" }],
+    })
+}
+
+/// A node runs the stages it declared and no others. The refusal is not a
+/// silent skip: it names the kind and what the node does accept, because a job
+/// queueing forever with no reason is the failure this replaces.
+#[tokio::test]
+async fn a_node_is_offered_only_the_kinds_it_declares() {
+    let nodes = FakeNodeRepository::new();
+    let t = tenant();
+    let me = uuid::Uuid::now_v7();
+    let mine = online_declaring(
+        &nodes,
+        t,
+        "mine",
+        Some(me),
+        false,
+        declaring(&["spec"], false),
+    )
+    .await;
+
+    assert_eq!(
+        nodes
+            .eligible_loop_executors(t, me, "claude", "spec")
+            .await
+            .unwrap(),
+        vec![mine],
+        "the kind it declared"
+    );
+    assert!(
+        nodes
+            .eligible_loop_executors(t, me, "claude", "decompose")
+            .await
+            .unwrap()
+            .is_empty(),
+        "a kind it did not declare is not offered, however capable the node is"
+    );
+}
+
+/// AC-1's default, stated as a test: a node that configured nothing runs
+/// nothing. The alternative — silence meaning "anything" — would have enrolled
+/// every existing machine in agent work the moment this shipped.
+#[tokio::test]
+async fn a_node_declaring_nothing_accepts_nothing() {
+    let nodes = FakeNodeRepository::new();
+    let t = tenant();
+    let me = uuid::Uuid::now_v7();
+    let mine = online_declaring(
+        &nodes,
+        t,
+        "mine",
+        Some(me),
+        false,
+        serde_json::json!({ "runtime_auth": [{ "runtime": "claude", "state": "authorized" }] }),
+    )
+    .await;
+    let _ = mine;
+
+    for kind in ["spec", "decompose", "review", "epic-run", "build"] {
+        assert!(
+            nodes
+                .eligible_loop_executors(t, me, "claude", kind)
+                .await
+                .unwrap()
+                .is_empty(),
+            "{kind} was offered to a node that declared no kinds"
+        );
+    }
+}
+
+/// The wall AC-3 exists for: a shared operator that declares `build` — the
+/// lying-or-misconfigured node — is still never offered build work, and is
+/// still refused at claim. Its own configuration is not consulted.
+#[tokio::test]
+async fn a_shared_operator_never_runs_build_however_it_is_configured() {
+    let nodes = FakeNodeRepository::new();
+    let t = tenant();
+    let me = uuid::Uuid::now_v7();
+    let op = online_declaring(
+        &nodes,
+        t,
+        "operator",
+        None,
+        true,
+        declaring(&["spec", "review", "build"], true),
+    )
+    .await;
+
+    assert!(
+        nodes
+            .eligible_loop_executors(t, me, "claude", "build")
+            .await
+            .unwrap()
+            .is_empty(),
+        "a shared operator declaring `build` is still not offered build work"
+    );
+    assert_eq!(
+        nodes
+            .eligible_loop_executors(t, me, "claude", "review")
+            .await
+            .unwrap(),
+        vec![op],
+        "…while the stages it is FOR are unaffected"
+    );
+    assert!(
+        nodes.is_shared_operator(op).await.unwrap(),
+        "and the wall's question is answered from the stored row"
+    );
+}
+
+/// A personal node may run build work — the wall is about shared substrate,
+/// not about build being dangerous.
+#[tokio::test]
+async fn a_personal_node_may_run_build() {
+    let nodes = FakeNodeRepository::new();
+    let t = tenant();
+    let me = uuid::Uuid::now_v7();
+    let mine = online_declaring(
+        &nodes,
+        t,
+        "mine",
+        Some(me),
+        false,
+        declaring(&["build"], false),
+    )
+    .await;
+
+    assert_eq!(
+        nodes
+            .eligible_loop_executors(t, me, "claude", "build")
+            .await
+            .unwrap(),
+        vec![mine]
+    );
+}
+
+/// The capacity the control plane reads back is the one the node reported, and
+/// an absent one is distinguishable from a zero — zero means "stop claiming",
+/// absent means "an agent too old to say".
+#[tokio::test]
+async fn a_reported_capacity_round_trips_and_absent_is_not_zero() {
+    let nodes = FakeNodeRepository::new();
+    let t = tenant();
+    let me = uuid::Uuid::now_v7();
+
+    let capped = nodes.add(t, "capped", Some(me), false);
+    nodes.set_capabilities(
+        capped,
+        serde_json::json!({ "loop_kinds": ["spec"], "max_loop_jobs": 0 }),
+    );
+    let silent = nodes.add(t, "silent", Some(me), false);
+    nodes.set_capabilities(silent, serde_json::json!({ "loop_kinds": ["spec"] }));
+
+    assert_eq!(
+        nodes.loop_profile(capped).await.unwrap(),
+        Some((vec!["spec".to_string()], Some(0)))
+    );
+    assert_eq!(
+        nodes.loop_profile(silent).await.unwrap(),
+        Some((vec!["spec".to_string()], None)),
+        "absent is None, not Some(0) — one disables claiming, the other does not"
+    );
 }

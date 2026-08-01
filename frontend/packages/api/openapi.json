@@ -7915,6 +7915,22 @@
           "hostname": {
             "type": "string"
           },
+          "loop_kinds": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Which loop stages this node will execute (MAIN-142): any of `spec`,\n`decompose`, `review`, `epic-run`, `build`. Set by `NOOK_LOOP_KINDS`.\n\n**Empty means the node accepts NO loop jobs** — the safe default, so a\nmachine that never opted in cannot be handed agent work by an upgrade.\nIt is the node's own declaration and the control plane treats it as\nexactly that: a filter it applies, never a permission it trusts. The\nshared-operator build wall does not consult this list at all."
+          },
+          "max_loop_jobs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "How many loop jobs this node will hold at once (MAIN-142), from\n`NOOK_MAX_LOOP_JOBS`. `0` disables claiming entirely. Absent from an\nolder node's report, which reads as \"unspecified\" rather than zero —\nsee `nook_control::services::jobs::CAPACITY_WHEN_UNREPORTED`.",
+            "minimum": 0
+          },
           "memory": {
             "type": "integer",
             "format": "int64",
@@ -8416,6 +8432,17 @@
               "null"
             ],
             "description": "Move the task here at the same time, by column TYPE. Omit to claim\nwithout moving."
+          },
+          "session_id": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/SessionId",
+                "description": "The session this claim was made from (MAIN-142 AC-4), so the control\nplane can refuse a build-loop claim running on a shared operator. The\nCLI fills it from `NOOK_SESSION_ID` when it has one; a claim made\noutside a session simply has none, and is out of the check's reach."
+              }
+            ]
           }
         }
       },

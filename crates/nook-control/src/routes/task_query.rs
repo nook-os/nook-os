@@ -313,6 +313,28 @@ pub async fn claim(
     Json(req): Json<ClaimTaskRequest>,
 ) -> ApiResult<Json<TaskItem>> {
     let claimant = req.assignee_user_id.unwrap_or(auth.user_id);
+    // AC-4 (MAIN-142): the build loop, as it runs TODAY, is a human-or-agent
+    // typing `nook claim` inside a session — there is no `build` job kind yet
+    // for the executor wall to catch. So the wall is applied here, against the
+    // node the claiming session actually runs on.
+    //
+    // A claim with NO session context is out of this check's reach and is left
+    // exactly as it was: the control plane cannot tell where it came from, and
+    // refusing every context-less claim would break every human on the board.
+    if let Some(session) = req.session_id {
+        if let Some(node) = state
+            .sessions
+            .by_id_unscoped(session)
+            .await?
+            .map(|s| s.node_id)
+        {
+            if state.nodes.is_shared_operator(node).await? {
+                return Err(ApiError::ForbiddenMsg(
+                    "shared operator nodes do not run the build loop".into(),
+                ));
+            }
+        }
+    }
     Ok(Json(
         claim_inner(&state, auth.tenant_id, claimant, &ident, req.column_type).await?,
     ))

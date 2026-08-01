@@ -103,6 +103,23 @@ networkPolicy:
     # The agent listener's port — the one nodes dial, not the browser API's.
     port: 8081
 
+# Which loop stages this node runs (MAIN-142). `build` is deliberately absent:
+# shared substrate reviews, specs, decomposes and runs epics, while building is
+# a person's own machine. Adding it here changes nothing — the control plane
+# refuses build work on any shared operator whatever the node declares — so the
+# list is a statement of intent, not the wall.
+#
+# An empty list means the node accepts NO loop jobs.
+loopKinds:
+  - spec
+  - decompose
+  - review
+  - epic-run
+
+# How many loop jobs this node holds at once. `0` stops it claiming entirely,
+# which is the way to quiesce an operator without deleting it.
+maxLoopJobs: 2
+
 # Extra environment for the node process (e.g. RUST_LOG overrides).
 extraEnv: []
 
