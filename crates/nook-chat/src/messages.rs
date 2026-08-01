@@ -469,7 +469,8 @@ mod tests {
 
     use axum::extract::{Path, Query};
     use axum::Json;
-    use nook_db::{params, Db, Postgres, TypeMapping};
+    use nook_db::dialect::type_mapping;
+    use nook_db::{params, Db};
 
     use super::*;
 
@@ -673,7 +674,7 @@ mod tests {
             .exec(
                 &format!(
                     "UPDATE chat_channels SET archived_at = {} WHERE id = $1",
-                    Postgres.now()
+                    type_mapping(state.db.engine()).now()
                 ),
                 params![channel],
             )

@@ -49,6 +49,15 @@ pub async fn publish(pool: &DbPool, message_id: Uuid, origin: Uuid, updated: boo
         updated,
     })
     .unwrap_or_default();
+    // Cross-instance fan-out is a Postgres capability (MAIN-196). On SQLite the
+    // deployment IS one process against one file — there is no peer to announce
+    // to — and `PgEventBus` would panic reaching for a Postgres pool. Local
+    // subscribers are served by the in-memory registry either way, so returning
+    // here loses nothing that engine could have had. Mirrors how the control
+    // plane declines to start its own bus on SQLite.
+    if pool.engine() != nook_db::Engine::Postgres {
+        return;
+    }
     // The NOTIFY itself lives in the event-bus seam's Postgres impl; chat only
     // composes the payload and picks the channel.
     if let Err(e) = PgEventBus::new(pool.clone())
@@ -67,6 +76,11 @@ pub fn start(
     pool: DbPool,
     messages: Arc<dyn crate::repo::messages::MessageRepository>,
 ) {
+    // Same reason as `publish`: nothing to listen for on a single-process engine.
+    if pool.engine() != nook_db::Engine::Postgres {
+        tracing::info!("single-instance engine — chat bus listener not started");
+        return;
+    }
     tokio::spawn(async move {
         loop {
             if let Err(e) = run(&registry, &pool, &*messages).await {

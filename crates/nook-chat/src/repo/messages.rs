@@ -13,7 +13,7 @@ use async_trait::async_trait;
 use super::RepoResult;
 use chrono::{DateTime, Utc};
 use nook_db::dialect::type_mapping;
-use nook_db::{params, Db, DbPool, Postgres, TypeMapping};
+use nook_db::{params, Db, DbPool};
 use uuid::Uuid;
 
 /// A message row as stored. `deleted_at` is carried, not applied — redaction
@@ -80,15 +80,15 @@ pub struct Page {
 /// The cheap projection: no thread rollups, so `reply_count` is 0 and
 /// `last_reply_at` NULL. The casts route through the type-mapping seam
 /// (MAIN-212), which is why this is a fn and not a const.
-fn select_message() -> String {
+fn select_message(engine: nook_db::Engine) -> String {
     format!(
         "SELECT m.id, m.channel_id, m.author_id, \
          u.display_name AS author_name, m.body, m.parent_message_id, m.created_at, \
          m.edited_at, m.deleted_at, \
          {zero} AS reply_count, {null_ts} AS last_reply_at \
-         FROM chat_messages m LEFT JOIN public.users u ON u.id = m.author_id",
-        zero = Postgres.cast("0", "bigint"),
-        null_ts = Postgres.cast("NULL", "timestamptz"),
+         FROM chat_messages m LEFT JOIN users u ON u.id = m.author_id",
+        zero = type_mapping(engine).cast("0", "bigint"),
+        null_ts = type_mapping(engine).cast("NULL", "timestamptz"),
     )
 }
 
@@ -100,7 +100,7 @@ const SELECT_MESSAGE_WITH_REPLIES: &str = "SELECT m.id, m.channel_id, m.author_i
      (SELECT count(*) FROM chat_messages r WHERE r.parent_message_id = m.id) AS reply_count, \
      (SELECT max(r.created_at) FROM chat_messages r WHERE r.parent_message_id = m.id) \
        AS last_reply_at \
-     FROM chat_messages m LEFT JOIN public.users u ON u.id = m.author_id";
+     FROM chat_messages m LEFT JOIN users u ON u.id = m.author_id";
 
 #[async_trait]
 pub trait MessageRepository: Send + Sync {
@@ -177,7 +177,7 @@ impl MessageRepository for DbMessageRepository {
                       WHERE message_id = ANY($1)
                       GROUP BY message_id, emoji
                       ORDER BY message_id, emoji",
-                    cnt = Postgres.cast("count(*)", "bigint")
+                    cnt = type_mapping(self.db.engine()).cast("count(*)", "bigint")
                 ),
                 params![messages.to_vec(), viewer],
             )
@@ -222,12 +222,12 @@ impl MessageRepository for DbMessageRepository {
                         (id, channel_id, author_id, tenant_id, body, parent_message_id)
                      VALUES ($1, $2, $3, $4, $5, $6)
                      RETURNING id, channel_id, author_id,
-                         (SELECT display_name FROM public.users WHERE id = author_id)
+                         (SELECT display_name FROM users WHERE id = author_id)
                            AS author_name,
                          body, parent_message_id, created_at, edited_at, deleted_at,
                          {zero} AS reply_count, {null_ts} AS last_reply_at",
-                    zero = Postgres.cast("0", "bigint"),
-                    null_ts = Postgres.cast("NULL", "timestamptz"),
+                    zero = type_mapping(self.db.engine()).cast("0", "bigint"),
+                    null_ts = type_mapping(self.db.engine()).cast("NULL", "timestamptz"),
                 ),
                 params![
                     Uuid::now_v7(),
@@ -259,7 +259,7 @@ impl MessageRepository for DbMessageRepository {
                     "{SELECT_MESSAGE_WITH_REPLIES} WHERE m.channel_id = $1 \
                      AND m.parent_message_id IS NULL \
                      AND ({cursor} IS NULL OR m.id < $2) ORDER BY m.id DESC LIMIT $3",
-                    cursor = Postgres.cast("$2", "uuid")
+                    cursor = type_mapping(self.db.engine()).cast("$2", "uuid")
                 ),
                 params![channel, page.before, page.limit],
             )
@@ -273,8 +273,8 @@ impl MessageRepository for DbMessageRepository {
                 &format!(
                     "{sel} WHERE m.parent_message_id = $1 AND ({cursor} IS NULL OR m.id < $2)
                      ORDER BY m.id DESC LIMIT $3",
-                    sel = select_message(),
-                    cursor = Postgres.cast("$2", "uuid")
+                    sel = select_message(self.db.engine()),
+                    cursor = type_mapping(self.db.engine()).cast("$2", "uuid")
                 ),
                 params![parent, page.before, page.limit],
             )

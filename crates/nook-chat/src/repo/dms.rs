@@ -14,7 +14,8 @@ use async_trait::async_trait;
 
 use super::RepoResult;
 use chrono::{DateTime, Utc};
-use nook_db::{params, Db, DbPool, Postgres, TypeMapping};
+use nook_db::dialect::type_mapping;
+use nook_db::{params, Db, DbPool};
 use uuid::Uuid;
 
 /// A person the caller may start a DM with.
@@ -34,7 +35,7 @@ pub struct Participant {
 
 #[async_trait]
 pub trait DmRepository: Send + Sync {
-    /// The person behind a user. Reads `public.users` — nook-control's data,
+    /// The person behind a user. Reads `users` — nook-control's data,
     /// unreachable from this crate (see the module note on `repo/mod.rs`).
     async fn person_of(&self, user: Uuid) -> RepoResult<Option<Uuid>>;
 
@@ -97,10 +98,7 @@ impl DmRepository for DbDmRepository {
         // non-null decode would turn that documented null into a 500.
         let row: Option<(Option<Uuid>,)> = self
             .db
-            .query_opt(
-                "SELECT person_id FROM public.users WHERE id = $1",
-                params![user],
-            )
+            .query_opt("SELECT person_id FROM users WHERE id = $1", params![user])
             .await?;
         Ok(row.and_then(|(p,)| p))
     }
@@ -109,12 +107,12 @@ impl DmRepository for DbDmRepository {
         self.db
             .query_scalar::<bool>(
                 "SELECT EXISTS(
-                     SELECT 1 FROM public.users u
-                     JOIN public.tenants t ON t.id = u.tenant_id
+                     SELECT 1 FROM users u
+                     JOIN tenants t ON t.id = u.tenant_id
                      WHERE u.person_id = $2
                        AND t.org_id IN (
-                           SELECT t2.org_id FROM public.users u2
-                           JOIN public.tenants t2 ON t2.id = u2.tenant_id
+                           SELECT t2.org_id FROM users u2
+                           JOIN tenants t2 ON t2.id = u2.tenant_id
                            WHERE u2.person_id = $1
                        )
                  )",
@@ -129,12 +127,12 @@ impl DmRepository for DbDmRepository {
             .db
             .query_all(
                 "SELECT DISTINCT ON (u.person_id) u.person_id, u.display_name
-                   FROM public.users u
-                   JOIN public.tenants t ON t.id = u.tenant_id
+                   FROM users u
+                   JOIN tenants t ON t.id = u.tenant_id
                   WHERE u.person_id <> $1
                     AND t.org_id IN (
-                        SELECT t2.org_id FROM public.users u2
-                        JOIN public.tenants t2 ON t2.id = u2.tenant_id
+                        SELECT t2.org_id FROM users u2
+                        JOIN tenants t2 ON t2.id = u2.tenant_id
                         WHERE u2.person_id = $1
                     )
                   ORDER BY u.person_id, u.display_name",
@@ -225,7 +223,7 @@ impl DmRepository for DbDmRepository {
             .query_all(
                 "SELECT DISTINCT ON (pp.person_id) pp.person_id, u.display_name
                    FROM chat_channel_participants pp
-                   LEFT JOIN public.users u ON u.person_id = pp.person_id
+                   LEFT JOIN users u ON u.person_id = pp.person_id
                   WHERE pp.channel_id = $1
                   ORDER BY pp.person_id, u.display_name",
                 params![channel],
@@ -252,7 +250,7 @@ impl DmRepository for DbDmRepository {
                             (SELECT r.last_read_at FROM chat_read_cursors r
                                WHERE r.channel_id = $1 AND r.user_id = $2),
                             {ninf})",
-                    ninf = Postgres.cast("'-infinity'", "timestamptz")
+                    ninf = type_mapping(self.db.engine()).cast("'-infinity'", "timestamptz")
                 ),
                 params![channel, reader],
             )
