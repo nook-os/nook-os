@@ -84,10 +84,18 @@ async fn only_one_claimant_can_win() {
     let id = f.task("contended", f.todo, "task", "team", None, &[]).await;
     let (a, b) = (UserId::new(), UserId::new());
 
-    let first = f.repo.claim_task(id, f.tenant, a, None).await.unwrap();
+    let first = f
+        .repo
+        .claim_task(id, f.tenant, a, None, None)
+        .await
+        .unwrap();
     assert!(first.is_some(), "the first claim takes it");
 
-    let second = f.repo.claim_task(id, f.tenant, b, None).await.unwrap();
+    let second = f
+        .repo
+        .claim_task(id, f.tenant, b, None, None)
+        .await
+        .unwrap();
     assert!(
         second.is_none(),
         "the second matches no row — a 409, not a steal"
@@ -103,7 +111,7 @@ async fn only_one_claimant_can_win() {
     f.repo.release_assignment(id, f.tenant).await.unwrap();
     assert!(f
         .repo
-        .claim_task(id, f.tenant, b, None)
+        .claim_task(id, f.tenant, b, None, None)
         .await
         .unwrap()
         .is_some());
@@ -117,7 +125,7 @@ async fn claiming_moves_the_task_only_when_asked() {
     let id = f.task("t", f.todo, "task", "team", None, &[]).await;
 
     f.repo
-        .claim_task(id, f.tenant, UserId::new(), None)
+        .claim_task(id, f.tenant, UserId::new(), None, None)
         .await
         .unwrap();
     assert_eq!(
@@ -139,7 +147,7 @@ async fn claiming_moves_the_task_only_when_asked() {
         .unwrap()
         .unwrap();
     f.repo
-        .claim_task(id, f.tenant, UserId::new(), Some(started))
+        .claim_task(id, f.tenant, UserId::new(), Some(started), None)
         .await
         .unwrap();
     assert_eq!(

@@ -2220,6 +2220,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/tasks/{id}/claim/renew": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["task_renew_claim"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/tasks/{id}/comments": {
         parameters: {
             query?: never;
@@ -5536,6 +5552,14 @@ export interface components {
             board_id: components["schemas"]["BoardId"];
             branch?: string | null;
             checkout_id?: null | components["schemas"]["NodeWorkspaceId"];
+            /**
+             * Format: date-time
+             * @description When this card's **agent** claim lapses (MAIN-229). Set only by the agent
+             *     claim / start-work path; `None` for a card a human put in progress by
+             *     hand, and that `None` is the fence the claim reaper is confined to — an
+             *     unleased card is never examined, moved or labelled by it.
+             */
+            claim_expires_at?: string | null;
             column_id: components["schemas"]["ColumnId"];
             /** Format: date-time */
             created_at: string;
@@ -10251,6 +10275,41 @@ export interface operations {
                 };
             };
             /** @description already claimed */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    task_renew_claim: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskItem"];
+                };
+            };
+            /** @description not the claim holder */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description no claim lease to renew */
             409: {
                 headers: {
                     [name: string]: unknown;

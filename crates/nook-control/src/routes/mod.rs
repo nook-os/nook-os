@@ -354,6 +354,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/tasks/{id}/submit-pr", post(taskwork::submit_pr))
         .route("/tasks/{id}/prune-worktree", post(taskwork::prune_worktree))
         .route("/tasks/{id}/move", post(taskwork::move_task))
+        .route("/tasks/{id}/claim/renew", post(taskwork::renew_claim))
         .route("/tasks/bulk", post(bulk::bulk_tasks))
         // Loop jobs (MAIN-127): detached spec/decompose work riding the queue.
         .route("/jobs", post(jobs::create))

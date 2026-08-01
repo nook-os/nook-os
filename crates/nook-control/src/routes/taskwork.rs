@@ -94,6 +94,24 @@ pub async fn prune_worktree(
     ))
 }
 
+#[utoipa::path(post, path = "/api/v1/tasks/{id}/claim/renew",
+    operation_id = "task_renew_claim",
+    params(("id" = String, Path,)),
+    responses((status = 200, body = TaskItem),
+              (status = 403, description = "not the claim holder"),
+              (status = 409, description = "no claim lease to renew")))]
+pub async fn renew_claim(
+    State(state): State<AppState>,
+    auth: AuthCtx,
+    Path(ident): Path<String>,
+) -> ApiResult<Json<TaskItem>> {
+    let id =
+        crate::services::tasks::resolve_id(state.tasks.as_ref(), auth.tenant_id, &ident).await?;
+    Ok(Json(
+        taskwork::renew_claim(&state, auth.tenant_id, auth.user_id, auth.principal, id).await?,
+    ))
+}
+
 #[utoipa::path(post, path = "/api/v1/tasks/{id}/move",
     operation_id = "task_move",
     params(("id" = String, Path,)),

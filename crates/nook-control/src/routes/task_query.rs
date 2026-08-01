@@ -375,7 +375,16 @@ pub async fn claim_inner(
         None => None,
     };
 
-    let updated = state.tasks.claim_task(id, tenant, claimant, target).await?;
+    // A claim that takes the card into `started` is an agent taking work, and
+    // that is exactly what carries a lease (MAIN-229 AC-2). A claim that leaves
+    // the card where it is does not — nothing has started, so there is nothing
+    // to reclaim.
+    let lease =
+        (column_type.as_deref() == Some("started")).then_some(state.cfg.max_claim_secs as i64);
+    let updated = state
+        .tasks
+        .claim_task(id, tenant, claimant, target, lease)
+        .await?;
 
     let Some(task) = updated else {
         // Losing a race is the expected outcome for all but one caller, so the

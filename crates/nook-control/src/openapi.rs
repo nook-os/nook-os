@@ -152,6 +152,7 @@ use utoipa::OpenApi;
         crate::routes::taskwork::submit_pr,
         crate::routes::taskwork::prune_worktree,
         crate::routes::taskwork::move_task,
+        crate::routes::taskwork::renew_claim,
         crate::routes::jobs::create,
         crate::routes::jobs::get,
         crate::routes::jobs::list_for_task,

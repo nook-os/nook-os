@@ -108,6 +108,9 @@ pub trait TimeMath {
     /// variable amount stays parameterized. Postgres:
     /// `now() - ({count} * interval '{unit}')`.
     fn now_minus_scaled(&self, count: &str, unit: &str) -> String;
+    /// The same, forwards — a lease expiry written from a configured TTL
+    /// (MAIN-229). Postgres: `now() + ({count} * interval '{unit}')`.
+    fn now_plus_scaled(&self, count: &str, unit: &str) -> String;
 }
 
 // ── ci-match (case-insensitive matching) ─────────────────────────────────────
@@ -209,6 +212,9 @@ impl TimeMath for Postgres {
     fn now_minus_scaled(&self, count: &str, unit: &str) -> String {
         format!("now() - ({count} * interval '{unit}')")
     }
+    fn now_plus_scaled(&self, count: &str, unit: &str) -> String {
+        format!("now() + ({count} * interval '{unit}')")
+    }
 }
 
 impl CiMatch for Postgres {
@@ -266,6 +272,9 @@ impl TimeMath for Sqlite {
         // `-N unit` has to be built at runtime because the count is a bind or
         // an expression: `printf` composes the modifier string in-database.
         format!("datetime('now', printf('-%s {unit}', {count}))")
+    }
+    fn now_plus_scaled(&self, count: &str, unit: &str) -> String {
+        format!("datetime('now', printf('+%s {unit}', {count}))")
     }
 }
 
@@ -394,6 +403,11 @@ mod tests {
         assert_eq!(
             pg.now_minus_scaled("$1::bigint", "1 second"),
             "now() - ($1::bigint * interval '1 second')"
+        );
+        // And forwards, for a claim lease written from a configured TTL.
+        assert_eq!(
+            pg.now_plus_scaled("$1::bigint", "1 second"),
+            "now() + ($1::bigint * interval '1 second')"
         );
     }
 
