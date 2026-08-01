@@ -588,7 +588,8 @@ mod tests {
 #[cfg(test)]
 mod db_tests {
     use super::{query_rows, TaskFilter};
-    use nook_db::{params, Db, DbPool, Postgres, TypeMapping};
+    use nook_db::dialect::type_mapping;
+    use nook_db::{params, Db, DbPool};
     use nook_types::{TaskId, TenantId};
     use sqlx::postgres::PgPoolOptions;
     use uuid::Uuid;
@@ -614,7 +615,7 @@ mod db_tests {
             &format!(
                 "INSERT INTO tasks (id, tenant_id, board_id, column_id, title, archived_at)
              VALUES ($1, $2, $3, $4, 't', CASE WHEN $5 THEN {} ELSE NULL END)",
-                Postgres.now()
+                type_mapping(db.engine()).now()
             ),
             params![id, tenant, board, col, archived],
         )

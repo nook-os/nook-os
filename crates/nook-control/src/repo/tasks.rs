@@ -27,8 +27,8 @@
 //! moved SQL unchanged; replacing them is the dialect sweep's job.
 
 use async_trait::async_trait;
-use nook_db::dialect::{time_math, type_mapping};
-use nook_db::{params, CiMatch, Db, DbPool, Postgres, TypeMapping};
+use nook_db::dialect::{atomic_claim, ci_match, time_math, type_mapping};
+use nook_db::{params, Db, DbPool};
 use nook_types::*;
 use std::collections::HashMap;
 use uuid::Uuid;
@@ -885,9 +885,15 @@ impl TaskRepository for DbTaskRepository {
         let mut tx = self.db.begin().await.map_err(nook_db::DbError::from)?;
         let number: i32 = tx
             .query_scalar(
-                "UPDATE boards SET next_number = next_number + 1
-             WHERE id = (SELECT id FROM boards WHERE id = $1 FOR UPDATE)
+                &format!(
+                    "UPDATE boards SET next_number = next_number + 1
+             WHERE id = (SELECT id FROM boards WHERE id = $1 {lock})
              RETURNING next_number - 1",
+                    // The WAITING lock, never the queue's skipping one: a second
+                    // creator must block and then read the incremented counter,
+                    // where `SKIP LOCKED` would match no row and fail the create.
+                    lock = atomic_claim(self.db.engine()).row_lock_clause()
+                ),
                 params![new.board],
             )
             .await?;
@@ -976,7 +982,7 @@ impl TaskRepository for DbTaskRepository {
                AND ({guard} IS NULL OR updated_at = $11)
              RETURNING *",
                     now = type_mapping(self.db.engine()).now(),
-                    guard = Postgres.cast("$11", "timestamptz")
+                    guard = type_mapping(self.db.engine()).cast("$11", "timestamptz")
                 ),
                 params![
                     id,
@@ -1476,29 +1482,32 @@ impl TaskRepository for DbTaskRepository {
         ORDER BY CASE WHEN t.priority = 0 THEN 5 ELSE t.priority END, t.created_at
         LIMIT $12
         "#,
-                    ws = Postgres.cast("$3", "uuid"),
-                    assignee = Postgres.cast("$7", "uuid"),
-                    created = Postgres.cast("$11", "timestamptz"),
-                    parent = Postgres.cast("$17", "uuid"),
-                    b_text = Postgres.cast("$2", "text"),
-                    bid_text = Postgres.cast("b.id", "text"),
-                    col_text = Postgres.cast("$4", "text"),
-                    prio_int = Postgres.cast("$5", "int"),
-                    unassigned_bool = Postgres.cast("$6", "bool"),
-                    blocked_bool = Postgres.cast("$10", "bool"),
-                    archived_bool = Postgres.cast("$13", "bool"),
-                    q_text = Postgres.cast("$14", "text"),
-                    title_match = Postgres.ci_match("t.title", "$14"),
-                    desc_match = Postgres.ci_match("t.description", "$14"),
-                    key_match = Postgres.ci_match(
-                        &format!("(b.key || '-' || {})", Postgres.cast("t.number", "text")),
+                    ws = type_mapping(self.db.engine()).cast("$3", "uuid"),
+                    assignee = type_mapping(self.db.engine()).cast("$7", "uuid"),
+                    created = type_mapping(self.db.engine()).cast("$11", "timestamptz"),
+                    parent = type_mapping(self.db.engine()).cast("$17", "uuid"),
+                    b_text = type_mapping(self.db.engine()).cast("$2", "text"),
+                    bid_text = type_mapping(self.db.engine()).cast("b.id", "text"),
+                    col_text = type_mapping(self.db.engine()).cast("$4", "text"),
+                    prio_int = type_mapping(self.db.engine()).cast("$5", "int"),
+                    unassigned_bool = type_mapping(self.db.engine()).cast("$6", "bool"),
+                    blocked_bool = type_mapping(self.db.engine()).cast("$10", "bool"),
+                    archived_bool = type_mapping(self.db.engine()).cast("$13", "bool"),
+                    q_text = type_mapping(self.db.engine()).cast("$14", "text"),
+                    title_match = ci_match(self.db.engine()).ci_match("t.title", "$14"),
+                    desc_match = ci_match(self.db.engine()).ci_match("t.description", "$14"),
+                    key_match = ci_match(self.db.engine()).ci_match(
+                        &format!(
+                            "(b.key || '-' || {})",
+                            type_mapping(self.db.engine()).cast("t.number", "text")
+                        ),
                         "$14"
                     ),
-                    backlog_bool = Postgres.cast("$18", "bool"),
-                    labels_arr = Postgres.cast("$8", "text[]"),
-                    not_labels_arr = Postgres.cast("$9", "text[]"),
-                    types_arr = Postgres.cast("$15", "text[]"),
-                    vis_arr = Postgres.cast("$19", "text[]"),
+                    backlog_bool = type_mapping(self.db.engine()).cast("$18", "bool"),
+                    labels_arr = type_mapping(self.db.engine()).cast("$8", "text[]"),
+                    not_labels_arr = type_mapping(self.db.engine()).cast("$9", "text[]"),
+                    types_arr = type_mapping(self.db.engine()).cast("$15", "text[]"),
+                    vis_arr = type_mapping(self.db.engine()).cast("$19", "text[]"),
                     visible = crate::services::tasks::visible_sql("t", "$16"),
                 ),
                 params![
@@ -2056,7 +2065,7 @@ impl TaskRepository for DbTaskRepository {
              WHERE t.parent_task_id = $1
                AND {visible}
              ORDER BY CASE WHEN t.priority = 0 THEN 5 ELSE t.priority END, t.created_at",
-                    number = Postgres.cast("t.number", "text"),
+                    number = type_mapping(self.db.engine()).cast("t.number", "text"),
                     visible = crate::services::tasks::visible_sql("t", "$2"),
                 ),
                 params![parent, viewer],
