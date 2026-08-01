@@ -1300,7 +1300,24 @@ impl IdentityRepository for DbIdentityRepository {
                 "SELECT t.id, t.name, t.slug, m.role, t.created_at
              FROM tenant_members m
              JOIN tenants t ON t.id = m.tenant_id
-             WHERE m.principal_type = 'user' AND m.principal_id = $1
+             WHERE m.principal_type = 'user'
+               -- By PERSON, not by the one user row we happen to be acting as.
+               --
+               -- A grant is recorded against whichever `users` row existed when
+               -- it was made, and there is one of those per tenant. So joining a
+               -- second team wrote a grant against the NEW row, and asking from
+               -- the old one found only the old grant: the team switcher could
+               -- see exactly the teams reachable from wherever you already were,
+               -- which is the one thing it exists not to require. Switching
+               -- became a trip through the Team page.
+               --
+               -- Same rule as `has_permission` and `nodes.owner_person_id`: what
+               -- a human has belongs to the human, not to one of their seats
+               -- (MAIN-119, MAIN-353).
+               AND m.principal_id IN (
+                     SELECT u.id FROM users u
+                      WHERE u.person_id = (SELECT person_id FROM users WHERE id = $1)
+                   )
              ORDER BY t.created_at",
                 params![user_id],
             )

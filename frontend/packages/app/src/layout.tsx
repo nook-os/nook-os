@@ -307,6 +307,10 @@ export function Shell({ me }: { me: MeResponse }) {
           <Plus size={14} style={{ verticalAlign: "-2px" }} /> New Workspace
         </button>
         <ControlPlanePill />
+        {/* Team first, then workspace: a workspace belongs to a team, so the
+            wider scope reads to the left of the narrower one — and the control
+            people reach for most often is nearest the brand. */}
+        <TenantSwitcher me={me} />
         <WorkspaceSwitcher />
         <nav className="nook-tabs">
           <ContextTabs />
@@ -416,8 +420,6 @@ export function Shell({ me }: { me: MeResponse }) {
         </span>
         <span className="sep">│</span>
         <span>{activeSessions.length} active sessions</span>
-        <span className="sep">│</span>
-        <TenantSwitcher me={me} />
         <span style={{ flex: 1 }} />
         {/* The control plane's real version, not a literal. This read
             "NookOS 0.1.0" from a hardcoded string for every release since

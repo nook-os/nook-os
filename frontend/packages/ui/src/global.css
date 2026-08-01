@@ -656,34 +656,53 @@ code,
 
 /* Tenant switcher in the status strip. Sits at the bottom of the window, so its
    menu opens UPWARD. Reuses the amber-CRT menu look of the workspace switcher. */
-.tenant-switcher { position: relative; display: inline-flex; }
-.tenant-switcher-btn {
+/* The team switcher, in the TOP BAR (was a bare label in the bottom status
+   strip). Sized and bordered like `.ws-switcher-btn` beside it, because the two
+   are the same kind of control — the scope you are working in — and reading as
+   one pair is what makes the pairing legible. The dropdown opens DOWNWARD from
+   here, where the old one opened up out of the strip. */
+.team-switcher { position: relative; display: inline-flex; align-items: center; }
+.team-switcher-btn {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
-  background: transparent;
-  border: none;
-  padding: 0;
-  color: var(--nook-fg-dim);
-  cursor: pointer;
-  font: inherit;
-}
-.tenant-switcher-btn:hover:not(:disabled) { color: var(--nook-fg-bright); }
-.tenant-switcher-btn:disabled { cursor: default; opacity: 0.6; }
-.tenant-switcher-menu {
-  position: absolute;
-  bottom: calc(100% + 6px);
-  left: 0;
-  min-width: 200px;
+  gap: 7px;
+  height: 28px;
+  padding: 0 12px;
+  line-height: 1;
   background: var(--nook-bg-raised);
   border: 1px solid var(--nook-border-bright);
   border-radius: var(--nook-radius);
-  box-shadow: 0 -8px 24px rgba(0, 0, 0, 0.5);
+  color: var(--nook-fg);
+  cursor: pointer;
+  max-width: 200px;
+  font-family: var(--nook-font-mono);
+  font-size: 12px;
+}
+.team-switcher-btn:hover:not(:disabled):not(.static) { border-color: var(--nook-accent); }
+.team-switcher-btn:disabled { cursor: default; opacity: 0.6; }
+/* One team: same footprint, no affordance — it is a label, and offering a menu
+   onto a list of one would be a lie about what clicking does. */
+.team-switcher-btn.static { cursor: default; color: var(--nook-fg-dim); }
+.team-switcher-btn .name {
+  color: var(--nook-fg-bright);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.team-switcher-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  min-width: 220px;
+  background: var(--nook-bg-raised);
+  border: 1px solid var(--nook-border-bright);
+  border-radius: var(--nook-radius);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
   z-index: 100;
   overflow: hidden;
   padding: 4px;
 }
-.tenant-switcher-item {
+.team-switcher-item {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -697,11 +716,12 @@ code,
   text-align: left;
   font: inherit;
 }
-.tenant-switcher-item:hover { background: var(--nook-bg-panel); color: var(--nook-fg-bright); }
-.tenant-switcher-item.current { color: var(--nook-accent); }
-.tenant-switcher-item .check { width: 12px; display: inline-flex; flex: none; }
-.tenant-switcher-item .name { flex: 1; }
-.tenant-switcher-item .role { margin-left: auto; text-transform: capitalize; }
+.team-switcher-item:hover { background: var(--nook-bg-panel); color: var(--nook-fg-bright); }
+.team-switcher-item.current { color: var(--nook-accent); }
+.team-switcher-item .check { width: 12px; display: inline-flex; flex: none; }
+.team-switcher-item .name { flex: 1; }
+.team-switcher-item .role { margin-left: auto; text-transform: capitalize; }
+.team-switcher-hint { padding: 4px 8px 2px; border-top: 1px solid var(--nook-border); margin-top: 4px; }
 
 /* Scope chip shown on pages filtered by the workspace context */
 .scope-chip {
