@@ -18,8 +18,11 @@
 # Measured on two full runs of `cargo test --workspace --no-fail-fast` under
 # sqlite://, which produced identical failure sets — nothing here is flaky.
 #
-# 93 test binaries: 50 COVERED, 42 pending below, 1 deliberately Postgres-only —
+# 103 test binaries: 61 COVERED, 41 pending below, 1 deliberately Postgres-only —
 # the numbers check-sqlite-ci.sh itself reports, not arithmetic on this file.
+# (93/50/42 before MAIN-355. The suite gained binaries and MAIN-288's
+# conversions landed; MAIN-355 itself added no line and removed none — it made
+# `claim_lease` pass rather than excusing it.)
 # (44/45 of 90 when this list was written; the suite has gained binaries since,
 # and MAIN-293 then MAIN-294 deleted three lines between them.)
 # (AC-1's "~55 of 101" was an earlier estimate of mine that counted the 11

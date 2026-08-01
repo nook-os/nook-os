@@ -312,12 +312,49 @@ impl TimeMath for Sqlite {
         format!("datetime('now', '-{spec}')")
     }
     fn now_minus_scaled(&self, count: &str, unit: &str) -> String {
-        // `-N unit` has to be built at runtime because the count is a bind or
-        // an expression: `printf` composes the modifier string in-database.
-        format!("datetime('now', printf('-%s {unit}', {count}))")
+        // The modifier has to be built at runtime because the count is a bind
+        // or an expression: `printf` composes the string in-database.
+        //
+        // The sign is NEGATED, not prepended. SQLite's `NNN units` modifier
+        // takes a signed number, and a caller may legitimately pass a negative
+        // count — `claim_lease` leases `-60` to mean "expired a minute ago".
+        // Prepending gave `'+-60 seconds'`, which is not a modifier, and an
+        // unrecognised modifier makes `datetime()` return NULL SILENTLY rather
+        // than error (MAIN-355).
+        format!(
+            "datetime('now', printf('%s {}', -({count})))",
+            sqlite_modifier_unit(unit)
+        )
     }
     fn now_plus_scaled(&self, count: &str, unit: &str) -> String {
-        format!("datetime('now', printf('+%s {unit}', {count}))")
+        format!(
+            "datetime('now', printf('%s {}', {count}))",
+            sqlite_modifier_unit(unit)
+        )
+    }
+}
+
+/// The unit half of a SQLite date modifier, from the Postgres interval literal
+/// the seam's callers write (MAIN-355).
+///
+/// `unit` is a Postgres interval literal — `"1 second"` — because the Postgres
+/// arm MULTIPLIES by it: `count * interval '1 second'`. SQLite has no interval
+/// type and no multiplication; it takes a modifier STRING, `'+5 seconds'`.
+/// Pasting the literal through produced `'+5 1 second'`, which is not a
+/// modifier at all — `datetime()` returns NULL for it, silently, so a lease
+/// expiry simply never got written and a cutoff comparison never matched.
+///
+/// The count is already the multiple, so a leading `1` is dropped and the unit
+/// is pluralised (SQLite accepts both, but the plural is the documented form).
+/// Anything else is left alone rather than guessed at: a caller writing
+/// `"7 days"` means seven days PER count, which this shape cannot express, and
+/// producing a wrong-but-plausible modifier would be worse than an obvious one.
+fn sqlite_modifier_unit(unit: &str) -> String {
+    let bare = unit.strip_prefix("1 ").unwrap_or(unit);
+    if bare.ends_with('s') {
+        bare.to_string()
+    } else {
+        format!("{bare}s")
     }
 }
 
@@ -703,5 +740,34 @@ mod sqlite_dialect_tests {
         assert_eq!(m.now_plus("10 years"), "datetime('now', '+10 years')");
         assert_eq!(m.now_minus("7 days"), "datetime('now', '-7 days')");
         assert!(m.now_minus_scaled("$1", "second").contains("printf"));
+    }
+
+    #[test]
+    fn the_scaled_modifier_is_a_modifier_sqlite_accepts() {
+        // The whole binary this seam serves was red on SQLite for this
+        // (MAIN-355). Callers pass the POSTGRES interval literal `"1 second"`,
+        // because the Postgres arm multiplies by it; pasting that through gave
+        // `'+5 1 second'`, which SQLite does not recognise as a modifier at
+        // all. `datetime()` then returns NULL rather than erroring, so the
+        // failure was a lease that never got written — not a query that blew
+        // up. Asserting `contains("printf")` was what let it ship, so this
+        // asserts the string.
+        let m = time_math(Engine::Sqlite);
+        assert_eq!(
+            m.now_plus_scaled("$1", "1 second"),
+            "datetime('now', printf('%s seconds', $1))"
+        );
+        // NEGATED, not prefixed with `-`. A caller may pass a negative count
+        // (`claim_lease` leases `-60` for "expired a minute ago"), and `'+-60
+        // seconds'` is not a modifier — it silently yields NULL.
+        assert_eq!(
+            m.now_minus_scaled("$1", "1 second"),
+            "datetime('now', printf('%s seconds', -($1)))"
+        );
+        // Already plural, and already bare: both left exactly as written.
+        assert_eq!(
+            m.now_plus_scaled("$1", "hours"),
+            "datetime('now', printf('%s hours', $1))"
+        );
     }
 }

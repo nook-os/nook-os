@@ -13,6 +13,7 @@
 
 use nook_control::services::claim_reaper;
 use nook_control::state::AppState;
+use nook_db::dialect::{time_math, type_mapping};
 use nook_db::{params, Db, DbPool};
 use nook_testkit::TestBed;
 use nook_types::*;
@@ -75,8 +76,12 @@ async fn task_in(
 async fn node_seen(db: &DbPool, tenant: TenantId, secs_ago: i64) -> NodeId {
     let id = NodeId::new();
     db.exec(
-        "INSERT INTO nodes (id, tenant_id, name, node_token_hash, status, last_seen_at)
-         VALUES ($1,$2,$3,$4,'online', now() - ($5::bigint * interval '1 second'))",
+        &format!(
+            "INSERT INTO nodes (id, tenant_id, name, node_token_hash, status, last_seen_at)
+             VALUES ($1,$2,$3,$4,'online', {ago})",
+            ago = time_math(db.engine())
+                .now_minus_scaled(&type_mapping(db.engine()).cast("$5", "bigint"), "1 second")
+        ),
         params![
             id,
             tenant,
@@ -113,10 +118,14 @@ async fn leased(
     lease_in_secs: i64,
 ) {
     db.exec(
-        "UPDATE tasks SET column_id = $2, assigned_node_id = $3, session_id = $4,
-                assignee_user_id = $5,
-                claim_expires_at = now() + ($6::bigint * interval '1 second')
-         WHERE id = $1",
+        &format!(
+            "UPDATE tasks SET column_id = $2, assigned_node_id = $3, session_id = $4,
+                    assignee_user_id = $5,
+                    claim_expires_at = {expiry}
+             WHERE id = $1",
+            expiry = time_math(db.engine())
+                .now_plus_scaled(&type_mapping(db.engine()).cast("$6", "bigint"), "1 second")
+        ),
         params![task, in_progress, node, sess, assignee, lease_in_secs],
     )
     .await
