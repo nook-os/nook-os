@@ -35,6 +35,27 @@ pub async fn put(
             "scope must be 'tenant' or 'user'".into(),
         ));
     }
+    // A TENANT-scoped setting is everybody's, so writing one is administering
+    // the tenant — `loops.enabled` and `sessions.reconcile.enabled` decide
+    // whether the fleet runs agents and converges sessions for the whole team.
+    // This was ungated: any signed-in member could turn either on.
+    //
+    // Safe to require only now that a tenant owner/admin actually HOLDS
+    // `tenant.manage` — `has_permission` derives the `tenant_admin` binding
+    // from `users.role` rather than relying on 0001's one-time backfill, which
+    // nothing had maintained. Gating this before that fix would have locked out
+    // every owner of a tenant created since.
+    //
+    // A USER-scoped setting is your own preference and stays ungated.
+    if scope == "tenant" {
+        auth.require(
+            &state,
+            crate::auth::perm::Permission::TenantManage,
+            crate::auth::perm::Scope::Tenant(auth.tenant_id),
+        )
+        .await?;
+    }
+
     let user_id = (scope == "user").then_some(auth.user_id);
     let setting = state
         .settings

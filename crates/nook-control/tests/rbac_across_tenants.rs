@@ -34,6 +34,11 @@ fn ctx(user: UserId, tenant: TenantId) -> AuthCtx {
 
 /// A second user row for an EXISTING person — how one human holds membership of
 /// two orgs, and the exact shape that broke.
+///
+/// Every caller below passes `member` deliberately. An `owner`/`admin` seat now
+/// holds its own tenant's permissions implicitly, so an admin seat would satisfy
+/// these assertions without the BINDING under test being consulted at all —
+/// passing for the wrong reason, which is worse than failing.
 async fn member(bed: &TestBed, tenant: TenantId, person: Uuid, role: &str) -> UserId {
     let user = UserId::new();
     bed.db()
@@ -74,7 +79,7 @@ async fn a_deployment_grant_travels_to_every_tenant_its_holder_joins() {
     let mine = bed.tenant("mine").await;
     let theirs = bed.tenant("theirs").await;
     let (me_here, person) = bed.user(mine, "owner").await;
-    let me_there = member(&bed, theirs, person, "admin").await;
+    let me_there = member(&bed, theirs, person, "member").await;
     let state = bed.app_state().await;
 
     // Granted against the user row I had at the time — which is all a grant can
@@ -105,7 +110,7 @@ async fn a_tenant_grant_still_covers_only_its_own_tenant() {
     let mine = bed.tenant("mine").await;
     let theirs = bed.tenant("theirs").await;
     let (me_here, person) = bed.user(mine, "owner").await;
-    let me_there = member(&bed, theirs, person, "admin").await;
+    let me_there = member(&bed, theirs, person, "member").await;
     let state = bed.app_state().await;
 
     bind(&bed, me_here, "tenant_admin", "tenant", Some(mine.0)).await;

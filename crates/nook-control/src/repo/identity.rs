@@ -1029,10 +1029,27 @@ impl IdentityRepository for DbIdentityRepository {
         let hit: Option<(bool,)> = self
             .db
             .query_opt(
-                "SELECT true
+                "(SELECT true
              FROM role_bindings b
              JOIN role_permissions rp ON rp.role_key = b.role_key
              WHERE b.subject_type = 'user'
+               -- Two ways to hold a permission, and the second is not a
+               -- shortcut — it is the maintenance the first never had.
+               --
+               -- `0001` backfilled `users.role IN ('owner','admin')` into a
+               -- `tenant_admin` binding, ONCE, at migration time. Nothing has
+               -- maintained it since: every tenant created afterwards, and every
+               -- member promoted afterwards, has the role and no binding. So a
+               -- tenant OWNER held no permissions at all in their own tenant,
+               -- and the two mechanisms silently stopped meeting.
+               --
+               -- Deriving it on read rather than writing rows at each of the
+               -- eight-plus places a role is set is what stops it drifting
+               -- again: a ninth insert site cannot forget something nothing
+               -- writes. The permission SET still comes from `role_permissions`
+               -- under the `tenant_admin` key, so what the role grants stays
+               -- listable and auditable as data; only the BINDING is implied.
+               --
                -- Matched by PERSON, not by the one user row the grant named.
                --
                -- `users` is unique per (tenant, email), so a human in two orgs
@@ -1068,7 +1085,22 @@ impl IdentityRepository for DbIdentityRepository {
                      -- The exact tenant.
                   OR (b.scope_type = 'tenant' AND b.scope_id = $4)
                )
-             LIMIT 1",
+             LIMIT 1)
+             UNION ALL
+             (SELECT true
+                FROM users me
+                JOIN users seat ON seat.person_id = me.person_id
+                JOIN role_permissions rp ON rp.role_key = 'tenant_admin'
+               WHERE me.id = $1
+                 -- The seat must be in the TARGET tenant, so this can never
+                 -- reach past the tenant somebody actually administers. NULL
+                 -- `$4` — a deployment- or org-scoped ask — matches nothing,
+                 -- which is right: running one tenant is not running the
+                 -- deployment.
+                 AND seat.tenant_id = $4
+                 AND seat.role IN ('owner', 'admin')
+                 AND rp.permission_key = $2
+               LIMIT 1)",
                 params![user_id.0, permission, org_id, tenant_id],
             )
             .await?;
