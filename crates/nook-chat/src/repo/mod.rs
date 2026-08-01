@@ -13,8 +13,8 @@
 //!   `owner_type = 'dm'` plus the person-directory reads that decide who may
 //!   open one.
 //!
-//! **Cross-crate reads have nowhere else to go.** Chat reads `public.users` and
-//! `public.tenants` — who a user is as a person, which org their tenant belongs
+//! **Cross-crate reads have nowhere else to go.** Chat reads `users` and
+//! `tenants` — who a user is as a person, which org their tenant belongs
 //! to, what role they hold. That is nook-control's identity data, and on every
 //! previous card in this chain such a read was handed to its owning aggregate's
 //! repository. Here it cannot be: `IdentityRepository` lives in another crate.

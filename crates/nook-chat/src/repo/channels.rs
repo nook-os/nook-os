@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use super::RepoResult;
 use chrono::{DateTime, Utc};
 use nook_db::dialect::type_mapping;
-use nook_db::{params, Db, DbPool, Postgres, TypeMapping};
+use nook_db::{params, Db, DbPool};
 use uuid::Uuid;
 
 /// A channel row as stored, plus the unread rollup the list query adds.
@@ -70,7 +70,7 @@ const CATEGORY_COLS: &str = "id, name, owner_type, position, created_at";
 /// touches categories they can see. `$N` is the tenant-id bind index.
 fn category_scope(bind: &str) -> String {
     format!(
-        "((owner_type = 'tenant' AND owner_id = {bind})\n     OR (owner_type = 'org' AND owner_id = (SELECT org_id FROM public.tenants WHERE id = {bind})))"
+        "((owner_type = 'tenant' AND owner_id = {bind})\n     OR (owner_type = 'org' AND owner_id = (SELECT org_id FROM tenants WHERE id = {bind})))"
     )
 }
 
@@ -80,7 +80,7 @@ fn category_scope(bind: &str) -> String {
 /// caller bind. No cursor row → `-infinity`, so everything counts until the
 /// first read; the boundary is strict, so a message at the cursor instant is
 /// already read.
-fn unread_subquery(chan: &str, reader: &str) -> String {
+fn unread_subquery(engine: nook_db::Engine, chan: &str, reader: &str) -> String {
     format!(
         "(SELECT count(*) FROM chat_messages m
             WHERE m.channel_id = {chan}
@@ -90,7 +90,7 @@ fn unread_subquery(chan: &str, reader: &str) -> String {
                   (SELECT r.last_read_at FROM chat_read_cursors r
                      WHERE r.channel_id = {chan} AND r.user_id = {reader}),
                   {ninf}))",
-        ninf = Postgres.cast("'-infinity'", "timestamptz")
+        ninf = type_mapping(engine).cast("'-infinity'", "timestamptz")
     )
 }
 
@@ -110,7 +110,7 @@ pub trait ChannelRepository: Send + Sync {
     /// visibility rule: a person in two of an org's tenants sees the one
     /// channel (MAIN-112).
     ///
-    /// Reads `public.users`/`public.tenants` — nook-control's data, unreachable
+    /// Reads `users`/`tenants` — nook-control's data, unreachable
     /// from this crate's repositories. Named for the question, not the table.
     async fn person_in_org(&self, user: Uuid, org: Uuid) -> RepoResult<bool>;
 
@@ -224,10 +224,7 @@ impl ChannelRepository for DbChannelRepository {
 
     async fn org_of_tenant(&self, tenant: Uuid) -> RepoResult<Option<Uuid>> {
         self.db
-            .query_scalar_opt::<Uuid>(
-                "SELECT org_id FROM public.tenants WHERE id = $1",
-                params![tenant],
-            )
+            .query_scalar_opt::<Uuid>("SELECT org_id FROM tenants WHERE id = $1", params![tenant])
             .await
             .map_err(Into::into)
     }
@@ -236,10 +233,10 @@ impl ChannelRepository for DbChannelRepository {
         self.db
             .query_scalar::<bool>(
                 "SELECT EXISTS(
-                     SELECT 1 FROM public.users u
-                     JOIN public.tenants t ON t.id = u.tenant_id
+                     SELECT 1 FROM users u
+                     JOIN tenants t ON t.id = u.tenant_id
                      WHERE t.org_id = $2
-                       AND u.person_id = (SELECT person_id FROM public.users WHERE id = $1)
+                       AND u.person_id = (SELECT person_id FROM users WHERE id = $1)
                  )",
                 params![user, org],
             )
@@ -264,7 +261,7 @@ impl ChannelRepository for DbChannelRepository {
                 "SELECT EXISTS(
                      SELECT 1 FROM chat_channel_participants
                      WHERE channel_id = $1
-                       AND person_id = (SELECT person_id FROM public.users WHERE id = $2)
+                       AND person_id = (SELECT person_id FROM users WHERE id = $2)
                  )",
                 params![channel, user],
             )
@@ -300,11 +297,11 @@ impl ChannelRepository for DbChannelRepository {
                       WHERE (
                               (c.owner_type = 'tenant' AND c.owner_id = $1)
                            OR (c.owner_type = 'org' AND c.owner_id =
-                                 (SELECT org_id FROM public.tenants WHERE id = $1))
+                                 (SELECT org_id FROM tenants WHERE id = $1))
                             )
                         AND ($2 OR c.archived_at IS NULL)
                       ORDER BY c.created_at",
-                    unread = unread_subquery("c.id", "$3"),
+                    unread = unread_subquery(self.db.engine(), "c.id", "$3"),
                 ),
                 params![tenant, include_archived, reader],
             )
@@ -377,11 +374,13 @@ impl ChannelRepository for DbChannelRepository {
             .exec(
                 &format!(
                     "INSERT INTO chat_read_cursors (channel_id, user_id, last_read_at)
-                     VALUES ($1, $2, {})
+                     VALUES ($1, $2, {now})
                      ON CONFLICT (channel_id, user_id)
                      DO UPDATE SET last_read_at =
-                         GREATEST(chat_read_cursors.last_read_at, EXCLUDED.last_read_at)",
-                    type_mapping(self.db.engine()).now()
+                         {greatest}",
+                    greatest = type_mapping(self.db.engine())
+                        .greatest("chat_read_cursors.last_read_at", "EXCLUDED.last_read_at"),
+                    now = type_mapping(self.db.engine()).now()
                 ),
                 params![channel, user],
             )

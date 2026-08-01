@@ -321,7 +321,8 @@ mod tests {
     use axum::extract::{Path, Query, State};
     use axum::Json;
     use chrono::{DateTime, Utc};
-    use nook_db::{params, Db, DbPool, Postgres, TimeMath};
+    use nook_db::dialect::time_math;
+    use nook_db::{params, Db, DbPool};
     use nook_errors::ApiError;
     use nook_types::{
         ChatChannelPlacement, CreateChatCategory, CreateChatChannel, ReorderChatCategories,
@@ -1091,7 +1092,7 @@ mod tests {
         let future = state
             .db
             .query_scalar::<DateTime<Utc>>(
-                &format!("SELECT {}", Postgres.now_plus("1 hour")),
+                &format!("SELECT {}", time_math(state.db.engine()).now_plus("1 hour")),
                 params![],
             )
             .await

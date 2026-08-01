@@ -100,6 +100,12 @@ pub trait TypeMapping {
     /// The current-timestamp expression. Postgres: `now()`; SQLite:
     /// `CURRENT_TIMESTAMP`.
     fn now(&self) -> &'static str;
+    /// The larger of two scalar expressions (MAIN-352). Postgres spells it
+    /// `GREATEST`; SQLite's two-argument `MAX` is the same function under
+    /// another name. Both propagate a NULL operand differently from the other,
+    /// so this is for operands known non-NULL — the read-cursor advance, whose
+    /// column is `NOT NULL` on both tracks.
+    fn greatest(&self, a: &str, b: &str) -> String;
 }
 
 // ── time-math (interval arithmetic) ──────────────────────────────────────────
@@ -217,6 +223,9 @@ impl TypeMapping for Postgres {
     fn now(&self) -> &'static str {
         "now()"
     }
+    fn greatest(&self, a: &str, b: &str) -> String {
+        format!("GREATEST({a}, {b})")
+    }
 }
 
 impl TimeMath for Postgres {
@@ -284,6 +293,11 @@ impl TypeMapping for Sqlite {
     }
     fn now(&self) -> &'static str {
         "CURRENT_TIMESTAMP"
+    }
+    fn greatest(&self, a: &str, b: &str) -> String {
+        // SQLite's scalar `max(a, b)` — distinct from the aggregate `max(x)`,
+        // which is the same keyword with one argument.
+        format!("MAX({a}, {b})")
     }
 }
 
@@ -432,6 +446,15 @@ mod tests {
         assert_eq!(pg.jsonb_column(), "jsonb");
         assert_eq!(pg.cast("$1", "uuid"), "$1::uuid");
         assert_eq!(pg.now(), "now()");
+        assert_eq!(pg.greatest("a.x", "b.x"), "GREATEST(a.x, b.x)");
+    }
+
+    /// The two engines spell the same function differently, and SQLite's is the
+    /// scalar `MAX` — not the aggregate that shares its name.
+    #[test]
+    fn greatest_is_the_engines_own_two_argument_maximum() {
+        assert_eq!(Sqlite.greatest("a.x", "b.x"), "MAX(a.x, b.x)");
+        assert_ne!(Sqlite.greatest("a", "b"), Postgres.greatest("a", "b"));
     }
 
     #[test]
