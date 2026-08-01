@@ -566,7 +566,7 @@ async fn tenant_name(state: &AppState, id: TenantId) -> ApiResult<String> {
         .tenant_names(&[id])
         .await?
         .remove(&id.0)
-        .ok_or(crate::error::ApiError::NotFound.into())
+        .ok_or(crate::error::ApiError::NotFound)
 }
 
 /// The two switches, resolved for one tenant.

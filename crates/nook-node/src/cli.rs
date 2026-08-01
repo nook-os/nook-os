@@ -2299,7 +2299,13 @@ pub async fn operator_bindings(json: bool) -> Result<()> {
         println!("{}", serde_json::to_string_pretty(&rows)?);
         return Ok(());
     }
-    let rows = rows.as_array().cloned().unwrap_or_default();
+    // The endpoint returns a page (`{rows, next_cursor}`), not a bare array —
+    // reading the body as an array printed "No role bindings." unconditionally.
+    let rows = rows
+        .get("rows")
+        .and_then(|r| r.as_array())
+        .cloned()
+        .unwrap_or_default();
     if rows.is_empty() {
         println!("No role bindings.");
         return Ok(());
