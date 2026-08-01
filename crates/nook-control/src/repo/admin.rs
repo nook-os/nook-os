@@ -35,8 +35,8 @@
 //! column this trait writes, and it is named for that.
 
 use async_trait::async_trait;
-use nook_db::dialect::type_mapping;
-use nook_db::{params, CiMatch, Db, DbPool, Postgres, TypeMapping};
+use nook_db::dialect::{ci_match, type_mapping};
+use nook_db::{params, Db, DbPool};
 use nook_types::*;
 use uuid::Uuid;
 
@@ -192,7 +192,7 @@ impl OperatorRepository for DbOperatorRepository {
                 &format!(
                     "INSERT INTO orgs (id, name, slug) VALUES ($1, $2, $3)
          RETURNING id, name, slug, created_at, {} AS tenants",
-                    Postgres.cast("0", "bigint")
+                    type_mapping(self.db.engine()).cast("0", "bigint")
                 ),
                 params![Uuid::now_v7(), name, slug],
             )
@@ -245,7 +245,7 @@ impl OperatorRepository for DbOperatorRepository {
         q: Option<String>,
         page: Keyset,
     ) -> ApiResult<Vec<OperatorAuditEntry>> {
-        let term = Postgres.cast("$2", "text");
+        let term = type_mapping(self.db.engine()).cast("$2", "text");
         Ok(self
             .db
             .query_all(
@@ -263,11 +263,14 @@ impl OperatorRepository for DbOperatorRepository {
            AND ({cursor} IS NULL OR e.id < $3)
          ORDER BY e.id DESC
          LIMIT $1",
-                    cursor = Postgres.cast("$3", "uuid"),
-                    m_kind = Postgres.ci_match("e.kind", SEARCH_PATTERN),
-                    m_slug = Postgres.ci_match("t.slug", SEARCH_PATTERN),
-                    m_atype = Postgres.ci_match("e.actor_type", SEARCH_PATTERN),
-                    m_aid = Postgres.ci_match(&Postgres.cast("e.actor_id", "text"), SEARCH_PATTERN)
+                    cursor = type_mapping(self.db.engine()).cast("$3", "uuid"),
+                    m_kind = ci_match(self.db.engine()).ci_match("e.kind", SEARCH_PATTERN),
+                    m_slug = ci_match(self.db.engine()).ci_match("t.slug", SEARCH_PATTERN),
+                    m_atype = ci_match(self.db.engine()).ci_match("e.actor_type", SEARCH_PATTERN),
+                    m_aid = ci_match(self.db.engine()).ci_match(
+                        &type_mapping(self.db.engine()).cast("e.actor_id", "text"),
+                        SEARCH_PATTERN
+                    )
                 ),
                 params![page.limit, q, page.after],
             )
@@ -279,7 +282,7 @@ impl OperatorRepository for DbOperatorRepository {
         q: Option<String>,
         page: Keyset,
     ) -> ApiResult<Vec<OperatorTenant>> {
-        let term = Postgres.cast("$2", "text");
+        let term = type_mapping(self.db.engine()).cast("$2", "text");
         Ok(self
             .db
             .query_all(
@@ -296,9 +299,9 @@ impl OperatorRepository for DbOperatorRepository {
            AND ({cursor} IS NULL OR t.id < $3)
          ORDER BY t.id DESC
          LIMIT $1",
-                    cursor = Postgres.cast("$3", "uuid"),
-                    m_slug = Postgres.ci_match("t.slug", SEARCH_PATTERN),
-                    m_name = Postgres.ci_match("t.name", SEARCH_PATTERN)
+                    cursor = type_mapping(self.db.engine()).cast("$3", "uuid"),
+                    m_slug = ci_match(self.db.engine()).ci_match("t.slug", SEARCH_PATTERN),
+                    m_name = ci_match(self.db.engine()).ci_match("t.name", SEARCH_PATTERN)
                 ),
                 params![page.limit, q, page.after],
             )
@@ -306,7 +309,7 @@ impl OperatorRepository for DbOperatorRepository {
     }
 
     async fn nodes_page(&self, q: Option<String>, page: Keyset) -> ApiResult<Vec<OperatorNode>> {
-        let term = Postgres.cast("$2", "text");
+        let term = type_mapping(self.db.engine()).cast("$2", "text");
         Ok(self
             .db
             .query_all(
@@ -325,11 +328,11 @@ impl OperatorRepository for DbOperatorRepository {
            AND ({cursor} IS NULL OR n.id < $3)
          ORDER BY n.id DESC
          LIMIT $1",
-                    cursor = Postgres.cast("$3", "uuid"),
-                    m_name = Postgres.ci_match("n.name", SEARCH_PATTERN),
-                    m_slug = Postgres.ci_match("t.slug", SEARCH_PATTERN),
-                    m_platform = Postgres.ci_match("n.platform", SEARCH_PATTERN),
-                    m_status = Postgres.ci_match("n.status", SEARCH_PATTERN)
+                    cursor = type_mapping(self.db.engine()).cast("$3", "uuid"),
+                    m_name = ci_match(self.db.engine()).ci_match("n.name", SEARCH_PATTERN),
+                    m_slug = ci_match(self.db.engine()).ci_match("t.slug", SEARCH_PATTERN),
+                    m_platform = ci_match(self.db.engine()).ci_match("n.platform", SEARCH_PATTERN),
+                    m_status = ci_match(self.db.engine()).ci_match("n.status", SEARCH_PATTERN)
                 ),
                 params![page.limit, q, page.after],
             )
@@ -337,7 +340,7 @@ impl OperatorRepository for DbOperatorRepository {
     }
 
     async fn bindings_page(&self, q: Option<String>, page: Keyset) -> ApiResult<Vec<BindingRow>> {
-        let term = Postgres.cast("$2", "text");
+        let term = type_mapping(self.db.engine()).cast("$2", "text");
         Ok(self
             .db
             .query_all(
@@ -356,11 +359,12 @@ impl OperatorRepository for DbOperatorRepository {
            AND ({cursor} IS NULL OR b.id < $3)
          ORDER BY b.id DESC
          LIMIT $1",
-                    cursor = Postgres.cast("$3", "uuid"),
-                    m_email = Postgres.ci_match("u.email", SEARCH_PATTERN),
-                    m_role = Postgres.ci_match("b.role_key", SEARCH_PATTERN),
-                    m_scope = Postgres.ci_match("b.scope_type", SEARCH_PATTERN),
-                    m_label = Postgres.ci_match("COALESCE(o.slug, t.slug)", SEARCH_PATTERN)
+                    cursor = type_mapping(self.db.engine()).cast("$3", "uuid"),
+                    m_email = ci_match(self.db.engine()).ci_match("u.email", SEARCH_PATTERN),
+                    m_role = ci_match(self.db.engine()).ci_match("b.role_key", SEARCH_PATTERN),
+                    m_scope = ci_match(self.db.engine()).ci_match("b.scope_type", SEARCH_PATTERN),
+                    m_label = ci_match(self.db.engine())
+                        .ci_match("COALESCE(o.slug, t.slug)", SEARCH_PATTERN)
                 ),
                 params![page.limit, q, page.after],
             )
@@ -623,7 +627,7 @@ impl SkillRepository for DbSkillRepository {
          FROM skills s
          LEFT JOIN users u ON u.id = s.updated_by
          WHERE s.tenant_id = $1 ORDER BY s.name",
-                    Postgres.cast("length(s.content)", "bigint")
+                    type_mapping(self.db.engine()).cast("length(s.content)", "bigint")
                 ),
                 params![tenant],
             )
@@ -656,7 +660,7 @@ impl SkillRepository for DbSkillRepository {
          RETURNING id, name, sha256, {size} AS size, updated_at,
            (SELECT display_name FROM users WHERE id = $6) AS updated_by",
                     now = type_mapping(self.db.engine()).now(),
-                    size = Postgres.cast("length(content)", "bigint"),
+                    size = type_mapping(self.db.engine()).cast("length(content)", "bigint"),
                 ),
                 params![
                     Uuid::now_v7(),

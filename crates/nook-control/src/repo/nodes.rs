@@ -27,19 +27,21 @@
 //! signature, and row mapping lives inside the impls (AC-2).
 
 use async_trait::async_trait;
-use nook_db::dialect::type_mapping;
-use nook_db::{params, Db, DbPool, Json, Postgres, TypeMapping};
+use nook_db::dialect::{json, type_mapping};
+use nook_db::{params, Db, DbPool};
 use nook_types::*;
 use std::collections::HashMap;
 use uuid::Uuid;
 
 use crate::ca::TenantCa;
 
-/// A node advertising itself as shared operator substrate.
-fn shared_operator_clause() -> String {
-    Postgres.contains(
+/// A node advertising itself as shared operator substrate. Takes the engine
+/// rather than reading one: it is a free function, and the containment test it
+/// builds is `jsonb @>` on Postgres and a `json_each` walk on SQLite.
+fn shared_operator_clause(engine: nook_db::Engine) -> String {
+    json(engine).contains(
         "capabilities",
-        &Postgres.literal("{\"shared_operator\":true}"),
+        &json(engine).literal("{\"shared_operator\":true}"),
     )
 }
 use crate::error::ApiResult;
@@ -401,8 +403,8 @@ impl DbNodeRepository {
 #[async_trait]
 impl NodeRepository for DbNodeRepository {
     async fn live_leases(&self) -> ApiResult<Vec<(Uuid, Uuid, f64)>> {
-        let now = Postgres.now();
-        let epoch = Postgres.cast(
+        let now = type_mapping(self.db.engine()).now();
+        let epoch = type_mapping(self.db.engine()).cast(
             &format!("EXTRACT(EPOCH FROM lease_expires_at - {now})"),
             "float8",
         );
@@ -453,8 +455,8 @@ impl NodeRepository for DbNodeRepository {
                             AND ({owner} IS NULL OR owner_person_id = $2 OR shared))
                         OR ({own} IS NOT NULL AND owner_person_id = $3)
                      ORDER BY name",
-                    owner = Postgres.cast("$2", "uuid"),
-                    own = Postgres.cast("$3", "uuid")
+                    owner = type_mapping(self.db.engine()).cast("$2", "uuid"),
+                    own = type_mapping(self.db.engine()).cast("$3", "uuid")
                 ),
                 params![tenant, owner, own_person],
             )
@@ -777,10 +779,10 @@ impl NodeRepository for DbNodeRepository {
         // the json seam (MAIN-201): the runtime_auth array is expanded and its
         // elements' fields read via the trait, so the Postgres-specific SQL
         // lives here in the impl.
-        let runtime_auth = Postgres.array_elements(&format!(
+        let runtime_auth = json(self.db.engine()).array_elements(&format!(
             "COALESCE({}, {})",
-            Postgres.get_json("capabilities", "runtime_auth"),
-            Postgres.literal("[]")
+            json(self.db.engine()).get_json("capabilities", "runtime_auth"),
+            json(self.db.engine()).literal("[]")
         ));
         Ok(self
             .db
@@ -797,9 +799,9 @@ impl NodeRepository for DbNodeRepository {
                            )
                      ORDER BY (owner_person_id = $2) DESC NULLS LAST, id
                      LIMIT 1",
-                    operator = shared_operator_clause(),
-                    rt = Postgres.get_text("e", "runtime"),
-                    state = Postgres.get_text("e", "state"),
+                    operator = shared_operator_clause(self.db.engine()),
+                    rt = json(self.db.engine()).get_text("e", "runtime"),
+                    state = json(self.db.engine()).get_text("e", "state"),
                 ),
                 params![tenant, person, runtime],
             )
@@ -839,7 +841,7 @@ impl NodeRepository for DbNodeRepository {
                     "SELECT count(*) FROM nodes
                      WHERE tenant_id = $1 AND status = 'online'
                        AND {}",
-                    shared_operator_clause()
+                    shared_operator_clause(self.db.engine())
                 ),
                 params![tenant],
             )
@@ -924,7 +926,7 @@ impl NodeRepository for DbNodeRepository {
     }
 
     async fn merge_runtime_auth(&self, id: NodeId, profiles: &serde_json::Value) -> ApiResult<()> {
-        let merge = Postgres.set("capabilities", "{runtime_auth}", "$2");
+        let merge = json(self.db.engine()).set("capabilities", "{runtime_auth}", "$2");
         self.db
             .exec(
                 &format!(

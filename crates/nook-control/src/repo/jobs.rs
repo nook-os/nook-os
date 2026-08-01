@@ -29,7 +29,8 @@
 //! signature, and row mapping lives inside the impls (AC-2).
 
 use async_trait::async_trait;
-use nook_db::{params, Db, DbPool, Postgres, TimeMath, TypeMapping};
+use nook_db::dialect::{time_math, type_mapping};
+use nook_db::{params, Db, DbPool};
 use nook_types::*;
 
 use crate::error::ApiResult;
@@ -226,7 +227,7 @@ impl LoopJobRepository for DbLoopJobRepository {
                 &format!(
                     "UPDATE loop_jobs SET state = $2, updated_at = {}
                      WHERE id = $1 RETURNING *",
-                    Postgres.now()
+                    type_mapping(self.db.engine()).now()
                 ),
                 params![id, to],
             )
@@ -243,7 +244,7 @@ impl LoopJobRepository for DbLoopJobRepository {
                          updated_at = {}
                      WHERE id = $1 AND state = 'queued'
                      RETURNING *",
-                    Postgres.now()
+                    type_mapping(self.db.engine()).now()
                 ),
                 params![id, node],
             )
@@ -257,7 +258,7 @@ impl LoopJobRepository for DbLoopJobRepository {
                 &format!(
                     "UPDATE loop_jobs SET queued_reason = $2, updated_at = {}
                      WHERE id = $1 AND state = 'queued'",
-                    Postgres.now()
+                    type_mapping(self.db.engine()).now()
                 ),
                 params![id, reason],
             )
@@ -319,8 +320,11 @@ impl LoopJobRepository for DbLoopJobRepository {
                         AND n.last_seen_at IS NOT NULL
                         AND n.last_seen_at < {cutoff}
                     RETURNING j.id, j.tenant_id, j.target_task_id, n.last_seen_at",
-                    now = Postgres.now(),
-                    cutoff = Postgres.now_minus_scaled("$1::bigint", "1 second")
+                    now = type_mapping(self.db.engine()).now(),
+                    cutoff = time_math(self.db.engine()).now_minus_scaled(
+                        &type_mapping(self.db.engine()).cast("$1", "bigint"),
+                        "1 second"
+                    )
                 ),
                 params![grace_secs],
             )
@@ -437,7 +441,7 @@ impl InteractionRepository for DbInteractionRepository {
                          answered_at = {now}, updated_at = {now}
                      WHERE id = $1 AND state = 'pending'
                      RETURNING *",
-                    now = Postgres.now()
+                    now = type_mapping(self.db.engine()).now()
                 ),
                 params![id, viewer, response],
             )
@@ -453,7 +457,7 @@ impl InteractionRepository for DbInteractionRepository {
                      SET state = 'canceled', updated_at = {}
                      WHERE id = $1 AND state = 'pending'
                      RETURNING *",
-                    Postgres.now()
+                    type_mapping(self.db.engine()).now()
                 ),
                 params![id],
             )
@@ -469,7 +473,7 @@ impl InteractionRepository for DbInteractionRepository {
                      SET state = 'canceled', updated_at = {}
                      WHERE job_id = $1 AND tenant_id = $2 AND state = 'pending'
                      RETURNING *",
-                    Postgres.now()
+                    type_mapping(self.db.engine()).now()
                 ),
                 params![job, tenant],
             )
