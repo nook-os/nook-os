@@ -2573,7 +2573,6 @@ dependencies = [
  "dotenvy",
  "futures-util",
  "nook-auth",
- "nook-control",
  "nook-db",
  "nook-errors",
  "nook-testkit",

@@ -137,21 +137,15 @@ mod tests {
     /// to traffic it did not create.
     #[tokio::test]
     async fn publish_reaches_a_subscriber_through_the_seam() {
-        if std::env::var("NOOK_REQUIRE_DB").ok().as_deref() != Some("1") {
-            eprintln!(
-                "skipping publish_reaches_a_subscriber_through_the_seam — no NOOK_REQUIRE_DB"
-            );
-            return;
-        }
-        let Ok(url) = std::env::var("DATABASE_URL") else {
-            return;
-        };
         // LISTEN/NOTIFY is Postgres. There is no SQLite behaviour to assert here
         // (MAIN-294) — see `crate::testdb::skip_unless_postgres`.
         if crate::testdb::skip_unless_postgres("the chat event-bus seam test") {
             return;
         }
-        let pool = nook_db::connect(&url, 2).await.expect("connect");
+        let Some(st) = crate::testdb::chat_test("the chat event-bus seam test").await else {
+            return;
+        };
+        let pool = st.db.clone();
 
         // Subscribe first (the seam's LISTEN), then publish, then read it back.
         let mut sub = PgEventBus::new(pool.clone())
@@ -185,6 +179,8 @@ mod tests {
         assert_eq!(notice.id, id);
         assert_eq!(notice.origin, origin);
         assert!(notice.updated);
+
+        st.teardown().await;
     }
 
     /// The isolation itself, pinned deterministically (MAIN-234 AC-1).
@@ -198,19 +194,15 @@ mod tests {
     /// reintroduces the assumption fails here rather than one CI run in three.
     #[tokio::test]
     async fn a_siblings_notice_does_not_satisfy_this_subscription() {
-        if std::env::var("NOOK_REQUIRE_DB").ok().as_deref() != Some("1") {
-            eprintln!("skipping a_siblings_notice_does_not_satisfy_this_subscription — no NOOK_REQUIRE_DB");
-            return;
-        }
-        let Ok(url) = std::env::var("DATABASE_URL") else {
-            return;
-        };
         // LISTEN/NOTIFY is Postgres. There is no SQLite behaviour to assert here
         // (MAIN-294) — see `crate::testdb::skip_unless_postgres`.
         if crate::testdb::skip_unless_postgres("the chat event-bus seam test") {
             return;
         }
-        let pool = nook_db::connect(&url, 2).await.expect("connect");
+        let Some(st) = crate::testdb::chat_test("the chat event-bus seam test").await else {
+            return;
+        };
+        let pool = st.db.clone();
 
         let mut sub = PgEventBus::new(pool.clone())
             .subscribe(NOTIFY_CHANNEL)
@@ -247,5 +239,7 @@ mod tests {
         assert_ne!(notice.id, foreign_before);
         assert_eq!(notice.origin, origin);
         assert!(notice.updated);
+
+        st.teardown().await;
     }
 }

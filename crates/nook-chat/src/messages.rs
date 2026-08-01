@@ -548,6 +548,8 @@ mod tests {
         assert_eq!(page.messages.len(), 1);
         assert_eq!(page.messages[0].id, posted.id);
         assert!(page.next_cursor.is_none());
+
+        state.teardown().await;
     }
 
     #[tokio::test]
@@ -604,6 +606,8 @@ mod tests {
         let page2: Vec<_> = p2.messages.iter().map(|m| m.id).collect();
         assert_eq!(page2, vec![ids[2], ids[1]]);
         assert!(page1.iter().all(|id| !page2.contains(id)), "no overlap");
+
+        state.teardown().await;
     }
 
     #[tokio::test]
@@ -640,6 +644,8 @@ mod tests {
         .await
         .expect_err("cross-tenant post is refused");
         assert!(matches!(err, ApiError::Forbidden));
+
+        state.teardown().await;
     }
 
     #[tokio::test]
@@ -701,6 +707,8 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(page.messages.len(), 1);
+
+        state.teardown().await;
     }
 
     // ---- Threaded replies (MAIN-114) ----
@@ -773,6 +781,8 @@ mod tests {
         let reply_ids: Vec<_> = t.replies.iter().map(|m| m.id).collect();
         assert_eq!(reply_ids, vec![r2.id, r1.id], "newest-first");
         assert!(t.next_cursor.is_none());
+
+        state.teardown().await;
     }
 
     #[tokio::test]
@@ -810,6 +820,8 @@ mod tests {
         .await
         .expect_err("an unknown parent is refused");
         assert!(matches!(err, ApiError::BadRequest(_)));
+
+        state.teardown().await;
     }
 
     #[tokio::test]
@@ -847,6 +859,8 @@ mod tests {
         .await
         .expect_err("a reply has no thread");
         assert!(matches!(err, ApiError::BadRequest(_)));
+
+        state.teardown().await;
     }
 
     #[tokio::test]
@@ -895,6 +909,8 @@ mod tests {
         let page2: Vec<_> = p2.replies.iter().map(|m| m.id).collect();
         assert_eq!(page2, vec![ids[0]]);
         assert!(p2.next_cursor.is_none());
+
+        state.teardown().await;
     }
 
     #[tokio::test]
@@ -913,6 +929,8 @@ mod tests {
         .await
         .expect_err("no such message");
         assert!(matches!(err, ApiError::NotFound));
+
+        state.teardown().await;
     }
 
     #[tokio::test]
@@ -937,6 +955,8 @@ mod tests {
         .await
         .expect_err("cross-tenant thread read refused");
         assert!(matches!(err, ApiError::Forbidden));
+
+        state.teardown().await;
     }
 
     // ── Reactions + edit/delete (MAIN-116) ──
@@ -1041,6 +1061,8 @@ mod tests {
         )
         .await;
         assert!(matches!(bad, Err(ApiError::BadRequest(_))));
+
+        state.teardown().await;
     }
 
     #[tokio::test]
@@ -1087,6 +1109,8 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(prior, "typ0");
+
+        state.teardown().await;
     }
 
     #[tokio::test]
@@ -1149,6 +1173,8 @@ mod tests {
         )
         .await;
         assert!(matches!(r, Err(ApiError::Conflict(_))));
+
+        state.teardown().await;
     }
 }
 

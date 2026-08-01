@@ -35,11 +35,8 @@ futures-util = { workspace = true }
 # `oneshot` for the panic-layer test (MAIN-273); nook-chat otherwise needs only
 # tower-http.
 tower = { workspace = true }
-# Test-only: the search_path regression test provisions the control-plane
-# `public` schema (tenants/users/sessions_auth/tenant_members) via its MIGRATOR,
-# so the test does not depend on a database that already has it. No cycle —
-# nook-control does not depend on nook-chat.
-nook-control = { workspace = true }
-# Test-only: the SQLite arm takes a private, migrated bed rather than building a
-# pool by hand (MAIN-294). No cycle — nook-testkit does not depend on nook-chat.
+# Test-only: every DB-backed chat test takes a private, migrated bed rather than
+# the shared dev database (MAIN-165) — which is also where the control-plane
+# `public` schema those tests need comes from, so nook-control is no longer a
+# direct dev-dependency. No cycle — nook-testkit does not depend on nook-chat.
 nook-testkit = { workspace = true }

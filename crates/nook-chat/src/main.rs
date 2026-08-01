@@ -49,17 +49,6 @@ static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 /// in `public` — resolve instead of 500ing.
 pub(crate) const CHAT_SEARCH_PATH: &str = "chat,public";
 
-/// `public` alone — for a pool that must write the CONTROL PLANE's schema.
-///
-/// Only the tests use this, and the distinction is load-bearing rather than
-/// cosmetic: running `nook_control::MIGRATOR` over a `chat,public` pool puts the
-/// control plane's tables AND its ledger in the `chat` schema, where they collide
-/// with chat's own. That is not theoretical — it is what reddened CI on this
-/// card, and the shared dev database hid it because both schemas were already
-/// populated there.
-#[cfg(test)]
-pub(crate) const PUBLIC_SEARCH_PATH: &str = "public";
-
 /// Chat's squash manifest (MAIN-235); see `nook_control::SQUASH_MANIFEST`.
 static SQUASH_MANIFEST: &str = include_str!("../migrations/squash-manifest.txt");
 
