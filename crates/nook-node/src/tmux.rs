@@ -410,6 +410,13 @@ fn spawn(
         // by the UI's agent-state signal.
         "-e",
         &sid,
+        // Git authenticates by forking `ssh`, so this is the only place a git
+        // command typed in a session — or run by a loop agent — can be told
+        // which key its repo uses (MAIN-367). The shim falls through to plain
+        // ssh whenever there is nothing pinned, so exporting it unconditionally
+        // changes nothing for public repos and local paths.
+        "-e",
+        "GIT_SSH_COMMAND=nook get workspace git-ssh",
     ];
     // Owned strings for any extra env, kept alive alongside `args`.
     let extra: Vec<String> = extra_env.iter().map(|(k, v)| format!("{k}={v}")).collect();

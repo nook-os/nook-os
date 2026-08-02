@@ -94,6 +94,27 @@ impl Client {
         self.send(reqwest::Method::GET, path, None).await
     }
 
+    /// GET returning the RAW body, for endpoints whose answer is not JSON.
+    ///
+    /// The git-ssh shim's key material is one of those: a PEM block is not a
+    /// JSON document, and wrapping it in one would only mean the shim had to
+    /// unwrap it again (MAIN-367). An empty body — the 204 a workspace with no
+    /// pinned credential returns — comes back as an empty string.
+    pub async fn get_text(&self, path: &str) -> Result<String> {
+        let url = format!("{}{}", self.base.trim_end_matches('/'), path);
+        let res = self
+            .http
+            .get(&url)
+            .bearer_auth(&self.token)
+            .send()
+            .await
+            .with_context(|| format!("cannot reach {url}"))?;
+        if !res.status().is_success() {
+            anyhow::bail!("{} returned {}", path, res.status());
+        }
+        Ok(res.text().await.unwrap_or_default())
+    }
+
     pub async fn post(&self, path: &str, body: Value) -> Result<Value> {
         self.send(reqwest::Method::POST, path, Some(body)).await
     }
@@ -2964,5 +2985,129 @@ mod migrate_tests {
         );
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+/// `nook get workspace git-ssh …` — the ssh shim git runs (MAIN-367).
+///
+/// Sessions export `GIT_SSH_COMMAND` pointing here, so every git command inside
+/// one — typed by a person, or run by a loop agent that knows nothing about any
+/// of this — authenticates with the workspace's own key. An agent cannot forget
+/// to fetch a credential it never has to ask for.
+///
+/// The key is written for the length of ONE ssh invocation and removed in the
+/// same breath. Nothing persists on the node, which is the property that lets a
+/// shared operator machine clone a private repo without becoming a place where
+/// private keys accumulate. `TempKey`'s Drop is what guarantees it, so an ssh
+/// that fails, is killed, or panics still cleans up.
+///
+/// Falls through to plain ssh whenever there is no key to use — outside a nook
+/// session, in an ad-hoc terminal, or for a workspace that pins nothing. That is
+/// the ordinary case and it must keep working untouched: public repos and local
+/// paths have never needed a credential.
+pub async fn git_ssh(args: &[String]) -> Result<()> {
+    let key = fetch_session_git_key().await;
+    let held = key.as_deref().and_then(TempKey::write);
+
+    let mut cmd = std::process::Command::new("ssh");
+    if let Some(k) = &held {
+        // `IdentitiesOnly` so a stray agent identity cannot silently answer for
+        // a repo this key was chosen for.
+        cmd.args(["-i", &k.path.to_string_lossy(), "-o", "IdentitiesOnly=yes"]);
+    }
+    cmd.args(args);
+    let status = cmd.status().context("could not run ssh")?;
+    // Dropping `held` removes the key before this process exits, whatever ssh did.
+    drop(held);
+    std::process::exit(status.code().unwrap_or(1));
+}
+
+/// The workspace credential for the session we are running inside, or `None`.
+///
+/// Every failure is `None` rather than an error: this sits in front of every git
+/// command in a session, and a control plane that is briefly unreachable must
+/// degrade to "use the node's own key" rather than break `git status`.
+async fn fetch_session_git_key() -> Option<String> {
+    let sid = std::env::var("NOOK_SESSION_ID")
+        .ok()
+        .filter(|s| !s.is_empty())?;
+    let client = Client::from_config().ok()?;
+    let body = client
+        .get_text(&format!("/api/v1/sessions/{sid}/git-key"))
+        .await
+        .ok()?;
+    let trimmed = body.trim();
+    (!trimmed.is_empty()).then(|| body.to_string())
+}
+
+/// A private key on disk for exactly as long as one command needs it.
+struct TempKey {
+    path: std::path::PathBuf,
+}
+
+impl TempKey {
+    fn write(material: &str) -> Option<Self> {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let path = std::env::temp_dir().join(format!("nook-git-{}", uuid::Uuid::now_v7()));
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            // 0600 at CREATION, not after: a key that is briefly world-readable
+            // on a shared operator machine is a key that leaked.
+            .mode(0o600)
+            .open(&path)
+            .ok()?;
+        let mut body = material.trim_end().to_string();
+        body.push('\n');
+        f.write_all(body.as_bytes()).ok()?;
+        Some(Self { path })
+    }
+}
+
+impl Drop for TempKey {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+#[cfg(test)]
+mod git_ssh_tests {
+    use super::TempKey;
+    use std::os::unix::fs::PermissionsExt;
+
+    /// 0600 at creation, not after. A key that is briefly world-readable on a
+    /// shared operator machine is a key that leaked (MAIN-367 AC-7).
+    #[test]
+    fn the_key_is_never_readable_by_anyone_else() {
+        let held = TempKey::write("PRIVATE KEY MATERIAL").expect("wrote the key");
+        let mode = std::fs::metadata(&held.path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "mode was {:o}", mode & 0o777);
+    }
+
+    /// The whole "nothing persists on the node" property rests on Drop, so it
+    /// has to hold when ssh fails or is killed — not only on the happy path.
+    #[test]
+    fn the_key_is_gone_once_the_command_is_over() {
+        let path = {
+            let held = TempKey::write("PRIVATE KEY MATERIAL").expect("wrote the key");
+            assert!(held.path.exists());
+            held.path.clone()
+        };
+        assert!(
+            !path.exists(),
+            "the key outlived the command that needed it"
+        );
+    }
+
+    /// Two concurrent git commands in one session must not share, or clobber,
+    /// each other's file — `create_new` plus a v7 id is what prevents that.
+    #[test]
+    fn concurrent_commands_get_their_own_file() {
+        let a = TempKey::write("A").expect("a");
+        let b = TempKey::write("B").expect("b");
+        assert_ne!(a.path, b.path);
+        assert_eq!(std::fs::read_to_string(&a.path).unwrap().trim(), "A");
+        assert_eq!(std::fs::read_to_string(&b.path).unwrap().trim(), "B");
     }
 }

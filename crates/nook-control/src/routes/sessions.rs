@@ -35,6 +35,50 @@ use crate::events::{self, EventDraft};
 use crate::services::session_queries;
 use crate::state::AppState;
 
+/// `GET /api/v1/sessions/{id}/git-key` — the workspace credential for the repo
+/// this session runs in, as material for ONE ssh invocation (MAIN-367).
+///
+/// The deliberate delivery channel, and the only one. It exists because git
+/// authenticates by forking `ssh`, so a shim inside the session has to be able
+/// to obtain a key; `nook get workspace git-ssh` is that shim and this is what
+/// it calls. AC-7's rule — no key in a log, an event, or a browser-facing
+/// response — still holds: this is not in the browser surface, it is anchored
+/// to a live session rather than to a workspace, and nothing here is recorded.
+///
+/// Gated exactly like attaching a terminal to the session, which already
+/// carries every keystroke and every byte of output on that machine: the same
+/// `session_for_content` check, plus `require_node_may_use`. Somebody who can
+/// open that terminal can already run `git` in it, so this grants no reach they
+/// did not have — it only removes the need to store the key on the node.
+///
+/// 204 with no body when the workspace pins nothing, which is the ordinary
+/// case: the shim then execs plain ssh and the node's own key applies.
+#[utoipa::path(get, path = "/api/v1/sessions/{id}/git-key",
+    operation_id = "session_git_key",
+    params(("id" = String, Path,)),
+    responses((status = 200), (status = 204), (status = 404)))]
+pub async fn git_key(
+    State(state): State<AppState>,
+    auth: AuthCtx,
+    Path(id): Path<SessionId>,
+) -> ApiResult<axum::response::Response> {
+    use axum::response::IntoResponse;
+
+    let session = session_for_content(&state, &auth, id).await?;
+    // Running git here is running a program on that machine; hold this to the
+    // same bar as starting the session in the first place.
+    auth.require_node_may_use(&state, session.node_id).await?;
+
+    // An ad-hoc terminal has no workspace, so there is no repo to have a key for.
+    let Some(workspace_id) = session.workspace_id else {
+        return Ok(axum::http::StatusCode::NO_CONTENT.into_response());
+    };
+    match crate::services::workspace_git_key(&state, session.tenant_id, workspace_id).await {
+        Some(material) => Ok(material.into_response()),
+        None => Ok(axum::http::StatusCode::NO_CONTENT.into_response()),
+    }
+}
+
 #[derive(Deserialize, utoipa::IntoParams)]
 pub struct SessionsQuery {
     pub workspace_id: Option<WorkspaceId>,

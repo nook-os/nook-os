@@ -319,6 +319,12 @@ enum Command {
         /// Print raw JSON instead of a table.
         #[arg(long)]
         json: bool,
+        /// Anything after that. `nook get workspace git-ssh` is invoked BY git
+        /// as its `GIT_SSH_COMMAND`, which appends ssh's own arguments —
+        /// `user@host`, `-o`, a remote command — so they have to be accepted
+        /// here rather than rejected as unexpected (MAIN-367).
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
     },
     /// Adopt a git repository as a workspace on this node. Works from
     /// anywhere: a repo outside the workspace roots is placed at
@@ -860,7 +866,17 @@ async fn main() -> Result<()> {
             resource,
             name,
             json,
-        } => cli::get(&resource, name.as_deref(), json).await,
+            args,
+        } => {
+            // `nook get workspace git-ssh` is not a listing at all — it is the
+            // ssh shim git execs. Routed here so the verb reads the way the
+            // rest of the CLI does.
+            if resource == "workspace" && name.as_deref() == Some("git-ssh") {
+                cli::git_ssh(&args).await
+            } else {
+                cli::get(&resource, name.as_deref(), json).await
+            }
+        }
         Command::Import { path, link } => cli::import(path.as_deref(), link).await,
         Command::Delete { resource, name } => cli::delete(&resource, &name).await,
         Command::MigrateWorkspaces { apply } => cli::migrate_workspaces(apply).await,

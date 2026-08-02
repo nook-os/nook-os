@@ -406,6 +406,7 @@ pub fn build_router(state: AppState) -> Router {
                 .patch(sessions::update)
                 .delete(sessions::delete),
         )
+        .route("/sessions/{id}/git-key", get(sessions::git_key))
         .route("/sessions/{id}/windows", post(sessions::windows))
         .route("/tokens", get(tokens::list).post(tokens::create))
         .route("/tokens/{id}", delete_route(tokens::revoke))
