@@ -500,7 +500,7 @@ async fn handle_message(
         } => {
             state
                 .nodes
-                .mark_session_running(session_id, tenant, &tmux_session)
+                .mark_session_running(session_id, node_id, &tmux_session)
                 .await?;
             state.registry.publish(
                 tenant,
@@ -532,7 +532,7 @@ async fn handle_message(
             session_id,
             exit_code,
         } => {
-            state.nodes.mark_session_exited(session_id, tenant).await?;
+            state.nodes.mark_session_exited(session_id, node_id).await?;
             // Ephemeral secrets exist on disk only while a session is using
             // them; the encrypted copy stays in the vault.
             crate::services::secrets::wipe_ephemeral_for_session(state, tenant, session_id).await;
@@ -573,7 +573,7 @@ async fn handle_message(
             // leaving it stuck on "starting".
             state
                 .nodes
-                .mark_session_failed(session_id, tenant, &message)
+                .mark_session_failed(session_id, node_id, &message)
                 .await?;
             state.registry.publish(
                 tenant,
