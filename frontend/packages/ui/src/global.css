@@ -1250,6 +1250,21 @@ table.nook-table tr.clickable { cursor: pointer; }
   border-bottom: 1px solid var(--nook-border);
   flex: 0 0 auto;
 }
+/* Actions live at the far end of the tab row. `margin-left:auto` does the
+   pushing; the centring is the point — a flex child of a fixed-height row
+   STRETCHES by default, so buttons dropped in here sit full-height and
+   misaligned against the tabs beside them. Height comes from the control token
+   like every other button, never from padding. */
+.board-tabs-actions {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 8px;
+}
+.board-tabs-actions .btn {
+  height: var(--nook-ctrl-sm);
+}
 .board-tab {
   display: inline-flex;
   align-items: center;
