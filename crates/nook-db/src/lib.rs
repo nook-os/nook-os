@@ -44,6 +44,12 @@ pub mod row;
 pub use nook_db_derive::FromDbRow;
 pub use row::{DbRow, FromDbColumn, FromDbRow};
 
+/// The pagination contract's server half (QOL sprint 2026-08): opaque cursors,
+/// validated page arguments, and the one SQL skeleton every paginated list
+/// shares. A repository adopts it by declaring a [`paging::ListSpec`]; fakes
+/// inherit identical semantics from [`paging::page_vec`].
+pub mod paging;
+
 /// Boot-time migration runner with dev tolerance for a ledger ahead of the
 /// checked-out migration set (MAIN-224). Both services' boot paths run through
 /// [`migrate::run_with_dev_tolerance`], so they get identical treatment.

@@ -28,6 +28,7 @@
 
 use async_trait::async_trait;
 use nook_db::dialect::{json, type_mapping};
+use nook_db::paging::{DbPage, ListSpec, PageArgs};
 use nook_db::{params, Db, DbPool};
 use nook_types::*;
 use std::collections::HashMap;
@@ -146,6 +147,33 @@ pub trait NodeRepository: Send + Sync {
         owner: Option<Uuid>,
         own_person: Option<Uuid>,
     ) -> ApiResult<Vec<Node>>;
+
+    /// The same rows as [`list`] — same visibility rule, same params — through
+    /// the pagination contract: searched (name/hostname/platform/status),
+    /// sorted, cursor-walked.
+    async fn page(
+        &self,
+        tenant: TenantId,
+        owner: Option<Uuid>,
+        own_person: Option<Uuid>,
+        args: &PageArgs,
+    ) -> ApiResult<DbPage<Node>>;
+
+    /// Every node a tenant's workspaces may be placed on: the tenant's own
+    /// nodes, PLUS any node owned by a person who is a member of it, wherever
+    /// that node is homed.
+    ///
+    /// The second half is the point. A person's machines are theirs across every
+    /// org they belong to (MAIN-353), so a workspace in a tenant they joined
+    /// should reach those machines — otherwise "my own nodes" means "my own
+    /// nodes, in one org", and joining a second team silently leaves your
+    /// laptops out of it.
+    ///
+    /// Deliberately NOT a visibility query: this decides where the reconciler
+    /// may CLONE and START work, and nothing here is returned to a browser. The
+    /// see-path rule (`list`) is unchanged and still hides other people's
+    /// machines.
+    async fn placement_candidates(&self, tenant: TenantId) -> ApiResult<Vec<Node>>;
 
     /// A node by id with NO tenant scope, for the two callers that must ask
     /// "is this the caller's own machine?" before they know which tenant it
@@ -424,6 +452,15 @@ const NODE_COLUMNS: &str = "id, tenant_id, name, hostname, platform, capabilitie
      status, last_seen_at, owner_person_id, shared, created_at, updated_at, labels, taints, \
      port_range_start, port_range_end";
 
+/// The tenant node list's sort allowlist — the paged endpoint's contract half.
+pub const NODE_PAGE_SORTS: &[(&str, &str)] = &[
+    ("name", "name"),
+    ("status", "status"),
+    ("platform", "platform"),
+    ("last_seen", "last_seen_at"),
+    ("created", "id"),
+];
+
 pub struct DbNodeRepository {
     db: DbPool,
 }
@@ -493,6 +530,56 @@ impl NodeRepository for DbNodeRepository {
                     own = type_mapping(self.db.engine()).cast("$3", "uuid")
                 ),
                 params![tenant, owner, own_person],
+            )
+            .await?)
+    }
+
+    async fn page(
+        &self,
+        tenant: TenantId,
+        owner: Option<Uuid>,
+        own_person: Option<Uuid>,
+        args: &PageArgs,
+    ) -> ApiResult<DbPage<Node>> {
+        // The visibility WHERE is `list`'s, verbatim — the page must never
+        // show a node the whole list would hide. Scope params start at $4.
+        let select = format!(
+            "SELECT {NODE_COLUMNS}
+             FROM nodes
+             WHERE (tenant_id = $4
+                    AND ({owner} IS NULL OR owner_person_id = $5 OR shared))
+                OR ({own} IS NOT NULL AND owner_person_id = $6)",
+            owner = type_mapping(self.db.engine()).cast("$5", "uuid"),
+            own = type_mapping(self.db.engine()).cast("$6", "uuid")
+        );
+        Ok(ListSpec {
+            select: &select,
+            id: "id",
+            search: &["name", "hostname", "platform", "status"],
+        }
+        .fetch(
+            &self.db,
+            args,
+            params![tenant, owner, own_person],
+            |n: &Node| n.id.0,
+        )
+        .await?)
+    }
+
+    async fn placement_candidates(&self, tenant: TenantId) -> ApiResult<Vec<Node>> {
+        Ok(self
+            .db
+            .query_all(
+                &format!(
+                    "SELECT {NODE_COLUMNS}
+                     FROM nodes
+                     WHERE tenant_id = $1
+                        OR owner_person_id IN (
+                             SELECT u.person_id FROM users u WHERE u.tenant_id = $1
+                           )
+                     ORDER BY name"
+                ),
+                params![tenant],
             )
             .await?)
     }
@@ -1548,6 +1635,24 @@ impl NodeRepository for FakeNodeRepository {
             .collect())
     }
 
+    async fn placement_candidates(&self, tenant: TenantId) -> ApiResult<Vec<Node>> {
+        // The tenant half only. The member half — nodes owned by a person who
+        // belongs to this tenant but whose machine is homed elsewhere — needs a
+        // `users` table to resolve, and this fake holds nodes. That behaviour is
+        // pinned against a real database in `tests/placement_across_tenants.rs`;
+        // a fake that guessed at it would let a caller test pass against a rule
+        // the database does not have.
+        let s = self.inner.lock().unwrap();
+        let mut out: Vec<Node> = s
+            .nodes
+            .iter()
+            .filter(|n| n.node.tenant_id == tenant)
+            .map(|n| n.node.clone())
+            .collect();
+        out.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(out)
+    }
+
     async fn list(
         &self,
         tenant: TenantId,
@@ -1578,6 +1683,41 @@ impl NodeRepository for FakeNodeRepository {
             .collect();
         out.sort_by(|a, b| a.name.cmp(&b.name));
         Ok(out)
+    }
+
+    async fn page(
+        &self,
+        tenant: TenantId,
+        owner: Option<Uuid>,
+        own_person: Option<Uuid>,
+        args: &PageArgs,
+    ) -> ApiResult<DbPage<Node>> {
+        let all = self.list(tenant, owner, own_person).await?;
+        let q = args.q.as_ref().map(|s| s.to_lowercase());
+        let rows: Vec<Node> = all
+            .into_iter()
+            .filter(|n| match &q {
+                None => true,
+                Some(q) => {
+                    n.name.to_lowercase().contains(q)
+                        || n.hostname.to_lowercase().contains(q)
+                        || n.platform.to_lowercase().contains(q)
+                        || n.status.to_lowercase().contains(q)
+                }
+            })
+            .collect();
+        Ok(nook_db::paging::page_vec(
+            rows,
+            args,
+            |n| n.id.0,
+            |col, a, b| match col {
+                "name" => a.name.cmp(&b.name),
+                "status" => a.status.cmp(&b.status),
+                "platform" => a.platform.cmp(&b.platform),
+                "last_seen_at" => a.last_seen_at.cmp(&b.last_seen_at),
+                other => unreachable!("unlisted sort col {other}"),
+            },
+        ))
     }
 
     async fn list_ids_and_names(&self, tenant: TenantId) -> ApiResult<Vec<(NodeId, String)>> {

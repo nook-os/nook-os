@@ -158,6 +158,11 @@ pub fn catalog() -> Vec<nook_types::NotificationKind> {
             "A node could not apply the managed hook set.",
         ),
         k(
+            "tenant.switch_changed",
+            "Tenant switch changed",
+            "An operator turned this tenant's loops or session reconciling on or off.",
+        ),
+        k(
             "workspace.settings_invalid",
             "Repo settings unreadable",
             "A repo's .nook.toml could not be believed, so the stored declaration was kept.",
@@ -289,6 +294,26 @@ pub fn notable(base_url: &str, event: &Event) -> Option<crate::services::notify:
         "skill.install_failed" => Draft::new("A node could not learn a skill")
             .level("error")
             .body(text("error").unwrap_or_default().to_string()),
+        // Turning a tenant's loops or reconciling on or off is done from OUTSIDE
+        // that tenant by an operator, so the people it affects would otherwise
+        // have no way to see it happened — their jobs simply start or stop
+        // moving. The notice lands in their feed, not the operator's.
+        "tenant.switch_changed" => {
+            Draft::new("An operator changed this team's automation").body(format!(
+                "{} is now {}",
+                text("switch").unwrap_or("a switch"),
+                if event
+                    .payload
+                    .get("enabled")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false)
+                {
+                    "ON"
+                } else {
+                    "OFF"
+                }
+            ))
+        }
         "hooks.install_failed" => Draft::new("A node could not apply the managed hooks")
             .level("error")
             .body(text("error").unwrap_or_default().to_string()),

@@ -1,10 +1,11 @@
 import React, { useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate, useParams } from "react-router-dom";
-import { ArrowUpCircle, SquareTerminal } from "lucide-react";
-import { api } from "@nookos/api";
-import { Empty, Panel, Pill, ResourceBars, StatusDot, statusTone } from "@nookos/ui";
+import { ArrowUpCircle, Eye, EyeOff, SquareTerminal, Trash2 } from "lucide-react";
+import { api, type NodeInfo } from "@nookos/api";
+import { Empty, PagedPanel, Panel, Pill, ResourceBars, RowAction, RowActions, StatusDot, statusTone, type DataColumn } from "@nookos/ui";
 import { AgentVersion, NodeFacts, useControlPlaneVersion } from "../NodeFacts";
+import { usePagedList } from "../paging";
 import { askConfirm, notify } from "../dialogs";
 import { useLive } from "../live";
 import { AddNodeModal } from "../AddNodeModal";
@@ -14,11 +15,16 @@ import { NodePorts } from "../NodePorts";
 export function NodesPage() {
   const [adding, setAdding] = useState(false);
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
   const nodeStatus = useLive((s) => s.nodeStatus);
   const nodeResources = useLive((s) => s.nodeResources);
-  const { data: nodes, refetch } = useQuery({
-    queryKey: ["nodes"],
-    queryFn: async () => (await api.GET("/api/v1/nodes")).data ?? [],
+  // The table speaks the pagination contract; liveness stays an overlay — the
+  // socket's status/resources are keyed by node id and painted over whatever
+  // rows the current page holds.
+  const list = usePagedList<NodeInfo>({
+    key: ["nodes", "page"],
+    fetch: async (params) =>
+      (await api.GET("/api/v1/nodes/page", { params: { query: params } })).data,
   });
   // The caller's person id, so we can mirror the server's rule (MAIN-132): a
   // node you own is spawnable; a teammate's is manage-only. Same `["me"]` key
@@ -46,236 +52,237 @@ export function NodesPage() {
     navigate(`/sessions/${data.id}`);
   };
 
+  const columns: DataColumn<NodeInfo>[] = [
+    {
+      key: "node",
+      header: "Node",
+      sortKey: "name",
+      cell: (n) => {
+        const caps = n.capabilities as Record<string, unknown>;
+        return (
+          <>
+            <StatusDot status={nodeStatus[n.id] ?? n.status} />{" "}
+            <Link to={`/nodes/${n.id}`} className="bright">
+              {n.name}
+            </Link>{" "}
+            <span className="faint">{n.hostname}</span>
+            {n.shared && (
+              <>
+                {" "}
+                <Pill
+                  tone="accent"
+                  title="visible to the whole team and usable by them — anyone can start a session here"
+                >
+                  shared
+                </Pill>
+              </>
+            )}
+            {/* The deployment's shared operator node (MAIN-125): a machine the
+                stack ships with the loop toolchain, not a person's own.
+                Surfaced so it is distinguishable from personal nodes at a
+                glance. */}
+            {(caps.shared_operator as boolean) && (
+              <>
+                {" "}
+                <Pill
+                  tone="accent"
+                  title="the deployment's shared operator node — ships with the loop toolchain"
+                >
+                  operator
+                </Pill>
+              </>
+            )}
+          </>
+        );
+      },
+    },
+    {
+      key: "status",
+      header: "Status",
+      sortKey: "status",
+      cell: (n) => {
+        const status = nodeStatus[n.id] ?? n.status;
+        return <Pill tone={statusTone(status)}>{status}</Pill>;
+      },
+    },
+    { key: "platform", header: "Platform", className: "muted", sortKey: "platform", cell: (n) => n.platform },
+    {
+      key: "agent",
+      header: "Agent",
+      cell: (n) => (
+        <AgentVersion
+          reported={(n.capabilities as Record<string, unknown>).agent_version as string | null}
+          expected={expected}
+        />
+      ),
+    },
+    {
+      key: "cpus",
+      header: "CPUs",
+      className: "muted",
+      cell: (n) => ((n.capabilities as Record<string, unknown>).cpus as number) ?? "—",
+    },
+    {
+      key: "gpus",
+      header: "GPUs",
+      className: "muted",
+      cell: (n) =>
+        (((n.capabilities as Record<string, unknown>).gpus as { model: string }[]) ?? [])
+          .map((g) => g.model)
+          .join(", ") || "—",
+    },
+    {
+      key: "capacity",
+      header: "Capacity",
+      className: "col-capacity",
+      cell: (n) => <ResourceBars resources={nodeResources[n.id] ?? n.resources} />,
+    },
+    {
+      key: "runtimes",
+      header: "Runtimes",
+      cell: (n) =>
+        (((n.capabilities as Record<string, unknown>).runtimes as string[]) ?? []).map((r) => (
+          <Pill key={r}>{r}</Pill>
+        )),
+    },
+    {
+      key: "seen",
+      header: "Last seen",
+      className: "muted",
+      sortKey: "last_seen",
+      cell: (n) =>
+        n.last_seen_at
+          ? new Date(n.last_seen_at).toLocaleTimeString([], { hour12: false })
+          : "never",
+    },
+    {
+      key: "actions",
+      header: "",
+      cell: (n) => {
+        const caps = n.capabilities as Record<string, unknown>;
+        const status = nodeStatus[n.id] ?? n.status;
+        // `terminal` is offered on a node you own OR one shared with the team
+        // (MAIN-136); `share` stays owner-only. Fleet MANAGEMENT
+        // (update/remove) stays with the owner or a tenant admin, as it was
+        // before shared nodes existed: a member seeing a teammate's `shared`
+        // node (MAIN-135) gets the terminal but no manage buttons — read-only
+        // — while an admin keeps them (MAIN-132's admin-fleet-management).
+        // The server enforces all of this; this only hides what would 403.
+        const owned = n.owner_person_id === me?.person_id;
+        const canManage =
+          owned || me?.user?.role === "owner" || me?.user?.role === "admin";
+        return (
+          <RowActions>
+            {status === "online" && (owned || n.shared) && (
+              <RowAction
+                icon={SquareTerminal}
+                label="terminal"
+                title={`open a shell on ${n.name}`}
+                onClick={() => openTerminal(n.id)}
+              />
+            )}
+            {/* Sharing is the owner's call and the server enforces it
+                (MAIN-135); the toggle shows only on rows you own. */}
+            {owned && (
+              <RowAction
+                icon={n.shared ? EyeOff : Eye}
+                label={n.shared ? "unshare" : "share"}
+                title={
+                  n.shared
+                    ? `stop sharing ${n.name} with the team`
+                    : `let the team see ${n.name}`
+                }
+                onClick={async () => {
+                  const { error } = await api.POST("/api/v1/nodes/{id}/shared", {
+                    params: { path: { id: n.id } },
+                    body: { shared: !n.shared },
+                  });
+                  if (error) {
+                    await notify("Couldn't change sharing", JSON.stringify(error));
+                    return;
+                  }
+                  queryClient.invalidateQueries({ queryKey: ["nodes"] });
+                }}
+              />
+            )}
+            {status === "online" && canManage && (
+              <RowAction
+                icon={ArrowUpCircle}
+                label="update"
+                title={
+                  (caps.agent_version as string)
+                    ? `agent ${caps.agent_version} — update and restart`
+                    : "update the agent and restart it"
+                }
+                onClick={async () => {
+                  const { error } = await api.POST("/api/v1/nodes/{id}/update", {
+                    params: { path: { id: n.id } },
+                  });
+                  // The node decides whether it can: unsupervised, it refuses
+                  // rather than taking itself offline. Say what happened
+                  // either way — silence after pressing a button reads as
+                  // nothing happening.
+                  await notify(
+                    error ? "Not updated" : "Updating",
+                    error
+                      ? `${n.name} could not be asked to update.`
+                      : `${n.name} is fetching the new agent. It will drop off for a moment and come back — sessions survive, because tmux outlives the agent.`,
+                  );
+                }}
+              />
+            )}
+            {canManage && (
+              <RowAction
+                icon={Trash2}
+                danger
+                title={`remove ${n.name} from NookOS`}
+                onClick={async () => {
+                  const ok = await askConfirm({
+                    title: `Remove node ${n.name}`,
+                    description:
+                      "It stops appearing in NookOS. Re-running `nook setup` on that machine rejoins it.",
+                    confirmLabel: "remove",
+                    danger: true,
+                  });
+                  if (ok) {
+                    await api.DELETE("/api/v1/nodes/{id}", {
+                      params: { path: { id: n.id } },
+                    });
+                    queryClient.invalidateQueries({ queryKey: ["nodes"] });
+                  }
+                }}
+              />
+            )}
+          </RowActions>
+        );
+      },
+    },
+  ];
+
   return (
-    <div className="nook-grid" style={{ gridTemplateColumns: "1fr" }}>
+    <div className="nook-grid cards">
       {adding && (
         <AddNodeModal
           onClose={() => {
             setAdding(false);
-            refetch();
+            queryClient.invalidateQueries({ queryKey: ["nodes"] });
           }}
         />
       )}
-      <Panel
+      <PagedPanel
         title="Nodes"
+        list={list}
+        columns={columns}
+        rowKey={(n) => n.id}
+        searchPlaceholder="Search name, host, platform…"
+        searchLabel="Search nodes"
+        empty="No machines yet — run `nook join` on a computer to add one."
         actions={
           <button className="btn primary small" onClick={() => setAdding(true)}>
             + add node
           </button>
         }
-      >
-        {(nodes ?? []).length === 0 ? (
-          <Empty>No machines yet — run `nook join` on a computer to add one.</Empty>
-        ) : (
-          <table className="nook-table">
-            <thead>
-              <tr>
-                <th>Node</th>
-                <th>Status</th>
-                <th>Platform</th>
-                <th>Agent</th>
-                <th>CPUs</th>
-                <th>GPUs</th>
-                <th>Capacity</th>
-                <th>Runtimes</th>
-                <th>Last seen</th>
-                <th />
-              </tr>
-            </thead>
-            <tbody>
-              {(nodes ?? []).map((n) => {
-                const caps = n.capabilities as Record<string, unknown>;
-                const status = nodeStatus[n.id] ?? n.status;
-                // `terminal` is offered on a node you own OR one shared with the
-                // team (MAIN-136); `share` stays owner-only. Fleet MANAGEMENT
-                // (update/remove) stays with the owner or a tenant admin, as it
-                // was before shared nodes existed: a member seeing a teammate's
-                // `shared` node (MAIN-135) gets the terminal but no manage
-                // buttons — read-only — while an admin keeps them (MAIN-132's
-                // admin-fleet-management). The server enforces all of this; this
-                // only hides what would 403.
-                const owned = n.owner_person_id === me?.person_id;
-                const canManage =
-                  owned ||
-                  me?.user?.role === "owner" ||
-                  me?.user?.role === "admin";
-                return (
-                  <tr key={n.id}>
-                    <td>
-                      <StatusDot status={status} />{" "}
-                      <Link to={`/nodes/${n.id}`} className="bright">
-                        {n.name}
-                      </Link>{" "}
-                      <span className="faint">{n.hostname}</span>
-                      {n.shared && (
-                        <>
-                          {" "}
-                          <Pill
-                            tone="accent"
-                            title="visible to the whole team and usable by them — anyone can start a session here"
-                          >
-                            shared
-                          </Pill>
-                        </>
-                      )}
-                      {/* The deployment's shared operator node (MAIN-125): a
-                          machine the stack ships with the loop toolchain, not a
-                          person's own. Surfaced so it is distinguishable from
-                          personal nodes at a glance. */}
-                      {(caps.shared_operator as boolean) && (
-                        <>
-                          {" "}
-                          <Pill
-                            tone="accent"
-                            title="the deployment's shared operator node — ships with the loop toolchain"
-                          >
-                            operator
-                          </Pill>
-                        </>
-                      )}
-                    </td>
-                    <td>
-                      <Pill tone={statusTone(status)}>{status}</Pill>
-                    </td>
-                    <td className="muted">{n.platform}</td>
-                    <td>
-                      <AgentVersion
-                        reported={caps.agent_version as string | null}
-                        expected={expected}
-                      />
-                    </td>
-                    <td className="muted">{(caps.cpus as number) ?? "—"}</td>
-                    <td className="muted">
-                      {((caps.gpus as { model: string }[]) ?? [])
-                        .map((g) => g.model)
-                        .join(", ") || "—"}
-                    </td>
-                    <td style={{ minWidth: 180 }}>
-                      <ResourceBars resources={nodeResources[n.id] ?? n.resources} />
-                    </td>
-                    <td>
-                      {((caps.runtimes as string[]) ?? []).map((r) => (
-                        <Pill key={r}>{r}</Pill>
-                      ))}
-                    </td>
-                    <td className="muted">
-                      {n.last_seen_at
-                        ? new Date(n.last_seen_at).toLocaleTimeString([], {
-                            hour12: false,
-                          })
-                        : "never"}
-                    </td>
-                    {/* The flex box goes INSIDE the cell. Setting display:flex
-                        on a <td> removes it from table layout entirely, so it
-                        stops sharing the row's column widths and the buttons
-                        drift out of line with every other row. */}
-                    <td style={{ textAlign: "right", whiteSpace: "nowrap" }}>
-                      <span
-                        style={{
-                          display: "inline-flex",
-                          gap: 6,
-                          justifyContent: "flex-end",
-                        }}
-                      >
-                      {status === "online" && (owned || n.shared) && (
-                        <button
-                          className="btn small"
-                          title={`open a shell on ${n.name}`}
-                          onClick={() => openTerminal(n.id)}
-                        >
-                          <SquareTerminal size={12} /> terminal
-                        </button>
-                      )}
-                      {/* Sharing is the owner's call and the server enforces it
-                          (MAIN-135); we only offer the toggle on rows you own. */}
-                      {owned && (
-                        <button
-                          className="btn small"
-                          title={
-                            n.shared
-                              ? `stop sharing ${n.name} with the team`
-                              : `let the team see ${n.name}`
-                          }
-                          onClick={async () => {
-                            const { error } = await api.POST(
-                              "/api/v1/nodes/{id}/shared",
-                              {
-                                params: { path: { id: n.id } },
-                                body: { shared: !n.shared },
-                              },
-                            );
-                            if (error) {
-                              await notify(
-                                "Couldn't change sharing",
-                                JSON.stringify(error),
-                              );
-                              return;
-                            }
-                            refetch();
-                          }}
-                        >
-                          {n.shared ? "unshare" : "share"}
-                        </button>
-                      )}
-                      {status === "online" && canManage && (
-                        <button
-                          className="btn small"
-                          title={
-                            (caps.agent_version as string)
-                              ? `agent ${caps.agent_version} — update and restart`
-                              : "update the agent and restart it"
-                          }
-                          onClick={async () => {
-                            const { error } = await api.POST(
-                              "/api/v1/nodes/{id}/update",
-                              { params: { path: { id: n.id } } },
-                            );
-                            // The node decides whether it can: unsupervised, it
-                            // refuses rather than taking itself offline. Say
-                            // what happened either way — silence after pressing
-                            // a button reads as nothing happening.
-                            await notify(
-                              error ? "Not updated" : "Updating",
-                              error
-                                ? `${n.name} could not be asked to update.`
-                                : `${n.name} is fetching the new agent. It will drop off for a moment and come back — sessions survive, because tmux outlives the agent.`,
-                            );
-                          }}
-                        >
-                          <ArrowUpCircle size={12} /> update
-                        </button>
-                      )}
-                      {canManage && (
-                        <button
-                          className="btn danger small"
-                          onClick={async () => {
-                            const ok = await askConfirm({
-                              title: `Remove node ${n.name}`,
-                              description:
-                                "It stops appearing in NookOS. Re-running `nook setup` on that machine rejoins it.",
-                              confirmLabel: "remove",
-                              danger: true,
-                            });
-                            if (ok) {
-                              await api.DELETE("/api/v1/nodes/{id}", {
-                                params: { path: { id: n.id } },
-                              });
-                              refetch();
-                            }
-                          }}
-                        >
-                          remove
-                        </button>
-                      )}
-                      </span>
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        )}
-      </Panel>
+      />
     </div>
   );
 }

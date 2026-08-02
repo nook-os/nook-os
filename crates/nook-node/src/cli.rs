@@ -2118,6 +2118,88 @@ pub async fn operator_role(email: &str, role: &str, revoke: bool) -> Result<()> 
 /// preference. It writes the same tenant-scoped setting the Settings UI does,
 /// and the control plane re-reads it every poll — so the change lands within a
 /// poll interval with no restart.
+/// The same switch for session reconciling (`sessions.reconcile.enabled`).
+///
+/// It is the twin of `operator_loops` and exists for the same reason: the
+/// setting is tenant-scoped and defaults OFF, so a workspace can declare a
+/// SessionSpec and converge never. Unlike loops, this one had NO way to change
+/// it — no CLI verb, no UI write — which made declarative sessions reachable
+/// only by hand-writing a PUT to /settings.
+///
+/// Deliberately a separate verb rather than a flag on `loops`: they gate
+/// different machinery (job dispatch vs session convergence) and a deployment
+/// commonly wants one without the other.
+pub async fn operator_reconcile(state: &str) -> Result<()> {
+    operator_switch(
+        state,
+        "sessions.reconcile.enabled",
+        "reconciling",
+        "  Declared workspaces start converging within a poll interval.",
+        "  Managed sessions are left alone; nothing is torn down.",
+    )
+    .await
+}
+
+/// The shared body of the two tenant switches, so their behaviour — the accepted
+/// words, the "off (default)" reading of an absent setting, the exit codes —
+/// cannot drift apart.
+async fn operator_switch(
+    state: &str,
+    key: &str,
+    label: &str,
+    on_note: &str,
+    off_note: &str,
+) -> Result<()> {
+    let client = Client::from_config()?;
+
+    let want = match state {
+        "on" | "enable" | "enabled" => Some(true),
+        "off" | "disable" | "disabled" => Some(false),
+        "status" | "" => None,
+        other => {
+            anyhow::bail!("unknown state {other:?} — expected on, off, or status");
+        }
+    };
+
+    if let Some(on) = want {
+        client
+            .put(
+                &format!("/api/v1/settings/{key}"),
+                serde_json::json!({ "scope": "tenant", "value": on }),
+            )
+            .await?;
+        println!(
+            "{label} {}",
+            if on {
+                crate::style::ok_c("enabled")
+            } else {
+                crate::style::dim("disabled")
+            }
+        );
+        println!("{}", if on { on_note } else { off_note });
+        return Ok(());
+    }
+
+    // An absent setting is the default — say "off (default)" rather than a bare
+    // "off", so nobody hunts for a switch they never flipped.
+    let settings = client.get("/api/v1/settings").await?;
+    let row = settings.as_array().and_then(|a| {
+        a.iter()
+            .find(|s| s["key"].as_str() == Some(key) && s["scope"].as_str() == Some("tenant"))
+    });
+    match row {
+        Some(r) if r["value"].as_bool() == Some(true) => {
+            println!("{label} {}", crate::style::ok_c("enabled"))
+        }
+        Some(_) => println!("{label} {}", crate::style::dim("disabled")),
+        None => println!(
+            "{label} {} — no setting stored yet",
+            crate::style::dim("disabled (default)")
+        ),
+    }
+    Ok(())
+}
+
 pub async fn operator_loops(state: &str) -> Result<()> {
     let client = Client::from_config()?;
 
@@ -2217,7 +2299,13 @@ pub async fn operator_bindings(json: bool) -> Result<()> {
         println!("{}", serde_json::to_string_pretty(&rows)?);
         return Ok(());
     }
-    let rows = rows.as_array().cloned().unwrap_or_default();
+    // The endpoint returns a page (`{rows, next_cursor}`), not a bare array —
+    // reading the body as an array printed "No role bindings." unconditionally.
+    let rows = rows
+        .get("rows")
+        .and_then(|r| r.as_array())
+        .cloned()
+        .unwrap_or_default();
     if rows.is_empty() {
         println!("No role bindings.");
         return Ok(());

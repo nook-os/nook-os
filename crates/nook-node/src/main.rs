@@ -572,6 +572,9 @@ async fn main() -> Result<()> {
             cli::operator_role(&email, &role, true).await
         }
         Command::Operator(OperatorCommand::Loops { state }) => cli::operator_loops(&state).await,
+        Command::Operator(OperatorCommand::Reconcile { state }) => {
+            cli::operator_reconcile(&state).await
+        }
         Command::Operator(OperatorCommand::Who) => cli::operator_who().await,
         Command::Operator(OperatorCommand::Bindings { json }) => cli::operator_bindings(json).await,
         Command::Operator(OperatorCommand::Org(OrgCommand::List { json })) => {
@@ -910,6 +913,15 @@ enum OperatorCommand {
     /// Turn the loop machinery on or off for this tenant, or ask its state.
     /// Default is OFF: a fresh deployment runs no loops until asked.
     Loops {
+        /// `on` | `off` | `status` (omit for status).
+        #[arg(default_value = "status")]
+        state: String,
+    },
+    /// Turn session RECONCILING on or off for this tenant, or ask its state.
+    /// Default is OFF, like loops — a fresh deployment converges nothing until
+    /// asked. Until this verb existed the switch had no CLI and no UI write at
+    /// all, so declarative sessions could only be enabled by raw HTTP.
+    Reconcile {
         /// `on` | `off` | `status` (omit for status).
         #[arg(default_value = "status")]
         state: String,

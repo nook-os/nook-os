@@ -2,8 +2,24 @@
 # Recreates the entire NookOS dev environment from scratch.
 # `docker compose down -v` destroys everything; this script brings it all back.
 #
-#   ./run.sh                  full recreate
+#   ./run.sh                  full recreate, reusing the images already built
+#   ./run.sh --build          the same, but rebuild the images first
 #   ./run.sh --claude-login   only (re-)run the fleet's Claude device login
+#
+# IMAGES ARE NOT REBUILT BY DEFAULT, because for the Rust services there is
+# nothing in them to rebuild: `dev-rust.Dockerfile` bakes a toolchain and no
+# source, the repo is bind-mounted at /app, and cargo-watch compiles inside the
+# running container. `--build` on every run re-sent the whole build context to
+# re-derive an image that had not changed.
+#
+# THE ONE EXCEPTION IS THE OPERATOR NODE, and it is the reason `--build` still
+# exists: `operator-node.Dockerfile` COPYs `crates/` and bakes a release binary,
+# with no mount and no cargo-watch. It therefore keeps running whatever `nook`
+# it was built with until somebody rebuilds it — and a stale one skews against
+# the control plane's protocol and hangs loop jobs at "waiting for the agent",
+# which looks like a hung job rather than an old image. After changing anything
+# under `crates/`, run `./run.sh --build` (or `docker compose build
+# operator-node`) before trusting a loop run.
 #
 # A clean run lands in a state the loop can actually be tested in (MAIN-341):
 # a real bare git repo on the operator node, a seeded workspace pointing at it,
@@ -112,6 +128,15 @@ claude_login_gate() {
 # `--claude-login` is the on-demand switch: it re-runs the flow against the same
 # mount whether or not a session is already there, so swapping accounts is
 # `rm -rf .nook-secrets/claude` (or `claude auth logout`) then this.
+# Rebuild images only when asked. See the header for why the default is off and
+# when it is wrong.
+BUILD=""
+for arg in "$@"; do
+  case "$arg" in
+    --build|--rebuild) BUILD="--build" ;;
+  esac
+done
+
 if [ "${1:-}" = "--claude-login" ]; then
   mkdir -p "$CLAUDE_DIR"
   if ! docker compose ps --status running --services 2>/dev/null | grep -qx "$CLAUDE_SVC"; then
@@ -274,8 +299,19 @@ if [ -z "$dev_join_token" ]; then
   echo "  run without it: docker compose up -d --scale operator-node=0" >&2
 fi
 
-say "Building and starting the stack..."
-docker compose up --build -d
+if [ -n "$BUILD" ]; then
+  say "Rebuilding images and starting the stack..."
+else
+  say "Starting the stack (reusing existing images — ./run.sh --build to rebuild)..."
+  # Only worth saying when there IS an operator-node image that could be stale;
+  # on a first run compose builds it here anyway and the warning would be a lie.
+  if docker image inspect "$(docker compose config --images 2>/dev/null | grep -i operator | head -1)" \
+      >/dev/null 2>&1; then
+    warn "operator-node runs a BAKED binary — rebuild it after changing crates/"
+  fi
+fi
+# shellcheck disable=SC2086  # $BUILD is a single flag or empty, by construction.
+docker compose up $BUILD -d
 
 say "Waiting for control plane..."
 for _ in $(seq 1 120); do

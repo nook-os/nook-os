@@ -13,6 +13,7 @@ export type TenantMembership = Schemas["TenantMembership"];
 export type Capabilities = Schemas["Capabilities"];
 export type NodeInfo = Schemas["Node"];
 export type Workspace = Schemas["Workspace"];
+export type WorkspaceDetail = Schemas["WorkspaceDetail"];
 export type WorkspaceLocation = Schemas["WorkspaceLocation"];
 export type Session = Schemas["Session"];
 export type Overview = Schemas["Overview"];
@@ -59,7 +60,9 @@ export type UpdateUserNoteFolder = Schemas["UpdateUserNoteFolder"];
 export type Theme = Schemas["Theme"];
 export type DispatchSuggestion = Schemas["DispatchSuggestion"];
 export type OperatorAuditEntry = Schemas["OperatorAuditEntry"];
-export type OperatorAuditPage = Schemas["OperatorAuditPage"];
+/** One page of any paginated list — the pagination contract's wire shape.
+ *  `next_cursor` is opaque: pass it back verbatim as `after`, never parse it. */
+export type Page<T> = { rows: T[]; next_cursor?: string | null };
 export type OperatorTenant = Schemas["OperatorTenant"];
 export type OperatorNode = Schemas["OperatorNode"];
 export type BindingRow = Schemas["BindingRow"];

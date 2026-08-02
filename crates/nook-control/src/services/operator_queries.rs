@@ -6,102 +6,69 @@
 //! `services::identity` — the shared cursor/search behaviour is the thing under
 //! test, so they stayed together rather than being split in half.
 //!
-//! What is left here after MAIN-258 is the one rule these four lists share and
-//! the repository does not: how a page decides whether there is another one.
-//! The queries themselves live in `repo::admin`.
+//! Since the QOL pagination sweep the shared behaviour itself lives in
+//! `nook_db::paging`; what is left here is each list's step from the wire
+//! (`PageQuery`) to validated `PageArgs` under its own sort allowlist — the
+//! one place an unknown sort or a stale cursor becomes the caller's 400.
 
+use nook_db::paging::PageError;
 use nook_types::*;
 
-use crate::error::ApiResult;
-use crate::repo::admin::{Keyset, OperatorRepository};
-use crate::services::core::search_filter;
+use crate::error::{ApiError, ApiResult};
+use crate::repo::admin::{
+    OperatorRepository, AUDIT_SORTS, BINDING_SORTS, NODE_SORTS, TENANT_SORTS,
+};
 
-/// The console's page size, clamped the same way for every list.
-fn keyset(after: Option<uuid::Uuid>, limit: i64) -> Keyset {
-    Keyset {
-        after,
-        limit: limit.clamp(1, 200),
-    }
+/// The contract's argument errors are the caller's, never a 500.
+pub fn bad_page(e: PageError) -> ApiError {
+    ApiError::BadRequest(e.to_string())
 }
 
-/// The cursor is the last id of a FULL page: a page short of `limit` means
-/// there is no more, so `next_cursor` is null. A caller that pages one past the
-/// end therefore gets an empty page and a null cursor — a clean end-of-list,
-/// not an error.
-fn next_cursor<T, F, Id>(rows: &[T], limit: i64, id_of: F) -> Option<Id>
-where
-    F: Fn(&T) -> Id,
-{
-    (rows.len() as i64 == limit)
-        .then(|| rows.last().map(id_of))
-        .flatten()
-}
-
-/// The operator audit trail, paged by keyset cursor and filtered by an optional
-/// server-side search (MAIN-43).
+/// The operator audit trail, paged + searched + sorted per the pagination
+/// contract (MAIN-43, reshaped by the QOL sweep).
 ///
-/// Search (`q`) is case-insensitive and matches across the event kind, the
-/// tenant slug, and the actor (type or id) — the whole log, not just the page
-/// in hand, because the `WHERE` runs before `LIMIT`. Pagination is keyset on the
-/// row's UUID v7 `id`: `after` is the last id the caller has seen, and rows are
-/// walked `id DESC`, so each page is strictly older with no offset to drift.
-///
-/// Kinds, actors and times only — never payloads, which can carry a branch name
-/// or task title this surface must not hand over (the same rule `audit_log`
-/// enforced before it grew a cursor).
+/// Search (`q`) is case-insensitive across the event kind, the tenant slug and
+/// the actor; sort keys are `time`/`kind`/`tenant`. Kinds, actors and times
+/// only — never payloads, which can carry a branch name or task title this
+/// surface must not hand over (the same rule `audit_log` enforced before it
+/// grew a cursor).
 pub async fn operator_audit_page(
     repo: &dyn OperatorRepository,
-    q: Option<String>,
-    after: Option<EventId>,
-    limit: i64,
-) -> ApiResult<OperatorAuditPage> {
-    let page = keyset(after.map(|e| e.0), limit);
-    // An empty or whitespace-only search is "no filter", not "match the empty
-    // string" — the search box clears to that and must show the whole log.
-    let rows = repo.audit_page(search_filter(q), page).await?;
-    let next_cursor = next_cursor(&rows, page.limit, |r| r.id);
-    Ok(OperatorAuditPage { rows, next_cursor })
+    wire: &PageQuery,
+) -> ApiResult<Page<OperatorAuditEntry>> {
+    let args = wire.args(AUDIT_SORTS).map_err(bad_page)?;
+    Ok(repo.audit_page(&args).await?.into())
 }
 
-/// Operator tenants, keyset-paginated + searched (slug/name), mirroring
-/// `operator_audit_page`. Rows come back WITHOUT the policy-gated fields
+/// Operator tenants (search: slug/name; sort: slug/members/nodes/sessions/
+/// created). Rows come back WITHOUT the policy-gated fields
 /// (`repositories`/`task_titles`); the handler enriches them per opted-in org.
 pub async fn operator_tenants_page(
     repo: &dyn OperatorRepository,
-    q: Option<String>,
-    after: Option<TenantId>,
-    limit: i64,
-) -> ApiResult<OperatorTenantPage> {
-    let page = keyset(after.map(|t| t.0), limit);
-    let rows = repo.tenants_page(search_filter(q), page).await?;
-    let next_cursor = next_cursor(&rows, page.limit, |r| r.id);
-    Ok(OperatorTenantPage { rows, next_cursor })
+    wire: &PageQuery,
+) -> ApiResult<Page<OperatorTenant>> {
+    let args = wire.args(TENANT_SORTS).map_err(bad_page)?;
+    Ok(repo.tenants_page(&args).await?.into())
 }
 
-/// Operator nodes, keyset-paginated + searched (name/tenant slug/platform/status).
+/// Operator nodes (search: name/tenant slug/platform/status; sort:
+/// name/status/platform/sessions/last_seen/created).
 pub async fn operator_nodes_page(
     repo: &dyn OperatorRepository,
-    q: Option<String>,
-    after: Option<NodeId>,
-    limit: i64,
-) -> ApiResult<OperatorNodePage> {
-    let page = keyset(after.map(|n| n.0), limit);
-    let rows = repo.nodes_page(search_filter(q), page).await?;
-    let next_cursor = next_cursor(&rows, page.limit, |r| r.id);
-    Ok(OperatorNodePage { rows, next_cursor })
+    wire: &PageQuery,
+) -> ApiResult<Page<OperatorNode>> {
+    let args = wire.args(NODE_SORTS).map_err(bad_page)?;
+    Ok(repo.nodes_page(&args).await?.into())
 }
 
-/// Operator role bindings, keyset-paginated + searched (email/role/scope).
+/// Operator role bindings (search: email/role/scope; sort: email/role/scope/
+/// created).
 pub async fn operator_bindings_page(
     repo: &dyn OperatorRepository,
-    q: Option<String>,
-    after: Option<uuid::Uuid>,
-    limit: i64,
-) -> ApiResult<OperatorBindingPage> {
-    let page = keyset(after, limit);
-    let rows = repo.bindings_page(search_filter(q), page).await?;
-    let next_cursor = next_cursor(&rows, page.limit, |r| r.id);
-    Ok(OperatorBindingPage { rows, next_cursor })
+    wire: &PageQuery,
+) -> ApiResult<Page<BindingRow>> {
+    let args = wire.args(BINDING_SORTS).map_err(bad_page)?;
+    Ok(repo.bindings_page(&args).await?.into())
 }
 
 #[cfg(test)]
@@ -116,9 +83,21 @@ mod db_tests {
     fn operator_repo(db: &DbPool) -> crate::repo::admin::DbOperatorRepository {
         crate::repo::admin::DbOperatorRepository::new(db.clone())
     }
+    /// The old call shape as a shim: these tests reason in (q, after, limit),
+    /// and the wire's PageQuery is noise at this layer.
+    fn pq(q: Option<String>, after: Option<String>, limit: i64) -> PageQuery {
+        PageQuery {
+            q,
+            after,
+            limit: Some(limit),
+            ..Default::default()
+        }
+    }
+
     use super::{
         operator_audit_page, operator_bindings_page, operator_nodes_page, operator_tenants_page,
     };
+    use nook_types::PageQuery;
     // Lives in the identity aggregate since MAIN-245; the keyset behaviour under
     // test here is shared with the operator pages, so the tests stayed together.
     use crate::services::identity::tenant_members_page;
@@ -268,14 +247,14 @@ mod db_tests {
             .await;
         }
 
-        let p1 = tenant_members_page(&repo_of(&db), t, None, None, 2)
+        let p1 = tenant_members_page(&repo_of(&db), t, &pq(None, None, 2))
             .await
             .unwrap();
         assert!(p1.rows.len() <= 2, "page is bounded");
         assert!(p1.next_cursor.is_some(), "a full page carries a cursor");
 
         // Search by (distinctive) email/name reaches the needle on a later page.
-        let hit = tenant_members_page(&repo_of(&db), t, Some("NEEDLE".into()), None, 2)
+        let hit = tenant_members_page(&repo_of(&db), t, &pq(Some("NEEDLE".into()), None, 2))
             .await
             .unwrap();
         assert!(
@@ -292,7 +271,7 @@ mod db_tests {
 
         // No matches → empty.
         assert!(
-            tenant_members_page(&repo_of(&db), t, Some("zzno".into()), None, 50)
+            tenant_members_page(&repo_of(&db), t, &pq(Some("zzno".into()), None, 50))
                 .await
                 .unwrap()
                 .rows
@@ -321,7 +300,7 @@ mod db_tests {
         let newest_first: Vec<EventId> = ids.iter().rev().copied().collect();
 
         // Page 1: the two newest, with a cursor.
-        let p1 = operator_audit_page(&operator_repo(&db), None, None, 2)
+        let p1 = operator_audit_page(&operator_repo(&db), &pq(None, None, 2))
             .await
             .unwrap();
         // Filter to THIS tenant's rows so a shared dev DB's other events don't
@@ -350,7 +329,7 @@ mod db_tests {
             let after = cursor.take().unwrap();
             guard += 1;
             assert!(guard < 20, "cursor did not reach our rows");
-            let page = operator_audit_page(&operator_repo(&db), None, Some(after), 2)
+            let page = operator_audit_page(&operator_repo(&db), &pq(None, Some(after), 2))
                 .await
                 .unwrap();
             for r in &page.rows {
@@ -398,7 +377,7 @@ mod db_tests {
 
         // Case-insensitive substring on the kind, small page — the match is not
         // on page one, yet search returns it.
-        let hit = operator_audit_page(&operator_repo(&db), Some("revoked".into()), None, 2)
+        let hit = operator_audit_page(&operator_repo(&db), &pq(Some("revoked".into()), None, 2))
             .await
             .unwrap();
         assert!(
@@ -434,7 +413,7 @@ mod db_tests {
 
         // Search by that unique token: a list of exactly one row, so the page is
         // short and the cursor is null.
-        let page = operator_audit_page(&operator_repo(&db), Some(kind.clone()), None, 50)
+        let page = operator_audit_page(&operator_repo(&db), &pq(Some(kind.clone()), None, 50))
             .await
             .unwrap();
         assert!(
@@ -449,9 +428,16 @@ mod db_tests {
         assert!(page.next_cursor.is_none(), "a short page ends the list");
 
         // Paging strictly past our row returns no error (empty of our id).
-        let past = operator_audit_page(&operator_repo(&db), None, Some(only), 50)
-            .await
-            .unwrap();
+        let past = operator_audit_page(
+            &operator_repo(&db),
+            &pq(
+                None,
+                Some(nook_db::paging::Cursor::Keyset(only.0).encode()),
+                50,
+            ),
+        )
+        .await
+        .unwrap();
         assert!(
             !past.rows.iter().any(|r| r.id == only),
             "the cursor excludes the row it points at"
@@ -476,14 +462,14 @@ mod db_tests {
         }
 
         // Page 1 is bounded and carries a cursor.
-        let p1 = operator_tenants_page(&operator_repo(&db), None, None, 2)
+        let p1 = operator_tenants_page(&operator_repo(&db), &pq(None, None, 2))
             .await
             .unwrap();
         assert!(p1.rows.len() <= 2, "page is bounded");
         assert!(p1.next_cursor.is_some(), "a full page carries a cursor");
 
         // Search reaches the needle even though it is not on page 1.
-        let hit = operator_tenants_page(&operator_repo(&db), Some("ZZNEEDLE".into()), None, 2)
+        let hit = operator_tenants_page(&operator_repo(&db), &pq(Some("ZZNEEDLE".into()), None, 2))
             .await
             .unwrap();
         assert!(
@@ -513,18 +499,19 @@ mod db_tests {
             node(&db, t, &format!("worker{i}"), "offline").await;
         }
 
-        let p1 = operator_nodes_page(&operator_repo(&db), None, None, 2)
+        let p1 = operator_nodes_page(&operator_repo(&db), &pq(None, None, 2))
             .await
             .unwrap();
         assert!(p1.rows.len() <= 2 && p1.next_cursor.is_some());
 
         // Search by (distinctive) name reaches the needle on a later page.
-        let by_name = operator_nodes_page(&operator_repo(&db), Some("ODDBALL".into()), None, 2)
-            .await
-            .unwrap();
+        let by_name =
+            operator_nodes_page(&operator_repo(&db), &pq(Some("ODDBALL".into()), None, 2))
+                .await
+                .unwrap();
         assert!(by_name.rows.iter().any(|r| r.id == NodeId(needle)));
         // Search by status matches the whole set of that status.
-        let online = operator_nodes_page(&operator_repo(&db), Some("online".into()), None, 50)
+        let online = operator_nodes_page(&operator_repo(&db), &pq(Some("online".into()), None, 50))
             .await
             .unwrap();
         assert!(online.rows.iter().all(|r| r.status == "online"));
@@ -548,19 +535,20 @@ mod db_tests {
             binding(&db, u, "org_admin").await;
         }
 
-        let p1 = operator_bindings_page(&operator_repo(&db), None, None, 2)
+        let p1 = operator_bindings_page(&operator_repo(&db), &pq(None, None, 2))
             .await
             .unwrap();
         assert!(p1.rows.len() <= 2 && p1.next_cursor.is_some());
 
         // Search by email reaches the needle beyond page 1.
-        let by_email = operator_bindings_page(&operator_repo(&db), Some("NEEDLE@".into()), None, 2)
-            .await
-            .unwrap();
+        let by_email =
+            operator_bindings_page(&operator_repo(&db), &pq(Some("NEEDLE@".into()), None, 2))
+                .await
+                .unwrap();
         assert!(by_email.rows.iter().any(|r| r.id == needle));
         // Search by role narrows to that role.
         let operators =
-            operator_bindings_page(&operator_repo(&db), Some("operator".into()), None, 50)
+            operator_bindings_page(&operator_repo(&db), &pq(Some("operator".into()), None, 50))
                 .await
                 .unwrap();
         assert!(operators.rows.iter().all(|r| r.role_key == "operator"));

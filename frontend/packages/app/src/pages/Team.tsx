@@ -8,13 +8,8 @@
 // the management controls show is decided by the active membership's role
 // (`me.tenants` — the `tenant_members` source), not `me.user.role`.
 import React from "react";
-import {
-  useInfiniteQuery,
-  useMutation,
-  useQuery,
-  useQueryClient,
-} from "@tanstack/react-query";
-import { Boxes, Check, FolderGit2, Loader, Mail, Send, Trash2 } from "lucide-react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { Boxes, Check, FolderGit2, Loader, LogOut, Mail, Send, Trash2 } from "lucide-react";
 import {
   api,
   type Invite,
@@ -27,10 +22,13 @@ import {
   Empty,
   Panel,
   Pill,
+  RowAction,
+  RowActions,
   Select,
   SearchInput,
   type DataColumn,
 } from "@nookos/ui";
+import { usePagedList } from "../paging";
 import { askConfirm, CopyRow, notify } from "../dialogs";
 import { useToasts } from "../Notifications";
 import { useWorkspaceContext } from "../context";
@@ -90,25 +88,19 @@ function MembersRoster() {
   const myId = me?.user?.id;
   const canManage = myRole === "owner" || myRole === "admin";
 
-  const [search, setSearch] = React.useState("");
-  const membersQuery = useInfiniteQuery({
-    queryKey: ["tenant-members", tenantId, search],
-    initialPageParam: undefined as string | undefined,
-    queryFn: async ({ pageParam }) =>
+  const list = usePagedList<TenantMemberItem>({
+    key: ["tenant-members", tenantId],
+    fetch: async (params) =>
       tenantId
         ? (
             await api.GET("/api/v1/tenants/{id}/members", {
-              params: {
-                path: { id: tenantId },
-                query: { q: search || undefined, after: pageParam || undefined, limit: 50 },
-              },
+              params: { path: { id: tenantId }, query: params },
             })
-          ).data ?? { rows: [], next_cursor: null }
+          ).data
         : { rows: [], next_cursor: null },
-    getNextPageParam: (last) => last.next_cursor ?? undefined,
     enabled: !!tenantId,
   });
-  const members = membersQuery.data?.pages.flatMap((p) => p.rows) ?? [];
+  const members = list.rows;
 
   const bust = () =>
     queryClient.invalidateQueries({ queryKey: ["tenant-members", tenantId] });
@@ -165,6 +157,7 @@ function MembersRoster() {
       key: "name",
       header: "Name",
       className: "bright",
+      sortKey: "name",
       cell: (m) => (
         <>
           {m.display_name}
@@ -172,10 +165,11 @@ function MembersRoster() {
         </>
       ),
     },
-    { key: "email", header: "Email", className: "mono muted", cell: (m) => m.email },
+    { key: "email", header: "Email", className: "mono muted", cell: (m) => m.email, sortKey: "email" },
     {
       key: "role",
       header: "Role",
+      sortKey: "role",
       cell: (m) =>
         canManage && m.principal_id !== myId ? (
           <select
@@ -196,16 +190,18 @@ function MembersRoster() {
       header: "",
       cell: (m) =>
         m.principal_id === myId ? (
-          <button className="btn danger small" onClick={leave}>
-            Leave
-          </button>
+          <RowActions>
+            <RowAction icon={LogOut} danger title="leave this tenant" onClick={leave} />
+          </RowActions>
         ) : canManage ? (
-          <button
-            className="btn danger small"
-            onClick={() => remove(m.principal_id, m.display_name)}
-          >
-            Remove
-          </button>
+          <RowActions>
+            <RowAction
+              icon={Trash2}
+              danger
+              title={`remove ${m.display_name} from this tenant`}
+              onClick={() => remove(m.principal_id, m.display_name)}
+            />
+          </RowActions>
         ) : null,
     },
   ];
@@ -214,7 +210,7 @@ function MembersRoster() {
     <>
       <div style={{ padding: "0 0 8px" }}>
         <SearchInput
-          onSearch={setSearch}
+          onSearch={list.setSearch}
           placeholder="Search members…"
           ariaLabel="Search members"
         />
@@ -223,13 +219,15 @@ function MembersRoster() {
         columns={columns}
         rows={members}
         rowKey={(m) => m.principal_id}
-        loading={membersQuery.isLoading}
-        filtered={search.length > 0}
+        loading={list.loading}
+        filtered={list.filtered}
         empty="No members."
         noResults="No matches."
-        hasMore={membersQuery.hasNextPage}
-        onLoadMore={() => membersQuery.fetchNextPage()}
-        loadingMore={membersQuery.isFetchingNextPage}
+        sort={list.sort}
+        onSort={list.toggleSort}
+        hasMore={list.hasMore}
+        onLoadMore={list.loadMore}
+        loadingMore={list.loadingMore}
       />
     </>
   );
@@ -467,31 +465,24 @@ function TeamInvites() {
                       >
                         {exp.text}
                       </td>
-                      <td style={{ textAlign: "right", whiteSpace: "nowrap" }}>
-                        <button
-                          className="btn small icon"
-                          title="resend the invite email"
-                          disabled={resending || revoking}
-                          onClick={() => resendMutation.mutate(inv)}
-                        >
-                          {resending ? (
-                            <Loader size={12} className="spin" />
-                          ) : (
-                            <Send size={12} />
-                          )}
-                        </button>
-                        <button
-                          className="btn small danger icon"
-                          title="revoke"
-                          disabled={resending || revoking}
-                          onClick={() => askRevoke(inv)}
-                        >
-                          {revoking ? (
-                            <Loader size={12} className="spin" />
-                          ) : (
-                            <Trash2 size={12} />
-                          )}
-                        </button>
+                      <td>
+                        <RowActions>
+                          <RowAction
+                            icon={Send}
+                            title="resend the invite email"
+                            busy={resending}
+                            disabled={revoking}
+                            onClick={() => resendMutation.mutate(inv)}
+                          />
+                          <RowAction
+                            icon={Trash2}
+                            danger
+                            title="revoke this invite"
+                            busy={revoking}
+                            disabled={resending}
+                            onClick={() => askRevoke(inv)}
+                          />
+                        </RowActions>
                       </td>
                     </tr>
                     {link && (

@@ -47,20 +47,22 @@ const SECTIONS = [
   { to: "/sessions", label: "Sessions", icon: SquareTerminal },
   { to: "/board", label: "Board", icon: KanbanSquare },
   { to: "/chat", label: "Chat", icon: MessageSquare },
-  { to: "/activity", label: "Activity", icon: Activity },
   { to: "/nodes", label: "Nodes", icon: Server },
   // Person-global, not workspace-scoped: your private notebook follows you
   // across every org you belong to (MAIN-101).
   { to: "/notebook", label: "Notes", icon: NotebookText },
 ];
 
-/// Shown only to somebody holding an operator binding.
+/// The management surface — the Activity table lives here as a section now,
+/// alongside the operator's fleet views. Shown to a tenant admin/owner or an
+/// operator. (Workspaces went back to the rail after a day here: they are what
+/// the app is ABOUT, and hiding the product inside Admin was the wrong read.)
 ///
 /// Absent rather than disabled: a greyed-out door still tells you there is a
-/// room, and on this surface the room is other people's fleets.
-const OPERATOR_SECTION = {
-  to: "/operator",
-  label: "Operator",
+/// room, and for the operator half the room is other people's fleets.
+const ADMIN_SECTION = {
+  to: "/admin",
+  label: "Admin",
   icon: ShieldCheck,
   end: false,
 };
@@ -90,7 +92,12 @@ function ContextTabs() {
       active: location.pathname.startsWith("/sessions"),
     },
     { to: "/board", label: "Board", icon: KanbanSquare, active: location.pathname === "/board" },
-    { to: "/activity", label: "Activity", icon: Activity, active: location.pathname === "/activity" },
+    {
+      to: "/admin?section=activity",
+      label: "Activity",
+      icon: Activity,
+      active: location.pathname === "/admin" && location.search.includes("section=activity"),
+    },
   ];
   return (
     <>
@@ -283,10 +290,10 @@ export function Shell({ me }: { me: MeResponse }) {
     window.location.href = "/";
   };
 
-  // Absent unless held — see OPERATOR_SECTION.
-  const sections = me.capability?.operator
-    ? [...SECTIONS, OPERATOR_SECTION]
-    : SECTIONS;
+  // Absent unless held — see ADMIN_SECTION.
+  const isAdmin =
+    !!me.capability?.operator || me.user.role === "owner" || me.user.role === "admin";
+  const sections = isAdmin ? [...SECTIONS, ADMIN_SECTION] : SECTIONS;
 
   return (
     <div className="nook-app">
@@ -307,6 +314,10 @@ export function Shell({ me }: { me: MeResponse }) {
           <Plus size={14} style={{ verticalAlign: "-2px" }} /> New Workspace
         </button>
         <ControlPlanePill />
+        {/* Team first, then workspace: a workspace belongs to a team, so the
+            wider scope reads to the left of the narrower one — and the control
+            people reach for most often is nearest the brand. */}
+        <TenantSwitcher me={me} />
         <WorkspaceSwitcher />
         <nav className="nook-tabs">
           <ContextTabs />
@@ -416,8 +427,6 @@ export function Shell({ me }: { me: MeResponse }) {
         </span>
         <span className="sep">│</span>
         <span>{activeSessions.length} active sessions</span>
-        <span className="sep">│</span>
-        <TenantSwitcher me={me} />
         <span style={{ flex: 1 }} />
         {/* The control plane's real version, not a literal. This read
             "NookOS 0.1.0" from a hardcoded string for every release since

@@ -1,5 +1,6 @@
 import React from "react";
 import { OrgVisibility } from "../OrgVisibility";
+import { SectionedPage, type PageSection } from "../SectionedPage";
 import { NotificationChannels } from "../NotificationChannels";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
@@ -15,11 +16,13 @@ import {
   Markdown,
   Panel,
   Pill,
+  RowAction,
+  RowActions,
   SearchInput,
   type DataColumn,
   type ThemeTokens,
 } from "@nookos/ui";
-import { Eye, KeyRound, Pencil, Plus, Trash2 } from "lucide-react";
+import { Eye, KeyRound, Palette, Pencil, Plus, Trash2 } from "lucide-react";
 import { requireAppPassword, useAppPassword, whenSet } from "../apppassword";
 import { enrollPasskey, passkeysSupported } from "../passkey";
 import { askConfirm, askText, notify } from "../dialogs";
@@ -147,9 +150,9 @@ function AccessTokenSettings() {
       key: "actions",
       header: "",
       cell: (t) => (
-        <button className="btn small danger" onClick={() => revoke(t)}>
-          revoke
-        </button>
+        <RowActions>
+          <RowAction icon={Trash2} danger title="revoke this token" onClick={() => revoke(t)} />
+        </RowActions>
       ),
     },
   ];
@@ -296,9 +299,14 @@ function PasskeySettings() {
       key: "actions",
       header: "",
       cell: (p) => (
-        <button className="btn small icon" title="remove" onClick={() => remove(p.id, p.label)}>
-          <Trash2 size={12} />
-        </button>
+        <RowActions>
+          <RowAction
+            icon={Trash2}
+            danger
+            title="remove this passkey"
+            onClick={() => remove(p.id, p.label)}
+          />
+        </RowActions>
       ),
     },
   ];
@@ -686,7 +694,9 @@ function TaughtSkillsSettings() {
   );
 }
 
-export function SettingsPage() {
+/** Theme picking, in its own section component so the queries only run when
+ *  somebody is actually looking at appearance. */
+function AppearanceSettings() {
   const queryClient = useQueryClient();
   const { data: themes } = useQuery({
     queryKey: ["themes"],
@@ -696,26 +706,9 @@ export function SettingsPage() {
     queryKey: ["settings"],
     queryFn: async () => (await api.GET("/api/v1/settings")).data ?? [],
   });
-
   const activeTheme = String(
     (settings ?? []).find((s) => s.key === "theme")?.value ?? DEFAULT_THEME,
   );
-
-  // The loops master switch (MAIN-239). Tenant-scoped and default OFF, so an
-  // absent setting reads as off — which is also what a fresh deployment has.
-  const loopsOn =
-    (settings ?? []).find(
-      (s) => s.key === "loops.enabled" && s.scope === "tenant",
-    )?.value === true;
-
-  const setLoops = async (on: boolean) => {
-    await api.PUT("/api/v1/settings/{key}", {
-      params: { path: { key: "loops.enabled" } },
-      body: { value: on, scope: "tenant" },
-    });
-    queryClient.invalidateQueries({ queryKey: ["settings"] });
-  };
-
   const pickTheme = async (slug: string, tokens: unknown) => {
     applyTokens(tokens as ThemeTokens);
     await api.PUT("/api/v1/settings/{key}", {
@@ -726,107 +719,277 @@ export function SettingsPage() {
   };
 
   return (
-    <div className="nook-grid" style={{ gridTemplateColumns: "1fr 1fr" }}>
-      <Panel title="Theme">
-        {(themes ?? []).length === 0 ? (
-          <Empty>No themes installed.</Empty>
-        ) : (
-          <table className="nook-table">
-            <tbody>
-              {(themes ?? []).map((t) => (
-                <tr key={t.id}>
-                  <td className="bright">{t.name}</td>
-                  <td className="mono muted">{t.slug}</td>
-                  <td>{t.tenant_id === null && <Pill>built-in</Pill>}</td>
-                  <td>
-                    {activeTheme === t.slug ? (
+    <Panel title="Theme">
+      {(themes ?? []).length === 0 ? (
+        <Empty>No themes installed.</Empty>
+      ) : (
+        <table className="nook-table">
+          <tbody>
+            {(themes ?? []).map((t) => (
+              <tr key={t.id}>
+                <td className="bright">{t.name}</td>
+                <td className="mono muted">{t.slug}</td>
+                <td>{t.tenant_id === null && <Pill>built-in</Pill>}</td>
+                <td>
+                  {activeTheme === t.slug ? (
+                    <RowActions>
                       <Pill tone="ok">active</Pill>
-                    ) : (
-                      <button
-                        className="btn small"
+                    </RowActions>
+                  ) : (
+                    <RowActions>
+                      <RowAction
+                        icon={Palette}
+                        label="use"
+                        title={`switch to ${t.name}`}
                         onClick={() => pickTheme(t.slug, t.tokens)}
-                      >
-                        use
-                      </button>
-                    )}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
-      </Panel>
-
-      {/* MAIN-239: the one switch for the loop machinery. Deliberately says
-          what OFF means, because the confusing failure is a promoted ticket
-          that never moves and no visible reason why. */}
-      <Panel title="Loops">
-        <div className="loops-switch" data-testid="loops-switch">
-          <div>
-            <div className="bright">
-              Loop machinery is{" "}
-              {loopsOn ? (
-                <Pill tone="ok">on</Pill>
-              ) : (
-                <Pill>off</Pill>
-              )}
-            </div>
-            <div className="faint small">
-              {loopsOn
-                ? "Queued spec and decompose jobs are dispatched to eligible executors."
-                : "Off by default. Jobs you start are queued and wait here — nothing is lost, and nothing runs until you turn this on."}
-            </div>
-          </div>
-          <button
-            className={`btn small${loopsOn ? "" : " primary"}`}
-            onClick={() => void setLoops(!loopsOn)}
-            aria-pressed={loopsOn}
-          >
-            {loopsOn ? "Turn off" : "Turn on"}
-          </button>
-        </div>
-        <div className="faint small">
-          Also: <span className="mono">nook operator loops on|off|status</span>.
-          Takes effect within a poll interval; no restart.
-        </div>
-      </Panel>
-
-      <Panel title="Email">
-        <EmailVerification />
-      </Panel>
-
-      <Panel title="App password">
-        <AppPasswordSettings />
-      </Panel>
-
-      <Panel title="Access tokens">
-        <AccessTokenSettings />
-      </Panel>
-
-      <Panel title="Notifications">
-        <NotificationSettings />
-      </Panel>
-
-      <TaughtSkillsSettings />
-
-      <OrgVisibility />
-
-      <NotificationChannels />
-
-      <Panel title="Instance">
-        <div style={{ padding: 10 }} className="small">
-          <p className="muted">
-            API docs: <a href="/docs" target="_blank" rel="noreferrer">/docs</a>
-          </p>
-          <p className="muted" style={{ marginTop: 8 }}>
-            MCP endpoint: <span className="mono">/mcp</span> (bearer token from
-            your instance config)
-          </p>
-          <p className="muted" style={{ marginTop: 8 }}>
-            Add a machine: Nodes tab → “+ add node”.
-          </p>
-        </div>
-      </Panel>
-    </div>
+                      />
+                    </RowActions>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </Panel>
   );
+}
+
+/** One tenant-wide on/off switch, rendered the way the loops switch always
+ *  was. Extracted because there are two of them now and their copy is the only
+ *  difference — the shape drifting apart would make one look less official
+ *  than the other. */
+function TenantSwitch({
+  label,
+  settingKey,
+  on,
+  onCopy,
+  offCopy,
+  cli,
+  flip,
+  testid,
+}: {
+  label: string;
+  settingKey: string;
+  on: boolean;
+  onCopy: string;
+  offCopy: string;
+  cli: string;
+  flip: (key: string, next: boolean) => Promise<void>;
+  testid?: string;
+}) {
+  return (
+    <>
+      <div className="loops-switch" data-testid={testid}>
+        <div>
+          <div className="bright">
+            {label} {on ? <Pill tone="ok">on</Pill> : <Pill>off</Pill>}
+          </div>
+          <div className="faint small">{on ? onCopy : offCopy}</div>
+        </div>
+        <button
+          className={`btn small${on ? "" : " primary"}`}
+          onClick={() => void flip(settingKey, !on)}
+          aria-pressed={on}
+        >
+          {on ? "Turn off" : "Turn on"}
+        </button>
+      </div>
+      <div className="faint small">
+        Also: <span className="mono">{cli}</span>. Takes effect within a poll
+        interval; no restart.
+      </div>
+    </>
+  );
+}
+
+/** The tenant's automation switches (MAIN-239 + the reconcile twin). Both are
+ *  team-wide, which is why this whole section carries the `team` badge in the
+ *  nav — the blast radius is everyone, not this browser. */
+function AutomationSettings() {
+  const queryClient = useQueryClient();
+  const { data: settings } = useQuery({
+    queryKey: ["settings"],
+    queryFn: async () => (await api.GET("/api/v1/settings")).data ?? [],
+  });
+  const isOn = (key: string) =>
+    (settings ?? []).find((s) => s.key === key && s.scope === "tenant")?.value === true;
+
+  const flip = async (key: string, next: boolean) => {
+    await api.PUT("/api/v1/settings/{key}", {
+      params: { path: { key } },
+      body: { value: next, scope: "tenant" },
+    });
+    queryClient.invalidateQueries({ queryKey: ["settings"] });
+  };
+
+  return (
+    <Panel title="Automation">
+      <div style={{ padding: 10, display: "grid", gap: 14 }} className="small">
+        <TenantSwitch
+          label="Loop machinery is"
+          settingKey="loops.enabled"
+          on={isOn("loops.enabled")}
+          onCopy="Queued spec and decompose jobs are dispatched to eligible executors."
+          offCopy="Off by default. Jobs you start are queued and wait here — nothing is lost, and nothing runs until you turn this on."
+          cli="nook operator loops on|off|status"
+          flip={flip}
+          testid="loops-switch"
+        />
+        <TenantSwitch
+          label="Session reconciling is"
+          settingKey="sessions.reconcile.enabled"
+          on={isOn("sessions.reconcile.enabled")}
+          onCopy="Workspaces with a session spec converge onto their nodes — clones made, sessions started and kept running."
+          offCopy="Off by default. A workspace can declare sessions and show 'reconciling off' forever until this is turned on."
+          cli="nook operator reconcile on|off|status"
+          flip={flip}
+          testid="reconcile-switch"
+        />
+        <p className="muted" style={{ margin: 0 }}>
+          Both apply to this whole team, not just you.
+        </p>
+      </div>
+    </Panel>
+  );
+}
+
+function InstanceInfo() {
+  return (
+    <Panel title="Instance">
+      <div style={{ padding: 10 }} className="small">
+        <p className="muted">
+          API docs: <a href="/docs" target="_blank" rel="noreferrer">/docs</a>
+        </p>
+        <p className="muted" style={{ marginTop: 8 }}>
+          MCP endpoint: <span className="mono">/mcp</span> (bearer token from
+          your instance config)
+        </p>
+        <p className="muted" style={{ marginTop: 8 }}>
+          Add a machine: Nodes tab → “+ add node”.
+        </p>
+      </div>
+    </Panel>
+  );
+}
+
+export function SettingsPage() {
+  // The registry IS the information architecture. Grouped by who a section
+  // affects — You / Team / Instance — because "is this mine or everybody's"
+  // was exactly the question the old grid never answered. Keywords are the
+  // words somebody would actually type when they cannot find a thing.
+  const sections: PageSection[] = [
+    {
+      id: "appearance",
+      title: "Appearance",
+      group: "You",
+      keywords: ["theme", "colors", "amber", "dark", "look"],
+      render: () => <AppearanceSettings />,
+    },
+    {
+      id: "notifications",
+      title: "Notifications",
+      group: "You",
+      keywords: ["desktop", "chime", "sound", "alerts", "noise", "ping"],
+      render: () => (
+        <Panel title="Notifications">
+          <NotificationSettings />
+        </Panel>
+      ),
+    },
+    {
+      id: "email",
+      title: "Email",
+      group: "You",
+      keywords: ["verify", "verification", "address", "invite"],
+      render: () => (
+        <Panel title="Email">
+          <EmailVerification />
+        </Panel>
+      ),
+    },
+    {
+      id: "security",
+      title: "Security",
+      group: "You",
+      keywords: [
+        "app password",
+        "passkey",
+        "vault",
+        "lock",
+        "unlock",
+        "encrypt",
+        "secrets",
+        "webauthn",
+        "biometric",
+      ],
+      render: () => (
+        <Panel title="App password">
+          <AppPasswordSettings />
+        </Panel>
+      ),
+    },
+    {
+      id: "tokens",
+      title: "Access tokens",
+      group: "You",
+      keywords: ["cli", "token", "nook login", "credential", "api key", "revoke"],
+      render: () => (
+        <Panel title="Access tokens">
+          <AccessTokenSettings />
+        </Panel>
+      ),
+    },
+    {
+      id: "automation",
+      title: "Automation",
+      group: "Team",
+      badge: "team",
+      keywords: [
+        "loops",
+        "reconcile",
+        "sessions",
+        "dispatch",
+        "jobs",
+        "agents",
+        "declarative",
+        "converge",
+        "queued",
+      ],
+      render: () => <AutomationSettings />,
+    },
+    {
+      id: "channels",
+      title: "Notification channels",
+      group: "Team",
+      badge: "team",
+      keywords: ["ntfy", "webhook", "slack", "push", "phone", "channel"],
+      render: () => <NotificationChannels />,
+    },
+    {
+      id: "skills",
+      title: "Taught skills",
+      group: "Team",
+      badge: "fleet",
+      keywords: ["skill", "teach", "agents", "claude", "SKILL.md", "forget"],
+      render: () => <TaughtSkillsSettings />,
+    },
+    {
+      id: "visibility",
+      title: "Operator visibility",
+      group: "Team",
+      badge: "org",
+      keywords: ["operator", "privacy", "policy", "who can see", "metadata"],
+      render: () => <OrgVisibility />,
+    },
+    {
+      id: "instance",
+      title: "About this instance",
+      group: "Instance",
+      keywords: ["docs", "api", "mcp", "add node", "version"],
+      render: () => <InstanceInfo />,
+    },
+  ];
+
+  return <SectionedPage sections={sections} placeholder="find a setting…" />;
 }

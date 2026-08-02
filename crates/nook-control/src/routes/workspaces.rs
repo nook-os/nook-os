@@ -1,4 +1,4 @@
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::Json;
 use nook_types::*;
 
@@ -18,6 +18,23 @@ pub async fn list(
 ) -> ApiResult<Json<Vec<WorkspaceDetail>>> {
     Ok(Json(
         workspace_queries::list_workspaces(&*state.workspaces, auth.tenant_id).await?,
+    ))
+}
+
+/// The paged twin of the whole-list read — the table view's endpoint. The
+/// whole list stays for the pickers (workspace switcher, dispatch target),
+/// which genuinely want everything.
+#[utoipa::path(get, path = "/api/v1/workspaces/page",
+    operation_id = "workspaces_page",
+    params(PageQuery),
+    responses((status = 200, body = Page<WorkspaceDetail>)))]
+pub async fn page(
+    State(state): State<AppState>,
+    auth: AuthCtx,
+    Query(q): Query<PageQuery>,
+) -> ApiResult<Json<Page<WorkspaceDetail>>> {
+    Ok(Json(
+        workspace_queries::workspaces_page(&*state.workspaces, auth.tenant_id, &q).await?,
     ))
 }
 

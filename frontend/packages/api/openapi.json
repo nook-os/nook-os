@@ -1872,6 +1872,90 @@
         }
       }
     },
+    "/api/v1/nodes/page": {
+      "get": {
+        "tags": [
+          "crate::routes::nodes"
+        ],
+        "summary": "The paged twin of the whole-list read — the Nodes table's endpoint, on the\npagination contract. Same visibility rule as `list`, applied in the repo's\nWHERE, so a page can never show a node the whole list would hide.",
+        "operationId": "nodes_page",
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "description": "Case-insensitive substring; the searched fields differ per list.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "after",
+            "in": "query",
+            "description": "Opaque cursor from the previous page's `next_cursor`.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Page size (default 50, clamped 1..=200).",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64"
+            }
+          },
+          {
+            "name": "sort",
+            "in": "query",
+            "description": "Sort key from the endpoint's documented set. Absent = newest first.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "dir",
+            "in": "query",
+            "description": "`asc` | `desc`. Defaults ascending under `sort`, newest-first without.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page_Node"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/nodes/renew": {
       "post": {
         "tags": [
@@ -3344,7 +3428,7 @@
           {
             "name": "q",
             "in": "query",
-            "description": "Case-insensitive substring matched across kind, tenant slug, and actor.",
+            "description": "Case-insensitive substring; the searched fields differ per list.",
             "required": false,
             "schema": {
               "type": [
@@ -3356,16 +3440,12 @@
           {
             "name": "after",
             "in": "query",
-            "description": "Keyset cursor: the last `id` already seen. Returns strictly older rows.",
+            "description": "Opaque cursor from the previous page's `next_cursor`.",
             "required": false,
             "schema": {
-              "oneOf": [
-                {
-                  "type": "null"
-                },
-                {
-                  "$ref": "#/components/schemas/EventId"
-                }
+              "type": [
+                "string",
+                "null"
               ]
             }
           },
@@ -3381,6 +3461,30 @@
               ],
               "format": "int64"
             }
+          },
+          {
+            "name": "sort",
+            "in": "query",
+            "description": "Sort key from the endpoint's documented set. Absent = newest first.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "dir",
+            "in": "query",
+            "description": "`asc` | `desc`. Defaults ascending under `sort`, newest-first without.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
           }
         ],
         "responses": {
@@ -3389,7 +3493,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/OperatorAuditPage"
+                  "$ref": "#/components/schemas/Page_OperatorAuditEntry"
                 }
               }
             }
@@ -3423,14 +3527,13 @@
           {
             "name": "after",
             "in": "query",
-            "description": "Keyset cursor: the last `id` already seen. Returns strictly older rows.",
+            "description": "Opaque cursor from the previous page's `next_cursor`.",
             "required": false,
             "schema": {
               "type": [
                 "string",
                 "null"
-              ],
-              "format": "uuid"
+              ]
             }
           },
           {
@@ -3445,6 +3548,30 @@
               ],
               "format": "int64"
             }
+          },
+          {
+            "name": "sort",
+            "in": "query",
+            "description": "Sort key from the endpoint's documented set. Absent = newest first.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "dir",
+            "in": "query",
+            "description": "`asc` | `desc`. Defaults ascending under `sort`, newest-first without.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
           }
         ],
         "responses": {
@@ -3453,7 +3580,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/OperatorBindingPage"
+                  "$ref": "#/components/schemas/Page_BindingRow"
                 }
               }
             }
@@ -3513,14 +3640,13 @@
           {
             "name": "after",
             "in": "query",
-            "description": "Keyset cursor: the last `id` already seen. Returns strictly older rows.",
+            "description": "Opaque cursor from the previous page's `next_cursor`.",
             "required": false,
             "schema": {
               "type": [
                 "string",
                 "null"
-              ],
-              "format": "uuid"
+              ]
             }
           },
           {
@@ -3535,6 +3661,30 @@
               ],
               "format": "int64"
             }
+          },
+          {
+            "name": "sort",
+            "in": "query",
+            "description": "Sort key from the endpoint's documented set. Absent = newest first.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "dir",
+            "in": "query",
+            "description": "`asc` | `desc`. Defaults ascending under `sort`, newest-first without.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
           }
         ],
         "responses": {
@@ -3543,7 +3693,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/OperatorNodePage"
+                  "$ref": "#/components/schemas/Page_OperatorNode"
                 }
               }
             }
@@ -3821,14 +3971,13 @@
           {
             "name": "after",
             "in": "query",
-            "description": "Keyset cursor: the last `id` already seen. Returns strictly older rows.",
+            "description": "Opaque cursor from the previous page's `next_cursor`.",
             "required": false,
             "schema": {
               "type": [
                 "string",
                 "null"
-              ],
-              "format": "uuid"
+              ]
             }
           },
           {
@@ -3843,6 +3992,30 @@
               ],
               "format": "int64"
             }
+          },
+          {
+            "name": "sort",
+            "in": "query",
+            "description": "Sort key from the endpoint's documented set. Absent = newest first.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "dir",
+            "in": "query",
+            "description": "`asc` | `desc`. Defaults ascending under `sort`, newest-first without.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
           }
         ],
         "responses": {
@@ -3851,7 +4024,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/OperatorTenantPage"
+                  "$ref": "#/components/schemas/Page_OperatorTenant"
                 }
               }
             }
@@ -3968,6 +4141,89 @@
         },
         "responses": {
           "200": {
+            "description": ""
+          },
+          "403": {
+            "description": ""
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      }
+    },
+    "/api/v1/operator/tenants/{id}/switches": {
+      "get": {
+        "tags": [
+          "crate::routes::operator"
+        ],
+        "operationId": "tenant_switches",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TenantSwitches"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": ""
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "crate::routes::operator"
+        ],
+        "operationId": "set_tenant_switch",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetTenantSwitchRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TenantSwitches"
+                }
+              }
+            }
+          },
+          "400": {
             "description": ""
           },
           "403": {
@@ -6003,7 +6259,7 @@
           {
             "name": "q",
             "in": "query",
-            "description": "Case-insensitive substring across email, display name, and role.",
+            "description": "Case-insensitive substring; the searched fields differ per list.",
             "required": false,
             "schema": {
               "type": [
@@ -6015,14 +6271,13 @@
           {
             "name": "after",
             "in": "query",
-            "description": "Keyset cursor: the last member `principal_id` seen. Returns older rows.",
+            "description": "Opaque cursor from the previous page's `next_cursor`.",
             "required": false,
             "schema": {
               "type": [
                 "string",
                 "null"
-              ],
-              "format": "uuid"
+              ]
             }
           },
           {
@@ -6037,6 +6292,30 @@
               ],
               "format": "int64"
             }
+          },
+          {
+            "name": "sort",
+            "in": "query",
+            "description": "Sort key from the endpoint's documented set. Absent = newest first.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "dir",
+            "in": "query",
+            "description": "`asc` | `desc`. Defaults ascending under `sort`, newest-first without.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
           }
         ],
         "responses": {
@@ -6045,7 +6324,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/TenantMemberPage"
+                  "$ref": "#/components/schemas/Page_TenantMemberItem"
                 }
               }
             }
@@ -6523,6 +6802,90 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/Workspace"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/workspaces/page": {
+      "get": {
+        "tags": [
+          "crate::routes::workspaces"
+        ],
+        "summary": "The paged twin of the whole-list read — the table view's endpoint. The\nwhole list stays for the pickers (workspace switcher, dispatch target),\nwhich genuinely want everything.",
+        "operationId": "workspaces_page",
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "description": "Case-insensitive substring; the searched fields differ per list.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "after",
+            "in": "query",
+            "description": "Opaque cursor from the previous page's `next_cursor`.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Page size (default 50, clamped 1..=200).",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64"
+            }
+          },
+          {
+            "name": "sort",
+            "in": "query",
+            "description": "Sort key from the endpoint's documented set. Absent = newest first.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "dir",
+            "in": "query",
+            "description": "`asc` | `desc`. Defaults ascending under `sort`, newest-first without.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page_WorkspaceDetail"
                 }
               }
             }
@@ -10097,6 +10460,17 @@
           "role": {
             "type": "string",
             "description": "`operator` | `org_admin` | …"
+          },
+          "tenant_id": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/TenantId",
+                "description": "Grant over ONE tenant instead of the whole deployment.\n\nAbsent keeps the old behaviour exactly — deployment scope — so every\nexisting caller is unchanged. Present is what lets somebody be the admin\nof one team without being handed the entire deployment, which until now\nwas the only thing this endpoint could do."
+              }
+            ]
           }
         }
       },
@@ -11520,53 +11894,6 @@
           }
         }
       },
-      "OperatorAuditPage": {
-        "type": "object",
-        "description": "A page of audit rows plus the keyset cursor to reach the next (older) page.\n\nMirrors [`EventsPage`]'s `{ items, next_cursor }` shape so the two feeds read\nthe same way, but keys on the row's UUID v7 `id` rather than a timestamp:\nv7 ids are creation-ordered and unique, so `id < cursor` walks strictly\nolder rows with no ties to break (and needs no new column). `next_cursor` is\nnull at the end of the list.",
-        "required": [
-          "rows"
-        ],
-        "properties": {
-          "next_cursor": {
-            "oneOf": [
-              {
-                "type": "null"
-              },
-              {
-                "$ref": "#/components/schemas/EventId",
-                "description": "Pass as `after` to fetch the next (older) page; null at end of list."
-              }
-            ]
-          },
-          "rows": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/OperatorAuditEntry"
-            }
-          }
-        }
-      },
-      "OperatorBindingPage": {
-        "type": "object",
-        "required": [
-          "rows"
-        ],
-        "properties": {
-          "next_cursor": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "format": "uuid"
-          },
-          "rows": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/BindingRow"
-            }
-          }
-        }
-      },
       "OperatorNode": {
         "type": "object",
         "required": [
@@ -11609,30 +11936,6 @@
           },
           "tenant_slug": {
             "type": "string"
-          }
-        }
-      },
-      "OperatorNodePage": {
-        "type": "object",
-        "required": [
-          "rows"
-        ],
-        "properties": {
-          "next_cursor": {
-            "oneOf": [
-              {
-                "type": "null"
-              },
-              {
-                "$ref": "#/components/schemas/NodeId"
-              }
-            ]
-          },
-          "rows": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/OperatorNode"
-            }
           }
         }
       },
@@ -11729,31 +12032,6 @@
           "workspaces": {
             "type": "integer",
             "format": "int64"
-          }
-        }
-      },
-      "OperatorTenantPage": {
-        "type": "object",
-        "description": "A page of operator tenants + the keyset cursor to the next page. Same shape\nand mechanism as [`OperatorAuditPage`] (keyed on the row's UUID v7 `id`),\nfanned out to the tenants/nodes/bindings lists (MAIN-44).",
-        "required": [
-          "rows"
-        ],
-        "properties": {
-          "next_cursor": {
-            "oneOf": [
-              {
-                "type": "null"
-              },
-              {
-                "$ref": "#/components/schemas/TenantId"
-              }
-            ]
-          },
-          "rows": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/OperatorTenant"
-            }
           }
         }
       },
@@ -11937,6 +12215,490 @@
               "$ref": "#/components/schemas/Session"
             },
             "description": "Sessions in this workspace not bound to a listed checkout (its checkout\nwas pruned, or sits on a node the caller cannot see) — kept so work is\nnever lost from the view."
+          }
+        }
+      },
+      "Page_BindingRow": {
+        "type": "object",
+        "description": "One page of any paginated list — THE pagination wire contract (QOL sprint\n2026-08). Every list endpoint returns this shape; the request half is\n[`PageQuery`]. `next_cursor` is an OPAQUE token: pass it back verbatim as\n`after`, never parse it — the opacity is what lets the server pick the\nmechanism (keyset vs offset) per request. Null means end of list.\n\nThe server half — cursor codec, validation, SQL skeleton — is\n`nook_db::paging`; the React half is `usePagedList` + `PagedPanel`.",
+        "required": [
+          "rows"
+        ],
+        "properties": {
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Opaque continuation token — pass back verbatim as `after`; null = end."
+          },
+          "rows": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "description": "Who holds what, for the roles table.",
+              "required": [
+                "id",
+                "email",
+                "display_name",
+                "role_key",
+                "scope_type",
+                "created_at"
+              ],
+              "properties": {
+                "created_at": {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                "display_name": {
+                  "type": "string"
+                },
+                "email": {
+                  "type": "string"
+                },
+                "id": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "role_key": {
+                  "type": "string"
+                },
+                "scope_id": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "format": "uuid"
+                },
+                "scope_label": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "The org or tenant slug the binding is scoped to, when it has one."
+                },
+                "scope_type": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      },
+      "Page_Node": {
+        "type": "object",
+        "description": "One page of any paginated list — THE pagination wire contract (QOL sprint\n2026-08). Every list endpoint returns this shape; the request half is\n[`PageQuery`]. `next_cursor` is an OPAQUE token: pass it back verbatim as\n`after`, never parse it — the opacity is what lets the server pick the\nmechanism (keyset vs offset) per request. Null means end of list.\n\nThe server half — cursor codec, validation, SQL skeleton — is\n`nook_db::paging`; the React half is `usePagedList` + `PagedPanel`.",
+        "required": [
+          "rows"
+        ],
+        "properties": {
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Opaque continuation token — pass back verbatim as `after`; null = end."
+          },
+          "rows": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "description": "Status values: `online` | `offline`.",
+              "required": [
+                "id",
+                "tenant_id",
+                "name",
+                "hostname",
+                "platform",
+                "capabilities",
+                "resources",
+                "status",
+                "shared",
+                "labels",
+                "taints",
+                "created_at",
+                "updated_at"
+              ],
+              "properties": {
+                "capabilities": {},
+                "created_at": {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                "home_tenant": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "The name of this node's HOME tenant, set only when that is not the\ntenant you are acting in (MAIN-353) — your own machine, reached from\nanother of your orgs. `None` for the ordinary case, so a UI can render\nthe badge on presence rather than by comparing ids.\n\nComputed per response, never stored: it is a fact about the *viewer's*\nposition, not about the node."
+                },
+                "hostname": {
+                  "type": "string"
+                },
+                "id": {
+                  "$ref": "#/components/schemas/NodeId"
+                },
+                "labels": {
+                  "description": "Operator-set labels, `{\"key\": \"value\"}` (MAIN-314). The DERIVED `os` and\n`arch` labels are not in here: they are computed from what the node\nreports, so storing them would let them drift from the truth."
+                },
+                "last_seen_at": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "format": "date-time"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "owner_person_id": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "format": "uuid",
+                  "description": "The person who owns this node — its join-token minter, else the tenant\nowner (MAIN-119). Session-start is confined to this person (MAIN-130)."
+                },
+                "platform": {
+                  "type": "string"
+                },
+                "port_range_end": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "format": "int32"
+                },
+                "port_range_start": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "format": "int32",
+                  "description": "An operator's port range for this node, overriding what it advertises\n(MAIN-301). Both `None` means \"use the node's own\"; the pair is set and\ncleared together, which the API enforces."
+                },
+                "resources": {
+                  "description": "Latest heartbeat resource sample (see `NodeResources`); `{}` until first."
+                },
+                "shared": {
+                  "type": "boolean",
+                  "description": "Whether the owner has designated this node team-usable (MAIN-135). A\nshared node is VISIBLE to the whole team; it is not yet usable by them —\nsession-start stays owner-only until a later unit of the epic."
+                },
+                "status": {
+                  "type": "string"
+                },
+                "taints": {
+                  "description": "Operator-set taints, `[{\"key\": …, \"effect\": …}]` (MAIN-314)."
+                },
+                "tenant_id": {
+                  "$ref": "#/components/schemas/TenantId"
+                },
+                "updated_at": {
+                  "type": "string",
+                  "format": "date-time"
+                }
+              }
+            }
+          }
+        }
+      },
+      "Page_OperatorAuditEntry": {
+        "type": "object",
+        "description": "One page of any paginated list — THE pagination wire contract (QOL sprint\n2026-08). Every list endpoint returns this shape; the request half is\n[`PageQuery`]. `next_cursor` is an OPAQUE token: pass it back verbatim as\n`after`, never parse it — the opacity is what lets the server pick the\nmechanism (keyset vs offset) per request. Null means end of list.\n\nThe server half — cursor codec, validation, SQL skeleton — is\n`nook_db::paging`; the React half is `usePagedList` + `PagedPanel`.",
+        "required": [
+          "rows"
+        ],
+        "properties": {
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Opaque continuation token — pass back verbatim as `after`; null = end."
+          },
+          "rows": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "description": "An audit row. Kinds, actors and times — never payloads, which can carry the\nvery metadata policy exists to gate.",
+              "required": [
+                "id",
+                "kind",
+                "tenant_id",
+                "tenant_slug",
+                "occurred_at"
+              ],
+              "properties": {
+                "actor_id": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "format": "uuid"
+                },
+                "actor_type": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "id": {
+                  "$ref": "#/components/schemas/EventId"
+                },
+                "kind": {
+                  "type": "string"
+                },
+                "occurred_at": {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                "tenant_id": {
+                  "$ref": "#/components/schemas/TenantId"
+                },
+                "tenant_slug": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      },
+      "Page_OperatorNode": {
+        "type": "object",
+        "description": "One page of any paginated list — THE pagination wire contract (QOL sprint\n2026-08). Every list endpoint returns this shape; the request half is\n[`PageQuery`]. `next_cursor` is an OPAQUE token: pass it back verbatim as\n`after`, never parse it — the opacity is what lets the server pick the\nmechanism (keyset vs offset) per request. Null means end of list.\n\nThe server half — cursor codec, validation, SQL skeleton — is\n`nook_db::paging`; the React half is `usePagedList` + `PagedPanel`.",
+        "required": [
+          "rows"
+        ],
+        "properties": {
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Opaque continuation token — pass back verbatim as `after`; null = end."
+          },
+          "rows": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "id",
+                "name",
+                "platform",
+                "status",
+                "resources",
+                "tenant_id",
+                "tenant_slug",
+                "active_sessions"
+              ],
+              "properties": {
+                "active_sessions": {
+                  "type": "integer",
+                  "format": "int64"
+                },
+                "id": {
+                  "$ref": "#/components/schemas/NodeId"
+                },
+                "last_seen_at": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "format": "date-time"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "platform": {
+                  "type": "string"
+                },
+                "resources": {},
+                "status": {
+                  "type": "string"
+                },
+                "tenant_id": {
+                  "$ref": "#/components/schemas/TenantId"
+                },
+                "tenant_slug": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      },
+      "Page_OperatorTenant": {
+        "type": "object",
+        "description": "One page of any paginated list — THE pagination wire contract (QOL sprint\n2026-08). Every list endpoint returns this shape; the request half is\n[`PageQuery`]. `next_cursor` is an OPAQUE token: pass it back verbatim as\n`after`, never parse it — the opacity is what lets the server pick the\nmechanism (keyset vs offset) per request. Null means end of list.\n\nThe server half — cursor codec, validation, SQL skeleton — is\n`nook_db::paging`; the React half is `usePagedList` + `PagedPanel`.",
+        "required": [
+          "rows"
+        ],
+        "properties": {
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Opaque continuation token — pass back verbatim as `after`; null = end."
+          },
+          "rows": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "description": "A tenant as an operator sees it.\n\nThe first block is always visible: existence, counts, load. Everything\nafter is `Option` and stays `None` unless the org opted in — policy ADDS\nthese fields rather than filtering them out, so forgetting to add one\nleaves it absent instead of leaking it.",
+              "required": [
+                "id",
+                "slug",
+                "created_at",
+                "members",
+                "nodes",
+                "active_sessions",
+                "workspaces"
+              ],
+              "properties": {
+                "active_sessions": {
+                  "type": "integer",
+                  "format": "int64"
+                },
+                "created_at": {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                "id": {
+                  "$ref": "#/components/schemas/TenantId"
+                },
+                "members": {
+                  "type": "integer",
+                  "format": "int64"
+                },
+                "nodes": {
+                  "type": "integer",
+                  "format": "int64"
+                },
+                "org_id": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "format": "uuid"
+                },
+                "repositories": {
+                  "type": [
+                    "array",
+                    "null"
+                  ],
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "slug": {
+                  "type": "string"
+                },
+                "task_titles": {
+                  "type": [
+                    "array",
+                    "null"
+                  ],
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "workspaces": {
+                  "type": "integer",
+                  "format": "int64"
+                }
+              }
+            }
+          }
+        }
+      },
+      "Page_TenantMemberItem": {
+        "type": "object",
+        "description": "One page of any paginated list — THE pagination wire contract (QOL sprint\n2026-08). Every list endpoint returns this shape; the request half is\n[`PageQuery`]. `next_cursor` is an OPAQUE token: pass it back verbatim as\n`after`, never parse it — the opacity is what lets the server pick the\nmechanism (keyset vs offset) per request. Null means end of list.\n\nThe server half — cursor codec, validation, SQL skeleton — is\n`nook_db::paging`; the React half is `usePagedList` + `PagedPanel`.",
+        "required": [
+          "rows"
+        ],
+        "properties": {
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Opaque continuation token — pass back verbatim as `after`; null = end."
+          },
+          "rows": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "description": "One member OF a tenant, for the members panel — distinct from\n`TenantMembership` (a tenant the caller belongs to). Keyed by\n`principal_id`, the `users.id`/`tenant_members.principal_id` used to change\nthe role or remove them.",
+              "required": [
+                "principal_id",
+                "email",
+                "display_name",
+                "role",
+                "joined_at"
+              ],
+              "properties": {
+                "display_name": {
+                  "type": "string"
+                },
+                "email": {
+                  "type": "string"
+                },
+                "joined_at": {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                "principal_id": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "role": {
+                  "type": "string",
+                  "description": "`owner` | `admin` | `member`."
+                }
+              }
+            }
+          }
+        }
+      },
+      "Page_WorkspaceDetail": {
+        "type": "object",
+        "description": "One page of any paginated list — THE pagination wire contract (QOL sprint\n2026-08). Every list endpoint returns this shape; the request half is\n[`PageQuery`]. `next_cursor` is an OPAQUE token: pass it back verbatim as\n`after`, never parse it — the opacity is what lets the server pick the\nmechanism (keyset vs offset) per request. Null means end of list.\n\nThe server half — cursor codec, validation, SQL skeleton — is\n`nook_db::paging`; the React half is `usePagedList` + `PagedPanel`.",
+        "required": [
+          "rows"
+        ],
+        "properties": {
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Opaque continuation token — pass back verbatim as `after`; null = end."
+          },
+          "rows": {
+            "type": "array",
+            "items": {
+              "allOf": [
+                {
+                  "$ref": "#/components/schemas/Workspace"
+                },
+                {
+                  "type": "object",
+                  "required": [
+                    "locations"
+                  ],
+                  "properties": {
+                    "locations": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/WorkspaceLocation"
+                      }
+                    }
+                  }
+                }
+              ]
+            }
           }
         }
       },
@@ -12923,6 +13685,23 @@
           }
         }
       },
+      "SetTenantSwitchRequest": {
+        "type": "object",
+        "description": "Throw one of them.",
+        "required": [
+          "switch",
+          "enabled"
+        ],
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
+          "switch": {
+            "type": "string",
+            "description": "`loops` or `reconcile` — a closed set, not a settings key, so this\nendpoint can never become a way to write arbitrary settings into\nsomebody else's tenant."
+          }
+        }
+      },
       "SetVaultPassphraseRequest": {
         "type": "object",
         "description": "Setting or checking the app password.",
@@ -13683,28 +14462,6 @@
           }
         }
       },
-      "TenantMemberPage": {
-        "type": "object",
-        "description": "A page of tenant members + the keyset cursor to the next page. Same shape and\nmechanism as the operator lists (keyed on the member's UUID v7 `principal_id`),\nso a large tenant's members are searchable and paged (MAIN-45).",
-        "required": [
-          "rows"
-        ],
-        "properties": {
-          "next_cursor": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "format": "uuid"
-          },
-          "rows": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/TenantMemberItem"
-            }
-          }
-        }
-      },
       "TenantMembership": {
         "type": "object",
         "description": "A tenant the caller belongs to, and the role they hold in it.\n\nMembership is deliberately its own concept: a user has one *current*\ntenant (`users.tenant_id`) and may reach several, which is what teams will\nbe — not a new mechanism, just more rows.",
@@ -13736,6 +14493,32 @@
             "description": "`owner` | `admin` | `member`."
           },
           "slug": {
+            "type": "string"
+          }
+        }
+      },
+      "TenantSwitches": {
+        "type": "object",
+        "description": "The switches an operator can throw for a tenant OTHER than the one they are\nacting in.\n\n`settings::put` writes to the caller's active tenant, which meant turning\nloops on for somebody else's team required switching into it first — and if\ntheir team was never set up, nothing ran and nothing said why.",
+        "required": [
+          "tenant_id",
+          "tenant_name",
+          "loops_enabled",
+          "reconcile_enabled"
+        ],
+        "properties": {
+          "loops_enabled": {
+            "type": "boolean",
+            "description": "`loops.enabled` — whether this tenant dispatches loop jobs at all\n(MAIN-239). Default off, which is why a fresh team's loops never fire."
+          },
+          "reconcile_enabled": {
+            "type": "boolean",
+            "description": "`sessions.reconcile.enabled` — whether the reconciler converges this\ntenant's workspaces onto its nodes. Default off."
+          },
+          "tenant_id": {
+            "$ref": "#/components/schemas/TenantId"
+          },
+          "tenant_name": {
             "type": "string"
           }
         }

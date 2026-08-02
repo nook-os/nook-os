@@ -25,7 +25,6 @@
 use axum::extract::{Path, Query, State};
 use axum::Json;
 use nook_types::*;
-use serde::Deserialize;
 use uuid::Uuid;
 
 use crate::auth::perm::{Permission, Scope};
@@ -68,18 +67,6 @@ pub async fn orgs(
     Ok(Json(rows))
 }
 
-/// Query for a paginated + searchable operator list. The cursor is the last
-/// `id` seen; all three list ids are uuids, so one struct serves every list.
-#[derive(Deserialize, utoipa::IntoParams)]
-pub struct OperatorListQuery {
-    /// Case-insensitive substring; the searched fields differ per list.
-    pub q: Option<String>,
-    /// Keyset cursor: the last `id` already seen. Returns strictly older rows.
-    pub after: Option<Uuid>,
-    /// Page size (default 50, clamped 1..=200).
-    pub limit: Option<i64>,
-}
-
 /// Tenants, at minimum visibility.
 ///
 /// Always visible, per the model: that a tenant exists, its member count, and
@@ -91,23 +78,17 @@ pub struct OperatorListQuery {
 /// and then removed.
 #[utoipa::path(get, path = "/api/v1/operator/tenants",
     operation_id = "operator_list_tenants",
-    params(OperatorListQuery),
-    responses((status = 200, body = OperatorTenantPage), (status = 403)))]
+    params(PageQuery),
+    responses((status = 200, body = Page<OperatorTenant>), (status = 403)))]
 pub async fn tenants(
     State(state): State<AppState>,
     auth: AuthCtx,
-    Query(q): Query<OperatorListQuery>,
-) -> ApiResult<Json<OperatorTenantPage>> {
+    Query(q): Query<PageQuery>,
+) -> ApiResult<Json<Page<OperatorTenant>>> {
     auth.require(&state, Permission::TenantView, Scope::Deployment)
         .await?;
 
-    let mut page = operator_queries::operator_tenants_page(
-        &*state.operator,
-        q.q,
-        q.after.map(TenantId),
-        q.limit.unwrap_or(50),
-    )
-    .await?;
+    let mut page = operator_queries::operator_tenants_page(&*state.operator, &q).await?;
 
     // Policy ADDS. Absent unless an org has opted in, and absent by default.
     for row in &mut page.rows {
@@ -157,59 +138,35 @@ async fn enrich(state: &AppState, row: &mut OperatorTenant) -> ApiResult<()> {
 /// Nodes, always visible. Names, status, resources, owner, session count.
 #[utoipa::path(get, path = "/api/v1/operator/nodes",
     operation_id = "operator_list_nodes",
-    params(OperatorListQuery),
-    responses((status = 200, body = OperatorNodePage), (status = 403)))]
+    params(PageQuery),
+    responses((status = 200, body = Page<OperatorNode>), (status = 403)))]
 pub async fn nodes(
     State(state): State<AppState>,
     auth: AuthCtx,
-    Query(q): Query<OperatorListQuery>,
-) -> ApiResult<Json<OperatorNodePage>> {
+    Query(q): Query<PageQuery>,
+) -> ApiResult<Json<Page<OperatorNode>>> {
     auth.require(&state, Permission::NodeView, Scope::Deployment)
         .await?;
-    let page = operator_queries::operator_nodes_page(
-        &*state.operator,
-        q.q,
-        q.after.map(NodeId),
-        q.limit.unwrap_or(50),
-    )
-    .await?;
+    let page = operator_queries::operator_nodes_page(&*state.operator, &q).await?;
     audit(&state, &auth, "nodes", None).await;
     Ok(Json(page))
-}
-
-/// Query for the audit trail: an optional server-side search and a keyset
-/// cursor. Both absent returns the newest page.
-#[derive(Deserialize, utoipa::IntoParams)]
-pub struct AuditQuery {
-    /// Case-insensitive substring matched across kind, tenant slug, and actor.
-    pub q: Option<String>,
-    /// Keyset cursor: the last `id` already seen. Returns strictly older rows.
-    pub after: Option<EventId>,
-    /// Page size (default 50, clamped 1..=200).
-    pub limit: Option<i64>,
 }
 
 /// The audit trail, including operator reads themselves — paged and searchable.
 #[utoipa::path(get, path = "/api/v1/operator/audit",
     operation_id = "operator_audit",
-    params(AuditQuery),
-    responses((status = 200, body = OperatorAuditPage), (status = 403)))]
+    params(PageQuery),
+    responses((status = 200, body = Page<OperatorAuditEntry>), (status = 403)))]
 pub async fn audit_log(
     State(state): State<AppState>,
     auth: AuthCtx,
-    Query(q): Query<AuditQuery>,
-) -> ApiResult<Json<OperatorAuditPage>> {
+    Query(q): Query<PageQuery>,
+) -> ApiResult<Json<Page<OperatorAuditEntry>>> {
     auth.require(&state, Permission::AuditView, Scope::Deployment)
         .await?;
     // Kinds, actors and times — never payloads. The projection and the
     // prefix filter live in `operator_queries::operator_audit_page`, shared with its tests.
-    let page = operator_queries::operator_audit_page(
-        &*state.operator,
-        q.q,
-        q.after,
-        q.limit.unwrap_or(50),
-    )
-    .await?;
+    let page = operator_queries::operator_audit_page(&*state.operator, &q).await?;
     audit(&state, &auth, "audit", None).await;
     Ok(Json(page))
 }
@@ -264,6 +221,11 @@ pub async fn grant(
 ) -> ApiResult<Json<serde_json::Value>> {
     // `rbac.grant`, not `org.manage` — see migration 0018. An operator holds
     // this; a tenant admin never does.
+    //
+    // Required at DEPLOYMENT scope even when granting over one tenant: handing
+    // out a role is the power to hand out that power, so it stays with whoever
+    // runs the deployment rather than becoming something each tenant's admin
+    // can do for their own.
     auth.require(&state, Permission::RbacGrant, Scope::Deployment)
         .await?;
 
@@ -273,16 +235,31 @@ pub async fn grant(
         .await?
         .ok_or(crate::error::ApiError::NotFound)?;
 
-    if req.revoke {
-        state
-            .operator
-            .revoke_deployment_role(user_id.0, &req.role)
-            .await?;
-    } else {
-        state
-            .operator
-            .grant_deployment_role(user_id.0, &req.role, auth.user_id.0)
-            .await?;
+    match (req.revoke, req.tenant_id) {
+        (true, None) => {
+            state
+                .operator
+                .revoke_deployment_role(user_id.0, &req.role)
+                .await?
+        }
+        (false, None) => {
+            state
+                .operator
+                .grant_deployment_role(user_id.0, &req.role, auth.user_id.0)
+                .await?
+        }
+        (true, Some(t)) => {
+            state
+                .operator
+                .revoke_tenant_role(user_id.0, &req.role, t)
+                .await?
+        }
+        (false, Some(t)) => {
+            state
+                .operator
+                .grant_tenant_role(user_id.0, &req.role, t, auth.user_id.0)
+                .await?
+        }
     }
 
     // Who gained power over this deployment, granted by whom, is the single
@@ -540,22 +517,16 @@ pub async fn remove_node(
 /// binding you cannot see.
 #[utoipa::path(get, path = "/api/v1/operator/bindings",
     operation_id = "operator_list_bindings",
-    params(OperatorListQuery),
-    responses((status = 200, body = OperatorBindingPage), (status = 403)))]
+    params(PageQuery),
+    responses((status = 200, body = Page<BindingRow>), (status = 403)))]
 pub async fn bindings(
     State(state): State<AppState>,
     auth: AuthCtx,
-    Query(q): Query<OperatorListQuery>,
-) -> ApiResult<Json<OperatorBindingPage>> {
+    Query(q): Query<PageQuery>,
+) -> ApiResult<Json<Page<BindingRow>>> {
     auth.require(&state, Permission::RbacGrant, Scope::Deployment)
         .await?;
-    let page = operator_queries::operator_bindings_page(
-        &*state.operator,
-        q.q,
-        q.after,
-        q.limit.unwrap_or(50),
-    )
-    .await?;
+    let page = operator_queries::operator_bindings_page(&*state.operator, &q).await?;
     audit(&state, &auth, "bindings", None).await;
     Ok(Json(page))
 }
@@ -577,4 +548,121 @@ fn slugify(name: &str) -> String {
     } else {
         s
     }
+}
+
+// ── per-tenant switches, from outside the tenant (QOL 4) ────────────────────
+//
+// `settings::put` writes to `auth.tenant_id`, so turning loops on for another
+// team meant switching into it first. A brand-new team therefore starts with
+// `loops.enabled` off (MAIN-239's shipped default), its promoted tickets sit
+// queued forever, and nothing anywhere says which switch is off. That is what
+// "the loops did not fire for my PM" looks like from the operator's side.
+
+/// The tenant's display name, and the 404 for one that does not exist. Reuses
+/// the node repository's lookup rather than adding a second one.
+async fn tenant_name(state: &AppState, id: TenantId) -> ApiResult<String> {
+    state
+        .nodes
+        .tenant_names(&[id])
+        .await?
+        .remove(&id.0)
+        .ok_or(crate::error::ApiError::NotFound)
+}
+
+/// The two switches, resolved for one tenant.
+fn switch_key(switch: &str) -> Option<&'static str> {
+    // A closed set, deliberately: this endpoint must never become a way to
+    // write arbitrary settings into somebody else's tenant.
+    match switch {
+        "loops" => Some(crate::services::loops::KEY),
+        "reconcile" => Some(crate::services::session_reconcile::KEY),
+        _ => None,
+    }
+}
+
+async fn read_switches(
+    state: &AppState,
+    tenant: TenantId,
+    name: String,
+) -> ApiResult<TenantSwitches> {
+    let on = |v: Option<serde_json::Value>| {
+        matches!(v, Some(serde_json::Value::Bool(true)))
+            || matches!(v.as_ref().and_then(|x| x.as_str()), Some("true"))
+    };
+    Ok(TenantSwitches {
+        tenant_id: tenant,
+        tenant_name: name,
+        loops_enabled: on(state
+            .settings
+            .tenant_value(tenant, crate::services::loops::KEY)
+            .await?),
+        reconcile_enabled: on(state
+            .settings
+            .tenant_value(tenant, crate::services::session_reconcile::KEY)
+            .await?),
+    })
+}
+
+#[utoipa::path(get, path = "/api/v1/operator/tenants/{id}/switches",
+    operation_id = "tenant_switches",
+    params(("id" = String, Path,)),
+    responses((status = 200, body = TenantSwitches), (status = 403), (status = 404)))]
+pub async fn tenant_switches(
+    State(state): State<AppState>,
+    auth: AuthCtx,
+    Path(id): Path<TenantId>,
+) -> ApiResult<Json<TenantSwitches>> {
+    // Scoped to the TARGET tenant, so a deployment operator passes and a tenant
+    // admin passes for their own — and nobody reads a team they have no say in.
+    auth.require(&state, Permission::TenantManage, Scope::Tenant(id))
+        .await?;
+    let name = tenant_name(&state, id).await?;
+    Ok(Json(read_switches(&state, id, name).await?))
+}
+
+#[utoipa::path(post, path = "/api/v1/operator/tenants/{id}/switches",
+    operation_id = "set_tenant_switch",
+    params(("id" = String, Path,)),
+    request_body = SetTenantSwitchRequest,
+    responses((status = 200, body = TenantSwitches), (status = 400), (status = 403), (status = 404)))]
+pub async fn set_tenant_switch(
+    State(state): State<AppState>,
+    auth: AuthCtx,
+    Path(id): Path<TenantId>,
+    Json(req): Json<SetTenantSwitchRequest>,
+) -> ApiResult<Json<TenantSwitches>> {
+    auth.require(&state, Permission::TenantManage, Scope::Tenant(id))
+        .await?;
+    let key = switch_key(&req.switch).ok_or_else(|| {
+        crate::error::ApiError::BadRequest("switch must be `loops` or `reconcile`".into())
+    })?;
+    let name = tenant_name(&state, id).await?;
+
+    state
+        .settings
+        .put(crate::repo::admin::SettingWrite {
+            tenant: id,
+            scope: "tenant".into(),
+            user: None,
+            key: key.to_string(),
+            value: serde_json::Value::Bool(req.enabled),
+        })
+        .await?;
+
+    // Throwing a switch in a tenant you are not standing in is exactly the kind
+    // of act that should leave a trace in that tenant's own feed.
+    crate::events::record(
+        &state,
+        id,
+        crate::events::EventDraft::new("tenant.switch_changed")
+            .actor("user", auth.user_id.0)
+            .payload(serde_json::json!({
+                "switch": req.switch,
+                "enabled": req.enabled,
+                "key": key,
+            })),
+    )
+    .await;
+
+    Ok(Json(read_switches(&state, id, name).await?))
 }

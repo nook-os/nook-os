@@ -219,7 +219,7 @@ function NewWorkModal() {
         id: data.path,
         label: `Cloning ${repoLabel(q)}`,
         kind: "clone",
-        href: "/workspaces",
+        href: "/admin?section=workspaces",
       });
     }
     return data.path ?? "";

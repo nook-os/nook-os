@@ -68,12 +68,13 @@ function StatusLine({
         {status.running}/{status.desired} running
       </Pill>
       {/* A spec with the switch off converges never, which looks exactly like
-          "broken" unless something says so. */}
-      {!status.enabled && (
-        <Pill tone="err" title="sessions.reconcile.enabled is off for this tenant">
-          reconciling off
-        </Pill>
-      )}
+          "broken" unless something says so — and until now saying so was ALL it
+          did. `sessions.reconcile.enabled` had no CLI verb and no UI write
+          anywhere: the only way to turn it on was a raw PUT to /settings, which
+          made the whole declarative-sessions feature unreachable by anyone not
+          hand-writing HTTP. The pill names the reason, so the pill is where the
+          fix belongs. */}
+      {!status.enabled && <ReconcileSwitch />}
       {status.shortfall > 0 && (
         <span className="faint small">
           {status.shortfall} short
@@ -85,6 +86,50 @@ function StatusLine({
           )}
         </span>
       )}
+    </span>
+  );
+}
+
+/** Turn this tenant's reconciling on, from the thing that told you it was off.
+ *
+ *  Tenant-scoped, like the loops switch beside it in Settings — it governs the
+ *  whole team's workspaces, not this one. Said plainly on the button, because a
+ *  control that reads as workspace-local while writing tenant-wide state is how
+ *  somebody turns on the fleet thinking they toggled one repo. */
+function ReconcileSwitch() {
+  const queryClient = useQueryClient();
+  const [busy, setBusy] = useState(false);
+
+  const turnOn = async () => {
+    setBusy(true);
+    const { error } = await api.PUT("/api/v1/settings/{key}", {
+      params: { path: { key: "sessions.reconcile.enabled" } },
+      body: { scope: "tenant", value: true },
+    });
+    setBusy(false);
+    if (error) {
+      await notify(
+        "Could not turn reconciling on",
+        "The control plane refused the change.",
+      );
+      return;
+    }
+    queryClient.invalidateQueries();
+  };
+
+  return (
+    <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+      <Pill tone="err" title="sessions.reconcile.enabled is off for this tenant">
+        reconciling off
+      </Pill>
+      <button
+        className="btn small"
+        disabled={busy}
+        title="turn reconciling on for this TEAM — every workspace in it starts converging"
+        onClick={turnOn}
+      >
+        turn it on
+      </button>
     </span>
   );
 }

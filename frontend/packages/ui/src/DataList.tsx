@@ -9,6 +9,7 @@
 // operator page without a restyle.
 
 import React from "react";
+import { ChevronDown, ChevronUp } from "lucide-react";
 
 export interface DataColumn<T> {
   /** Stable key for React and for the header/cell pairing. */
@@ -17,6 +18,10 @@ export interface DataColumn<T> {
   cell: (row: T) => React.ReactNode;
   /** Applied to both the `<th>` and each `<td>` in the column. */
   className?: string;
+  /** The endpoint's sort key for this column. Present = the header is a
+   *  button cycling none → asc → desc → none (server-side, per the pagination
+   *  contract); absent = a plain header. */
+  sortKey?: string;
 }
 
 export type DataListPhase = "loading" | "empty" | "no-results" | "rows";
@@ -48,6 +53,8 @@ export function DataList<T>({
   hasMore = false,
   onLoadMore,
   loadingMore = false,
+  sort = null,
+  onSort,
 }: {
   columns: DataColumn<T>[];
   rows: T[];
@@ -64,6 +71,9 @@ export function DataList<T>({
   onLoadMore?: () => void;
   /** True while a "load more" fetch is in flight. */
   loadingMore?: boolean;
+  /** The active server-side sort, if any — matched against `sortKey`. */
+  sort?: { key: string; desc: boolean } | null;
+  onSort?: (key: string) => void;
 }) {
   const phase = dataListPhase({ loading, count: rows.length, filtered });
   return (
@@ -72,11 +82,36 @@ export function DataList<T>({
         <table className="op-table data-list-table">
           <thead>
             <tr>
-              {columns.map((c) => (
-                <th key={c.key} className={c.className}>
-                  {c.header}
-                </th>
-              ))}
+              {columns.map((c) =>
+                c.sortKey && onSort ? (
+                  <th
+                    key={c.key}
+                    className={c.className}
+                    aria-sort={
+                      sort?.key === c.sortKey
+                        ? sort.desc
+                          ? "descending"
+                          : "ascending"
+                        : undefined
+                    }
+                  >
+                    <button
+                      type="button"
+                      className="data-list-sort"
+                      title="sort by this column"
+                      onClick={() => onSort(c.sortKey!)}
+                    >
+                      {c.header}
+                      {sort?.key === c.sortKey &&
+                        (sort.desc ? <ChevronDown size={11} /> : <ChevronUp size={11} />)}
+                    </button>
+                  </th>
+                ) : (
+                  <th key={c.key} className={c.className}>
+                    {c.header}
+                  </th>
+                ),
+              )}
             </tr>
           </thead>
           <tbody>

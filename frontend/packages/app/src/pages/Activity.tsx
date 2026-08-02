@@ -75,11 +75,12 @@ export function ActivityFeed({
 
 const KINDS = ["", "node.", "session.", "task.", "workspace.", "user.", "note."];
 
-export function ActivityPage() {
+/** The full activity timeline as a mountable panel (no page wrapper) — it lives
+ *  as a section of the Admin page now, not as its own rail entry. */
+export function ActivityPanel() {
   const [kind, setKind] = useState("");
   const { selectedWorkspaceId } = useWorkspaceContext();
   return (
-    <div className="nook-grid" style={{ gridTemplateColumns: "1fr" }}>
       <Panel
         title="Activity timeline"
         actions={
@@ -105,6 +106,5 @@ export function ActivityPage() {
           workspaceId={selectedWorkspaceId ?? undefined}
         />
       </Panel>
-    </div>
   );
 }

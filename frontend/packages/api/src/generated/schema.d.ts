@@ -960,6 +960,27 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/nodes/page": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The paged twin of the whole-list read — the Nodes table's endpoint, on the
+         *     pagination contract. Same visibility rule as `list`, applied in the repo's
+         *     WHERE, so a page can never show a node the whole list would hide.
+         */
+        get: operations["nodes_page"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/nodes/renew": {
         parameters: {
             query?: never;
@@ -1843,6 +1864,22 @@ export interface paths {
          *     tenants somewhere they cannot be followed.
          */
         post: operations["operator_move_tenant"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/operator/tenants/{id}/switches": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["tenant_switches"];
+        put?: never;
+        post: operations["set_tenant_switch"];
         delete?: never;
         options?: never;
         head?: never;
@@ -2873,6 +2910,27 @@ export interface paths {
         get: operations["list_workspaces"];
         put?: never;
         post: operations["create_workspace"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/page": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The paged twin of the whole-list read — the table view's endpoint. The
+         *     whole list stays for the pickers (workspace switcher, dispatch target),
+         *     which genuinely want everything.
+         */
+        get: operations["workspaces_page"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -4365,6 +4423,7 @@ export interface components {
             revoke?: boolean;
             /** @description `operator` | `org_admin` | … */
             role: string;
+            tenant_id?: null | components["schemas"]["TenantId"];
         };
         /** @description Adopt a file that already exists in a checkout into the vault. */
         ImportSecretRequest: {
@@ -4984,24 +5043,6 @@ export interface components {
             tenant_id: components["schemas"]["TenantId"];
             tenant_slug: string;
         };
-        /**
-         * @description A page of audit rows plus the keyset cursor to reach the next (older) page.
-         *
-         *     Mirrors [`EventsPage`]'s `{ items, next_cursor }` shape so the two feeds read
-         *     the same way, but keys on the row's UUID v7 `id` rather than a timestamp:
-         *     v7 ids are creation-ordered and unique, so `id < cursor` walks strictly
-         *     older rows with no ties to break (and needs no new column). `next_cursor` is
-         *     null at the end of the list.
-         */
-        OperatorAuditPage: {
-            next_cursor?: null | components["schemas"]["EventId"];
-            rows: components["schemas"]["OperatorAuditEntry"][];
-        };
-        OperatorBindingPage: {
-            /** Format: uuid */
-            next_cursor?: string | null;
-            rows: components["schemas"]["BindingRow"][];
-        };
         OperatorNode: {
             /** Format: int64 */
             active_sessions: number;
@@ -5014,10 +5055,6 @@ export interface components {
             status: string;
             tenant_id: components["schemas"]["TenantId"];
             tenant_slug: string;
-        };
-        OperatorNodePage: {
-            next_cursor?: null | components["schemas"]["NodeId"];
-            rows: components["schemas"]["OperatorNode"][];
         };
         OperatorOrg: {
             /** Format: date-time */
@@ -5054,15 +5091,6 @@ export interface components {
             task_titles?: string[] | null;
             /** Format: int64 */
             workspaces: number;
-        };
-        /**
-         * @description A page of operator tenants + the keyset cursor to the next page. Same shape
-         *     and mechanism as [`OperatorAuditPage`] (keyed on the row's UUID v7 `id`),
-         *     fanned out to the tenants/nodes/bindings lists (MAIN-44).
-         */
-        OperatorTenantPage: {
-            next_cursor?: null | components["schemas"]["TenantId"];
-            rows: components["schemas"]["OperatorTenant"][];
         };
         /** @description An org: the layer between a deployment and its tenants. */
         Org: {
@@ -5149,6 +5177,229 @@ export interface components {
              *     never lost from the view.
              */
             unbound_sessions: components["schemas"]["Session"][];
+        };
+        /**
+         * @description One page of any paginated list — THE pagination wire contract (QOL sprint
+         *     2026-08). Every list endpoint returns this shape; the request half is
+         *     [`PageQuery`]. `next_cursor` is an OPAQUE token: pass it back verbatim as
+         *     `after`, never parse it — the opacity is what lets the server pick the
+         *     mechanism (keyset vs offset) per request. Null means end of list.
+         *
+         *     The server half — cursor codec, validation, SQL skeleton — is
+         *     `nook_db::paging`; the React half is `usePagedList` + `PagedPanel`.
+         */
+        Page_BindingRow: {
+            /** @description Opaque continuation token — pass back verbatim as `after`; null = end. */
+            next_cursor?: string | null;
+            rows: {
+                /** Format: date-time */
+                created_at: string;
+                display_name: string;
+                email: string;
+                /** Format: uuid */
+                id: string;
+                role_key: string;
+                /** Format: uuid */
+                scope_id?: string | null;
+                /** @description The org or tenant slug the binding is scoped to, when it has one. */
+                scope_label?: string | null;
+                scope_type: string;
+            }[];
+        };
+        /**
+         * @description One page of any paginated list — THE pagination wire contract (QOL sprint
+         *     2026-08). Every list endpoint returns this shape; the request half is
+         *     [`PageQuery`]. `next_cursor` is an OPAQUE token: pass it back verbatim as
+         *     `after`, never parse it — the opacity is what lets the server pick the
+         *     mechanism (keyset vs offset) per request. Null means end of list.
+         *
+         *     The server half — cursor codec, validation, SQL skeleton — is
+         *     `nook_db::paging`; the React half is `usePagedList` + `PagedPanel`.
+         */
+        Page_Node: {
+            /** @description Opaque continuation token — pass back verbatim as `after`; null = end. */
+            next_cursor?: string | null;
+            rows: {
+                capabilities: unknown;
+                /** Format: date-time */
+                created_at: string;
+                /**
+                 * @description The name of this node's HOME tenant, set only when that is not the
+                 *     tenant you are acting in (MAIN-353) — your own machine, reached from
+                 *     another of your orgs. `None` for the ordinary case, so a UI can render
+                 *     the badge on presence rather than by comparing ids.
+                 *
+                 *     Computed per response, never stored: it is a fact about the *viewer's*
+                 *     position, not about the node.
+                 */
+                home_tenant?: string | null;
+                hostname: string;
+                id: components["schemas"]["NodeId"];
+                /**
+                 * @description Operator-set labels, `{"key": "value"}` (MAIN-314). The DERIVED `os` and
+                 *     `arch` labels are not in here: they are computed from what the node
+                 *     reports, so storing them would let them drift from the truth.
+                 */
+                labels: unknown;
+                /** Format: date-time */
+                last_seen_at?: string | null;
+                name: string;
+                /**
+                 * Format: uuid
+                 * @description The person who owns this node — its join-token minter, else the tenant
+                 *     owner (MAIN-119). Session-start is confined to this person (MAIN-130).
+                 */
+                owner_person_id?: string | null;
+                platform: string;
+                /** Format: int32 */
+                port_range_end?: number | null;
+                /**
+                 * Format: int32
+                 * @description An operator's port range for this node, overriding what it advertises
+                 *     (MAIN-301). Both `None` means "use the node's own"; the pair is set and
+                 *     cleared together, which the API enforces.
+                 */
+                port_range_start?: number | null;
+                /** @description Latest heartbeat resource sample (see `NodeResources`); `{}` until first. */
+                resources: unknown;
+                /**
+                 * @description Whether the owner has designated this node team-usable (MAIN-135). A
+                 *     shared node is VISIBLE to the whole team; it is not yet usable by them —
+                 *     session-start stays owner-only until a later unit of the epic.
+                 */
+                shared: boolean;
+                status: string;
+                /** @description Operator-set taints, `[{"key": …, "effect": …}]` (MAIN-314). */
+                taints: unknown;
+                tenant_id: components["schemas"]["TenantId"];
+                /** Format: date-time */
+                updated_at: string;
+            }[];
+        };
+        /**
+         * @description One page of any paginated list — THE pagination wire contract (QOL sprint
+         *     2026-08). Every list endpoint returns this shape; the request half is
+         *     [`PageQuery`]. `next_cursor` is an OPAQUE token: pass it back verbatim as
+         *     `after`, never parse it — the opacity is what lets the server pick the
+         *     mechanism (keyset vs offset) per request. Null means end of list.
+         *
+         *     The server half — cursor codec, validation, SQL skeleton — is
+         *     `nook_db::paging`; the React half is `usePagedList` + `PagedPanel`.
+         */
+        Page_OperatorAuditEntry: {
+            /** @description Opaque continuation token — pass back verbatim as `after`; null = end. */
+            next_cursor?: string | null;
+            rows: {
+                /** Format: uuid */
+                actor_id?: string | null;
+                actor_type?: string | null;
+                id: components["schemas"]["EventId"];
+                kind: string;
+                /** Format: date-time */
+                occurred_at: string;
+                tenant_id: components["schemas"]["TenantId"];
+                tenant_slug: string;
+            }[];
+        };
+        /**
+         * @description One page of any paginated list — THE pagination wire contract (QOL sprint
+         *     2026-08). Every list endpoint returns this shape; the request half is
+         *     [`PageQuery`]. `next_cursor` is an OPAQUE token: pass it back verbatim as
+         *     `after`, never parse it — the opacity is what lets the server pick the
+         *     mechanism (keyset vs offset) per request. Null means end of list.
+         *
+         *     The server half — cursor codec, validation, SQL skeleton — is
+         *     `nook_db::paging`; the React half is `usePagedList` + `PagedPanel`.
+         */
+        Page_OperatorNode: {
+            /** @description Opaque continuation token — pass back verbatim as `after`; null = end. */
+            next_cursor?: string | null;
+            rows: {
+                /** Format: int64 */
+                active_sessions: number;
+                id: components["schemas"]["NodeId"];
+                /** Format: date-time */
+                last_seen_at?: string | null;
+                name: string;
+                platform: string;
+                resources: unknown;
+                status: string;
+                tenant_id: components["schemas"]["TenantId"];
+                tenant_slug: string;
+            }[];
+        };
+        /**
+         * @description One page of any paginated list — THE pagination wire contract (QOL sprint
+         *     2026-08). Every list endpoint returns this shape; the request half is
+         *     [`PageQuery`]. `next_cursor` is an OPAQUE token: pass it back verbatim as
+         *     `after`, never parse it — the opacity is what lets the server pick the
+         *     mechanism (keyset vs offset) per request. Null means end of list.
+         *
+         *     The server half — cursor codec, validation, SQL skeleton — is
+         *     `nook_db::paging`; the React half is `usePagedList` + `PagedPanel`.
+         */
+        Page_OperatorTenant: {
+            /** @description Opaque continuation token — pass back verbatim as `after`; null = end. */
+            next_cursor?: string | null;
+            rows: {
+                /** Format: int64 */
+                active_sessions: number;
+                /** Format: date-time */
+                created_at: string;
+                id: components["schemas"]["TenantId"];
+                /** Format: int64 */
+                members: number;
+                /** Format: int64 */
+                nodes: number;
+                /** Format: uuid */
+                org_id?: string | null;
+                repositories?: string[] | null;
+                slug: string;
+                task_titles?: string[] | null;
+                /** Format: int64 */
+                workspaces: number;
+            }[];
+        };
+        /**
+         * @description One page of any paginated list — THE pagination wire contract (QOL sprint
+         *     2026-08). Every list endpoint returns this shape; the request half is
+         *     [`PageQuery`]. `next_cursor` is an OPAQUE token: pass it back verbatim as
+         *     `after`, never parse it — the opacity is what lets the server pick the
+         *     mechanism (keyset vs offset) per request. Null means end of list.
+         *
+         *     The server half — cursor codec, validation, SQL skeleton — is
+         *     `nook_db::paging`; the React half is `usePagedList` + `PagedPanel`.
+         */
+        Page_TenantMemberItem: {
+            /** @description Opaque continuation token — pass back verbatim as `after`; null = end. */
+            next_cursor?: string | null;
+            rows: {
+                display_name: string;
+                email: string;
+                /** Format: date-time */
+                joined_at: string;
+                /** Format: uuid */
+                principal_id: string;
+                /** @description `owner` | `admin` | `member`. */
+                role: string;
+            }[];
+        };
+        /**
+         * @description One page of any paginated list — THE pagination wire contract (QOL sprint
+         *     2026-08). Every list endpoint returns this shape; the request half is
+         *     [`PageQuery`]. `next_cursor` is an OPAQUE token: pass it back verbatim as
+         *     `after`, never parse it — the opacity is what lets the server pick the
+         *     mechanism (keyset vs offset) per request. Null means end of list.
+         *
+         *     The server half — cursor codec, validation, SQL skeleton — is
+         *     `nook_db::paging`; the React half is `usePagedList` + `PagedPanel`.
+         */
+        Page_WorkspaceDetail: {
+            /** @description Opaque continuation token — pass back verbatim as `after`; null = end. */
+            next_cursor?: string | null;
+            rows: (components["schemas"]["Workspace"] & {
+                locations: components["schemas"]["WorkspaceLocation"][];
+            })[];
         };
         /**
          * @description A person the caller may address in a DM (MAIN-113 AC-4): the stable
@@ -5669,6 +5920,16 @@ export interface components {
         SetSharedRequest: {
             shared: boolean;
         };
+        /** @description Throw one of them. */
+        SetTenantSwitchRequest: {
+            enabled: boolean;
+            /**
+             * @description `loops` or `reconcile` — a closed set, not a settings key, so this
+             *     endpoint can never become a way to write arbitrary settings into
+             *     somebody else's tenant.
+             */
+            switch: string;
+        };
         /** @description Setting or checking the app password. */
         SetVaultPassphraseRequest: {
             passphrase: string;
@@ -5978,16 +6239,6 @@ export interface components {
             role: string;
         };
         /**
-         * @description A page of tenant members + the keyset cursor to the next page. Same shape and
-         *     mechanism as the operator lists (keyed on the member's UUID v7 `principal_id`),
-         *     so a large tenant's members are searchable and paged (MAIN-45).
-         */
-        TenantMemberPage: {
-            /** Format: uuid */
-            next_cursor?: string | null;
-            rows: components["schemas"]["TenantMemberItem"][];
-        };
-        /**
          * @description A tenant the caller belongs to, and the role they hold in it.
          *
          *     Membership is deliberately its own concept: a user has one *current*
@@ -6004,6 +6255,28 @@ export interface components {
             /** @description `owner` | `admin` | `member`. */
             role: string;
             slug: string;
+        };
+        /**
+         * @description The switches an operator can throw for a tenant OTHER than the one they are
+         *     acting in.
+         *
+         *     `settings::put` writes to the caller's active tenant, which meant turning
+         *     loops on for somebody else's team required switching into it first — and if
+         *     their team was never set up, nothing ran and nothing said why.
+         */
+        TenantSwitches: {
+            /**
+             * @description `loops.enabled` — whether this tenant dispatches loop jobs at all
+             *     (MAIN-239). Default off, which is why a fresh team's loops never fire.
+             */
+            loops_enabled: boolean;
+            /**
+             * @description `sessions.reconcile.enabled` — whether the reconciler converges this
+             *     tenant's workspaces onto its nodes. Default off.
+             */
+            reconcile_enabled: boolean;
+            tenant_id: components["schemas"]["TenantId"];
+            tenant_name: string;
         };
         Theme: {
             /** Format: date-time */
@@ -8131,6 +8404,36 @@ export interface operations {
             };
         };
     };
+    nodes_page: {
+        parameters: {
+            query?: {
+                /** @description Case-insensitive substring; the searched fields differ per list. */
+                q?: string | null;
+                /** @description Opaque cursor from the previous page's `next_cursor`. */
+                after?: string | null;
+                /** @description Page size (default 50, clamped 1..=200). */
+                limit?: number | null;
+                /** @description Sort key from the endpoint's documented set. Absent = newest first. */
+                sort?: string | null;
+                /** @description `asc` | `desc`. Defaults ascending under `sort`, newest-first without. */
+                dir?: string | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Page_Node"];
+                };
+            };
+        };
+    };
     renew_node_cert: {
         parameters: {
             query?: never;
@@ -9334,12 +9637,16 @@ export interface operations {
     operator_audit: {
         parameters: {
             query?: {
-                /** @description Case-insensitive substring matched across kind, tenant slug, and actor. */
+                /** @description Case-insensitive substring; the searched fields differ per list. */
                 q?: string | null;
-                /** @description Keyset cursor: the last `id` already seen. Returns strictly older rows. */
-                after?: null | components["schemas"]["EventId"];
+                /** @description Opaque cursor from the previous page's `next_cursor`. */
+                after?: string | null;
                 /** @description Page size (default 50, clamped 1..=200). */
                 limit?: number | null;
+                /** @description Sort key from the endpoint's documented set. Absent = newest first. */
+                sort?: string | null;
+                /** @description `asc` | `desc`. Defaults ascending under `sort`, newest-first without. */
+                dir?: string | null;
             };
             header?: never;
             path?: never;
@@ -9352,7 +9659,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["OperatorAuditPage"];
+                    "application/json": components["schemas"]["Page_OperatorAuditEntry"];
                 };
             };
             403: {
@@ -9368,10 +9675,14 @@ export interface operations {
             query?: {
                 /** @description Case-insensitive substring; the searched fields differ per list. */
                 q?: string | null;
-                /** @description Keyset cursor: the last `id` already seen. Returns strictly older rows. */
+                /** @description Opaque cursor from the previous page's `next_cursor`. */
                 after?: string | null;
                 /** @description Page size (default 50, clamped 1..=200). */
                 limit?: number | null;
+                /** @description Sort key from the endpoint's documented set. Absent = newest first. */
+                sort?: string | null;
+                /** @description `asc` | `desc`. Defaults ascending under `sort`, newest-first without. */
+                dir?: string | null;
             };
             header?: never;
             path?: never;
@@ -9384,7 +9695,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["OperatorBindingPage"];
+                    "application/json": components["schemas"]["Page_BindingRow"];
                 };
             };
             403: {
@@ -9427,10 +9738,14 @@ export interface operations {
             query?: {
                 /** @description Case-insensitive substring; the searched fields differ per list. */
                 q?: string | null;
-                /** @description Keyset cursor: the last `id` already seen. Returns strictly older rows. */
+                /** @description Opaque cursor from the previous page's `next_cursor`. */
                 after?: string | null;
                 /** @description Page size (default 50, clamped 1..=200). */
                 limit?: number | null;
+                /** @description Sort key from the endpoint's documented set. Absent = newest first. */
+                sort?: string | null;
+                /** @description `asc` | `desc`. Defaults ascending under `sort`, newest-first without. */
+                dir?: string | null;
             };
             header?: never;
             path?: never;
@@ -9443,7 +9758,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["OperatorNodePage"];
+                    "application/json": components["schemas"]["Page_OperatorNode"];
                 };
             };
             403: {
@@ -9670,10 +9985,14 @@ export interface operations {
             query?: {
                 /** @description Case-insensitive substring; the searched fields differ per list. */
                 q?: string | null;
-                /** @description Keyset cursor: the last `id` already seen. Returns strictly older rows. */
+                /** @description Opaque cursor from the previous page's `next_cursor`. */
                 after?: string | null;
                 /** @description Page size (default 50, clamped 1..=200). */
                 limit?: number | null;
+                /** @description Sort key from the endpoint's documented set. Absent = newest first. */
+                sort?: string | null;
+                /** @description `asc` | `desc`. Defaults ascending under `sort`, newest-first without. */
+                dir?: string | null;
             };
             header?: never;
             path?: never;
@@ -9686,7 +10005,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["OperatorTenantPage"];
+                    "application/json": components["schemas"]["Page_OperatorTenant"];
                 };
             };
             403: {
@@ -9778,6 +10097,82 @@ export interface operations {
         };
         responses: {
             200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    tenant_switches: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TenantSwitches"];
+                };
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    set_tenant_switch: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SetTenantSwitchRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TenantSwitches"];
+                };
+            };
+            400: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -11313,12 +11708,16 @@ export interface operations {
     list_members: {
         parameters: {
             query?: {
-                /** @description Case-insensitive substring across email, display name, and role. */
+                /** @description Case-insensitive substring; the searched fields differ per list. */
                 q?: string | null;
-                /** @description Keyset cursor: the last member `principal_id` seen. Returns older rows. */
+                /** @description Opaque cursor from the previous page's `next_cursor`. */
                 after?: string | null;
                 /** @description Page size (default 50, clamped 1..=200). */
                 limit?: number | null;
+                /** @description Sort key from the endpoint's documented set. Absent = newest first. */
+                sort?: string | null;
+                /** @description `asc` | `desc`. Defaults ascending under `sort`, newest-first without. */
+                dir?: string | null;
             };
             header?: never;
             path: {
@@ -11333,7 +11732,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["TenantMemberPage"];
+                    "application/json": components["schemas"]["Page_TenantMemberItem"];
                 };
             };
             403: {
@@ -11744,6 +12143,36 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["Workspace"];
+                };
+            };
+        };
+    };
+    workspaces_page: {
+        parameters: {
+            query?: {
+                /** @description Case-insensitive substring; the searched fields differ per list. */
+                q?: string | null;
+                /** @description Opaque cursor from the previous page's `next_cursor`. */
+                after?: string | null;
+                /** @description Page size (default 50, clamped 1..=200). */
+                limit?: number | null;
+                /** @description Sort key from the endpoint's documented set. Absent = newest first. */
+                sort?: string | null;
+                /** @description `asc` | `desc`. Defaults ascending under `sort`, newest-first without. */
+                dir?: string | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Page_WorkspaceDetail"];
                 };
             };
         };

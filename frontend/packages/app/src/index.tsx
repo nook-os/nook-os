@@ -1,19 +1,18 @@
 import React, { useEffect, useState } from "react";
-import { OperatorPage } from "./pages/Operator";
+import { AdminPage } from "./pages/Admin";
 import { installWriteFailureToasts, Toasts } from "./Notifications";
 import {
   QueryClient,
   QueryClientProvider,
   useQuery,
 } from "@tanstack/react-query";
-import { BrowserRouter, Route, Routes, useNavigate } from "react-router-dom";
+import { BrowserRouter, Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { api } from "@nookos/api";
 import { Empty, ThemeProvider } from "@nookos/ui";
 import { ContextMenuProvider } from "./contextMenu";
 import { Shell } from "./layout";
 import { startLive } from "./live";
 import { AcceptInvitePage } from "./pages/AcceptInvite";
-import { ActivityPage } from "./pages/Activity";
 import { BoardPage } from "./pages/Board";
 import { ChatPage } from "./pages/Chat";
 import { Dashboard } from "./pages/Dashboard";
@@ -32,6 +31,13 @@ import { VerifyEmailPage } from "./pages/VerifyEmail";
 import { WorkspaceDetail, WorkspacesPage } from "./pages/Workspaces";
 import { MissionPage } from "./pages/Mission";
 import { LoopPage } from "./pages/Loop";
+
+/** /operator carried ?section= deep links before it merged into /admin;
+ *  preserve them rather than dumping everyone on the first section. */
+function LegacyOperatorRedirect() {
+  const location = useLocation();
+  return <Navigate to={`/admin${location.search}`} replace />;
+}
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -173,8 +179,12 @@ function AuthGate() {
         <Route path="loop/:taskId" element={<LoopPage />} />
         <Route path="chat" element={<ChatPage />} />
         <Route path="accept" element={<AcceptInvitePage />} />
-        <Route path="operator" element={<OperatorPage />} />
-        <Route path="activity" element={<ActivityPage />} />
+        <Route path="admin" element={<AdminPage />} />
+        {/* The old rail entries live on as redirects: bookmarks and muscle
+            memory keep working, and /operator?section=tenants still lands on
+            the same table it always named. */}
+        <Route path="operator" element={<LegacyOperatorRedirect />} />
+        <Route path="activity" element={<Navigate to="/admin?section=activity" replace />} />
         <Route path="nodes" element={<NodesPage />} />
         <Route path="nodes/:id" element={<NodeDetail />} />
         <Route path="notebook" element={<Notebook />} />

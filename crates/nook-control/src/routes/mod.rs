@@ -136,6 +136,7 @@ pub fn build_router(state: AppState) -> Router {
             "/workspaces",
             get(workspaces::list).post(workspaces::create),
         )
+        .route("/workspaces/page", get(workspaces::page))
         .route(
             "/workspaces/{id}",
             get(workspaces::get_one)
@@ -204,6 +205,10 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route("/operator/orgs/{id}", patch(operator::rename_org))
         .route("/operator/tenants/{id}/org", post(operator::move_tenant))
+        .route(
+            "/operator/tenants/{id}/switches",
+            get(operator::tenant_switches).post(operator::set_tenant_switch),
+        )
         .route("/operator/tenants/{id}/ca", post(operator::stage_ca))
         .route(
             "/operator/tenants/{id}/ca/{ca}/promote",
@@ -332,6 +337,7 @@ pub fn build_router(state: AppState) -> Router {
             patch(notebook::update_folder).delete(notebook::delete_folder),
         )
         .route("/nodes", get(nodes::list))
+        .route("/nodes/page", get(nodes::page))
         .route("/nodes/{id}", get(nodes::get_one).delete(nodes::delete))
         .route("/node/releases", get(dist::releases))
         .route("/nodes/join-tokens", post(join::create_join_token))

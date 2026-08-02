@@ -146,12 +146,17 @@ pub async fn connect_once(cfg: &NodeConfig) -> Result<()> {
         })
         .await
         .ok();
-    out_tx
-        .send(NodeToControl::WorkspacesDiscovered {
-            workspaces: discovery::scan(&cfg.workspace_roots),
-        })
-        .await
-        .ok();
+    {
+        // Off the loop: a full scan is one `git status` per checkout, which on
+        // a bind-mounted filesystem can take seconds.
+        let tx = out_tx.clone();
+        let roots = cfg.workspace_roots.clone();
+        tokio::task::spawn_blocking(move || {
+            let _ = tx.blocking_send(NodeToControl::WorkspacesDiscovered {
+                workspaces: discovery::scan(&roots),
+            });
+        });
+    }
 
     // Best-effort: on every (re)connect, prune loop-job worktrees orphaned by a
     // crash or a node restart (MAIN-161 AC-4). Blocking git, non-fatal.
@@ -215,7 +220,10 @@ pub async fn connect_once(cfg: &NodeConfig) -> Result<()> {
         }
     });
 
-    let mut manager = sessions::Manager::new(out_tx.clone());
+    // The session engine lives on its own thread (see sessions.rs) — the read
+    // loop only ever forwards commands, so a slow tmux spawn can never sit
+    // between a keystroke arriving and it reaching the PTY.
+    let session_tx = sessions::Manager::spawn(out_tx.clone());
 
     while let Some(msg) = stream.next().await {
         let msg = match msg {
@@ -308,7 +316,14 @@ pub async fn connect_once(cfg: &NodeConfig) -> Result<()> {
                 } else {
                     workspace_path
                 };
-                manager.start(session_id, &runtime, &cwd, cols, rows, &ports)
+                let _ = session_tx.send(sessions::Cmd::Start {
+                    session_id,
+                    runtime,
+                    cwd,
+                    cols,
+                    rows,
+                    ports,
+                });
             }
             ControlToNode::StartAuthSession {
                 session_id,
@@ -319,23 +334,48 @@ pub async fn connect_once(cfg: &NodeConfig) -> Result<()> {
                 // The node picks the allowlisted login command for `runtime`;
                 // an unknown runtime fails the session rather than running
                 // anything (MAIN-126).
-                manager.start_auth(session_id, &runtime, cols, rows)
+                let _ = session_tx.send(sessions::Cmd::StartAuth {
+                    session_id,
+                    runtime,
+                    cols,
+                    rows,
+                });
             }
             ControlToNode::AttachSession {
                 session_id,
                 tmux_session,
-            } => manager.attach(session_id, tmux_session.as_deref()),
+            } => {
+                let _ = session_tx.send(sessions::Cmd::Attach {
+                    session_id,
+                    tmux_session,
+                });
+            }
             ControlToNode::SessionInput {
                 session_id,
                 data_b64,
-            } => manager.input(session_id, &data_b64),
+            } => {
+                let _ = session_tx.send(sessions::Cmd::Input {
+                    session_id,
+                    data_b64,
+                });
+            }
             ControlToNode::ResizeSession {
                 session_id,
                 cols,
                 rows,
-            } => manager.resize(session_id, cols, rows),
-            ControlToNode::KillSession { session_id } => manager.kill(session_id),
-            ControlToNode::DetachSession { session_id } => manager.detach(session_id),
+            } => {
+                let _ = session_tx.send(sessions::Cmd::Resize {
+                    session_id,
+                    cols,
+                    rows,
+                });
+            }
+            ControlToNode::KillSession { session_id } => {
+                let _ = session_tx.send(sessions::Cmd::Kill { session_id });
+            }
+            ControlToNode::DetachSession { session_id } => {
+                let _ = session_tx.send(sessions::Cmd::Detach { session_id });
+            }
             ControlToNode::GetGitStatus {
                 request_id,
                 workspace_path,
@@ -585,52 +625,59 @@ pub async fn connect_once(cfg: &NodeConfig) -> Result<()> {
                 name,
                 content_b64,
             } => {
-                use base64::Engine;
-                let bytes = base64::engine::general_purpose::STANDARD
-                    .decode(content_b64.as_bytes())
-                    .unwrap_or_default();
-                if let Err(e) = crate::gitops::write_workspace_file(&checkout_path, &name, &bytes) {
-                    out_tx
-                        .send(NodeToControl::Error {
+                let tx = out_tx.clone();
+                tokio::task::spawn_blocking(move || {
+                    use base64::Engine;
+                    let bytes = base64::engine::general_purpose::STANDARD
+                        .decode(content_b64.as_bytes())
+                        .unwrap_or_default();
+                    if let Err(e) =
+                        crate::gitops::write_workspace_file(&checkout_path, &name, &bytes)
+                    {
+                        let _ = tx.blocking_send(NodeToControl::Error {
                             context: "write_workspace_file".into(),
                             message: e,
-                        })
-                        .await
-                        .ok();
-                } else {
-                    tracing::info!(checkout = %checkout_path, file = %name, "workspace file synced");
-                }
+                        });
+                    } else {
+                        tracing::info!(checkout = %checkout_path, file = %name, "workspace file synced");
+                    }
+                });
             }
             ControlToNode::ReadWorkspaceFile {
                 request_id,
                 checkout_path,
                 name,
             } => {
-                use base64::Engine;
-                let (ok, message) = match crate::gitops::read_workspace_file(&checkout_path, &name)
-                {
-                    Ok(bytes) => (
-                        true,
-                        base64::engine::general_purpose::STANDARD.encode(&bytes),
-                    ),
-                    Err(e) => (false, e),
-                };
-                out_tx
-                    .send(NodeToControl::OpResult {
+                let tx = out_tx.clone();
+                tokio::task::spawn_blocking(move || {
+                    use base64::Engine;
+                    let (ok, message) =
+                        match crate::gitops::read_workspace_file(&checkout_path, &name) {
+                            Ok(bytes) => (
+                                true,
+                                base64::engine::general_purpose::STANDARD.encode(&bytes),
+                            ),
+                            Err(e) => (false, e),
+                        };
+                    let _ = tx.blocking_send(NodeToControl::OpResult {
                         request_id,
                         ok,
                         path: Some(checkout_path),
                         message,
-                    })
-                    .await
-                    .ok();
+                    });
+                });
             }
             ControlToNode::RescanWorkspaces => {
-                let workspaces = discovery::scan(&cfg.workspace_roots);
-                out_tx
-                    .send(NodeToControl::WorkspacesDiscovered { workspaces })
-                    .await
-                    .ok();
+                // spawn_blocking like every other git arm — this one ran the
+                // scan INLINE and stalled the read loop (frozen keystrokes)
+                // for one `git status` per checkout.
+                let tx = out_tx.clone();
+                let roots = cfg.workspace_roots.clone();
+                tokio::task::spawn_blocking(move || {
+                    let _ = tx.blocking_send(NodeToControl::WorkspacesDiscovered {
+                        workspaces: discovery::scan(&roots),
+                    });
+                });
             }
             ControlToNode::InstallSkill {
                 name,

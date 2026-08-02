@@ -656,34 +656,53 @@ code,
 
 /* Tenant switcher in the status strip. Sits at the bottom of the window, so its
    menu opens UPWARD. Reuses the amber-CRT menu look of the workspace switcher. */
-.tenant-switcher { position: relative; display: inline-flex; }
-.tenant-switcher-btn {
+/* The team switcher, in the TOP BAR (was a bare label in the bottom status
+   strip). Sized and bordered like `.ws-switcher-btn` beside it, because the two
+   are the same kind of control — the scope you are working in — and reading as
+   one pair is what makes the pairing legible. The dropdown opens DOWNWARD from
+   here, where the old one opened up out of the strip. */
+.team-switcher { position: relative; display: inline-flex; align-items: center; }
+.team-switcher-btn {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
-  background: transparent;
-  border: none;
-  padding: 0;
-  color: var(--nook-fg-dim);
-  cursor: pointer;
-  font: inherit;
-}
-.tenant-switcher-btn:hover:not(:disabled) { color: var(--nook-fg-bright); }
-.tenant-switcher-btn:disabled { cursor: default; opacity: 0.6; }
-.tenant-switcher-menu {
-  position: absolute;
-  bottom: calc(100% + 6px);
-  left: 0;
-  min-width: 200px;
+  gap: 7px;
+  height: 28px;
+  padding: 0 12px;
+  line-height: 1;
   background: var(--nook-bg-raised);
   border: 1px solid var(--nook-border-bright);
   border-radius: var(--nook-radius);
-  box-shadow: 0 -8px 24px rgba(0, 0, 0, 0.5);
+  color: var(--nook-fg);
+  cursor: pointer;
+  max-width: 200px;
+  font-family: var(--nook-font-mono);
+  font-size: 12px;
+}
+.team-switcher-btn:hover:not(:disabled):not(.static) { border-color: var(--nook-accent); }
+.team-switcher-btn:disabled { cursor: default; opacity: 0.6; }
+/* One team: same footprint, no affordance — it is a label, and offering a menu
+   onto a list of one would be a lie about what clicking does. */
+.team-switcher-btn.static { cursor: default; color: var(--nook-fg-dim); }
+.team-switcher-btn .name {
+  color: var(--nook-fg-bright);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.team-switcher-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  min-width: 220px;
+  background: var(--nook-bg-raised);
+  border: 1px solid var(--nook-border-bright);
+  border-radius: var(--nook-radius);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
   z-index: 100;
   overflow: hidden;
   padding: 4px;
 }
-.tenant-switcher-item {
+.team-switcher-item {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -697,11 +716,12 @@ code,
   text-align: left;
   font: inherit;
 }
-.tenant-switcher-item:hover { background: var(--nook-bg-panel); color: var(--nook-fg-bright); }
-.tenant-switcher-item.current { color: var(--nook-accent); }
-.tenant-switcher-item .check { width: 12px; display: inline-flex; flex: none; }
-.tenant-switcher-item .name { flex: 1; }
-.tenant-switcher-item .role { margin-left: auto; text-transform: capitalize; }
+.team-switcher-item:hover { background: var(--nook-bg-panel); color: var(--nook-fg-bright); }
+.team-switcher-item.current { color: var(--nook-accent); }
+.team-switcher-item .check { width: 12px; display: inline-flex; flex: none; }
+.team-switcher-item .name { flex: 1; }
+.team-switcher-item .role { margin-left: auto; text-transform: capitalize; }
+.team-switcher-hint { padding: 4px 8px 2px; border-top: 1px solid var(--nook-border); margin-top: 4px; }
 
 /* Scope chip shown on pages filtered by the workspace context */
 .scope-chip {
@@ -801,8 +821,14 @@ code,
   color: var(--nook-fg-bright);
   text-shadow: var(--nook-glow);
 }
+/* A flex row, not block flow: mixed-height children (a search field beside a
+   button) baseline-drift several pixels apart otherwise. Centering here fixes
+   every panel title bar at once — no per-panel wrapper spans. */
 .nook-panel-actions {
   flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
 }
 
 .nook-panel-heading::before {
@@ -1399,8 +1425,10 @@ table.nook-table tr.clickable { cursor: pointer; }
   color: var(--nook-fg);
   background: var(--nook-bg);
   border: 1px solid var(--nook-border);
-  border-radius: 3px;
-  padding: 2px 7px;
+  border-radius: var(--nook-radius);
+  /* Control grid, like every input it shares a toolbar with. */
+  height: var(--nook-ctrl-sm);
+  padding: 0 7px;
   width: 190px;
 }
 .board-search:focus {
@@ -1416,11 +1444,15 @@ table.nook-table tr.clickable { cursor: pointer; }
 }
 
 .task-chip {
+  /* Pill height (`--nook-pill-h`), like every other chip in a mixed row. */
+  display: inline-flex;
+  align-items: center;
+  height: var(--nook-pill-h);
   border: 1px solid var(--nook-border-bright);
   background: transparent;
   color: var(--nook-fg-dim);
-  border-radius: 2px;
-  padding: 1px 5px;
+  border-radius: var(--nook-radius);
+  padding: 0 5px;
   font-size: 10.5px;
   cursor: pointer;
   font-family: inherit;
@@ -1529,13 +1561,15 @@ table.nook-table tr.clickable { cursor: pointer; }
 .filters-label-search { width: 100%; }
 
 .task-select {
+  /* Control grid, same reason as .sel-trigger. */
+  height: var(--nook-ctrl-sm);
   background: var(--nook-bg);
   color: var(--nook-fg);
   border: 1px solid var(--nook-border-bright);
-  border-radius: 2px;
+  border-radius: var(--nook-radius);
   font-size: 10.5px;
   font-family: inherit;
-  padding: 1px 3px;
+  padding: 0 3px;
 }
 
 /* ── Task detail panel ──────────────────────────────────────────────────── */
@@ -3449,13 +3483,15 @@ textarea.env-area.blurred {
   align-items: center;
   gap: 5px;
   width: 100%;
+  /* Control grid: mixed rows (a select beside pills or buttons) line up. */
+  height: var(--nook-ctrl-sm);
   background: var(--nook-bg);
   border: 1px solid var(--nook-border-bright);
-  border-radius: 3px;
+  border-radius: var(--nook-radius);
   color: var(--nook-fg);
   font-family: inherit;
   font-size: 11.5px;
-  padding: 3px 6px;
+  padding: 0 6px;
   cursor: pointer;
   text-align: left;
 }
@@ -3840,6 +3876,127 @@ a.toast-main:hover .toast-title { text-decoration: underline; }
 
 .chan-empty { display: flex; align-items: center; gap: 6px; padding: 4px 0; }
 
+/* ── Sectioned pages (Settings, Operator) ───────────────────────────────────
+   The shell that replaced the panel-grid soup: a grouped nav on the left, one
+   section's content on the right, a finder on top of the nav. Nav is sticky so
+   long section content scrolls under it, and the whole thing collapses to a
+   single column at the shared medium breakpoint. */
+/* Fills `.nook-main` completely: padded at the edges, the nav rail running the
+   FULL height like the app's own icon rail, and the content column scrolling
+   independently underneath a nav that never moves. A short nav floating in
+   empty background read as a lost dialog, not as the page's spine. */
+.spage-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  height: 100%;
+  min-height: 0;
+  padding: 10px;
+  overflow: hidden;
+}
+.spage {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 220px minmax(0, 1fr);
+  gap: 10px;
+}
+.spage-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 8px;
+  background: var(--nook-bg-panel);
+  border: 1px solid var(--nook-border);
+  border-radius: var(--nook-radius);
+  overflow-y: auto;
+  min-height: 0;
+}
+.spage-find { margin-bottom: 6px; }
+.spage-group {
+  margin: 8px 6px 3px;
+  font-size: 10px;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--nook-fg-faint);
+}
+.spage-group:first-of-type { margin-top: 2px; }
+.spage-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 5px 8px;
+  background: transparent;
+  border: none;
+  border-radius: calc(var(--nook-radius) - 2px);
+  color: var(--nook-fg-dim);
+  cursor: pointer;
+  text-align: left;
+  font: inherit;
+}
+.spage-item:hover { background: var(--nook-bg-raised); color: var(--nook-fg-bright); }
+.spage-item.active {
+  background: var(--nook-bg-raised);
+  color: var(--nook-accent);
+}
+.spage-item-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* The blast radius, on the nav itself — "team"/"org"/"fleet" says who a
+   section affects BEFORE it is opened. Dim, not alarming: it is a fact, not a
+   warning. */
+.spage-badge {
+  margin-left: auto;
+  flex: none;
+  font-size: 10px;
+  padding: 0 5px;
+  border: 1px solid var(--nook-border);
+  border-radius: 3px;
+  color: var(--nook-fg-faint);
+}
+.spage-item.active .spage-badge { color: var(--nook-accent); border-color: color-mix(in srgb, var(--nook-accent) 45%, transparent); }
+.spage-empty { display: flex; align-items: center; gap: 6px; padding: 6px 8px; }
+.spage-content {
+  min-width: 0;
+  min-height: 0;
+  display: grid;
+  /* One full-height track per section child: the panel frames the whole column
+     top to bottom, twin to the nav rail beside it, and long content scrolls
+     INSIDE the panel body exactly as it does everywhere else in the app —
+     which is also why there is no overflow here (one scrollbar, not two). */
+  grid-auto-rows: minmax(0, 1fr);
+  gap: 10px;
+}
+/* THE CARD LOOK, defined once. Panels outside a seam-grid carry the same
+   rounded border the nav rail does, so a page reads as one system instead of a
+   framed rail beside floating tables. Covers every panel in a sectioned page —
+   content AND the standing intro banner above the nav — plus any `.nook-grid`
+   that opts in with `cards`. One rule, because "choose one style" only stays
+   chosen if there is exactly one place the style lives. */
+.spage-wrap .nook-panel,
+.nook-grid.cards > .nook-panel {
+  border: 1px solid var(--nook-border);
+  border-radius: var(--nook-radius);
+  overflow: hidden;
+}
+/* A seam-grid that opted into cards: the seams go (transparent gaps instead of
+   border-colored background), and the page gets the same edge padding the
+   sectioned pages have. */
+.nook-grid.cards {
+  background: transparent;
+  gap: 10px;
+  padding: 10px;
+}
+@media (max-width: 1024px) {
+  /* One column: the nav sizes to its content on top, and the content row takes
+     the rest — the rail must not eat half a small screen. */
+  .spage { grid-template-columns: 1fr; grid-template-rows: auto minmax(0, 1fr); }
+  .spage-nav { overflow-y: visible; }
+}
+
 /* ── Operator surface ───────────────────────────────────────────────────── */
 
 .op-intro {
@@ -3879,6 +4036,8 @@ a.toast-main:hover .toast-title { text-decoration: underline; }
 }
 
 .op-table-wrap { overflow-x: auto; padding: 0 12px 12px; }
+/* The capacity bars need room to read as bars. */
+.col-capacity { min-width: 180px; }
 .op-table { border-collapse: collapse; width: 100%; font-size: 11.5px; }
 .op-table th {
   text-align: left;
@@ -3918,14 +4077,36 @@ a.toast-main:hover .toast-title { text-decoration: underline; }
   background: var(--nook-bg-raised);
 }
 .data-list-more-btn:disabled { opacity: 0.5; cursor: default; }
+/* A sortable header is a button that dresses as its th: same face, plus a
+   direction chevron when it is the active sort. */
+.data-list-sort {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  background: none;
+  border: none;
+  padding: 0;
+  margin: 0;
+  font: inherit;
+  color: inherit;
+  text-transform: inherit;
+  letter-spacing: inherit;
+  cursor: pointer;
+}
+.data-list-sort:hover { color: var(--nook-accent); }
+th[aria-sort] .data-list-sort { color: var(--nook-accent); }
 
+/* On the control grid (`--nook-ctrl-sm`), like every neighbour it sits
+   beside: a content-driven height here is why a search box and a button in
+   one title bar used to disagree by a few pixels. */
 .search-input {
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  padding: 2px 7px;
+  height: var(--nook-ctrl-sm);
+  padding: 0 7px;
   border: 1px solid var(--nook-border);
-  border-radius: 3px;
+  border-radius: var(--nook-radius);
   background: var(--nook-bg);
 }
 .search-input:focus-within { border-color: var(--nook-accent); }
@@ -3940,6 +4121,22 @@ a.toast-main:hover .toast-title { text-decoration: underline; }
   width: 180px;
 }
 .search-input-field::placeholder { color: var(--nook-fg-faint); }
+/* Kill the native WebKit cancel button (Chrome renders it blue, wildly off
+   theme); SearchInput renders its own themed clear instead. */
+input[type="search"]::-webkit-search-cancel-button {
+  -webkit-appearance: none;
+  appearance: none;
+}
+.search-input-clear {
+  display: inline-flex;
+  align-items: center;
+  background: none;
+  border: none;
+  padding: 0;
+  color: var(--nook-fg-faint);
+  cursor: pointer;
+}
+.search-input-clear:hover { color: var(--nook-accent); }
 
 .op-policy { display: flex; flex-direction: column; gap: 7px; padding: 10px 12px; }
 .op-policy-row { display: flex; gap: 9px; align-items: center; }
@@ -4066,6 +4263,51 @@ a.toast-main:hover .toast-title { text-decoration: underline; }
   gap: 8px;
 }
 
+/* ── Row actions: the one system for controls in a table row ──────────────
+   See RowActions.tsx for the rules. Resting = faint; the ROW's hover raises
+   them; the ACTION's hover shows intent colour. Destructive stands apart. */
+.row-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 4px;
+  width: 100%;
+}
+.row-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  height: var(--nook-ctrl-sm);
+  min-width: var(--nook-ctrl-sm);
+  padding: 0;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: var(--nook-radius);
+  color: var(--nook-fg-faint);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.row-action.labeled { padding: 0 8px; }
+.row-action.danger { margin-left: 6px; }
+tr:hover .row-action,
+.notebook-row:hover .row-action {
+  color: var(--nook-fg-dim);
+  border-color: var(--nook-border);
+}
+.row-action:hover:not(:disabled) {
+  color: var(--nook-accent);
+  border-color: var(--nook-accent);
+  background: var(--nook-bg-raised);
+}
+.row-action.danger:hover:not(:disabled) {
+  color: var(--nook-err);
+  border-color: var(--nook-err);
+}
+.row-action:disabled { opacity: 0.4; cursor: default; }
+
 .op-row-actions { display: inline-flex; gap: 4px; }
 .op-note { padding: 8px 12px 0; margin: 0; }
 .op-table td .sel { min-width: 120px; }
@@ -4073,9 +4315,14 @@ a.toast-main:hover .toast-title { text-decoration: underline; }
 /* ── Team chat ─────────────────────────────────────────────────────────────
    Full-height, two-panel: channel list + the reusable ChatView. Amber-CRT,
    dense, edge-to-edge like the rest of the console. */
+/* Card layout, matching the sectioned pages: a bordered rounded rail beside a
+   bordered rounded room, padded at the page edge — instead of the edge-to-edge
+   seam the page shipped with. Same reason as `.spage`: one style, everywhere. */
 .chat-page {
   display: grid;
-  grid-template-columns: 200px 1fr;
+  grid-template-columns: 200px minmax(0, 1fr);
+  gap: 10px;
+  padding: 10px;
   height: 100%;
   min-height: 0;
   background: var(--nook-bg);
@@ -4083,9 +4330,11 @@ a.toast-main:hover .toast-title { text-decoration: underline; }
 .chat-channels {
   display: flex;
   flex-direction: column;
-  border-right: 1px solid var(--nook-border);
+  border: 1px solid var(--nook-border);
+  border-radius: var(--nook-radius);
   background: var(--nook-bg-panel);
   overflow-y: auto;
+  min-height: 0;
 }
 .chat-channels-head {
   height: var(--nook-titlebar-h);
@@ -4260,6 +4509,9 @@ a.toast-main:hover .toast-title { text-decoration: underline; }
   flex-direction: column;
   min-width: 0;
   min-height: 0;
+  border: 1px solid var(--nook-border);
+  border-radius: var(--nook-radius);
+  overflow: hidden;
 }
 .chat-main-head {
   height: var(--nook-titlebar-h);
@@ -4723,6 +4975,19 @@ a.toast-main:hover .toast-title { text-decoration: underline; }
   font: inherit;
 }
 .type-select-trigger:hover { border-color: var(--nook-border-bright); }
+/* Inside the card's Details grid the visibility picker sits in a COLUMN of
+   selects — it matches them (full width, control-grid height, left-aligned),
+   not the standalone type picker's comfortable square. */
+.side-grid .type-select-trigger {
+  width: 100%;
+  min-height: 0;
+  height: var(--nook-ctrl-sm);
+  padding: 0 6px;
+  justify-content: flex-start;
+  font-size: 11.5px;
+}
+.side-grid .type-select-trigger .type-select-caret { margin-left: auto; }
+.side-grid .task-vis-field { width: 100%; }
 /* The trigger box itself inherits the picked type's colour (icon + a subtle
    toned border) — no nested pill. */
 .type-select-trigger.err { color: var(--nook-err); border-color: color-mix(in srgb, var(--nook-err) 35%, transparent); }

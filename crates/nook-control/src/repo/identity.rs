@@ -32,10 +32,11 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use nook_db::dialect::{ci_match, json, time_math, type_mapping};
+use nook_db::paging::{DbPage, ListSpec, PageArgs};
 use nook_db::{params, Db, DbPool};
 use nook_types::{
-    AuthSessionId, DevAccount, IdentityId, Tenant, TenantId, TenantMemberItem, TenantMemberPage,
-    User, UserId, UserToken,
+    AuthSessionId, DevAccount, IdentityId, Tenant, TenantId, TenantMemberItem, User, UserId,
+    UserToken,
 };
 use serde_json::Value;
 use uuid::Uuid;
@@ -152,10 +153,8 @@ pub trait IdentityRepository: Send + Sync {
     async fn members_page(
         &self,
         tenant: TenantId,
-        q: Option<String>,
-        after: Option<Uuid>,
-        limit: i64,
-    ) -> ApiResult<TenantMemberPage>;
+        args: &PageArgs,
+    ) -> ApiResult<DbPage<TenantMemberItem>>;
 
     /// The person behind a user row — the cross-tenant identity that outlives
     /// any single membership.
@@ -588,42 +587,21 @@ impl IdentityRepository for DbIdentityRepository {
     async fn members_page(
         &self,
         tenant: TenantId,
-        q: Option<String>,
-        after: Option<Uuid>,
-        limit: i64,
-    ) -> ApiResult<TenantMemberPage> {
-        let limit = limit.clamp(1, 200);
-        let q = crate::services::core::search_filter(q);
-        let term = type_mapping(self.db.engine()).cast("$3", "text");
-        let rows: Vec<TenantMemberItem> = self
-            .db
-            .query_all(
-                &format!(
-                    "SELECT m.principal_id, u.email, u.display_name, m.role, m.created_at AS joined_at
-         FROM tenant_members m
-         JOIN users u ON u.id = m.principal_id
-         WHERE m.tenant_id = $1 AND m.principal_type = 'user'
-           AND ({term} IS NULL OR (
-                    {m_email}
-                 OR {m_name}
-                 OR {m_role}))
-           AND ({cursor} IS NULL OR m.principal_id < $4)
-         ORDER BY m.principal_id DESC
-         LIMIT $2",
-                    cursor = type_mapping(self.db.engine()).cast("$4", "uuid"),
-                    m_email = ci_match(self.db.engine()).ci_match("u.email", "'%' || $3 || '%'"),
-                    m_name = ci_match(self.db.engine()).ci_match("u.display_name", "'%' || $3 || '%'"),
-                    m_role = ci_match(self.db.engine()).ci_match("m.role", "'%' || $3 || '%'")
-                ),
-                params![tenant, limit, q, after],
-            )
-            .await?;
-        let next_cursor = if rows.len() as i64 == limit {
-            rows.last().map(|r| r.principal_id)
-        } else {
-            None
-        };
-        Ok(TenantMemberPage { rows, next_cursor })
+        args: &PageArgs,
+    ) -> ApiResult<DbPage<TenantMemberItem>> {
+        Ok(ListSpec {
+            select: "SELECT m.principal_id, u.email, u.display_name, m.role,
+                            m.created_at AS joined_at
+                     FROM tenant_members m
+                     JOIN users u ON u.id = m.principal_id
+                     WHERE m.tenant_id = $4 AND m.principal_type = 'user'",
+            id: "principal_id",
+            search: &["email", "display_name", "role"],
+        }
+        .fetch(&self.db, args, params![tenant], |r: &TenantMemberItem| {
+            r.principal_id
+        })
+        .await?)
     }
 
     async fn person_id_of(&self, user_id: UserId) -> ApiResult<Option<Uuid>> {
@@ -1029,11 +1007,53 @@ impl IdentityRepository for DbIdentityRepository {
         let hit: Option<(bool,)> = self
             .db
             .query_opt(
-                "SELECT true
+                "(SELECT true
              FROM role_bindings b
              JOIN role_permissions rp ON rp.role_key = b.role_key
              WHERE b.subject_type = 'user'
-               AND b.subject_id = $1
+               -- Two ways to hold a permission, and the second is not a
+               -- shortcut — it is the maintenance the first never had.
+               --
+               -- `0001` backfilled `users.role IN ('owner','admin')` into a
+               -- `tenant_admin` binding, ONCE, at migration time. Nothing has
+               -- maintained it since: every tenant created afterwards, and every
+               -- member promoted afterwards, has the role and no binding. So a
+               -- tenant OWNER held no permissions at all in their own tenant,
+               -- and the two mechanisms silently stopped meeting.
+               --
+               -- Deriving it on read rather than writing rows at each of the
+               -- eight-plus places a role is set is what stops it drifting
+               -- again: a ninth insert site cannot forget something nothing
+               -- writes. The permission SET still comes from `role_permissions`
+               -- under the `tenant_admin` key, so what the role grants stays
+               -- listable and auditable as data; only the BINDING is implied.
+               --
+               -- Matched by PERSON, not by the one user row the grant named.
+               --
+               -- `users` is unique per (tenant, email), so a human in two orgs
+               -- is two rows with two ids. A binding stores one of them, which
+               -- meant every grant silently stopped applying the moment its
+               -- holder acted in another tenant — including a DEPLOYMENT-scoped
+               -- one, whose entire meaning is `everywhere`. An operator with
+               -- deployment scope was refused `node.manage` in a tenant they had
+               -- just been added to, which reads as a permissions bug in the
+               -- other tenant rather than as the grant not travelling.
+               --
+               -- Ownership already learned this: `nodes.owner_person_id` is a
+               -- PERSON precisely because a person outlives one membership
+               -- (MAIN-119, MAIN-353). This is the same rule for grants.
+               --
+               -- SCOPE is untouched and still decides WHERE: a tenant-scoped
+               -- binding matches only its own tenant however many rows the
+               -- person has. This widens WHO the grant belongs to, never what
+               -- it covers.
+               -- `users.person_id` is NOT NULL, so this always includes the
+               -- caller's own row; no `OR u.id = $1` fallback is needed and one
+               -- would only suggest a NULL case that cannot happen.
+               AND b.subject_id IN (
+                     SELECT u.id FROM users u
+                      WHERE u.person_id = (SELECT person_id FROM users WHERE id = $1)
+                   )
                AND rp.permission_key = $2
                AND (
                      -- Deployment covers everything below it.
@@ -1043,7 +1063,22 @@ impl IdentityRepository for DbIdentityRepository {
                      -- The exact tenant.
                   OR (b.scope_type = 'tenant' AND b.scope_id = $4)
                )
-             LIMIT 1",
+             LIMIT 1)
+             UNION ALL
+             (SELECT true
+                FROM users me
+                JOIN users seat ON seat.person_id = me.person_id
+                JOIN role_permissions rp ON rp.role_key = 'tenant_admin'
+               WHERE me.id = $1
+                 -- The seat must be in the TARGET tenant, so this can never
+                 -- reach past the tenant somebody actually administers. NULL
+                 -- `$4` — a deployment- or org-scoped ask — matches nothing,
+                 -- which is right: running one tenant is not running the
+                 -- deployment.
+                 AND seat.tenant_id = $4
+                 AND seat.role IN ('owner', 'admin')
+                 AND rp.permission_key = $2
+               LIMIT 1)",
                 params![user_id.0, permission, org_id, tenant_id],
             )
             .await?;
@@ -1275,7 +1310,24 @@ impl IdentityRepository for DbIdentityRepository {
                 "SELECT t.id, t.name, t.slug, m.role, t.created_at
              FROM tenant_members m
              JOIN tenants t ON t.id = m.tenant_id
-             WHERE m.principal_type = 'user' AND m.principal_id = $1
+             WHERE m.principal_type = 'user'
+               -- By PERSON, not by the one user row we happen to be acting as.
+               --
+               -- A grant is recorded against whichever `users` row existed when
+               -- it was made, and there is one of those per tenant. So joining a
+               -- second team wrote a grant against the NEW row, and asking from
+               -- the old one found only the old grant: the team switcher could
+               -- see exactly the teams reachable from wherever you already were,
+               -- which is the one thing it exists not to require. Switching
+               -- became a trip through the Team page.
+               --
+               -- Same rule as `has_permission` and `nodes.owner_person_id`: what
+               -- a human has belongs to the human, not to one of their seats
+               -- (MAIN-119, MAIN-353).
+               AND m.principal_id IN (
+                     SELECT u.id FROM users u
+                      WHERE u.person_id = (SELECT person_id FROM users WHERE id = $1)
+                   )
              ORDER BY t.created_at",
                 params![user_id],
             )
@@ -1737,14 +1789,11 @@ impl IdentityRepository for FakeIdentityRepository {
     async fn members_page(
         &self,
         tenant: TenantId,
-        q: Option<String>,
-        after: Option<Uuid>,
-        limit: i64,
-    ) -> ApiResult<TenantMemberPage> {
-        let limit = limit.clamp(1, 200);
+        args: &PageArgs,
+    ) -> ApiResult<DbPage<TenantMemberItem>> {
         let st = self.inner.lock().unwrap();
-        let q = q.map(|s| s.trim().to_lowercase()).filter(|s| !s.is_empty());
-        let mut rows: Vec<TenantMemberItem> = st
+        let q = args.q.as_ref().map(|s| s.to_lowercase());
+        let rows: Vec<TenantMemberItem> = st
             .members
             .iter()
             .filter(|(t, _, _)| *t == tenant)
@@ -1767,18 +1816,18 @@ impl IdentityRepository for FakeIdentityRepository {
                 }
             })
             .collect();
-        // Descending, matching the real query's `ORDER BY … DESC`.
-        rows.sort_by_key(|r| std::cmp::Reverse(r.principal_id));
-        if let Some(after) = after {
-            rows.retain(|r| r.principal_id < after);
-        }
-        rows.truncate(limit as usize);
-        let next_cursor = if rows.len() as i64 == limit {
-            rows.last().map(|r| r.principal_id)
-        } else {
-            None
-        };
-        Ok(TenantMemberPage { rows, next_cursor })
+        Ok(nook_db::paging::page_vec(
+            rows,
+            args,
+            |r| r.principal_id,
+            |col, a, b| match col {
+                "email" => a.email.cmp(&b.email),
+                "display_name" => a.display_name.cmp(&b.display_name),
+                "role" => a.role.cmp(&b.role),
+                "joined_at" => a.joined_at.cmp(&b.joined_at),
+                other => unreachable!("unlisted sort col {other}"),
+            },
+        ))
     }
 
     async fn person_id_of(&self, user_id: UserId) -> ApiResult<Option<Uuid>> {
