@@ -176,11 +176,21 @@ async fn a_late_status_write_cannot_resurrect_a_finished_session() {
     let node = add_node(&bed.db(), tenant).await;
     let id = add_session(&bed.db(), tenant, node, None).await;
 
+    // The node reported it started, so it is `running` — the state a departing
+    // viewer may move.
+    bed.db()
+        .exec(
+            "UPDATE sessions SET status = 'running' WHERE id = $1",
+            params![id],
+        )
+        .await
+        .expect("running");
+
     // While it is live, the write lands.
     assert_eq!(
         state
             .sessions
-            .mark_status_if_live(id, "detached")
+            .mark_viewer_presence(id, false)
             .await
             .expect("live write"),
         1
@@ -203,7 +213,7 @@ async fn a_late_status_write_cannot_resurrect_a_finished_session() {
     assert_eq!(
         state
             .sessions
-            .mark_status_if_live(id, "detached")
+            .mark_viewer_presence(id, false)
             .await
             .expect("late write"),
         0,

@@ -288,8 +288,15 @@ impl Registry {
         epoch
     }
 
-    pub fn unregister_node(&self, id: NodeId, epoch: u64) {
-        self.nodes.remove_if(&id, |_, n| n.epoch == epoch);
+    /// Drop this node's connection — but only if `epoch` is still the live one.
+    ///
+    /// Returns whether it actually removed anything, i.e. whether the caller's
+    /// connection was the current one. `false` means the node already
+    /// reconnected and a NEWER connection owns it, so the caller must not go on
+    /// to record consequences of "the node went away" (MAIN-363).
+    #[must_use]
+    pub fn unregister_node(&self, id: NodeId, epoch: u64) -> bool {
+        self.nodes.remove_if(&id, |_, n| n.epoch == epoch).is_some()
     }
 
     pub fn node_tx(&self, id: NodeId) -> Option<mpsc::Sender<ControlToNode>> {

@@ -12,7 +12,9 @@ import {
 } from "@dnd-kit/core";
 import {
   GitBranch,
+  Layers,
   Pencil,
+  Sparkles,
   Play,
   Plus,
   Rocket,
@@ -27,6 +29,7 @@ import {
 import { api, type TaskItem, type LoopJob } from "@nookos/api";
 import { AutomationDialog } from "./BoardAutomation";
 import { BoardBacklog } from "./BoardBacklog";
+import { NewTicketModal } from "../NewTicketModal";
 import { summarizeBulk, useBacklogSelection } from "./backlogSelection";
 import {
   Empty,
@@ -1093,6 +1096,9 @@ export function BoardPage() {
   // the query string also makes Back close the modal, which is what every
   // browser user already expects.
   const [params, setParams] = useSearchParams();
+  // `null` = closed; a string preselects the type, so one modal serves both the
+  // generic entry point and "New epic".
+  const [newTicketType, setNewTicketType] = useState<string | null>(null);
   const openTask = params.get("task");
   const setOpenTask = (key: string | null) => {
     setParams(
@@ -1146,7 +1152,17 @@ export function BoardPage() {
       (await api.GET("/api/v1/boards/{id}", { params: { path: { id: board!.id } } }))
         .data,
     enabled: !!board,
-    refetchInterval: 5000,
+    // No timer (MAIN-365). `task_changed` already invalidates the `["boards"]`
+    // prefix the moment anything moves, so the five-second poll was a second
+    // mechanism racing the first — and on reconnect it joined the blanket
+    // `invalidateQueries()` in a herd of refetches that blanked every panel.
+    //
+    // Focus is the one resync a dumb frontend still wants: column adds and
+    // renames are the changes that carry no event, they are rare and
+    // deliberate, and coming back to the tab is exactly when a stale column
+    // would be noticed. It costs one request at the moment somebody looks,
+    // instead of twelve a minute forever.
+    refetchOnWindowFocus: true,
   });
 
   const { data: me } = useQuery({
@@ -1634,6 +1650,25 @@ export function BoardPage() {
                 <span className="board-tab-count">{backlogTasks.length}</span>
               )}
             </button>
+            {/* The board-level entry point (MAIN-364). The per-column composer
+                stays for jotting a title where it belongs; this is the one that
+                takes an idea to a drafted ticket without opening one first. */}
+            <span className="board-tabs-actions">
+              <button
+                className="btn small primary"
+                onClick={() => setNewTicketType("task")}
+                title="hand an agent a prompt; it writes the ticket"
+              >
+                <Sparkles size={11} /> Draft with AI
+              </button>
+              <button
+                className="btn small"
+                onClick={() => setNewTicketType("epic")}
+                title="hand an agent a prompt; it decomposes the epic"
+              >
+                <Layers size={11} /> New epic
+              </button>
+            </span>
           </div>
           <Filters
             labels={labels ?? []}
@@ -1719,6 +1754,21 @@ export function BoardPage() {
           automation={detail.board.automation}
           onClose={() => setShowAutomation(false)}
           onSaved={bust}
+        />
+      )}
+      {newTicketType && (
+        <NewTicketModal
+          boardId={board.id}
+          initialType={newTicketType}
+          onClose={() => setNewTicketType(null)}
+          onCreated={({ taskId }) => {
+            setNewTicketType(null);
+            bust();
+            // Straight to the loop: that is where the agent's questions arrive
+            // and where the person answers them. The card is a placeholder the
+            // run is about to rewrite, so it is not the useful place to land.
+            navigate(`/loop/${taskId}`);
+          }}
         />
       )}
 

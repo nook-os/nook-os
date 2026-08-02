@@ -17,7 +17,12 @@ COPY crates ./crates
 # The agent skill is embedded with include_str!: a build input, not a
 # runtime file.
 COPY skills ./skills
-RUN cargo build --release -p nook-node
+# Shared cargo caches. The copy-out has to live in this RUN: target/ is a mount
+# rather than image content, so it is gone by the next instruction.
+RUN --mount=type=cache,id=nook-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=nook-cargo-target,target=/src/target,sharing=locked \
+    cargo build --release -p nook-node \
+    && mkdir -p /out && cp target/release/nook /out/
 
 FROM debian:bookworm-slim
 
@@ -37,7 +42,7 @@ ARG HERMES_REF=v2026.7.20
 # procps) plus what the runtime installers need (a C toolchain some npm deps
 # build against, and Node.js, added below).
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      ca-certificates curl git tmux bash procps gnupg xz-utils \
+      ca-certificates curl git tmux bash procps gnupg xz-utils openssh-client \
     && rm -rf /var/lib/apt/lists/*
 
 # Node.js (for the npm-published CLIs). NodeSource, pinned to a major.
@@ -54,14 +59,14 @@ RUN npm install -g \
     && npm cache clean --force
 RUN curl -fsSL https://hermes-agent.nousresearch.com/install.sh | HERMES_REF="${HERMES_REF}" bash
 
-COPY --from=build /src/target/release/nook /usr/local/bin/nook
+COPY --from=build /out/nook /usr/local/bin/nook
 COPY deploy/docker/operator-node-entrypoint.sh /usr/local/bin/node-entrypoint.sh
 RUN chmod +x /usr/local/bin/node-entrypoint.sh
 
 # The whole point of this image is that the toolchain is present. Fail the build
 # — loudly, at build time — if any expected binary is missing from PATH, so a
 # renamed package or a failed installer never ships as a silently-degraded node.
-RUN set -eux; for bin in git tmux claude hermes copilot codex nook; do \
+RUN set -eux; for bin in git tmux ssh claude hermes copilot codex nook; do \
       command -v "$bin" >/dev/null || { echo "FATAL: '$bin' not on PATH"; exit 1; }; \
     done
 

@@ -10,6 +10,7 @@ import {
   RotateCw,
   List,
   SquareTerminal,
+  X,
 } from "lucide-react";
 import { api, attachSession, type Session } from "@nookos/api";
 import {
@@ -132,9 +133,13 @@ function FileDiff({
 function GitPanel({
   session,
   workspaceId,
+  onClose,
 }: {
   session: Session;
   workspaceId: string;
+  /** Mobile only: the panel is a drawer there, and a drawer needs a close of
+   *  its own — the header toggle that opened it is underneath it. */
+  onClose: () => void;
 }) {
   const [tab, setTab] = useState<"diff" | "files">("files");
   const [message, setMessage] = useState("");
@@ -254,6 +259,15 @@ function GitPanel({
             title="refresh"
           >
             <RefreshCw size={12} className={isFetching ? "spin" : ""} />
+          </button>
+          {/* Hidden on desktop by CSS — there the header toggle stays visible
+              beside the panel and a second close would be clutter. */}
+          <button
+            className="btn small icon git-drawer-close"
+            onClick={onClose}
+            title="close git panel"
+          >
+            <X size={13} />
           </button>
         </>
       }
@@ -624,7 +638,7 @@ export function SessionPage() {
     <div className="session-view">
       <SessionTabs activeId={session.id} />
       <div
-        className="nook-grid"
+        className="nook-grid session-grid"
         style={{
           gridTemplateColumns: gitOpen && hasGitPanel ? "1fr 440px" : "1fr",
           flex: 1,
@@ -748,7 +762,22 @@ export function SessionPage() {
           )}
         </Panel>
         {gitOpen && hasGitPanel && session.workspace_id && (
-          <GitPanel session={session} workspaceId={session.workspace_id} />
+          <>
+            {/* Exists only for the phone layout, where the git panel is a
+                drawer over the terminal: tapping the dimmed terminal closes
+                it. Display: none on desktop, so it can never eat a click
+                there. */}
+            <div
+              className="git-drawer-scrim"
+              aria-hidden="true"
+              onClick={toggleGit}
+            />
+            <GitPanel
+              session={session}
+              workspaceId={session.workspace_id}
+              onClose={toggleGit}
+            />
+          </>
         )}
       </div>
     </div>

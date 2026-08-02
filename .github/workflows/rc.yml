@@ -1,0 +1,254 @@
+name: RC images
+
+# Deploy tooling finds the run it just dispatched by matching this title
+# exactly — "rc <full sha>". A run's headSha is the branch the workflow was
+# dispatched on, NOT the commit being built, so the title is the only reliable
+# handle when those two differ. Change the shape here, change it there.
+run-name: rc ${{ inputs.ref }}
+
+# Deploying a commit without cutting a release.
+#
+# `release.yml` is the promise: a tag, a version guard, binaries, a desktop
+# bundle, a chart, a GitHub release. All of that is what makes a release worth
+# trusting, and all of it is ceremony when the only question is "does this
+# commit work on a real deployment?".
+#
+# This publishes exactly the container images the prod compose file pulls,
+# tagged `rc-<short sha>`, and nothing else. No git tag, no version bump, no
+# release, no chart. It shares `release.yml`'s build cache scopes on purpose, so
+# an RC is usually a few minutes and it warms the cache the real release will
+# use.
+#
+# NOT wired to `push`: six images across two architectures is twelve runners,
+# which is the right cost when you ask for it and the wrong one on every commit.
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Commit SHA or branch to build
+        required: true
+      images:
+        description: Comma-separated subset to build; the rest are aliased from `base`
+        required: false
+        default: control,node,operator-node,web,chat,worker
+      base:
+        description: "Tag the un-built images are aliased from (default: newest release)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  # ------------------------------------------------------------------- plan
+  #
+  # Resolve the ref, name the tag, and split the image set into "build these"
+  # and "alias the rest". The split is what makes a partial build safe: the
+  # compose file pins ONE tag for every service, so an RC that published only
+  # `control` would leave `web`, `chat`, `worker` and `operator-node`
+  # unpullable at that tag. Aliasing points those at the newest release's
+  # manifest instead, so `rc-<sha>` is always a complete set.
+  plan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      sha: ${{ steps.plan.outputs.sha }}
+      tag: ${{ steps.plan.outputs.tag }}
+      matrix: ${{ steps.plan.outputs.matrix }}
+      built: ${{ steps.plan.outputs.built }}
+      rest: ${{ steps.plan.outputs.rest }}
+      base: ${{ steps.plan.outputs.base }}
+    steps:
+      - id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          REF: ${{ inputs.ref }}
+          IMAGES: ${{ inputs.images }}
+          BASE: ${{ inputs.base }}
+        run: |
+          set -euo pipefail
+
+          # Resolving through the API instead of a checkout is also the check
+          # that matters: only a commit GitHub already has can be built, so an
+          # unpushed one fails here, with one clear message, before twelve
+          # runners start.
+          sha="$(gh api "repos/${REPO}/commits/${REF}" -q .sha)"
+          [ -n "$sha" ] || { echo "::error::no such commit on GitHub: ${REF}"; exit 1; }
+          tag="rc-${sha:0:8}"
+
+          all='[
+            {"image":"control","dockerfile":"deploy/docker/control.Dockerfile"},
+            {"image":"node","dockerfile":"deploy/docker/node.Dockerfile"},
+            {"image":"operator-node","dockerfile":"deploy/docker/operator-node.Dockerfile"},
+            {"image":"web","dockerfile":"deploy/docker/web-prod.Dockerfile"},
+            {"image":"chat","dockerfile":"deploy/docker/chat.Dockerfile"},
+            {"image":"worker","dockerfile":"deploy/docker/worker.Dockerfile"}
+          ]'
+
+          # `sed` and not `tr -d`: tr has no concept of lines, so deleting
+          # whitespace with it deletes the newlines this just split on and the
+          # whole list collapses into one token named "controlnodeweb…".
+          built="$(printf '%s' "$IMAGES" | tr ',' '\n' | sed 's/[[:space:]]//g' \
+                   | grep -v '^$' | jq -Rc . | jq -sc .)"
+
+          unknown="$(jq -rn --argjson all "$all" --argjson built "$built" \
+            '[$built[] | select(. as $i | ($all | map(.image)) | index($i) | not)] | join(", ")')"
+          [ -z "$unknown" ] || { echo "::error::unknown image(s): ${unknown}"; exit 1; }
+          [ "$(jq 'length' <<<"$built")" -gt 0 ] || { echo "::error::no images selected"; exit 1; }
+
+          # One row per image × arch, built here rather than as a matrix
+          # `include:` — an include entry naming an image the dynamic axis does
+          # not contain becomes its OWN combination (with no arch), which is a
+          # job that cannot run.
+          matrix="$(jq -cn --argjson all "$all" --argjson built "$built" '
+            {include: [
+              $all[]
+              | select(.image as $i | $built | index($i)) as $e
+              | ({"amd64":"ubuntu-22.04","arm64":"ubuntu-22.04-arm"} | to_entries[]) as $a
+              | {image: $e.image, dockerfile: $e.dockerfile, arch: $a.key, runner: $a.value}
+            ]}')"
+
+          rest="$(jq -cn --argjson all "$all" --argjson built "$built" \
+            '[$all[].image | select(. as $i | $built | index($i) | not)]')"
+
+          if [ "$rest" != "[]" ] && [ -z "$BASE" ]; then
+            BASE="$(gh release view --repo "${REPO}" --json tagName -q .tagName)"
+            [ -n "$BASE" ] || { echo "::error::no release to alias the un-built images from"; exit 1; }
+          fi
+
+          {
+            echo "sha=$sha"
+            echo "tag=$tag"
+            echo "matrix=$matrix"
+            echo "built=$built"
+            echo "rest=$rest"
+            echo "base=$BASE"
+          } >> "$GITHUB_OUTPUT"
+
+          {
+            echo "### RC \`${tag}\`"
+            echo
+            echo "- commit: \`${sha}\`"
+            echo "- building: \`$(jq -r 'join(", ")' <<<"$built")\`"
+            [ "$rest" = "[]" ] || echo "- aliased from \`${BASE}\`: \`$(jq -r 'join(", ")' <<<"$rest")\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ----------------------------------------------------------------- images
+  #
+  # Native runner per architecture, pushed by digest, stitched into one
+  # multi-arch tag below — the same shape as `release.yml`, for the same reason
+  # (buildx + QEMU emulates the whole Rust compile).
+  images:
+    name: ${{ matrix.image }} (${{ matrix.arch }})
+    needs: plan
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          platforms: linux/${{ matrix.arch }}
+          outputs: type=image,name=${{ env.REGISTRY }}/${{ github.repository_owner }}/nook-${{ matrix.image }},push-by-digest=true,name-canonical=true,push=true
+          # Deliberately the SAME scope release.yml uses: an RC of a commit that
+          # is about to be tagged should not build everything twice.
+          cache-from: type=gha,scope=${{ matrix.image }}-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.image }}-${{ matrix.arch }}
+
+      - name: Record the digest
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          mkdir -p /tmp/digests
+          touch "/tmp/digests/${DIGEST#sha256:}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: digest-${{ matrix.image }}-${{ matrix.arch }}
+          path: /tmp/digests/*
+          retention-days: 1
+
+  merge:
+    name: manifest ${{ matrix.image }}
+    needs: [plan, images]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      matrix:
+        image: ${{ fromJSON(needs.plan.outputs.built) }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: digest-${{ matrix.image }}-*
+          path: /tmp/digests
+          merge-multiple: true
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Create the manifest
+        working-directory: /tmp/digests
+        env:
+          REPO: ${{ env.REGISTRY }}/${{ github.repository_owner }}/nook-${{ matrix.image }}
+          TAG: ${{ needs.plan.outputs.tag }}
+        run: |
+          # ONE tag, and never `latest`: an RC is a specific commit somebody is
+          # testing, not a thing anything else should float onto.
+          #
+          # Word splitting is the point — every digest has to arrive as its own
+          # argument, and the filenames are hex, so there is nothing to split on
+          # but the spaces we put there.
+          # shellcheck disable=SC2046
+          docker buildx imagetools create -t "$REPO:$TAG" \
+            $(printf "${REPO}@sha256:%s " $(ls))
+          docker buildx imagetools inspect "$REPO:$TAG"
+
+  # ------------------------------------------------------------------ alias
+  #
+  # Point every image this RC did NOT build at the base release's manifest, so
+  # `rc-<sha>` names a complete set and the compose pin stays whole. Copies a
+  # manifest; builds nothing.
+  alias:
+    name: alias ${{ matrix.image }}
+    needs: plan
+    if: needs.plan.outputs.rest != '[]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      matrix:
+        image: ${{ fromJSON(needs.plan.outputs.rest) }}
+    steps:
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - env:
+          REPO: ${{ env.REGISTRY }}/${{ github.repository_owner }}/nook-${{ matrix.image }}
+          TAG: ${{ needs.plan.outputs.tag }}
+          BASE: ${{ needs.plan.outputs.base }}
+        run: |
+          docker buildx imagetools create -t "$REPO:$TAG" "$REPO:$BASE"
+          docker buildx imagetools inspect "$REPO:$TAG"

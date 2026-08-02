@@ -284,6 +284,19 @@ code,
   white-space: nowrap;
   font-size: 12px;
   z-index: 50;
+  /* The bubble sits over the neighbouring button (and, on the bottom-bar
+     layout, over the NEXT destination) — it must never be the thing a click
+     lands on. A pseudo-element takes pointer events for its owner, so a tap
+     that visually hit "Board" was re-routed to the button you last touched. */
+  pointer-events: none;
+}
+/* No pointer, no hover: on touch, :hover is a sticky artifact of the last tap,
+   so the tooltip appears late, points at nothing, and covers the icon beside
+   it. Touch help is the long-press label the OS provides, not this. */
+@media (hover: none) {
+  .nook-rail-btn[data-tip]:hover::after {
+    display: none;
+  }
 }
 
 /* ── Pill tabs (topbar) ─────────────────────────────────────────────────── */
@@ -1236,6 +1249,21 @@ table.nook-table tr.clickable { cursor: pointer; }
   background: var(--nook-bg-panel);
   border-bottom: 1px solid var(--nook-border);
   flex: 0 0 auto;
+}
+/* Actions live at the far end of the tab row. `margin-left:auto` does the
+   pushing; the centring is the point — a flex child of a fixed-height row
+   STRETCHES by default, so buttons dropped in here sit full-height and
+   misaligned against the tabs beside them. Height comes from the control token
+   like every other button, never from padding. */
+.board-tabs-actions {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 8px;
+}
+.board-tabs-actions .btn {
+  height: var(--nook-ctrl-sm);
 }
 .board-tab {
   display: inline-flex;
@@ -5362,6 +5390,49 @@ tr:hover .row-action,
 .m-node-name { color: var(--nook-fg); }
 .m-node-name.muted { color: var(--nook-fg-dim); }
 
+/* ── Node cards: the machines list on the same card system ────────────────
+   A node card is an `.m-repo` — same border, head, body — so the Nodes page
+   and Mission read as one family. These rules only add what a machine needs
+   that a repo does not: a label/value fact grid and an action row. */
+.node-card-facts {
+  display: grid;
+  grid-template-columns: 76px 1fr;
+  gap: 3px 10px;
+  align-items: baseline;
+  padding: 6px 2px 2px;
+  font-size: 12px;
+}
+.node-card-facts .k {
+  color: var(--nook-fg-faint);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.node-card-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 4px;
+  padding-top: 4px;
+  margin-top: 4px;
+  border-top: 1px solid var(--nook-border);
+}
+/* Row actions rest faint and rely on `tr:hover` to raise them — a card is not
+   a row, so the card's hover does the same job. */
+.node-card:hover .row-action {
+  color: var(--nook-fg-dim);
+  border-color: var(--nook-border);
+}
+/* A detail page's standing identity strip, under its intro panel title —
+   nodes and workspaces share it, so the two admin shells read as one. */
+.detail-id-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 8px 10px;
+}
+.detail-id-head > svg { color: var(--nook-fg-dim); }
+
 .m-co { margin: 1px 0 3px; }
 .m-co-row {
   display: flex;
@@ -5873,6 +5944,60 @@ tr:hover .row-action,
   .nook-main {
     min-width: 0;
     overflow-x: hidden;
+  }
+
+  /* ── The git panel becomes a drawer ─────────────────────────────────────
+     The session grid asks for `1fr 440px` inline, which on a phone puts a
+     440px column on a 390px screen — the git panel and the terminal share
+     the width and neither survives. `!important` because that column split
+     is an inline style, and this is the one screen where it must lose.
+     The panel itself leaves the grid entirely: a fixed drawer over the
+     terminal, scrim behind it, slid in from the edge it docks to on
+     desktop. The terminal keeps every pixel it had, and nothing about the
+     panel's own innards changes — same commit bar, same tabs, same diff. */
+  .session-grid {
+    grid-template-columns: minmax(0, 1fr) !important;
+  }
+  .git-drawer-scrim {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 79;
+    background: rgba(0, 0, 0, 0.55);
+  }
+  .session-grid > .git-panel {
+    position: fixed;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    width: min(440px, 92vw);
+    /* The visible viewport, for the same reason .nook-app uses it: 100vh
+       counts the collapsing URL bar and would sink the commit bar under
+       the browser chrome. */
+    height: 100dvh;
+    z-index: 80;
+    border-left: 1px solid var(--nook-border-bright);
+    box-shadow: -12px 0 32px rgba(0, 0, 0, 0.5);
+    animation: git-drawer-in 0.16s ease-out;
+  }
+  .git-drawer-close {
+    display: inline-flex;
+  }
+}
+
+@keyframes git-drawer-in {
+  from {
+    transform: translateX(100%);
+  }
+}
+
+/* Desktop: the drawer chrome does not exist. The scrim would sit over the
+   whole app eating clicks, and the close button duplicates the header
+   toggle that is visible right beside the panel. */
+@media (min-width: 641px) {
+  .git-drawer-scrim,
+  .git-drawer-close {
+    display: none;
   }
 }
 

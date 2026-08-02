@@ -17,7 +17,7 @@ use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Response};
 use futures_util::{SinkExt, StreamExt};
 use nook_proto::{ControlToNode, NodeToControl, UiEvent};
-use nook_types::{NodeId, TenantId};
+use nook_types::{NodeId, SessionId, TenantId};
 use tokio::sync::mpsc;
 
 use crate::error::ApiError;
@@ -189,7 +189,18 @@ async fn handle(
     // Disconnect: offline + detach-preserving (tmux keeps sessions alive).
     writer.abort();
     pinger.abort();
-    state.registry.unregister_node(node_id, epoch);
+    // A node that reconnected before this loop noticed the old socket had gone
+    // is served by a NEWER connection — this one is a ghost, and everything
+    // below would be a lie about a live node (MAIN-363). Seen in prod: an agent
+    // reconnected, then the superseded reader ended 108 seconds later and
+    // marked the node `offline` while it was heartbeating every five seconds.
+    // Nothing ever flipped it back — only `Register` writes `online`, and the
+    // live connection had already registered — so a healthy machine sat
+    // invisible to the dispatcher and the reconciler for eighteen hours.
+    if !state.registry.unregister_node(node_id, epoch) {
+        tracing::info!(%node_id, node = %name, "superseded connection closed — node is live on a newer one");
+        return;
+    }
     // Release the lease and mark offline — but only if WE still own it; the
     // node may have already reconnected to another instance.
     let _ = state
@@ -250,6 +261,41 @@ async fn handle_message(
                 .nodes
                 .expire_sessions_missing_from_tmux(node_id, &live_tmux_sessions)
                 .await?;
+
+            // …and the converse, which was missing entirely: tmux sessions the
+            // control plane has no live row for. Nothing can ever attach to
+            // one again — a session is reachable only through its row — so it
+            // is a process holding a shell open that no UI will ever show. They
+            // accumulate from exactly the failures this card fixed: a row ended
+            // while its tmux kept running, every time, forever (MAIN-363).
+            //
+            // Keyed on the session id parsed back out of the name, not on the
+            // name itself: a live row that has not reported its tmux name yet
+            // still counts as believed-live, so a session in the middle of
+            // starting is never swept. `nook_job_*` (loop jobs) fail the uuid
+            // parse and are left alone, which is what we want — this owns
+            // terminal sessions and nothing else.
+            let believed: std::collections::HashSet<SessionId> = state
+                .nodes
+                .live_session_ids(node_id)
+                .await?
+                .into_iter()
+                .collect();
+            for name in &live_tmux_sessions {
+                let Some(rest) = name.strip_prefix(nook_proto::TMUX_SESSION_PREFIX) else {
+                    continue;
+                };
+                let Ok(id) = uuid::Uuid::parse_str(rest).map(SessionId) else {
+                    continue;
+                };
+                if believed.contains(&id) {
+                    continue;
+                }
+                tracing::info!(%node_id, session = %id, tmux = %name, "orphaned tmux session — no live row, killing");
+                let _ = _tx
+                    .send(ControlToNode::KillSession { session_id: id })
+                    .await;
+            }
 
             // What this tenant trusts, so the node can tell whether a rotation
             // is being staged and renew for it rather than waiting for expiry.
@@ -489,7 +535,7 @@ async fn handle_message(
         } => {
             state
                 .nodes
-                .mark_session_running(session_id, tenant, &tmux_session)
+                .mark_session_running(session_id, node_id, &tmux_session)
                 .await?;
             state.registry.publish(
                 tenant,
@@ -521,7 +567,7 @@ async fn handle_message(
             session_id,
             exit_code,
         } => {
-            state.nodes.mark_session_exited(session_id, tenant).await?;
+            state.nodes.mark_session_exited(session_id, node_id).await?;
             // Ephemeral secrets exist on disk only while a session is using
             // them; the encrypted copy stays in the vault.
             crate::services::secrets::wipe_ephemeral_for_session(state, tenant, session_id).await;
@@ -562,7 +608,7 @@ async fn handle_message(
             // leaving it stuck on "starting".
             state
                 .nodes
-                .mark_session_failed(session_id, tenant, &message)
+                .mark_session_failed(session_id, node_id, &message)
                 .await?;
             state.registry.publish(
                 tenant,

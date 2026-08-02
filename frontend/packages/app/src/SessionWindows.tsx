@@ -5,7 +5,7 @@
 import React from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { CircleDot, Columns2, Loader2, Plus, Rows2, X } from "lucide-react";
-import { api } from "@nookos/api";
+import { api, READ_ONLY_POST } from "@nookos/api";
 import { ContextMenuRegion, type ContextMenuItem } from "./contextMenu";
 import { useLive, liveAgentMark } from "./live";
 import { askText } from "./dialogs";
@@ -27,10 +27,17 @@ export function SessionWindows({ sessionId }: { sessionId: string }) {
         await api.POST("/api/v1/sessions/{id}/windows", {
           params: { path: { id: sessionId } },
           body: { action: "list" },
+          headers: READ_ONLY_POST,
         })
       ).data ?? [],
-    // tmux is the source of truth and the user can also change windows from
-    // inside the terminal, so poll gently.
+    // Only while the session actually HAS a terminal (MAIN-365). tmux window
+    // changes made inside the pane reach us by no other route, so this poll
+    // earns its keep — but a session that is still starting, or has exited,
+    // answers 400 to every one of these forever. That was a request every five
+    // seconds per open tab against a session that could not answer, and each
+    // one raised a toast. `sessionStatus` is fed by the SessionStatus event, so
+    // the poll starts the moment the socket says there is something to poll.
+    enabled: status === "running" || status === "detached",
     refetchInterval: 5000,
     // A session with no live terminal yet (still starting, or its node just
     // dropped) answers 400. React Query's default is to retry a failure three

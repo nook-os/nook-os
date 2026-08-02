@@ -10,6 +10,14 @@ use nook_types::{AuthProfile, Capabilities, NodeId, SessionId};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
+/// What a session's tmux name starts with: `nook_<session-uuid-simple>`.
+///
+/// Shared rather than owned by the node because BOTH ends now need it — the
+/// node to build the name, the control plane to read a session id back out of
+/// one a node reported. Two copies of a naming rule is exactly the drift that
+/// makes a sweep quietly stop matching anything (MAIN-363).
+pub const TMUX_SESSION_PREFIX: &str = "nook_";
+
 /// The canonical NookOS hook set, shared by the node (which installs it) and the
 /// control plane (which stores it as managed content). See [`hooks`].
 pub mod hooks;
@@ -352,6 +360,16 @@ pub enum ControlToNode {
         url: String,
         dest_name: Option<String>,
         ssh_key: Option<String>,
+        /// The slug of the tenant this clone is FOR, so the checkout lands in
+        /// that tenant's tree (MAIN-363).
+        ///
+        /// The node cannot work this out: it knows only its own home tenant,
+        /// and cross-tenant placement (MAIN-353) means the tenant that asked is
+        /// routinely not that one. Absent — an older control plane, or a node
+        /// that predates this — the node falls back to its own configured slug,
+        /// which is the pre-existing behaviour rather than a regression.
+        #[serde(default)]
+        tenant_slug: Option<String>,
     },
     /// Add a git worktree next to an existing checkout: the same workspace
     /// gains another location (branch) on this node.

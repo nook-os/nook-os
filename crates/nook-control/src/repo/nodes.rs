@@ -379,19 +379,39 @@ pub trait NodeRepository: Send + Sync {
         live_tmux_sessions: &[String],
     ) -> ApiResult<u64>;
 
+    /// Sessions this control plane still believes are live on `node`.
+    ///
+    /// The converse of `expire_sessions_missing_from_tmux`, and the half that
+    /// was missing: that one ends rows whose tmux is gone, nothing ever killed
+    /// tmux whose row is gone. Ids rather than tmux names on purpose — a live
+    /// row that has not reported its name yet must still count as believed-live,
+    /// or the sweep would kill a session in the middle of starting.
+    async fn live_session_ids(&self, node: NodeId) -> ApiResult<Vec<SessionId>>;
+
+    /// Node-reported session lifecycle, scoped by the NODE rather than by the
+    /// node's home tenant (MAIN-363).
+    ///
+    /// Cross-tenant placement (MAIN-353) means a session on this machine can
+    /// belong to any tenant its owner is a member of, while the node's socket
+    /// authenticates as its HOME tenant. Scoping these by that tenant matched
+    /// zero rows for exactly those sessions: `tmux_session` was never recorded,
+    /// so every viewer got "session has no terminal yet", the reaper ended the
+    /// row, and the reconciler started another sixty seconds later — forever.
+    /// `node_id` is the stronger guard anyway: a node may report on the
+    /// sessions it is running and on nothing else.
     async fn mark_session_running(
         &self,
         session: SessionId,
-        tenant: TenantId,
+        node: NodeId,
         tmux_session: &str,
     ) -> ApiResult<u64>;
 
-    async fn mark_session_exited(&self, session: SessionId, tenant: TenantId) -> ApiResult<u64>;
+    async fn mark_session_exited(&self, session: SessionId, node: NodeId) -> ApiResult<u64>;
 
     async fn mark_session_failed(
         &self,
         session: SessionId,
-        tenant: TenantId,
+        node: NodeId,
         message: &str,
     ) -> ApiResult<u64>;
 }
@@ -1121,7 +1141,15 @@ impl NodeRepository for DbNodeRepository {
         self.db
             .exec(
                 &format!(
+                    // `status = 'online'` belongs here, not only on Register: a
+                    // node sending us resources IS online, and making the
+                    // heartbeat say so is what stops a stale `offline` from
+                    // outliving the connection that caused it. Register used to
+                    // be the sole writer of `online`, so a node marked offline
+                    // in error stayed that way until it fully reconnected —
+                    // which a healthy node never does (MAIN-363).
                     "UPDATE nodes SET last_seen_at = {now}, resources = $2,
+                        status = 'online',
                         lease_expires_at = CASE WHEN owning_instance_id = $3
                             THEN {now} + make_interval(secs => $4)
                             ELSE lease_expires_at END
@@ -1171,10 +1199,22 @@ impl NodeRepository for DbNodeRepository {
             .await?)
     }
 
+    async fn live_session_ids(&self, node: NodeId) -> ApiResult<Vec<SessionId>> {
+        let rows: Vec<(Uuid,)> = self
+            .db
+            .query_all(
+                "SELECT id FROM sessions
+                 WHERE node_id = $1 AND status IN ('starting', 'running', 'detached')",
+                params![node],
+            )
+            .await?;
+        Ok(rows.into_iter().map(|(id,)| SessionId(id)).collect())
+    }
+
     async fn mark_session_running(
         &self,
         session: SessionId,
-        tenant: TenantId,
+        node: NodeId,
         tmux_session: &str,
     ) -> ApiResult<u64> {
         Ok(self
@@ -1182,24 +1222,24 @@ impl NodeRepository for DbNodeRepository {
             .exec(
                 &format!(
                     "UPDATE sessions SET status = 'running', tmux_session = $2, updated_at = {now}
-                     WHERE id = $1 AND tenant_id = $3",
+                     WHERE id = $1 AND node_id = $3",
                     now = type_mapping(self.db.engine()).now()
                 ),
-                params![session, tmux_session, tenant],
+                params![session, tmux_session, node],
             )
             .await?)
     }
 
-    async fn mark_session_exited(&self, session: SessionId, tenant: TenantId) -> ApiResult<u64> {
+    async fn mark_session_exited(&self, session: SessionId, node: NodeId) -> ApiResult<u64> {
         Ok(self
             .db
             .exec(
                 &format!(
                     "UPDATE sessions SET status = 'exited', ended_at = {now}, updated_at = {now}
-                     WHERE id = $1 AND tenant_id = $2",
+                     WHERE id = $1 AND node_id = $2",
                     now = type_mapping(self.db.engine()).now()
                 ),
-                params![session, tenant],
+                params![session, node],
             )
             .await?)
     }
@@ -1207,7 +1247,7 @@ impl NodeRepository for DbNodeRepository {
     async fn mark_session_failed(
         &self,
         session: SessionId,
-        tenant: TenantId,
+        node: NodeId,
         message: &str,
     ) -> ApiResult<u64> {
         Ok(self
@@ -1216,10 +1256,10 @@ impl NodeRepository for DbNodeRepository {
                 &format!(
                     "UPDATE sessions SET status = 'error', error = $3, ended_at = {now},
                         updated_at = {now}
-                     WHERE id = $1 AND tenant_id = $2",
+                     WHERE id = $1 AND node_id = $2",
                     now = type_mapping(self.db.engine()).now()
                 ),
-                params![session, tenant, message],
+                params![session, node, message],
             )
             .await?)
     }
@@ -2220,6 +2260,8 @@ impl NodeRepository for FakeNodeRepository {
         if let Some(n) = s.nodes.iter_mut().find(|n| n.node.id == id) {
             n.node.resources = resources.clone();
             n.node.last_seen_at = Some(chrono::Utc::now());
+            // A heartbeat is proof of life — same as the SQL (MAIN-363).
+            n.node.status = "online".into();
             // The lease extends only while it is still ours — the CASE.
             if n.owning_instance_id == Some(instance) {
                 n.owning_instance_id = Some(instance);
@@ -2263,10 +2305,24 @@ impl NodeRepository for FakeNodeRepository {
         Ok(n)
     }
 
+    async fn live_session_ids(&self, node: NodeId) -> ApiResult<Vec<SessionId>> {
+        Ok(self
+            .inner
+            .lock()
+            .unwrap()
+            .sessions
+            .iter()
+            .filter(|x| {
+                x.node == node && matches!(x.status.as_str(), "starting" | "running" | "detached")
+            })
+            .map(|x| x.id)
+            .collect())
+    }
+
     async fn mark_session_running(
         &self,
         session: SessionId,
-        tenant: TenantId,
+        node: NodeId,
         tmux_session: &str,
     ) -> ApiResult<u64> {
         let mut s = self.inner.lock().unwrap();
@@ -2274,7 +2330,7 @@ impl NodeRepository for FakeNodeRepository {
             match s
                 .sessions
                 .iter_mut()
-                .find(|x| x.id == session && x.tenant == tenant)
+                .find(|x| x.id == session && x.node == node)
             {
                 Some(x) => {
                     x.status = "running".into();
@@ -2286,13 +2342,13 @@ impl NodeRepository for FakeNodeRepository {
         )
     }
 
-    async fn mark_session_exited(&self, session: SessionId, tenant: TenantId) -> ApiResult<u64> {
+    async fn mark_session_exited(&self, session: SessionId, node: NodeId) -> ApiResult<u64> {
         let mut s = self.inner.lock().unwrap();
         Ok(
             match s
                 .sessions
                 .iter_mut()
-                .find(|x| x.id == session && x.tenant == tenant)
+                .find(|x| x.id == session && x.node == node)
             {
                 Some(x) => {
                     x.status = "exited".into();
@@ -2306,7 +2362,7 @@ impl NodeRepository for FakeNodeRepository {
     async fn mark_session_failed(
         &self,
         session: SessionId,
-        tenant: TenantId,
+        node: NodeId,
         message: &str,
     ) -> ApiResult<u64> {
         let mut s = self.inner.lock().unwrap();
@@ -2314,7 +2370,7 @@ impl NodeRepository for FakeNodeRepository {
             match s
                 .sessions
                 .iter_mut()
-                .find(|x| x.id == session && x.tenant == tenant)
+                .find(|x| x.id == session && x.node == node)
             {
                 Some(x) => {
                     x.status = "error".into();

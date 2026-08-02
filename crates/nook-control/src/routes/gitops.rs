@@ -200,6 +200,7 @@ pub async fn clone_repo(
     .await;
 
     let url = req.url.clone();
+    let tenant_slug = crate::services::tenant_slug(&state, auth.tenant_id).await;
     let rx = state
         .registry
         .request_op(node_id, |request_id| ControlToNode::CloneRepo {
@@ -207,6 +208,7 @@ pub async fn clone_repo(
             url: req.url.clone(),
             dest_name: req.name.clone(),
             ssh_key,
+            tenant_slug,
         })
         .ok_or_else(|| ApiError::BadRequest("node is offline".into()))?;
 

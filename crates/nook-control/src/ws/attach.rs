@@ -14,6 +14,11 @@ use crate::auth::AuthCtx;
 use crate::error::ApiError;
 use crate::state::AppState;
 
+/// Keepalive cadence, the same twenty seconds the node socket has always used.
+/// See `ws::ui` for why a socket that sends nothing does not survive the path
+/// between a browser and this process.
+const PING_INTERVAL: std::time::Duration = std::time::Duration::from_secs(20);
+
 pub async fn attach_ws(
     State(state): State<AppState>,
     auth: AuthCtx,
@@ -58,8 +63,9 @@ async fn handle(state: AppState, socket: WebSocket, session: Session) {
         },
     );
 
-    // Viewer arrived → session is being watched.
-    mark_status(&state, &session, "running").await;
+    // Viewer arrived → session is being watched. Only lifts `detached`; a
+    // session still `starting` stays there until its node says otherwise.
+    mark_status(&state, &session, true).await;
 
     let (mut sink, mut stream) = socket.split();
 
@@ -70,8 +76,21 @@ async fn handle(state: AppState, socket: WebSocket, session: Session) {
         }
     }
 
+    // Same keepalive as the UI socket and for the same reason (MAIN-365): an
+    // idle terminal sends nothing for as long as nobody types, and a silent
+    // socket is what an intermediary reaps. Here the symptom is worse than a
+    // refetch — the pane goes dead until the browser notices and re-attaches,
+    // which reads as "the terminal froze".
+    let mut ping = tokio::time::interval(PING_INTERVAL);
+    ping.tick().await;
+
     loop {
         tokio::select! {
+            _ = ping.tick() => {
+                if sink.send(Message::Ping(Vec::new().into())).await.is_err() {
+                    break;
+                }
+            }
             out = rx.recv() => {
                 match out {
                     Ok(msg) => {
@@ -158,22 +177,26 @@ async fn handle(state: AppState, socket: WebSocket, session: Session) {
         state
             .registry
             .send_to_node(session.node_id, ControlToNode::DetachSession { session_id });
-        let still_running = state.sessions.status_of(session_id).await.ok().flatten();
-        if matches!(still_running, Some(ref s) if s == "running" || s == "starting") {
-            mark_status(&state, &session, "detached").await;
-        }
+        mark_status(&state, &session, false).await;
     }
     let _ = tenant;
 }
 
-async fn mark_status(state: &AppState, session: &Session, status: &str) {
-    let res = state.sessions.mark_status_if_live(session.id, status).await;
+/// Publish only when the transition actually happened — the repo returns 0 rows
+/// when the session was not in the state this transition may leave, and telling
+/// the UI a session went `detached` when it is still `starting` is the same
+/// class of lie this guard exists to stop.
+async fn mark_status(state: &AppState, session: &Session, watched: bool) {
+    let res = state
+        .sessions
+        .mark_viewer_presence(session.id, watched)
+        .await;
     if matches!(res, Ok(r) if r > 0) {
         state.registry.publish(
             session.tenant_id,
             UiEvent::SessionStatus {
                 session_id: session.id,
-                status: status.to_string(),
+                status: if watched { "running" } else { "detached" }.into(),
             },
         );
     }

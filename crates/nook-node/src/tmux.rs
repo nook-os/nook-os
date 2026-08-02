@@ -6,7 +6,7 @@ use anyhow::{Context, Result};
 use std::process::Command;
 use std::sync::OnceLock;
 
-pub const SESSION_PREFIX: &str = "nook_";
+pub const SESSION_PREFIX: &str = nook_proto::TMUX_SESSION_PREFIX;
 
 /// The tmux server this node talks to, as an `-L <socket>` name (MAIN-108).
 /// `None` — the default, and what every unset call sees — means the user's
@@ -444,6 +444,24 @@ fn spawn(
 pub fn kill_session(name: &str) -> Result<()> {
     tmux(&["kill-session", "-t", name])?;
     Ok(())
+}
+
+/// Detach every client currently attached to a session.
+///
+/// Called immediately before this node attaches its own, which makes "exactly
+/// one client per session" true rather than merely intended. Every reconnect
+/// builds a fresh session manager with an empty map, so the next attach spawned
+/// ANOTHER `tmux attach` and nothing ever ended the previous one — a handful of
+/// page refreshes left three clients on one session, and the symptoms are what
+/// you would expect of a shared terminal nobody owns: input lands, live output
+/// stops reaching the browser, and every attach gets slower as tmux redraws for
+/// all of them (MAIN-363).
+///
+/// Detaching a client does NOT touch the session or its processes — that is the
+/// whole reason tmux is the buffer of record here. Failure is ignored: a
+/// session with no clients is the state we wanted anyway.
+pub fn detach_clients(name: &str) {
+    let _ = tmux(&["detach-client", "-s", name]);
 }
 
 /// Capture a session's pane as plain text: the visible screen plus up to

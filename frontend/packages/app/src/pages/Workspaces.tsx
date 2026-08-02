@@ -1,7 +1,7 @@
 import React, { useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate, useParams } from "react-router-dom";
-import { Eye, EyeOff, Lock, Plus, Sparkles, Trash2 } from "lucide-react";
+import { Eye, EyeOff, FolderGit2, Lock, Plus, Sparkles, Trash2 } from "lucide-react";
 import { api, type WorkspaceDetail as WsDetail } from "@nookos/api";
 import { Empty, PagedPanel, Panel, Pill, RowAction, RowActions, StatusDot, statusTone, type DataColumn } from "@nookos/ui";
 import { ActivityFeed } from "./Activity";
@@ -12,6 +12,7 @@ import { usePagedList } from "../paging";
 import { PortSafetyNotice } from "../PortSafetyNotice";
 import { SessionPolicy } from "../SessionPolicy";
 import { WorkspaceLocations } from "../WorkspaceLocations";
+import { SectionedPage, type PageSection } from "../SectionedPage";
 import { askChoice, askConfirm, askForm, askText, notify } from "../dialogs";
 import { requireAppPassword, useAppPassword } from "../apppassword";
 import { adoptEnvFromDisk, saveEnv } from "../envvault";
@@ -394,145 +395,199 @@ export function WorkspaceDetail() {
 
   if (!ws) return <Empty>Loading…</Empty>;
 
-  return (
-    <div
-      className="nook-grid"
-      style={{ gridTemplateColumns: "1.3fr 1fr", gridTemplateRows: "auto 1fr" }}
-    >
-      <Panel
-        title={`Workspace · ${ws.name}`}
-        actions={
-          <>
-            <NewSpecButton workspaceId={ws.id} />
-            <button
-              className="btn small"
-              title={
-                ws.git_remote_url
-                  ? "Clone this workspace's stored remote onto another node"
-                  : "This workspace has no stored git remote URL yet"
-              }
-              onClick={cloneToNode}
-            >
-              clone to node…
-            </button>
-            <button
-              className="btn primary small"
-              onClick={() => showNewWork({ workspaceId: ws.id })}
-            >
-              start work
-            </button>
-          </>
-        }
-      >
-        <table className="nook-table">
-          <thead>
-            <tr>
-              <th>Node</th>
-              <th>Path</th>
-              <th>Branch</th>
-              <th>State</th>
-              <th />
-            </tr>
-          </thead>
-          <tbody>
-            {ws.locations.map((l) => (
-              <tr key={`${l.node_id}:${l.path}`}>
-                <td>
-                  <StatusDot status={l.node_status} /> {l.node_name}
-                </td>
-                <td className="mono muted">{l.path}</td>
-                <td className="mono">
-                  {l.git_branch ?? "—"}{" "}
-                  {l.worktree ? (
-                    <Pill tone="info">worktree</Pill>
-                  ) : (
-                    <Pill tone="dim">primary</Pill>
-                  )}
-                </td>
-                <td>
-                  {l.dirty ? <Pill tone="warn">dirty</Pill> : <Pill tone="ok">clean</Pill>}
-                </td>
-                <td>
-                  <button
-                    className="btn small"
-                    disabled={l.node_status !== "online"}
-                    title="new worktree location"
-                    onClick={() =>
-                      showNewWork({
-                        workspaceId: ws.id,
-                        nodeId: l.node_id,
-                        worktree: true,
-                      })
-                    }
-                  >
-                    + worktree
-                  </button>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </Panel>
-
-      {/* Declared desired state and how close the fleet is to it (MAIN-319).
-          Above the session list on purpose: the policy is what PRODUCES that
-          list once reconciling is on. */}
-      {/* The cap, where somebody living with it will see it (MAIN-361 AC-6).
-          Above the session policy on purpose: the policy's replica count is the
-          number the cap is overriding. */}
-      {id && <PortSafetyNotice workspaceId={id} workspaceName={ws.name} />}
-
-      {id && <SessionPolicy workspaceId={id} />}
-
-      <Panel title="Sessions">
-        {(sessions ?? []).length === 0 ? (
-          <Empty>No sessions in this workspace yet.</Empty>
-        ) : (
+  const sections: PageSection[] = [
+    {
+      id: "checkouts",
+      title: "Checkouts",
+      group: "Repo",
+      keywords: ["nodes", "worktree", "branch", "clone", "locations", "dirty"],
+      render: () => (
+        <Panel title="Checkouts">
           <table className="nook-table">
+            <thead>
+              <tr>
+                <th>Node</th>
+                <th>Path</th>
+                <th>Branch</th>
+                <th>State</th>
+                <th />
+              </tr>
+            </thead>
             <tbody>
-              {(sessions ?? []).map((s) => (
-                <tr key={s.id}>
+              {ws.locations.map((l) => (
+                <tr key={`${l.node_id}:${l.path}`}>
                   <td>
-                    <Link className="bright" to={`/sessions/${s.id}`}>
-                      {s.name}
-                    </Link>
+                    <StatusDot status={l.node_status} /> {l.node_name}
+                  </td>
+                  <td className="mono muted">{l.path}</td>
+                  <td className="mono">
+                    {l.git_branch ?? "—"}{" "}
+                    {l.worktree ? (
+                      <Pill tone="info">worktree</Pill>
+                    ) : (
+                      <Pill tone="dim">primary</Pill>
+                    )}
                   </td>
                   <td>
-                    <Pill tone="accent">{s.runtime}</Pill>
+                    {l.dirty ? <Pill tone="warn">dirty</Pill> : <Pill tone="ok">clean</Pill>}
                   </td>
                   <td>
-                    <Pill tone={statusTone(s.status)}>{s.status}</Pill>
-                  </td>
-                  <td>
-                    <SessionOwner createdBy={s.created_by} meId={me?.user?.id} />
-                  </td>
-                  <td className="muted small">
-                    {new Date(s.created_at).toLocaleString()}
+                    <button
+                      className="btn small"
+                      disabled={l.node_status !== "online"}
+                      title="new worktree location"
+                      onClick={() =>
+                        showNewWork({
+                          workspaceId: ws.id,
+                          nodeId: l.node_id,
+                          worktree: true,
+                        })
+                      }
+                    >
+                      + worktree
+                    </button>
                   </td>
                 </tr>
               ))}
             </tbody>
           </table>
-        )}
-      </Panel>
-
-      <Panel title="env vault">
-        <EnvPanel workspaceId={ws.id} />
-      </Panel>
-
-      <div
-        className="nook-grid"
-        style={{ gridTemplateRows: "1fr 1fr", gridTemplateColumns: "1fr" }}
-      >
+        </Panel>
+      ),
+    },
+    {
+      id: "env",
+      title: "Env vault",
+      group: "Repo",
+      keywords: ["secrets", ".env", "password", "encrypt", "sealed", "vault"],
+      render: () => (
+        <Panel title="env vault">
+          <EnvPanel workspaceId={ws.id} />
+        </Panel>
+      ),
+    },
+    {
+      id: "sessions",
+      title: "Sessions",
+      group: "Work",
+      keywords: ["terminals", "running", "agents"],
+      render: () => (
+        <Panel title="Sessions">
+          {(sessions ?? []).length === 0 ? (
+            <Empty>No sessions in this workspace yet.</Empty>
+          ) : (
+            <table className="nook-table">
+              <tbody>
+                {(sessions ?? []).map((s) => (
+                  <tr key={s.id}>
+                    <td>
+                      <Link className="bright" to={`/sessions/${s.id}`}>
+                        {s.name}
+                      </Link>
+                    </td>
+                    <td>
+                      <Pill tone="accent">{s.runtime}</Pill>
+                    </td>
+                    <td>
+                      <Pill tone={statusTone(s.status)}>{s.status}</Pill>
+                    </td>
+                    <td>
+                      <SessionOwner createdBy={s.created_by} meId={me?.user?.id} />
+                    </td>
+                    <td className="muted small">
+                      {new Date(s.created_at).toLocaleString()}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </Panel>
+      ),
+    },
+    {
+      id: "policy",
+      title: "Session policy",
+      group: "Work",
+      keywords: ["reconcile", "replicas", "desired", "declarative", "ports", "cap"],
+      // One flex column, not two grid tracks: the section shell gives every
+      // child an equal-height row, and the cap banner (which usually renders
+      // NOTHING) must not cost the policy half the screen when it appears.
+      // The banner stays ABOVE the policy on purpose (MAIN-361 AC-6): the
+      // policy's replica count is the number the cap is overriding.
+      render: () => (
+        <div style={{ display: "flex", flexDirection: "column", gap: 10, minHeight: 0 }}>
+          {id && <PortSafetyNotice workspaceId={id} workspaceName={ws.name} />}
+          {/* The grid wrapper hands the policy panel the column's remaining
+              height, so this section fills the shell like every other one. */}
+          <div style={{ flex: 1, minHeight: 0, display: "grid" }}>
+            {id && <SessionPolicy workspaceId={id} />}
+          </div>
+        </div>
+      ),
+    },
+    {
+      id: "notes",
+      title: "Rolling notes",
+      group: "Journal",
+      keywords: ["notes", "scratch", "handoff"],
+      render: () => (
         <Panel title="Rolling notes">
           <NotesPanel workspaceId={ws.id} />
         </Panel>
+      ),
+    },
+    {
+      id: "activity",
+      title: "Activity",
+      group: "Journal",
+      keywords: ["events", "history", "audit"],
+      render: () => (
         <Panel title="Activity">
           <ActivityFeed workspaceId={ws.id} limit={60} />
         </Panel>
+      ),
+    },
+  ];
+
+  const intro = (
+    <Panel
+      title={`Workspace · ${ws.name}`}
+      actions={
+        <>
+          <NewSpecButton workspaceId={ws.id} />
+          <button
+            className="btn small"
+            title={
+              ws.git_remote_url
+                ? "Clone this workspace's stored remote onto another node"
+                : "This workspace has no stored git remote URL yet"
+            }
+            onClick={cloneToNode}
+          >
+            clone to node…
+          </button>
+          <button
+            className="btn primary small"
+            onClick={() => showNewWork({ workspaceId: ws.id })}
+          >
+            start work
+          </button>
+        </>
+      }
+    >
+      <div className="detail-id-head">
+        <FolderGit2 size={14} />
+        <WorkspaceLocations locations={ws.locations} />
+        {ws.git_remote_url && (
+          <span className="mono muted small" style={{ overflow: "hidden", textOverflow: "ellipsis" }}>
+            {ws.git_remote_url}
+          </span>
+        )}
       </div>
-    </div>
+    </Panel>
   );
+
+  return <SectionedPage sections={sections} placeholder="find…" intro={intro} />;
 }
 
 /** Delete a workspace, optionally removing its checkouts from disk.

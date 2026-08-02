@@ -370,6 +370,7 @@ impl NookBackend for McpBackend {
     async fn clone_repo(&self, url: String, node: Option<String>) -> anyhow::Result<String> {
         let tenant = self.tenant().await?;
         let node_id = self.resolve_node(tenant, node).await?;
+        let tenant_slug = crate::services::tenant_slug(&self.state, tenant).await;
         self.run_op(
             node_id,
             |request_id| ControlToNode::CloneRepo {
@@ -377,6 +378,7 @@ impl NookBackend for McpBackend {
                 url,
                 dest_name: None,
                 ssh_key: None,
+                tenant_slug,
             },
             90,
         )
