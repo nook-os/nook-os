@@ -310,6 +310,15 @@ pub trait WorkspaceRepository: Send + Sync {
         workspace: WorkspaceId,
     ) -> ApiResult<Vec<(NodeId, NodeWorkspaceId)>>;
 
+    /// Which tenant already owns the checkout at `path` on `node`, if any —
+    /// deliberately NOT scoped to a tenant, because the whole question is
+    /// whether this path belongs to somebody else (MAIN-363).
+    async fn checkout_tenant_at_path(
+        &self,
+        node: NodeId,
+        path: &str,
+    ) -> ApiResult<Option<TenantId>>;
+
     /// Whether this node already knows a checkout at `path`. The scan uses it
     /// to tell a brand-new checkout (which wants the workspace's `.env`
     /// announced) from one it is merely re-reporting.
@@ -1037,6 +1046,20 @@ impl WorkspaceRepository for DbWorkspaceRepository {
                    AND kind = 'clone' AND missing_at IS NULL
                  ORDER BY discovered_at",
                 params![tenant, workspace],
+            )
+            .await?)
+    }
+
+    async fn checkout_tenant_at_path(
+        &self,
+        node: NodeId,
+        path: &str,
+    ) -> ApiResult<Option<TenantId>> {
+        Ok(self
+            .db
+            .query_scalar_opt(
+                "SELECT tenant_id FROM node_workspaces WHERE node_id = $1 AND path = $2",
+                params![node, path],
             )
             .await?)
     }
@@ -2242,6 +2265,21 @@ impl WorkspaceRepository for FakeWorkspaceRepository {
             .collect();
         rows.sort_by_key(|c| c.seq);
         Ok(rows.into_iter().map(|c| (c.node_id, c.id)).collect())
+    }
+
+    async fn checkout_tenant_at_path(
+        &self,
+        node: NodeId,
+        path: &str,
+    ) -> ApiResult<Option<TenantId>> {
+        Ok(self
+            .inner
+            .lock()
+            .unwrap()
+            .checkouts
+            .iter()
+            .find(|c| c.node_id == node && c.path == path)
+            .map(|c| c.tenant))
     }
 
     async fn checkout_id_at_path(

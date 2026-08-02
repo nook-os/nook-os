@@ -50,6 +50,27 @@ pub async fn reconcile(
 
     for d in &discovered {
         reported_paths.push(d.path.clone());
+
+        // A path this node already holds for ANOTHER tenant is that tenant's
+        // checkout, and re-reporting it here must not mint a second workspace
+        // (MAIN-363). Cross-tenant placement means the reconciler of tenant B
+        // can clone onto a node homed in tenant A; every lookup below is scoped
+        // to A, so all of them miss and the fallback creates a duplicate
+        // workspace in A — which then gets its own default spec, its own
+        // desired replicas, and clones the same repo across the fleet again.
+        // Seen in prod: two workspaces duplicated within four minutes of the
+        // switch going on, each amplifying the clone storm that produced it.
+        // The owning tenant already keeps this row correct via `associate_clone`.
+        if let Some(owner) = state
+            .workspaces
+            .checkout_tenant_at_path(node_id, &d.path)
+            .await?
+        {
+            if owner != tenant {
+                continue;
+            }
+        }
+
         let normalized = d.git_remote_url.as_deref().map(normalize_remote);
 
         // Find the workspace this checkout belongs to.

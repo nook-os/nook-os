@@ -161,10 +161,7 @@ async fn a_late_detach_cannot_resurrect_a_finished_session() {
     sessions.force_status(s.id, "exited");
 
     // A detach event arrives afterwards — the last browser tab closing.
-    let changed = sessions
-        .mark_status_if_live(s.id, "detached")
-        .await
-        .unwrap();
+    let changed = sessions.mark_viewer_presence(s.id, false).await.unwrap();
     assert_eq!(
         changed, 0,
         "no row matched: the session is already finished"
@@ -177,17 +174,43 @@ async fn a_late_detach_cannot_resurrect_a_finished_session() {
     );
 }
 
+/// Viewer presence moves a session between `detached` and `running`, and only
+/// between those two.
 #[tokio::test]
-async fn a_live_session_does_take_the_status() {
+async fn a_viewer_arriving_and_leaving_moves_a_live_session() {
     let sessions = FakeSessionRepository::new();
     let t = tenant();
     let s = start(&sessions, t, NodeId::new(), None, None, "s").await;
 
-    for (from, to) in [("starting", "running"), ("running", "detached")] {
+    for (from, watched, to) in [
+        ("detached", true, "running"),
+        ("running", false, "detached"),
+    ] {
         sessions.force_status(s.id, from);
-        assert_eq!(sessions.mark_status_if_live(s.id, to).await.unwrap(), 1);
+        assert_eq!(
+            sessions.mark_viewer_presence(s.id, watched).await.unwrap(),
+            1
+        );
         assert_eq!(sessions.status_snapshot(s.id).as_deref(), Some(to));
     }
+}
+
+/// The fix for the "session has no terminal yet" loop (MAIN-363): a browser tab
+/// opening is not evidence that a process started. Only the node's
+/// `SessionStarted` — which also carries the tmux name — may leave `starting`.
+#[tokio::test]
+async fn a_viewer_cannot_promote_a_session_that_never_started() {
+    let sessions = FakeSessionRepository::new();
+    let t = tenant();
+    let s = start(&sessions, t, NodeId::new(), None, None, "s").await;
+
+    assert_eq!(sessions.status_snapshot(s.id).as_deref(), Some("starting"));
+    assert_eq!(
+        sessions.mark_viewer_presence(s.id, true).await.unwrap(),
+        0,
+        "attaching must not lift `starting`; the row still has no tmux session"
+    );
+    assert_eq!(sessions.status_snapshot(s.id).as_deref(), Some("starting"));
 }
 
 #[tokio::test]
@@ -382,9 +405,9 @@ async fn live_siblings_counts_only_other_live_sessions_in_the_workspace() {
     );
 
     let live = start(&repo, t, node, Some(ws), None, "still working").await;
-    repo.mark_status_if_live(live.id, "detached").await.unwrap();
+    repo.force_status(live.id, "detached");
     let dead = start(&repo, t, node, Some(ws), None, "finished").await;
-    repo.mark_status_if_live(dead.id, "exited").await.unwrap();
+    repo.force_status(dead.id, "exited");
     start(&repo, t, node, Some(other_ws), None, "elsewhere").await;
 
     assert_eq!(

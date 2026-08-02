@@ -71,6 +71,21 @@ pub async fn run(cfg: NodeConfig) -> Result<()> {
 }
 
 /// One connection lifetime: register, resync, pump until the socket closes.
+/// Where a NEW checkout is written — always the tenant-scoped root, never
+/// `workspace_roots[0]` (MAIN-363).
+///
+/// `workspace_roots` is the SCAN list, and on a node that enrolled before
+/// MAIN-347 the first entry is the old flat `~/.nook/workspace`. Cloning there
+/// puts the repo at `<owner>/<repo>` with nothing tenant-specific in the path,
+/// so two tenants whose repos share an owner and a name land in one directory —
+/// and cross-tenant placement (MAIN-353) makes that ordinary rather than exotic.
+/// Reading the legacy roots continues, so checkouts already on disk are still
+/// discovered where they are; only writing is forced canonical, which is what
+/// stops new collisions without moving anything that exists.
+fn new_checkout_root(cfg: &NodeConfig) -> String {
+    crate::config::default_workspace_root(cfg.tenant_slug.as_deref(), &cfg.server)
+}
+
 pub async fn connect_once(cfg: &NodeConfig) -> Result<()> {
     let mut request = ws_url(cfg.agent_endpoint())
         .into_client_request()
@@ -399,9 +414,7 @@ pub async fn connect_once(cfg: &NodeConfig) -> Result<()> {
                 ssh_key,
             } => {
                 let tx = out_tx.clone();
-                let root = cfg.workspace_roots.first().cloned().unwrap_or_else(|| {
-                    crate::config::default_workspace_root(cfg.tenant_slug.as_deref(), &cfg.server)
-                });
+                let root = new_checkout_root(cfg);
                 let roots = cfg.workspace_roots.clone();
                 tokio::task::spawn_blocking(move || {
                     let outcome = crate::gitops::clone_repo(
@@ -576,9 +589,7 @@ pub async fn connect_once(cfg: &NodeConfig) -> Result<()> {
             }
             ControlToNode::InitProject { request_id, name } => {
                 let tx = out_tx.clone();
-                let root = cfg.workspace_roots.first().cloned().unwrap_or_else(|| {
-                    crate::config::default_workspace_root(cfg.tenant_slug.as_deref(), &cfg.server)
-                });
+                let root = new_checkout_root(cfg);
                 let roots = cfg.workspace_roots.clone();
                 tokio::task::spawn_blocking(move || {
                     let outcome = crate::gitops::init_project(&root, &name);

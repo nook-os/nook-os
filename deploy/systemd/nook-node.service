@@ -7,8 +7,13 @@
 #
 [Unit]
 Description=NookOS node agent
-After=network-online.target
-Wants=network-online.target
+# NOT network-online.target (MAIN-363). The agent dials out and reconnects with
+# jittered backoff from one second, so it needs an interface, not a *configured*
+# one. Waiting for network-online costs real minutes where nothing manages it:
+# on WSL, systemd-networkd-wait-online does not own the interface, times out
+# after two minutes and FAILS — and the node sat unreachable for that whole
+# window after every boot, having done nothing but wait.
+After=network.target
 
 [Service]
 Type=simple

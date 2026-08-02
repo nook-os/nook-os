@@ -189,7 +189,18 @@ async fn handle(
     // Disconnect: offline + detach-preserving (tmux keeps sessions alive).
     writer.abort();
     pinger.abort();
-    state.registry.unregister_node(node_id, epoch);
+    // A node that reconnected before this loop noticed the old socket had gone
+    // is served by a NEWER connection — this one is a ghost, and everything
+    // below would be a lie about a live node (MAIN-363). Seen in prod: an agent
+    // reconnected, then the superseded reader ended 108 seconds later and
+    // marked the node `offline` while it was heartbeating every five seconds.
+    // Nothing ever flipped it back — only `Register` writes `online`, and the
+    // live connection had already registered — so a healthy machine sat
+    // invisible to the dispatcher and the reconciler for eighteen hours.
+    if !state.registry.unregister_node(node_id, epoch) {
+        tracing::info!(%node_id, node = %name, "superseded connection closed — node is live on a newer one");
+        return;
+    }
     // Release the lease and mark offline — but only if WE still own it; the
     // node may have already reconnected to another instance.
     let _ = state

@@ -1121,7 +1121,15 @@ impl NodeRepository for DbNodeRepository {
         self.db
             .exec(
                 &format!(
+                    // `status = 'online'` belongs here, not only on Register: a
+                    // node sending us resources IS online, and making the
+                    // heartbeat say so is what stops a stale `offline` from
+                    // outliving the connection that caused it. Register used to
+                    // be the sole writer of `online`, so a node marked offline
+                    // in error stayed that way until it fully reconnected —
+                    // which a healthy node never does (MAIN-363).
                     "UPDATE nodes SET last_seen_at = {now}, resources = $2,
+                        status = 'online',
                         lease_expires_at = CASE WHEN owning_instance_id = $3
                             THEN {now} + make_interval(secs => $4)
                             ELSE lease_expires_at END
@@ -2220,6 +2228,8 @@ impl NodeRepository for FakeNodeRepository {
         if let Some(n) = s.nodes.iter_mut().find(|n| n.node.id == id) {
             n.node.resources = resources.clone();
             n.node.last_seen_at = Some(chrono::Utc::now());
+            // A heartbeat is proof of life — same as the SQL (MAIN-363).
+            n.node.status = "online".into();
             // The lease extends only while it is still ours — the CASE.
             if n.owning_instance_id == Some(instance) {
                 n.owning_instance_id = Some(instance);

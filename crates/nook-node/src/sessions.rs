@@ -77,6 +77,20 @@ pub enum Cmd {
 }
 
 pub struct Manager {
+    /// Lifecycle messages go out with `blocking_send`, NEVER `try_send`.
+    ///
+    /// `SessionStarted` carries the tmux name — the only way the control plane
+    /// ever learns which tmux session backs a row. `try_send` drops it when the
+    /// channel is full and `let _ =` hid that: under load the node would create
+    /// the tmux session, attach its PTY, and report nothing, leaving a row with
+    /// a NULL `tmux_session` that no viewer could ever attach to. Nothing
+    /// re-sends it, so the session was broken for good. Output frames are the
+    /// droppable ones and they already block; losing the identity of a session
+    /// to save a few milliseconds on a saturated link is the wrong trade.
+    ///
+    /// Blocking here is safe in a way it would not have been before MAIN-362:
+    /// this is the manager's own thread, not the connection's read loop, so a
+    /// backed-up socket delays session bookkeeping and nothing else.
     out: Sender<NodeToControl>,
     sessions: HashMap<SessionId, SessionHandle>,
 }
@@ -143,7 +157,7 @@ impl Manager {
     /// "starting" with no way to learn why.
     fn session_failed(&self, session_id: SessionId, message: String) {
         tracing::warn!(%session_id, %message, "session failed to start");
-        let _ = self.out.try_send(NodeToControl::SessionFailed {
+        let _ = self.out.blocking_send(NodeToControl::SessionFailed {
             session_id,
             message,
         });
@@ -179,7 +193,7 @@ impl Manager {
         }
         match self.attach_pty(session_id, &tmux_name, cols, rows, false) {
             Ok(()) => {
-                let _ = self.out.try_send(NodeToControl::SessionStarted {
+                let _ = self.out.blocking_send(NodeToControl::SessionStarted {
                     session_id,
                     tmux_session: tmux_name,
                 });
@@ -210,7 +224,7 @@ impl Manager {
         }
         match self.attach_pty(session_id, &tmux_name, cols, rows, true) {
             Ok(()) => {
-                let _ = self.out.try_send(NodeToControl::SessionStarted {
+                let _ = self.out.blocking_send(NodeToControl::SessionStarted {
                     session_id,
                     tmux_session: tmux_name,
                 });
@@ -370,7 +384,7 @@ impl Manager {
                     .session_failed(session_id, "session is not running on this node".into());
             };
             if !tmux::session_exists(&name) {
-                let _ = self.out.try_send(NodeToControl::SessionExited {
+                let _ = self.out.blocking_send(NodeToControl::SessionExited {
                     session_id,
                     exit_code: None,
                 });
@@ -439,7 +453,7 @@ impl Manager {
         if tmux::session_exists(&name) {
             let _ = tmux::kill_session(&name);
         }
-        let _ = self.out.try_send(NodeToControl::SessionExited {
+        let _ = self.out.blocking_send(NodeToControl::SessionExited {
             session_id,
             exit_code: None,
         });

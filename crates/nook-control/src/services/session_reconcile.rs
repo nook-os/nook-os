@@ -380,37 +380,94 @@ pub fn start(state: AppState) {
     });
 }
 
-/// Remembers when a clone was last asked of a (workspace, node), so a repo that
-/// cannot be cloned — a private URL with no credential, a path that 404s — is
-/// retried at most once per [`CLONE_RETRY_TTL`] instead of on every 10s pass.
+/// Paces clone-on-demand per (workspace, node).
+///
+/// A flat retry interval is not enough, and prod proved it: a repo the node's
+/// key cannot read fails identically forever, so five nodes × four workspaces
+/// re-issued a clone every minute for as long as the switch was on — a
+/// permanent outbound storm against the git host, and enough traffic on the
+/// node link to start dropping session messages. Two rules fix that class:
+///
+///   1. **Geometric backoff on consecutive failures**, from [`CLONE_RETRY_MIN`]
+///      to [`CLONE_RETRY_MAX`], reset by a success. A transient failure recovers
+///      in a minute; a permanent one settles to a check twice an hour.
+///   2. **One attempt in flight per pair.** A clone may take up to 15 minutes;
+///      with a 60s retry the old code could stack fifteen concurrent clones of
+///      the same repo onto the same node, each fighting for the same directory.
+///
 /// In-process and per-replica: two replicas may each issue one initial clone,
 /// which git handles (the second lands on an existing/in-progress directory and
 /// fails harmlessly). It only ever grows by (workspace, node) pairs the fleet
 /// actually has, so it needs no eviction.
-#[derive(Default)]
+///
+/// Cloned handles share one map — `start_clone` keeps a handle so the spawned
+/// task can report the outcome back, which is what makes the backoff respond to
+/// reality rather than merely to the clock.
+#[derive(Default, Clone)]
 pub struct CloneThrottle {
-    last: std::collections::HashMap<(WorkspaceId, NodeId), std::time::Instant>,
+    inner: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<Pair, Attempt>>>,
 }
 
-const CLONE_RETRY_TTL: Duration = Duration::from_secs(60);
+type Pair = (WorkspaceId, NodeId);
+
+#[derive(Default)]
+struct Attempt {
+    at: Option<std::time::Instant>,
+    /// Consecutive failures; zeroed by a success.
+    failures: u32,
+    in_flight: bool,
+}
+
+const CLONE_RETRY_MIN: Duration = Duration::from_secs(60);
+const CLONE_RETRY_MAX: Duration = Duration::from_secs(30 * 60);
 
 impl CloneThrottle {
-    /// True at most once per TTL per pair; records the moment it says yes.
-    fn may_issue(&mut self, workspace: WorkspaceId, node: NodeId) -> bool {
-        let now = std::time::Instant::now();
-        match self.last.get(&(workspace, node)) {
-            Some(at) if now.duration_since(*at) < CLONE_RETRY_TTL => false,
-            _ => {
-                self.last.insert((workspace, node), now);
-                true
+    /// How long to wait after `failures` consecutive failures. `1 << 5` already
+    /// exceeds the cap, so the shift cannot overflow into a short interval.
+    fn backoff(failures: u32) -> Duration {
+        CLONE_RETRY_MIN
+            .saturating_mul(1u32 << failures.min(5))
+            .min(CLONE_RETRY_MAX)
+    }
+
+    /// True at most once per backoff window per pair, and never while an
+    /// attempt for that pair is still outstanding. Marks the attempt in flight;
+    /// the caller MUST report the outcome with [`CloneThrottle::record`].
+    fn may_issue(&self, workspace: WorkspaceId, node: NodeId) -> bool {
+        let mut map = self.inner.lock().unwrap();
+        let entry = map.entry((workspace, node)).or_default();
+        if entry.in_flight {
+            return false;
+        }
+        if let Some(at) = entry.at {
+            if at.elapsed() < Self::backoff(entry.failures) {
+                return false;
             }
         }
+        entry.at = Some(std::time::Instant::now());
+        entry.in_flight = true;
+        true
+    }
+
+    /// Report an attempt's outcome. Returns how long the next attempt will wait,
+    /// so the failure log can say when it will be retried instead of leaving a
+    /// reader to guess from a stream of identical lines.
+    fn record(&self, workspace: WorkspaceId, node: NodeId, ok: bool) -> Duration {
+        let mut map = self.inner.lock().unwrap();
+        let entry = map.entry((workspace, node)).or_default();
+        entry.in_flight = false;
+        entry.failures = if ok {
+            0
+        } else {
+            entry.failures.saturating_add(1)
+        };
+        Self::backoff(entry.failures)
     }
 }
 
 async fn run(state: AppState) {
     let mut switch = SwitchLog::default();
-    let mut clones = CloneThrottle::default();
+    let clones = CloneThrottle::default();
     loop {
         // Re-read every tick, so a flip lands within one interval with no
         // restart. With every tenant off this is one indexed lookup and the
@@ -419,7 +476,7 @@ async fn run(state: AppState) {
             tokio::time::sleep(POLL_INTERVAL).await;
             continue;
         }
-        if let Err(e) = pass(&state, &mut clones).await {
+        if let Err(e) = pass(&state, &clones).await {
             // A failed pass is not fatal: the next one re-reads the world from
             // scratch, which is the point of a reconciler over a queue.
             tracing::warn!(error = %e, "session reconcile pass failed");
@@ -457,7 +514,7 @@ pub(crate) fn default_spec() -> SessionSpec {
 /// selector, or zero replicas. Everything else in an on tenant gets
 /// [`default_spec`], which is the auto-derive: no per-workspace opt-in, the
 /// tenant switch is the whole gate.
-async fn pass(state: &AppState, clones: &mut CloneThrottle) -> crate::error::ApiResult<()> {
+async fn pass(state: &AppState, clones: &CloneThrottle) -> crate::error::ApiResult<()> {
     // Explicit specs, keyed by workspace so the per-workspace lookup below is a
     // map hit and not a query. Ids are uuids, unique across tenants, so a flat
     // map is safe even though this crosses every tenant.
@@ -542,7 +599,7 @@ async fn reconcile_workspace(
     tenant: TenantId,
     workspace: WorkspaceId,
     spec: &SessionSpec,
-    clones: &mut CloneThrottle,
+    clones: &CloneThrottle,
 ) -> crate::error::ApiResult<()> {
     let nodes = node_facts(state, tenant).await?;
     let checkouts: Vec<CheckoutSlot> = state
@@ -640,7 +697,7 @@ async fn reconcile_workspace(
     // repo that cannot be cloned would otherwise be re-issued every pass.
     for node in &plan.needs_clone {
         if clones.may_issue(workspace, *node) {
-            start_clone(state, tenant, workspace, *node).await;
+            start_clone(state, tenant, workspace, *node, clones.clone()).await;
         }
     }
     Ok(())
@@ -654,11 +711,18 @@ async fn reconcile_workspace(
 /// path, or a public/preconfigured remote. A private repo that needs a secret
 /// stays `needs_clone` rather than failing here; wiring the workspace's stored
 /// credential in is the follow-up.
-async fn start_clone(state: &AppState, tenant: TenantId, workspace: WorkspaceId, node: NodeId) {
+async fn start_clone(
+    state: &AppState,
+    tenant: TenantId,
+    workspace: WorkspaceId,
+    node: NodeId,
+    clones: CloneThrottle,
+) {
     let url = match state.workspaces.git_remote_url(workspace, tenant).await {
         Ok(Some(Some(url))) => url,
         // No remote to clone from, or the workspace vanished — nothing to do.
         _ => {
+            clones.record(workspace, node, false);
             tracing::warn!(%workspace, node = %node, "clone-on-demand: no git remote to clone");
             return;
         }
@@ -674,6 +738,9 @@ async fn start_clone(state: &AppState, tenant: TenantId, workspace: WorkspaceId,
             })
     else {
         // Went offline between planning and issuing; the next pass re-reads.
+        // Not a failure of the repo — do not let a flapping node back off a
+        // clone that has never actually been tried.
+        clones.record(workspace, node, true);
         return;
     };
     tracing::info!(%workspace, node = %node, url = %url, "clone-on-demand: cloning workspace onto node");
@@ -681,7 +748,13 @@ async fn start_clone(state: &AppState, tenant: TenantId, workspace: WorkspaceId,
     // silent perpetual shortfall — but do NOT block the pass on it.
     let state = state.clone();
     tokio::spawn(async move {
-        match tokio::time::timeout(std::time::Duration::from_secs(900), rx).await {
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(900), rx).await;
+        // Record BEFORE the reporting below: the backoff must move even if
+        // recording the checkout then fails, or a repo that clones fine but
+        // cannot be associated would retry at the floor interval forever.
+        let ok = matches!(&outcome, Ok(Ok(p)) if p.ok);
+        let retry_in = clones.record(workspace, node, ok);
+        match outcome {
             Ok(Ok(p)) if p.ok => {
                 // Pin the checkout row NOW instead of waiting for the node's next
                 // discovery scan — otherwise the session can't place until the
@@ -709,13 +782,17 @@ async fn start_clone(state: &AppState, tenant: TenantId, workspace: WorkspaceId,
                     }
                 }
             }
+            // Every failure line carries the next retry, so a reader can tell a
+            // backing-off loop from a hammering one without timing the log.
             Ok(Ok(p)) => {
-                tracing::warn!(%workspace, node = %node, message = %p.message, "clone-on-demand: clone failed")
+                tracing::warn!(%workspace, node = %node, message = %p.message, retry_in_s = retry_in.as_secs(), "clone-on-demand: clone failed")
             }
             Ok(Err(_)) => {
-                tracing::warn!(%workspace, node = %node, "clone-on-demand: node disconnected mid-clone")
+                tracing::warn!(%workspace, node = %node, retry_in_s = retry_in.as_secs(), "clone-on-demand: node disconnected mid-clone")
             }
-            Err(_) => tracing::warn!(%workspace, node = %node, "clone-on-demand: clone timed out"),
+            Err(_) => {
+                tracing::warn!(%workspace, node = %node, retry_in_s = retry_in.as_secs(), "clone-on-demand: clone timed out")
+            }
         }
     });
 }
@@ -799,6 +876,66 @@ async fn start_managed(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn ids() -> (WorkspaceId, NodeId) {
+        (
+            WorkspaceId(uuid::Uuid::now_v7()),
+            NodeId(uuid::Uuid::now_v7()),
+        )
+    }
+
+    /// A repo that can never be cloned must not be retried at a fixed interval
+    /// forever — that is the prod storm this backoff exists to prevent.
+    #[test]
+    fn clone_backoff_grows_with_consecutive_failures_and_caps() {
+        assert_eq!(CloneThrottle::backoff(0), CLONE_RETRY_MIN);
+        assert_eq!(CloneThrottle::backoff(1), CLONE_RETRY_MIN * 2);
+        assert_eq!(CloneThrottle::backoff(4), CLONE_RETRY_MIN * 16);
+        // Past the cap it stops growing rather than wrapping to something short.
+        assert_eq!(CloneThrottle::backoff(5), CLONE_RETRY_MAX);
+        assert_eq!(CloneThrottle::backoff(u32::MAX), CLONE_RETRY_MAX);
+    }
+
+    #[test]
+    fn a_success_returns_the_pair_to_the_floor_interval() {
+        let (ws, node) = ids();
+        let t = CloneThrottle::default();
+        assert!(t.may_issue(ws, node));
+        for _ in 0..3 {
+            t.record(ws, node, false);
+        }
+        assert_eq!(t.record(ws, node, true), CLONE_RETRY_MIN);
+    }
+
+    /// The other half of the storm: a clone may take up to 15 minutes, so a
+    /// throttle that only looked at elapsed time would stack a fresh attempt on
+    /// top of the outstanding one every minute.
+    #[test]
+    fn only_one_attempt_per_pair_is_in_flight() {
+        let (ws, node) = ids();
+        let t = CloneThrottle::default();
+        assert!(t.may_issue(ws, node));
+        assert!(
+            !t.may_issue(ws, node),
+            "second attempt while one is running"
+        );
+        t.record(ws, node, false);
+        // Still inside the backoff window, so it stays refused — but for the
+        // window now, not because something is outstanding.
+        assert!(!t.may_issue(ws, node));
+    }
+
+    /// Handles share state: `start_clone` reports the outcome through a clone of
+    /// the throttle, and that must reach the map the pass reads.
+    #[test]
+    fn cloned_handles_share_one_map() {
+        let (ws, node) = ids();
+        let t = CloneThrottle::default();
+        let handle = t.clone();
+        assert!(t.may_issue(ws, node));
+        handle.record(ws, node, false);
+        assert!(!t.may_issue(ws, node), "backoff must apply across handles");
+    }
 
     /// The planner as it behaves for a workspace that HAS declared its ports —
     /// which every case below is about except the cap's own tests. Keeps those

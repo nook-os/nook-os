@@ -110,9 +110,17 @@ pub trait SessionRepository: Send + Sync {
     /// A session's tmux name, or `None` while the node has yet to report it.
     async fn tmux_of(&self, id: SessionId) -> ApiResult<Option<String>>;
 
-    /// Set a status, but only from a live one. The guard is what stops a late
-    /// socket event resurrecting a session that already exited or errored.
-    async fn mark_status_if_live(&self, id: SessionId, status: &str) -> ApiResult<u64>;
+    /// Move a session between the two VIEWER-PRESENCE states, and only those:
+    /// `detached` ⇄ `running` as the last viewer leaves and the first arrives.
+    ///
+    /// The narrowness is the point. This used to be a general "set any status
+    /// from any live one", which let a viewer opening a tab promote a session
+    /// out of `starting` — including one whose node never reported
+    /// `SessionStarted`, so the row read `running` with a NULL `tmux_session`
+    /// and the UI offered a terminal that could never attach. Leaving
+    /// `starting` is the NODE's statement about a process; a browser tab is not
+    /// evidence that anything started.
+    async fn mark_viewer_presence(&self, id: SessionId, watched: bool) -> ApiResult<u64>;
 
     async fn delete(&self, id: SessionId, tenant: TenantId) -> ApiResult<u64>;
 
@@ -364,16 +372,21 @@ impl SessionRepository for DbSessionRepository {
             .await?)
     }
 
-    async fn mark_status_if_live(&self, id: SessionId, status: &str) -> ApiResult<u64> {
+    async fn mark_viewer_presence(&self, id: SessionId, watched: bool) -> ApiResult<u64> {
+        // Two static statements rather than one with a bound status: the source
+        // state is half the guard, so it belongs in the SQL, not in a parameter.
+        let sql = if watched {
+            "UPDATE sessions SET status = 'running', updated_at = {now}
+             WHERE id = $1 AND status = 'detached'"
+        } else {
+            "UPDATE sessions SET status = 'detached', updated_at = {now}
+             WHERE id = $1 AND status = 'running'"
+        };
         Ok(self
             .db
             .exec(
-                &format!(
-                    "UPDATE sessions SET status = $2, updated_at = {now}
-                     WHERE id = $1 AND status IN ('starting', 'running', 'detached')",
-                    now = type_mapping(self.db.engine()).now()
-                ),
-                params![id, status],
+                &sql.replace("{now}", type_mapping(self.db.engine()).now()),
+                params![id],
             )
             .await?)
     }
@@ -779,13 +792,16 @@ impl SessionRepository for FakeSessionRepository {
             .map(|x| x.status.clone()))
     }
 
-    async fn mark_status_if_live(&self, id: SessionId, status: &str) -> ApiResult<u64> {
+    async fn mark_viewer_presence(&self, id: SessionId, watched: bool) -> ApiResult<u64> {
+        let (from, to) = if watched {
+            ("detached", "running")
+        } else {
+            ("running", "detached")
+        };
         let mut s = self.inner.lock().unwrap();
         Ok(match s.iter_mut().find(|x| x.id == id) {
-            // The live-status guard: a session that already exited or errored
-            // is final, whatever a late socket event says.
-            Some(x) if matches!(x.status.as_str(), "starting" | "running" | "detached") => {
-                x.status = status.to_string();
+            Some(x) if x.status == from => {
+                x.status = to.to_string();
                 x.updated_at = chrono::Utc::now();
                 1
             }

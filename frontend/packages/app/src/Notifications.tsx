@@ -33,6 +33,32 @@ export const useToasts = create<ToastState>((set) => ({
 }));
 
 /**
+ * What actually went wrong, in the words a person would use.
+ *
+ * Every failed write used to read "That change was not saved", which is wrong
+ * for most of them: half these calls save nothing (killing a session, promoting
+ * a ticket, toggling reconcile), and a permission failure, a stale row and a
+ * server crash are three different problems with three different next steps.
+ * A title that fits all of them tells you only that a button did not work —
+ * which you already knew, because you pressed it.
+ *
+ * The status is the honest signal, so it picks the sentence. `undefined` means
+ * the request never got a reply, which is the one case where the trouble is
+ * certainly not with what you asked for.
+ */
+function writeFailureTitle(f: { status?: number; method: string }): string {
+  if (f.status === undefined) return "Could not reach the server";
+  if (f.status === 403) return "You are not allowed to do that";
+  if (f.status === 404) return "That is no longer there";
+  if (f.status === 409) return "That clashed with a change someone else made";
+  if (f.status === 429) return "Too many requests — try again in a moment";
+  if (f.status >= 500) return "The server failed while doing that";
+  // Remaining 4xx: the request reached the server and was refused on its
+  // merits, so the body below is the part worth reading.
+  return f.method === "DELETE" ? "That was not deleted" : "That was not saved";
+}
+
+/**
  * Say so when a write does not happen.
  *
  * Installed once at startup. Nothing else in the app reports these: every call
@@ -51,7 +77,7 @@ export function installWriteFailureToasts(): () => void {
       id: `write-failure-${++n}`,
       tenant_id: "",
       level: "error",
-      title: "That change was not saved",
+      title: writeFailureTitle(f),
       // The path, because "a task" and "a setting" fail identically otherwise,
       // and the message, because the server usually says something useful.
       body: `${f.method} ${f.path} — ${f.message}`,
