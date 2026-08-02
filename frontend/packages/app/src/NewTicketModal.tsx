@@ -1,4 +1,4 @@
-// Filing work from the board, without a ticket first (MAIN-364).
+// Starting a spec loop from the board, without a ticket first (MAIN-364).
 //
 // The old path made you produce the thing you were trying to produce: file a
 // stub ticket, open it, find "Draft a spec", and only then describe what you
@@ -6,15 +6,21 @@
 // loop's whole job is turning an idea into a ticket, so requiring a ticket to
 // start one is backwards.
 //
-// So this is one gesture: describe the idea, say which workspace it belongs to,
-// and it lands in triage. `Draft with AI` (the default) additionally starts the
-// loop with your text as its seed — the ticket you get back is the one the
-// loop wrote, not the stub you typed. `File it myself` is the escape hatch for
-// when you already know exactly what you want and the interview is noise.
+// This modal is therefore AI-only, on purpose. Filing a ticket by hand already
+// has a home — the per-column composer, one click away on the board itself —
+// and duplicating it here would only make people choose between two things that
+// look the same. This is the other job: hand an agent a prompt and let it come
+// back with the ticket.
 //
-// Epic is just another type here, which is what makes "a button to create an
-// epic" fall out for free: an epic + AI routes to the decomposer rather than
-// the spec interview, because `loopAction` already keys on the type.
+// What you type is the PROMPT, not a title. It goes to the agent verbatim as
+// the run's seed; the ticket it creates is a placeholder the loop rewrites, so
+// splitting the text into title-and-body would be inventing structure the agent
+// is about to replace — and worse, it would quietly drop everything after the
+// first line into a description nobody asked for.
+//
+// Epic is just another type here, which is what makes "New epic" fall out for
+// free: an epic routes to the decomposer rather than the spec interview,
+// because `loopAction` already keys on the type.
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Sparkles, X } from "lucide-react";
@@ -27,10 +33,16 @@ import { createLoopJob, loopAction } from "./loop";
  *  knowing which uuid that is on this board today. */
 const TRIAGE: string = "backlog";
 
+/** A title has to exist for the card to render before the agent has written
+ *  anything, so the prompt's opening words stand in. Deliberately NOT parsed
+ *  out of the prompt as a real title — the loop replaces it. */
+function placeholderTitle(prompt: string): string {
+  const oneLine = prompt.replace(/\s+/g, " ").trim();
+  return oneLine.length > 80 ? `${oneLine.slice(0, 79)}…` : oneLine;
+}
+
 export interface NewTicketResult {
   taskId: string;
-  /** A loop was started on it — the caller opens the loop rather than the card. */
-  drafting: boolean;
 }
 
 export function NewTicketModal({
@@ -45,10 +57,9 @@ export function NewTicketModal({
   onCreated: (result: NewTicketResult) => void;
   initialType?: string;
 }) {
-  const [idea, setIdea] = useState("");
+  const [prompt, setPrompt] = useState("");
   const [type, setType] = useState(initialType);
   const [workspaceId, setWorkspaceId] = useState<string>("");
-  const [useAi, setUseAi] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const ref = useRef<HTMLTextAreaElement>(null);
@@ -76,30 +87,22 @@ export function NewTicketModal({
     [workspaces],
   );
 
-  // What the AI run would be. An epic decomposes; everything else gets the spec
-  // interview. Derived from the SAME helper the ticket page uses, so the button
-  // cannot promise a different run from the one that starts.
+  // Which run this will be. Derived from the SAME helper the ticket page uses,
+  // so the button cannot promise a different run from the one that starts.
   const action = loopAction(type, undefined);
 
   const submit = async () => {
-    const text = idea.trim();
+    const text = prompt.trim();
     if (!text || busy) return;
     setBusy(true);
     setError(null);
 
-    // The title is the first line; anything after it is already description.
-    // Somebody pasting three paragraphs should not get a three-paragraph title.
-    const [first, ...rest] = text.split("\n");
-    const title = first.trim().slice(0, 200);
-    const description = rest.join("\n").trim();
-
     const created = await api.POST("/api/v1/boards/{id}/tasks", {
       params: { path: { id: boardId } },
       body: {
-        title,
+        title: placeholderTitle(text),
         column_type: TRIAGE,
         type,
-        ...(description ? { description } : {}),
         ...(workspaceId ? { workspace_id: workspaceId } : {}),
       },
     });
@@ -108,28 +111,19 @@ export function NewTicketModal({
       // The global write-failure toast already says WHY (method, path, server
       // message); this only has to say the modal is still holding your text.
       setBusy(false);
-      setError("Could not file that — your text is still here.");
+      setError("Could not file that — your prompt is still here.");
       return;
     }
 
-    if (!useAi) {
-      setBusy(false);
-      onCreated({ taskId, drafting: false });
-      return;
-    }
-
-    // The ticket exists either way — a loop that cannot start is a ticket in
-    // triage, not a lost idea. So a failure here reports itself and still hands
-    // the caller the card, rather than rolling back work the person did.
+    // The prompt goes to the agent WHOLE. The ticket exists either way, so a
+    // loop that cannot start is a ticket in triage, not a lost idea.
     const job = await createLoopJob(action.kind, taskId, text);
     setBusy(false);
     if (!job.data) {
-      // Worth its own sentence rather than the generic toast: the ticket DID
-      // get filed, so "it failed" would send someone off to re-file it.
-      setError("Filed it in triage, but the draft could not start.");
+      setError("Filed it in triage, but the agent could not start.");
       return;
     }
-    onCreated({ taskId, drafting: true });
+    onCreated({ taskId });
   };
 
   return (
@@ -138,11 +132,13 @@ export function NewTicketModal({
         className="modal dialog"
         role="dialog"
         aria-modal="true"
-        aria-label="New work"
+        aria-label="Draft with AI"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="modal-header">
-          <span>New work</span>
+          <span>
+            <Sparkles size={12} /> Draft with AI
+          </span>
           <button className="btn small" onClick={onClose} aria-label="close">
             <X size={12} />
           </button>
@@ -150,14 +146,14 @@ export function NewTicketModal({
 
         <div className="modal-body">
           <label className="field">
-            <span className="field-label">What do you want?</span>
+            <span className="field-label">What should it build?</span>
             <textarea
               ref={ref}
               className="composer-input"
-              rows={4}
-              placeholder="Describe the idea. The first line becomes the title."
-              value={idea}
-              onChange={(e) => setIdea(e.target.value)}
+              rows={5}
+              placeholder="Describe what you want. This is the prompt the agent starts from."
+              value={prompt}
+              onChange={(e) => setPrompt(e.target.value)}
               onKeyDown={(e) => {
                 if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
                   e.preventDefault();
@@ -183,34 +179,10 @@ export function NewTicketModal({
             </label>
           </div>
 
-          <div className="field">
-            <span className="field-label">How</span>
-            <div className="seg" role="radiogroup" aria-label="How to file it">
-              <button
-                type="button"
-                role="radio"
-                aria-checked={useAi}
-                className={`btn small${useAi ? " primary" : ""}`}
-                onClick={() => setUseAi(true)}
-              >
-                <Sparkles size={11} /> Draft with AI
-              </button>
-              <button
-                type="button"
-                role="radio"
-                aria-checked={!useAi}
-                className={`btn small${!useAi ? " primary" : ""}`}
-                onClick={() => setUseAi(false)}
-              >
-                File it myself
-              </button>
-            </div>
-            <span className="faint small">
-              {useAi
-                ? `Files it in triage and starts ${action.label.toLowerCase()} from what you wrote.`
-                : "Files it in triage exactly as written."}
-            </span>
-          </div>
+          <span className="faint small">
+            Files a placeholder in triage and starts {action.label.toLowerCase()}.
+            The agent writes the ticket.
+          </span>
 
           {error && (
             <div className="small" role="alert" style={{ color: "var(--nook-err)" }}>
@@ -226,9 +198,9 @@ export function NewTicketModal({
           <button
             className="btn small primary"
             onClick={() => void submit()}
-            disabled={!idea.trim() || busy}
+            disabled={!prompt.trim() || busy}
           >
-            {busy ? "Working…" : useAi ? "Draft it" : "File it"}
+            <Sparkles size={11} /> {busy ? "Starting…" : "Start drafting"}
           </button>
         </div>
       </div>

@@ -14,6 +14,7 @@ import {
   GitBranch,
   Layers,
   Pencil,
+  Sparkles,
   Play,
   Plus,
   Rocket,
@@ -1646,14 +1647,14 @@ export function BoardPage() {
               <button
                 className="btn small primary"
                 onClick={() => setNewTicketType("task")}
-                title="describe an idea and file it in triage"
+                title="hand an agent a prompt; it writes the ticket"
               >
-                <Plus size={11} /> New work
+                <Sparkles size={11} /> Draft with AI
               </button>
               <button
                 className="btn small"
                 onClick={() => setNewTicketType("epic")}
-                title="file an epic in triage"
+                title="hand an agent a prompt; it decomposes the epic"
               >
                 <Layers size={11} /> New epic
               </button>
@@ -1750,14 +1751,13 @@ export function BoardPage() {
           boardId={board.id}
           initialType={newTicketType}
           onClose={() => setNewTicketType(null)}
-          onCreated={({ taskId, drafting }) => {
+          onCreated={({ taskId }) => {
             setNewTicketType(null);
             bust();
-            // A draft that is running has somewhere better to be than a card:
-            // the loop page is where its questions arrive and where the person
-            // answers them. Filing manually just opens the ticket.
-            if (drafting) navigate(`/loop/${taskId}`);
-            else setOpenTask(taskId);
+            // Straight to the loop: that is where the agent's questions arrive
+            // and where the person answers them. The card is a placeholder the
+            // run is about to rewrite, so it is not the useful place to land.
+            navigate(`/loop/${taskId}`);
           }}
         />
       )}

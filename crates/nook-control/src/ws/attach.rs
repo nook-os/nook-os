@@ -14,6 +14,11 @@ use crate::auth::AuthCtx;
 use crate::error::ApiError;
 use crate::state::AppState;
 
+/// Keepalive cadence, the same twenty seconds the node socket has always used.
+/// See `ws::ui` for why a socket that sends nothing does not survive the path
+/// between a browser and this process.
+const PING_INTERVAL: std::time::Duration = std::time::Duration::from_secs(20);
+
 pub async fn attach_ws(
     State(state): State<AppState>,
     auth: AuthCtx,
@@ -71,8 +76,21 @@ async fn handle(state: AppState, socket: WebSocket, session: Session) {
         }
     }
 
+    // Same keepalive as the UI socket and for the same reason (MAIN-365): an
+    // idle terminal sends nothing for as long as nobody types, and a silent
+    // socket is what an intermediary reaps. Here the symptom is worse than a
+    // refetch — the pane goes dead until the browser notices and re-attaches,
+    // which reads as "the terminal froze".
+    let mut ping = tokio::time::interval(PING_INTERVAL);
+    ping.tick().await;
+
     loop {
         tokio::select! {
+            _ = ping.tick() => {
+                if sink.send(Message::Ping(Vec::new().into())).await.is_err() {
+                    break;
+                }
+            }
             out = rx.recv() => {
                 match out {
                     Ok(msg) => {
