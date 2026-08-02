@@ -284,6 +284,19 @@ code,
   white-space: nowrap;
   font-size: 12px;
   z-index: 50;
+  /* The bubble sits over the neighbouring button (and, on the bottom-bar
+     layout, over the NEXT destination) — it must never be the thing a click
+     lands on. A pseudo-element takes pointer events for its owner, so a tap
+     that visually hit "Board" was re-routed to the button you last touched. */
+  pointer-events: none;
+}
+/* No pointer, no hover: on touch, :hover is a sticky artifact of the last tap,
+   so the tooltip appears late, points at nothing, and covers the icon beside
+   it. Touch help is the long-press label the OS provides, not this. */
+@media (hover: none) {
+  .nook-rail-btn[data-tip]:hover::after {
+    display: none;
+  }
 }
 
 /* ── Pill tabs (topbar) ─────────────────────────────────────────────────── */
@@ -5915,6 +5928,60 @@ tr:hover .row-action,
   .nook-main {
     min-width: 0;
     overflow-x: hidden;
+  }
+
+  /* ── The git panel becomes a drawer ─────────────────────────────────────
+     The session grid asks for `1fr 440px` inline, which on a phone puts a
+     440px column on a 390px screen — the git panel and the terminal share
+     the width and neither survives. `!important` because that column split
+     is an inline style, and this is the one screen where it must lose.
+     The panel itself leaves the grid entirely: a fixed drawer over the
+     terminal, scrim behind it, slid in from the edge it docks to on
+     desktop. The terminal keeps every pixel it had, and nothing about the
+     panel's own innards changes — same commit bar, same tabs, same diff. */
+  .session-grid {
+    grid-template-columns: minmax(0, 1fr) !important;
+  }
+  .git-drawer-scrim {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 79;
+    background: rgba(0, 0, 0, 0.55);
+  }
+  .session-grid > .git-panel {
+    position: fixed;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    width: min(440px, 92vw);
+    /* The visible viewport, for the same reason .nook-app uses it: 100vh
+       counts the collapsing URL bar and would sink the commit bar under
+       the browser chrome. */
+    height: 100dvh;
+    z-index: 80;
+    border-left: 1px solid var(--nook-border-bright);
+    box-shadow: -12px 0 32px rgba(0, 0, 0, 0.5);
+    animation: git-drawer-in 0.16s ease-out;
+  }
+  .git-drawer-close {
+    display: inline-flex;
+  }
+}
+
+@keyframes git-drawer-in {
+  from {
+    transform: translateX(100%);
+  }
+}
+
+/* Desktop: the drawer chrome does not exist. The scrim would sit over the
+   whole app eating clicks, and the close button duplicates the header
+   toggle that is visible right beside the panel. */
+@media (min-width: 641px) {
+  .git-drawer-scrim,
+  .git-drawer-close {
+    display: none;
   }
 }
 
