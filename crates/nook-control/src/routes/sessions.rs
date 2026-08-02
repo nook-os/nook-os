@@ -24,6 +24,25 @@ async fn session_for_content(
 ) -> ApiResult<Session> {
     let session: Option<Session> = state.sessions.by_id_unscoped(id).await?;
     let session = session.ok_or(ApiError::NotFound)?;
+    // A machine speaks for the sessions running ON IT, whatever tenant they
+    // belong to (MAIN-367). Cross-tenant placement (MAIN-353) means a session on
+    // a node homed in tenant A routinely belongs to tenant B, and
+    // `require_session_access` refuses a node principal outright once the
+    // tenants differ — so a node asking about its OWN session was refused. That
+    // is the same scope-by-the-node's-tenant mistake MAIN-363 fixed for
+    // node-reported session updates.
+    //
+    // This grants a machine nothing it did not already have: it runs the PTY,
+    // so those bytes are already its own. The confinement that matters is
+    // unchanged and is the `== session.node_id` — a node still cannot reach a
+    // session on any other machine, which is the lateral-movement boundary
+    // `require_session_access` was protecting.
+    //
+    // The operator-cannot-read-your-terminal promise is untouched: a deployment
+    // operator is a `Principal::User` and never takes this branch.
+    if matches!(auth.principal, crate::auth::Principal::Node(n) if n == session.node_id) {
+        return Ok(session);
+    }
     auth.require_session_access(state, session.tenant_id)
         .await?;
     Ok(session)
@@ -64,6 +83,9 @@ pub async fn git_key(
 ) -> ApiResult<axum::response::Response> {
     use axum::response::IntoResponse;
 
+    // The one guard, like every other session handler — the node's own-machine
+    // case is handled inside it rather than around it, so this route cannot
+    // drift from the isolation boundary `session_isolation.rs` asserts.
     let session = session_for_content(&state, &auth, id).await?;
     // Running git here is running a program on that machine; hold this to the
     // same bar as starting the session in the first place.
