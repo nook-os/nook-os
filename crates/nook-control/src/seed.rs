@@ -130,8 +130,12 @@ impl Palette {
                 "selection": self.selection,
                 "terminal-bg": self.terminal_bg, "terminal-cursor": self.accent
             },
-            "radius": self.radius,
-            "effects": { "glow-strong": self.glow, "scanlines": "off" }
+            // `spacing.radius` and `effects.glow`, not top-level keys: the
+            // theme engine maps sections (`VAR_MAP` in theme.tsx), so a
+            // top-level "radius" set NOTHING and every palette theme silently
+            // inherited the previous theme's radius and glow.
+            "spacing": { "radius": self.radius },
+            "effects": { "glow": self.glow, "glow-strong": self.glow, "scanlines": "off" }
         })
     }
 }
@@ -240,6 +244,35 @@ fn phosphor_green_tokens() -> serde_json::Value {
     .tokens()
 }
 
+/// Red Alert — klaxon reds on near-black. Shields up: the console for an
+/// incident bridge, or for anyone who wants the fleet to FEEL on fire.
+fn red_alert_tokens() -> serde_json::Value {
+    Palette {
+        bg: "#0a0303",
+        bg_panel: "#140606",
+        bg_raised: "#1f0909",
+        border: "#3a0f0f",
+        border_bright: "#611515",
+        fg: "#ff8a7a",
+        fg_bright: "#ffd7cf",
+        fg_dim: "#b0554a",
+        fg_faint: "#5f2721",
+        accent: "#ff2d2d",
+        accent_dim: "#c41e1e",
+        // `ok` stays green ON PURPOSE: on an all-red bridge, "healthy" must
+        // still be unmistakable at a glance.
+        ok: "#4be36e",
+        warn: "#ffb000",
+        err: "#ff1744",
+        info: "#5fd7ff",
+        selection: "#3a1210",
+        terminal_bg: "#080202",
+        radius: "3px",
+        glow: "0 0 12px rgba(255, 45, 45, 0.45)",
+    }
+    .tokens()
+}
+
 /// Paper-light for bright rooms.
 fn daylight_tokens() -> serde_json::Value {
     Palette {
@@ -307,6 +340,7 @@ pub async fn run(db: &DbPool, cfg: &Config) -> Result<()> {
         ("Deep Teal", "deep-teal", deep_teal_tokens()),
         ("Synth Magenta", "synth-magenta", synth_magenta_tokens()),
         ("Phosphor Green", "phosphor-green", phosphor_green_tokens()),
+        ("Red Alert", "red-alert", red_alert_tokens()),
         ("Daylight", "daylight", daylight_tokens()),
     ] {
         db.exec(

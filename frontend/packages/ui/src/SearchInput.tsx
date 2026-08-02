@@ -6,7 +6,7 @@
 // other operator tables and Settings next.
 
 import React, { useMemo, useState } from "react";
-import { Search } from "lucide-react";
+import { Search, X } from "lucide-react";
 import { debounce } from "./debounce";
 
 export function SearchInput({
@@ -51,6 +51,23 @@ export function SearchInput({
           emit(e.target.value);
         }}
       />
+      {/* Our own clear control — the native WebKit one is Chrome-blue and is
+          suppressed in CSS. Clearing emits immediately: an empty box that
+          still shows filtered rows reads as broken. */}
+      {value && (
+        <button
+          type="button"
+          className="search-input-clear"
+          title="clear"
+          aria-label="clear search"
+          onClick={() => {
+            setValue("");
+            onSearch("");
+          }}
+        >
+          <X size={12} />
+        </button>
+      )}
     </span>
   );
 }

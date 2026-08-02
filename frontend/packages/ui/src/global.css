@@ -821,8 +821,14 @@ code,
   color: var(--nook-fg-bright);
   text-shadow: var(--nook-glow);
 }
+/* A flex row, not block flow: mixed-height children (a search field beside a
+   button) baseline-drift several pixels apart otherwise. Centering here fixes
+   every panel title bar at once — no per-panel wrapper spans. */
 .nook-panel-actions {
   flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
 }
 
 .nook-panel-heading::before {
@@ -1419,8 +1425,10 @@ table.nook-table tr.clickable { cursor: pointer; }
   color: var(--nook-fg);
   background: var(--nook-bg);
   border: 1px solid var(--nook-border);
-  border-radius: 3px;
-  padding: 2px 7px;
+  border-radius: var(--nook-radius);
+  /* Control grid, like every input it shares a toolbar with. */
+  height: var(--nook-ctrl-sm);
+  padding: 0 7px;
   width: 190px;
 }
 .board-search:focus {
@@ -1436,11 +1444,15 @@ table.nook-table tr.clickable { cursor: pointer; }
 }
 
 .task-chip {
+  /* Pill height (`--nook-pill-h`), like every other chip in a mixed row. */
+  display: inline-flex;
+  align-items: center;
+  height: var(--nook-pill-h);
   border: 1px solid var(--nook-border-bright);
   background: transparent;
   color: var(--nook-fg-dim);
-  border-radius: 2px;
-  padding: 1px 5px;
+  border-radius: var(--nook-radius);
+  padding: 0 5px;
   font-size: 10.5px;
   cursor: pointer;
   font-family: inherit;
@@ -1549,13 +1561,15 @@ table.nook-table tr.clickable { cursor: pointer; }
 .filters-label-search { width: 100%; }
 
 .task-select {
+  /* Control grid, same reason as .sel-trigger. */
+  height: var(--nook-ctrl-sm);
   background: var(--nook-bg);
   color: var(--nook-fg);
   border: 1px solid var(--nook-border-bright);
-  border-radius: 2px;
+  border-radius: var(--nook-radius);
   font-size: 10.5px;
   font-family: inherit;
-  padding: 1px 3px;
+  padding: 0 3px;
 }
 
 /* ── Task detail panel ──────────────────────────────────────────────────── */
@@ -3469,13 +3483,15 @@ textarea.env-area.blurred {
   align-items: center;
   gap: 5px;
   width: 100%;
+  /* Control grid: mixed rows (a select beside pills or buttons) line up. */
+  height: var(--nook-ctrl-sm);
   background: var(--nook-bg);
   border: 1px solid var(--nook-border-bright);
-  border-radius: 3px;
+  border-radius: var(--nook-radius);
   color: var(--nook-fg);
   font-family: inherit;
   font-size: 11.5px;
-  padding: 3px 6px;
+  padding: 0 6px;
   cursor: pointer;
   text-align: left;
 }
@@ -4078,13 +4094,17 @@ a.toast-main:hover .toast-title { text-decoration: underline; }
 .data-list-sort:hover { color: var(--nook-accent); }
 th[aria-sort] .data-list-sort { color: var(--nook-accent); }
 
+/* On the control grid (`--nook-ctrl-sm`), like every neighbour it sits
+   beside: a content-driven height here is why a search box and a button in
+   one title bar used to disagree by a few pixels. */
 .search-input {
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  padding: 2px 7px;
+  height: var(--nook-ctrl-sm);
+  padding: 0 7px;
   border: 1px solid var(--nook-border);
-  border-radius: 3px;
+  border-radius: var(--nook-radius);
   background: var(--nook-bg);
 }
 .search-input:focus-within { border-color: var(--nook-accent); }
@@ -4099,6 +4119,22 @@ th[aria-sort] .data-list-sort { color: var(--nook-accent); }
   width: 180px;
 }
 .search-input-field::placeholder { color: var(--nook-fg-faint); }
+/* Kill the native WebKit cancel button (Chrome renders it blue, wildly off
+   theme); SearchInput renders its own themed clear instead. */
+input[type="search"]::-webkit-search-cancel-button {
+  -webkit-appearance: none;
+  appearance: none;
+}
+.search-input-clear {
+  display: inline-flex;
+  align-items: center;
+  background: none;
+  border: none;
+  padding: 0;
+  color: var(--nook-fg-faint);
+  cursor: pointer;
+}
+.search-input-clear:hover { color: var(--nook-accent); }
 
 .op-policy { display: flex; flex-direction: column; gap: 7px; padding: 10px 12px; }
 .op-policy-row { display: flex; gap: 9px; align-items: center; }
@@ -4892,6 +4928,19 @@ th[aria-sort] .data-list-sort { color: var(--nook-accent); }
   font: inherit;
 }
 .type-select-trigger:hover { border-color: var(--nook-border-bright); }
+/* Inside the card's Details grid the visibility picker sits in a COLUMN of
+   selects — it matches them (full width, control-grid height, left-aligned),
+   not the standalone type picker's comfortable square. */
+.side-grid .type-select-trigger {
+  width: 100%;
+  min-height: 0;
+  height: var(--nook-ctrl-sm);
+  padding: 0 6px;
+  justify-content: flex-start;
+  font-size: 11.5px;
+}
+.side-grid .type-select-trigger .type-select-caret { margin-left: auto; }
+.side-grid .task-vis-field { width: 100%; }
 /* The trigger box itself inherits the picked type's colour (icon + a subtle
    toned border) — no nested pill. */
 .type-select-trigger.err { color: var(--nook-err); border-color: color-mix(in srgb, var(--nook-err) 35%, transparent); }
