@@ -12,6 +12,7 @@ import {
 } from "@dnd-kit/core";
 import {
   GitBranch,
+  Layers,
   Pencil,
   Play,
   Plus,
@@ -27,6 +28,7 @@ import {
 import { api, type TaskItem, type LoopJob } from "@nookos/api";
 import { AutomationDialog } from "./BoardAutomation";
 import { BoardBacklog } from "./BoardBacklog";
+import { NewTicketModal } from "../NewTicketModal";
 import { summarizeBulk, useBacklogSelection } from "./backlogSelection";
 import {
   Empty,
@@ -1093,6 +1095,9 @@ export function BoardPage() {
   // the query string also makes Back close the modal, which is what every
   // browser user already expects.
   const [params, setParams] = useSearchParams();
+  // `null` = closed; a string preselects the type, so one modal serves both the
+  // generic entry point and "New epic".
+  const [newTicketType, setNewTicketType] = useState<string | null>(null);
   const openTask = params.get("task");
   const setOpenTask = (key: string | null) => {
     setParams(
@@ -1634,6 +1639,25 @@ export function BoardPage() {
                 <span className="board-tab-count">{backlogTasks.length}</span>
               )}
             </button>
+            {/* The board-level entry point (MAIN-364). The per-column composer
+                stays for jotting a title where it belongs; this is the one that
+                takes an idea to a drafted ticket without opening one first. */}
+            <span className="board-tabs-actions">
+              <button
+                className="btn small primary"
+                onClick={() => setNewTicketType("task")}
+                title="describe an idea and file it in triage"
+              >
+                <Plus size={11} /> New work
+              </button>
+              <button
+                className="btn small"
+                onClick={() => setNewTicketType("epic")}
+                title="file an epic in triage"
+              >
+                <Layers size={11} /> New epic
+              </button>
+            </span>
           </div>
           <Filters
             labels={labels ?? []}
@@ -1719,6 +1743,22 @@ export function BoardPage() {
           automation={detail.board.automation}
           onClose={() => setShowAutomation(false)}
           onSaved={bust}
+        />
+      )}
+      {newTicketType && (
+        <NewTicketModal
+          boardId={board.id}
+          initialType={newTicketType}
+          onClose={() => setNewTicketType(null)}
+          onCreated={({ taskId, drafting }) => {
+            setNewTicketType(null);
+            bust();
+            // A draft that is running has somewhere better to be than a card:
+            // the loop page is where its questions arrive and where the person
+            // answers them. Filing manually just opens the ticket.
+            if (drafting) navigate(`/loop/${taskId}`);
+            else setOpenTask(taskId);
+          }}
         />
       )}
 
