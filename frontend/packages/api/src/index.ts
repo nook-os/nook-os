@@ -155,9 +155,21 @@ function pathOf(url: string): string {
   }
 }
 
+/** A POST that is really a read, and must not be reported as a failed write.
+ *
+ * Some endpoints take an action in the body (`{action:"list"}`) so one route
+ * serves a family of tmux operations. A LIST through that route is a read
+ * wearing a write's method, and treating it as a write was loud: a polled list
+ * against a session with no terminal raised a toast every five seconds, per
+ * open tab, for a condition the poller already handles. Marked at the call
+ * site rather than sniffed from the body, because only the caller knows
+ * whether it meant to change anything. */
+export const READ_ONLY_POST = { "x-nook-read": "1" } as const;
+
 api.use({
   async onResponse({ request, response }) {
     if (response.ok || !isWrite(request.method)) return;
+    if (request.headers.get("x-nook-read")) return;
     let message = `${response.status} ${response.statusText}`.trim();
     try {
       const text = await response.clone().text();
@@ -180,7 +192,7 @@ api.use({
     // The case that matters most, and the one a status check would miss: the
     // request never left. That is what a WebKit webview does when handed a
     // body it cannot upload, and it is what being offline looks like.
-    if (!isWrite(request.method)) return;
+    if (!isWrite(request.method) || request.headers.get("x-nook-read")) return;
     reportWriteFailure({
       method: request.method,
       path: pathOf(request.url),
