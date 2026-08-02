@@ -310,14 +310,14 @@ pub trait WorkspaceRepository: Send + Sync {
         workspace: WorkspaceId,
     ) -> ApiResult<Vec<(NodeId, NodeWorkspaceId)>>;
 
-    /// Which tenant already owns the checkout at `path` on `node`, if any —
-    /// deliberately NOT scoped to a tenant, because the whole question is
-    /// whether this path belongs to somebody else (MAIN-363).
-    async fn checkout_tenant_at_path(
+    /// Who already owns the checkout at `path` on `node` — tenant AND
+    /// workspace. Deliberately NOT scoped to a tenant, because the whole
+    /// question is whether this path belongs to somebody else (MAIN-363).
+    async fn checkout_owner_at_path(
         &self,
         node: NodeId,
         path: &str,
-    ) -> ApiResult<Option<TenantId>>;
+    ) -> ApiResult<Option<(TenantId, WorkspaceId)>>;
 
     /// Whether this node already knows a checkout at `path`. The scan uses it
     /// to tell a brand-new checkout (which wants the workspace's `.env`
@@ -1050,15 +1050,16 @@ impl WorkspaceRepository for DbWorkspaceRepository {
             .await?)
     }
 
-    async fn checkout_tenant_at_path(
+    async fn checkout_owner_at_path(
         &self,
         node: NodeId,
         path: &str,
-    ) -> ApiResult<Option<TenantId>> {
+    ) -> ApiResult<Option<(TenantId, WorkspaceId)>> {
         Ok(self
             .db
-            .query_scalar_opt(
-                "SELECT tenant_id FROM node_workspaces WHERE node_id = $1 AND path = $2",
+            .query_opt(
+                "SELECT tenant_id, workspace_id FROM node_workspaces \
+                 WHERE node_id = $1 AND path = $2",
                 params![node, path],
             )
             .await?)
@@ -2267,11 +2268,11 @@ impl WorkspaceRepository for FakeWorkspaceRepository {
         Ok(rows.into_iter().map(|c| (c.node_id, c.id)).collect())
     }
 
-    async fn checkout_tenant_at_path(
+    async fn checkout_owner_at_path(
         &self,
         node: NodeId,
         path: &str,
-    ) -> ApiResult<Option<TenantId>> {
+    ) -> ApiResult<Option<(TenantId, WorkspaceId)>> {
         Ok(self
             .inner
             .lock()
@@ -2279,7 +2280,7 @@ impl WorkspaceRepository for FakeWorkspaceRepository {
             .checkouts
             .iter()
             .find(|c| c.node_id == node && c.path == path)
-            .map(|c| c.tenant))
+            .map(|c| (c.tenant, c.workspace_id)))
     }
 
     async fn checkout_id_at_path(

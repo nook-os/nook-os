@@ -51,27 +51,47 @@ pub async fn reconcile(
     for d in &discovered {
         reported_paths.push(d.path.clone());
 
+        let normalized = d.git_remote_url.as_deref().map(normalize_remote);
+
         // A path this node already holds for ANOTHER tenant is that tenant's
         // checkout, and re-reporting it here must not mint a second workspace
         // (MAIN-363). Cross-tenant placement means the reconciler of tenant B
-        // can clone onto a node homed in tenant A; every lookup below is scoped
-        // to A, so all of them miss and the fallback creates a duplicate
-        // workspace in A — which then gets its own default spec, its own
-        // desired replicas, and clones the same repo across the fleet again.
-        // Seen in prod: two workspaces duplicated within four minutes of the
-        // switch going on, each amplifying the clone storm that produced it.
-        // The owning tenant already keeps this row correct via `associate_clone`.
-        if let Some(owner) = state
+        // can clone onto a node homed in tenant A; every identity lookup below
+        // is scoped to A, so all of them miss and the fallback creates a
+        // duplicate workspace in A — which then gets its own default spec, its
+        // own desired replicas, and clones the same repo across the fleet
+        // again. Seen in prod: two workspaces duplicated within four minutes of
+        // the switch going on, each amplifying the clone storm.
+        //
+        // What is skipped is the workspace IDENTITY work, not the report. The
+        // first cut skipped the whole iteration, and that was worse than the
+        // bug it fixed: `upsert_checkout` is what clears `missing_at`, so a
+        // perfectly healthy cross-tenant checkout stayed flagged missing
+        // forever while the reconciler kept starting sessions against it. The
+        // row is refreshed under the tenant that OWNS it.
+        if let Some((owner_tenant, owner_workspace)) = state
             .workspaces
-            .checkout_tenant_at_path(node_id, &d.path)
+            .checkout_owner_at_path(node_id, &d.path)
             .await?
         {
-            if owner != tenant {
+            if owner_tenant != tenant {
+                state
+                    .workspaces
+                    .upsert_checkout(CheckoutUpsert {
+                        tenant: owner_tenant,
+                        node_id,
+                        workspace_id: owner_workspace,
+                        path: d.path.clone(),
+                        git_remote_url: d.git_remote_url.clone(),
+                        git_remote_normalized: normalized.clone(),
+                        branch: d.branch.clone(),
+                        git_status: serde_json::json!({ "dirty": d.dirty, "worktree": d.worktree }),
+                        kind: if d.worktree { "worktree" } else { "clone" }.to_string(),
+                    })
+                    .await?;
                 continue;
             }
         }
-
-        let normalized = d.git_remote_url.as_deref().map(normalize_remote);
 
         // Find the workspace this checkout belongs to.
         let workspace_id: Option<WorkspaceId> = match &normalized {

@@ -98,6 +98,41 @@ fn new_checkout_root(cfg: &NodeConfig, requested: Option<&str>) -> String {
     checkout_root(requested, cfg.tenant_slug.as_deref(), &cfg.server)
 }
 
+/// Make `root` a scan root, persisting it, unless it already is one.
+///
+/// The clone destination and the SCAN list have to agree, and MAIN-363's
+/// tenant-scoping broke that on any node enrolled before MAIN-347. Those nodes
+/// scan the flat `~/.nook/workspace`, and `discovery::scan` walks exactly two
+/// levels — enough for `<owner>/<repo>`, one short of
+/// `<tenant>/<owner>/<repo>`. So the clone landed somewhere discovery could not
+/// see: the checkout was reported missing while sitting on disk, and the
+/// reconciler kept starting sessions against a path it believed in.
+///
+/// Registering the tenant root instead of deepening the walk is the fix that
+/// matches MAIN-347's model — a root IS tenant-scoped, and `<owner>/<repo>`
+/// below it is exactly two levels again. Deepening the walk would also start
+/// finding vendored repos nested inside real checkouts.
+fn ensure_scan_root(cfg: &NodeConfig, root: &str) -> Vec<String> {
+    let mut roots = cfg.workspace_roots.clone();
+    let expanded = crate::config::expand_path(root);
+    if roots
+        .iter()
+        .any(|r| crate::config::expand_path(r) == expanded)
+    {
+        return roots;
+    }
+    roots.push(root.to_string());
+    let mut next = cfg.clone();
+    next.workspace_roots = roots.clone();
+    match next.save() {
+        Ok(()) => tracing::info!(%root, "registered a new workspace scan root"),
+        // In-memory still wins for this process, so the scan below is correct
+        // even when the write is not possible.
+        Err(e) => tracing::warn!(%root, error = %e, "could not persist the new scan root"),
+    }
+    roots
+}
+
 /// One connection lifetime: register, resync, pump until the socket closes.
 pub async fn connect_once(cfg: &NodeConfig) -> Result<()> {
     let mut request = ws_url(cfg.agent_endpoint())
@@ -429,7 +464,9 @@ pub async fn connect_once(cfg: &NodeConfig) -> Result<()> {
             } => {
                 let tx = out_tx.clone();
                 let root = new_checkout_root(cfg, tenant_slug.as_deref());
-                let roots = cfg.workspace_roots.clone();
+                // Registered BEFORE the clone, so the rescan that follows can
+                // actually see what we are about to write there.
+                let roots = ensure_scan_root(cfg, &root);
                 tokio::task::spawn_blocking(move || {
                     let outcome = crate::gitops::clone_repo(
                         &root,
