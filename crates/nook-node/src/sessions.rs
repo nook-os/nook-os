@@ -248,6 +248,11 @@ impl Manager {
         if self.sessions.contains_key(&session_id) {
             return Ok(()); // already attached
         }
+        // We are about to become this session's client, so anything else
+        // attached is a leftover from a previous connection — see
+        // `tmux::detach_clients`. Safe here precisely because we hold no handle
+        // for this session: every caller either removed it or checked above.
+        crate::tmux::detach_clients(tmux_name);
         let pty = native_pty_system();
         let pair = pty
             .openpty(PtySize {

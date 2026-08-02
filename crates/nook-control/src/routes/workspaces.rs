@@ -675,13 +675,23 @@ pub async fn delete(
         .ok_or(ApiError::NotFound)?;
 
     // Live sessions would be killed by the cascade with their tmux left
-    // orphaned on the node — make the caller deal with them first.
+    // orphaned on the node, so they have to be dealt with first — but only the
+    // ones a PERSON started. A managed session exists solely because this
+    // workspace declares it, and telling the caller to go kill those was an
+    // unwinnable instruction: the reconciler restarts them within a pass, so
+    // "kill them first" could never be satisfied and the workspace could not be
+    // deleted at all (MAIN-363). Deleting the declaration is the only way to
+    // stop them, so deletion is exactly what may.
+    let managed = state.sessions.live_managed(auth.tenant_id, id).await?;
     let live = state.workspaces.live_session_count(id).await?;
-    if live > 0 {
+    let unmanaged = live.saturating_sub(managed.len() as i64).max(0);
+    if unmanaged > 0 {
         return Err(ApiError::Conflict(format!(
-            "{live} live session(s) — kill them first"
+            "{unmanaged} live session(s) somebody started — kill them first"
         )));
     }
+
+    let mut stranded = 0usize;
 
     let checkouts: Vec<(NodeId, String)> = state
         .workspaces
@@ -722,6 +732,31 @@ pub async fn delete(
         }
     }
 
+    // Stop the managed sessions ourselves, kill-then-mark like the reconciler:
+    // end the row alone and the tmux session keeps running with nothing left
+    // that knows about it. A node that is offline cannot be told, and the
+    // workspace is going away regardless — so that is reported rather than
+    // treated as a reason to refuse, which would put us back in the deadlock.
+    //
+    // Immediately before the delete, NOT before the file removal above: that
+    // part waits on node ops, and a reconcile pass landing in the gap would
+    // start fresh managed sessions for a workspace we are about to cascade —
+    // which is the orphaned-tmux case this whole ordering exists to avoid.
+    for (session, _checkout, node) in &managed {
+        if !state.registry.send_to_node(
+            *node,
+            ControlToNode::KillSession {
+                session_id: *session,
+            },
+        ) {
+            stranded += 1;
+            continue;
+        }
+        if let Err(e) = state.sessions.mark_ended(auth.tenant_id, *session).await {
+            tracing::warn!(workspace = %id, session = %session, error = %e, "could not end a managed session while deleting its workspace");
+        }
+    }
+
     // Cascades node_workspaces, sessions, notes and secrets; tasks and events
     // keep their history with a null workspace.
     state.workspaces.delete(id, auth.tenant_id).await?;
@@ -740,7 +775,7 @@ pub async fn delete(
     .await;
 
     let remaining = total - removed;
-    let message = if remaining > 0 {
+    let mut message = if remaining > 0 {
         format!(
             "deleted '{}' — {remaining} checkout(s) still on disk and will be \
              rediscovered until removed",
@@ -749,6 +784,15 @@ pub async fn delete(
     } else {
         format!("deleted '{}'", workspace.name)
     };
+    if stranded > 0 {
+        // Said out loud: the row is gone, so nothing will retry this, and a
+        // tmux session nobody now tracks is exactly the thing an operator wants
+        // to hear about at the moment it happens.
+        message.push_str(&format!(
+            " — {stranded} managed session(s) could not be stopped (node offline); \
+             their tmux may still be running"
+        ));
+    }
     Ok(Json(DeleteWorkspaceResponse {
         deleted: true,
         checkouts_removed: removed,
