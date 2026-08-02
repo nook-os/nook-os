@@ -254,6 +254,12 @@ pub fn new_session(
     // the node as framework-agnostic as the broker. Empty when the node
     // advertises no range or the workspace declares no listeners.
     ports: &[nook_types::LeasedPort],
+    // Which workspace this checkout is (MAIN-367). Exported as
+    // `NOOK_WORKSPACE_ID` so the git-ssh shim can name the repo it is in
+    // without asking the control plane about the session first — which is what
+    // keeps a credential fetch off the session-content authorization path.
+    // `None` for an ad-hoc terminal, which is in no workspace.
+    workspace_id: Option<&str>,
 ) -> Result<()> {
     // Preflight, so the failure names its own cause. tmux's own message for a
     // missing -c directory is terse and arrives with no session attached, and
@@ -269,10 +275,13 @@ pub fn new_session(
         .iter()
         .map(|p| (p.env.clone(), p.port.to_string()))
         .collect();
-    let extra: Vec<(&str, &str)> = port_s
+    let mut extra: Vec<(&str, &str)> = port_s
         .iter()
         .map(|(env, port)| (env.as_str(), port.as_str()))
         .collect();
+    if let Some(ws) = workspace_id {
+        extra.push(("NOOK_WORKSPACE_ID", ws));
+    }
     spawn(
         name,
         cwd,

@@ -299,6 +299,60 @@ pub async fn get_port_requirements(
 /// The declaration is the workspace's, which is the whole point of MAIN-301's
 /// second cut: the control plane leases numbers and never learns what `PORT`
 /// means to anybody.
+/// `GET /api/v1/nodes/{node_id}/workspaces/{id}/git-key` — the workspace's ssh
+/// key, as material for ONE ssh invocation (MAIN-367).
+///
+/// The deliberate delivery channel, and the only one. It exists because git
+/// authenticates by forking `ssh`, so a shim on the machine has to be able to
+/// obtain a key; `nook get workspace git-ssh` is that shim and this is what it
+/// calls.
+///
+/// Keyed on NODE and WORKSPACE rather than on a session, which is the whole
+/// point of its shape. A git credential is workspace data, not session content:
+/// anchoring it to a session forced it through `session_for_content` and made a
+/// cross-tenant node widen that guard for all nine session routes — far more
+/// than fetching a key needs. Asked this way, the authorization question is the
+/// one that actually applies, `require_node_may_use`, and the session-content
+/// boundary is untouched.
+///
+/// A node acting on ITSELF is the case that matters: cross-tenant placement
+/// (MAIN-353) means a node homed in one tenant routinely runs another tenant's
+/// workspace, and `require_node_may_use` already answers "is this your own
+/// machine" without consulting tenants at all.
+///
+/// AC-7 holds: not in the browser-facing surface, and nothing here is logged or
+/// recorded. 204 when the workspace pins nothing, which is the ordinary case —
+/// the shim then execs plain ssh and the node's own key applies.
+#[utoipa::path(get, path = "/api/v1/nodes/{node_id}/workspaces/{id}/git-key",
+    operation_id = "workspace_git_key",
+    params(("node_id" = String, Path,), ("id" = String, Path,)),
+    responses((status = 200), (status = 204), (status = 404)))]
+pub async fn git_key(
+    State(state): State<AppState>,
+    auth: AuthCtx,
+    Path((node_id, id)): Path<(NodeId, WorkspaceId)>,
+) -> ApiResult<axum::response::Response> {
+    use axum::response::IntoResponse;
+
+    // Running git on that machine is running a program on it; hold this to the
+    // same bar as starting a session there.
+    auth.require_node_may_use(&state, node_id).await?;
+
+    // The workspace must actually be checked out ON that node. Without this a
+    // node could name any workspace id and be handed its key; with it, the node
+    // may only ask about repos it demonstrably holds.
+    let owner = state
+        .workspaces
+        .checkout_owner_at_node(node_id, id)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+
+    match crate::services::workspace_git_key(&state, owner, id).await {
+        Some(material) => Ok(material.into_response()),
+        None => Ok(axum::http::StatusCode::NO_CONTENT.into_response()),
+    }
+}
+
 /// `PUT /api/v1/workspaces/{id}/credential` — pin the ssh key this repo clones
 /// and fetches with, or unpin it with `null` (MAIN-367).
 ///

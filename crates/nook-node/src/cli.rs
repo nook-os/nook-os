@@ -3022,18 +3022,29 @@ pub async fn git_ssh(args: &[String]) -> Result<()> {
     std::process::exit(status.code().unwrap_or(1));
 }
 
-/// The workspace credential for the session we are running inside, or `None`.
+/// The workspace credential for the repo this session is in, or `None`.
+///
+/// Asked as NODE + WORKSPACE, not as a session (MAIN-367 review). A git
+/// credential is workspace data, not session content: routing it through a
+/// session forced the fetch onto the session-content authorization path, and a
+/// node running another tenant's workspace could only be let through there by
+/// widening that guard for every session route. Both ids are already to hand —
+/// the node knows itself from its config, and the session exports
+/// `NOOK_WORKSPACE_ID` — so this needs no lookup at all.
 ///
 /// Every failure is `None` rather than an error: this sits in front of every git
 /// command in a session, and a control plane that is briefly unreachable must
 /// degrade to "use the node's own key" rather than break `git status`.
 async fn fetch_session_git_key() -> Option<String> {
-    let sid = std::env::var("NOOK_SESSION_ID")
+    let workspace = std::env::var("NOOK_WORKSPACE_ID")
         .ok()
         .filter(|s| !s.is_empty())?;
+    let node = NodeConfig::load().ok()?.node_id;
     let client = Client::from_config().ok()?;
     let body = client
-        .get_text(&format!("/api/v1/sessions/{sid}/git-key"))
+        .get_text(&format!(
+            "/api/v1/nodes/{node}/workspaces/{workspace}/git-key"
+        ))
         .await
         .ok()?;
     let trimmed = body.trim();

@@ -2993,14 +2993,9 @@ export interface paths {
         };
         get?: never;
         /**
-         * `PUT /api/v1/workspaces/{id}/ports` — declare what this repo binds.
-         * @description The declaration is the workspace's, which is the whole point of MAIN-301's
-         *     second cut: the control plane leases numbers and never learns what `PORT`
-         *     means to anybody.
-         *     `PUT /api/v1/workspaces/{id}/credential` — pin the ssh key this repo clones
+         * `PUT /api/v1/workspaces/{id}/credential` — pin the ssh key this repo clones
          *     and fetches with, or unpin it with `null` (MAIN-367).
-         *
-         *     Returns the workspace, never the key: the private half leaves this process
+         * @description Returns the workspace, never the key: the private half leaves this process
          *     only as transient material delivered to a node for one git command, and an
          *     endpoint a browser can reach must never be a way to read it back (AC-7).
          */

@@ -6,7 +6,7 @@
 //! a future optimization). All enums are adjacently tagged for clean
 //! generated TypeScript.
 
-use nook_types::{AuthProfile, Capabilities, NodeId, SessionId};
+use nook_types::{AuthProfile, Capabilities, NodeId, SessionId, WorkspaceId};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
@@ -280,6 +280,12 @@ pub enum ControlToNode {
         session_id: SessionId,
         runtime: String,
         workspace_path: String,
+        /// Which workspace this checkout is, so the session can export it and
+        /// anything inside — the git-ssh shim in particular — can name the repo
+        /// it is in without asking the control plane about the session first
+        /// (MAIN-367). `None` for an ad-hoc terminal, which is in no workspace.
+        #[serde(default)]
+        workspace_id: Option<WorkspaceId>,
         cols: u16,
         rows: u16,
         /// The ports leased to this session (MAIN-301), each carrying the env

@@ -7072,8 +7072,8 @@
         "tags": [
           "crate::routes::workspaces"
         ],
-        "summary": "`PUT /api/v1/workspaces/{id}/ports` — declare what this repo binds.",
-        "description": "The declaration is the workspace's, which is the whole point of MAIN-301's\nsecond cut: the control plane leases numbers and never learns what `PORT`\nmeans to anybody.\n`PUT /api/v1/workspaces/{id}/credential` — pin the ssh key this repo clones\nand fetches with, or unpin it with `null` (MAIN-367).\n\nReturns the workspace, never the key: the private half leaves this process\nonly as transient material delivered to a node for one git command, and an\nendpoint a browser can reach must never be a way to read it back (AC-7).",
+        "summary": "`PUT /api/v1/workspaces/{id}/credential` — pin the ssh key this repo clones\nand fetches with, or unpin it with `null` (MAIN-367).",
+        "description": "Returns the workspace, never the key: the private half leaves this process\nonly as transient material delivered to a node for one git command, and an\nendpoint a browser can reach must never be a way to read it back (AC-7).",
         "operationId": "set_workspace_credential",
         "parameters": [
           {

@@ -318,6 +318,19 @@ pub trait WorkspaceRepository: Send + Sync {
         workspace: WorkspaceId,
     ) -> ApiResult<Vec<(NodeId, NodeWorkspaceId)>>;
 
+    /// Which tenant owns this workspace's checkout ON this node, if the node
+    /// holds one at all (MAIN-367).
+    ///
+    /// The proof a node may ask about a repo: it is answering "do you actually
+    /// have this checked out?", so a node cannot name an arbitrary workspace id
+    /// and be handed its key. Returns the CHECKOUT's tenant, which under
+    /// cross-tenant placement is the workspace's, not the node's.
+    async fn checkout_owner_at_node(
+        &self,
+        node: NodeId,
+        workspace: WorkspaceId,
+    ) -> ApiResult<Option<TenantId>>;
+
     /// Who already owns the checkout at `path` on `node` — tenant AND
     /// workspace. Deliberately NOT scoped to a tenant, because the whole
     /// question is whether this path belongs to somebody else (MAIN-363).
@@ -1085,6 +1098,21 @@ impl WorkspaceRepository for DbWorkspaceRepository {
                    AND kind = 'clone' AND missing_at IS NULL
                  ORDER BY discovered_at",
                 params![tenant, workspace],
+            )
+            .await?)
+    }
+
+    async fn checkout_owner_at_node(
+        &self,
+        node: NodeId,
+        workspace: WorkspaceId,
+    ) -> ApiResult<Option<TenantId>> {
+        Ok(self
+            .db
+            .query_scalar_opt(
+                "SELECT tenant_id FROM node_workspaces
+                 WHERE node_id = $1 AND workspace_id = $2 AND missing_at IS NULL",
+                params![node, workspace],
             )
             .await?)
     }
@@ -2339,6 +2367,21 @@ impl WorkspaceRepository for FakeWorkspaceRepository {
             .collect();
         rows.sort_by_key(|c| c.seq);
         Ok(rows.into_iter().map(|c| (c.node_id, c.id)).collect())
+    }
+
+    async fn checkout_owner_at_node(
+        &self,
+        node: NodeId,
+        workspace: WorkspaceId,
+    ) -> ApiResult<Option<TenantId>> {
+        Ok(self
+            .inner
+            .lock()
+            .unwrap()
+            .checkouts
+            .iter()
+            .find(|c| c.node_id == node && c.workspace_id == workspace)
+            .map(|c| c.tenant))
     }
 
     async fn checkout_owner_at_path(

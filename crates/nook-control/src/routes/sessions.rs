@@ -24,25 +24,6 @@ async fn session_for_content(
 ) -> ApiResult<Session> {
     let session: Option<Session> = state.sessions.by_id_unscoped(id).await?;
     let session = session.ok_or(ApiError::NotFound)?;
-    // A machine speaks for the sessions running ON IT, whatever tenant they
-    // belong to (MAIN-367). Cross-tenant placement (MAIN-353) means a session on
-    // a node homed in tenant A routinely belongs to tenant B, and
-    // `require_session_access` refuses a node principal outright once the
-    // tenants differ — so a node asking about its OWN session was refused. That
-    // is the same scope-by-the-node's-tenant mistake MAIN-363 fixed for
-    // node-reported session updates.
-    //
-    // This grants a machine nothing it did not already have: it runs the PTY,
-    // so those bytes are already its own. The confinement that matters is
-    // unchanged and is the `== session.node_id` — a node still cannot reach a
-    // session on any other machine, which is the lateral-movement boundary
-    // `require_session_access` was protecting.
-    //
-    // The operator-cannot-read-your-terminal promise is untouched: a deployment
-    // operator is a `Principal::User` and never takes this branch.
-    if matches!(auth.principal, crate::auth::Principal::Node(n) if n == session.node_id) {
-        return Ok(session);
-    }
     auth.require_session_access(state, session.tenant_id)
         .await?;
     Ok(session)
@@ -53,53 +34,6 @@ use crate::error::{ApiError, ApiResult};
 use crate::events::{self, EventDraft};
 use crate::services::session_queries;
 use crate::state::AppState;
-
-/// `GET /api/v1/sessions/{id}/git-key` — the workspace credential for the repo
-/// this session runs in, as material for ONE ssh invocation (MAIN-367).
-///
-/// The deliberate delivery channel, and the only one. It exists because git
-/// authenticates by forking `ssh`, so a shim inside the session has to be able
-/// to obtain a key; `nook get workspace git-ssh` is that shim and this is what
-/// it calls. AC-7's rule — no key in a log, an event, or a browser-facing
-/// response — still holds: this is not in the browser surface, it is anchored
-/// to a live session rather than to a workspace, and nothing here is recorded.
-///
-/// Gated exactly like attaching a terminal to the session, which already
-/// carries every keystroke and every byte of output on that machine: the same
-/// `session_for_content` check, plus `require_node_may_use`. Somebody who can
-/// open that terminal can already run `git` in it, so this grants no reach they
-/// did not have — it only removes the need to store the key on the node.
-///
-/// 204 with no body when the workspace pins nothing, which is the ordinary
-/// case: the shim then execs plain ssh and the node's own key applies.
-#[utoipa::path(get, path = "/api/v1/sessions/{id}/git-key",
-    operation_id = "session_git_key",
-    params(("id" = String, Path,)),
-    responses((status = 200), (status = 204), (status = 404)))]
-pub async fn git_key(
-    State(state): State<AppState>,
-    auth: AuthCtx,
-    Path(id): Path<SessionId>,
-) -> ApiResult<axum::response::Response> {
-    use axum::response::IntoResponse;
-
-    // The one guard, like every other session handler — the node's own-machine
-    // case is handled inside it rather than around it, so this route cannot
-    // drift from the isolation boundary `session_isolation.rs` asserts.
-    let session = session_for_content(&state, &auth, id).await?;
-    // Running git here is running a program on that machine; hold this to the
-    // same bar as starting the session in the first place.
-    auth.require_node_may_use(&state, session.node_id).await?;
-
-    // An ad-hoc terminal has no workspace, so there is no repo to have a key for.
-    let Some(workspace_id) = session.workspace_id else {
-        return Ok(axum::http::StatusCode::NO_CONTENT.into_response());
-    };
-    match crate::services::workspace_git_key(&state, session.tenant_id, workspace_id).await {
-        Some(material) => Ok(material.into_response()),
-        None => Ok(axum::http::StatusCode::NO_CONTENT.into_response()),
-    }
-}
 
 #[derive(Deserialize, utoipa::IntoParams)]
 pub struct SessionsQuery {
@@ -516,6 +450,7 @@ pub async fn restart(
             session_id: id,
             runtime: session.runtime.clone(),
             workspace_path,
+            workspace_id: session.workspace_id,
             cols: 120,
             rows: 32,
             // The SAME ports it already holds (MAIN-301). A restart is the
