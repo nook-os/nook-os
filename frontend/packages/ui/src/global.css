@@ -5362,6 +5362,48 @@ tr:hover .row-action,
 .m-node-name { color: var(--nook-fg); }
 .m-node-name.muted { color: var(--nook-fg-dim); }
 
+/* ── Node cards: the machines list on the same card system ────────────────
+   A node card is an `.m-repo` — same border, head, body — so the Nodes page
+   and Mission read as one family. These rules only add what a machine needs
+   that a repo does not: a label/value fact grid and an action row. */
+.node-card-facts {
+  display: grid;
+  grid-template-columns: 76px 1fr;
+  gap: 3px 10px;
+  align-items: baseline;
+  padding: 6px 2px 2px;
+  font-size: 12px;
+}
+.node-card-facts .k {
+  color: var(--nook-fg-faint);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.node-card-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 4px;
+  padding-top: 4px;
+  margin-top: 4px;
+  border-top: 1px solid var(--nook-border);
+}
+/* Row actions rest faint and rely on `tr:hover` to raise them — a card is not
+   a row, so the card's hover does the same job. */
+.node-card:hover .row-action {
+  color: var(--nook-fg-dim);
+  border-color: var(--nook-border);
+}
+/* The node detail's standing identity strip, under the intro panel title. */
+.node-id-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 8px 10px;
+}
+.node-id-head > svg { color: var(--nook-fg-dim); }
+
 .m-co { margin: 1px 0 3px; }
 .m-co-row {
   display: flex;
