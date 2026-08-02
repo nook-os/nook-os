@@ -275,13 +275,10 @@ pub fn new_session(
         .iter()
         .map(|p| (p.env.clone(), p.port.to_string()))
         .collect();
-    let mut extra: Vec<(&str, &str)> = port_s
+    let extra: Vec<(&str, &str)> = port_s
         .iter()
         .map(|(env, port)| (env.as_str(), port.as_str()))
         .collect();
-    if let Some(ws) = workspace_id {
-        extra.push(("NOOK_WORKSPACE_ID", ws));
-    }
     spawn(
         name,
         cwd,
@@ -289,6 +286,7 @@ pub fn new_session(
         rows,
         &login_command(command),
         session_id,
+        workspace_id,
         &extra,
     )
 }
@@ -316,7 +314,7 @@ pub fn new_auth_session(
     // `exec` binds the pane to the login command, so quitting it ends the
     // session — which is the "authorization done, clean up" signal (AC-4).
     let launch = format!("{} -l -i -c 'exec {runtime} {login_args}'", login_shell());
-    spawn(name, cwd, cols, rows, &launch, session_id, &[])
+    spawn(name, cwd, cols, rows, &launch, session_id, None, &[])
 }
 
 /// Start a loop-job session (MAIN-161): the same PTY machinery as
@@ -334,6 +332,7 @@ pub fn new_job_session(
     job_id: &str,
     status_file: &str,
     seed: Option<&str>,
+    workspace_id: Option<&str>,
 ) -> Result<()> {
     if !std::path::Path::new(cwd).is_dir() {
         anyhow::bail!("checkout {cwd} does not exist on this node");
@@ -355,6 +354,7 @@ pub fn new_job_session(
         rows,
         &job_launch_command(runtime, status_file),
         session_id,
+        workspace_id,
         &env,
     )
 }
@@ -391,6 +391,12 @@ fn spawn(
     rows: u16,
     launch: &str,
     session_id: &str,
+    // Which workspace this session's checkout is (MAIN-367). Set HERE, beside
+    // `GIT_SSH_COMMAND`, because the two are one mechanism: the shim is useless
+    // without the id. Setting it in `new_session` instead let the three session
+    // constructors diverge, and a loop-job session — the workload the whole
+    // credential path exists for — silently got the command and not the id.
+    workspace_id: Option<&str>,
     extra_env: &[(&str, &str)],
 ) -> Result<()> {
     apply_server_defaults();
@@ -427,6 +433,12 @@ fn spawn(
         "-e",
         "GIT_SSH_COMMAND=nook get workspace git-ssh",
     ];
+    let ws_pair;
+    if let Some(ws) = workspace_id {
+        ws_pair = format!("NOOK_WORKSPACE_ID={ws}");
+        args.push("-e");
+        args.push(&ws_pair);
+    }
     // Owned strings for any extra env, kept alive alongside `args`.
     let extra: Vec<String> = extra_env.iter().map(|(k, v)| format!("{k}={v}")).collect();
     for pair in &extra {
@@ -677,6 +689,78 @@ mod tests {
         assert!(
             !stock.contains(WHEEL_MARKER),
             "must NOT match tmux's default, or an unconfigured server looks configured"
+        );
+    }
+}
+
+#[cfg(test)]
+mod session_env_tests {
+    //! `GIT_SSH_COMMAND` and `NOOK_WORKSPACE_ID` are one mechanism, and the
+    //! source is the only place that can say so.
+    //!
+    //! The shim is inert without the id, so a session that gets the command and
+    //! not the id fails in the least visible way there is: git silently uses the
+    //! wrong key. That is exactly what happened when the id was set in
+    //! `new_session` while `new_job_session` built its own environment — loop
+    //! jobs, the workload the credential path exists for, were the ones missing
+    //! it. Asserting on `spawn` being the single site is what stops a fourth
+    //! session constructor reintroducing it.
+    use std::fs;
+
+    /// The module's own source, MINUS the tests — this file is the file being
+    /// scanned, so the assertions below would otherwise count themselves.
+    fn source() -> String {
+        let whole = fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/tmux.rs"))
+            .expect("tmux.rs must be readable");
+        match whole.find("\n#[cfg(test)]") {
+            Some(i) => whole[..i].to_string(),
+            None => whole,
+        }
+    }
+
+    #[test]
+    fn the_shim_and_its_workspace_id_are_set_in_the_same_place() {
+        let src = source();
+        // Both exported exactly once, and only from `spawn`.
+        assert_eq!(
+            src.matches("GIT_SSH_COMMAND=nook get workspace git-ssh")
+                .count(),
+            1,
+            "GIT_SSH_COMMAND is exported from more than one place"
+        );
+        assert_eq!(
+            src.matches("NOOK_WORKSPACE_ID=").count(),
+            1,
+            "NOOK_WORKSPACE_ID is exported from more than one place — it must \
+             live beside GIT_SSH_COMMAND in `spawn`, or a session constructor \
+             will get one without the other"
+        );
+
+        // …and that place is `spawn`, which every constructor goes through.
+        let spawn_body = src.split("\nfn spawn(").nth(1).expect("spawn must exist");
+        assert!(
+            spawn_body.contains("GIT_SSH_COMMAND=nook get workspace git-ssh")
+                && spawn_body.contains("NOOK_WORKSPACE_ID="),
+            "both must be set inside `spawn`; setting either in a caller is how \
+             new_session and new_job_session diverged"
+        );
+    }
+
+    /// Every session constructor reaches `spawn`. If a new one appears that does
+    /// not, it silently opts out of the git credential path.
+    #[test]
+    fn every_session_constructor_goes_through_spawn() {
+        let src = source();
+        // `new_window` opens a window in an EXISTING session, so it inherits
+        // that session's environment and is not a constructor for this purpose.
+        let constructors =
+            src.matches("pub fn new_").count() - src.matches("pub fn new_window").count();
+        let spawn_calls = src.matches("    spawn(").count();
+        assert!(
+            spawn_calls >= constructors,
+            "{constructors} session constructors but only {spawn_calls} reach \
+             `spawn`; one of them builds its own environment and will not get \
+             GIT_SSH_COMMAND or NOOK_WORKSPACE_ID"
         );
     }
 }

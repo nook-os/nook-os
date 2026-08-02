@@ -476,6 +476,11 @@ pub enum ControlToNode {
         /// The clonable git remote, resolved by the control plane from the
         /// executor's `node_workspaces` row.
         repo_url: String,
+        /// Which workspace that row is for (MAIN-367), so the job's session can
+        /// export `NOOK_WORKSPACE_ID` and the git-ssh shim can name the repo it
+        /// is working in. Resolved from the same row as `repo_url`.
+        #[serde(default)]
+        workspace_id: Option<WorkspaceId>,
         /// The branch the per-job worktree is based on.
         branch: String,
         /// The human's opening brief for this run (MAIN-231), if one was given

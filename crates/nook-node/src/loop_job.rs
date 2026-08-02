@@ -45,6 +45,9 @@ pub struct LoopJob {
     pub branch: String,
     /// The human's opening brief (MAIN-231), if the job was seeded with one.
     pub seed: Option<String>,
+    /// Exported into the job's session so git authenticates with the
+    /// workspace's key (MAIN-367).
+    pub workspace_id: Option<String>,
 }
 
 /// Worktree directory names of jobs running on this node right now, so
@@ -261,6 +264,7 @@ pub fn run(cfg: NodeConfig, out: Sender<NodeToControl>, job: LoopJob) {
         repo_url,
         branch,
         seed,
+        workspace_id,
     } = job;
     let dirname = job_dirname(&job_id);
     if let Ok(mut s) = running_jobs().lock() {
@@ -348,6 +352,7 @@ pub fn run(cfg: NodeConfig, out: Sender<NodeToControl>, job: LoopJob) {
             skill,
             &target_task_key,
             seed.as_deref(),
+            workspace_id.as_deref(),
         ),
     };
 
@@ -573,6 +578,7 @@ fn drive_session(
     skill: &str,
     target: &str,
     seed: Option<&str>,
+    workspace_id: Option<&str>,
 ) -> (bool, String) {
     let cwd = worktree.to_string_lossy().to_string();
     // Where the launched shell records the runtime's exit code (AC-4). A sibling
@@ -592,6 +598,7 @@ fn drive_session(
         job_id,
         &status_path,
         seed,
+        workspace_id.as_deref(),
     ) {
         return (false, format!("could not launch session: {e}"));
     }

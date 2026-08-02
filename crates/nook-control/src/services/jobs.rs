@@ -751,6 +751,9 @@ pub async fn dispatch_to_node(state: &AppState, tenant: TenantId, job: &LoopJob)
     let sent = state.registry.send_to_node(
         node,
         nook_proto::ControlToNode::RunLoopJob {
+            // The SAME row `repo_url` came from, so the job's session can export it
+            // and git inside authenticates with the workspace's key (MAIN-367).
+            workspace_id: Some(workspace_id),
             job_id: job.id.0.to_string(),
             kind: job.kind.clone(),
             target_task_key,

@@ -880,6 +880,7 @@ pub async fn connect_once(cfg: &NodeConfig) -> Result<()> {
                 out_tx.send(report).await.ok();
             }
             ControlToNode::RunLoopJob {
+                workspace_id,
                 job_id,
                 kind,
                 target_task_key,
@@ -897,6 +898,7 @@ pub async fn connect_once(cfg: &NodeConfig) -> Result<()> {
                         cfg,
                         tx,
                         crate::loop_job::LoopJob {
+                            workspace_id: workspace_id.map(|w| w.0.to_string()),
                             job_id,
                             kind,
                             target_task_key,
