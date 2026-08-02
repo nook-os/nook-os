@@ -4036,6 +4036,8 @@ a.toast-main:hover .toast-title { text-decoration: underline; }
 }
 
 .op-table-wrap { overflow-x: auto; padding: 0 12px 12px; }
+/* The capacity bars need room to read as bars. */
+.col-capacity { min-width: 180px; }
 .op-table { border-collapse: collapse; width: 100%; font-size: 11.5px; }
 .op-table th {
   text-align: left;

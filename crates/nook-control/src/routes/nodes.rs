@@ -1,4 +1,4 @@
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::Json;
 use nook_types::*;
 
@@ -80,6 +80,31 @@ pub async fn list(State(state): State<AppState>, auth: AuthCtx) -> ApiResult<Jso
     let mut nodes = state.nodes.list(auth.tenant_id, scope, mine).await?;
     label_foreign_homes(&state, auth.tenant_id, &mut nodes).await?;
     Ok(Json(nodes))
+}
+
+/// The paged twin of the whole-list read — the Nodes table's endpoint, on the
+/// pagination contract. Same visibility rule as `list`, applied in the repo's
+/// WHERE, so a page can never show a node the whole list would hide.
+#[utoipa::path(get, path = "/api/v1/nodes/page",
+    operation_id = "nodes_page",
+    params(PageQuery),
+    responses((status = 200, body = Page<Node>)))]
+pub async fn page(
+    State(state): State<AppState>,
+    auth: AuthCtx,
+    Query(q): Query<PageQuery>,
+) -> ApiResult<Json<Page<Node>>> {
+    let args = q
+        .args(crate::repo::nodes::NODE_PAGE_SORTS)
+        .map_err(crate::services::operator_queries::bad_page)?;
+    let scope = visibility_scope(&state, &auth).await?;
+    let mine = own_person(&state, &auth).await;
+    let mut page = state.nodes.page(auth.tenant_id, scope, mine, &args).await?;
+    label_foreign_homes(&state, auth.tenant_id, &mut page.rows).await?;
+    Ok(Json(Page {
+        rows: page.rows,
+        next_cursor: page.next_cursor,
+    }))
 }
 
 #[utoipa::path(get, path = "/api/v1/nodes/{id}",

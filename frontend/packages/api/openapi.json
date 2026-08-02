@@ -1872,6 +1872,90 @@
         }
       }
     },
+    "/api/v1/nodes/page": {
+      "get": {
+        "tags": [
+          "crate::routes::nodes"
+        ],
+        "summary": "The paged twin of the whole-list read — the Nodes table's endpoint, on the\npagination contract. Same visibility rule as `list`, applied in the repo's\nWHERE, so a page can never show a node the whole list would hide.",
+        "operationId": "nodes_page",
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "description": "Case-insensitive substring; the searched fields differ per list.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "after",
+            "in": "query",
+            "description": "Opaque cursor from the previous page's `next_cursor`.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Page size (default 50, clamped 1..=200).",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64"
+            }
+          },
+          {
+            "name": "sort",
+            "in": "query",
+            "description": "Sort key from the endpoint's documented set. Absent = newest first.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "dir",
+            "in": "query",
+            "description": "`asc` | `desc`. Defaults ascending under `sort`, newest-first without.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page_Node"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/nodes/renew": {
       "post": {
         "tags": [
@@ -12195,6 +12279,123 @@
                 },
                 "scope_type": {
                   "type": "string"
+                }
+              }
+            }
+          }
+        }
+      },
+      "Page_Node": {
+        "type": "object",
+        "description": "One page of any paginated list — THE pagination wire contract (QOL sprint\n2026-08). Every list endpoint returns this shape; the request half is\n[`PageQuery`]. `next_cursor` is an OPAQUE token: pass it back verbatim as\n`after`, never parse it — the opacity is what lets the server pick the\nmechanism (keyset vs offset) per request. Null means end of list.\n\nThe server half — cursor codec, validation, SQL skeleton — is\n`nook_db::paging`; the React half is `usePagedList` + `PagedPanel`.",
+        "required": [
+          "rows"
+        ],
+        "properties": {
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Opaque continuation token — pass back verbatim as `after`; null = end."
+          },
+          "rows": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "description": "Status values: `online` | `offline`.",
+              "required": [
+                "id",
+                "tenant_id",
+                "name",
+                "hostname",
+                "platform",
+                "capabilities",
+                "resources",
+                "status",
+                "shared",
+                "labels",
+                "taints",
+                "created_at",
+                "updated_at"
+              ],
+              "properties": {
+                "capabilities": {},
+                "created_at": {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                "home_tenant": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "The name of this node's HOME tenant, set only when that is not the\ntenant you are acting in (MAIN-353) — your own machine, reached from\nanother of your orgs. `None` for the ordinary case, so a UI can render\nthe badge on presence rather than by comparing ids.\n\nComputed per response, never stored: it is a fact about the *viewer's*\nposition, not about the node."
+                },
+                "hostname": {
+                  "type": "string"
+                },
+                "id": {
+                  "$ref": "#/components/schemas/NodeId"
+                },
+                "labels": {
+                  "description": "Operator-set labels, `{\"key\": \"value\"}` (MAIN-314). The DERIVED `os` and\n`arch` labels are not in here: they are computed from what the node\nreports, so storing them would let them drift from the truth."
+                },
+                "last_seen_at": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "format": "date-time"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "owner_person_id": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "format": "uuid",
+                  "description": "The person who owns this node — its join-token minter, else the tenant\nowner (MAIN-119). Session-start is confined to this person (MAIN-130)."
+                },
+                "platform": {
+                  "type": "string"
+                },
+                "port_range_end": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "format": "int32"
+                },
+                "port_range_start": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "format": "int32",
+                  "description": "An operator's port range for this node, overriding what it advertises\n(MAIN-301). Both `None` means \"use the node's own\"; the pair is set and\ncleared together, which the API enforces."
+                },
+                "resources": {
+                  "description": "Latest heartbeat resource sample (see `NodeResources`); `{}` until first."
+                },
+                "shared": {
+                  "type": "boolean",
+                  "description": "Whether the owner has designated this node team-usable (MAIN-135). A\nshared node is VISIBLE to the whole team; it is not yet usable by them —\nsession-start stays owner-only until a later unit of the epic."
+                },
+                "status": {
+                  "type": "string"
+                },
+                "taints": {
+                  "description": "Operator-set taints, `[{\"key\": …, \"effect\": …}]` (MAIN-314)."
+                },
+                "tenant_id": {
+                  "$ref": "#/components/schemas/TenantId"
+                },
+                "updated_at": {
+                  "type": "string",
+                  "format": "date-time"
                 }
               }
             }

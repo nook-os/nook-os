@@ -337,6 +337,7 @@ pub fn build_router(state: AppState) -> Router {
             patch(notebook::update_folder).delete(notebook::delete_folder),
         )
         .route("/nodes", get(nodes::list))
+        .route("/nodes/page", get(nodes::page))
         .route("/nodes/{id}", get(nodes::get_one).delete(nodes::delete))
         .route("/node/releases", get(dist::releases))
         .route("/nodes/join-tokens", post(join::create_join_token))

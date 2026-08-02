@@ -960,6 +960,27 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/nodes/page": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The paged twin of the whole-list read — the Nodes table's endpoint, on the
+         *     pagination contract. Same visibility rule as `list`, applied in the repo's
+         *     WHERE, so a page can never show a node the whole list would hide.
+         */
+        get: operations["nodes_page"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/nodes/renew": {
         parameters: {
             query?: never;
@@ -5195,6 +5216,76 @@ export interface components {
          *     The server half — cursor codec, validation, SQL skeleton — is
          *     `nook_db::paging`; the React half is `usePagedList` + `PagedPanel`.
          */
+        Page_Node: {
+            /** @description Opaque continuation token — pass back verbatim as `after`; null = end. */
+            next_cursor?: string | null;
+            rows: {
+                capabilities: unknown;
+                /** Format: date-time */
+                created_at: string;
+                /**
+                 * @description The name of this node's HOME tenant, set only when that is not the
+                 *     tenant you are acting in (MAIN-353) — your own machine, reached from
+                 *     another of your orgs. `None` for the ordinary case, so a UI can render
+                 *     the badge on presence rather than by comparing ids.
+                 *
+                 *     Computed per response, never stored: it is a fact about the *viewer's*
+                 *     position, not about the node.
+                 */
+                home_tenant?: string | null;
+                hostname: string;
+                id: components["schemas"]["NodeId"];
+                /**
+                 * @description Operator-set labels, `{"key": "value"}` (MAIN-314). The DERIVED `os` and
+                 *     `arch` labels are not in here: they are computed from what the node
+                 *     reports, so storing them would let them drift from the truth.
+                 */
+                labels: unknown;
+                /** Format: date-time */
+                last_seen_at?: string | null;
+                name: string;
+                /**
+                 * Format: uuid
+                 * @description The person who owns this node — its join-token minter, else the tenant
+                 *     owner (MAIN-119). Session-start is confined to this person (MAIN-130).
+                 */
+                owner_person_id?: string | null;
+                platform: string;
+                /** Format: int32 */
+                port_range_end?: number | null;
+                /**
+                 * Format: int32
+                 * @description An operator's port range for this node, overriding what it advertises
+                 *     (MAIN-301). Both `None` means "use the node's own"; the pair is set and
+                 *     cleared together, which the API enforces.
+                 */
+                port_range_start?: number | null;
+                /** @description Latest heartbeat resource sample (see `NodeResources`); `{}` until first. */
+                resources: unknown;
+                /**
+                 * @description Whether the owner has designated this node team-usable (MAIN-135). A
+                 *     shared node is VISIBLE to the whole team; it is not yet usable by them —
+                 *     session-start stays owner-only until a later unit of the epic.
+                 */
+                shared: boolean;
+                status: string;
+                /** @description Operator-set taints, `[{"key": …, "effect": …}]` (MAIN-314). */
+                taints: unknown;
+                tenant_id: components["schemas"]["TenantId"];
+                /** Format: date-time */
+                updated_at: string;
+            }[];
+        };
+        /**
+         * @description One page of any paginated list — THE pagination wire contract (QOL sprint
+         *     2026-08). Every list endpoint returns this shape; the request half is
+         *     [`PageQuery`]. `next_cursor` is an OPAQUE token: pass it back verbatim as
+         *     `after`, never parse it — the opacity is what lets the server pick the
+         *     mechanism (keyset vs offset) per request. Null means end of list.
+         *
+         *     The server half — cursor codec, validation, SQL skeleton — is
+         *     `nook_db::paging`; the React half is `usePagedList` + `PagedPanel`.
+         */
         Page_OperatorAuditEntry: {
             /** @description Opaque continuation token — pass back verbatim as `after`; null = end. */
             next_cursor?: string | null;
@@ -8309,6 +8400,36 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["CreateJoinTokenResponse"];
+                };
+            };
+        };
+    };
+    nodes_page: {
+        parameters: {
+            query?: {
+                /** @description Case-insensitive substring; the searched fields differ per list. */
+                q?: string | null;
+                /** @description Opaque cursor from the previous page's `next_cursor`. */
+                after?: string | null;
+                /** @description Page size (default 50, clamped 1..=200). */
+                limit?: number | null;
+                /** @description Sort key from the endpoint's documented set. Absent = newest first. */
+                sort?: string | null;
+                /** @description `asc` | `desc`. Defaults ascending under `sort`, newest-first without. */
+                dir?: string | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Page_Node"];
                 };
             };
         };
