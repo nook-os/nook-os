@@ -1152,7 +1152,17 @@ export function BoardPage() {
       (await api.GET("/api/v1/boards/{id}", { params: { path: { id: board!.id } } }))
         .data,
     enabled: !!board,
-    refetchInterval: 5000,
+    // No timer (MAIN-365). `task_changed` already invalidates the `["boards"]`
+    // prefix the moment anything moves, so the five-second poll was a second
+    // mechanism racing the first — and on reconnect it joined the blanket
+    // `invalidateQueries()` in a herd of refetches that blanked every panel.
+    //
+    // Focus is the one resync a dumb frontend still wants: column adds and
+    // renames are the changes that carry no event, they are rare and
+    // deliberate, and coming back to the tab is exactly when a stale column
+    // would be noticed. It costs one request at the moment somebody looks,
+    // instead of twelve a minute forever.
+    refetchOnWindowFocus: true,
   });
 
   const { data: me } = useQuery({
