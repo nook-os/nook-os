@@ -6,7 +6,7 @@ use anyhow::{Context, Result};
 use std::process::Command;
 use std::sync::OnceLock;
 
-pub const SESSION_PREFIX: &str = "nook_";
+pub const SESSION_PREFIX: &str = nook_proto::TMUX_SESSION_PREFIX;
 
 /// The tmux server this node talks to, as an `-L <socket>` name (MAIN-108).
 /// `None` — the default, and what every unset call sees — means the user's

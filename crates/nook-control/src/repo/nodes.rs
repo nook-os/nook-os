@@ -379,6 +379,15 @@ pub trait NodeRepository: Send + Sync {
         live_tmux_sessions: &[String],
     ) -> ApiResult<u64>;
 
+    /// Sessions this control plane still believes are live on `node`.
+    ///
+    /// The converse of `expire_sessions_missing_from_tmux`, and the half that
+    /// was missing: that one ends rows whose tmux is gone, nothing ever killed
+    /// tmux whose row is gone. Ids rather than tmux names on purpose — a live
+    /// row that has not reported its name yet must still count as believed-live,
+    /// or the sweep would kill a session in the middle of starting.
+    async fn live_session_ids(&self, node: NodeId) -> ApiResult<Vec<SessionId>>;
+
     /// Node-reported session lifecycle, scoped by the NODE rather than by the
     /// node's home tenant (MAIN-363).
     ///
@@ -1188,6 +1197,18 @@ impl NodeRepository for DbNodeRepository {
                 params![node, live_tmux_sessions.to_vec()],
             )
             .await?)
+    }
+
+    async fn live_session_ids(&self, node: NodeId) -> ApiResult<Vec<SessionId>> {
+        let rows: Vec<(Uuid,)> = self
+            .db
+            .query_all(
+                "SELECT id FROM sessions
+                 WHERE node_id = $1 AND status IN ('starting', 'running', 'detached')",
+                params![node],
+            )
+            .await?;
+        Ok(rows.into_iter().map(|(id,)| SessionId(id)).collect())
     }
 
     async fn mark_session_running(
@@ -2282,6 +2303,20 @@ impl NodeRepository for FakeNodeRepository {
             }
         }
         Ok(n)
+    }
+
+    async fn live_session_ids(&self, node: NodeId) -> ApiResult<Vec<SessionId>> {
+        Ok(self
+            .inner
+            .lock()
+            .unwrap()
+            .sessions
+            .iter()
+            .filter(|x| {
+                x.node == node && matches!(x.status.as_str(), "starting" | "running" | "detached")
+            })
+            .map(|x| x.id)
+            .collect())
     }
 
     async fn mark_session_running(

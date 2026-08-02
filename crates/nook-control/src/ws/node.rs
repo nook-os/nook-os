@@ -17,7 +17,7 @@ use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Response};
 use futures_util::{SinkExt, StreamExt};
 use nook_proto::{ControlToNode, NodeToControl, UiEvent};
-use nook_types::{NodeId, TenantId};
+use nook_types::{NodeId, SessionId, TenantId};
 use tokio::sync::mpsc;
 
 use crate::error::ApiError;
@@ -261,6 +261,41 @@ async fn handle_message(
                 .nodes
                 .expire_sessions_missing_from_tmux(node_id, &live_tmux_sessions)
                 .await?;
+
+            // …and the converse, which was missing entirely: tmux sessions the
+            // control plane has no live row for. Nothing can ever attach to
+            // one again — a session is reachable only through its row — so it
+            // is a process holding a shell open that no UI will ever show. They
+            // accumulate from exactly the failures this card fixed: a row ended
+            // while its tmux kept running, every time, forever (MAIN-363).
+            //
+            // Keyed on the session id parsed back out of the name, not on the
+            // name itself: a live row that has not reported its tmux name yet
+            // still counts as believed-live, so a session in the middle of
+            // starting is never swept. `nook_job_*` (loop jobs) fail the uuid
+            // parse and are left alone, which is what we want — this owns
+            // terminal sessions and nothing else.
+            let believed: std::collections::HashSet<SessionId> = state
+                .nodes
+                .live_session_ids(node_id)
+                .await?
+                .into_iter()
+                .collect();
+            for name in &live_tmux_sessions {
+                let Some(rest) = name.strip_prefix(nook_proto::TMUX_SESSION_PREFIX) else {
+                    continue;
+                };
+                let Ok(id) = uuid::Uuid::parse_str(rest).map(SessionId) else {
+                    continue;
+                };
+                if believed.contains(&id) {
+                    continue;
+                }
+                tracing::info!(%node_id, session = %id, tmux = %name, "orphaned tmux session — no live row, killing");
+                let _ = _tx
+                    .send(ControlToNode::KillSession { session_id: id })
+                    .await;
+            }
 
             // What this tenant trusts, so the node can tell whether a rotation
             // is being staged and renew for it rather than waiting for expiry.
