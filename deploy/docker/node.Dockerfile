@@ -5,13 +5,18 @@ COPY crates ./crates
 # The agent skill is embedded with include_str!: a build input, not a
 # runtime file.
 COPY skills ./skills
-RUN cargo build --release -p nook-node
+# Shared cargo caches. The copy-out has to live in this RUN: target/ is a mount
+# rather than image content, so it is gone by the next instruction.
+RUN --mount=type=cache,id=nook-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=nook-cargo-target,target=/src/target,sharing=locked \
+    cargo build --release -p nook-node \
+    && mkdir -p /out && cp target/release/nook /out/
 
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates curl git tmux bash procps \
     && rm -rf /var/lib/apt/lists/*
-COPY --from=build /src/target/release/nook /usr/local/bin/nook
+COPY --from=build /out/nook /usr/local/bin/nook
 COPY deploy/docker/node-prod-entrypoint.sh /usr/local/bin/node-entrypoint.sh
 RUN chmod +x /usr/local/bin/node-entrypoint.sh
 ENTRYPOINT ["node-entrypoint.sh"]
