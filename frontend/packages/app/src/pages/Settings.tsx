@@ -16,11 +16,13 @@ import {
   Markdown,
   Panel,
   Pill,
+  RowAction,
+  RowActions,
   SearchInput,
   type DataColumn,
   type ThemeTokens,
 } from "@nookos/ui";
-import { Eye, KeyRound, Pencil, Plus, Trash2 } from "lucide-react";
+import { Eye, KeyRound, Palette, Pencil, Plus, Trash2 } from "lucide-react";
 import { requireAppPassword, useAppPassword, whenSet } from "../apppassword";
 import { enrollPasskey, passkeysSupported } from "../passkey";
 import { askConfirm, askText, notify } from "../dialogs";
@@ -148,9 +150,9 @@ function AccessTokenSettings() {
       key: "actions",
       header: "",
       cell: (t) => (
-        <button className="btn small danger" onClick={() => revoke(t)}>
-          revoke
-        </button>
+        <RowActions>
+          <RowAction icon={Trash2} danger title="revoke this token" onClick={() => revoke(t)} />
+        </RowActions>
       ),
     },
   ];
@@ -297,9 +299,14 @@ function PasskeySettings() {
       key: "actions",
       header: "",
       cell: (p) => (
-        <button className="btn small icon" title="remove" onClick={() => remove(p.id, p.label)}>
-          <Trash2 size={12} />
-        </button>
+        <RowActions>
+          <RowAction
+            icon={Trash2}
+            danger
+            title="remove this passkey"
+            onClick={() => remove(p.id, p.label)}
+          />
+        </RowActions>
       ),
     },
   ];
@@ -725,14 +732,18 @@ function AppearanceSettings() {
                 <td>{t.tenant_id === null && <Pill>built-in</Pill>}</td>
                 <td>
                   {activeTheme === t.slug ? (
-                    <Pill tone="ok">active</Pill>
+                    <RowActions>
+                      <Pill tone="ok">active</Pill>
+                    </RowActions>
                   ) : (
-                    <button
-                      className="btn small"
-                      onClick={() => pickTheme(t.slug, t.tokens)}
-                    >
-                      use
-                    </button>
+                    <RowActions>
+                      <RowAction
+                        icon={Palette}
+                        label="use"
+                        title={`switch to ${t.name}`}
+                        onClick={() => pickTheme(t.slug, t.tokens)}
+                      />
+                    </RowActions>
                   )}
                 </td>
               </tr>

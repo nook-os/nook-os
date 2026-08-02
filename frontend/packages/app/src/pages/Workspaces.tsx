@@ -3,7 +3,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { Eye, EyeOff, Lock, Plus, Sparkles, Trash2 } from "lucide-react";
 import { api, type WorkspaceDetail as WsDetail } from "@nookos/api";
-import { Empty, PagedPanel, Panel, Pill, StatusDot, statusTone, type DataColumn } from "@nookos/ui";
+import { Empty, PagedPanel, Panel, Pill, RowAction, RowActions, StatusDot, statusTone, type DataColumn } from "@nookos/ui";
 import { ActivityFeed } from "./Activity";
 import { NotesPanel } from "./Notes";
 import { createSpecDraft } from "../newspec";
@@ -24,7 +24,7 @@ import { SessionOwner } from "../sessionOwner";
  * they have an idea about this repo — the alternative was knowing a task id and
  * typing a `/loop/` URL, which is the thing this card exists to delete.
  */
-function NewSpecButton({ workspaceId }: { workspaceId: string }) {
+function NewSpecButton({ workspaceId, inRow = false }: { workspaceId: string; inRow?: boolean }) {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const [busy, setBusy] = useState(false);
@@ -41,6 +41,17 @@ function NewSpecButton({ workspaceId }: { workspaceId: string }) {
     navigate(`/loop/${ident}`);
   };
 
+  if (inRow) {
+    return (
+      <RowAction
+        icon={Sparkles}
+        label="new spec"
+        title="Draft a spec for this repo — files a backlog ticket and opens its Loop page"
+        busy={busy}
+        onClick={go}
+      />
+    );
+  }
   return (
     <button
       className="btn small"
@@ -83,15 +94,13 @@ export function WorkspacesPage() {
       cell: (w) => <WorkspaceLocations locations={w.locations} />,
     },
     {
-      key: "spec",
-      header: "",
-      cell: (w) => <NewSpecButton workspaceId={w.id} />,
-    },
-    {
-      key: "delete",
+      key: "actions",
       header: "",
       cell: (w) => (
-        <DeleteWorkspaceButton id={w.id} name={w.name} checkouts={w.locations.length} />
+        <RowActions>
+          <NewSpecButton workspaceId={w.id} inRow />
+          <DeleteWorkspaceButton id={w.id} name={w.name} checkouts={w.locations.length} />
+        </RowActions>
       ),
     },
   ];
@@ -596,13 +605,6 @@ function DeleteWorkspaceButton({
   };
 
   return (
-    <button
-      className="btn danger small icon"
-      title="delete workspace"
-      onClick={del}
-      disabled={busy}
-    >
-      <Trash2 size={12} />
-    </button>
+    <RowAction icon={Trash2} danger title="delete this workspace" busy={busy} onClick={del} />
   );
 }

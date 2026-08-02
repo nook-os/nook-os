@@ -4261,6 +4261,51 @@ input[type="search"]::-webkit-search-cancel-button {
   gap: 8px;
 }
 
+/* ── Row actions: the one system for controls in a table row ──────────────
+   See RowActions.tsx for the rules. Resting = faint; the ROW's hover raises
+   them; the ACTION's hover shows intent colour. Destructive stands apart. */
+.row-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 4px;
+  width: 100%;
+}
+.row-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  height: var(--nook-ctrl-sm);
+  min-width: var(--nook-ctrl-sm);
+  padding: 0;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: var(--nook-radius);
+  color: var(--nook-fg-faint);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.row-action.labeled { padding: 0 8px; }
+.row-action.danger { margin-left: 6px; }
+tr:hover .row-action,
+.notebook-row:hover .row-action {
+  color: var(--nook-fg-dim);
+  border-color: var(--nook-border);
+}
+.row-action:hover:not(:disabled) {
+  color: var(--nook-accent);
+  border-color: var(--nook-accent);
+  background: var(--nook-bg-raised);
+}
+.row-action.danger:hover:not(:disabled) {
+  color: var(--nook-err);
+  border-color: var(--nook-err);
+}
+.row-action:disabled { opacity: 0.4; cursor: default; }
+
 .op-row-actions { display: inline-flex; gap: 4px; }
 .op-note { padding: 8px 12px 0; margin: 0; }
 .op-table td .sel { min-width: 120px; }

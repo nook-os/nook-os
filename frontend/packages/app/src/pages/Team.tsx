@@ -9,7 +9,7 @@
 // (`me.tenants` — the `tenant_members` source), not `me.user.role`.
 import React from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Boxes, Check, FolderGit2, Loader, Mail, Send, Trash2 } from "lucide-react";
+import { Boxes, Check, FolderGit2, Loader, LogOut, Mail, Send, Trash2 } from "lucide-react";
 import {
   api,
   type Invite,
@@ -22,6 +22,8 @@ import {
   Empty,
   Panel,
   Pill,
+  RowAction,
+  RowActions,
   Select,
   SearchInput,
   type DataColumn,
@@ -188,16 +190,18 @@ function MembersRoster() {
       header: "",
       cell: (m) =>
         m.principal_id === myId ? (
-          <button className="btn danger small" onClick={leave}>
-            Leave
-          </button>
+          <RowActions>
+            <RowAction icon={LogOut} danger title="leave this tenant" onClick={leave} />
+          </RowActions>
         ) : canManage ? (
-          <button
-            className="btn danger small"
-            onClick={() => remove(m.principal_id, m.display_name)}
-          >
-            Remove
-          </button>
+          <RowActions>
+            <RowAction
+              icon={Trash2}
+              danger
+              title={`remove ${m.display_name} from this tenant`}
+              onClick={() => remove(m.principal_id, m.display_name)}
+            />
+          </RowActions>
         ) : null,
     },
   ];
@@ -461,31 +465,24 @@ function TeamInvites() {
                       >
                         {exp.text}
                       </td>
-                      <td style={{ textAlign: "right", whiteSpace: "nowrap" }}>
-                        <button
-                          className="btn small icon"
-                          title="resend the invite email"
-                          disabled={resending || revoking}
-                          onClick={() => resendMutation.mutate(inv)}
-                        >
-                          {resending ? (
-                            <Loader size={12} className="spin" />
-                          ) : (
-                            <Send size={12} />
-                          )}
-                        </button>
-                        <button
-                          className="btn small danger icon"
-                          title="revoke"
-                          disabled={resending || revoking}
-                          onClick={() => askRevoke(inv)}
-                        >
-                          {revoking ? (
-                            <Loader size={12} className="spin" />
-                          ) : (
-                            <Trash2 size={12} />
-                          )}
-                        </button>
+                      <td>
+                        <RowActions>
+                          <RowAction
+                            icon={Send}
+                            title="resend the invite email"
+                            busy={resending}
+                            disabled={revoking}
+                            onClick={() => resendMutation.mutate(inv)}
+                          />
+                          <RowAction
+                            icon={Trash2}
+                            danger
+                            title="revoke this invite"
+                            busy={revoking}
+                            disabled={resending}
+                            onClick={() => askRevoke(inv)}
+                          />
+                        </RowActions>
                       </td>
                     </tr>
                     {link && (

@@ -16,6 +16,8 @@ import {
   Empty,
   Panel,
   Pill,
+  RowAction,
+  RowActions,
   statusTone,
   TerminalView,
   type TerminalControls,
@@ -1000,14 +1002,15 @@ export function SessionsPage() {
                       {new Date(s.created_at).toLocaleString()}
                     </td>
                     <td>
-                      <button
-                        className="btn danger small icon"
-                        title="delete session"
-                        disabled={busy}
-                        onClick={() => removeMany([s.id], "session")}
-                      >
-                        <Trash2 size={12} />
-                      </button>
+                      <RowActions>
+                        <RowAction
+                          icon={Trash2}
+                          danger
+                          title="delete this session"
+                          disabled={busy}
+                          onClick={() => removeMany([s.id], "session")}
+                        />
+                      </RowActions>
                     </td>
                   </tr>
                 );

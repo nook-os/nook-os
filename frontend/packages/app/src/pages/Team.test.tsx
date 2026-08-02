@@ -133,7 +133,7 @@ describe("TeamPage", () => {
     renderPage();
 
     // askConfirm is mocked to true, so clicking revoke proceeds to the DELETE.
-    const revoke = await screen.findByTitle("revoke");
+    const revoke = await screen.findByTitle("revoke this invite");
     await userEvent.click(revoke);
 
     await waitFor(() => expect(mock.DELETE).toHaveBeenCalled());

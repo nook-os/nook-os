@@ -1,9 +1,9 @@
 import React, { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link, useNavigate, useParams } from "react-router-dom";
-import { ArrowUpCircle, SquareTerminal } from "lucide-react";
+import { ArrowUpCircle, Eye, EyeOff, SquareTerminal, Trash2 } from "lucide-react";
 import { api } from "@nookos/api";
-import { Empty, Panel, Pill, ResourceBars, StatusDot, statusTone } from "@nookos/ui";
+import { Empty, Panel, Pill, ResourceBars, RowAction, RowActions, StatusDot, statusTone } from "@nookos/ui";
 import { AgentVersion, NodeFacts, useControlPlaneVersion } from "../NodeFacts";
 import { askConfirm, notify } from "../dialogs";
 import { useLive } from "../live";
@@ -165,109 +165,97 @@ export function NodesPage() {
                           })
                         : "never"}
                     </td>
-                    {/* The flex box goes INSIDE the cell. Setting display:flex
-                        on a <td> removes it from table layout entirely, so it
-                        stops sharing the row's column widths and the buttons
-                        drift out of line with every other row. */}
-                    <td style={{ textAlign: "right", whiteSpace: "nowrap" }}>
-                      <span
-                        style={{
-                          display: "inline-flex",
-                          gap: 6,
-                          justifyContent: "flex-end",
-                        }}
-                      >
-                      {status === "online" && (owned || n.shared) && (
-                        <button
-                          className="btn small"
-                          title={`open a shell on ${n.name}`}
-                          onClick={() => openTerminal(n.id)}
-                        >
-                          <SquareTerminal size={12} /> terminal
-                        </button>
-                      )}
-                      {/* Sharing is the owner's call and the server enforces it
-                          (MAIN-135); we only offer the toggle on rows you own. */}
-                      {owned && (
-                        <button
-                          className="btn small"
-                          title={
-                            n.shared
-                              ? `stop sharing ${n.name} with the team`
-                              : `let the team see ${n.name}`
-                          }
-                          onClick={async () => {
-                            const { error } = await api.POST(
-                              "/api/v1/nodes/{id}/shared",
-                              {
-                                params: { path: { id: n.id } },
-                                body: { shared: !n.shared },
-                              },
-                            );
-                            if (error) {
-                              await notify(
-                                "Couldn't change sharing",
-                                JSON.stringify(error),
+                    <td>
+                      <RowActions>
+                        {status === "online" && (owned || n.shared) && (
+                          <RowAction
+                            icon={SquareTerminal}
+                            label="terminal"
+                            title={`open a shell on ${n.name}`}
+                            onClick={() => openTerminal(n.id)}
+                          />
+                        )}
+                        {/* Sharing is the owner's call and the server enforces
+                            it (MAIN-135); the toggle shows only on rows you
+                            own. */}
+                        {owned && (
+                          <RowAction
+                            icon={n.shared ? EyeOff : Eye}
+                            label={n.shared ? "unshare" : "share"}
+                            title={
+                              n.shared
+                                ? `stop sharing ${n.name} with the team`
+                                : `let the team see ${n.name}`
+                            }
+                            onClick={async () => {
+                              const { error } = await api.POST(
+                                "/api/v1/nodes/{id}/shared",
+                                {
+                                  params: { path: { id: n.id } },
+                                  body: { shared: !n.shared },
+                                },
                               );
-                              return;
-                            }
-                            refetch();
-                          }}
-                        >
-                          {n.shared ? "unshare" : "share"}
-                        </button>
-                      )}
-                      {status === "online" && canManage && (
-                        <button
-                          className="btn small"
-                          title={
-                            (caps.agent_version as string)
-                              ? `agent ${caps.agent_version} — update and restart`
-                              : "update the agent and restart it"
-                          }
-                          onClick={async () => {
-                            const { error } = await api.POST(
-                              "/api/v1/nodes/{id}/update",
-                              { params: { path: { id: n.id } } },
-                            );
-                            // The node decides whether it can: unsupervised, it
-                            // refuses rather than taking itself offline. Say
-                            // what happened either way — silence after pressing
-                            // a button reads as nothing happening.
-                            await notify(
-                              error ? "Not updated" : "Updating",
-                              error
-                                ? `${n.name} could not be asked to update.`
-                                : `${n.name} is fetching the new agent. It will drop off for a moment and come back — sessions survive, because tmux outlives the agent.`,
-                            );
-                          }}
-                        >
-                          <ArrowUpCircle size={12} /> update
-                        </button>
-                      )}
-                      {canManage && (
-                        <button
-                          className="btn danger small"
-                          onClick={async () => {
-                            const ok = await askConfirm({
-                              title: `Remove node ${n.name}`,
-                              description:
-                                "It stops appearing in NookOS. Re-running `nook setup` on that machine rejoins it.",
-                              confirmLabel: "remove",
-                              danger: true,
-                            });
-                            if (ok) {
-                              await api.DELETE("/api/v1/nodes/{id}", {
-                                params: { path: { id: n.id } },
-                              });
+                              if (error) {
+                                await notify(
+                                  "Couldn't change sharing",
+                                  JSON.stringify(error),
+                                );
+                                return;
+                              }
                               refetch();
+                            }}
+                          />
+                        )}
+                        {status === "online" && canManage && (
+                          <RowAction
+                            icon={ArrowUpCircle}
+                            label="update"
+                            title={
+                              (caps.agent_version as string)
+                                ? `agent ${caps.agent_version} — update and restart`
+                                : "update the agent and restart it"
                             }
-                          }}
-                        >
-                          remove
-                        </button>
-                      )}
-                      </span>
+                            onClick={async () => {
+                              const { error } = await api.POST(
+                                "/api/v1/nodes/{id}/update",
+                                { params: { path: { id: n.id } } },
+                              );
+                              // The node decides whether it can: unsupervised,
+                              // it refuses rather than taking itself offline.
+                              // Say what happened either way — silence after
+                              // pressing a button reads as nothing happening.
+                              await notify(
+                                error ? "Not updated" : "Updating",
+                                error
+                                  ? `${n.name} could not be asked to update.`
+                                  : `${n.name} is fetching the new agent. It will drop off for a moment and come back — sessions survive, because tmux outlives the agent.`,
+                              );
+                            }}
+                          />
+                        )}
+                        {canManage && (
+                          <RowAction
+                            icon={Trash2}
+                            danger
+                            title={`remove ${n.name} from NookOS`}
+                            onClick={async () => {
+                              const ok = await askConfirm({
+                                title: `Remove node ${n.name}`,
+                                description:
+                                  "It stops appearing in NookOS. Re-running `nook setup` on that machine rejoins it.",
+                                confirmLabel: "remove",
+                                danger: true,
+                              });
+                              if (ok) {
+                                await api.DELETE("/api/v1/nodes/{id}", {
+                                  params: { path: { id: n.id } },
+                                });
+                                refetch();
+                              }
+                            }}
+                          />
+                        )}
+                      </RowActions>
                     </td>
                   </tr>
                 );

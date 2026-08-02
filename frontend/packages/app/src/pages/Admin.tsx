@@ -39,7 +39,7 @@ import {
   type OperatorNode,
   type OperatorTenant,
 } from "@nookos/api";
-import { PagedPanel, Panel, Select, type DataColumn } from "@nookos/ui";
+import { PagedPanel, Panel, RowAction, RowActions, Select, type DataColumn } from "@nookos/ui";
 import { askConfirm, askForm, askText, notify } from "../dialogs";
 import { usePagedList } from "../paging";
 import { SectionedPage, type PageSection } from "../SectionedPage";
@@ -318,13 +318,14 @@ export function AdminPage() {
       key: "actions",
       header: "",
       cell: (t) => (
-        <button
-          className="btn small"
-          onClick={() => stageCa(t.id, t.slug)}
-          title="stage a new certificate authority"
-        >
-          <KeyRound size={11} /> stage CA
-        </button>
+        <RowActions>
+          <RowAction
+            icon={KeyRound}
+            label="stage CA"
+            title="stage a new certificate authority"
+            onClick={() => stageCa(t.id, t.slug)}
+          />
+        </RowActions>
       ),
     },
   ];
@@ -351,14 +352,10 @@ export function AdminPage() {
       key: "actions",
       header: "",
       cell: (n) => (
-        <span className="op-row-actions">
-          <button className="btn small" onClick={() => revokeNode(n.id, n.name)} title="revoke its certificate">
-            <Ban size={11} />
-          </button>
-          <button className="btn danger small" onClick={() => removeNode(n.id, n.name)} title="remove the node">
-            <Trash2 size={11} />
-          </button>
-        </span>
+        <RowActions>
+          <RowAction icon={Ban} title="revoke its certificate" onClick={() => revokeNode(n.id, n.name)} />
+          <RowAction icon={Trash2} danger title="remove the node" onClick={() => removeNode(n.id, n.name)} />
+        </RowActions>
       ),
     },
   ];
@@ -373,9 +370,14 @@ export function AdminPage() {
       header: "",
       cell: (b) =>
         b.scope_type === "deployment" ? (
-          <button className="btn danger small" onClick={() => revokeRole(b.email, b.role_key)} title="revoke">
-            <Trash2 size={11} />
-          </button>
+          <RowActions>
+            <RowAction
+              icon={Trash2}
+              danger
+              title="revoke this binding"
+              onClick={() => revokeRole(b.email, b.role_key)}
+            />
+          </RowActions>
         ) : null,
     },
   ];
