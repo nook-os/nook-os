@@ -3,6 +3,15 @@
 //!
 //! The PTY attach client stays alive whether or not anyone is watching —
 //! tmux keeps the session; browsers attach and detach freely upstream.
+//!
+//! The manager runs on its OWN thread, fed by [`Cmd`]s from the connection's
+//! read loop. That thread placement is load-bearing: start/attach/kill spawn
+//! tmux subprocesses, and when they ran inline on the WebSocket read loop a
+//! reconcile burst (repeated `StartSession` for a spec whose checkout is
+//! missing) stalled the loop for the duration of every spawn — during which
+//! `SessionInput` sat unread and the terminal froze mid-keystroke. One
+//! channel, one thread: command order is preserved, and the read loop never
+//! waits on a subprocess.
 
 use anyhow::{Context, Result};
 use base64::Engine;
@@ -30,6 +39,43 @@ struct SessionHandle {
     alive: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
+/// Everything the connection asks of the session engine, in arrival order.
+pub enum Cmd {
+    Start {
+        session_id: SessionId,
+        runtime: String,
+        cwd: String,
+        cols: u16,
+        rows: u16,
+        ports: Vec<nook_types::LeasedPort>,
+    },
+    StartAuth {
+        session_id: SessionId,
+        runtime: String,
+        cols: u16,
+        rows: u16,
+    },
+    Attach {
+        session_id: SessionId,
+        tmux_session: Option<String>,
+    },
+    Input {
+        session_id: SessionId,
+        data_b64: String,
+    },
+    Resize {
+        session_id: SessionId,
+        cols: u16,
+        rows: u16,
+    },
+    Kill {
+        session_id: SessionId,
+    },
+    Detach {
+        session_id: SessionId,
+    },
+}
+
 pub struct Manager {
     out: Sender<NodeToControl>,
     sessions: HashMap<SessionId, SessionHandle>,
@@ -40,6 +86,54 @@ impl Manager {
         Self {
             out,
             sessions: HashMap::new(),
+        }
+    }
+
+    /// The manager's thread. Ends when the connection drops its sender, which
+    /// is the connection ending — a reconnect builds a fresh one, exactly as
+    /// it built a fresh `Manager` before.
+    pub fn spawn(out: Sender<NodeToControl>) -> std::sync::mpsc::Sender<Cmd> {
+        let (tx, rx) = std::sync::mpsc::channel::<Cmd>();
+        std::thread::spawn(move || {
+            let mut manager = Manager::new(out);
+            while let Ok(cmd) = rx.recv() {
+                manager.handle(cmd);
+            }
+        });
+        tx
+    }
+
+    fn handle(&mut self, cmd: Cmd) {
+        match cmd {
+            Cmd::Start {
+                session_id,
+                runtime,
+                cwd,
+                cols,
+                rows,
+                ports,
+            } => self.start(session_id, &runtime, &cwd, cols, rows, &ports),
+            Cmd::StartAuth {
+                session_id,
+                runtime,
+                cols,
+                rows,
+            } => self.start_auth(session_id, &runtime, cols, rows),
+            Cmd::Attach {
+                session_id,
+                tmux_session,
+            } => self.attach(session_id, tmux_session.as_deref()),
+            Cmd::Input {
+                session_id,
+                data_b64,
+            } => self.input(session_id, &data_b64),
+            Cmd::Resize {
+                session_id,
+                cols,
+                rows,
+            } => self.resize(session_id, cols, rows),
+            Cmd::Kill { session_id } => self.kill(session_id),
+            Cmd::Detach { session_id } => self.detach(session_id),
         }
     }
 
