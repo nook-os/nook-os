@@ -570,6 +570,9 @@ fn unregister(dirname: &str) {
 /// Launch the runtime, stream its PTY output verbatim, drive the skill, and wait
 /// for the session to end (or time out). Returns `(ok, message)` for
 /// `JobFinished`.
+// One session launch's parameters, already grouped as `LoopJob` on the wire —
+// the same reason `new_job_session` carries this allow.
+#[allow(clippy::too_many_arguments)]
 fn drive_session(
     out: &Sender<NodeToControl>,
     job_id: &str,
@@ -598,7 +601,7 @@ fn drive_session(
         job_id,
         &status_path,
         seed,
-        workspace_id.as_deref(),
+        workspace_id,
     ) {
         return (false, format!("could not launch session: {e}"));
     }

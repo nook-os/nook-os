@@ -132,6 +132,48 @@ async fn a_node_may_not_ask_on_behalf_of_another_machine() {
     bed.teardown().await;
 }
 
+/// Discovery's liveness opinion must not gate the key. A checkout flagged
+/// missing has still been held by this node, and discovery gets that wrong:
+/// a clone landing outside the scan roots was flagged missing while sitting on
+/// disk (MAIN-363). Refusing here would turn that into an authentication
+/// failure two layers away, and buys nothing — a checkout that really is gone
+/// gives git no repo to run in.
+#[tokio::test]
+async fn a_checkout_flagged_missing_still_yields_its_key() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let state = bed.app_state().await;
+
+    let tenant = bed.tenant("t").await;
+    let (_u, person) = bed.user(tenant, "owner").await;
+    let node = bed.node(tenant, person).await;
+    let workspace = bed.workspace(tenant).await;
+    add_checkout(&bed.db(), tenant, node, workspace).await;
+    bed.db()
+        .exec(
+            "UPDATE node_workspaces SET missing_at = now()
+             WHERE node_id = $1 AND workspace_id = $2",
+            params![node, workspace],
+        )
+        .await
+        .expect("flag missing");
+
+    let res = git_key(
+        State(state.clone()),
+        node_ctx(node, tenant),
+        Path((node, workspace)),
+    )
+    .await;
+    assert!(
+        res.is_ok(),
+        "a checkout flagged missing was refused its key — discovery's opinion \
+         must not become an authentication failure"
+    );
+
+    bed.teardown().await;
+}
+
 /// A workspace pinning nothing yields 204, so the shim falls through to plain
 /// ssh and public repos keep working untouched (AC-6).
 #[tokio::test]

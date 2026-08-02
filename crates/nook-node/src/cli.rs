@@ -3032,23 +3032,64 @@ pub async fn git_ssh(args: &[String]) -> Result<()> {
 /// the node knows itself from its config, and the session exports
 /// `NOOK_WORKSPACE_ID` — so this needs no lookup at all.
 ///
-/// Every failure is `None` rather than an error: this sits in front of every git
-/// command in a session, and a control plane that is briefly unreachable must
-/// degrade to "use the node's own key" rather than break `git status`.
+/// Falling back to the node's own key is correct for a workspace that pins
+/// nothing, and a lie for a workspace that pins one we could not fetch — but
+/// both used to be a silent `None`. That silence hid two real defects during
+/// this ticket's own review: a cross-tenant 403, and a loop session missing its
+/// workspace id. In both, git simply used the wrong key and failed later with an
+/// authentication error nobody could trace back here.
+///
+/// So the fallback stays — a control plane that is briefly unreachable must not
+/// break `git status` — but it announces itself. `git` shows a
+/// `GIT_SSH_COMMAND`'s stderr, so one line reaches whoever ran the command, and
+/// a loop transcript keeps it.
 async fn fetch_session_git_key() -> Option<String> {
+    // Not in a workspace session at all: an ad-hoc terminal, or a shell outside
+    // nook. Nothing is expected here, so nothing is said.
     let workspace = std::env::var("NOOK_WORKSPACE_ID")
         .ok()
         .filter(|s| !s.is_empty())?;
-    let node = NodeConfig::load().ok()?.node_id;
-    let client = Client::from_config().ok()?;
-    let body = client
-        .get_text(&format!(
-            "/api/v1/nodes/{node}/workspaces/{workspace}/git-key"
-        ))
-        .await
-        .ok()?;
-    let trimmed = body.trim();
-    (!trimmed.is_empty()).then(|| body.to_string())
+
+    let outcome = match load_client_for_git_key() {
+        Err(why) => Err(why),
+        Ok((client, node)) => client
+            .get_text(&format!(
+                "/api/v1/nodes/{node}/workspaces/{workspace}/git-key"
+            ))
+            .await
+            .map_err(|e| e.to_string()),
+    };
+    let (key, warning) = classify_git_key(outcome);
+    if let Some(warning) = warning {
+        eprintln!("nook: {warning}; falling back to this machine's own key");
+    }
+    key
+}
+
+/// The config and credential this machine fetches with, or why it cannot.
+fn load_client_for_git_key() -> Result<(Client, String), String> {
+    let node = NodeConfig::load()
+        .map_err(|e| format!("this machine has no node config ({e})"))?
+        .node_id;
+    let client = Client::from_config().map_err(|e| format!("no usable credential ({e})"))?;
+    Ok((client, node))
+}
+
+/// What a fetch outcome means: the key to use, and anything worth saying.
+///
+/// Pure, so the distinction that matters — "nothing is pinned" versus "we could
+/// not find out" — is asserted by tests rather than trusted.
+fn classify_git_key(outcome: Result<String, String>) -> (Option<String>, Option<String>) {
+    match outcome {
+        // A 204 comes back as an empty body: this workspace pins no credential,
+        // which is the ordinary case and is not worth a word.
+        Ok(body) if body.trim().is_empty() => (None, None),
+        Ok(body) => (Some(body), None),
+        Err(why) => (
+            None,
+            Some(format!("could not fetch this workspace's git key: {why}")),
+        ),
+    }
 }
 
 /// A private key on disk for exactly as long as one command needs it.
@@ -3084,8 +3125,37 @@ impl Drop for TempKey {
 
 #[cfg(test)]
 mod git_ssh_tests {
-    use super::TempKey;
+    use super::{classify_git_key, TempKey};
     use std::os::unix::fs::PermissionsExt;
+
+    /// The distinction that was missing. "Nothing pinned" and "we could not find
+    /// out" both fell back to the node's own key, and both said nothing — which
+    /// hid a cross-tenant 403 and a loop session with no workspace id during this
+    /// ticket's own review. Falling back is still right; being quiet about it is
+    /// not.
+    #[test]
+    fn an_unpinned_workspace_is_silent_but_a_failure_speaks() {
+        // 204 → empty body → the ordinary case, no key and no noise.
+        assert_eq!(classify_git_key(Ok(String::new())), (None, None));
+        assert_eq!(classify_git_key(Ok("   \n".into())), (None, None));
+
+        // A real failure still falls back, but says so.
+        let (key, warning) = classify_git_key(Err("403 Forbidden".into()));
+        assert!(key.is_none(), "a failed fetch must not invent a key");
+        let warning = warning.expect("a failure must be announced");
+        assert!(
+            warning.contains("403"),
+            "the warning must carry the cause, got: {warning}"
+        );
+    }
+
+    #[test]
+    fn a_fetched_key_is_returned_verbatim_and_quietly() {
+        let pem = "-----BEGIN OPENSSH PRIVATE KEY-----\nabc\n";
+        let (key, warning) = classify_git_key(Ok(pem.to_string()));
+        assert_eq!(key.as_deref(), Some(pem));
+        assert!(warning.is_none());
+    }
 
     /// 0600 at creation, not after. A key that is briefly world-readable on a
     /// shared operator machine is a key that leaked (MAIN-367 AC-7).

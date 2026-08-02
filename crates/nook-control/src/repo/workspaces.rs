@@ -1110,8 +1110,20 @@ impl WorkspaceRepository for DbWorkspaceRepository {
         Ok(self
             .db
             .query_scalar_opt(
+                // Deliberately NOT filtered on `missing_at`. The row's
+                // EXISTENCE is the authorization fact — this node holds a
+                // checkout of this workspace — while `missing_at` is discovery's
+                // opinion about liveness, and discovery is wrong sometimes: a
+                // clone landing outside the scan roots was flagged missing while
+                // sitting perfectly on disk (MAIN-363). Filtering here turned
+                // that into an authentication failure two layers away, which is
+                // a miserable thing to debug.
+                //
+                // Refusing also buys no safety: if the checkout really is gone,
+                // git has no repo to run in and fails on its own, without the
+                // key ever being used.
                 "SELECT tenant_id FROM node_workspaces
-                 WHERE node_id = $1 AND workspace_id = $2 AND missing_at IS NULL",
+                 WHERE node_id = $1 AND workspace_id = $2",
                 params![node, workspace],
             )
             .await?)

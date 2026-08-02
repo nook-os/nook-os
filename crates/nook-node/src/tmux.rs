@@ -384,6 +384,10 @@ pub fn send_keys(session: &str, line: &str) -> Result<()> {
 /// `launch`, with the UTF-8 locale, the session-id env, the sizing/rename
 /// options every entry point wants, plus any `extra_env` a caller needs (a loop
 /// job's `NOOK_JOB_ID`, say).
+// Every session's launch parameters in one call. Grouping them into a struct
+// would only move the same fields behind a name the three callers never use
+// for anything else.
+#[allow(clippy::too_many_arguments)]
 fn spawn(
     name: &str,
     cwd: &str,
