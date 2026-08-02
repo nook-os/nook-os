@@ -350,7 +350,7 @@ async fn a_session_failure_records_the_reason() {
     let s = SessionId::new();
     repo.add_session(s, t, node, None);
 
-    repo.mark_session_failed(s, t, "runtime not installed")
+    repo.mark_session_failed(s, node, "runtime not installed")
         .await
         .unwrap();
     assert_eq!(repo.session_status(s).as_deref(), Some("error"));
@@ -359,8 +359,10 @@ async fn a_session_failure_records_the_reason() {
         Some("runtime not installed")
     );
 
-    // Wrong tenant matches nothing.
-    assert_eq!(repo.mark_session_exited(s, tenant()).await.unwrap(), 0);
+    // A DIFFERENT node matches nothing (MAIN-363): these reports are scoped by
+    // the node making the claim, not by its tenant — a session on this machine
+    // may belong to any tenant its owner is a member of.
+    assert_eq!(repo.mark_session_exited(s, NodeId::new()).await.unwrap(), 0);
     assert_eq!(repo.session_status(s).as_deref(), Some("error"));
 }
 

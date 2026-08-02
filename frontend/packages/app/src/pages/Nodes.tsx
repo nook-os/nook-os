@@ -658,7 +658,7 @@ export function NodeDetail() {
         />
       }
     >
-      <div className="node-id-head">
+      <div className="detail-id-head">
         <HardDrive size={14} />
         <StatusDot status={status} />
         <Pill tone={statusTone(status)}>{status}</Pill>

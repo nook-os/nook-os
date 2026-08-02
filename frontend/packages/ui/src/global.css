@@ -5407,15 +5407,16 @@ tr:hover .row-action,
   color: var(--nook-fg-dim);
   border-color: var(--nook-border);
 }
-/* The node detail's standing identity strip, under the intro panel title. */
-.node-id-head {
+/* A detail page's standing identity strip, under its intro panel title —
+   nodes and workspaces share it, so the two admin shells read as one. */
+.detail-id-head {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
   gap: 8px;
   padding: 8px 10px;
 }
-.node-id-head > svg { color: var(--nook-fg-dim); }
+.detail-id-head > svg { color: var(--nook-fg-dim); }
 
 .m-co { margin: 1px 0 3px; }
 .m-co-row {
