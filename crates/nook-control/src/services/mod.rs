@@ -1,6 +1,35 @@
 //! Shared service layer: REST handlers and MCP tools both call into here so
 //! the two surfaces can never drift apart.
 
+/// The private key a workspace's git operations should use, decrypted for
+/// transient delivery to a node (MAIN-367).
+///
+/// `None` when the workspace pins no credential, which is the ordinary case and
+/// must stay ordinary: the node then falls back to its own generated key, which
+/// is what public repos and local paths have always used. `None` is also the
+/// answer when the credential has gone or cannot be decrypted — a clone that
+/// then fails on authentication is a better outcome than one that fails to be
+/// attempted, and the node reports the git error either way.
+///
+/// The material returned here is the ONLY form in which a private key leaves
+/// this process, and it exists to be written to a node's disk for the life of a
+/// single git command. It must never be logged, recorded on an event, or
+/// returned from an API that a browser can reach.
+pub async fn workspace_git_key(
+    state: &crate::state::AppState,
+    tenant: nook_types::TenantId,
+    workspace: nook_types::WorkspaceId,
+) -> Option<String> {
+    let ws = state.workspaces.get(tenant, workspace).await.ok()??;
+    let credential = ws.git_credential_id?;
+    let sealed = state
+        .git_credentials
+        .sealed_secret(credential, tenant)
+        .await
+        .ok()??;
+    state.vault.decrypt_string(&sealed).ok()
+}
+
 /// The slug naming a tenant's checkout tree on a node.
 ///
 /// Every `CloneRepo` carries this, because the node cannot derive it: it knows

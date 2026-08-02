@@ -80,6 +80,21 @@ pub async fn delete_credential(
     auth: AuthCtx,
     Path(id): Path<GitCredentialId>,
 ) -> ApiResult<axum::http::StatusCode> {
+    // Refuse while anything still depends on it, and say what (MAIN-367). A key
+    // that vanishes underneath a workspace does not fail here — it fails an hour
+    // later as an authentication error on a clone, which nobody connects back to
+    // a deletion. Naming the workspaces makes the fix obvious: unpin them first.
+    let used_by = state
+        .git_credentials
+        .workspaces_using(id, auth.tenant_id)
+        .await?;
+    if !used_by.is_empty() {
+        return Err(ApiError::Conflict(format!(
+            "still used by {}: unpin it there first",
+            used_by.join(", ")
+        )));
+    }
+
     let res = state.git_credentials.delete(id, auth.tenant_id).await?;
     if res == 0 {
         return Err(ApiError::NotFound);
@@ -431,8 +446,14 @@ pub async fn git_push(
 
     // Same credential story as clone: decrypted here, written 0600 on the node
     // for the length of the push, deleted after.
+    //
+    // An explicitly named credential wins; otherwise the WORKSPACE's pinned one
+    // is used (MAIN-367). Before that fallback, a push from a caller who did not
+    // happen to name a key went out with the node's own — so a repo that cloned
+    // fine failed on its first push, with an auth error that looked like a
+    // different problem entirely.
     let ssh_key = match req.credential_id {
-        None => None,
+        None => crate::services::workspace_git_key(&state, auth.tenant_id, workspace_id).await,
         Some(cred_id) => {
             let enc = state
                 .git_credentials

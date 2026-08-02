@@ -299,6 +299,55 @@ pub async fn get_port_requirements(
 /// The declaration is the workspace's, which is the whole point of MAIN-301's
 /// second cut: the control plane leases numbers and never learns what `PORT`
 /// means to anybody.
+/// `PUT /api/v1/workspaces/{id}/credential` — pin the ssh key this repo clones
+/// and fetches with, or unpin it with `null` (MAIN-367).
+///
+/// Returns the workspace, never the key: the private half leaves this process
+/// only as transient material delivered to a node for one git command, and an
+/// endpoint a browser can reach must never be a way to read it back (AC-7).
+#[utoipa::path(put, path = "/api/v1/workspaces/{id}/credential",
+    operation_id = "set_workspace_credential",
+    params(("id" = String, Path,)),
+    request_body = SetWorkspaceCredentialRequest,
+    responses((status = 200, body = Workspace), (status = 404)))]
+pub async fn set_credential(
+    State(state): State<AppState>,
+    auth: AuthCtx,
+    Path(id): Path<WorkspaceId>,
+    Json(req): Json<SetWorkspaceCredentialRequest>,
+) -> ApiResult<Json<Workspace>> {
+    // A person chooses a key; a node credential is not a person.
+    auth.require_user()?;
+    // Resolve it in THIS tenant before storing, so a credential id from another
+    // tenant is a 404 here rather than a foreign key error later.
+    if let Some(cred) = req.credential_id {
+        if state
+            .git_credentials
+            .sealed_secret(cred, auth.tenant_id)
+            .await?
+            .is_none()
+        {
+            return Err(ApiError::NotFound);
+        }
+    }
+    let ws = state
+        .workspaces
+        .set_git_credential(auth.tenant_id, id, req.credential_id)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    events::record(
+        &state,
+        auth.tenant_id,
+        EventDraft::new("workspace.credential_set")
+            .actor("user", auth.user_id.0)
+            .workspace(id)
+            // The id, never the key.
+            .payload(serde_json::json!({ "credential_id": req.credential_id })),
+    )
+    .await;
+    Ok(Json(ws))
+}
+
 #[utoipa::path(put, path = "/api/v1/workspaces/{id}/ports",
     operation_id = "set_port_requirements",
     params(("id" = String, Path,)),

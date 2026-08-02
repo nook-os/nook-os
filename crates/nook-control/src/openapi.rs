@@ -74,6 +74,7 @@ use utoipa::OpenApi;
         crate::routes::nodes::release_lease,
         crate::routes::workspaces::get_port_requirements,
         crate::routes::workspaces::set_port_requirements,
+        crate::routes::workspaces::set_credential,
         crate::routes::nodes::authorize,
         // The sessionless replacement for `nodes::authorize` (MAIN-290). Both
         // are listed until C5 retires the older one.
@@ -294,6 +295,7 @@ use utoipa::OpenApi;
         nook_types::PortRequirement,
         nook_types::LeasedPort,
         nook_types::SetPortRequirementsRequest,
+        nook_types::SetWorkspaceCredentialRequest,
         nook_types::SetNodePortsRequest,
         nook_types::SessionSpec,
         nook_types::Replicas,

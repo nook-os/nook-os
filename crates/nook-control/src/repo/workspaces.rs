@@ -141,6 +141,14 @@ pub trait WorkspaceRepository: Send + Sync {
         requirements: Option<serde_json::Value>,
     ) -> ApiResult<Option<Workspace>>;
 
+    /// Pin (or unpin, with `None`) the ssh key this repo clones with (MAIN-367).
+    async fn set_git_credential(
+        &self,
+        tenant: TenantId,
+        id: WorkspaceId,
+        credential: Option<GitCredentialId>,
+    ) -> ApiResult<Option<Workspace>>;
+
     /// Every workspace that declares a spec, across every tenant (MAIN-316).
     ///
     /// Cross-tenant because the reconciler is one loop for the deployment, like
@@ -471,6 +479,17 @@ pub trait GitCredentialRepository: Send + Sync {
 
     async fn delete(&self, id: GitCredentialId, tenant: TenantId) -> ApiResult<u64>;
 
+    /// Names of the workspaces still pinning this credential (MAIN-367).
+    ///
+    /// Asked BEFORE a delete: a key that vanishes underneath a workspace turns
+    /// into clones that start failing an hour later with an auth error nobody
+    /// connects to the deletion. Refusing by name is a far better failure.
+    async fn workspaces_using(
+        &self,
+        id: GitCredentialId,
+        tenant: TenantId,
+    ) -> ApiResult<Vec<String>>;
+
     /// The encrypted private key, for transient use on a node. Named
     /// `sealed_secret` rather than `secret` because what comes back is still
     /// wrapped by the app vault — the caller must decrypt it.
@@ -565,6 +584,26 @@ impl WorkspaceRepository for DbWorkspaceRepository {
                     type_mapping(self.db.engine()).now()
                 ),
                 params![tenant, id, spec],
+            )
+            .await?)
+    }
+
+    async fn set_git_credential(
+        &self,
+        tenant: TenantId,
+        id: WorkspaceId,
+        credential: Option<GitCredentialId>,
+    ) -> ApiResult<Option<Workspace>> {
+        Ok(self
+            .db
+            .query_opt(
+                &format!(
+                    "UPDATE workspaces SET git_credential_id = $3, updated_at = {}
+                     WHERE tenant_id = $1 AND id = $2
+                     RETURNING *",
+                    type_mapping(self.db.engine()).now()
+                ),
+                params![tenant, id, credential.map(|c| c.0)],
             )
             .await?)
     }
@@ -1467,6 +1506,23 @@ impl GitCredentialRepository for DbGitCredentialRepository {
             .await?)
     }
 
+    async fn workspaces_using(
+        &self,
+        id: GitCredentialId,
+        tenant: TenantId,
+    ) -> ApiResult<Vec<String>> {
+        let rows: Vec<(String,)> = self
+            .db
+            .query_all(
+                "SELECT name FROM workspaces
+                 WHERE tenant_id = $2 AND git_credential_id = $1
+                 ORDER BY name",
+                params![id, tenant],
+            )
+            .await?;
+        Ok(rows.into_iter().map(|(n,)| n).collect())
+    }
+
     async fn sealed_secret(
         &self,
         id: GitCredentialId,
@@ -1766,6 +1822,7 @@ impl FakeWorkspaceRepository {
             updated_at: now,
             port_requirements: None,
             session_spec: None,
+            git_credential_id: None,
         }
     }
 }
@@ -1788,6 +1845,22 @@ impl WorkspaceRepository for FakeWorkspaceRepository {
         };
         w.session_spec = spec;
         Ok(Some(w.clone()))
+    }
+
+    async fn set_git_credential(
+        &self,
+        tenant: TenantId,
+        id: WorkspaceId,
+        credential: Option<GitCredentialId>,
+    ) -> ApiResult<Option<Workspace>> {
+        let mut s = self.inner.lock().unwrap();
+        Ok(s.workspaces
+            .iter_mut()
+            .find(|w| w.id == id && w.tenant_id == tenant)
+            .map(|w| {
+                w.git_credential_id = credential;
+                w.clone()
+            }))
     }
 
     async fn set_port_requirements(
@@ -2658,6 +2731,17 @@ impl GitCredentialRepository for FakeGitCredentialRepository {
         };
         s.push((cred.clone(), secret_enc));
         Ok(cred)
+    }
+
+    /// The fake has no workspaces to consult, so nothing ever depends on a
+    /// credential here — the guard's REFUSAL path is exercised against the
+    /// database, where the relationship actually exists.
+    async fn workspaces_using(
+        &self,
+        _id: GitCredentialId,
+        _tenant: TenantId,
+    ) -> ApiResult<Vec<String>> {
+        Ok(Vec::new())
     }
 
     async fn delete(&self, id: GitCredentialId, tenant: TenantId) -> ApiResult<u64> {

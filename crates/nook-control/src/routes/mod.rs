@@ -156,6 +156,10 @@ pub fn build_router(state: AppState) -> Router {
             "/workspaces/{id}/ports",
             get(workspaces::get_port_requirements).put(workspaces::set_port_requirements),
         )
+        .route(
+            "/workspaces/{id}/credential",
+            put(workspaces::set_credential),
+        )
         .route("/workspaces/{id}/git", get(workspaces::git_status))
         .route("/workspaces/{id}/clone", post(workspaces::clone_to_node))
         .route("/workspaces/{id}/worktrees", post(gitops::add_worktree))
