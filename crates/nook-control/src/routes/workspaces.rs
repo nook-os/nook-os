@@ -486,6 +486,7 @@ pub async fn clone_to_node(
     .await;
 
     // Let the node derive the directory from the URL, exactly like a manual clone.
+    let tenant_slug = crate::services::tenant_slug(&state, auth.tenant_id).await;
     let rx = state
         .registry
         .request_op(req.node_id, |request_id| ControlToNode::CloneRepo {
@@ -493,6 +494,7 @@ pub async fn clone_to_node(
             url: url.clone(),
             dest_name: None,
             ssh_key,
+            tenant_slug,
         })
         .ok_or_else(|| ApiError::BadRequest("node is offline".into()))?;
 

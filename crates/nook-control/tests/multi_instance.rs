@@ -177,6 +177,7 @@ async fn op_reply_routes_back_to_requester() {
             url: "https://example.com/repo.git".into(),
             dest_name: None,
             ssh_key: None,
+            tenant_slug: None,
         })
         .expect("request routed");
 

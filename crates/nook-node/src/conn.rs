@@ -70,8 +70,7 @@ pub async fn run(cfg: NodeConfig) -> Result<()> {
     }
 }
 
-/// One connection lifetime: register, resync, pump until the socket closes.
-/// Where a NEW checkout is written — always the tenant-scoped root, never
+/// Where a NEW checkout is written — always a tenant-scoped root, never
 /// `workspace_roots[0]` (MAIN-363).
 ///
 /// `workspace_roots` is the SCAN list, and on a node that enrolled before
@@ -82,10 +81,24 @@ pub async fn run(cfg: NodeConfig) -> Result<()> {
 /// Reading the legacy roots continues, so checkouts already on disk are still
 /// discovered where they are; only writing is forced canonical, which is what
 /// stops new collisions without moving anything that exists.
-fn new_checkout_root(cfg: &NodeConfig) -> String {
-    crate::config::default_workspace_root(cfg.tenant_slug.as_deref(), &cfg.server)
+///
+/// `requested` is the slug the control plane sent for the tenant this checkout
+/// is FOR, and it wins: the node's own `tenant_slug` is its HOME tenant, which
+/// on a cross-tenant placement is the wrong tree, and on a node that enrolled
+/// before MAIN-347 is absent entirely (leaving the control-plane host slug as
+/// the last resort — a tenant-shaped path with no tenant in it).
+///
+/// Takes the slugs rather than the config so that precedence is testable
+/// without standing up a `NodeConfig`.
+fn checkout_root(requested: Option<&str>, own: Option<&str>, server: &str) -> String {
+    crate::config::default_workspace_root(requested.or(own), server)
 }
 
+fn new_checkout_root(cfg: &NodeConfig, requested: Option<&str>) -> String {
+    checkout_root(requested, cfg.tenant_slug.as_deref(), &cfg.server)
+}
+
+/// One connection lifetime: register, resync, pump until the socket closes.
 pub async fn connect_once(cfg: &NodeConfig) -> Result<()> {
     let mut request = ws_url(cfg.agent_endpoint())
         .into_client_request()
@@ -412,9 +425,10 @@ pub async fn connect_once(cfg: &NodeConfig) -> Result<()> {
                 url,
                 dest_name,
                 ssh_key,
+                tenant_slug,
             } => {
                 let tx = out_tx.clone();
-                let root = new_checkout_root(cfg);
+                let root = new_checkout_root(cfg, tenant_slug.as_deref());
                 let roots = cfg.workspace_roots.clone();
                 tokio::task::spawn_blocking(move || {
                     let outcome = crate::gitops::clone_repo(
@@ -589,7 +603,10 @@ pub async fn connect_once(cfg: &NodeConfig) -> Result<()> {
             }
             ControlToNode::InitProject { request_id, name } => {
                 let tx = out_tx.clone();
-                let root = new_checkout_root(cfg);
+                // No tenant on the wire for this one yet, so it uses the node's
+                // own — correct for the ordinary case, and still better than
+                // `workspace_roots[0]`.
+                let root = new_checkout_root(cfg, None);
                 let roots = cfg.workspace_roots.clone();
                 tokio::task::spawn_blocking(move || {
                     let outcome = crate::gitops::init_project(&root, &name);
@@ -930,5 +947,50 @@ async fn maybe_renew(server_fingerprints: &[String]) {
         // Worth a warning rather than an error: the next check retries, and the
         // seven-day window exists precisely so a few failures do not matter.
         Err(e) => tracing::warn!(error = %e, "could not renew — will try again"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::checkout_root;
+
+    const SERVER: &str = "https://nook.hein.network";
+
+    /// The tenant that ASKED wins over the node's home tenant. Cross-tenant
+    /// placement (MAIN-353) makes this the ordinary case, not the exception:
+    /// a node homed in one tenant routinely clones for another, and the
+    /// checkout belongs in the requesting tenant's tree.
+    #[test]
+    fn the_requesting_tenant_beats_the_nodes_own() {
+        assert_eq!(
+            checkout_root(Some("engineering-team"), Some("hein"), SERVER),
+            "~/.nook/workspace/engineering-team"
+        );
+    }
+
+    /// The prod case that exposed this: a node enrolled before MAIN-347 has no
+    /// slug of its own at all, so without one on the wire the path falls back
+    /// to the control-plane host — tenant-shaped with no tenant in it.
+    #[test]
+    fn a_node_with_no_slug_of_its_own_still_lands_in_the_right_tree() {
+        assert_eq!(
+            checkout_root(Some("engineering-team"), None, SERVER),
+            "~/.nook/workspace/engineering-team"
+        );
+        assert_eq!(
+            checkout_root(None, None, SERVER),
+            "~/.nook/workspace/nook.hein.network",
+            "no slug anywhere: the host is the last resort, not a bare root"
+        );
+    }
+
+    /// An older control plane sends nothing, and the node keeps its previous
+    /// behaviour rather than regressing to a rootless path.
+    #[test]
+    fn without_a_requested_slug_the_nodes_own_is_used() {
+        assert_eq!(
+            checkout_root(None, Some("hein"), SERVER),
+            "~/.nook/workspace/hein"
+        );
     }
 }

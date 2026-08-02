@@ -352,6 +352,16 @@ pub enum ControlToNode {
         url: String,
         dest_name: Option<String>,
         ssh_key: Option<String>,
+        /// The slug of the tenant this clone is FOR, so the checkout lands in
+        /// that tenant's tree (MAIN-363).
+        ///
+        /// The node cannot work this out: it knows only its own home tenant,
+        /// and cross-tenant placement (MAIN-353) means the tenant that asked is
+        /// routinely not that one. Absent — an older control plane, or a node
+        /// that predates this — the node falls back to its own configured slug,
+        /// which is the pre-existing behaviour rather than a regression.
+        #[serde(default)]
+        tenant_slug: Option<String>,
     },
     /// Add a git worktree next to an existing checkout: the same workspace
     /// gains another location (branch) on this node.

@@ -1,6 +1,29 @@
 //! Shared service layer: REST handlers and MCP tools both call into here so
 //! the two surfaces can never drift apart.
 
+/// The slug naming a tenant's checkout tree on a node.
+///
+/// Every `CloneRepo` carries this, because the node cannot derive it: it knows
+/// only its own home tenant, and cross-tenant placement (MAIN-353) means the
+/// tenant that asked for a clone is routinely a different one. Sending it makes
+/// the requesting tenant the thing the path is scoped by, which is what stops
+/// two tenants' copies of the same repo landing in one directory (MAIN-363).
+///
+/// `None` on a lookup failure rather than an error: a clone that lands in the
+/// node's default tree is a worse path, not a failed operation.
+pub async fn tenant_slug(
+    state: &crate::state::AppState,
+    tenant: nook_types::TenantId,
+) -> Option<String> {
+    state
+        .operator
+        .tenant_org_and_slug(tenant)
+        .await
+        .ok()
+        .flatten()
+        .map(|(_, slug)| slug)
+}
+
 pub mod activity_queries;
 pub mod claim_reaper;
 pub mod discovery;

@@ -727,6 +727,9 @@ async fn start_clone(
             return;
         }
     };
+    // Whose tree this checkout belongs in. The REQUESTING tenant, which on a
+    // cross-tenant placement is not the node's own (MAIN-363).
+    let tenant_slug = crate::services::tenant_slug(state, tenant).await;
     let Some(rx) =
         state
             .registry
@@ -735,6 +738,7 @@ async fn start_clone(
                 url: url.clone(),
                 dest_name: None,
                 ssh_key: None,
+                tenant_slug: tenant_slug.clone(),
             })
     else {
         // Went offline between planning and issuing; the next pass re-reads.
