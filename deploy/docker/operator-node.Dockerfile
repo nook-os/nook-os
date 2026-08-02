@@ -42,7 +42,7 @@ ARG HERMES_REF=v2026.7.20
 # procps) plus what the runtime installers need (a C toolchain some npm deps
 # build against, and Node.js, added below).
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      ca-certificates curl git tmux bash procps gnupg xz-utils \
+      ca-certificates curl git tmux bash procps gnupg xz-utils openssh-client \
     && rm -rf /var/lib/apt/lists/*
 
 # Node.js (for the npm-published CLIs). NodeSource, pinned to a major.
@@ -66,7 +66,7 @@ RUN chmod +x /usr/local/bin/node-entrypoint.sh
 # The whole point of this image is that the toolchain is present. Fail the build
 # — loudly, at build time — if any expected binary is missing from PATH, so a
 # renamed package or a failed installer never ships as a silently-degraded node.
-RUN set -eux; for bin in git tmux claude hermes copilot codex nook; do \
+RUN set -eux; for bin in git tmux ssh claude hermes copilot codex nook; do \
       command -v "$bin" >/dev/null || { echo "FATAL: '$bin' not on PATH"; exit 1; }; \
     done
 
