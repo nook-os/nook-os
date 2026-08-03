@@ -47,13 +47,33 @@ function keyType(publicKey: string): string {
   return publicKey.trim().split(/\s+/)[0] || "ssh";
 }
 
+/// The list, with failure kept distinguishable from emptiness.
+///
+/// THROWS rather than `?? []`. Swallowing the error made react-query report
+/// SUCCESS with an empty array, so a 403 or an unreachable control plane
+/// rendered as "no credentials yet" — a claim the client had not established,
+/// and the exact shape of the bug this whole ticket exists because of: a picker
+/// that was empty for a reason nobody could see read as broken.
+///
+/// Shared by every caller (Settings, the workspace panel, + New Workspace) so
+/// none of them can quietly reintroduce the swallow.
+export async function fetchCredentials(): Promise<GitCredential[]> {
+  const { data, error } = await api.GET("/api/v1/git-credentials");
+  if (error) throw new Error(JSON.stringify(error));
+  return data ?? [];
+}
+
 export function GitCredentials() {
   const queryClient = useQueryClient();
   const [prints, setPrints] = React.useState<Record<string, string>>({});
 
-  const { data: creds } = useQuery({
+  const {
+    data: creds,
+    isLoading,
+    isError,
+  } = useQuery({
     queryKey: ["git-credentials"],
-    queryFn: async () => (await api.GET("/api/v1/git-credentials")).data ?? [],
+    queryFn: fetchCredentials,
   });
 
   // Fingerprints are async (Web Crypto), so they land after the rows do. Keyed
@@ -89,11 +109,14 @@ export function GitCredentials() {
           required: true,
         },
         {
+          // Not `secret: true` — `dialogs.tsx` branches on `multiline` first, so
+          // the flag never renders here and claiming otherwise is a lie about
+          // what the screen does. Visible is right anyway: a PEM you are pasting
+          // is one you already hold, and masking it only hides paste errors.
           name: "private_key",
           label: "Existing private key (optional)",
           placeholder: "-----BEGIN OPENSSH PRIVATE KEY-----",
           multiline: true,
-          secret: true,
         },
       ],
       confirmLabel: "add credential",
@@ -201,7 +224,14 @@ export function GitCredentials() {
         <Plus size={14} /> add credential
       </button>
 
-      {(creds ?? []).length === 0 ? (
+      {isLoading ? (
+        <Empty>Loading credentials…</Empty>
+      ) : isError ? (
+        <Empty>
+          Could not load credentials. This is not the same as having none — nothing has
+          been added or removed; the list could not be read.
+        </Empty>
+      ) : (creds ?? []).length === 0 ? (
         <Empty>
           No credentials yet. Add one, put its public half on the git host, then pin it
           to the workspace that needs it.

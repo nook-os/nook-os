@@ -45,8 +45,30 @@ pub async fn create_credential(
             .ok_or_else(|| {
                 ApiError::BadRequest("provide private_key or set generate:true".into())
             })?;
-        // Best effort: derive the public key when possible.
-        let public = derive_public_key(&key).await.unwrap_or_default();
+        // REFUSED, not stored empty. `unwrap_or_default()` here used to accept a
+        // key `ssh-keygen -y` could not read and save it with `public_key = ""`.
+        // That credential is worse than none: it stores fine, pins fine, and
+        // then fails at clone time as an opaque authentication error nobody
+        // connects back to this moment — the same "fails an hour later" trap
+        // AC-8 exists to close for deletion.
+        //
+        // The common cause is a PASSPHRASE-PROTECTED key, which cannot work
+        // here whatever we do: the node runs git unattended and has nothing to
+        // answer the prompt with. Failing at the door names the problem while
+        // the person who has the key is still looking at it.
+        //
+        // It is also what lets the UI promise a public half to copy — without a
+        // derivable one there is nothing to authorize on the git host, so the
+        // credential could never have been used.
+        let public = derive_public_key(&key).await.ok_or_else(|| {
+            ApiError::BadRequest(
+                "could not read a public key out of that private key. A \
+                 passphrase-protected key cannot be used unattended — a node \
+                 running git has no way to answer the prompt. Supply an \
+                 unencrypted key, or generate one here instead."
+                    .into(),
+            )
+        })?;
         (key, public)
     };
 
@@ -964,4 +986,36 @@ pub async fn import_secret(
         path: Some(path),
         message: format!("imported {name} · sealed and synced to {pushed} checkout(s)"),
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The door `create_credential` now refuses at.
+    ///
+    /// `derive_public_key` returning `None` is the whole condition — before this
+    /// it was `unwrap_or_default()`, so an unreadable key stored with
+    /// `public_key = ""`. That credential pinned fine and then failed at clone
+    /// time as an opaque authentication error, which is the failure mode AC-8
+    /// already refuses to create for deletion.
+    ///
+    /// Asserts only the REFUSAL direction on purpose. The happy path needs a
+    /// real `ssh-keygen` on PATH, and a test that silently inverts its meaning
+    /// when a binary is missing is worse than no test — this one reads the same
+    /// either way.
+    #[tokio::test]
+    async fn a_key_ssh_keygen_cannot_read_yields_no_public_half() {
+        assert!(derive_public_key("not a private key at all")
+            .await
+            .is_none());
+        assert!(derive_public_key("").await.is_none());
+        assert!(
+            derive_public_key("-----BEGIN OPENSSH PRIVATE KEY-----\ntruncated\n")
+                .await
+                .is_none(),
+            "a well-formed header with a corrupt body must not pass — that is \
+             exactly the shape a bad paste takes"
+        );
+    }
 }

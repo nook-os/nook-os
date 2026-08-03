@@ -11,6 +11,7 @@ import { X } from "lucide-react";
 import { api, type NodeInfo } from "@nookos/api";
 import { defaultRuntime, RuntimePicker } from "@nookos/ui";
 import { useNewWork } from "./newwork";
+import { fetchCredentials } from "./GitCredentials";
 import { PORT_CAP_SENTENCE } from "./PortSafetyNotice";
 import { onJobFinish, useJobs } from "./jobs";
 import { WorkspaceLocations } from "./WorkspaceLocations";
@@ -77,7 +78,7 @@ function NewWorkModal() {
   });
   const { data: credentials } = useQuery({
     queryKey: ["git-credentials"],
-    queryFn: async () => (await api.GET("/api/v1/git-credentials")).data ?? [],
+    queryFn: fetchCredentials,
   });
 
   // Starting work here IS a spawn, so offer nodes the caller may run on: their

@@ -9,6 +9,7 @@ import { NotesPanel } from "./Notes";
 import { createSpecDraft } from "../newspec";
 import { useNewWork } from "../newwork";
 import { usePagedList } from "../paging";
+import { fetchCredentials } from "../GitCredentials";
 import { PortSafetyNotice } from "../PortSafetyNotice";
 import { SessionPolicy } from "../SessionPolicy";
 import { WorkspaceLocations } from "../WorkspaceLocations";
@@ -39,10 +40,11 @@ function WorkspaceCredential({
 }) {
   const queryClient = useQueryClient();
   const [saving, setSaving] = useState(false);
-  const { data: creds } = useQuery({
-    queryKey: ["git-credentials"],
-    queryFn: async () => (await api.GET("/api/v1/git-credentials")).data ?? [],
-  });
+  const {
+    data: creds,
+    isLoading,
+    isError,
+  } = useQuery({ queryKey: ["git-credentials"], queryFn: fetchCredentials });
 
   const pick = async (id: string) => {
     setSaving(true);
@@ -65,7 +67,7 @@ function WorkspaceCredential({
         <select
           className="input"
           value={pinned ?? ""}
-          disabled={saving}
+          disabled={saving || isLoading || isError}
           onChange={(e) => pick(e.target.value)}
         >
           <option value="">node's own key (public repos and local paths)</option>
@@ -76,12 +78,23 @@ function WorkspaceCredential({
           ))}
         </select>
       </div>
-      {(creds ?? []).length === 0 && (
+      {/* Disabled rather than merely empty while unknown: a picker offering only
+          "node's own key" is a statement that no key is available, and choosing
+          it would silently unpin whatever is already set. */}
+      {isLoading ? (
+        <div className="muted">Loading credentials…</div>
+      ) : isError ? (
         <div className="muted">
-          No keys stored yet — add one under <Link to="/settings#git-credentials">Settings → Git credentials</Link>,
-          then authorize its public half on the repo.
+          Could not load credentials — the list could not be read, which is not the
+          same as there being none. Anything already pinned is unchanged.
         </div>
-      )}
+      ) : (creds ?? []).length === 0 ? (
+        <div className="muted">
+          No keys stored yet — add one under{" "}
+          <Link to="/settings#git-credentials">Settings → Git credentials</Link>, then
+          authorize its public half on the git host.
+        </div>
+      ) : null}
     </Panel>
   );
 }
