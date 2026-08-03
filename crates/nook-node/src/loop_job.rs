@@ -531,15 +531,23 @@ fn drive_streaming(
             // This is the id an operator resumes with by hand (see AC-5 above).
             note(&tx, &id, format!("agent session {session_id}"));
         }
-        Event::UserEcho(text) => {
-            // Echoed back by --replay-user-messages: the agent HAS it. Recording
-            // on the echo rather than on our write is the difference between
-            // "we sent it" and "it arrived".
-            let _ = tx.blocking_send(NodeToControl::JobTranscript {
-                job_id: id.clone(),
-                source: "human".into(),
-                content: text,
-            });
+        Event::UserEcho(_) => {
+            // DELIBERATELY not recorded. `--replay-user-messages` hands our own
+            // turn back, and the control plane has already written that line:
+            // `jobs::post_message` appends it on send, and a job's seed is
+            // appended at create. Appending here too is why a steering message
+            // appeared twice and read as the agent parroting you.
+            //
+            // The control plane has to be the one that records it. It is the
+            // only end that can: a QUEUED job has no executor to echo anything,
+            // an offline node never echoes, and the REST call must return the
+            // entry it created. It also already distinguishes delivered from
+            // not-delivered with its own system line, so recording on the echo
+            // bought nothing the transcript did not already say.
+            //
+            // The echo is still parsed rather than ignored — `TurnState` sees
+            // every event, and a silent hole in the vocabulary is how the next
+            // record type becomes a surprise.
         }
         Event::AssistantText(text) => {
             if let Some(now) = turn.observe(&Event::AssistantText(text.clone())) {
