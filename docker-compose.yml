@@ -16,7 +16,7 @@ services:
       POSTGRES_PASSWORD: nook
       POSTGRES_DB: nook
     ports:
-      - "5432:5432"
+      - "${NOOK_PG_PORT:-5432}:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -34,8 +34,8 @@ services:
       MINIO_ROOT_USER: nookdev
       MINIO_ROOT_PASSWORD: nookdevsecret
     ports:
-      - "9000:9000"
-      - "9001:9001"
+      - "${NOOK_MINIO_PORT:-9000}:9000"
+      - "${NOOK_MINIO_CONSOLE_PORT:-9001}:9001"
     volumes:
       - miniodata:/data
     healthcheck:
@@ -62,7 +62,7 @@ services:
   redis:
     image: redis:7-alpine
     ports:
-      - "6379:6379"
+      - "${NOOK_REDIS_PORT:-6379}:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 2s
@@ -75,7 +75,7 @@ services:
   elasticmq:
     image: softwaremill/elasticmq-native:1.6.11
     ports:
-      - "9324:9324"
+      - "${NOOK_SQS_PORT:-9324}:9324"
 
   # Mailpit — a live dev inbox. Outbound mail (email verification, invites) is
   # sent over SMTP to :1025 and read in the web UI at http://localhost:8025.
@@ -83,8 +83,8 @@ services:
   mailpit:
     image: axllent/mailpit:latest
     ports:
-      - "1025:1025" # SMTP — the control plane sends here (mailpit:1025 on the net)
-      - "8025:8025" # Web UI — open http://localhost:8025 to read dev mail
+      - "${NOOK_SMTP_PORT:-1025}:1025" # SMTP — the control plane sends here (mailpit:1025 on the net)
+      - "${NOOK_MAILPIT_PORT:-8025}:8025" # Web UI — open http://localhost:8025 to read dev mail
 
   control-plane:
     # On BOTH networks: the default one it shares with postgres/web/node, and
@@ -104,6 +104,19 @@ services:
       # The node agent's own door (see Config::agent_bind). Separate from the
       # browser API so mTLS can terminate here rather than at the edge proxy.
       NOOK_AGENT_BIND: 0.0.0.0:8081
+      # Deep links DEFAULT to the leased web port, and stay overridable
+      # (MAIN-376, owner ruling). `env_file` is literal — compose does not
+      # interpolate inside it — so the substitution has to happen here; but a
+      # bare `http://localhost:${NOOK_WEB_PORT:-5173}` made these win
+      # unconditionally and turned a real knob into a dead one. That broke
+      # reaching the stack by hostname or over the LAN, which is what OIDC dev
+      # actually needs, and it broke it HALF-WAY: these two snapped back to
+      # localhost while OIDC_REDIRECT_URL kept the hostname.
+      #
+      # The nested form keeps all three cases true at once: unset gives 5173,
+      # a lease moves it, and an explicit value still wins.
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://localhost:${NOOK_WEB_PORT:-5173}}
+      WEB_ORIGIN: ${WEB_ORIGIN:-http://localhost:${NOOK_WEB_PORT:-5173}}
       # mTLS terminates at the control plane, not the proxy — only it knows
       # which tenant CA to judge a client certificate against. Dev cert is
       # self-signed; nodes pin it by fingerprint.
@@ -144,8 +157,8 @@ services:
       SMTP_TLS: none
       SMTP_FROM: "NookOS dev <no-reply@nook.local>"
     ports:
-      - "8080:8080"
-      - "8081:8081"
+      - "${NOOK_CONTROL_PORT:-8080}:8080"
+      - "${NOOK_AGENT_PORT:-8081}:8081"
     volumes:
       - .:/app
       - cargo-registry:/usr/local/cargo/registry
@@ -178,7 +191,7 @@ services:
       CHAT_BIND: 0.0.0.0:8082
       CARGO_TARGET_DIR: /app/target-docker
     ports:
-      - "8082:8082"
+      - "${NOOK_CHAT_PORT:-8082}:8082"
     volumes:
       - .:/app
       - cargo-registry:/usr/local/cargo/registry
@@ -368,8 +381,13 @@ services:
     environment:
       NOOK_API_PROXY: http://control-plane:8080
       NOOK_CHAT_PROXY: http://chat:8082
+      # The browser arrives on the LEASED host port; Vite still binds 5173
+      # inside the container, because that is the container side of the mapping
+      # above. Without this the forwarded-host header names the bind port and
+      # `nook join` commands point at whichever checkout owns 5173 (MAIN-376).
+      NOOK_WEB_PUBLIC_PORT: ${NOOK_WEB_PORT:-5173}
     ports:
-      - "5173:5173"
+      - "${NOOK_WEB_PORT:-5173}:5173"
     volumes:
       - ./frontend:/app/frontend
       - web-node-modules:/app/frontend/node_modules

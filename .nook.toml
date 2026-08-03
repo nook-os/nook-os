@@ -8,20 +8,115 @@
 # This is a DECLARATION, not a detection: nothing scans the source for
 # hardcoded ports. What this file says is what nook believes.
 
-# The ports a session in this repo needs. The control plane leases a free
-# number per entry from the node's range and exports it as `env`, so N
+# The ports a session in this repo needs (MAIN-376). The control plane leases a
+# free number per entry from the node's range and exports it as `env`, so N
 # worktrees of this repo run side by side instead of fighting over one port.
 #
-# An app in a session binds `$NOOK_PORT`, never a literal — that is the
-# convention CLAUDE.md documents, and this file is now where it is stated.
+# An app in a session binds `$THAT_VARIABLE`, never a literal — the convention
+# CLAUDE.md documents, and this file is where it is stated.
 #
-# `required` is false here on purpose: most sessions in this repo are a shell
-# or an agent, not a server, and a node that has run out of ports should not
-# stop somebody opening a terminal. A repo whose session IS its server wants
-# `required = true`, so that exhaustion fails loudly instead of starting an app
-# that then collides on a hardcoded default.
+# WHAT IS DECLARED HERE IS THE DEV STACK'S HOST BINDINGS, and only those. The
+# eleven below are every port `docker compose up` publishes to the machine, and
+# they are what two checkouts of this repo actually collide on. Ports INSIDE the
+# compose network are deliberately absent: services reach each other by service
+# name on a fixed container port, and two stacks each get their own network, so
+# those never contend. Declaring them would lease numbers nothing reads.
+#
+# Every `env` below is consumed by `docker-compose.yml` as
+# `${VAR:-<previous default>}`, so an unset variable — a plain clone, no nook —
+# publishes exactly the ports this repo always did.
+#
+# `required = true` throughout — the second half of MAIN-359's own note: a repo
+# whose session IS its server wants it, so exhaustion fails loudly rather than
+# starting an app that then collides on a hardcoded default. This repo's session
+# is the stack.
+#
+# `false` was the first cut here, and it is actively unsafe in a way that looks
+# like the kinder setting. Measured on a node with the range narrowed to sixteen
+# ports: the second session leased 2 of 11 and STARTED, the third leased 0 and
+# STARTED. Compose cannot tell "unset because this is a plain clone" from "unset
+# because the node ran out" — both are just an absent variable — so those
+# sessions fall back to 5432/5173/8080 and collide on precisely the literals
+# this card removed. Silently.
+#
+# The control plane is the only layer that can tell those two apart, and
+# `required` is how it says so. The cost is real and deliberate: EVERY session
+# in this repo leases eleven ports, shells and agents included, so a node
+# advertising 100 supports nine concurrent sessions and the tenth is refused BY
+# NAME — "no free port for `control` (NOOK_CONTROL_PORT): every port in
+# 4200-4299 is leased on this node". Widen the node's range to raise that. A
+# refusal that names the port is recoverable; a silent collision is not.
+
+# The control plane: the browser door and the agent (mTLS) door.
+[[ports]]
+name = "control"
+env = "NOOK_CONTROL_PORT"
+protocol = "tcp"
+required = true
+
+[[ports]]
+name = "agent"
+env = "NOOK_AGENT_PORT"
+protocol = "tcp"
+required = true
+
+# The web app (Vite dev server) — the one a person actually opens.
 [[ports]]
 name = "web"
-env = "NOOK_PORT"
+env = "NOOK_WEB_PORT"
 protocol = "tcp"
-required = false
+required = true
+
+# Team chat, its own service.
+[[ports]]
+name = "chat"
+env = "NOOK_CHAT_PORT"
+protocol = "tcp"
+required = true
+
+# Postgres, published so a psql or a GUI on the machine can reach it. The
+# services themselves go over the compose network, not through this.
+[[ports]]
+name = "postgres"
+env = "NOOK_PG_PORT"
+protocol = "tcp"
+required = true
+
+[[ports]]
+name = "redis"
+env = "NOOK_REDIS_PORT"
+protocol = "tcp"
+required = true
+
+# Object storage: the S3 API and its console are separate listeners.
+[[ports]]
+name = "minio"
+env = "NOOK_MINIO_PORT"
+protocol = "tcp"
+required = true
+
+[[ports]]
+name = "minio-console"
+env = "NOOK_MINIO_CONSOLE_PORT"
+protocol = "tcp"
+required = true
+
+# The SQS-compatible queue.
+[[ports]]
+name = "sqs"
+env = "NOOK_SQS_PORT"
+protocol = "tcp"
+required = true
+
+# Dev mail: SMTP in, web inbox out. Two listeners, one service.
+[[ports]]
+name = "smtp"
+env = "NOOK_SMTP_PORT"
+protocol = "tcp"
+required = true
+
+[[ports]]
+name = "mailpit"
+env = "NOOK_MAILPIT_PORT"
+protocol = "tcp"
+required = true

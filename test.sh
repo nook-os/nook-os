@@ -45,10 +45,14 @@ container_ready() {
 # Run a command where the Rust tests should run.
 rust() {
   if [ "$HOST" = "1" ]; then
-    # The host reaches Postgres on the published port rather than by service
-    # name. NOOK_REQUIRE_DB makes a missing database a failure instead of a
-    # suite that silently skips its database half and still reports success.
-    DATABASE_URL="${DATABASE_URL:-postgres://nook:nook@localhost:5432/nook}" \
+    # The host reaches Postgres on the PUBLISHED port rather than by service
+    # name — and that port is leased now (MAIN-376), so it follows
+    # NOOK_PG_PORT with compose's own default. A literal 5432 here reaches
+    # whichever checkout happens to hold it, which under --host means running
+    # this suite against another instance's database.
+    # NOOK_REQUIRE_DB makes a missing database a failure instead of a suite that
+    # silently skips its database half and still reports success.
+    DATABASE_URL="${DATABASE_URL:-postgres://nook:nook@localhost:${NOOK_PG_PORT:-5432}/nook}" \
     NOOK_REQUIRE_DB=1 "$@"
   else
     container_ready || die "the dev stack is not running — 'docker compose up -d', or use ./test.sh --host"

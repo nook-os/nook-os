@@ -117,6 +117,28 @@ strip existing comments: leave them unless you are changing that code.
 
 - Postgres: 5432. Control plane: 8080. Web (Vite): 5173, proxies `/api` to 8080.
 - Mailpit: SMTP 1025, web inbox `http://localhost:8025` (dev email).
+- **Those are DEFAULTS, not literals (MAIN-376).** Every host port compose
+  publishes is `${VAR:-<the number above>}`, and `.nook.toml` declares one
+  listener per variable — so a nook session leases its own set and two
+  checkouts of this repo run at once instead of both grabbing 8080. Unset
+  (a plain clone, no nook) is byte-for-byte the old behaviour, which is what
+  keeps a local dev run working outside a session.
+- Changing one by hand is `NOOK_WEB_PORT=5273 docker compose up`; the full list
+  of variables is `.nook.toml`, and it is the file to edit when a service
+  starts publishing a new port. A bare `- "1234:1234"` in `docker-compose.yml`
+  now fails `./test.sh` — the declaration and the compose file are checked
+  against each other, in both directions.
+- **All eleven are `required = true`, and that caps sessions per node.** Every
+  session in this repo leases eleven ports — a shell and an agent as much as the
+  stack — so a node advertising 100 (the dev node's `4200-4299`) supports NINE
+  concurrent sessions, and the tenth is refused by name rather than started.
+  That is the deliberate trade: compose cannot distinguish "unset because plain
+  clone" from "unset because the node ran out", so `required = false` let a
+  half-leased session start and collide on the very literals this replaced.
+  Widen the node's range if nine is tight.
+- **Leased ports are baked in at session creation** (`tmux new-session -e`).
+  Editing a workspace's declaration does not re-lease and does not reach a
+  RUNNING session — kill it and start a new one to pick up a change.
 
 ## Boot → test the loop, in one step (MAIN-341)
 
