@@ -278,6 +278,18 @@ function NewWorkModal() {
       body: { name: repoLabel(q), git_remote_url: q.trim() },
     });
     if (error || !ws) throw new Error(JSON.stringify(error) || "could not create workspace");
+    // Pin the key BEFORE the spec, because the spec is what the reconciler acts
+    // on: turn reconcile on with no credential and clone-on-demand fires with
+    // `ssh_key: None`, which no private repo authorizes (MAIN-367). The picker
+    // used to be hidden on this path entirely, so a declaratively-added private
+    // repo could never clone — the exact case that blocks a loop.
+    if (credentialId) {
+      const { error: credErr } = await api.PUT("/api/v1/workspaces/{id}/credential", {
+        params: { path: { id: ws.id } },
+        body: { credential_id: credentialId },
+      });
+      if (credErr) throw new Error(JSON.stringify(credErr));
+    }
     const { error: specErr } = await api.PUT("/api/v1/workspaces/{id}/session-spec", {
       params: { path: { id: ws.id } },
       body: {
@@ -468,7 +480,7 @@ function NewWorkModal() {
                   its ports on the workspace afterwards) and the limit lifts.
                 </div>
               )}
-              {newIntent === "clone" && !declarative && (
+              {newIntent === "clone" && (
                 <div className="field">
                   <label>SSH credential (for private repos)</label>
                   <select className="input" value={credentialId} onChange={(e) => setCredentialId(e.target.value)}>

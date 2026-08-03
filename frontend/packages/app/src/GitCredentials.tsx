@@ -15,7 +15,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, type GitCredential } from "@nookos/api";
 import { DataList, Empty, Panel, Pill, RowAction, RowActions, type DataColumn } from "@nookos/ui";
 import { Copy, Plus, Trash2 } from "lucide-react";
-import { askConfirm, notify } from "./dialogs";
+import { askConfirm, askForm, notify } from "./dialogs";
 
 /// The SHA256 fingerprint OpenSSH prints, computed here rather than served.
 ///
@@ -49,10 +49,6 @@ function keyType(publicKey: string): string {
 
 export function GitCredentials() {
   const queryClient = useQueryClient();
-  const [name, setName] = React.useState("");
-  const [privateKey, setPrivateKey] = React.useState("");
-  const [pasting, setPasting] = React.useState(false);
-  const [busy, setBusy] = React.useState(false);
   const [prints, setPrints] = React.useState<Record<string, string>>({});
 
   const { data: creds } = useQuery({
@@ -77,35 +73,53 @@ export function GitCredentials() {
     };
   }, [creds]);
 
-  const create = async () => {
-    if (!name.trim()) {
-      await notify("Name it first", "The name is how you tell keys apart later.");
-      return;
-    }
-    setBusy(true);
+  // One modal, two paths. Leaving the key box empty generates one here, which is
+  // the path worth defaulting to: a key that never existed outside this control
+  // plane cannot have leaked before it arrived.
+  const add = async () => {
+    const form = await askForm({
+      title: "Add a git credential",
+      description:
+        "An ssh key a workspace can clone and fetch with. Leave the key box empty and one is generated for you.",
+      fields: [
+        {
+          name: "name",
+          label: "Name",
+          placeholder: "deploy key — services repo",
+          required: true,
+        },
+        {
+          name: "private_key",
+          label: "Existing private key (optional)",
+          placeholder: "-----BEGIN OPENSSH PRIVATE KEY-----",
+          multiline: true,
+          secret: true,
+        },
+      ],
+      confirmLabel: "add credential",
+    });
+    if (!form?.name?.trim()) return;
+
+    const pasted = form.private_key?.trim() ?? "";
     const { data, error } = await api.POST("/api/v1/git-credentials", {
       body: {
-        name: name.trim(),
-        generate: !pasting,
-        private_key: pasting ? privateKey : null,
+        name: form.name.trim(),
+        generate: pasted.length === 0,
+        private_key: pasted.length > 0 ? pasted : null,
       },
     });
-    setBusy(false);
     if (error || !data) {
       await notify("Could not add the key", JSON.stringify(error));
       return;
     }
-    setName("");
-    setPrivateKey("");
-    setPasting(false);
     queryClient.invalidateQueries({ queryKey: ["git-credentials"] });
-    // The PUBLIC half is the thing with somewhere to go: it has to be added to
-    // the repo as a deploy key before any of this works. Offering it at the
-    // moment of creation is the difference between a key that works and one
-    // that sits here unused.
+    // The PUBLIC half is the only part with somewhere to go, and this is the
+    // moment to hand it over: a generated key is useless until the git host
+    // trusts it. The private half never leaves the control plane except as
+    // transient material delivered to a node for one git command.
     await notify(
-      "Key added — now authorize it on the repo",
-      "Add this public half as a deploy key (or to your git account). The private half stays sealed in the control plane and is only ever delivered to a node for a single git command.",
+      "Credential added — two steps left",
+      "1. Add this public half to the repo on GitHub (Settings → Deploy keys), so the host trusts it.\n2. Pin this credential to the workspace that needs it — Workspaces → the repo → Git credential.",
       { copy: data.public_key },
     );
   };
@@ -183,48 +197,18 @@ export function GitCredentials() {
         what public repos have always used.
       </div>
 
+      <button className="btn" onClick={add} style={{ marginBottom: "0.75rem" }}>
+        <Plus size={14} /> add credential
+      </button>
+
       {(creds ?? []).length === 0 ? (
-        <Empty>No keys yet. Generate one below, then add its public half to the repo.</Empty>
+        <Empty>
+          No credentials yet. Add one, put its public half on the git host, then pin it
+          to the workspace that needs it.
+        </Empty>
       ) : (
         <DataList rows={creds ?? []} columns={columns} rowKey={(c) => c.id} />
       )}
-
-      <div className="field" style={{ marginTop: "1rem" }}>
-        <label>Add a key</label>
-        <input
-          className="input"
-          value={name}
-          placeholder="deploy key — services repo"
-          onChange={(e) => setName(e.target.value)}
-        />
-      </div>
-
-      {pasting && (
-        <div className="field">
-          <label>Private key (PEM)</label>
-          <textarea
-            className="input mono"
-            rows={6}
-            value={privateKey}
-            placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"
-            onChange={(e) => setPrivateKey(e.target.value)}
-          />
-          <div className="muted" style={{ fontSize: "0.85em" }}>
-            Sealed with the tenant vault on arrival. Prefer generating instead — a key
-            that never existed outside this control plane cannot have leaked before it
-            got here.
-          </div>
-        </div>
-      )}
-
-      <RowActions>
-        <button className="btn" disabled={busy} onClick={create}>
-          <Plus size={14} /> {pasting ? "add pasted key" : "generate key"}
-        </button>
-        <button className="btn ghost" disabled={busy} onClick={() => setPasting((p) => !p)}>
-          {pasting ? "generate one instead" : "paste an existing key"}
-        </button>
-      </RowActions>
     </Panel>
   );
 }
