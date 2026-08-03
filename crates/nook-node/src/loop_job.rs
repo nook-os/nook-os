@@ -48,6 +48,9 @@ pub struct LoopJob {
     /// Exported into the job's session so git authenticates with the
     /// workspace's key (MAIN-367).
     pub workspace_id: Option<String>,
+    /// The workspace's pinned key, for the clone cache — which runs before any
+    /// session exists and so cannot use the shim `workspace_id` enables.
+    pub ssh_key: Option<String>,
 }
 
 /// Worktree directory names of jobs running on this node right now, so
@@ -110,20 +113,35 @@ fn repo_slug(repo_url: &str) -> String {
         .replace('/', "__")
 }
 
-/// Ensure a fresh bare mirror of `repo_url` under `base`, using the node's own
-/// SSH auth (`run_git` falls back to the node key when no explicit key is
-/// passed). Returns the mirror path.
-fn ensure_mirror_in(base: &Path, repo_url: &str) -> Result<PathBuf, String> {
+/// Ensure a fresh bare mirror of `repo_url` under `base`. Returns the mirror path.
+///
+/// Takes the workspace's key because THIS is the step a private repo dies on.
+/// The job's session gets `GIT_SSH_COMMAND` and `NOOK_WORKSPACE_ID` (MAIN-367),
+/// so git typed inside it authenticates — but the mirror is built here, in the
+/// node process, before any session exists. Passing `None` meant the node's own
+/// generated key, which no private repo authorizes, and the job ended at
+/// "preparing workspace" with `Permission denied (publickey)` no matter how
+/// correctly the credential was pinned.
+///
+/// `None` still means the node's own reach, which is right for a public repo or
+/// a local path. The key lives in a 0600 file for the length of the git command
+/// and `TransientKey`'s Drop removes it — including on the error paths, which is
+/// why the guard is bound rather than passed inline.
+fn ensure_mirror_in(base: &Path, repo_url: &str, ssh_key: Option<&str>) -> Result<PathBuf, String> {
+    let held = ssh_key.and_then(crate::gitops::TransientKey::write);
+    let key = held.as_ref().map(|k| k.path.as_path());
     let cache = base.join(format!("{}.git", repo_slug(repo_url)));
     if cache.join("HEAD").exists() {
-        crate::gitops::run_git(&["fetch", "--prune"], Some(&cache), None)?;
+        // The fetch needs it too: a mirror that cloned once still has to pull
+        // updates from the same private remote on every later job.
+        crate::gitops::run_git(&["fetch", "--prune"], Some(&cache), key)?;
     } else {
         std::fs::create_dir_all(base)
             .map_err(|e| format!("cannot create {}: {e}", base.display()))?;
         crate::gitops::run_git(
             &["clone", "--mirror", repo_url, &cache.to_string_lossy()],
             None,
-            None,
+            key,
         )?;
     }
     Ok(cache)
@@ -265,6 +283,7 @@ pub fn run(cfg: NodeConfig, out: Sender<NodeToControl>, job: LoopJob) {
         branch,
         seed,
         workspace_id,
+        ssh_key,
     } = job;
     let dirname = job_dirname(&job_id);
     if let Ok(mut s) = running_jobs().lock() {
@@ -279,7 +298,7 @@ pub fn run(cfg: NodeConfig, out: Sender<NodeToControl>, job: LoopJob) {
         &job_id,
         format!("preparing workspace from {repo_url} @ {branch}"),
     );
-    let cache = match ensure_mirror_in(&base, &repo_url) {
+    let cache = match ensure_mirror_in(&base, &repo_url, ssh_key.as_deref()) {
         Ok(c) => c,
         Err(e) => {
             finished(&out, &job_id, false, format!("clone cache failed: {e}"));
@@ -847,7 +866,8 @@ mod tests {
         let wt_base = tmp.join("worktrees");
         let repo_url = remote.to_string_lossy().to_string();
 
-        let cache = ensure_mirror_in(&base, &repo_url).expect("mirror clone");
+        // A local path needs no key — the `None` arm this fix deliberately kept.
+        let cache = ensure_mirror_in(&base, &repo_url, None).expect("mirror clone");
         assert!(cache.join("HEAD").exists(), "mirror has a HEAD");
 
         let w1 = add_job_worktree_in(&wt_base, &cache, "main", "job-aaa").expect("worktree 1");
@@ -869,5 +889,48 @@ mod tests {
         assert!(!w2.exists(), "wt2 gone");
 
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+}
+
+#[cfg(test)]
+mod clone_cache_key_tests {
+    use super::*;
+
+    /// The clone cache must USE the workspace's key, not the node's own.
+    ///
+    /// The prod failure: a loop job on a private repo died at "preparing
+    /// workspace" with `Permission denied (publickey)` while the credential was
+    /// correctly pinned. `workspace_id` gave the job's SESSION a working git via
+    /// the shim (MAIN-367), but the bare mirror is built here — in the node
+    /// process, before any session exists — and was passing `None`, which
+    /// `run_git` resolves to the node's own generated key.
+    ///
+    /// Asserts on the mechanism rather than on a real private clone, which a
+    /// test cannot have: given key material, `run_git` is handed a path, and
+    /// `git_ssh_command` builds a `GIT_SSH_COMMAND` naming THAT file. If the key
+    /// stopped reaching git, the `-i <path>` would go with it.
+    #[test]
+    fn supplied_key_material_becomes_the_ssh_identity() {
+        let held = crate::gitops::TransientKey::write("-----BEGIN OPENSSH PRIVATE KEY-----\nx\n")
+            .expect("transient key");
+        let cmd = crate::ssh::git_ssh_command(Some(held.path.as_path()))
+            .expect("a GIT_SSH_COMMAND for an explicit key");
+        assert!(
+            cmd.contains(&held.path.to_string_lossy().to_string()),
+            "the supplied key is not the identity git would use: {cmd}"
+        );
+    }
+
+    /// And the file does not outlive the command that needed it — the property
+    /// that lets a shared operator node clone a private repo without becoming a
+    /// place where private keys accumulate.
+    #[test]
+    fn the_transient_key_is_removed_on_drop() {
+        let path = {
+            let held = crate::gitops::TransientKey::write("material").expect("transient key");
+            assert!(held.path.exists(), "the key was not written");
+            held.path.clone()
+        };
+        assert!(!path.exists(), "the key outlived its guard");
     }
 }

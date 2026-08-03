@@ -501,6 +501,23 @@ pub enum ControlToNode {
         /// is working in. Resolved from the same row as `repo_url`.
         #[serde(default)]
         workspace_id: Option<WorkspaceId>,
+        /// The workspace's pinned ssh key, for the CLONE CACHE.
+        ///
+        /// `workspace_id` above lets the job's SESSION authenticate, via the
+        /// git-ssh shim. That is not enough: the job first prepares a bare
+        /// mirror in `~/.nook/clone-cache`, and that runs in the node process
+        /// before any session exists — with no `GIT_SSH_COMMAND`, no
+        /// `NOOK_WORKSPACE_ID`, and so the node's own generated key, which no
+        /// private repo authorizes. A loop job on a private repo therefore died
+        /// at "preparing workspace" with `Permission denied (publickey)` however
+        /// correctly the credential was pinned.
+        ///
+        /// Delivered the same way `CloneRepo` has always delivered one: over
+        /// this socket, written to a transient 0600 file for the git command and
+        /// removed straight after. `None` means the workspace pins nothing, and
+        /// the node's own reach applies — a public repo or a local path.
+        #[serde(default)]
+        ssh_key: Option<String>,
         /// The branch the per-job worktree is based on.
         branch: String,
         /// The human's opening brief for this run (MAIN-231), if one was given

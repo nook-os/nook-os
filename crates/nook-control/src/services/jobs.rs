@@ -754,6 +754,12 @@ pub async fn dispatch_to_node(state: &AppState, tenant: TenantId, job: &LoopJob)
             // The SAME row `repo_url` came from, so the job's session can export it
             // and git inside authenticates with the workspace's key (MAIN-367).
             workspace_id: Some(workspace_id),
+            // …and the key itself, because the session is not the first thing
+            // that clones. The job builds a bare mirror in the node's clone
+            // cache BEFORE any session exists, so `workspace_id` alone left that
+            // step on the node's own generated key and a private repo refused it
+            // at "preparing workspace". Same delivery `CloneRepo` uses.
+            ssh_key: crate::services::workspace_git_key(state, tenant, workspace_id).await,
             job_id: job.id.0.to_string(),
             kind: job.kind.clone(),
             target_task_key,
