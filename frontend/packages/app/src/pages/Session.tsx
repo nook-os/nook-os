@@ -44,6 +44,7 @@ import { SessionTabs } from "../SessionTabs";
 import { SessionWindows, SplitButtons } from "../SessionWindows";
 import { SessionOwner } from "../sessionOwner";
 import { askConfirm, notify } from "../dialogs";
+import { recall, remember } from "../lastPlace";
 
 const DIFF_PANEL_KEY = "nookos-diff-panel-open";
 
@@ -636,6 +637,7 @@ export function SessionPage() {
 
   return (
     <div className="session-view">
+      <RememberSession sessionId={session.id} />
       <SessionTabs activeId={session.id} />
       <div
         className="nook-grid session-grid"
@@ -794,14 +796,48 @@ export function SessionPage() {
 /// The redirect REPLACES the history entry. Pushing it would put `/sessions`
 /// behind every session you open, so Back would bounce you straight forward
 /// again and the button would look broken.
+/** Records the session you are looking at, so returning to `/sessions` comes
+ *  back here instead of to whichever tab happens to be first.
+ *
+ *  Its own component, and self-contained: it needs the tenant, `SessionPage`
+ *  does not otherwise, and the `["me"]` query is deduped across the app so
+ *  asking here costs nothing. Renders nothing.
+ *
+ *  Written on VIEW rather than on navigation, so it also captures a tab you
+ *  landed on by any other route — a deep link, a restart, the strip. */
+function RememberSession({ sessionId }: { sessionId: string }) {
+  const { data: me } = useQuery({
+    queryKey: ["me"],
+    queryFn: async () => (await api.GET("/api/v1/auth/me")).data ?? null,
+  });
+  const tenantId = me?.tenant?.id;
+  React.useEffect(() => {
+    remember(tenantId, "session.id", sessionId);
+  }, [tenantId, sessionId]);
+  return null;
+}
+
 export function SessionsIndex() {
   const { tabs, loaded } = useLiveTabs();
+  const { data: me } = useQuery({
+    queryKey: ["me"],
+    queryFn: async () => (await api.GET("/api/v1/auth/me")).data ?? null,
+  });
+  const tenantId = me?.tenant?.id;
 
   // Deciding before the list arrives is how you flash "no sessions yet" at
   // somebody who has ten, so wait for the answer rather than guess at it.
   if (!loaded) return <div className="session-view" />;
 
-  if (tabs.length > 0) return <Navigate to={`/sessions/${tabs[0].id}`} replace />;
+  if (tabs.length > 0) {
+    // Back to where you were, not to whatever happens to be first. Checked
+    // against the LIVE tabs: a remembered session that has since exited is
+    // gone, and navigating to it would land on a dead page — so a stale memory
+    // falls back to the first tab rather than failing.
+    const wanted = recall(tenantId, "session.id");
+    const target = tabs.find((t) => t.id === wanted) ?? tabs[0];
+    return <Navigate to={`/sessions/${target.id}`} replace />;
+  }
 
   return (
     // No <SessionTabs/> here: with no tabs it renders nothing, and mounting it
