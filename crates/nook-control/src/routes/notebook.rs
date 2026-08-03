@@ -428,15 +428,24 @@ pub async fn create_folder(
     Json(req): Json<CreateUserNoteFolder>,
 ) -> ApiResult<Json<UserNoteFolder>> {
     let person = person_id_for(&state, &auth).await?;
+    Ok(Json(create_folder_for(&state, person, req).await?))
+}
+
+/// Create a folder for a resolved person. Shared with the MCP tool, so the name
+/// rule and the "parent must be yours" check cannot differ between surfaces.
+pub(crate) async fn create_folder_for(
+    state: &AppState,
+    person: Uuid,
+    req: CreateUserNoteFolder,
+) -> ApiResult<UserNoteFolder> {
     validate_name(&req.name, "folder name")?;
     if let Some(parent) = req.parent_id {
-        owned_folder(&state, person, parent).await?;
+        owned_folder(state, person, parent).await?;
     }
-    let folder: UserNoteFolder = state
+    state
         .notebook
         .create_folder(person, req.parent_id, &req.name)
-        .await?;
-    Ok(Json(folder))
+        .await
 }
 
 #[utoipa::path(patch, path = "/api/v1/notebook/folders/{id}",
@@ -451,6 +460,18 @@ pub async fn update_folder(
     Json(req): Json<UpdateUserNoteFolder>,
 ) -> ApiResult<Json<UserNoteFolder>> {
     let person = person_id_for(&state, &auth).await?;
+    Ok(Json(update_folder_for(&state, person, id, req).await?))
+}
+
+/// Rename and/or MOVE a folder, for a resolved person. Shared with the MCP tool
+/// — the cycle guard below is the reason this is extracted rather than
+/// reimplemented: a second copy is a second chance to omit it.
+pub(crate) async fn update_folder_for(
+    state: &AppState,
+    person: Uuid,
+    id: UserNoteFolderId,
+    req: UpdateUserNoteFolder,
+) -> ApiResult<UserNoteFolder> {
     if let Some(name) = &req.name {
         validate_name(name, "folder name")?;
     }
@@ -459,8 +480,8 @@ pub async fn update_folder(
         // the folder inside its own subtree (AC-1) — which would drop it out of
         // the root-anchored path CTE and make its notes' paths render empty. The
         // cycle check subsumes the old self-parent guard.
-        owned_folder(&state, person, parent).await?;
-        if would_cycle(&state, person, id, parent).await? {
+        owned_folder(state, person, parent).await?;
+        if would_cycle(state, person, id, parent).await? {
             return Err(ApiError::BadRequest(
                 "that move would put a folder inside its own subtree".into(),
             ));
@@ -477,7 +498,7 @@ pub async fn update_folder(
             },
         )
         .await?;
-    folder.map(Json).ok_or(ApiError::NotFound)
+    folder.ok_or(ApiError::NotFound)
 }
 
 #[utoipa::path(delete, path = "/api/v1/notebook/folders/{id}",
@@ -490,14 +511,24 @@ pub async fn delete_folder(
     Path(id): Path<UserNoteFolderId>,
 ) -> ApiResult<axum::http::StatusCode> {
     let person = person_id_for(&state, &auth).await?;
-    // Deleting a folder REPARENTS its contents to its own parent (root if it had
-    // none) — it never cascade-deletes notes (AC-4). Notes and any child folders
-    // rise one level, then the folder itself goes. All in one transaction so a
-    // partial failure cannot orphan anything.
+    delete_folder_for(&state, person, id).await?;
+    Ok(axum::http::StatusCode::NO_CONTENT)
+}
+
+/// Delete a folder for a resolved person, REPARENTING its contents to its own
+/// parent (root if it had none) — it never cascade-deletes notes (AC-4). Notes
+/// and any child folders rise one level, then the folder itself goes. All in one
+/// transaction so a partial failure cannot orphan anything. Shared with MCP so a
+/// tool cannot delete a folder by a path that skips the reparenting.
+pub(crate) async fn delete_folder_for(
+    state: &AppState,
+    person: Uuid,
+    id: UserNoteFolderId,
+) -> ApiResult<()> {
     if !state.notebook.delete_folder_reparenting(person, id).await? {
         return Err(ApiError::NotFound);
     }
-    Ok(axum::http::StatusCode::NO_CONTENT)
+    Ok(())
 }
 
 // ── Person vault + note sealing (MAIN-100) ─────────────────────────────────────

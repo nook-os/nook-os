@@ -840,4 +840,29 @@ impl NookBackend for McpBackend {
     ) -> anyhow::Result<Vec<UserNoteFolder>> {
         Ok(crate::routes::notebook::list_folders_for(&self.state, person).await?)
     }
+
+    async fn notebook_create_folder(
+        &self,
+        person: uuid::Uuid,
+        req: CreateUserNoteFolder,
+    ) -> anyhow::Result<UserNoteFolder> {
+        Ok(crate::routes::notebook::create_folder_for(&self.state, person, req).await?)
+    }
+
+    async fn notebook_update_folder(
+        &self,
+        person: uuid::Uuid,
+        id: UserNoteFolderId,
+        req: UpdateUserNoteFolder,
+    ) -> anyhow::Result<UserNoteFolder> {
+        Ok(crate::routes::notebook::update_folder_for(&self.state, person, id, req).await?)
+    }
+
+    async fn notebook_delete_folder(
+        &self,
+        person: uuid::Uuid,
+        id: UserNoteFolderId,
+    ) -> anyhow::Result<()> {
+        Ok(crate::routes::notebook::delete_folder_for(&self.state, person, id).await?)
+    }
 }
