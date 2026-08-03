@@ -3094,6 +3094,12 @@ export interface paths {
          *     UI showing an empty table for the first would be lying.
          */
         get: operations["get_port_requirements"];
+        /**
+         * `PUT /api/v1/workspaces/{id}/ports` — declare what this repo binds.
+         * @description The declaration is the workspace's, which is the whole point of MAIN-301's
+         *     second cut: the control plane leases numbers and never learns what `PORT`
+         *     means to anybody.
+         */
         put: operations["set_port_requirements"];
         post?: never;
         delete?: never;

@@ -7355,6 +7355,8 @@
         "tags": [
           "crate::routes::workspaces"
         ],
+        "summary": "`PUT /api/v1/workspaces/{id}/ports` — declare what this repo binds.",
+        "description": "The declaration is the workspace's, which is the whole point of MAIN-301's\nsecond cut: the control plane leases numbers and never learns what `PORT`\nmeans to anybody.",
         "operationId": "set_port_requirements",
         "parameters": [
           {
