@@ -1318,6 +1318,17 @@ impl WorkspaceRepository for DbWorkspaceRepository {
                      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
                      ON CONFLICT (node_id, path) DO UPDATE SET
                        workspace_id = EXCLUDED.workspace_id,
+                       -- The tenant FOLLOWS the workspace. Leaving it out of this
+                       -- list is what stranded two prod nodes: healing a row in
+                       -- place re-points `workspace_id` at a workspace in another
+                       -- tenant, and without this the row keeps its old
+                       -- `tenant_id` and contradicts itself. Every read here is
+                       -- tenant-scoped, so `present_checkouts` stops seeing it —
+                       -- the reconciler concludes the node has no checkout,
+                       -- re-clones every 60s forever, and never reaches session
+                       -- placement. The clones kept SUCCEEDING, which is why it
+                       -- looked like nothing was happening at all.
+                       tenant_id = EXCLUDED.tenant_id,
                        git_remote_url = EXCLUDED.git_remote_url,
                        git_remote_normalized = EXCLUDED.git_remote_normalized,
                        git_branch = EXCLUDED.git_branch,
@@ -1362,6 +1373,11 @@ impl WorkspaceRepository for DbWorkspaceRepository {
                      VALUES ($1, $2, $3, $4, $5, $6, $7, {empty_json}, 'clone')
                      ON CONFLICT (node_id, path) DO UPDATE SET
                        workspace_id = EXCLUDED.workspace_id,
+                       -- Same rule as `upsert_checkout`: the tenant follows the
+                       -- workspace. A clone completing onto a path some stale row
+                       -- already claims must correct BOTH, or it heals the
+                       -- pointer and leaves the scope wrong.
+                       tenant_id = EXCLUDED.tenant_id,
                        git_remote_url = EXCLUDED.git_remote_url,
                        git_remote_normalized = EXCLUDED.git_remote_normalized,
                        kind = EXCLUDED.kind,
