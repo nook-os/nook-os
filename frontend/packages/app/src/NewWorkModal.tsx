@@ -76,7 +76,11 @@ function NewWorkModal() {
     queryKey: ["workspaces"],
     queryFn: async () => (await api.GET("/api/v1/workspaces")).data ?? [],
   });
-  const { data: credentials } = useQuery({
+  const {
+    data: credentials,
+    isLoading: credsLoading,
+    isError: credsFailed,
+  } = useQuery({
     queryKey: ["git-credentials"],
     queryFn: fetchCredentials,
   });
@@ -484,12 +488,36 @@ function NewWorkModal() {
               {newIntent === "clone" && (
                 <div className="field">
                   <label>SSH credential (for private repos)</label>
-                  <select className="input" value={credentialId} onChange={(e) => setCredentialId(e.target.value)}>
+                  <select
+                    className="input"
+                    value={credentialId}
+                    disabled={credsLoading || credsFailed}
+                    onChange={(e) => setCredentialId(e.target.value)}
+                  >
                     <option value="">node's own key</option>
                     {(credentials ?? []).map((c) => (
                       <option key={c.id} value={c.id}>🔑 {c.name}</option>
                     ))}
                   </select>
+                  {/* This is the screen where a private repo first gets a key, so a
+                      silent failure here is the expensive one: you would deploy with
+                      nothing pinned, `start_clone` would send `ssh_key: None`, and it
+                      would surface much later as an authentication error with nothing
+                      pointing back here. */}
+                  {credsLoading ? (
+                    <div className="muted">Loading credentials…</div>
+                  ) : credsFailed ? (
+                    <div className="muted">
+                      Could not load credentials — this is not the same as having none.
+                      Deploying now pins nothing, and a private repo will fail to clone;
+                      set the key afterwards under the workspace's <b>Git credential</b>.
+                    </div>
+                  ) : (credentials ?? []).length === 0 ? (
+                    <div className="muted">
+                      No keys stored — add one under Settings → Git credentials. Public
+                      repos and local paths need none.
+                    </div>
+                  ) : null}
                 </div>
               )}
             </>
