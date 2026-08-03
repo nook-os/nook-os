@@ -1474,6 +1474,10 @@ struct FakeNode {
 #[derive(Debug, Clone)]
 struct FakeSession {
     id: SessionId,
+    /// Stored, not read: the fake mirrors the real row, and every query the
+    /// node socket makes is already scoped by node. Kept so a test that starts
+    /// needing tenant scoping has it, rather than reshaping the fake then.
+    #[expect(dead_code)]
     tenant: TenantId,
     node: NodeId,
     status: String,
