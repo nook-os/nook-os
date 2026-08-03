@@ -24,7 +24,9 @@ async fn session_for_content(
 ) -> ApiResult<Session> {
     let session: Option<Session> = state.sessions.by_id_unscoped(id).await?;
     let session = session.ok_or(ApiError::NotFound)?;
-    auth.require_session_access(state, session.tenant_id)
+    // The node is read from the SESSION row, never from the request — a caller
+    // cannot name a machine they own to reach a terminal on one they do not.
+    auth.require_session_access(state, session.tenant_id, session.node_id)
         .await?;
     Ok(session)
 }

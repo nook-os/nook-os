@@ -35,7 +35,10 @@ pub async fn attach_ws(
     // THE session-content route: this socket carries the raw terminal stream —
     // every keystroke and every byte of output. Membership only; no role at any
     // scope reaches it. See auth/session_guard.rs.
-    if let Err(e) = auth.require_session_access(&state, session.tenant_id).await {
+    if let Err(e) = auth
+        .require_session_access(&state, session.tenant_id, session.node_id)
+        .await
+    {
         return e.into_response();
     }
     // Attaching is a terminal on that machine: keystrokes in, output out.
