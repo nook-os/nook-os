@@ -150,9 +150,13 @@ async fn a_checkout_flagged_missing_still_yields_its_key() {
     let node = bed.node(tenant, person).await;
     let workspace = bed.workspace(tenant).await;
     add_checkout(&bed.db(), tenant, node, workspace).await;
+    // `CURRENT_TIMESTAMP`, not `now()`: this test asserts engine-independent
+    // behaviour and must run on both legs, but `now()` is Postgres-only and the
+    // sqlite leg answers "no such function". Standard SQL is the version both
+    // engines take (docs/db-dialect-audit.md).
     bed.db()
         .exec(
-            "UPDATE node_workspaces SET missing_at = now()
+            "UPDATE node_workspaces SET missing_at = CURRENT_TIMESTAMP
              WHERE node_id = $1 AND workspace_id = $2",
             params![node, workspace],
         )
