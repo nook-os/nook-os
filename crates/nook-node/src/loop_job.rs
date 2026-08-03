@@ -51,6 +51,10 @@ pub struct LoopJob {
     /// The workspace's pinned key, for the clone cache — which runs before any
     /// session exists and so cannot use the shim `workspace_id` enables.
     pub ssh_key: Option<String>,
+    /// The credential the AGENT acts with — scoped to the job's tenant, issued
+    /// as its initiator. Without it `nook` inside the agent reads this machine's
+    /// login file and acts as whoever last logged in here, in THEIR tenant.
+    pub nook_token: Option<String>,
 }
 
 /// Worktree directory names of jobs running on this node right now, so
@@ -128,20 +132,18 @@ fn repo_slug(repo_url: &str) -> String {
 /// and `TransientKey`'s Drop removes it — including on the error paths, which is
 /// why the guard is bound rather than passed inline.
 fn ensure_mirror_in(base: &Path, repo_url: &str, ssh_key: Option<&str>) -> Result<PathBuf, String> {
-    let held = ssh_key.and_then(crate::gitops::TransientKey::write);
-    let key = held.as_ref().map(|k| k.path.as_path());
     let cache = base.join(format!("{}.git", repo_slug(repo_url)));
     if cache.join("HEAD").exists() {
-        // The fetch needs it too: a mirror that cloned once still has to pull
-        // updates from the same private remote on every later job.
-        crate::gitops::run_git(&["fetch", "--prune"], Some(&cache), key)?;
+        // The fetch needs the key too: a mirror that cloned once still pulls
+        // from the same private remote on every later job.
+        crate::gitops::run_git_remote(&["fetch", "--prune"], Some(&cache), ssh_key)?;
     } else {
         std::fs::create_dir_all(base)
             .map_err(|e| format!("cannot create {}: {e}", base.display()))?;
-        crate::gitops::run_git(
+        crate::gitops::run_git_remote(
             &["clone", "--mirror", repo_url, &cache.to_string_lossy()],
             None,
-            key,
+            ssh_key,
         )?;
     }
     Ok(cache)
@@ -284,6 +286,7 @@ pub fn run(cfg: NodeConfig, out: Sender<NodeToControl>, job: LoopJob) {
         seed,
         workspace_id,
         ssh_key,
+        nook_token,
     } = job;
     let dirname = job_dirname(&job_id);
     if let Ok(mut s) = running_jobs().lock() {
@@ -362,6 +365,11 @@ pub fn run(cfg: NodeConfig, out: Sender<NodeToControl>, job: LoopJob) {
             skill,
             &target_task_key,
             seed.as_deref(),
+            AgentIdentity {
+                token: nook_token.as_deref(),
+                server: &cfg.server,
+                workspace_id: workspace_id.as_deref(),
+            },
         ),
         crate::job_adapter::Adapter::Tmux => drive_session(
             &out,
@@ -424,6 +432,22 @@ const RUNTIME: &str = "claude";
 /// `(ok, message)` contract, same transcript stream back to the control plane —
 /// so the two adapters are interchangeable from `run`'s point of view and a
 /// skill cannot tell which one is driving it.
+/// What the agent needs to act as the JOB rather than as the machine it happens
+/// to be running on. One struct because the three travel together and mean
+/// nothing apart — and because passing them loose pushed `drive_streaming` past
+/// clippy's argument limit, which was a fair complaint about the shape.
+struct AgentIdentity<'a> {
+    /// The job's tenant-scoped token, issued as its initiator. `None` means
+    /// minting failed upstream and the agent falls back to this machine's login
+    /// — the old behaviour, and the bug.
+    token: Option<&'a str>,
+    /// The control plane that issued `token`. A token is only meaningful against
+    /// its issuer, so the two always travel together.
+    server: &'a str,
+    /// So `nook get workspace git-ssh` can name the repo it authenticates for.
+    workspace_id: Option<&'a str>,
+}
+
 fn drive_streaming(
     out: &Sender<NodeToControl>,
     job_id: &str,
@@ -431,6 +455,7 @@ fn drive_streaming(
     skill: &str,
     target: &str,
     seed: Option<&str>,
+    identity: AgentIdentity<'_>,
 ) -> (bool, String) {
     use crate::job_adapter::{self, Event, StreamingSession, TurnState};
 
@@ -447,6 +472,22 @@ fn drive_streaming(
     ];
     if let Some(s) = seed.filter(|s| !s.trim().is_empty()) {
         env.push(("NOOK_JOB_SEED", s));
+    }
+    // The agent's own identity, in the JOB's tenant. `AuthConfig::load` reads a
+    // FILE, so without this `nook` inside the agent acts as whoever last ran
+    // `nook login` on this machine — on a shared operator node, one human in one
+    // tenant, which is how a job for another tenant's workspace listed the wrong
+    // boards and drafted against the wrong one.
+    if let Some(t) = identity.token.filter(|t| !t.trim().is_empty()) {
+        env.push(("NOOK_TOKEN", t));
+        env.push(("NOOK_SERVER", identity.server));
+    }
+    // The streaming adapter spawns the agent directly and never touches tmux,
+    // so it never inherited what `tmux.rs` exports. `nook get workspace git-ssh`
+    // needs this to name the repo it is authenticating for; without it, git
+    // inside the agent silently falls back to the node's own key.
+    if let Some(w) = identity.workspace_id.filter(|w| !w.trim().is_empty()) {
+        env.push(("NOOK_WORKSPACE_ID", w));
     }
 
     let mut session = match StreamingSession::spawn(RUNTIME, &args, worktree, &env) {
@@ -894,7 +935,6 @@ mod tests {
 
 #[cfg(test)]
 mod clone_cache_key_tests {
-    use super::*;
 
     /// The clone cache must USE the workspace's key, not the node's own.
     ///

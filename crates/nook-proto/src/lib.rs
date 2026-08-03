@@ -518,6 +518,24 @@ pub enum ControlToNode {
         /// the node's own reach applies — a public repo or a local path.
         #[serde(default)]
         ssh_key: Option<String>,
+        /// The credential the AGENT acts with.
+        ///
+        /// Without these the agent shells out to `nook`, which reads a FILE —
+        /// whatever `nook login` last wrote on the executor. On a shared
+        /// operator node that is one human's token for one tenant, so a job for
+        /// another tenant's workspace listed that human's boards and drafted
+        /// against the wrong one. The job never picked a board; it had no
+        /// identity to pick with.
+        ///
+        /// Scoped to the job's tenant, issued as its initiator, revoked when the
+        /// job ends. `None` means minting failed — the agent falls back to the
+        /// node's login exactly as before, which is logged loudly.
+        ///
+        /// Only the token travels: the node already knows which control plane it
+        /// belongs to, so sending a server URL would be a second source of truth
+        /// for something it can never disagree with itself about.
+        #[serde(default)]
+        nook_token: Option<String>,
         /// The branch the per-job worktree is based on.
         branch: String,
         /// The human's opening brief for this run (MAIN-231), if one was given

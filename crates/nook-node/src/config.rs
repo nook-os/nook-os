@@ -168,7 +168,35 @@ pub fn auth_path() -> Result<PathBuf> {
 }
 
 impl AuthConfig {
+    /// The credential this `nook` invocation acts with.
+    ///
+    /// `NOOK_TOKEN` WINS over the login file, and that ordering is the point. A
+    /// loop job's agent runs on a shared operator node where the file holds one
+    /// human's token for one tenant; reading it meant a job for another tenant's
+    /// workspace listed that human's boards and drafted against the wrong one.
+    /// The job never chose a board — it had no identity to choose with.
+    ///
+    /// So an explicitly supplied identity beats an ambient one. The env var is
+    /// set per-process by whoever knows which tenant this run belongs to, while
+    /// the file is "whoever last logged in on this machine"; when both exist, the
+    /// caller who knew is right.
+    ///
+    /// `NOOK_SERVER` rides along because a token is only meaningful against the
+    /// control plane that issued it — taking the token from one place and the
+    /// server from another is how you get a confusing 401.
     pub fn load() -> Result<Self> {
+        if let Ok(token) = std::env::var("NOOK_TOKEN") {
+            let token = token.trim().to_string();
+            if !token.is_empty() {
+                return Ok(Self {
+                    server: std::env::var("NOOK_SERVER")
+                        .ok()
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty()),
+                    token,
+                });
+            }
+        }
         let path = auth_path()?;
         let raw = std::fs::read_to_string(&path)
             .with_context(|| format!("no login at {}", path.display()))?;
@@ -543,5 +571,65 @@ mod security_tests {
             "production must refuse the hatch outright, got: {err}"
         );
         clear();
+    }
+}
+
+#[cfg(test)]
+mod job_identity_tests {
+    use super::*;
+
+    /// A supplied identity beats the ambient one.
+    ///
+    /// The bug: a loop job's agent shells out to `nook`, `AuthConfig::load` read
+    /// the login FILE, and on a shared operator node that file is one human's
+    /// token for one tenant — so the job listed that human's boards and drafted
+    /// against the wrong one. It never picked a board; it had nothing else to
+    /// pick with.
+    ///
+    /// Serialised and restored by hand because these are process-globals: two
+    /// tests racing on `NOOK_TOKEN` would flake each other, which is the same
+    /// class of trap `wizard::skills` documents about `HOME`.
+    #[test]
+    fn nook_token_overrides_the_login_file() {
+        let _guard = env_lock();
+        let prev = (
+            std::env::var("NOOK_TOKEN").ok(),
+            std::env::var("NOOK_SERVER").ok(),
+        );
+        std::env::set_var("NOOK_TOKEN", "nook_user_from_the_job");
+        std::env::set_var("NOOK_SERVER", "https://cp.example");
+
+        let cfg = AuthConfig::load().expect("an env identity needs no login file");
+        assert_eq!(cfg.token, "nook_user_from_the_job");
+        assert_eq!(cfg.server.as_deref(), Some("https://cp.example"));
+
+        // Blank is the same as absent: an empty variable must not shadow a real
+        // login with a token that cannot authenticate.
+        std::env::set_var("NOOK_TOKEN", "   ");
+        let fell_through = AuthConfig::load()
+            .map(|c| c.token)
+            .unwrap_or_else(|_| "<no login file>".into());
+        assert_ne!(
+            fell_through, "   ",
+            "a blank NOOK_TOKEN was taken as an identity"
+        );
+
+        restore("NOOK_TOKEN", prev.0);
+        restore("NOOK_SERVER", prev.1);
+    }
+
+    fn restore(key: &str, prev: Option<String>) {
+        match prev {
+            Some(v) => std::env::set_var(key, v),
+            None => std::env::remove_var(key),
+        }
+    }
+
+    /// One lock for every test that touches these process-globals.
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
     }
 }

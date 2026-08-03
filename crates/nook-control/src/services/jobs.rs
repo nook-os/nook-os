@@ -760,6 +760,9 @@ pub async fn dispatch_to_node(state: &AppState, tenant: TenantId, job: &LoopJob)
             // step on the node's own generated key and a private repo refused it
             // at "preparing workspace". Same delivery `CloneRepo` uses.
             ssh_key: crate::services::workspace_git_key(state, tenant, workspace_id).await,
+            // The agent's own identity, in the JOB's tenant, as the person who
+            // asked for the run. Revoked in `finish`.
+            nook_token: mint_job_token(state, tenant, job.requested_by, job.id).await,
             job_id: job.id.0.to_string(),
             kind: job.kind.clone(),
             target_task_key,
@@ -797,6 +800,11 @@ pub async fn finish(
         append_transcript(state, id, "system", message).await.ok();
     }
     let _ = transition(state, tenant, id, if ok { "completed" } else { "failed" }).await;
+    // The agent's credential dies with the run. Expiry alone would leave a
+    // working token on a shared operator node for the rest of its window after
+    // the work is done. Unconditional: a FAILED job's token is exactly as live
+    // as a successful one's.
+    revoke_job_token(state, tenant, id).await;
     Ok(())
 }
 
@@ -968,4 +976,78 @@ pub async fn finish_from_node(
         return Ok(());
     }
     finish(state, tenant, id, ok, message).await
+}
+
+/// The name a job's token carries, so it is identifiable in Settings → Access
+/// tokens and findable for revocation without a second table.
+fn job_token_name(id: JobId) -> String {
+    format!("loop-job {}", id.0)
+}
+
+/// Mint the credential the agent inside a loop job acts with.
+///
+/// Without this the agent shells out to `nook` and `AuthConfig::load()` reads a
+/// FILE — whatever `nook login` last wrote on the executor. On a shared operator
+/// node that is one human's token for one tenant, so a job for another tenant's
+/// workspace listed that human's boards and drafted against the wrong one. The
+/// job never chose a board; nothing had ever given it an identity to choose
+/// with.
+///
+/// Scoped to the JOB's tenant and issued as `requested_by` — the person who
+/// started it. Bot identities are deliberately parked until RBAC lands, so
+/// attributing to the initiator is the honest option: they asked for this run,
+/// and every board action it takes is theirs.
+///
+/// **This buys the right TENANT, not least privilege.** `user_tokens` can
+/// express only `tenant_id` and `expires_at`; inside that tenant the token can
+/// do whatever the initiator can. It is strictly better than a cross-tenant
+/// human credential on a shared box, and it is not a sandbox — the job-anchored
+/// design that would be is tracked as a follow-up.
+///
+/// The expiry is a backstop, not the mechanism: [`revoke_job_token`] runs when
+/// the job finishes. The window matches the node's own job timeout so a node
+/// that dies without reporting cannot leave a usable token behind for long.
+pub async fn mint_job_token(
+    state: &AppState,
+    tenant: TenantId,
+    requested_by: UserId,
+    id: JobId,
+) -> Option<String> {
+    let token = crate::routes::join::random_token(crate::auth::USER_TOKEN_PREFIX, 40);
+    let new = crate::repo::identity::NewUserToken {
+        id: Uuid::now_v7(),
+        tenant,
+        user_id: requested_by,
+        token_hash: crate::seed::hash_token(&token),
+        name: job_token_name(id),
+        // The node stops a job at 60 minutes; two hours leaves room for the
+        // finish report without leaving a long-lived credential lying around.
+        expires_at: Some(chrono::Utc::now() + chrono::Duration::hours(2)),
+    };
+    match state.identity.create_user_token(new).await {
+        Ok(()) => Some(token),
+        Err(e) => {
+            // Not fatal: the job still runs, the agent just falls back to the
+            // node's own login exactly as it did before. Loud, because that
+            // fallback is the bug this exists to fix.
+            tracing::error!(job = %id.0, error = %e, "could not mint a job token — the agent will fall back to the node's login and may see the wrong tenant");
+            None
+        }
+    }
+}
+
+/// Revoke a job's token the moment the job ends, whatever the outcome.
+///
+/// Expiry alone would leave a working credential on a shared node for the rest
+/// of its window after the work is done. Best-effort by design: a failure here
+/// must not turn a finished job into a failed one, and the expiry still bounds
+/// it.
+pub async fn revoke_job_token(state: &AppState, tenant: TenantId, id: JobId) {
+    if let Err(e) = state
+        .identity
+        .revoke_user_tokens_named(tenant, &job_token_name(id))
+        .await
+    {
+        tracing::warn!(job = %id.0, error = %e, "could not revoke the job token; it expires on its own");
+    }
 }
