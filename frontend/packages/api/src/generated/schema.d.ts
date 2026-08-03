@@ -2984,6 +2984,29 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workspaces/{id}/credential": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * `PUT /api/v1/workspaces/{id}/credential` — pin the ssh key this repo clones
+         *     and fetches with, or unpin it with `null` (MAIN-367).
+         * @description Returns the workspace, never the key: the private half leaves this process
+         *     only as transient material delivered to a node for one git command, and an
+         *     endpoint a browser can reach must never be a way to read it back (AC-7).
+         */
+        put: operations["set_workspace_credential"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workspaces/{id}/git": {
         parameters: {
             query?: never;
@@ -5934,6 +5957,13 @@ export interface components {
         SetVaultPassphraseRequest: {
             passphrase: string;
         };
+        /**
+         * @description Pin or unpin a workspace's git credential (MAIN-367). `null` unpins, which
+         *     returns the workspace to the node's own key.
+         */
+        SetWorkspaceCredentialRequest: {
+            credential_id?: null | components["schemas"]["GitCredentialId"];
+        };
         /** @description Scope values: `tenant` | `user`. */
         Setting: {
             id: components["schemas"]["SettingId"];
@@ -6785,6 +6815,7 @@ export interface components {
             /** Format: date-time */
             created_at: string;
             description?: string | null;
+            git_credential_id?: null | components["schemas"]["GitCredentialId"];
             /**
              * @description The normalized form of [`Self::git_remote_url`] used to match a discovered
              *     checkout back to its workspace (host+path, scheme/creds/`.git` stripped).
@@ -12313,6 +12344,37 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    set_workspace_credential: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SetWorkspaceCredentialRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Workspace"];
+                };
             };
             404: {
                 headers: {

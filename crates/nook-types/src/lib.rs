@@ -961,6 +961,14 @@ pub struct ManagedContent {
 
 // ── Workspaces ───────────────────────────────────────────────────────────────
 
+/// Pin or unpin a workspace's git credential (MAIN-367). `null` unpins, which
+/// returns the workspace to the node's own key.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct SetWorkspaceCredentialRequest {
+    #[serde(default)]
+    pub credential_id: Option<GitCredentialId>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, nook_db::FromDbRow, ToSchema)]
 pub struct Workspace {
     pub id: WorkspaceId,
@@ -985,6 +993,14 @@ pub struct Workspace {
     /// nothing" and is honoured as the different statement it is.
     #[serde(default)]
     pub port_requirements: Option<serde_json::Value>,
+    /// Which stored ssh key this repo clones and fetches with (MAIN-367).
+    ///
+    /// The ID only — the private half never leaves the control plane except as
+    /// transient material delivered for a single git command. `None` means
+    /// unpinned, and unpinned falls back to the node's own generated key, which
+    /// is what public repos and local paths have always used.
+    #[serde(default)]
+    pub git_credential_id: Option<GitCredentialId>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

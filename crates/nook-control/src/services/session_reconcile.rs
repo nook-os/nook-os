@@ -707,10 +707,8 @@ async fn reconcile_workspace(
 /// the `node_workspaces` row and the next pass places the session, so holding
 /// the pass on a multi-minute clone would only stall every other workspace.
 ///
-/// No credential: the reconciler clones with the node's own reach — a local
-/// path, or a public/preconfigured remote. A private repo that needs a secret
-/// stays `needs_clone` rather than failing here; wiring the workspace's stored
-/// credential in is the follow-up.
+/// Carries the workspace's pinned credential when it has one (MAIN-367), and
+/// the node's own reach when it does not — a local path, or a public remote.
 async fn start_clone(
     state: &AppState,
     tenant: TenantId,
@@ -730,6 +728,13 @@ async fn start_clone(
     // Whose tree this checkout belongs in. The REQUESTING tenant, which on a
     // cross-tenant placement is not the node's own (MAIN-363).
     let tenant_slug = crate::services::tenant_slug(state, tenant).await;
+
+    // The workspace's own key (MAIN-367). This is what the "no credential"
+    // comment here used to admit was missing: without it every clone went out
+    // with the node's generated key, which no private repo authorizes, so a
+    // loop could never start on one. `None` still means "the node's own reach",
+    // which is what public repos and local paths need.
+    let ssh_key = crate::services::workspace_git_key(state, tenant, workspace).await;
     let Some(rx) =
         state
             .registry
@@ -737,7 +742,7 @@ async fn start_clone(
                 request_id,
                 url: url.clone(),
                 dest_name: None,
-                ssh_key: None,
+                ssh_key: ssh_key.clone(),
                 tenant_slug: tenant_slug.clone(),
             })
     else {

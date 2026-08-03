@@ -294,6 +294,130 @@ pub async fn get_port_requirements(
     ))
 }
 
+/// How long a checkout may carry `missing_at` and still yield its key.
+///
+/// Discovery re-reports every node's checkouts on a 300s `DISCOVERY_INTERVAL`,
+/// so a genuinely transient `missing_at` — a node restarting, a scan that ran
+/// while a directory was briefly unreadable — clears within one cycle. Three
+/// cycles of slack absorbs a missed one without opening the window further.
+///
+/// The alternative shapes are both wrong. Ignoring `missing_at` entirely (what
+/// this route did before) means pruning a workspace from a node never revokes
+/// its key access: the reaper that finally deletes the row runs at
+/// `workspace_missing_retention_secs` (default 7 days) and is itself gated on
+/// `loops.enabled`, which ships OFF — so in practice the access never ends,
+/// while "prune" reads to an operator as a revocation gesture. Refusing on any
+/// `missing_at` is the other extreme, and it is what MAIN-363 was hurt by: a
+/// clone landing outside the scan roots was flagged missing while sitting
+/// perfectly on disk, and refusing here turned that into an authentication
+/// failure two layers away.
+const CHECKOUT_MISSING_GRACE_SECS: i64 = 15 * 60;
+
+/// `GET /api/v1/nodes/{node_id}/workspaces/{id}/git-key` — the workspace's ssh
+/// key, as material for ONE ssh invocation (MAIN-367).
+///
+/// The deliberate delivery channel, and the only one. It exists because git
+/// authenticates by forking `ssh`, so a shim on the machine has to be able to
+/// obtain a key; `nook get workspace git-ssh` is that shim and this is what it
+/// calls.
+///
+/// Keyed on NODE and WORKSPACE rather than on a session, which is the whole
+/// point of its shape. A git credential is workspace data, not session content:
+/// anchoring it to a session forced it through `session_for_content` and made a
+/// cross-tenant node widen that guard for all nine session routes — far more
+/// than fetching a key needs.
+///
+/// **MACHINE-ONLY, and that is the load-bearing part** (owner's ruling on
+/// MAIN-367, 2026-08-03). This route hands back a decrypted private key, so a
+/// human credential must not reach it. `require_node_may_use` was the wrong
+/// guard: its user leg admits any member of a tenant the node is SHARED with,
+/// and a shared operator node running other tenants' workspaces is the normal
+/// case — so a session cookie was enough to read any key off it. Cross-tenant
+/// placement (MAIN-353) still works, because a machine asking about itself never
+/// consults tenants at all.
+///
+/// AC-7 holds as ruled: the key reaches no browser, no log and no event payload.
+/// Absence from the OpenAPI surface is NOT what makes that true — the guard is.
+/// 204 when the workspace pins nothing, which is the ordinary case — the shim
+/// then execs plain ssh and the node's own key applies.
+#[utoipa::path(get, path = "/api/v1/nodes/{node_id}/workspaces/{id}/git-key",
+    operation_id = "workspace_git_key",
+    params(("node_id" = String, Path,), ("id" = String, Path,)),
+    responses((status = 200), (status = 204), (status = 404)))]
+pub async fn git_key(
+    State(state): State<AppState>,
+    auth: AuthCtx,
+    Path((node_id, id)): Path<(NodeId, WorkspaceId)>,
+) -> ApiResult<axum::response::Response> {
+    use axum::response::IntoResponse;
+
+    // Delivering key material, so: this machine, about itself, and no human.
+    auth.require_node_is_self(node_id)?;
+
+    // The workspace must actually be checked out ON that node. Without this a
+    // node could name any workspace id and be handed its key; with it, the node
+    // may only ask about repos it demonstrably holds.
+    let owner = state
+        .workspaces
+        .checkout_owner_at_node(node_id, id, CHECKOUT_MISSING_GRACE_SECS)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+
+    match crate::services::workspace_git_key(&state, owner, id).await {
+        Some(material) => Ok(material.into_response()),
+        None => Ok(axum::http::StatusCode::NO_CONTENT.into_response()),
+    }
+}
+
+/// `PUT /api/v1/workspaces/{id}/credential` — pin the ssh key this repo clones
+/// and fetches with, or unpin it with `null` (MAIN-367).
+///
+/// Returns the workspace, never the key: the private half leaves this process
+/// only as transient material delivered to a node for one git command, and an
+/// endpoint a browser can reach must never be a way to read it back (AC-7).
+#[utoipa::path(put, path = "/api/v1/workspaces/{id}/credential",
+    operation_id = "set_workspace_credential",
+    params(("id" = String, Path,)),
+    request_body = SetWorkspaceCredentialRequest,
+    responses((status = 200, body = Workspace), (status = 404)))]
+pub async fn set_credential(
+    State(state): State<AppState>,
+    auth: AuthCtx,
+    Path(id): Path<WorkspaceId>,
+    Json(req): Json<SetWorkspaceCredentialRequest>,
+) -> ApiResult<Json<Workspace>> {
+    // A person chooses a key; a node credential is not a person.
+    auth.require_user()?;
+    // Resolve it in THIS tenant before storing, so a credential id from another
+    // tenant is a 404 here rather than a foreign key error later.
+    if let Some(cred) = req.credential_id {
+        if state
+            .git_credentials
+            .sealed_secret(cred, auth.tenant_id)
+            .await?
+            .is_none()
+        {
+            return Err(ApiError::NotFound);
+        }
+    }
+    let ws = state
+        .workspaces
+        .set_git_credential(auth.tenant_id, id, req.credential_id)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    events::record(
+        &state,
+        auth.tenant_id,
+        EventDraft::new("workspace.credential_set")
+            .actor("user", auth.user_id.0)
+            .workspace(id)
+            // The id, never the key.
+            .payload(serde_json::json!({ "credential_id": req.credential_id })),
+    )
+    .await;
+    Ok(Json(ws))
+}
+
 /// `PUT /api/v1/workspaces/{id}/ports` — declare what this repo binds.
 ///
 /// The declaration is the workspace's, which is the whole point of MAIN-301's

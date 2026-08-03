@@ -156,6 +156,10 @@ pub fn build_router(state: AppState) -> Router {
             "/workspaces/{id}/ports",
             get(workspaces::get_port_requirements).put(workspaces::set_port_requirements),
         )
+        .route(
+            "/workspaces/{id}/credential",
+            put(workspaces::set_credential),
+        )
         .route("/workspaces/{id}/git", get(workspaces::git_status))
         .route("/workspaces/{id}/clone", post(workspaces::clone_to_node))
         .route("/workspaces/{id}/worktrees", post(gitops::add_worktree))
@@ -290,6 +294,10 @@ pub fn build_router(state: AppState) -> Router {
         // The sessionless replacement (MAIN-290). Coexists with the line
         // above until C5 retires it.
         .route("/runtime-auth", post(runtime_auth::start))
+        .route(
+            "/nodes/{node_id}/workspaces/{id}/git-key",
+            get(workspaces::git_key),
+        )
         .route("/nodes/{id}/rescan", post(nodes::rescan))
         .route("/nodes/{id}/migrate-paths", post(nodes::migrate_paths))
         .route("/nodes/{id}/update", post(nodes::update))

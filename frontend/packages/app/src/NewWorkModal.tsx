@@ -11,6 +11,7 @@ import { X } from "lucide-react";
 import { api, type NodeInfo } from "@nookos/api";
 import { defaultRuntime, RuntimePicker } from "@nookos/ui";
 import { useNewWork } from "./newwork";
+import { fetchCredentials } from "./GitCredentials";
 import { PORT_CAP_SENTENCE } from "./PortSafetyNotice";
 import { onJobFinish, useJobs } from "./jobs";
 import { WorkspaceLocations } from "./WorkspaceLocations";
@@ -75,9 +76,13 @@ function NewWorkModal() {
     queryKey: ["workspaces"],
     queryFn: async () => (await api.GET("/api/v1/workspaces")).data ?? [],
   });
-  const { data: credentials } = useQuery({
+  const {
+    data: credentials,
+    isLoading: credsLoading,
+    isError: credsFailed,
+  } = useQuery({
     queryKey: ["git-credentials"],
-    queryFn: async () => (await api.GET("/api/v1/git-credentials")).data ?? [],
+    queryFn: fetchCredentials,
   });
 
   // Starting work here IS a spawn, so offer nodes the caller may run on: their
@@ -278,6 +283,18 @@ function NewWorkModal() {
       body: { name: repoLabel(q), git_remote_url: q.trim() },
     });
     if (error || !ws) throw new Error(JSON.stringify(error) || "could not create workspace");
+    // Pin the key BEFORE the spec, because the spec is what the reconciler acts
+    // on: turn reconcile on with no credential and clone-on-demand fires with
+    // `ssh_key: None`, which no private repo authorizes (MAIN-367). The picker
+    // used to be hidden on this path entirely, so a declaratively-added private
+    // repo could never clone — the exact case that blocks a loop.
+    if (credentialId) {
+      const { error: credErr } = await api.PUT("/api/v1/workspaces/{id}/credential", {
+        params: { path: { id: ws.id } },
+        body: { credential_id: credentialId },
+      });
+      if (credErr) throw new Error(JSON.stringify(credErr));
+    }
     const { error: specErr } = await api.PUT("/api/v1/workspaces/{id}/session-spec", {
       params: { path: { id: ws.id } },
       body: {
@@ -468,15 +485,39 @@ function NewWorkModal() {
                   its ports on the workspace afterwards) and the limit lifts.
                 </div>
               )}
-              {newIntent === "clone" && !declarative && (
+              {newIntent === "clone" && (
                 <div className="field">
                   <label>SSH credential (for private repos)</label>
-                  <select className="input" value={credentialId} onChange={(e) => setCredentialId(e.target.value)}>
+                  <select
+                    className="input"
+                    value={credentialId}
+                    disabled={credsLoading || credsFailed}
+                    onChange={(e) => setCredentialId(e.target.value)}
+                  >
                     <option value="">node's own key</option>
                     {(credentials ?? []).map((c) => (
                       <option key={c.id} value={c.id}>🔑 {c.name}</option>
                     ))}
                   </select>
+                  {/* This is the screen where a private repo first gets a key, so a
+                      silent failure here is the expensive one: you would deploy with
+                      nothing pinned, `start_clone` would send `ssh_key: None`, and it
+                      would surface much later as an authentication error with nothing
+                      pointing back here. */}
+                  {credsLoading ? (
+                    <div className="muted">Loading credentials…</div>
+                  ) : credsFailed ? (
+                    <div className="muted">
+                      Could not load credentials — this is not the same as having none.
+                      Deploying now pins nothing, and a private repo will fail to clone;
+                      set the key afterwards under the workspace's <b>Git credential</b>.
+                    </div>
+                  ) : (credentials ?? []).length === 0 ? (
+                    <div className="muted">
+                      No keys stored — add one under Settings → Git credentials. Public
+                      repos and local paths need none.
+                    </div>
+                  ) : null}
                 </div>
               )}
             </>

@@ -450,6 +450,7 @@ pub async fn restart(
             session_id: id,
             runtime: session.runtime.clone(),
             workspace_path,
+            workspace_id: session.workspace_id,
             cols: 120,
             rows: 32,
             // The SAME ports it already holds (MAIN-301). A restart is the

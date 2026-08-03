@@ -48,6 +48,9 @@ pub enum Cmd {
         cols: u16,
         rows: u16,
         ports: Vec<nook_types::LeasedPort>,
+        /// Exported into the session so the git-ssh shim can name its repo
+        /// without a session lookup (MAIN-367). `None` for an ad-hoc terminal.
+        workspace_id: Option<String>,
     },
     StartAuth {
         session_id: SessionId,
@@ -126,7 +129,16 @@ impl Manager {
                 cols,
                 rows,
                 ports,
-            } => self.start(session_id, &runtime, &cwd, cols, rows, &ports),
+                workspace_id,
+            } => self.start(
+                session_id,
+                &runtime,
+                &cwd,
+                cols,
+                rows,
+                &ports,
+                workspace_id.as_deref(),
+            ),
             Cmd::StartAuth {
                 session_id,
                 runtime,
@@ -163,6 +175,9 @@ impl Manager {
         });
     }
 
+    // Matches `new_job_session`'s precedent in tmux.rs: these are the fields of
+    // one session-start request, already grouped as `Cmd::Start` on the wire.
+    #[allow(clippy::too_many_arguments)]
     pub fn start(
         &mut self,
         session_id: SessionId,
@@ -171,6 +186,7 @@ impl Manager {
         cols: u16,
         rows: u16,
         ports: &[nook_types::LeasedPort],
+        workspace_id: Option<&str>,
     ) {
         // The runtime string is the executable to launch. Restrict to the
         // known set so the control plane can't run arbitrary commands.
@@ -185,9 +201,16 @@ impl Manager {
             // The canonical (hyphenated) uuid, not the tmux name's simple form,
             // so `GET /api/v1/sessions/{id}` inside the session resolves.
             let sid = session_id.0.to_string();
-            if let Err(e) =
-                tmux::new_session(&tmux_name, workspace_path, cols, rows, runtime, &sid, ports)
-            {
+            if let Err(e) = tmux::new_session(
+                &tmux_name,
+                workspace_path,
+                cols,
+                rows,
+                runtime,
+                &sid,
+                ports,
+                workspace_id,
+            ) {
                 return self.session_failed(session_id, e.to_string());
             }
         }

@@ -51,6 +51,33 @@ impl Client {
         })
     }
 
+    /// Build a client that speaks as THIS MACHINE, never as the person at the
+    /// keyboard (MAIN-367).
+    ///
+    /// [`Self::from_config`] prefers a `nook login` user token whenever one
+    /// exists, which is the right default for everything a human drives. It is
+    /// wrong for the git-key fetch: that route is machine-only by the owner's
+    /// ruling, so a shim built with `from_config` would present a user token on
+    /// any machine somebody had logged into — which is every dev box and, per
+    /// the dev stack's own setup, the operator node — and be refused.
+    ///
+    /// Deliberately does NOT fall back to the user token when there is no node
+    /// config. Falling back would send a credential this endpoint refuses and
+    /// surface as a puzzling 403; "this machine has not joined a fleet" is the
+    /// truthful answer, and the shim's caller degrades to plain ssh on it.
+    pub fn as_this_node() -> Result<Self> {
+        let cfg = NodeConfig::load()
+            .context("this machine has not joined a fleet — run `nook setup` to join it")?;
+        let base = cfg.server.trim_end_matches('/').to_string();
+        let insecure = crate::config::check_server_security(&base, false)?;
+        crate::config::warn_if_insecure(insecure, &base);
+        Ok(Self {
+            base,
+            token: cfg.node_token,
+            http: reqwest::Client::new(),
+        })
+    }
+
     /// Is this client acting as a person rather than as this machine? Drives
     /// the "which node can I target" logic in `start`.
     pub fn is_user(&self) -> bool {
@@ -92,6 +119,27 @@ impl Client {
 
     pub async fn get(&self, path: &str) -> Result<Value> {
         self.send(reqwest::Method::GET, path, None).await
+    }
+
+    /// GET returning the RAW body, for endpoints whose answer is not JSON.
+    ///
+    /// The git-ssh shim's key material is one of those: a PEM block is not a
+    /// JSON document, and wrapping it in one would only mean the shim had to
+    /// unwrap it again (MAIN-367). An empty body — the 204 a workspace with no
+    /// pinned credential returns — comes back as an empty string.
+    pub async fn get_text(&self, path: &str) -> Result<String> {
+        let url = format!("{}{}", self.base.trim_end_matches('/'), path);
+        let res = self
+            .http
+            .get(&url)
+            .bearer_auth(&self.token)
+            .send()
+            .await
+            .with_context(|| format!("cannot reach {url}"))?;
+        if !res.status().is_success() {
+            anyhow::bail!("{} returned {}", path, res.status());
+        }
+        Ok(res.text().await.unwrap_or_default())
     }
 
     pub async fn post(&self, path: &str, body: Value) -> Result<Value> {
@@ -2964,5 +3012,214 @@ mod migrate_tests {
         );
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+/// `nook get workspace git-ssh …` — the ssh shim git runs (MAIN-367).
+///
+/// Sessions export `GIT_SSH_COMMAND` pointing here, so every git command inside
+/// one — typed by a person, or run by a loop agent that knows nothing about any
+/// of this — authenticates with the workspace's own key. An agent cannot forget
+/// to fetch a credential it never has to ask for.
+///
+/// The key is written for the length of ONE ssh invocation and removed in the
+/// same breath. Nothing persists on the node, which is the property that lets a
+/// shared operator machine clone a private repo without becoming a place where
+/// private keys accumulate. `TempKey`'s Drop is what guarantees it, so an ssh
+/// that fails, is killed, or panics still cleans up.
+///
+/// Falls through to plain ssh whenever there is no key to use — outside a nook
+/// session, in an ad-hoc terminal, or for a workspace that pins nothing. That is
+/// the ordinary case and it must keep working untouched: public repos and local
+/// paths have never needed a credential.
+pub async fn git_ssh(args: &[String]) -> Result<()> {
+    let key = fetch_session_git_key().await;
+    let held = key.as_deref().and_then(TempKey::write);
+
+    let mut cmd = std::process::Command::new("ssh");
+    if let Some(k) = &held {
+        // `IdentitiesOnly` so a stray agent identity cannot silently answer for
+        // a repo this key was chosen for.
+        cmd.args(["-i", &k.path.to_string_lossy(), "-o", "IdentitiesOnly=yes"]);
+    }
+    cmd.args(args);
+    let status = cmd.status().context("could not run ssh")?;
+    // Dropping `held` removes the key before this process exits, whatever ssh did.
+    drop(held);
+    std::process::exit(status.code().unwrap_or(1));
+}
+
+/// The workspace credential for the repo this session is in, or `None`.
+///
+/// Asked as NODE + WORKSPACE, not as a session (MAIN-367 review). A git
+/// credential is workspace data, not session content: routing it through a
+/// session forced the fetch onto the session-content authorization path, and a
+/// node running another tenant's workspace could only be let through there by
+/// widening that guard for every session route. Both ids are already to hand —
+/// the node knows itself from its config, and the session exports
+/// `NOOK_WORKSPACE_ID` — so this needs no lookup at all.
+///
+/// Falling back to the node's own key is correct for a workspace that pins
+/// nothing, and a lie for a workspace that pins one we could not fetch — but
+/// both used to be a silent `None`. That silence hid two real defects during
+/// this ticket's own review: a cross-tenant 403, and a loop session missing its
+/// workspace id. In both, git simply used the wrong key and failed later with an
+/// authentication error nobody could trace back here.
+///
+/// So the fallback stays — a control plane that is briefly unreachable must not
+/// break `git status` — but it announces itself. `git` shows a
+/// `GIT_SSH_COMMAND`'s stderr, so one line reaches whoever ran the command, and
+/// a loop transcript keeps it.
+async fn fetch_session_git_key() -> Option<String> {
+    // Not in a workspace session at all: an ad-hoc terminal, or a shell outside
+    // nook. Nothing is expected here, so nothing is said.
+    let workspace = std::env::var("NOOK_WORKSPACE_ID")
+        .ok()
+        .filter(|s| !s.is_empty())?;
+
+    let outcome = match load_client_for_git_key() {
+        Err(why) => Err(why),
+        Ok((client, node)) => client
+            .get_text(&format!(
+                "/api/v1/nodes/{node}/workspaces/{workspace}/git-key"
+            ))
+            .await
+            .map_err(|e| e.to_string()),
+    };
+    let (key, warning) = classify_git_key(outcome);
+    if let Some(warning) = warning {
+        eprintln!("nook: {warning}; falling back to this machine's own key");
+    }
+    key
+}
+
+/// The config and credential this machine fetches with, or why it cannot.
+fn load_client_for_git_key() -> Result<(Client, String), String> {
+    let node = NodeConfig::load()
+        .map_err(|e| format!("this machine has no node config ({e})"))?
+        .node_id;
+    // `as_this_node`, not `from_config`: the git-key route is machine-only, so
+    // the node's own credential is the only one it accepts. `from_config` would
+    // hand over a `nook login` user token wherever one exists — which is most
+    // machines a human has touched — and earn a 403 for it.
+    let client = Client::as_this_node().map_err(|e| format!("no usable credential ({e})"))?;
+    Ok((client, node))
+}
+
+/// What a fetch outcome means: the key to use, and anything worth saying.
+///
+/// Pure, so the distinction that matters — "nothing is pinned" versus "we could
+/// not find out" — is asserted by tests rather than trusted.
+fn classify_git_key(outcome: Result<String, String>) -> (Option<String>, Option<String>) {
+    match outcome {
+        // A 204 comes back as an empty body: this workspace pins no credential,
+        // which is the ordinary case and is not worth a word.
+        Ok(body) if body.trim().is_empty() => (None, None),
+        Ok(body) => (Some(body), None),
+        Err(why) => (
+            None,
+            Some(format!("could not fetch this workspace's git key: {why}")),
+        ),
+    }
+}
+
+/// A private key on disk for exactly as long as one command needs it.
+struct TempKey {
+    path: std::path::PathBuf,
+}
+
+impl TempKey {
+    fn write(material: &str) -> Option<Self> {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let path = std::env::temp_dir().join(format!("nook-git-{}", uuid::Uuid::now_v7()));
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            // 0600 at CREATION, not after: a key that is briefly world-readable
+            // on a shared operator machine is a key that leaked.
+            .mode(0o600)
+            .open(&path)
+            .ok()?;
+        let mut body = material.trim_end().to_string();
+        body.push('\n');
+        f.write_all(body.as_bytes()).ok()?;
+        Some(Self { path })
+    }
+}
+
+impl Drop for TempKey {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+#[cfg(test)]
+mod git_ssh_tests {
+    use super::{classify_git_key, TempKey};
+    use std::os::unix::fs::PermissionsExt;
+
+    /// The distinction that was missing. "Nothing pinned" and "we could not find
+    /// out" both fell back to the node's own key, and both said nothing — which
+    /// hid a cross-tenant 403 and a loop session with no workspace id during this
+    /// ticket's own review. Falling back is still right; being quiet about it is
+    /// not.
+    #[test]
+    fn an_unpinned_workspace_is_silent_but_a_failure_speaks() {
+        // 204 → empty body → the ordinary case, no key and no noise.
+        assert_eq!(classify_git_key(Ok(String::new())), (None, None));
+        assert_eq!(classify_git_key(Ok("   \n".into())), (None, None));
+
+        // A real failure still falls back, but says so.
+        let (key, warning) = classify_git_key(Err("403 Forbidden".into()));
+        assert!(key.is_none(), "a failed fetch must not invent a key");
+        let warning = warning.expect("a failure must be announced");
+        assert!(
+            warning.contains("403"),
+            "the warning must carry the cause, got: {warning}"
+        );
+    }
+
+    #[test]
+    fn a_fetched_key_is_returned_verbatim_and_quietly() {
+        let pem = "-----BEGIN OPENSSH PRIVATE KEY-----\nabc\n";
+        let (key, warning) = classify_git_key(Ok(pem.to_string()));
+        assert_eq!(key.as_deref(), Some(pem));
+        assert!(warning.is_none());
+    }
+
+    /// 0600 at creation, not after. A key that is briefly world-readable on a
+    /// shared operator machine is a key that leaked (MAIN-367 AC-7).
+    #[test]
+    fn the_key_is_never_readable_by_anyone_else() {
+        let held = TempKey::write("PRIVATE KEY MATERIAL").expect("wrote the key");
+        let mode = std::fs::metadata(&held.path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "mode was {:o}", mode & 0o777);
+    }
+
+    /// The whole "nothing persists on the node" property rests on Drop, so it
+    /// has to hold when ssh fails or is killed — not only on the happy path.
+    #[test]
+    fn the_key_is_gone_once_the_command_is_over() {
+        let path = {
+            let held = TempKey::write("PRIVATE KEY MATERIAL").expect("wrote the key");
+            assert!(held.path.exists());
+            held.path.clone()
+        };
+        assert!(
+            !path.exists(),
+            "the key outlived the command that needed it"
+        );
+    }
+
+    /// Two concurrent git commands in one session must not share, or clobber,
+    /// each other's file — `create_new` plus a v7 id is what prevents that.
+    #[test]
+    fn concurrent_commands_get_their_own_file() {
+        let a = TempKey::write("A").expect("a");
+        let b = TempKey::write("B").expect("b");
+        assert_ne!(a.path, b.path);
+        assert_eq!(std::fs::read_to_string(&a.path).unwrap().trim(), "A");
+        assert_eq!(std::fs::read_to_string(&b.path).unwrap().trim(), "B");
     }
 }

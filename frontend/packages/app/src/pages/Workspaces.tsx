@@ -9,6 +9,7 @@ import { NotesPanel } from "./Notes";
 import { createSpecDraft } from "../newspec";
 import { useNewWork } from "../newwork";
 import { usePagedList } from "../paging";
+import { fetchCredentials } from "../GitCredentials";
 import { PortSafetyNotice } from "../PortSafetyNotice";
 import { SessionPolicy } from "../SessionPolicy";
 import { WorkspaceLocations } from "../WorkspaceLocations";
@@ -17,6 +18,86 @@ import { askChoice, askConfirm, askForm, askText, notify } from "../dialogs";
 import { requireAppPassword, useAppPassword } from "../apppassword";
 import { adoptEnvFromDisk, saveEnv } from "../envvault";
 import { SessionOwner } from "../sessionOwner";
+
+/**
+ * Which stored ssh key this repo clones and fetches with (MAIN-367 AC-1).
+ *
+ * The pin is the whole ticket: `credential_id` used to live on a CLONE REQUEST,
+ * used once and thrown away, so clone-on-demand had no key to send and every
+ * node fell back to its own — which no private repo authorizes. Setting it here
+ * is what makes "changeable afterwards" true; the picker in **+ New Workspace**
+ * only covers the create half.
+ *
+ * Lists keys, never key material: the private half never leaves the control
+ * plane except as transient material delivered to a node for one git command.
+ */
+function WorkspaceCredential({
+  workspaceId,
+  pinned,
+}: {
+  workspaceId: string;
+  pinned: string | null;
+}) {
+  const queryClient = useQueryClient();
+  const [saving, setSaving] = useState(false);
+  const {
+    data: creds,
+    isLoading,
+    isError,
+  } = useQuery({ queryKey: ["git-credentials"], queryFn: fetchCredentials });
+
+  const pick = async (id: string) => {
+    setSaving(true);
+    const { error } = await api.PUT("/api/v1/workspaces/{id}/credential", {
+      params: { path: { id: workspaceId } },
+      body: { credential_id: id || null },
+    });
+    setSaving(false);
+    if (error) {
+      await notify("Could not pin the key", JSON.stringify(error));
+      return;
+    }
+    queryClient.invalidateQueries({ queryKey: ["workspaces", workspaceId] });
+  };
+
+  return (
+    <Panel title="git credential">
+      <div className="field">
+        <label>Clone and fetch with</label>
+        <select
+          className="input"
+          value={pinned ?? ""}
+          disabled={saving || isLoading || isError}
+          onChange={(e) => pick(e.target.value)}
+        >
+          <option value="">node's own key (public repos and local paths)</option>
+          {(creds ?? []).map((c) => (
+            <option key={c.id} value={c.id}>
+              🔑 {c.name}
+            </option>
+          ))}
+        </select>
+      </div>
+      {/* Disabled rather than merely empty while unknown: a picker offering only
+          "node's own key" is a statement that no key is available, and choosing
+          it would silently unpin whatever is already set. */}
+      {isLoading ? (
+        <div className="muted">Loading credentials…</div>
+      ) : isError ? (
+        <div className="muted">
+          Could not load credentials — the list could not be read, which is not the
+          same as there being none. Anything already pinned is unchanged.
+        </div>
+      ) : (creds ?? []).length === 0 ? (
+        <div className="muted">
+          No keys stored yet — add one under{" "}
+          <Link to="/settings#git-credentials">Settings → Git credentials</Link>, then
+          authorize its public half on the git host.
+        </div>
+      ) : null}
+    </Panel>
+  );
+}
 
 /**
  * One click from a repo to a Loop page with a seed box (MAIN-298).
@@ -464,6 +545,13 @@ export function WorkspaceDetail() {
           <EnvPanel workspaceId={ws.id} />
         </Panel>
       ),
+    },
+    {
+      id: "credential",
+      title: "Git credential",
+      group: "Repo",
+      keywords: ["ssh", "key", "deploy key", "private repo", "clone", "credential"],
+      render: () => <WorkspaceCredential workspaceId={ws.id} pinned={ws.git_credential_id ?? null} />,
     },
     {
       id: "sessions",

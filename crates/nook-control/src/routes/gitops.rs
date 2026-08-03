@@ -45,8 +45,30 @@ pub async fn create_credential(
             .ok_or_else(|| {
                 ApiError::BadRequest("provide private_key or set generate:true".into())
             })?;
-        // Best effort: derive the public key when possible.
-        let public = derive_public_key(&key).await.unwrap_or_default();
+        // REFUSED, not stored empty. `unwrap_or_default()` here used to accept a
+        // key `ssh-keygen -y` could not read and save it with `public_key = ""`.
+        // That credential is worse than none: it stores fine, pins fine, and
+        // then fails at clone time as an opaque authentication error nobody
+        // connects back to this moment — the same "fails an hour later" trap
+        // AC-8 exists to close for deletion.
+        //
+        // The common cause is a PASSPHRASE-PROTECTED key, which cannot work
+        // here whatever we do: the node runs git unattended and has nothing to
+        // answer the prompt with. Failing at the door names the problem while
+        // the person who has the key is still looking at it.
+        //
+        // It is also what lets the UI promise a public half to copy — without a
+        // derivable one there is nothing to authorize on the git host, so the
+        // credential could never have been used.
+        let public = derive_public_key(&key).await.ok_or_else(|| {
+            ApiError::BadRequest(
+                "could not read a public key out of that private key. A \
+                 passphrase-protected key cannot be used unattended — a node \
+                 running git has no way to answer the prompt. Supply an \
+                 unencrypted key, or generate one here instead."
+                    .into(),
+            )
+        })?;
         (key, public)
     };
 
@@ -80,6 +102,21 @@ pub async fn delete_credential(
     auth: AuthCtx,
     Path(id): Path<GitCredentialId>,
 ) -> ApiResult<axum::http::StatusCode> {
+    // Refuse while anything still depends on it, and say what (MAIN-367). A key
+    // that vanishes underneath a workspace does not fail here — it fails an hour
+    // later as an authentication error on a clone, which nobody connects back to
+    // a deletion. Naming the workspaces makes the fix obvious: unpin them first.
+    let used_by = state
+        .git_credentials
+        .workspaces_using(id, auth.tenant_id)
+        .await?;
+    if !used_by.is_empty() {
+        return Err(ApiError::Conflict(format!(
+            "still used by {}: unpin it there first",
+            used_by.join(", ")
+        )));
+    }
+
     let res = state.git_credentials.delete(id, auth.tenant_id).await?;
     if res == 0 {
         return Err(ApiError::NotFound);
@@ -431,8 +468,14 @@ pub async fn git_push(
 
     // Same credential story as clone: decrypted here, written 0600 on the node
     // for the length of the push, deleted after.
+    //
+    // An explicitly named credential wins; otherwise the WORKSPACE's pinned one
+    // is used (MAIN-367). Before that fallback, a push from a caller who did not
+    // happen to name a key went out with the node's own — so a repo that cloned
+    // fine failed on its first push, with an auth error that looked like a
+    // different problem entirely.
     let ssh_key = match req.credential_id {
-        None => None,
+        None => crate::services::workspace_git_key(&state, auth.tenant_id, workspace_id).await,
         Some(cred_id) => {
             let enc = state
                 .git_credentials
@@ -943,4 +986,36 @@ pub async fn import_secret(
         path: Some(path),
         message: format!("imported {name} · sealed and synced to {pushed} checkout(s)"),
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The door `create_credential` now refuses at.
+    ///
+    /// `derive_public_key` returning `None` is the whole condition — before this
+    /// it was `unwrap_or_default()`, so an unreadable key stored with
+    /// `public_key = ""`. That credential pinned fine and then failed at clone
+    /// time as an opaque authentication error, which is the failure mode AC-8
+    /// already refuses to create for deletion.
+    ///
+    /// Asserts only the REFUSAL direction on purpose. The happy path needs a
+    /// real `ssh-keygen` on PATH, and a test that silently inverts its meaning
+    /// when a binary is missing is worse than no test — this one reads the same
+    /// either way.
+    #[tokio::test]
+    async fn a_key_ssh_keygen_cannot_read_yields_no_public_half() {
+        assert!(derive_public_key("not a private key at all")
+            .await
+            .is_none());
+        assert!(derive_public_key("").await.is_none());
+        assert!(
+            derive_public_key("-----BEGIN OPENSSH PRIVATE KEY-----\ntruncated\n")
+                .await
+                .is_none(),
+            "a well-formed header with a corrupt body must not pass — that is \
+             exactly the shape a bad paste takes"
+        );
+    }
 }

@@ -7067,6 +7067,51 @@
         }
       }
     },
+    "/api/v1/workspaces/{id}/credential": {
+      "put": {
+        "tags": [
+          "crate::routes::workspaces"
+        ],
+        "summary": "`PUT /api/v1/workspaces/{id}/credential` — pin the ssh key this repo clones\nand fetches with, or unpin it with `null` (MAIN-367).",
+        "description": "Returns the workspace, never the key: the private half leaves this process\nonly as transient material delivered to a node for one git command, and an\nendpoint a browser can reach must never be a way to read it back (AC-7).",
+        "operationId": "set_workspace_credential",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetWorkspaceCredentialRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Workspace"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      }
+    },
     "/api/v1/workspaces/{id}/git": {
       "get": {
         "tags": [
@@ -13714,6 +13759,22 @@
           }
         }
       },
+      "SetWorkspaceCredentialRequest": {
+        "type": "object",
+        "description": "Pin or unpin a workspace's git credential (MAIN-367). `null` unpins, which\nreturns the workspace to the node's own key.",
+        "properties": {
+          "credential_id": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/GitCredentialId"
+              }
+            ]
+          }
+        }
+      },
       "Setting": {
         "type": "object",
         "description": "Scope values: `tenant` | `user`.",
@@ -15863,6 +15924,17 @@
             "type": [
               "string",
               "null"
+            ]
+          },
+          "git_credential_id": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/GitCredentialId",
+                "description": "Which stored ssh key this repo clones and fetches with (MAIN-367).\n\nThe ID only — the private half never leaves the control plane except as\ntransient material delivered for a single git command. `None` means\nunpinned, and unpinned falls back to the node's own generated key, which\nis what public repos and local paths have always used."
+              }
             ]
           },
           "git_remote_normalized": {

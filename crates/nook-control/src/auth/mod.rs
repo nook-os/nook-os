@@ -288,6 +288,38 @@ impl AuthCtx {
         }
     }
 
+    /// A machine acting on ITSELF, with no human path through — for credential
+    /// DELIVERY (MAIN-367).
+    ///
+    /// [`Self::require_node_self`] deliberately waves signed-in humans through,
+    /// because driving other machines is what the control plane is for. That is
+    /// the wrong shape for a route that hands back a decrypted private ssh key:
+    /// a person has no reason to pull one out of the control plane, and the shim
+    /// that genuinely needs it runs ON the node and can present the node's own
+    /// credential.
+    ///
+    /// Owner's ruling on MAIN-367 (2026-08-03): the delivery endpoint exists —
+    /// AC-7 forbids the key reaching a browser, a log or an event, not the one
+    /// channel the shim needs — **and it is machine-only**. Before this, the
+    /// route used `require_node_may_use`, whose user leg calls
+    /// [`require_person_may_use_node`] and returns `Ok` for any member of a
+    /// tenant the node is SHARED with. A shared operator node is the normal
+    /// case, so a session cookie was enough to read any workspace's key off it.
+    ///
+    /// Named once, and separately, so a future delivery route cannot reach for
+    /// the laxer guard by accident — the two differ by one word and by every
+    /// human on the tenant.
+    pub fn require_node_is_self(&self, node_id: nook_types::NodeId) -> Result<(), ApiError> {
+        match self.principal {
+            Principal::Node(self_id) if self_id == node_id => Ok(()),
+            _ => Err(ApiError::ForbiddenMsg(
+                "this endpoint delivers key material to a machine acting on \
+                 itself; a user credential cannot fetch a workspace's key"
+                    .into(),
+            )),
+        }
+    }
+
     /// Confine a SESSION SPAWN to the machine's owner (MAIN-130).
     ///
     /// `require_node_self` waved every signed-in human straight through, so any

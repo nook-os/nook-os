@@ -197,6 +197,7 @@ pub async fn create_session_at(
             session_id: session.id,
             runtime: runtime.to_string(),
             workspace_path: workspace_path.to_string(),
+            workspace_id: Some(workspace_id),
             cols: 120,
             rows: 32,
             ports: ports.clone(),
@@ -273,6 +274,9 @@ pub async fn create_ad_hoc_session(
             runtime: runtime.to_string(),
             // Empty = the node's home directory. See conn.rs StartSession.
             workspace_path: String::new(),
+            // An ad-hoc terminal is in no workspace, so there is no repo whose
+            // key it could want.
+            workspace_id: None,
             cols: 120,
             rows: 32,
             ports: ports.clone(),

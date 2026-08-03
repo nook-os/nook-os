@@ -141,6 +141,14 @@ pub trait WorkspaceRepository: Send + Sync {
         requirements: Option<serde_json::Value>,
     ) -> ApiResult<Option<Workspace>>;
 
+    /// Pin (or unpin, with `None`) the ssh key this repo clones with (MAIN-367).
+    async fn set_git_credential(
+        &self,
+        tenant: TenantId,
+        id: WorkspaceId,
+        credential: Option<GitCredentialId>,
+    ) -> ApiResult<Option<Workspace>>;
+
     /// Every workspace that declares a spec, across every tenant (MAIN-316).
     ///
     /// Cross-tenant because the reconciler is one loop for the deployment, like
@@ -310,6 +318,26 @@ pub trait WorkspaceRepository: Send + Sync {
         workspace: WorkspaceId,
     ) -> ApiResult<Vec<(NodeId, NodeWorkspaceId)>>;
 
+    /// Which tenant owns this workspace's checkout ON this node, if the node
+    /// holds one at all (MAIN-367).
+    ///
+    /// The proof a node may ask about a repo: it is answering "do you actually
+    /// have this checked out?", so a node cannot name an arbitrary workspace id
+    /// and be handed its key. Returns the CHECKOUT's tenant, which under
+    /// cross-tenant placement is the workspace's, not the node's.
+    ///
+    /// `grace_secs` bounds how stale a tombstone may be and still answer. A
+    /// checkout flagged missing moments ago is almost certainly still on disk —
+    /// discovery is periodic and it is sometimes simply wrong — but one flagged
+    /// missing hours ago has been pruned, and continuing to answer would mean
+    /// removing a workspace from a node never withdraws its key access.
+    async fn checkout_owner_at_node(
+        &self,
+        node: NodeId,
+        workspace: WorkspaceId,
+        grace_secs: i64,
+    ) -> ApiResult<Option<TenantId>>;
+
     /// Who already owns the checkout at `path` on `node` — tenant AND
     /// workspace. Deliberately NOT scoped to a tenant, because the whole
     /// question is whether this path belongs to somebody else (MAIN-363).
@@ -471,6 +499,17 @@ pub trait GitCredentialRepository: Send + Sync {
 
     async fn delete(&self, id: GitCredentialId, tenant: TenantId) -> ApiResult<u64>;
 
+    /// Names of the workspaces still pinning this credential (MAIN-367).
+    ///
+    /// Asked BEFORE a delete: a key that vanishes underneath a workspace turns
+    /// into clones that start failing an hour later with an auth error nobody
+    /// connects to the deletion. Refusing by name is a far better failure.
+    async fn workspaces_using(
+        &self,
+        id: GitCredentialId,
+        tenant: TenantId,
+    ) -> ApiResult<Vec<String>>;
+
     /// The encrypted private key, for transient use on a node. Named
     /// `sealed_secret` rather than `secret` because what comes back is still
     /// wrapped by the app vault — the caller must decrypt it.
@@ -565,6 +604,26 @@ impl WorkspaceRepository for DbWorkspaceRepository {
                     type_mapping(self.db.engine()).now()
                 ),
                 params![tenant, id, spec],
+            )
+            .await?)
+    }
+
+    async fn set_git_credential(
+        &self,
+        tenant: TenantId,
+        id: WorkspaceId,
+        credential: Option<GitCredentialId>,
+    ) -> ApiResult<Option<Workspace>> {
+        Ok(self
+            .db
+            .query_opt(
+                &format!(
+                    "UPDATE workspaces SET git_credential_id = $3, updated_at = {}
+                     WHERE tenant_id = $1 AND id = $2
+                     RETURNING *",
+                    type_mapping(self.db.engine()).now()
+                ),
+                params![tenant, id, credential.map(|c| c.0)],
             )
             .await?)
     }
@@ -1050,6 +1109,38 @@ impl WorkspaceRepository for DbWorkspaceRepository {
             .await?)
     }
 
+    async fn checkout_owner_at_node(
+        &self,
+        node: NodeId,
+        workspace: WorkspaceId,
+        grace_secs: i64,
+    ) -> ApiResult<Option<TenantId>> {
+        Ok(self
+            .db
+            .query_scalar_opt(
+                // `missing_at` is discovery's OPINION about liveness, and
+                // discovery is wrong sometimes: a clone landing outside the scan
+                // roots was flagged missing while sitting perfectly on disk
+                // (MAIN-363). Refusing on any tombstone turns that into an
+                // authentication failure two layers away, which is a miserable
+                // thing to debug — so a fresh one is tolerated.
+                //
+                // But tolerating EVERY tombstone, which is what this did before,
+                // means pruning a workspace from a node never withdraws its key:
+                // the row survives until a reaper that is gated on `loops.enabled`
+                // (off by default) gets to it. `grace_secs` is the line between
+                // "discovery is momentarily confused" and "this was pruned".
+                &format!(
+                    "SELECT tenant_id FROM node_workspaces
+                     WHERE node_id = $1 AND workspace_id = $2
+                       AND (missing_at IS NULL OR missing_at > {})",
+                    time_math(self.db.engine()).now_minus_scaled("$3", "1 second")
+                ),
+                params![node, workspace, grace_secs],
+            )
+            .await?)
+    }
+
     async fn checkout_owner_at_path(
         &self,
         node: NodeId,
@@ -1467,6 +1558,23 @@ impl GitCredentialRepository for DbGitCredentialRepository {
             .await?)
     }
 
+    async fn workspaces_using(
+        &self,
+        id: GitCredentialId,
+        tenant: TenantId,
+    ) -> ApiResult<Vec<String>> {
+        let rows: Vec<(String,)> = self
+            .db
+            .query_all(
+                "SELECT name FROM workspaces
+                 WHERE tenant_id = $2 AND git_credential_id = $1
+                 ORDER BY name",
+                params![id, tenant],
+            )
+            .await?;
+        Ok(rows.into_iter().map(|(n,)| n).collect())
+    }
+
     async fn sealed_secret(
         &self,
         id: GitCredentialId,
@@ -1766,6 +1874,7 @@ impl FakeWorkspaceRepository {
             updated_at: now,
             port_requirements: None,
             session_spec: None,
+            git_credential_id: None,
         }
     }
 }
@@ -1788,6 +1897,22 @@ impl WorkspaceRepository for FakeWorkspaceRepository {
         };
         w.session_spec = spec;
         Ok(Some(w.clone()))
+    }
+
+    async fn set_git_credential(
+        &self,
+        tenant: TenantId,
+        id: WorkspaceId,
+        credential: Option<GitCredentialId>,
+    ) -> ApiResult<Option<Workspace>> {
+        let mut s = self.inner.lock().unwrap();
+        Ok(s.workspaces
+            .iter_mut()
+            .find(|w| w.id == id && w.tenant_id == tenant)
+            .map(|w| {
+                w.git_credential_id = credential;
+                w.clone()
+            }))
     }
 
     async fn set_port_requirements(
@@ -2268,6 +2393,30 @@ impl WorkspaceRepository for FakeWorkspaceRepository {
         Ok(rows.into_iter().map(|c| (c.node_id, c.id)).collect())
     }
 
+    async fn checkout_owner_at_node(
+        &self,
+        node: NodeId,
+        workspace: WorkspaceId,
+        grace_secs: i64,
+    ) -> ApiResult<Option<TenantId>> {
+        // The grace window is honoured here too, not just in the SQL: a fake
+        // that answered for every tombstone would let a test prove the guard
+        // while the guard was gone.
+        let cutoff = chrono::Utc::now() - chrono::Duration::seconds(grace_secs);
+        Ok(self
+            .inner
+            .lock()
+            .unwrap()
+            .checkouts
+            .iter()
+            .find(|c| {
+                c.node_id == node
+                    && c.workspace_id == workspace
+                    && c.missing_at.is_none_or(|m| m > cutoff)
+            })
+            .map(|c| c.tenant))
+    }
+
     async fn checkout_owner_at_path(
         &self,
         node: NodeId,
@@ -2658,6 +2807,17 @@ impl GitCredentialRepository for FakeGitCredentialRepository {
         };
         s.push((cred.clone(), secret_enc));
         Ok(cred)
+    }
+
+    /// The fake has no workspaces to consult, so nothing ever depends on a
+    /// credential here — the guard's REFUSAL path is exercised against the
+    /// database, where the relationship actually exists.
+    async fn workspaces_using(
+        &self,
+        _id: GitCredentialId,
+        _tenant: TenantId,
+    ) -> ApiResult<Vec<String>> {
+        Ok(Vec::new())
     }
 
     async fn delete(&self, id: GitCredentialId, tenant: TenantId) -> ApiResult<u64> {

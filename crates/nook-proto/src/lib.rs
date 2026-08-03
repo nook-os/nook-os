@@ -6,7 +6,7 @@
 //! a future optimization). All enums are adjacently tagged for clean
 //! generated TypeScript.
 
-use nook_types::{AuthProfile, Capabilities, NodeId, SessionId};
+use nook_types::{AuthProfile, Capabilities, NodeId, SessionId, WorkspaceId};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
@@ -280,6 +280,12 @@ pub enum ControlToNode {
         session_id: SessionId,
         runtime: String,
         workspace_path: String,
+        /// Which workspace this checkout is, so the session can export it and
+        /// anything inside — the git-ssh shim in particular — can name the repo
+        /// it is in without asking the control plane about the session first
+        /// (MAIN-367). `None` for an ad-hoc terminal, which is in no workspace.
+        #[serde(default)]
+        workspace_id: Option<WorkspaceId>,
         cols: u16,
         rows: u16,
         /// The ports leased to this session (MAIN-301), each carrying the env
@@ -470,6 +476,11 @@ pub enum ControlToNode {
         /// The clonable git remote, resolved by the control plane from the
         /// executor's `node_workspaces` row.
         repo_url: String,
+        /// Which workspace that row is for (MAIN-367), so the job's session can
+        /// export `NOOK_WORKSPACE_ID` and the git-ssh shim can name the repo it
+        /// is working in. Resolved from the same row as `repo_url`.
+        #[serde(default)]
+        workspace_id: Option<WorkspaceId>,
         /// The branch the per-job worktree is based on.
         branch: String,
         /// The human's opening brief for this run (MAIN-231), if one was given
