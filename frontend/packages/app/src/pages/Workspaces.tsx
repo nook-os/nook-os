@@ -19,6 +19,74 @@ import { adoptEnvFromDisk, saveEnv } from "../envvault";
 import { SessionOwner } from "../sessionOwner";
 
 /**
+ * Which stored ssh key this repo clones and fetches with (MAIN-367 AC-1).
+ *
+ * The pin is the whole ticket: `credential_id` used to live on a CLONE REQUEST,
+ * used once and thrown away, so clone-on-demand had no key to send and every
+ * node fell back to its own — which no private repo authorizes. Setting it here
+ * is what makes "changeable afterwards" true; the picker in **+ New Workspace**
+ * only covers the create half.
+ *
+ * Lists keys, never key material: the private half never leaves the control
+ * plane except as transient material delivered to a node for one git command.
+ */
+function WorkspaceCredential({
+  workspaceId,
+  pinned,
+}: {
+  workspaceId: string;
+  pinned: string | null;
+}) {
+  const queryClient = useQueryClient();
+  const [saving, setSaving] = useState(false);
+  const { data: creds } = useQuery({
+    queryKey: ["git-credentials"],
+    queryFn: async () => (await api.GET("/api/v1/git-credentials")).data ?? [],
+  });
+
+  const pick = async (id: string) => {
+    setSaving(true);
+    const { error } = await api.PUT("/api/v1/workspaces/{id}/credential", {
+      params: { path: { id: workspaceId } },
+      body: { credential_id: id || null },
+    });
+    setSaving(false);
+    if (error) {
+      await notify("Could not pin the key", JSON.stringify(error));
+      return;
+    }
+    queryClient.invalidateQueries({ queryKey: ["workspaces", workspaceId] });
+  };
+
+  return (
+    <Panel title="git credential">
+      <div className="field">
+        <label>Clone and fetch with</label>
+        <select
+          className="input"
+          value={pinned ?? ""}
+          disabled={saving}
+          onChange={(e) => pick(e.target.value)}
+        >
+          <option value="">node's own key (public repos and local paths)</option>
+          {(creds ?? []).map((c) => (
+            <option key={c.id} value={c.id}>
+              🔑 {c.name}
+            </option>
+          ))}
+        </select>
+      </div>
+      {(creds ?? []).length === 0 && (
+        <div className="muted">
+          No keys stored yet — add one under <Link to="/settings#git-credentials">Settings → Git credentials</Link>,
+          then authorize its public half on the repo.
+        </div>
+      )}
+    </Panel>
+  );
+}
+
+/**
  * One click from a repo to a Loop page with a seed box (MAIN-298).
  *
  * It lives here, on the workspace, because that is where a PM already is when
@@ -464,6 +532,13 @@ export function WorkspaceDetail() {
           <EnvPanel workspaceId={ws.id} />
         </Panel>
       ),
+    },
+    {
+      id: "credential",
+      title: "Git credential",
+      group: "Repo",
+      keywords: ["ssh", "key", "deploy key", "private repo", "clone", "credential"],
+      render: () => <WorkspaceCredential workspaceId={ws.id} pinned={ws.git_credential_id ?? null} />,
     },
     {
       id: "sessions",

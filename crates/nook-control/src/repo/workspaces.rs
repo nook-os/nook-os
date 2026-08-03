@@ -325,10 +325,17 @@ pub trait WorkspaceRepository: Send + Sync {
     /// have this checked out?", so a node cannot name an arbitrary workspace id
     /// and be handed its key. Returns the CHECKOUT's tenant, which under
     /// cross-tenant placement is the workspace's, not the node's.
+    ///
+    /// `grace_secs` bounds how stale a tombstone may be and still answer. A
+    /// checkout flagged missing moments ago is almost certainly still on disk —
+    /// discovery is periodic and it is sometimes simply wrong — but one flagged
+    /// missing hours ago has been pruned, and continuing to answer would mean
+    /// removing a workspace from a node never withdraws its key access.
     async fn checkout_owner_at_node(
         &self,
         node: NodeId,
         workspace: WorkspaceId,
+        grace_secs: i64,
     ) -> ApiResult<Option<TenantId>>;
 
     /// Who already owns the checkout at `path` on `node` — tenant AND
@@ -1106,25 +1113,30 @@ impl WorkspaceRepository for DbWorkspaceRepository {
         &self,
         node: NodeId,
         workspace: WorkspaceId,
+        grace_secs: i64,
     ) -> ApiResult<Option<TenantId>> {
         Ok(self
             .db
             .query_scalar_opt(
-                // Deliberately NOT filtered on `missing_at`. The row's
-                // EXISTENCE is the authorization fact — this node holds a
-                // checkout of this workspace — while `missing_at` is discovery's
-                // opinion about liveness, and discovery is wrong sometimes: a
-                // clone landing outside the scan roots was flagged missing while
-                // sitting perfectly on disk (MAIN-363). Filtering here turned
-                // that into an authentication failure two layers away, which is
-                // a miserable thing to debug.
+                // `missing_at` is discovery's OPINION about liveness, and
+                // discovery is wrong sometimes: a clone landing outside the scan
+                // roots was flagged missing while sitting perfectly on disk
+                // (MAIN-363). Refusing on any tombstone turns that into an
+                // authentication failure two layers away, which is a miserable
+                // thing to debug — so a fresh one is tolerated.
                 //
-                // Refusing also buys no safety: if the checkout really is gone,
-                // git has no repo to run in and fails on its own, without the
-                // key ever being used.
-                "SELECT tenant_id FROM node_workspaces
-                 WHERE node_id = $1 AND workspace_id = $2",
-                params![node, workspace],
+                // But tolerating EVERY tombstone, which is what this did before,
+                // means pruning a workspace from a node never withdraws its key:
+                // the row survives until a reaper that is gated on `loops.enabled`
+                // (off by default) gets to it. `grace_secs` is the line between
+                // "discovery is momentarily confused" and "this was pruned".
+                &format!(
+                    "SELECT tenant_id FROM node_workspaces
+                     WHERE node_id = $1 AND workspace_id = $2
+                       AND (missing_at IS NULL OR missing_at > {})",
+                    time_math(self.db.engine()).now_minus_scaled("$3", "1 second")
+                ),
+                params![node, workspace, grace_secs],
             )
             .await?)
     }
@@ -2385,14 +2397,23 @@ impl WorkspaceRepository for FakeWorkspaceRepository {
         &self,
         node: NodeId,
         workspace: WorkspaceId,
+        grace_secs: i64,
     ) -> ApiResult<Option<TenantId>> {
+        // The grace window is honoured here too, not just in the SQL: a fake
+        // that answered for every tombstone would let a test prove the guard
+        // while the guard was gone.
+        let cutoff = chrono::Utc::now() - chrono::Duration::seconds(grace_secs);
         Ok(self
             .inner
             .lock()
             .unwrap()
             .checkouts
             .iter()
-            .find(|c| c.node_id == node && c.workspace_id == workspace)
+            .find(|c| {
+                c.node_id == node
+                    && c.workspace_id == workspace
+                    && c.missing_at.is_none_or(|m| m > cutoff)
+            })
             .map(|c| c.tenant))
     }
 

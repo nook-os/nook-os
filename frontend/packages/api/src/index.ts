@@ -13,6 +13,7 @@ export type TenantMembership = Schemas["TenantMembership"];
 export type Capabilities = Schemas["Capabilities"];
 export type NodeInfo = Schemas["Node"];
 export type Workspace = Schemas["Workspace"];
+export type GitCredential = Schemas["GitCredential"];
 export type WorkspaceDetail = Schemas["WorkspaceDetail"];
 export type WorkspaceLocation = Schemas["WorkspaceLocation"];
 export type Session = Schemas["Session"];

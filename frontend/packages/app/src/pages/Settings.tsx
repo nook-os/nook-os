@@ -2,6 +2,7 @@ import React from "react";
 import { OrgVisibility } from "../OrgVisibility";
 import { SectionedPage, type PageSection } from "../SectionedPage";
 import { NotificationChannels } from "../NotificationChannels";
+import { GitCredentials } from "../GitCredentials";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   api,
@@ -939,6 +940,23 @@ export function SettingsPage() {
           <AccessTokenSettings />
         </Panel>
       ),
+    },
+    {
+      id: "git-credentials",
+      title: "Git credentials",
+      group: "Team",
+      badge: "team",
+      keywords: [
+        "ssh",
+        "key",
+        "deploy key",
+        "private repo",
+        "clone",
+        "credential",
+        "fingerprint",
+        "git",
+      ],
+      render: () => <GitCredentials />,
     },
     {
       id: "automation",

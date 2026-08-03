@@ -51,6 +51,33 @@ impl Client {
         })
     }
 
+    /// Build a client that speaks as THIS MACHINE, never as the person at the
+    /// keyboard (MAIN-367).
+    ///
+    /// [`Self::from_config`] prefers a `nook login` user token whenever one
+    /// exists, which is the right default for everything a human drives. It is
+    /// wrong for the git-key fetch: that route is machine-only by the owner's
+    /// ruling, so a shim built with `from_config` would present a user token on
+    /// any machine somebody had logged into — which is every dev box and, per
+    /// the dev stack's own setup, the operator node — and be refused.
+    ///
+    /// Deliberately does NOT fall back to the user token when there is no node
+    /// config. Falling back would send a credential this endpoint refuses and
+    /// surface as a puzzling 403; "this machine has not joined a fleet" is the
+    /// truthful answer, and the shim's caller degrades to plain ssh on it.
+    pub fn as_this_node() -> Result<Self> {
+        let cfg = NodeConfig::load()
+            .context("this machine has not joined a fleet — run `nook setup` to join it")?;
+        let base = cfg.server.trim_end_matches('/').to_string();
+        let insecure = crate::config::check_server_security(&base, false)?;
+        crate::config::warn_if_insecure(insecure, &base);
+        Ok(Self {
+            base,
+            token: cfg.node_token,
+            http: reqwest::Client::new(),
+        })
+    }
+
     /// Is this client acting as a person rather than as this machine? Drives
     /// the "which node can I target" logic in `start`.
     pub fn is_user(&self) -> bool {
@@ -3071,7 +3098,11 @@ fn load_client_for_git_key() -> Result<(Client, String), String> {
     let node = NodeConfig::load()
         .map_err(|e| format!("this machine has no node config ({e})"))?
         .node_id;
-    let client = Client::from_config().map_err(|e| format!("no usable credential ({e})"))?;
+    // `as_this_node`, not `from_config`: the git-key route is machine-only, so
+    // the node's own credential is the only one it accepts. `from_config` would
+    // hand over a `nook login` user token wherever one exists — which is most
+    // machines a human has touched — and earn a 403 for it.
+    let client = Client::as_this_node().map_err(|e| format!("no usable credential ({e})"))?;
     Ok((client, node))
 }
 
