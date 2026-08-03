@@ -52,6 +52,9 @@ fn inspect(dir: &Path) -> Option<DiscoveredWorkspace> {
         branch: git(dir, &["rev-parse", "--abbrev-ref", "HEAD"]),
         dirty: git(dir, &["status", "--porcelain"]).is_some_and(|s| !s.is_empty()),
         worktree,
+        // `inspect` sees one directory and has no idea which root led here.
+        // `scan` stamps it for the whole range it walked, so this stays None.
+        root_segment: None,
     })
 }
 
@@ -154,14 +157,36 @@ pub fn git_status(path: &str) -> GitSnapshot {
     }
 }
 
+/// The last path segment of a scan root, which for a tenant-scoped root IS the
+/// tenant's slug — `~/.nook/workspace/engineering-team` → `engineering-team`.
+///
+/// Reported as-is rather than interpreted here: the node has no tenant list to
+/// check against, and guessing would be the same mistake in a new place. The
+/// control plane resolves it against real slugs and ignores anything that does
+/// not match one, so a legacy root like `~/.nook/workspace/nook.hein.network`
+/// or a bare `~/.nook/workspace` simply yields nothing to resolve.
+fn root_segment_of(root: &Path) -> Option<String> {
+    let seg = root.file_name()?.to_str()?.trim();
+    (!seg.is_empty()).then(|| seg.to_string())
+}
+
 pub fn scan(roots: &[String]) -> Vec<DiscoveredWorkspace> {
     let mut found = Vec::new();
     for root in roots {
         let root = crate::config::expand_path(root);
         let root = Path::new(&root);
+        let segment = root_segment_of(root);
+        // Stamped after the walk from this index, rather than at each `push`:
+        // there are three push sites and a fourth would silently report `None`,
+        // which reads as "not tenant-scoped" and is the bug this field exists to
+        // fix. Marking the range makes forgetting impossible.
+        let from = found.len();
         // The root itself may be a repository.
         if let Some(ws) = inspect(root) {
             found.push(ws);
+            for ws in &mut found[from..] {
+                ws.root_segment = segment.clone();
+            }
             continue;
         }
         // Depth 1 and 2.
@@ -188,6 +213,9 @@ pub fn scan(roots: &[String]) -> Vec<DiscoveredWorkspace> {
                     }
                 }
             }
+        }
+        for ws in &mut found[from..] {
+            ws.root_segment = segment.clone();
         }
     }
     found.sort_by(|a, b| a.path.cmp(&b.path));

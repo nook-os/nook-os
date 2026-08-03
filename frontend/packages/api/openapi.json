@@ -9894,6 +9894,13 @@
           "path": {
             "type": "string"
           },
+          "root_segment": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The last segment of the scan root this checkout was found under —\n`engineering-team` for `~/.nook/workspace/engineering-team/acme/api`.\n\nCross-tenant placement (MAIN-353) lets tenant B's reconciler clone onto a\nnode homed in tenant A, and MAIN-363 put those files in B's own folder.\nBut the report carried only the path, which is an opaque string, so the\ncontrol plane attributed everything to A — the node's tenant — and minted\na duplicate workspace there, stealing the real one's checkout. Getting the\nFOLDER right never helped, because nothing read the folder.\n\nThe node has always known this: it is the root it was told to clone into.\nThis is that knowledge said out loud, so attribution stops being a guess\nthat races the checkout row's INSERT.\n\n`None` for a checkout under a root that is not tenant-scoped — the flat\npre-MAIN-347 `~/.nook/workspace`, or a control-plane-slug root. Those keep\nexactly today's behaviour (attributed to the node's own tenant), which is\nwhy a legacy tree that cannot be moved does not have to be."
+          },
           "worktree": {
             "type": "boolean",
             "description": "True when this checkout is a linked git worktree (its `.git` is a file\npointing at the primary repo, not a directory)."

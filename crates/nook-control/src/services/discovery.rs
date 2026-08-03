@@ -93,6 +93,40 @@ pub async fn reconcile(
             }
         }
 
+        // Whose folder the node found this in, when it is somebody else's.
+        //
+        // This is the fix for the duplicate-minting race. The lookups below are
+        // tenant-scoped, and scoping them to the NODE's tenant is what made a
+        // cross-tenant checkout invisible: every lookup missed, the fallback
+        // invented a workspace here, and it stole the real one's checkout. The
+        // guard above only saves us once the checkout row exists, and that row
+        // is written by a different task than the one delivering this scan —
+        // so it is a coin flip, and prod lost it.
+        //
+        // MATCHING ONLY, never creation. Honouring a foreign slug when creating
+        // would let a node token mint workspaces in a tenant it has no claim on
+        // by naming a folder; `owner_tenant` is therefore used to FIND an
+        // existing workspace, and `tenant` still owns anything new. Nothing here
+        // grants a node reach it did not already have — the workspace it
+        // attaches to must already exist and already carry this remote.
+        let owner_tenant = match d.root_segment.as_deref() {
+            Some(slug) if !slug.is_empty() => state
+                .identity
+                .tenant_by_slug(slug)
+                .await?
+                .map(|t| TenantId(t.id.0))
+                .filter(|t| *t != tenant),
+            // No segment, or a root that is not tenant-scoped (the flat
+            // pre-MAIN-347 tree, a control-plane-slug root, an older node that
+            // does not send the field). Behaves exactly as before.
+            _ => None,
+        };
+        // Deliberately NOT shadowing `tenant`: the creation arm below must stay
+        // on the node's own tenant, and a shadow here would silently hand a
+        // foreign slug the power to mint workspaces — the exact thing the
+        // paragraph above says it must not do.
+        let lookup_tenant = owner_tenant.unwrap_or(tenant);
+
         // Find the workspace this checkout belongs to.
         let workspace_id: Option<WorkspaceId> = match &normalized {
             // The remote on the workspace itself is authoritative; the
@@ -100,26 +134,31 @@ pub async fn reconcile(
             // identity was recorded there.
             Some(norm) => match state
                 .workspaces
-                .find_by_normalized_remote(tenant, norm)
+                .find_by_normalized_remote(lookup_tenant, norm)
                 .await?
             {
                 Some(id) => Some(id),
                 None => {
                     state
                         .workspaces
-                        .find_by_checkout_remote(tenant, norm)
+                        .find_by_checkout_remote(lookup_tenant, norm)
                         .await?
                 }
             },
             None => {
                 state
                     .workspaces
-                    .find_by_slug(tenant, &slugify(&d.name))
+                    .find_by_slug(lookup_tenant, &slugify(&d.name))
                     .await?
             }
         };
 
-        let workspace_id = match workspace_id {
+        // The tenant that OWNS whatever we ended up with — the matched
+        // workspace's, or the node's for one we just created. Everything below
+        // writes with this rather than with `tenant`: recording an
+        // engineering-team workspace's checkout under hein is the
+        // mis-attribution itself, just arriving by a different door.
+        let (workspace_id, tenant) = match workspace_id {
             Some(id) => {
                 // Qualify a bare name once the remote tells us the owner:
                 // "services" → "acme/services". Deliberately narrow — only
@@ -136,7 +175,7 @@ pub async fn reconcile(
                     // whole reconcile. The name may still be qualified in place.
                     state.workspaces.qualify_name(id, &d.name, repo).await?;
                 }
-                id
+                (id, lookup_tenant)
             }
             None => {
                 let id =
@@ -156,7 +195,7 @@ pub async fn reconcile(
                 )
                 .await;
                 let _ = event;
-                id
+                (id, tenant)
             }
         };
 

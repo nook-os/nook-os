@@ -35,6 +35,26 @@ pub struct DiscoveredWorkspace {
     /// pointing at the primary repo, not a directory).
     #[serde(default)]
     pub worktree: bool,
+    /// The last segment of the scan root this checkout was found under —
+    /// `engineering-team` for `~/.nook/workspace/engineering-team/acme/api`.
+    ///
+    /// Cross-tenant placement (MAIN-353) lets tenant B's reconciler clone onto a
+    /// node homed in tenant A, and MAIN-363 put those files in B's own folder.
+    /// But the report carried only the path, which is an opaque string, so the
+    /// control plane attributed everything to A — the node's tenant — and minted
+    /// a duplicate workspace there, stealing the real one's checkout. Getting the
+    /// FOLDER right never helped, because nothing read the folder.
+    ///
+    /// The node has always known this: it is the root it was told to clone into.
+    /// This is that knowledge said out loud, so attribution stops being a guess
+    /// that races the checkout row's INSERT.
+    ///
+    /// `None` for a checkout under a root that is not tenant-scoped — the flat
+    /// pre-MAIN-347 `~/.nook/workspace`, or a control-plane-slug root. Those keep
+    /// exactly today's behaviour (attributed to the node's own tenant), which is
+    /// why a legacy tree that cannot be moved does not have to be.
+    #[serde(default)]
+    pub root_segment: Option<String>,
 }
 
 /// Messages the node sends to the control plane.
