@@ -22,6 +22,24 @@ import { notify } from "./dialogs";
  *  somebody renamed the workspace. */
 export const PORTS_TICKET_TITLE = "Declare this repo's ports";
 
+/** Whether a workspace has declared its listeners, from the workspace ROW.
+ *
+ *  The list view's half of the cap. `port_capped` comes from
+ *  `/workspaces/{id}/reconcile-status`, which is one call per workspace — fine
+ *  on a detail page, an N+1 on a table. The declaration itself already rides on
+ *  every `Workspace`, and the server derives the cap from exactly this, so the
+ *  table can answer without asking.
+ *
+ *  `null` and absent are undeclared. An EMPTY array is not: it is the workspace
+ *  saying "this repo binds nothing", which is a real declaration and lifts the
+ *  cap. Collapsing the two is the easy mistake here — it would nag every repo
+ *  that has honestly answered. */
+export function hasPortDeclaration(w: {
+  port_requirements?: unknown;
+}): boolean {
+  return w.port_requirements !== null && w.port_requirements !== undefined;
+}
+
 /** Whether the reconciler is holding this workspace to one session per node.
  *
  *  Derived from what the server derived — never stored on either side, so a

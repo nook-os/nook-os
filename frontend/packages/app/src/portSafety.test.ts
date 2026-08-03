@@ -5,7 +5,7 @@
 // binding and ships a PR — handed that body it had nothing to satisfy and no
 // contract to open a PR against, so the ticket could only ever be research.
 import { describe, expect, it } from "vitest";
-import { portsTicketBody } from "./portSafety";
+import { hasPortDeclaration, portsTicketBody } from "./portSafety";
 
 describe("the filed ports ticket is a build contract", () => {
   const body = portsTicketBody("acme/api");
@@ -57,5 +57,28 @@ describe("the filed ports ticket is a build contract", () => {
 
   it("does not force a listener on a repo that binds none", () => {
     expect(flat).toMatch(/empty `\[\[ports\]\]` list is a valid statement/i);
+  });
+});
+
+// The list badge reads the workspace ROW rather than asking
+// `/reconcile-status` per repo — fine on a detail page, an N+1 on a table. It
+// has to agree with the server, which derives the cap from exactly this.
+describe("the list-level declaration check", () => {
+  it("treats absent and null as UNDECLARED", () => {
+    expect(hasPortDeclaration({})).toBe(false);
+    expect(hasPortDeclaration({ port_requirements: null })).toBe(false);
+  });
+
+  it("treats an EMPTY list as a real declaration", () => {
+    // "This repo binds nothing" is an answer, not a silence — the cap lifts on
+    // it. Collapsing it with null would nag every repo that has honestly said
+    // so, which is the whole reason the two are distinguished server-side.
+    expect(hasPortDeclaration({ port_requirements: [] })).toBe(true);
+  });
+
+  it("treats a populated list as declared", () => {
+    expect(
+      hasPortDeclaration({ port_requirements: [{ name: "web", env: "PORT" }] }),
+    ).toBe(true);
   });
 });
