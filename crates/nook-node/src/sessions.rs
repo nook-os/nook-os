@@ -94,14 +94,22 @@ pub struct Manager {
     /// Blocking here is safe in a way it would not have been before MAIN-362:
     /// this is the manager's own thread, not the connection's read loop, so a
     /// backed-up socket delays session bookkeeping and nothing else.
-    out: Sender<NodeToControl>,
+    ///
+    /// The CONTROL lane, not the output one: lifecycle must not queue behind
+    /// megabytes of somebody's `cat` (MAIN-371).
+    ctl: Sender<NodeToControl>,
+    /// Terminal output frames, and only those. Bulky, constant, and the one
+    /// thing on this connection that can be a few milliseconds late without
+    /// anyone noticing — which is exactly why it gets its own queue.
+    frames: Sender<NodeToControl>,
     sessions: HashMap<SessionId, SessionHandle>,
 }
 
 impl Manager {
-    pub fn new(out: Sender<NodeToControl>) -> Self {
+    pub fn new(frames: Sender<NodeToControl>, ctl: Sender<NodeToControl>) -> Self {
         Self {
-            out,
+            ctl,
+            frames,
             sessions: HashMap::new(),
         }
     }
@@ -109,10 +117,13 @@ impl Manager {
     /// The manager's thread. Ends when the connection drops its sender, which
     /// is the connection ending — a reconnect builds a fresh one, exactly as
     /// it built a fresh `Manager` before.
-    pub fn spawn(out: Sender<NodeToControl>) -> std::sync::mpsc::Sender<Cmd> {
+    pub fn spawn(
+        frames: Sender<NodeToControl>,
+        ctl: Sender<NodeToControl>,
+    ) -> std::sync::mpsc::Sender<Cmd> {
         let (tx, rx) = std::sync::mpsc::channel::<Cmd>();
         std::thread::spawn(move || {
-            let mut manager = Manager::new(out);
+            let mut manager = Manager::new(frames, ctl);
             while let Ok(cmd) = rx.recv() {
                 manager.handle(cmd);
             }
@@ -169,7 +180,7 @@ impl Manager {
     /// "starting" with no way to learn why.
     fn session_failed(&self, session_id: SessionId, message: String) {
         tracing::warn!(%session_id, %message, "session failed to start");
-        let _ = self.out.blocking_send(NodeToControl::SessionFailed {
+        let _ = self.ctl.blocking_send(NodeToControl::SessionFailed {
             session_id,
             message,
         });
@@ -216,7 +227,7 @@ impl Manager {
         }
         match self.attach_pty(session_id, &tmux_name, cols, rows, false) {
             Ok(()) => {
-                let _ = self.out.blocking_send(NodeToControl::SessionStarted {
+                let _ = self.ctl.blocking_send(NodeToControl::SessionStarted {
                     session_id,
                     tmux_session: tmux_name,
                 });
@@ -247,7 +258,7 @@ impl Manager {
         }
         match self.attach_pty(session_id, &tmux_name, cols, rows, true) {
             Ok(()) => {
-                let _ = self.out.blocking_send(NodeToControl::SessionStarted {
+                let _ = self.ctl.blocking_send(NodeToControl::SessionStarted {
                     session_id,
                     tmux_session: tmux_name,
                 });
@@ -324,7 +335,8 @@ impl Manager {
         // which (almost always) means the tmux session ended. Frames are only
         // forwarded while viewers are attached; the read itself never stops,
         // so exit detection stays live for paused sessions.
-        let out = self.out.clone();
+        let frames = self.frames.clone();
+        let ctl = self.ctl.clone();
         let tmux_name_owned = tmux_name.to_string();
         let forward = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
         let forward_reader = forward.clone();
@@ -346,7 +358,7 @@ impl Manager {
                             session_id,
                             data_b64: B64.encode(&buf[..n]),
                         };
-                        if out.blocking_send(frame).is_err() {
+                        if frames.blocking_send(frame).is_err() {
                             break;
                         }
                     }
@@ -357,7 +369,7 @@ impl Manager {
             let _ = child.wait();
             let exited = !tmux::session_exists(&tmux_name_owned);
             if exited {
-                let _ = out.blocking_send(NodeToControl::SessionExited {
+                let _ = ctl.blocking_send(NodeToControl::SessionExited {
                     session_id,
                     exit_code: None,
                 });
@@ -366,7 +378,7 @@ impl Manager {
                 // (MAIN-126 AC-4).
                 if is_auth {
                     let profiles = crate::runtime_auth::probe_all();
-                    let _ = out.blocking_send(NodeToControl::RuntimeAuthStatus { profiles });
+                    let _ = ctl.blocking_send(NodeToControl::RuntimeAuthStatus { profiles });
                 }
             }
         });
@@ -412,7 +424,7 @@ impl Manager {
                     .session_failed(session_id, "session is not running on this node".into());
             };
             if !tmux::session_exists(&name) {
-                let _ = self.out.blocking_send(NodeToControl::SessionExited {
+                let _ = self.ctl.blocking_send(NodeToControl::SessionExited {
                     session_id,
                     exit_code: None,
                 });
@@ -481,7 +493,7 @@ impl Manager {
         if tmux::session_exists(&name) {
             let _ = tmux::kill_session(&name);
         }
-        let _ = self.out.blocking_send(NodeToControl::SessionExited {
+        let _ = self.ctl.blocking_send(NodeToControl::SessionExited {
             session_id,
             exit_code: None,
         });

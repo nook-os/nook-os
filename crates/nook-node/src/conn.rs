@@ -133,6 +133,59 @@ fn ensure_scan_root(cfg: &NodeConfig, root: &str) -> Vec<String> {
     roots
 }
 
+/// Download and install a new agent, OFF the read loop (MAIN-371).
+///
+/// The read loop is the only thing that delivers a keystroke to a PTY, so a
+/// download awaited there freezes every terminal on the machine for as long as
+/// it takes — and `RegisterAck` carries this on every single reconnect, which
+/// is exactly when a deploy has just made the download large. The flag is not
+/// belt-and-braces: `UpdateAgent` and `RegisterAck` can both fire within a
+/// reconnect, and two installers unpacking over the same binary is worse than
+/// either of them alone.
+fn spawn_selfupdate(
+    reason: &'static str,
+    updating: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+) {
+    use std::sync::atomic::Ordering;
+    if updating.swap(true, Ordering::SeqCst) {
+        tracing::debug!(reason, "an agent update is already running");
+        return;
+    }
+    let updating = updating.clone();
+    tokio::spawn(async move {
+        if let Err(e) = crate::selfupdate::run(reason).await {
+            tracing::warn!(error = %e, "cannot update this agent");
+        }
+        updating.store(false, Ordering::SeqCst);
+    });
+}
+
+/// The next frame to write, control lane first (MAIN-371).
+///
+/// A busy session can hold a thousand output frames — several megabytes — in
+/// `out` at once. On ONE queue a `GitStatusResult` or an `OpResult` behind them
+/// arrives megabytes late, and the control plane gives up after ten seconds
+/// with "node did not answer in time" while the answer sits in this buffer.
+/// Control replies are small, rare and latency-critical; terminal output is
+/// bulky, constant, and tolerant of a few milliseconds. Two queues and a bias
+/// is the whole fix.
+///
+/// Starving `out` is not a risk worth guarding against: the control lane is
+/// heartbeats and answers to questions somebody asked, never a stream.
+///
+/// None when BOTH lanes are closed, which is the connection ending.
+async fn next_outbound(
+    ctl: &mut mpsc::Receiver<NodeToControl>,
+    out: &mut mpsc::Receiver<NodeToControl>,
+) -> Option<NodeToControl> {
+    tokio::select! {
+        biased;
+        Some(msg) = ctl.recv() => Some(msg),
+        Some(msg) = out.recv() => Some(msg),
+        else => None,
+    }
+}
+
 /// One connection lifetime: register, resync, pump until the socket closes.
 pub async fn connect_once(cfg: &NodeConfig) -> Result<()> {
     let mut request = ws_url(cfg.agent_endpoint())
@@ -187,11 +240,15 @@ pub async fn connect_once(cfg: &NodeConfig) -> Result<()> {
     );
     let (mut sink, mut stream) = socket.split();
 
+    // Two lanes to the control plane, not one (MAIN-371). `out_tx` carries
+    // terminal output and nothing else; `ctl_tx` carries everything a human or
+    // an API call is waiting on. See the writer below for why.
     let (out_tx, mut out_rx) = mpsc::channel::<NodeToControl>(1024);
+    let (ctl_tx, mut ctl_rx) = mpsc::channel::<NodeToControl>(256);
 
     // Writer: everything → socket.
     let writer = tokio::spawn(async move {
-        while let Some(msg) = out_rx.recv().await {
+        while let Some(msg) = next_outbound(&mut ctl_rx, &mut out_rx).await {
             let Ok(json) = serde_json::to_string(&msg) else {
                 continue;
             };
@@ -202,7 +259,7 @@ pub async fn connect_once(cfg: &NodeConfig) -> Result<()> {
     });
 
     // Register: idempotent full resync on every connect.
-    out_tx
+    ctl_tx
         .send(NodeToControl::Register {
             capabilities: capabilities::detect(),
             live_tmux_sessions: tmux::list_nook_sessions(),
@@ -212,7 +269,7 @@ pub async fn connect_once(cfg: &NodeConfig) -> Result<()> {
     {
         // Off the loop: a full scan is one `git status` per checkout, which on
         // a bind-mounted filesystem can take seconds.
-        let tx = out_tx.clone();
+        let tx = ctl_tx.clone();
         let roots = cfg.workspace_roots.clone();
         tokio::task::spawn_blocking(move || {
             let _ = tx.blocking_send(NodeToControl::WorkspacesDiscovered {
@@ -230,7 +287,7 @@ pub async fn connect_once(cfg: &NodeConfig) -> Result<()> {
 
     // Heartbeat carries a live resource sample so triage/humans can see which
     // machine can take the work.
-    let hb_tx = out_tx.clone();
+    let hb_tx = ctl_tx.clone();
     let heartbeat = tokio::spawn(async move {
         let mut interval = tokio::time::interval(HEARTBEAT_INTERVAL);
         let mut sampler = crate::resources::Sampler::new();
@@ -260,7 +317,7 @@ pub async fn connect_once(cfg: &NodeConfig) -> Result<()> {
     });
 
     // Periodic re-discovery.
-    let disc_tx = out_tx.clone();
+    let disc_tx = ctl_tx.clone();
     let roots = cfg.workspace_roots.clone();
     let discovery_task = tokio::spawn(async move {
         let mut interval = tokio::time::interval(DISCOVERY_INTERVAL);
@@ -286,7 +343,9 @@ pub async fn connect_once(cfg: &NodeConfig) -> Result<()> {
     // The session engine lives on its own thread (see sessions.rs) — the read
     // loop only ever forwards commands, so a slow tmux spawn can never sit
     // between a keystroke arriving and it reaching the PTY.
-    let session_tx = sessions::Manager::spawn(out_tx.clone());
+    let session_tx = sessions::Manager::spawn(out_tx.clone(), ctl_tx.clone());
+
+    let updating = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
 
     while let Some(msg) = stream.next().await {
         let msg = match msg {
@@ -305,19 +364,16 @@ pub async fn connect_once(cfg: &NodeConfig) -> Result<()> {
             ControlToNode::UpdateAgent => {
                 // Asked directly, so no version comparison: somebody pressed a
                 // button and meant it.
-                match crate::selfupdate::run("asked by the control plane").await {
-                    Ok(()) => {}
-                    Err(e) => tracing::warn!(error = %e, "cannot update this agent"),
-                }
+                spawn_selfupdate("asked by the control plane", &updating);
             }
             ControlToNode::Ping => {
-                out_tx.send(NodeToControl::Pong).await.ok();
+                ctl_tx.send(NodeToControl::Pong).await.ok();
             }
             ControlToNode::TrustChanged { ca_fingerprints } => {
                 // A CA was staged. Renew now so the operator can promote it
                 // without waiting up to thirty days for this node's
                 // certificate to expire on its own.
-                maybe_renew(&ca_fingerprints).await;
+                tokio::spawn(async move { maybe_renew(&ca_fingerprints).await });
             }
             ControlToNode::RegisterAck {
                 node_name,
@@ -329,7 +385,7 @@ pub async fn connect_once(cfg: &NodeConfig) -> Result<()> {
 
                 // Every reconnect is a chance to notice both a staged rotation
                 // and an approaching expiry, without waiting for the timer.
-                maybe_renew(&ca_fingerprints).await;
+                tokio::spawn(async move { maybe_renew(&ca_fingerprints).await });
 
                 // Nothing polls. A node reconnects whenever the control plane
                 // restarts, which is exactly when a fleet needs updating — so
@@ -343,11 +399,7 @@ pub async fn connect_once(cfg: &NodeConfig) -> Result<()> {
                         running = env!("CARGO_PKG_VERSION"),
                         "control plane expects a different agent version"
                     );
-                    if let Err(e) =
-                        crate::selfupdate::run("version differs from the control plane").await
-                    {
-                        tracing::warn!(error = %e, "cannot update this agent");
-                    }
+                    spawn_selfupdate("version differs from the control plane", &updating);
                 } else if behind {
                     // Being behind and saying nothing is the worst of the three
                     // outcomes. Somebody deploys, watches the fleet stay on the
@@ -445,7 +497,7 @@ pub async fn connect_once(cfg: &NodeConfig) -> Result<()> {
                 request_id,
                 workspace_path,
             } => {
-                let tx = out_tx.clone();
+                let tx = ctl_tx.clone();
                 tokio::task::spawn_blocking(move || {
                     let snap = discovery::git_status(&workspace_path);
                     let _ = tx.blocking_send(NodeToControl::GitStatusResult {
@@ -464,7 +516,7 @@ pub async fn connect_once(cfg: &NodeConfig) -> Result<()> {
                 ssh_key,
                 tenant_slug,
             } => {
-                let tx = out_tx.clone();
+                let tx = ctl_tx.clone();
                 let root = new_checkout_root(cfg, tenant_slug.as_deref());
                 // Registered BEFORE the clone, so the rescan that follows can
                 // actually see what we are about to write there.
@@ -496,7 +548,7 @@ pub async fn connect_once(cfg: &NodeConfig) -> Result<()> {
                 repo_path,
                 branch,
             } => {
-                let tx = out_tx.clone();
+                let tx = ctl_tx.clone();
                 let roots = cfg.workspace_roots.clone();
                 tokio::task::spawn_blocking(move || {
                     let outcome = crate::gitops::add_worktree(&repo_path, &branch);
@@ -518,7 +570,7 @@ pub async fn connect_once(cfg: &NodeConfig) -> Result<()> {
                 request_id,
                 worktree_path,
             } => {
-                let tx = out_tx.clone();
+                let tx = ctl_tx.clone();
                 let roots = cfg.workspace_roots.clone();
                 tokio::task::spawn_blocking(move || {
                     let outcome = crate::gitops::remove_worktree(&worktree_path);
@@ -542,7 +594,7 @@ pub async fn connect_once(cfg: &NodeConfig) -> Result<()> {
                 message,
                 paths,
             } => {
-                let tx = out_tx.clone();
+                let tx = ctl_tx.clone();
                 let roots = cfg.workspace_roots.clone();
                 tokio::task::spawn_blocking(move || {
                     let outcome =
@@ -569,7 +621,7 @@ pub async fn connect_once(cfg: &NodeConfig) -> Result<()> {
                 checkout_path,
                 ssh_key_material,
             } => {
-                let tx = out_tx.clone();
+                let tx = ctl_tx.clone();
                 tokio::task::spawn_blocking(move || {
                     let outcome =
                         crate::gitops::push_current(&checkout_path, ssh_key_material.as_deref());
@@ -582,7 +634,7 @@ pub async fn connect_once(cfg: &NodeConfig) -> Result<()> {
                 });
             }
             ControlToNode::RemoveCheckout { request_id, path } => {
-                let tx = out_tx.clone();
+                let tx = ctl_tx.clone();
                 let roots = cfg.workspace_roots.clone();
                 let scan_roots = roots.clone();
                 tokio::task::spawn_blocking(move || {
@@ -606,7 +658,7 @@ pub async fn connect_once(cfg: &NodeConfig) -> Result<()> {
                 tmux_session,
                 action,
             } => {
-                let tx = out_tx.clone();
+                let tx = ctl_tx.clone();
                 tokio::task::spawn_blocking(move || {
                     use nook_proto::WindowAction as W;
                     // Every action ends by reporting the resulting window list,
@@ -641,7 +693,7 @@ pub async fn connect_once(cfg: &NodeConfig) -> Result<()> {
                 });
             }
             ControlToNode::InitProject { request_id, name } => {
-                let tx = out_tx.clone();
+                let tx = ctl_tx.clone();
                 // No tenant on the wire for this one yet, so it uses the node's
                 // own — correct for the ordinary case, and still better than
                 // `workspace_roots[0]`.
@@ -668,7 +720,7 @@ pub async fn connect_once(cfg: &NodeConfig) -> Result<()> {
                 tmux_session,
                 history_lines,
             } => {
-                let tx = out_tx.clone();
+                let tx = ctl_tx.clone();
                 tokio::task::spawn_blocking(move || {
                     let result = crate::tmux::capture_pane(&tmux_session, history_lines);
                     let _ = tx.blocking_send(match result {
@@ -692,7 +744,7 @@ pub async fn connect_once(cfg: &NodeConfig) -> Result<()> {
                 name,
                 content_b64,
             } => {
-                let tx = out_tx.clone();
+                let tx = ctl_tx.clone();
                 tokio::task::spawn_blocking(move || {
                     use base64::Engine;
                     let bytes = base64::engine::general_purpose::STANDARD
@@ -715,7 +767,7 @@ pub async fn connect_once(cfg: &NodeConfig) -> Result<()> {
                 checkout_path,
                 name,
             } => {
-                let tx = out_tx.clone();
+                let tx = ctl_tx.clone();
                 tokio::task::spawn_blocking(move || {
                     use base64::Engine;
                     let (ok, message) =
@@ -738,7 +790,7 @@ pub async fn connect_once(cfg: &NodeConfig) -> Result<()> {
                 // spawn_blocking like every other git arm — this one ran the
                 // scan INLINE and stalled the read loop (frozen keystrokes)
                 // for one `git status` per checkout.
-                let tx = out_tx.clone();
+                let tx = ctl_tx.clone();
                 let roots = cfg.workspace_roots.clone();
                 tokio::task::spawn_blocking(move || {
                     let _ = tx.blocking_send(NodeToControl::WorkspacesDiscovered {
@@ -778,7 +830,7 @@ pub async fn connect_once(cfg: &NodeConfig) -> Result<()> {
                         }
                     }
                 };
-                out_tx.send(report).await.ok();
+                ctl_tx.send(report).await.ok();
             }
             ControlToNode::InstallRuntimeCredential {
                 runtime,
@@ -841,14 +893,14 @@ pub async fn connect_once(cfg: &NodeConfig) -> Result<()> {
                         }
                     }
                 };
-                out_tx.send(report).await.ok();
+                ctl_tx.send(report).await.ok();
 
                 // Re-probe and push the fresh set either way (AC-3), the same
                 // path an authorize session uses when it ends. On success this
                 // is what flips the panel to authorized; on failure it is what
                 // stops the panel claiming a state the node does not have.
                 let profiles = crate::runtime_auth::probe_all();
-                out_tx
+                ctl_tx
                     .send(NodeToControl::RuntimeAuthStatus { profiles })
                     .await
                     .ok();
@@ -877,7 +929,7 @@ pub async fn connect_once(cfg: &NodeConfig) -> Result<()> {
                         }
                     }
                 };
-                out_tx.send(report).await.ok();
+                ctl_tx.send(report).await.ok();
             }
             ControlToNode::RunLoopJob {
                 workspace_id,
@@ -891,7 +943,7 @@ pub async fn connect_once(cfg: &NodeConfig) -> Result<()> {
                 // git + tmux + PTY are all blocking, so the runner lives on a
                 // blocking thread with its own cloned sender and config —
                 // mirroring the git-op arms above.
-                let tx = out_tx.clone();
+                let tx = ctl_tx.clone();
                 let cfg = cfg.clone();
                 tokio::task::spawn_blocking(move || {
                     crate::loop_job::run(
@@ -915,7 +967,7 @@ pub async fn connect_once(cfg: &NodeConfig) -> Result<()> {
                 // blocking thread like the runner itself; a message that finds
                 // no session is reported back on the transcript, so the human
                 // never reads "sent" as "the agent saw it".
-                let tx = out_tx.clone();
+                let tx = ctl_tx.clone();
                 tokio::task::spawn_blocking(move || {
                     if let Err(e) = crate::loop_job::deliver_message(&job_id, &body) {
                         tracing::warn!(job = %job_id, error = %e, "could not deliver job message");
@@ -993,9 +1045,71 @@ async fn maybe_renew(server_fingerprints: &[String]) {
 
 #[cfg(test)]
 mod tests {
-    use super::checkout_root;
+    use super::{checkout_root, next_outbound};
+    use nook_proto::NodeToControl;
+    use nook_types::SessionId;
+    use tokio::sync::mpsc;
 
     const SERVER: &str = "https://nook.hein.network";
+
+    /// A git answer must not wait behind a terminal that is mid-`cat`.
+    ///
+    /// The bug this pins: one queue for both, a session flooding it, and the
+    /// control plane timing out at ten seconds on a reply the node had already
+    /// produced — "node did not answer in time", every terminal on the machine
+    /// frozen with it.
+    #[tokio::test]
+    async fn control_replies_overtake_a_backlog_of_terminal_output() {
+        let (out_tx, mut out_rx) = mpsc::channel::<NodeToControl>(1024);
+        let (ctl_tx, mut ctl_rx) = mpsc::channel::<NodeToControl>(256);
+
+        for _ in 0..1024 {
+            out_tx
+                .try_send(NodeToControl::SessionOutput {
+                    session_id: SessionId(uuid::Uuid::now_v7()),
+                    data_b64: "x".repeat(5500),
+                })
+                .expect("output lane holds a full backlog");
+        }
+        ctl_tx
+            .try_send(NodeToControl::Pong)
+            .expect("control lane is empty");
+
+        assert!(
+            matches!(
+                next_outbound(&mut ctl_rx, &mut out_rx).await,
+                Some(NodeToControl::Pong)
+            ),
+            "the control lane must be drained first, not after 1024 output frames"
+        );
+    }
+
+    /// Nothing is stranded on the bulk lane once control is quiet.
+    #[tokio::test]
+    async fn terminal_output_still_flows_when_control_is_idle() {
+        let (out_tx, mut out_rx) = mpsc::channel::<NodeToControl>(8);
+        let (_ctl_tx, mut ctl_rx) = mpsc::channel::<NodeToControl>(8);
+        out_tx
+            .try_send(NodeToControl::SessionOutput {
+                session_id: SessionId(uuid::Uuid::now_v7()),
+                data_b64: "y".into(),
+            })
+            .unwrap();
+        assert!(matches!(
+            next_outbound(&mut ctl_rx, &mut out_rx).await,
+            Some(NodeToControl::SessionOutput { .. })
+        ));
+    }
+
+    /// Both lanes closed is the connection ending — the writer must stop, not spin.
+    #[tokio::test]
+    async fn both_lanes_closed_ends_the_writer() {
+        let (out_tx, mut out_rx) = mpsc::channel::<NodeToControl>(1);
+        let (ctl_tx, mut ctl_rx) = mpsc::channel::<NodeToControl>(1);
+        drop(out_tx);
+        drop(ctl_tx);
+        assert!(next_outbound(&mut ctl_rx, &mut out_rx).await.is_none());
+    }
 
     /// The tenant that ASKED wins over the node's home tenant. Cross-tenant
     /// placement (MAIN-353) makes this the ordinary case, not the exception:

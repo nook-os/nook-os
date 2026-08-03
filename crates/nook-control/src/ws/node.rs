@@ -16,7 +16,7 @@ use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Response};
 use futures_util::{SinkExt, StreamExt};
-use nook_proto::{ControlToNode, NodeToControl, UiEvent};
+use nook_proto::{ControlToNode, DiscoveredWorkspace, NodeToControl, UiEvent};
 use nook_types::{NodeId, SessionId, TenantId};
 use tokio::sync::mpsc;
 
@@ -30,6 +30,10 @@ use crate::ws::registry::NodeHandle;
 const NODE_CHANNEL_CAP: usize = 1024;
 const IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(45);
 const PING_INTERVAL: std::time::Duration = std::time::Duration::from_secs(20);
+/// How long a single node-message handler may hold the read loop before it is
+/// worth a warning. Generous — a slow database write is not the target; a
+/// handler that WAITS on something is.
+const HANDLER_STALL_BUDGET: std::time::Duration = std::time::Duration::from_millis(500);
 
 pub async fn node_ws(
     State(state): State<AppState>,
@@ -154,6 +158,38 @@ async fn handle(
         }
     });
 
+    // Workspace scans reconcile HERE, not on the read loop below (MAIN-371).
+    //
+    // `discovery::reconcile` asks the node to read each checkout's `.nook.toml`
+    // and waits up to fifteen seconds per workspace for the answer. That answer
+    // comes back on this node's socket — whose only reader is the loop below —
+    // so running the reconcile there deadlocked it against itself: it burnt the
+    // full timeout every time, once per workspace, and read nothing meanwhile.
+    // Measured at 45s for three workspaces, during which every terminal on the
+    // machine froze and every git RPC returned "node did not answer in time".
+    //
+    // A scan is a full, idempotent snapshot, so only the NEWEST one is worth
+    // running: `watch` keeps exactly that and never blocks the sender. One
+    // consumer means two scans of the same node also cannot overlap and mint
+    // the same workspace twice.
+    let (scan_tx, mut scan_rx) =
+        tokio::sync::watch::channel::<Option<Vec<DiscoveredWorkspace>>>(None);
+    let reconciler = tokio::spawn({
+        let state = state.clone();
+        async move {
+            while scan_rx.changed().await.is_ok() {
+                let Some(scan) = scan_rx.borrow_and_update().clone() else {
+                    continue;
+                };
+                if let Err(e) =
+                    crate::services::discovery::reconcile(&state, tenant, node_id, scan).await
+                {
+                    tracing::error!(%node_id, error = %e, "workspace reconcile failed");
+                }
+            }
+        }
+    });
+
     // Reader with dead-man timeout.
     loop {
         let next = tokio::time::timeout(IDLE_TIMEOUT, stream.next()).await;
@@ -181,14 +217,38 @@ async fn handle(
                 continue;
             }
         };
+        // A full workspace scan is reconciled OFF this loop — see `scan_tx`.
+        if let NodeToControl::WorkspacesDiscovered { workspaces } = parsed {
+            let _ = scan_tx.send(Some(workspaces));
+            continue;
+        }
+
+        let kind = message_kind(&parsed);
+        let started = std::time::Instant::now();
         if let Err(e) = handle_message(&state, node_id, tenant, &name, parsed, &tx).await {
             tracing::error!(%node_id, error = %e, "error handling node message");
+        }
+        // Nothing here may block: this loop is the ONLY reader of the node's
+        // socket, so every millisecond spent in a handler is a millisecond in
+        // which no terminal byte, no RPC reply and no heartbeat is read from
+        // ANY session on this machine. A handler that waits on the node's
+        // answer deadlocks outright — the answer arrives on this socket. Say
+        // so loudly rather than letting it read as an unexplained freeze.
+        let elapsed = started.elapsed();
+        if elapsed > HANDLER_STALL_BUDGET {
+            tracing::warn!(
+                %node_id,
+                kind,
+                ms = elapsed.as_millis() as u64,
+                "node message handler stalled the read loop — every session on this node was frozen for that long"
+            );
         }
     }
 
     // Disconnect: offline + detach-preserving (tmux keeps sessions alive).
     writer.abort();
     pinger.abort();
+    reconciler.abort();
     // A node that reconnected before this loop noticed the old socket had gone
     // is served by a NEWER connection — this one is a ghost, and everything
     // below would be a lie about a live node (MAIN-363). Seen in prod: an agent
@@ -228,6 +288,24 @@ async fn handle(
     )
     .await;
     tracing::info!(%node_id, node = %name, "node disconnected");
+}
+
+/// What a message is, for the read loop's stall warning. Only the name — the
+/// point is to say WHICH handler blocked the socket, not to log traffic.
+fn message_kind(m: &NodeToControl) -> &'static str {
+    match m {
+        NodeToControl::SessionOutput { .. } => "session_output",
+        NodeToControl::Heartbeat { .. } => "heartbeat",
+        NodeToControl::WorkspacesDiscovered { .. } => "workspaces_discovered",
+        NodeToControl::GitStatusResult { .. } => "git_status_result",
+        NodeToControl::OpResult { .. } => "op_result",
+        NodeToControl::Register { .. } => "register",
+        NodeToControl::SessionStarted { .. } => "session_started",
+        NodeToControl::SessionExited { .. } => "session_exited",
+        NodeToControl::JobTranscript { .. } => "job_transcript",
+        NodeToControl::Pong => "pong",
+        _ => "other",
+    }
 }
 
 async fn handle_message(
@@ -394,9 +472,8 @@ async fn handle_message(
                 },
             );
         }
-        NodeToControl::WorkspacesDiscovered { workspaces } => {
-            crate::services::discovery::reconcile(state, tenant, node_id, workspaces).await?;
-        }
+        // Handled off the read loop, before dispatch — see `scan_tx` in `handle`.
+        NodeToControl::WorkspacesDiscovered { .. } => {}
         NodeToControl::SkillInstalled {
             name: skill,
             agents,
