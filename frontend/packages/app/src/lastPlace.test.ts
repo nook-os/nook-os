@@ -29,6 +29,24 @@ describe("last place, per tenant", () => {
     expect(recall("   ", "session.id")).toBeNull();
   });
 
+  it("holds a separate last place for each tenant, at the same time", () => {
+    // The switch-tenants case. Each tenant keeps its own session; moving between
+    // them returns you to where you were in EACH, and neither write disturbs the
+    // other. This is why the keys are flat rather than one nested blob — a
+    // read-modify-write on a shared object would let two tabs in different
+    // tenants clobber each other.
+    remember("hein", "session.id", "sess-hein");
+    remember("engineering", "session.id", "sess-eng");
+
+    expect(recall("hein", "session.id")).toBe("sess-hein");
+    expect(recall("engineering", "session.id")).toBe("sess-eng");
+
+    // Coming back and moving on in one tenant leaves the other untouched.
+    remember("hein", "session.id", "sess-hein-2");
+    expect(recall("hein", "session.id")).toBe("sess-hein-2");
+    expect(recall("engineering", "session.id")).toBe("sess-eng");
+  });
+
   it("keeps different things apart", () => {
     remember("t1", "board.view", "backlog");
     remember("t1", "session.id", "sess-9");
