@@ -1,4 +1,5 @@
-//! Who may touch a tenant's session content. Membership, and nothing else.
+//! Who may touch a session's content. Membership of the tenant, AND ownership
+//! of the machine it runs on.
 //!
 //! # This module deliberately does not import `perm.rs`
 //!
@@ -22,6 +23,29 @@
 //!
 //! If you are here to add "…unless the caller is an operator", the answer is
 //! no. That is the feature this file exists to prevent.
+//!
+//! # Membership was not enough
+//!
+//! Found in prod, 2026-08-03: a second OWNER of a tenant attached to sessions
+//! running on someone else's machines. Membership was the whole gate, so every
+//! member of a tenant could read, type into and kill any terminal in it — the
+//! promise above held against operators and strangers and not against the person
+//! at the next desk.
+//!
+//! So content now also requires that the caller's PERSON owns the node. Owners
+//! keep tenant-wide session METADATA (capacity and audit, MAIN-133); this is the
+//! line that makes "session content stays private regardless" true rather than
+//! stated. A terminal belongs to the machine's owner, and a role — including
+//! `owner` — is not a way in.
+//!
+//! Note what this is NOT: ownership is a fact about the node row, not a
+//! permission and not a policy. It can only NARROW. The structural test below
+//! still forbids every route into `role_bindings` or `Permission`, because
+//! widening is the failure this file exists to prevent and narrowing is not.
+//!
+//! Shared machines are deliberately NOT an exception here, unlike
+//! `require_person_may_use_node`. Sharing a node lets the team RUN work on it;
+//! it does not hand them the screens of work already running.
 
 use nook_types::TenantId;
 
@@ -30,43 +54,50 @@ use crate::error::ApiError;
 use crate::state::AppState;
 
 impl AuthCtx {
-    /// May this caller read or write session content belonging to `tenant`?
+    /// May this caller read or write the content of a session in `tenant`,
+    /// running on `node`?
     ///
-    /// Membership is: your current tenant is that tenant, or you hold a row in
-    /// `tenant_members` for it. A node may act on sessions in its own tenant,
-    /// because a node running the session is how the bytes exist at all.
+    /// Two gates, both required for a person. Membership is: your current tenant
+    /// is that tenant, or you hold a row in `tenant_members` for it. Ownership
+    /// is: `nodes.owner_person_id` is your person. A node credential passes on
+    /// membership alone — a node running the session is how the bytes exist at
+    /// all, and confining it to its own tenant is the check that matters there.
     pub async fn require_session_access(
         &self,
         state: &AppState,
         tenant: TenantId,
+        node: nook_types::NodeId,
     ) -> Result<(), ApiError> {
-        // The fast path, and the common one: this is your own tenant. Note
-        // that `self.tenant_id` comes from the authenticated context and never
+        // TENANT first. Same tenant, or an explicit `tenant_members` row —
+        // note `self.tenant_id` comes from the authenticated context and never
         // from the request, so it cannot be pointed at somebody else.
-        if self.tenant_id == tenant {
-            return Ok(());
-        }
+        //
+        // This used to `return Ok(())` on the same-tenant match, which is what
+        // let a co-owner attach to a colleague's terminals: the fast path
+        // answered before anything asked whose machine it was. It now only
+        // ESTABLISHES the tenant; the ownership gate below still has to pass.
+        let same_tenant = self.tenant_id == tenant;
 
         // A machine credential is confined to the tenant it belongs to, full
         // stop. There is no membership table for machines and there should not
         // be: a node reaching into another tenant's sessions is one compromised
         // box becoming all of them.
         if matches!(self.principal, Principal::Node(_)) {
-            return Err(refusal());
+            return if same_tenant { Ok(()) } else { Err(refusal()) };
         }
 
         // Explicit membership. This query is the entire authorization surface
         // for session content — `role_bindings` is deliberately not joined.
-        let member = state
-            .identity
-            .has_active_membership(self.user_id, tenant)
-            .await?;
+        let member = same_tenant
+            || state
+                .identity
+                .has_active_membership(self.user_id, tenant)
+                .await?;
 
-        if member {
-            Ok(())
-        } else {
-            Err(refusal())
+        if !member {
+            return Err(refusal());
         }
+        self.require_node_owner(state, node).await
     }
 }
 
@@ -77,8 +108,9 @@ impl AuthCtx {
 /// them would confirm that somebody else's session exists.
 fn refusal() -> ApiError {
     ApiError::ForbiddenMsg(
-        "session content belongs to the tenant that owns it. Operator and \
-         administrative roles do not grant access to terminals, prompts or code."
+        "terminals belong to the person who owns the machine. Tenant membership, \
+         operator and administrative roles — including `owner` — do not grant \
+         access to terminals, prompts or code."
             .into(),
     )
 }

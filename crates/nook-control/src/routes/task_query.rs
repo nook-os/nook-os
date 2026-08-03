@@ -37,6 +37,10 @@ pub struct TaskFilter {
     pub not_label: Vec<String>,
     /// A user id, or the literal `none` for unassigned.
     pub assignee: Option<String>,
+    /// The node asking, so a builder sees the cards dispatched to ITS machine
+    /// plus everything undispatched. Omit it and nothing is narrowed — a human
+    /// listing the board sees dispatched cards too.
+    pub node: Option<String>,
     pub column_type: Option<String>,
     pub priority: Option<i32>,
     /// Repeatable issue-type filter (MAIN-59). ORs within types (`type=epic&type=bug`
@@ -106,6 +110,7 @@ impl TaskFilter {
                 // raw term keeps a key search like `MAIN-42` intact.
                 "q" => f.q = Some(v),
                 "assignee" => f.assignee = Some(v),
+                "node" => f.node = Some(v),
                 "column_type" => f.column_type = Some(v),
                 "priority" => f.priority = Some(num(&k, &v)?),
                 "type" => many(&mut f.type_),
@@ -265,6 +270,13 @@ pub async fn query_rows(
         .map(|l| l.trim().to_lowercase())
         .collect();
     let types: Vec<String> = f.type_.iter().map(|t| t.trim().to_lowercase()).collect();
+    let node_id = match f.node.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        None => None,
+        Some(id) => Some(
+            id.parse::<uuid::Uuid>()
+                .map_err(|_| ApiError::BadRequest(format!("{id:?} is not a node id")))?,
+        ),
+    };
 
     let rows = repo
         .pick_tasks(
@@ -289,6 +301,7 @@ pub async fn query_rows(
                 parent: parent_id,
                 backlog: f.backlog.unwrap_or(false),
                 visibility: f.visibility.clone(),
+                node: node_id,
             },
         )
         .await?;

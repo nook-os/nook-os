@@ -51,6 +51,7 @@ import {
   type ContextMenuItem,
 } from "../contextMenu";
 import { fetchTaskJobs, taskJobsKey } from "../loop";
+import { recall, remember } from "../lastPlace";
 import { priorityMeta, priorityRank, previewText, PRIORITIES } from "../taskmeta";
 
 function Card({
@@ -1305,6 +1306,34 @@ export function BoardPage() {
     }
   }, [detail, openTask, params, setParams]);
 
+  // Which tab you were last on, per tenant.
+  //
+  // `view` lives in the URL, so it survives a REFRESH — but leaving the section
+  // and coming back arrives at a bare `/board`, which always meant the kanban
+  // even if you had spent the morning in the backlog.
+  //
+  // Remember on every explicit choice; restore only when the URL says nothing.
+  // An explicit `?view=` — a deep link, a shared URL, the backlog effect above —
+  // still wins, so this never overrides an intent somebody expressed.
+  React.useEffect(() => {
+    if (params.has("view")) remember(tenantId, "board.view", filter.view);
+  }, [tenantId, filter.view, params]);
+
+  React.useEffect(() => {
+    if (params.has("view")) return;
+    if (recall(tenantId, "board.view") !== "backlog") return;
+    setParams(
+      (prev) => {
+        const next = new URLSearchParams(prev);
+        next.set("view", "backlog");
+        return next;
+      },
+      // `replace` so returning to the board does not stack a history entry —
+      // otherwise Back would bounce between the two tabs instead of leaving.
+      { replace: true },
+    );
+  }, [tenantId, params, setParams]);
+
   const refresh = () => queryClient.invalidateQueries({ queryKey: ["boards"] });
 
   // Board-automation panel toggle. Declared with the other hooks, ABOVE every
@@ -1465,6 +1494,12 @@ export function BoardPage() {
           workspaceId: t.workspace_id ?? undefined,
           worktree: true,
         }),
+      // Close the detail modal if it is showing the ticket that just went. It
+      // would otherwise sit there rendering a deleted task, with every control
+      // on it failing against a 404.
+      onDeleted: (t) => {
+        if (openTask === t.key || openTask === t.id) setOpenTask(null);
+      },
       refresh: bust,
     });
   };

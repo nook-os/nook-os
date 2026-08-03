@@ -10,7 +10,8 @@ import { createSpecDraft } from "../newspec";
 import { useNewWork } from "../newwork";
 import { usePagedList } from "../paging";
 import { fetchCredentials } from "../GitCredentials";
-import { PortSafetyNotice } from "../PortSafetyNotice";
+import { PORT_CAP_SENTENCE, PortSafetyNotice } from "../PortSafetyNotice";
+import { hasPortDeclaration } from "../portSafety";
 import { SessionPolicy } from "../SessionPolicy";
 import { WorkspaceLocations } from "../WorkspaceLocations";
 import { SectionedPage, type PageSection } from "../SectionedPage";
@@ -174,6 +175,26 @@ export function WorkspacesPage() {
       key: "where",
       header: "Where it lives",
       cell: (w) => <WorkspaceLocations locations={w.locations} />,
+    },
+    {
+      // The cap, where you can see the whole fleet at once. It was only on a
+      // workspace's Policy section — fifth of seven, one repo at a time — so
+      // five capped repos meant five page visits and no way to know they
+      // existed. Derived from the row's own declaration, so the table costs no
+      // extra request.
+      key: "ports",
+      header: "Ports",
+      cell: (w) =>
+        hasPortDeclaration(w) ? (
+          <span className="muted small">declared</span>
+        ) : (
+          <Link
+            to={`/workspaces/${w.id}#policy`}
+            title={`${PORT_CAP_SENTENCE} Open the workspace to declare its listeners or file a ticket.`}
+          >
+            <Pill tone="warn">1 per node</Pill>
+          </Link>
+        ),
     },
     {
       key: "actions",

@@ -22,6 +22,24 @@ import { notify } from "./dialogs";
  *  somebody renamed the workspace. */
 export const PORTS_TICKET_TITLE = "Declare this repo's ports";
 
+/** Whether a workspace has declared its listeners, from the workspace ROW.
+ *
+ *  The list view's half of the cap. `port_capped` comes from
+ *  `/workspaces/{id}/reconcile-status`, which is one call per workspace — fine
+ *  on a detail page, an N+1 on a table. The declaration itself already rides on
+ *  every `Workspace`, and the server derives the cap from exactly this, so the
+ *  table can answer without asking.
+ *
+ *  `null` and absent are undeclared. An EMPTY array is not: it is the workspace
+ *  saying "this repo binds nothing", which is a real declaration and lifts the
+ *  cap. Collapsing the two is the easy mistake here — it would nag every repo
+ *  that has honestly answered. */
+export function hasPortDeclaration(w: {
+  port_requirements?: unknown;
+}): boolean {
+  return w.port_requirements !== null && w.port_requirements !== undefined;
+}
+
 /** Whether the reconciler is holding this workspace to one session per node.
  *
  *  Derived from what the server derived — never stored on either side, so a
@@ -30,37 +48,94 @@ export function isPortCapped(status: { port_capped?: boolean } | null | undefine
   return !!status?.port_capped;
 }
 
-/** The ticket body, written for a builder who has no other context.
+/** The ticket body, in the shape `nook-build` actually consumes.
  *
- *  It names the repo, says what to add, and — the part that actually matters —
- *  says the app has to READ those variables. A declaration nobody reads changes
- *  nothing: the ports would be leased and the app would still bind 3000. */
+ *  Deliberately a BUILD contract, not a research note. The first version read
+ *  as instructions to a human — no acceptance criteria, no non-goals, nothing
+ *  to verify — so a builder picking it up had nothing to satisfy and no PR to
+ *  open against. The loop implements `AC-N`, treats `NG-N` as binding, and
+ *  ships a PR; a ticket without them is a ticket the loop cannot finish.
+ *
+ *  AC-2 is the one that matters. A declaration the app ignores leases a port and
+ *  changes nothing — nook would hand it `PORT=41007` and the app would still
+ *  bind 3000, and the second session would still collide. The cap lifts on the
+ *  declaration alone, so it is entirely possible to "fix" this ticket and leave
+ *  the bug in place; AC-4 is what proves otherwise. */
 export function portsTicketBody(workspaceName: string): string {
   return [
-    `\`${workspaceName}\` declares no ports, so nook is holding it to ONE session per node.`,
+    "## Problem",
     "",
-    "Two sessions of this repo on one machine would both bind whatever the app",
-    "hardcodes, and the second would fail in a way that looks like the app's fault.",
+    `\`${workspaceName}\` declares no ports, so nook holds it to ONE session per`,
+    "node. Two sessions of this repo on one machine would both bind whatever the",
+    "app hardcodes, and the second would fail in a way that looks like the app's",
+    "fault rather than a collision.",
     "",
-    "## What to do",
+    "Lifting the cap takes two things, and the second is the one that is easy to",
+    "skip: the repo has to DECLARE its listeners, and the app has to READ them.",
     "",
-    "1. Add a `.nook.toml` at the repo root declaring each listener it binds:",
+    "## Acceptance Criteria",
     "",
-    "   ```toml",
-    "   [[ports]]",
-    '   name = "web"',
-    '   env  = "PORT"',
-    "   ```",
+    "- [ ] AC-1 — A `.nook.toml` at the repo root declares one `[[ports]]` entry",
+    "      per listener the app binds, each with a stable `name` and the `env`",
+    "      variable the app will read:",
     "",
-    "2. Change the app to read those variables instead of its hardcoded ports —",
-    "   this is the half that matters. A declaration the app ignores leases a",
-    "   port and changes nothing.",
+    "      ```toml",
+    "      [[ports]]",
+    '      name = "web"',
+    '      env  = "PORT"',
+    "      ```",
     "",
-    "3. If this repo genuinely binds nothing, declare that instead: an empty",
-    "   `[[ports]]` list is a valid statement and lifts the cap just as well.",
+    "- [ ] AC-2 — Every listener reads its port from that variable. No hardcoded",
+    "      port literal remains on any bind path. **This is the half that makes",
+    "      the feature work** — nook leases a number and sets the variable; an app",
+    "      that ignores it still collides.",
+    "- [ ] AC-3 — With the variable unset the app still starts, on whatever port it",
+    "      used before. It must keep running outside nook — a plain `git clone`",
+    "      and a local dev run cannot start depending on a lease.",
+    "- [ ] AC-4 — **Two instances run on one machine at once.** Start the app twice",
+    "      with different values for the declared variables; both come up and",
+    "      neither reports a port in use. This is the acceptance test — the cap",
+    "      lifts on the declaration alone, so without this the ticket can close",
+    "      with the collision still there.",
+    "- [ ] AC-5 — Anything that documents a fixed port (README, compose file, docs)",
+    "      matches the new behaviour, so the next person does not re-hardcode it.",
     "",
-    "The cap lifts by itself once a declaration exists — nothing here needs",
-    "closing, and closing it without declaring will not lift it.",
+    "## Non-goals",
+    "",
+    "- NG-1 — No reverse proxy, no nice URLs. Leasing a port is this ticket;",
+    "  putting a hostname in front of it is separate work.",
+    "- NG-2 — No behaviour change beyond WHERE the app listens. Same routes, same",
+    "  responses, same everything else.",
+    "- NG-3 — The app does not pick or negotiate ports. It reads a variable nook",
+    "  set. Any allocation logic added here is a second allocator competing with",
+    "  the real one.",
+    "- NG-4 — If this repo genuinely binds nothing, do not invent a listener to",
+    "  satisfy AC-1. An empty `[[ports]]` list is a valid statement — \"this binds",
+    "  nothing\" — and lifts the cap just as well. Say so on the ticket and stop.",
+    "",
+    "## Relevant files",
+    "",
+    "- `.nook.toml` — new, at the repo root",
+    "- Wherever the app calls listen/bind, and anything that passes it a port",
+    "- README / compose / docs that name a fixed port (AC-5)",
+    "",
+    "## Test expectations",
+    "",
+    "- The app starts with the variable set and listens on that port.",
+    "- The app starts with the variable unset and listens on its previous default",
+    "  (AC-3) — a regression here breaks every non-nook checkout.",
+    "",
+    "## How to verify",
+    "",
+    "1. `PORT=41001 <run the app>` — it listens on 41001.",
+    "2. In a second shell, `PORT=41002 <run the app>` — it also comes up. Neither",
+    "   reports a port already in use.",
+    "3. `<run the app>` with nothing set — it starts as it always did.",
+    "4. Open two nook sessions on the same node. Both start; the one-per-node cap",
+    "   is gone from the workspace.",
+    "",
+    "The cap lifts by itself once the declaration exists — nothing here needs",
+    "closing by hand, and closing it without declaring will not lift it.",
   ].join("\n");
 }
 

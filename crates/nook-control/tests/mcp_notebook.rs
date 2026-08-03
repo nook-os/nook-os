@@ -8,7 +8,7 @@
 use nook_control::mcp_backend::McpBackend;
 use nook_mcp::NookBackend;
 use nook_testkit::TestBed;
-use nook_types::{CreateUserNote, UpdateUserNote};
+use nook_types::{CreateUserNote, CreateUserNoteFolder, UpdateUserNote, UpdateUserNoteFolder};
 
 #[tokio::test]
 async fn notebook_is_person_scoped_and_round_trips() {
@@ -123,6 +123,197 @@ async fn notebook_create_propagates_validation_errors() {
     assert!(
         err.to_string().contains("blank"),
         "the MAIN-84 blank-title message propagates: {err}"
+    );
+
+    bed.teardown().await;
+}
+
+/// Folders, nested, moved and deleted through MCP — the gap that made an
+/// Obsidian-shaped notebook unusable from a chat client: notes could already be
+/// created in folders and moved between them, but nothing could MAKE a folder.
+#[tokio::test]
+async fn notebook_folders_nest_move_and_delete_through_mcp() {
+    let Some(mut bed) = TestBed::new().await else {
+        eprintln!("skipping mcp notebook folder test — no DATABASE_URL");
+        return;
+    };
+    let tenant = bed.tenant("mcpnbf").await;
+    let (_u, alice) = bed.user(tenant, "owner").await;
+    let backend = McpBackend {
+        state: bed.app_state().await,
+    };
+
+    let root = backend
+        .notebook_create_folder(
+            alice,
+            CreateUserNoteFolder {
+                name: "Projects".into(),
+                parent_id: None,
+            },
+        )
+        .await
+        .expect("root folder");
+
+    // Nesting: the thing the tree exists for.
+    let child = backend
+        .notebook_create_folder(
+            alice,
+            CreateUserNoteFolder {
+                name: "NookOS".into(),
+                parent_id: Some(root.id),
+            },
+        )
+        .await
+        .expect("nested folder");
+    assert_eq!(child.parent_id, Some(root.id));
+
+    // A note lands inside the nested folder.
+    let note = backend
+        .notebook_create_note(
+            alice,
+            CreateUserNote {
+                title: "Design".into(),
+                content_md: "# notes".into(),
+                folder_id: Some(child.id),
+            },
+        )
+        .await
+        .expect("note in a folder");
+    assert_eq!(note.folder_id, Some(child.id));
+
+    // Rename and move to the root in one call.
+    let moved = backend
+        .notebook_update_folder(
+            alice,
+            child.id,
+            UpdateUserNoteFolder {
+                name: Some("Nook".into()),
+                parent_id: Some(None),
+            },
+        )
+        .await
+        .expect("rename + move to root");
+    assert_eq!(moved.name, "Nook");
+    assert_eq!(moved.parent_id, None, "moving to root did not detach it");
+
+    // Deleting REPARENTS rather than cascading: the note must survive.
+    backend
+        .notebook_delete_folder(alice, moved.id)
+        .await
+        .expect("delete the folder");
+    let kept = backend
+        .notebook_get_note(alice, note.id)
+        .await
+        .expect("the note outlives its folder");
+    assert_eq!(kept.folder_id, None, "the note should rise to the root");
+
+    bed.teardown().await;
+}
+
+/// A folder cannot be moved inside its own subtree. The guard lives in the
+/// shared service path, so extracting it for MCP rather than reimplementing is
+/// what keeps this true on both surfaces — a second copy is a second chance to
+/// omit it, and the result would be a subtree detached from the root-anchored
+/// path CTE.
+#[tokio::test]
+async fn a_folder_cannot_be_moved_into_its_own_subtree_through_mcp() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let tenant = bed.tenant("mcpnbc").await;
+    let (_u, alice) = bed.user(tenant, "owner").await;
+    let backend = McpBackend {
+        state: bed.app_state().await,
+    };
+
+    let parent = backend
+        .notebook_create_folder(
+            alice,
+            CreateUserNoteFolder {
+                name: "A".into(),
+                parent_id: None,
+            },
+        )
+        .await
+        .expect("parent");
+    let child = backend
+        .notebook_create_folder(
+            alice,
+            CreateUserNoteFolder {
+                name: "B".into(),
+                parent_id: Some(parent.id),
+            },
+        )
+        .await
+        .expect("child");
+
+    assert!(
+        backend
+            .notebook_update_folder(
+                alice,
+                parent.id,
+                UpdateUserNoteFolder {
+                    name: None,
+                    parent_id: Some(Some(child.id)),
+                },
+            )
+            .await
+            .is_err(),
+        "a folder was moved inside its own subtree"
+    );
+
+    bed.teardown().await;
+}
+
+/// Another person's folder is not yours to nest under, rename or delete — the
+/// notebook is private, and the MCP surface must not be the way around that.
+#[tokio::test]
+async fn one_persons_folders_are_invisible_to_another_through_mcp() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let tenant = bed.tenant("mcpnbp").await;
+    let (_ua, alice) = bed.user(tenant, "owner").await;
+    let (_ub, bob) = bed.user(tenant, "owner").await;
+    let backend = McpBackend {
+        state: bed.app_state().await,
+    };
+
+    let hers = backend
+        .notebook_create_folder(
+            alice,
+            CreateUserNoteFolder {
+                name: "Private".into(),
+                parent_id: None,
+            },
+        )
+        .await
+        .expect("alice's folder");
+
+    assert!(
+        backend
+            .notebook_list_folders(bob)
+            .await
+            .expect("list")
+            .is_empty(),
+        "bob can see alice's folders"
+    );
+    assert!(
+        backend
+            .notebook_create_folder(
+                bob,
+                CreateUserNoteFolder {
+                    name: "sneak".into(),
+                    parent_id: Some(hers.id),
+                },
+            )
+            .await
+            .is_err(),
+        "bob nested a folder under alice's"
+    );
+    assert!(
+        backend.notebook_delete_folder(bob, hers.id).await.is_err(),
+        "bob deleted alice's folder"
     );
 
     bed.teardown().await;

@@ -74,13 +74,27 @@ a human can make.
 One query does the whole pick:
 
 ```bash
-nook tasks --label agent-ready --not-label blocked --assignee none --unblocked --json
+nook tasks --label agent-ready --not-label blocked --assignee none --unblocked --this-node --json
 ```
 
 Each flag is load-bearing: `--label agent-ready` is the human approval gate,
 `--not-label blocked` skips issues waiting on a human answer, `--assignee none`
-skips work someone already holds, and `--unblocked` drops anything with an
-unfinished blocker.
+skips work someone already holds, `--unblocked` drops anything with an
+unfinished blocker, and `--this-node` is how a DISPATCHED card finds you.
+
+**What `--this-node` means.** A human can dispatch a card to a specific machine
+— "this one wants the big box", "only that node has the runtime". With the flag
+you see cards dispatched to the machine you are running on, PLUS everything
+undispatched; you never see a card dispatched to somebody else. Without it, a
+builder would take work meant for another node, which is the whole reason
+dispatch used to do nothing useful.
+
+So a dispatch is a HINT you honour, not an assignment you must wait for: an
+undispatched card is still fair game for whoever gets there first, and the claim
+in step 3 remains the thing that actually settles who does it.
+
+On a machine that has not joined a fleet the flag is a no-op and says so — you
+still see the undispatched work.
 
 Results already arrive in the order work should be taken: urgent first, tasks
 with **no** priority last, then oldest first. Take the first row. If the list

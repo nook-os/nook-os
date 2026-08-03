@@ -19,6 +19,37 @@ fn fail(message: impl Into<String>) -> OpOutcome {
     }
 }
 
+/// Run a git command that reaches a REMOTE, authenticated with `ssh_key_material`.
+///
+/// **The one place key material becomes an authenticated git command.** Three
+/// call sites used to hand-roll the same two lines — write the material to a
+/// transient file, take its path, pass it down — and a fourth, the loop job's
+/// bare-mirror clone, forgot them entirely. That fourth is why a loop job on a
+/// private repo died at "preparing workspace" with `Permission denied
+/// (publickey)` while the credential was pinned correctly and the same repo had
+/// already cloned onto the same machine.
+///
+/// Collapsing them here is the point: a new remote command reaches for THIS and
+/// gets the key handling by construction, instead of remembering to repeat it.
+///
+/// `None` means this machine's own reach, which is right for a public repo or a
+/// local path — [`crate::ssh::git_ssh_command`] then resolves the key chosen at
+/// `nook setup`, else the node's generated key. Callers do not re-implement that
+/// fallback; `push_current` used to and got it subtly wrong, handing git a
+/// configured path without checking it existed.
+pub(crate) fn run_git_remote(
+    args: &[&str],
+    cwd: Option<&Path>,
+    ssh_key_material: Option<&str>,
+) -> Result<String, String> {
+    // Bound rather than inlined: `TransientKey`'s Drop removes the file, so the
+    // guard has to outlive the git command — including on its error paths.
+    let held = ssh_key_material.and_then(TransientKey::write);
+    run_git(args, cwd, held.as_ref().map(|k| k.path.as_path()))
+}
+
+/// Run a git command. Prefer [`run_git_remote`] for anything touching a remote —
+/// it owns the key handling, so there is no key argument here to forget.
 pub(crate) fn run_git(
     args: &[&str],
     cwd: Option<&Path>,
@@ -168,12 +199,11 @@ pub fn clone_repo(
         }
     }
 
-    // Tenant credential (if provided) lives on disk only for the duration of
-    // the clone.
-    let transient = ssh_key_material.and_then(TransientKey::write);
-    let key_path = transient.as_ref().map(|t| t.path.as_path());
-
-    match run_git(&["clone", url, &dest.to_string_lossy()], None, key_path) {
+    match run_git_remote(
+        &["clone", url, &dest.to_string_lossy()],
+        None,
+        ssh_key_material,
+    ) {
         Ok(_) => OpOutcome {
             ok: true,
             path: Some(dest.to_string_lossy().to_string()),
@@ -484,20 +514,12 @@ pub fn push_current(checkout_path: &str, ssh_key_material: Option<&str>) -> OpOu
         return fail("detached HEAD — check out a branch before pushing");
     }
 
-    let transient = ssh_key_material.and_then(TransientKey::write);
-    let key_path = transient.as_ref().map(|k| k.path.clone()).or_else(|| {
-        crate::config::NodeConfig::load()
-            .ok()
-            .and_then(|c| c.ssh_key_path)
-            .map(std::path::PathBuf::from)
-    });
-
     // -u so the first push on a fresh branch doesn't need the caller to know
     // that "no upstream" is a different command.
-    match run_git(
+    match run_git_remote(
         &["push", "-u", "origin", &branch],
         Some(dir),
-        key_path.as_deref(),
+        ssh_key_material,
     ) {
         Ok(_) => OpOutcome {
             ok: true,

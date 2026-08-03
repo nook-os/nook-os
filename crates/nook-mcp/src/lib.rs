@@ -20,8 +20,9 @@ use uuid::Uuid;
 
 use nook_errors::ApiError;
 use nook_types::{
-    CreateUserNote, Event, Node, Note, Session, TaskItem, TenantId, UpdateUserNote, UserId,
-    UserNote, UserNoteFolder, UserNoteFolderId, UserNoteId, UserNoteSummary, WorkspaceDetail,
+    CreateUserNote, CreateUserNoteFolder, Event, Node, Note, Session, TaskItem, TenantId,
+    UpdateUserNote, UpdateUserNoteFolder, UserId, UserNote, UserNoteFolder, UserNoteFolderId,
+    UserNoteId, UserNoteSummary, WorkspaceDetail,
 };
 
 /// The per-request MCP caller identity resolved from an OIDC bearer (MAIN-102).
@@ -185,6 +186,27 @@ pub trait NookBackend: Send + Sync + 'static {
     ) -> anyhow::Result<UserNote>;
     async fn notebook_delete_note(&self, person: Uuid, id: UserNoteId) -> anyhow::Result<()>;
     async fn notebook_list_folders(&self, person: Uuid) -> anyhow::Result<Vec<UserNoteFolder>>;
+    async fn notebook_create_folder(
+        &self,
+        person: Uuid,
+        req: CreateUserNoteFolder,
+    ) -> anyhow::Result<UserNoteFolder>;
+    /// Rename and/or MOVE. `parent_id` is tri-state exactly like a note's
+    /// `folder_id`, and the shared service path refuses a move that would put a
+    /// folder inside its own subtree.
+    async fn notebook_update_folder(
+        &self,
+        person: Uuid,
+        id: UserNoteFolderId,
+        req: UpdateUserNoteFolder,
+    ) -> anyhow::Result<UserNoteFolder>;
+    /// Delete a folder, REPARENTING its contents up one level. Never deletes
+    /// notes.
+    async fn notebook_delete_folder(
+        &self,
+        person: Uuid,
+        id: UserNoteFolderId,
+    ) -> anyhow::Result<()>;
 }
 
 /// The pick filter, mirroring `GET /api/v1/tasks`.
@@ -487,6 +509,48 @@ fn require_caller(parts: &Parts) -> Result<McpCaller, McpError> {
             None,
         )
     })
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct NotebookCreateFolderParams {
+    /// The folder's name.
+    pub name: String,
+    /// Put it inside this folder. Omit for a folder at the notebook root.
+    #[serde(default)]
+    pub parent_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct NotebookUpdateFolderParams {
+    /// The folder to rename and/or move.
+    pub id: String,
+    /// New name. Omit to leave it alone.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Move under this folder. Omit to leave it where it is; pass an empty
+    /// string to move it to the notebook root. A move that would put a folder
+    /// inside its own subtree is refused.
+    #[serde(default)]
+    pub parent_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct NotebookFolderIdParams {
+    pub id: String,
+}
+
+/// The tri-state a move needs, from the flat string MCP clients can express:
+/// absent = leave alone, empty = move to the root, an id = move under it.
+///
+/// A tool schema cannot easily carry `Option<Option<T>>`, and "" is the one
+/// value that is never a valid uuid — so it is unambiguous rather than a
+/// sentinel that could collide with real input.
+fn parse_move_target(s: Option<String>) -> Result<Option<Option<UserNoteFolderId>>, McpError> {
+    match s {
+        None => Ok(None),
+        Some(v) if v.trim().is_empty() => Ok(Some(None)),
+        Some(v) => Ok(Some(Some(parse_folder_id(v.trim())?))),
+    }
 }
 
 fn parse_note_id(s: &str) -> Result<UserNoteId, McpError> {
@@ -1102,6 +1166,78 @@ impl NookMcp {
                 .await
                 .map_err(backend_err)?,
         )
+    }
+
+    #[tool(
+        description = "Create a folder in your personal notebook. Give parent_id to nest it inside another folder."
+    )]
+    async fn notebook_create_folder(
+        &self,
+        Extension(parts): Extension<Parts>,
+        Parameters(p): Parameters<NotebookCreateFolderParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let person = require_person(&parts)?;
+        let parent_id = match p.parent_id.as_deref().map(str::trim) {
+            None | Some("") => None,
+            Some(v) => Some(parse_folder_id(v)?),
+        };
+        to_result(
+            &self
+                .backend
+                .notebook_create_folder(
+                    person,
+                    CreateUserNoteFolder {
+                        name: p.name,
+                        parent_id,
+                    },
+                )
+                .await
+                .map_err(backend_err)?,
+        )
+    }
+
+    #[tool(
+        description = "Rename or move a notebook folder. Omit parent_id to leave it where it is; pass an empty string to move it to the notebook root."
+    )]
+    async fn notebook_update_folder(
+        &self,
+        Extension(parts): Extension<Parts>,
+        Parameters(p): Parameters<NotebookUpdateFolderParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let person = require_person(&parts)?;
+        let id = parse_folder_id(p.id.trim())?;
+        let parent_id = parse_move_target(p.parent_id)?;
+        to_result(
+            &self
+                .backend
+                .notebook_update_folder(
+                    person,
+                    id,
+                    UpdateUserNoteFolder {
+                        name: p.name,
+                        parent_id,
+                    },
+                )
+                .await
+                .map_err(backend_err)?,
+        )
+    }
+
+    #[tool(
+        description = "Delete a notebook folder. Its notes and any folders inside it move up one level — nothing is deleted with it."
+    )]
+    async fn notebook_delete_folder(
+        &self,
+        Extension(parts): Extension<Parts>,
+        Parameters(p): Parameters<NotebookFolderIdParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let person = require_person(&parts)?;
+        let id = parse_folder_id(p.id.trim())?;
+        self.backend
+            .notebook_delete_folder(person, id)
+            .await
+            .map_err(backend_err)?;
+        Ok(CallToolResult::success(vec![ContentBlock::text("deleted")]))
     }
 }
 

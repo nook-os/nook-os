@@ -595,7 +595,11 @@ mod tests {
             }
             match ev {
                 Event::SessionStarted { session_id } => session = Some(session_id),
-                Event::UserEcho(t) => entries.push(("human", t)),
+                // Mirrors the driver: the echo is NOT transcribed. The control
+                // plane already recorded this line when it sent it, and
+                // transcribing it here too is what made a steering message
+                // appear twice and read as the agent parroting the human.
+                Event::UserEcho(_) => {}
                 Event::AssistantText(t) => entries.push(("agent", t)),
                 Event::ToolUse { name } => entries.push(("agent", format!("· {name}"))),
                 Event::TurnEnded { .. } | Event::Ignored | Event::TurnStarted => {}
@@ -606,12 +610,12 @@ mod tests {
         assert_eq!(
             entries,
             vec![
-                ("human", "draft the spec".to_string()),
                 ("agent", "Reading the code.".to_string()),
                 ("agent", "· Grep".to_string()),
                 ("agent", "## Problem".to_string()),
             ],
-            "the human turn is attributed to the human, and the garbage line vanished"
+            "the echoed human turn is not re-transcribed (the control plane owns \
+             that line), and the garbage line vanished"
         );
         // Exactly one open and one close — not a flicker per event.
         assert_eq!(transitions, vec![true, false]);

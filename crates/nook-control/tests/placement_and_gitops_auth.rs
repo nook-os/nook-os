@@ -395,3 +395,45 @@ async fn mutating_gitops_routes_require_person_may_use_node() {
 
     bed.teardown().await;
 }
+
+/// Dispatch places a card on a machine. It does NOT move it.
+///
+/// The column move was hardcoded to Todo and unconditional, so a mis-click on a
+/// card sitting In Review yanked an urgent ticket back into the queue. Where a
+/// card sits is the human's statement about progress; which machine should take
+/// it is a different question.
+#[tokio::test]
+async fn dispatch_assigns_a_node_without_moving_the_card() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let state = bed.app_state().await;
+    let tenant = bed.tenant("disp").await;
+    let (user, person) = bed.user(tenant, "owner").await;
+    let _node = online_node(&state, tenant, person).await;
+    let ws = bed.workspace(tenant).await;
+    let task = board_task(&bed.pool, tenant, ws, user).await;
+    let before = state
+        .tasks
+        .get_row(tenant, task)
+        .await
+        .expect("row")
+        .expect("task")
+        .column_id;
+
+    let updated =
+        nook_control::services::taskwork::dispatch(&state, tenant, user, Some(user), task)
+            .await
+            .expect("dispatch");
+
+    assert!(
+        updated.assigned_node_id.is_some(),
+        "dispatch must still place the card on a machine"
+    );
+    assert_eq!(
+        updated.column_id, before,
+        "dispatch moved the card — that is what cost an urgent ticket its column"
+    );
+
+    bed.teardown().await;
+}

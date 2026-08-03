@@ -112,6 +112,13 @@ enum Command {
         /// Hide anything with an unresolved blocker.
         #[arg(long)]
         unblocked: bool,
+        /// Narrow to work THIS machine should take: cards dispatched to it, plus
+        /// everything undispatched. What a builder looping on a node wants —
+        /// dispatch then means "this one is yours" instead of setting a field
+        /// nothing read. Off by default, so a human's `nook tasks` still shows
+        /// the whole board even on a machine that is also a node.
+        #[arg(long = "this-node")]
+        this_node: bool,
         /// Only this workspace (uuid or name). Defaults to the workspace of the
         /// session you are in, so an agent's pick stays inside its own repo.
         #[arg(long)]
@@ -499,6 +506,7 @@ async fn main() -> Result<()> {
             types,
             parent,
             unblocked,
+            this_node,
             workspace,
             all_workspaces,
             backlog,
@@ -513,6 +521,7 @@ async fn main() -> Result<()> {
                 &types,
                 parent.as_deref(),
                 unblocked,
+                this_node,
                 workspace.as_deref(),
                 all_workspaces,
                 backlog,

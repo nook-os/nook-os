@@ -376,6 +376,15 @@ pub trait IdentityRepository: Send + Sync {
     /// administrative act, not a self-service one. Returns rows removed.
     async fn revoke_user_token(&self, id: Uuid, user_id: UserId) -> ApiResult<u64>;
 
+    /// Revoke every token in `tenant` carrying `name`. Used to retire a loop
+    /// job's credential the moment the job ends, keyed by the job's own name so
+    /// no second table is needed to remember which token belonged to it.
+    ///
+    /// Tenant-scoped rather than user-scoped: the job's token belongs to its
+    /// initiator, but the thing revoking it is the control plane finishing a
+    /// job, not that person acting on their own account.
+    async fn revoke_user_tokens_named(&self, tenant: TenantId, name: &str) -> ApiResult<u64>;
+
     // ---- tenant membership management --------------------------------------
 
     /// The role a user holds in a tenant, from `tenant_members` — the source of
@@ -1277,6 +1286,16 @@ impl IdentityRepository for DbIdentityRepository {
             .exec(
                 "DELETE FROM user_tokens WHERE id = $1 AND user_id = $2",
                 params![id, user_id],
+            )
+            .await?)
+    }
+
+    async fn revoke_user_tokens_named(&self, tenant: TenantId, name: &str) -> ApiResult<u64> {
+        Ok(self
+            .db
+            .exec(
+                "DELETE FROM user_tokens WHERE tenant_id = $1 AND name = $2",
+                params![tenant, name],
             )
             .await?)
     }
@@ -2303,6 +2322,15 @@ impl IdentityRepository for FakeIdentityRepository {
         let before = st.user_tokens.len();
         st.user_tokens.retain(|t| t.id != key);
         st.token_owner.remove(&key);
+        Ok((before - st.user_tokens.len()) as u64)
+    }
+
+    async fn revoke_user_tokens_named(&self, _tenant: TenantId, name: &str) -> ApiResult<u64> {
+        // The fake keeps one tenant's worth of tokens, so matching on name alone
+        // is the same set the real `WHERE tenant_id = $1 AND name = $2` returns.
+        let mut st = self.inner.lock().unwrap();
+        let before = st.user_tokens.len();
+        st.user_tokens.retain(|t| t.name != name);
         Ok((before - st.user_tokens.len()) as u64)
     }
 

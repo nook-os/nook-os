@@ -464,3 +464,41 @@ async fn a_node_cannot_touch_a_job_it_does_not_execute() {
 
     bed.teardown().await;
 }
+
+/// A steering message is recorded ONCE.
+///
+/// Both ends used to append it: `post_message` on send, and the node again when
+/// `--replay-user-messages` echoed the turn back. The human typed once and saw
+/// their line twice, which read as the agent parroting them.
+///
+/// The control plane is the end that must keep it — it is the only one that
+/// can. A queued job has no executor to echo anything, an offline node never
+/// echoes, and the REST call has to return the entry it created.
+#[tokio::test]
+async fn a_steering_message_is_recorded_once() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let tenant = bed.tenant("lje").await;
+    let (user, _person) = bed.user(tenant, "owner").await;
+    let ws = bed.workspace(tenant).await;
+    let target = task_with_key(&bed.pool, tenant, "ACME", 42).await;
+    let n = node(&bed.pool, tenant).await;
+    let j = job(&bed.pool, tenant, target, Some(ws), "running", Some(n)).await;
+    let state = bed.app_state().await;
+
+    let body = "check the tenant before you draft";
+    jobs::post_message(&state, tenant, user, j, body)
+        .await
+        .expect("steering message accepted");
+
+    let lines = transcript_text(&bed.pool, j).await;
+    let mine = lines.matches(body).count();
+    assert_eq!(
+        mine, 1,
+        "the steering message appears {mine} times — the control plane records \
+         it on send, so the node must not record it again on the echo"
+    );
+
+    bed.teardown().await;
+}

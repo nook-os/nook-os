@@ -2063,6 +2063,18 @@ table.nook-table tr.clickable { cursor: pointer; }
   padding-top: 8vh;
   z-index: 200;
 }
+/* A dialog ANSWERS a modal, so it always sits above one.
+ *
+ * `DialogHost` mounts near the top of `.nook-app` while a page's modal renders
+ * inside the routed content, i.e. later in the DOM. At equal z-index paint order
+ * falls back to DOM order, so the task modal covered its own delete confirm and
+ * the button could not be reached. This is a layer above every modal rather than
+ * one number nudged past another, because the next modal would rediscover the
+ * same bug otherwise — there is exactly one dialog host, and it is always the
+ * thing responding to whatever is already on screen. */
+.dialog-backdrop {
+  z-index: 300;
+}
 .modal {
   width: 640px;
   max-width: 92vw;

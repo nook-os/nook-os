@@ -114,11 +114,15 @@ pub async fn dispatch(
     // "clone it there first" decision is surfaced here, not as a late start-work
     // 400. Dispatch never auto-clones (NG-2).
     let needs_clone = placement.needs_clone();
-    let todo = column_id(state, task.board_id, "Todo", 1).await?;
-
+    // Dispatch places, it does not relocate. Moving the card to Todo was
+    // hardcoded and unconditional, so dispatching something already In Review
+    // yanked it back into the queue — a mis-click cost an urgent ticket its
+    // column. Where a card sits is the human's statement about its progress;
+    // which machine should take it is a different question, and this answers
+    // only that one. Use "send to board" to move a card.
     let mut updated = state
         .tasks
-        .assign_node_and_column(task_id, node, todo)
+        .assign_node_and_column(task_id, node, None)
         .await?;
     updated.needs_clone = needs_clone;
 

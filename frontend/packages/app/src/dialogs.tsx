@@ -254,7 +254,7 @@ export function DialogHost() {
   };
 
   return (
-    <div className="modal-backdrop" onMouseDown={() => close(null)}>
+    <div className="modal-backdrop dialog-backdrop" onMouseDown={() => close(null)}>
       <div
         className="modal dialog"
         onMouseDown={(e) => e.stopPropagation()}

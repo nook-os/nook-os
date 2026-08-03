@@ -5043,6 +5043,15 @@
             }
           },
           {
+            "name": "node",
+            "in": "query",
+            "description": "The node asking, so a builder sees the cards dispatched to ITS machine\nplus everything undispatched. Omit it and nothing is narrowed — a human\nlisting the board sees dispatched cards too.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
             "name": "column_type",
             "in": "query",
             "required": false,
