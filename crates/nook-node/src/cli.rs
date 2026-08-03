@@ -1707,6 +1707,7 @@ fn build_tasks_query(
     types: &[String],
     parent: Option<&str>,
     unblocked: bool,
+    this_node: Option<&str>,
     backlog: bool,
 ) -> Vec<String> {
     let mut q: Vec<String> = Vec::new();
@@ -1738,6 +1739,12 @@ fn build_tasks_query(
     if let Some(p) = parent {
         q.push(format!("parent={p}"));
     }
+    // Node affinity: the server returns cards dispatched to THIS machine plus
+    // everything undispatched, so a dispatched card is a hint the loop honours
+    // rather than a field nobody read.
+    if let Some(n) = this_node {
+        q.push(format!("node={n}"));
+    }
     if unblocked {
         q.push("is_blocked=false".into());
     }
@@ -1760,12 +1767,30 @@ pub async fn tasks(
     types: &[String],
     parent: Option<&str>,
     unblocked: bool,
+    this_node: bool,
     workspace: Option<&str>,
     all_workspaces: bool,
     backlog: bool,
     json: bool,
 ) -> Result<()> {
     let client = Client::from_config()?;
+
+    // `--this-node` resolves HERE rather than server-side: the caller carries a
+    // user token, so the control plane cannot tell which machine is asking. The
+    // node id comes from this machine's own config; without one there is no node
+    // to be, and the flag is a no-op rather than an error — a laptop that never
+    // joined should still be able to run the command.
+    let node_id: Option<String> = if this_node {
+        match NodeConfig::load() {
+            Ok(cfg) => Some(cfg.node_id),
+            Err(_) => {
+                eprintln!("nook: --this-node ignored — this machine has not joined a fleet");
+                None
+            }
+        }
+    } else {
+        None
+    };
 
     // Confinement. An explicit `--workspace` wins; otherwise, unless the caller
     // asked for `--all-workspaces`, a command running inside a workspace session
@@ -1789,6 +1814,7 @@ pub async fn tasks(
         types,
         parent,
         unblocked,
+        node_id.as_deref(),
         backlog,
     );
     let path = if q.is_empty() {
@@ -2733,7 +2759,12 @@ mod task_verb_tests {
             &["epic".into(), "bug".into()],
             Some("NOOK-7"),
             true,
+            Some("node-9"),
             true,
+        );
+        assert!(
+            q.contains(&"node=node-9".to_string()),
+            "--this-node must reach the query, or dispatch means nothing again"
         );
         assert!(q.contains(&"type=epic".to_string()));
         assert!(q.contains(&"type=bug".to_string()));
@@ -2751,7 +2782,19 @@ mod task_verb_tests {
     fn tasks_query_omits_unset_filters() {
         // No workspace, no type, no parent → none of those keys appear, so a
         // bare `nook tasks` hits `/api/v1/tasks` with nothing extra.
-        let q = build_tasks_query(None, None, &[], &[], None, None, &[], None, false, false);
+        let q = build_tasks_query(
+            None,
+            None,
+            &[],
+            &[],
+            None,
+            None,
+            &[],
+            None,
+            false,
+            None,
+            false,
+        );
         assert!(q.is_empty(), "an unfiltered query is empty: {q:?}");
     }
 

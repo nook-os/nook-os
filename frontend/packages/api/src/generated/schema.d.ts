@@ -10865,6 +10865,12 @@ export interface operations {
                 not_label?: string[];
                 /** @description A user id, or the literal `none` for unassigned. */
                 assignee?: string;
+                /**
+                 * @description The node asking, so a builder sees the cards dispatched to ITS machine
+                 *     plus everything undispatched. Omit it and nothing is narrowed — a human
+                 *     listing the board sees dispatched cards too.
+                 */
+                node?: string;
                 column_type?: string;
                 priority?: number;
                 /**

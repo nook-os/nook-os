@@ -567,6 +567,8 @@ impl NookBackend for McpBackend {
             tenant,
             viewer,
             crate::routes::task_query::TaskFilter {
+                // MCP is a person's surface, not a machine's: no node narrowing.
+                node: None,
                 board: f.board,
                 label: f.label,
                 not_label: f.not_label,

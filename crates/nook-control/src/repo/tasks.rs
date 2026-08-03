@@ -152,6 +152,10 @@ pub struct PickParams {
     pub parent: Option<Uuid>,
     pub backlog: bool,
     pub visibility: Vec<String>,
+    /// The node asking. A card DISPATCHED to a machine is that machine's to
+    /// take; an undispatched card is anybody's. `None` disables the clause, so
+    /// a human's `nook tasks` still sees the whole board.
+    pub node: Option<Uuid>,
 }
 
 /// What a new task comment is made from.
@@ -282,11 +286,17 @@ pub trait TaskRepository: Send + Sync {
     ) -> ApiResult<TaskItem>;
 
     /// Triage → Todo: place the work on a node and move it.
+    /// Pin a task to a machine, and OPTIONALLY move it.
+    ///
+    /// `column: None` is dispatch's case. It used to be mandatory, so
+    /// dispatching always relocated the card to Todo — which quietly pulled an
+    /// urgent ticket out of In Review on a mis-click, and had nothing to do with
+    /// choosing a machine. Placement and position are separate decisions now.
     async fn assign_node_and_column(
         &self,
         id: TaskId,
         node: NodeId,
-        column: ColumnId,
+        column: Option<ColumnId>,
     ) -> ApiResult<TaskItem>;
 
     /// Stamp the worktree, branch, session and column a started task now has.
@@ -1043,17 +1053,19 @@ impl TaskRepository for DbTaskRepository {
         &self,
         id: TaskId,
         node: NodeId,
-        column: ColumnId,
+        column: Option<ColumnId>,
     ) -> ApiResult<TaskItem> {
         Ok(self
             .db
             .query_one(
                 &format!(
-                    "UPDATE tasks SET assigned_node_id = $2, column_id = $3, updated_at = {}
+                    "UPDATE tasks SET assigned_node_id = $2,
+                            column_id = COALESCE($3, column_id),
+                            updated_at = {}
          WHERE id = $1 RETURNING *",
                     type_mapping(self.db.engine()).now()
                 ),
-                params![id, node, column],
+                params![id, node, column.map(|c| c.0)],
             )
             .await?)
     }
@@ -1517,6 +1529,17 @@ impl TaskRepository for DbTaskRepository {
           -- BOTH this and the visibility predicate apply, so an epic's children
           -- are still filtered to what the viewer may see.
           AND ({parent} IS NULL OR t.parent_task_id = $17)
+          -- node affinity. Dispatch used to set `assigned_node_id` and nothing
+          -- read it — every builder on every machine saw every card, so
+          -- "dispatch to a node" moved a card to Todo and otherwise did
+          -- nothing. This is the clause that makes it mean something: asked BY
+          -- a node, a dispatched card belongs to the node it names and an
+          -- undispatched one is fair game. Asked by a person ($20 IS NULL) the
+          -- whole board still comes back, so dispatch narrows the loop's view
+          -- without hiding anything from a human.
+          AND ($20 IS NULL
+               OR t.assigned_node_id IS NULL
+               OR t.assigned_node_id = $20)
           -- backlog exclusion (MAIN-80): a `backlog`-type column is the human
           -- refinement space; the loop never draws from it unless `backlog=true`
           -- ($18). AC-3: a `parent=` query (an epic's children, which span
@@ -1574,7 +1597,8 @@ impl TaskRepository for DbTaskRepository {
                     viewer,
                     p.parent,
                     p.backlog,
-                    p.visibility
+                    p.visibility,
+                    p.node
                 ],
             )
             .await?)
@@ -2771,7 +2795,7 @@ impl TaskRepository for FakeTaskRepository {
         &self,
         id: TaskId,
         node: NodeId,
-        column: ColumnId,
+        column: Option<ColumnId>,
     ) -> ApiResult<TaskItem> {
         let mut st = self.inner.lock().unwrap();
         let t = st
@@ -2780,7 +2804,9 @@ impl TaskRepository for FakeTaskRepository {
             .find(|t| t.id == id)
             .expect("task exists");
         t.assigned_node_id = Some(node);
-        t.column_id = column;
+        if let Some(column) = column {
+            t.column_id = column;
+        }
         t.updated_at = chrono::Utc::now();
         Ok(t.clone())
     }
@@ -3030,6 +3056,14 @@ impl TaskRepository for FakeTaskRepository {
             .iter()
             .filter(|t| t.tenant_id == tenant)
             .filter(|t| p.workspace.is_none() || t.workspace_id.map(|w| w.0) == p.workspace)
+            // Node affinity, mirroring the SQL: asked by a node, a dispatched
+            // card is that node's and an undispatched one is anybody's.
+            .filter(|t| match p.node {
+                None => true,
+                Some(n) => {
+                    t.assigned_node_id.is_none() || t.assigned_node_id.map(|x| x.0) == Some(n)
+                }
+            })
             .filter(|t| match &p.column_type {
                 None => true,
                 Some(ct) => col_type(t.column_id) == *ct,
