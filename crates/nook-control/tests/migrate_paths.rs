@@ -298,6 +298,7 @@ async fn a_followup_discovery_of_the_new_paths_churns_nothing() {
             branch: Some("main".into()),
             dirty: false,
             worktree: false,
+            root_segment: None,
         },
         DiscoveredWorkspace {
             path: format!("{slug}/acme/repo__feature"),
@@ -306,6 +307,7 @@ async fn a_followup_discovery_of_the_new_paths_churns_nothing() {
             branch: Some("feature".into()),
             dirty: false,
             worktree: true,
+            root_segment: None,
         },
     ];
     discovery::reconcile(&state, f.tenant, f.node, discovered)

@@ -127,6 +127,7 @@ async fn discovery_writes_kind_from_the_report() {
         branch: Some("main".into()),
         dirty: false,
         worktree,
+        root_segment: None,
     };
     discovery::reconcile(
         &state,

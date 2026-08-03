@@ -83,6 +83,7 @@ fn discovered(path: &str, remote: &str) -> DiscoveredWorkspace {
         branch: Some("main".into()),
         dirty: false,
         worktree: false,
+        root_segment: None,
     }
 }
 
