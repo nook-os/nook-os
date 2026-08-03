@@ -1465,6 +1465,12 @@ export function BoardPage() {
           workspaceId: t.workspace_id ?? undefined,
           worktree: true,
         }),
+      // Close the detail modal if it is showing the ticket that just went. It
+      // would otherwise sit there rendering a deleted task, with every control
+      // on it failing against a 404.
+      onDeleted: (t) => {
+        if (openTask === t.key || openTask === t.id) setOpenTask(null);
+      },
       refresh: bust,
     });
   };

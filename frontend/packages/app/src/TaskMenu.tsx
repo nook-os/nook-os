@@ -75,6 +75,11 @@ export interface TaskMenuContext {
    *  WITH an idea and steered while it goes, rather than fired blind. */
   onOpenLoop: (task: TaskItem) => void;
   onStartWork: (task: TaskItem) => void;
+  /** Dismiss any open detail view of this task. Called after a confirmed
+   *  DELETE: the modal would otherwise keep showing a ticket that no longer
+   *  exists, and every control on it would fail against a 404. Optional so a
+   *  surface with no detail view (the backlog rows) need not pass one. */
+  onDeleted?: (task: TaskItem) => void;
   refresh: () => void;
 }
 
@@ -87,6 +92,7 @@ export function taskMenuItems({
   onOpen,
   onOpenLoop,
   onStartWork,
+  onDeleted,
   refresh,
 }: TaskMenuContext): ContextMenuItem[] {
   // Every mutating action refreshes the board after it lands; the primitive has
@@ -143,9 +149,13 @@ export function taskMenuItems({
         confirmLabel: "delete",
         danger: true,
       });
-      if (ok) {
-        await api.DELETE("/api/v1/tasks/{id}", { params: { path: { id: task.id } } });
-      }
+      if (!ok) return;
+      const { error } = await api.DELETE("/api/v1/tasks/{id}", {
+        params: { path: { id: task.id } },
+      });
+      // Only close on success. A failed delete leaves the ticket there, and
+      // dismissing the modal would report a deletion that did not happen.
+      if (!error) onDeleted?.(task);
     });
 
   const archive = () =>

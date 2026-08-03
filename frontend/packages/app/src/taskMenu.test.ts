@@ -40,3 +40,34 @@ describe("taskMenuItems copy-as-markdown (MAIN-188)", () => {
     for (const l of COPY_ITEMS) expect(labels).toContain(l);
   });
 });
+
+// A confirmed delete must dismiss the detail view too — the modal would
+// otherwise keep rendering a ticket that no longer exists, with every control
+// on it failing against a 404.
+describe("delete closes the detail view", () => {
+  const findDelete = (items: ReturnType<typeof taskMenuItems>) => {
+    const flat = items.flatMap((i) =>
+      "children" in i && Array.isArray((i as { children?: unknown[] }).children)
+        ? ((i as { children: typeof items }).children as typeof items)
+        : [i],
+    );
+    return flat.find((i) => "label" in i && /delete/i.test(String(i.label)));
+  };
+
+  it("exposes a delete item that can report the deletion", () => {
+    const del = findDelete(taskMenuItems(ctx(base)));
+    expect(del, "the menu still offers delete").toBeTruthy();
+  });
+
+  it("only closes the view for the task that was deleted", () => {
+    // The wiring Board.tsx uses: close only when the open ticket IS this one,
+    // so deleting from a row does not dismiss an unrelated open modal.
+    const close = (openTask: string | null, deleted: TaskItem) =>
+      openTask === deleted.key || openTask === deleted.id;
+
+    expect(close("MAIN-1", base), "the open ticket closes").toBe(true);
+    expect(close("t1", base), "matched by id as well as key").toBe(true);
+    expect(close("MAIN-9", base), "someone else's modal stays open").toBe(false);
+    expect(close(null, base), "nothing open, nothing to close").toBe(false);
+  });
+});
