@@ -446,10 +446,24 @@ pub async fn restart(
         }
     };
 
+    // A restart keeps the ports it already holds, so the unsatisfied set is
+    // derived rather than returned by the allocator. The derivation has to
+    // reproduce the allocator's rules and lives beside them, with tests.
+    let held = state.sessions.leases_of(id).await?;
+    let unsatisfied = crate::services::port_leases::unsatisfied_on_restart(
+        &state,
+        session.tenant_id,
+        session.node_id,
+        session.workspace_id,
+        &held,
+    )
+    .await?;
+
     let sent = state.registry.send_to_node(
         session.node_id,
         ControlToNode::StartSession {
             session_id: id,
+            unsatisfied,
             runtime: session.runtime.clone(),
             workspace_path,
             workspace_id: session.workspace_id,
@@ -460,7 +474,7 @@ pub async fn restart(
             // same session coming back, so re-leasing would hand it different
             // numbers and break every URL and config that pointed at the old
             // ones. Its leases outlive the process for exactly this reason.
-            ports: state.sessions.leases_of(id).await?,
+            ports: held,
             attempt: 0,
         },
     );

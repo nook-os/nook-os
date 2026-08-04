@@ -12939,7 +12939,7 @@
           },
           "required": {
             "type": "boolean",
-            "description": "Whether the session should refuse to start when this one cannot be\nleased. A `debug` listener is usually optional; the app's own port is\nusually not."
+            "description": "Whether the session should refuse to start when this one cannot be\nleased. A `debug` listener is usually optional; the app's own port is\nusually not.\n\n**What each setting costs, because the default is inherited silently.**\n`true` refuses the session with a message naming the listener — loud,\nrecoverable. `false` starts it and leaves the variable UNSET, which used\nto be indistinguishable from \"this repo was cloned outside nook\" and so\nsent apps to their hardcoded defaults — the shared literals every other\nsession also falls back to. A session that skipped an optional listener\nnow carries `NOOK_PORTS_UNSATISFIED` naming it (MAIN-377), so `false` is\nsafe for an app that checks it and still unsafe for one that does not."
           }
         }
       },

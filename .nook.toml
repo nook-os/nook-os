@@ -46,6 +46,17 @@
 # NAME — "no free port for `control` (NOOK_CONTROL_PORT): every port in
 # 4200-4299 is leased on this node". Widen the node's range to raise that. A
 # refusal that names the port is recoverable; a silent collision is not.
+#
+# IF YOU CHOOSE `false`, check `NOOK_PORTS_UNSATISFIED` (MAIN-377). A session
+# that was skipped a listener now carries that variable naming it, comma
+# separated, and carries NOTHING when everything was leased — so a startup
+# script can tell the two absent-variable cases apart at last:
+#
+#     [ -n "$NOOK_PORTS_UNSATISFIED" ] && {
+#       echo "no port for: $NOOK_PORTS_UNSATISFIED" >&2; exit 1; }
+#
+# That is what makes `false` a real choice rather than a silent one. It does not
+# make it the safe default: an app that ignores the variable still collides.
 
 # The control plane: the browser door and the agent (mTLS) door.
 [[ports]]

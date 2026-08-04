@@ -203,7 +203,8 @@ pub async fn create_session_at(
             tenant_id: Some(tenant),
             cols: 120,
             rows: 32,
-            ports: ports.clone(),
+            ports: ports.ports.clone(),
+            unsatisfied: ports.unsatisfied.clone(),
             attempt: 0,
         },
     );
@@ -286,7 +287,8 @@ pub async fn create_ad_hoc_session(
             tenant_id: None,
             cols: 120,
             rows: 32,
-            ports: ports.clone(),
+            ports: ports.ports.clone(),
+            unsatisfied: ports.unsatisfied.clone(),
             attempt: 0,
         },
     );

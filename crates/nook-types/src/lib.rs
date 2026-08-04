@@ -722,6 +722,15 @@ pub struct PortRequirement {
     /// Whether the session should refuse to start when this one cannot be
     /// leased. A `debug` listener is usually optional; the app's own port is
     /// usually not.
+    ///
+    /// **What each setting costs, because the default is inherited silently.**
+    /// `true` refuses the session with a message naming the listener — loud,
+    /// recoverable. `false` starts it and leaves the variable UNSET, which used
+    /// to be indistinguishable from "this repo was cloned outside nook" and so
+    /// sent apps to their hardcoded defaults — the shared literals every other
+    /// session also falls back to. A session that skipped an optional listener
+    /// now carries `NOOK_PORTS_UNSATISFIED` naming it (MAIN-377), so `false` is
+    /// safe for an app that checks it and still unsafe for one that does not.
     #[serde(default)]
     pub required: bool,
 }
