@@ -819,7 +819,6 @@ async fn get_all_tenants(
 /// the table still prints. A workspace list that refuses to render because a
 /// second request failed would be a worse answer than a partial one.
 fn with_session_counts(rows: Vec<Value>, sessions: Option<Vec<Value>>) -> Vec<Value> {
-    let sessions = sessions;
     rows.into_iter()
         .map(|mut w| {
             let Some(obj) = w.as_object_mut() else {
