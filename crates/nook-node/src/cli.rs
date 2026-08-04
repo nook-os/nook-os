@@ -602,9 +602,10 @@ fn resolve_resource(kind: &str) -> Result<&'static str> {
         "task" => "tasks",
         "event" | "activity" => "events",
         "theme" => "themes",
+        "tenant" | "namespace" => "tenants",
         other => bail!(
             "unknown resource '{other}' — try: nodes, sessions, workspaces, \
-             secrets, tasks, events, themes"
+             secrets, tasks, events, themes, tenants"
         ),
     })
 }
@@ -629,6 +630,13 @@ pub async fn get(
     // server stays one-tenant-per-request — no endpoint learns to span, and no
     // credential widens — and the CLI does the joining, which is also why the
     // TENANT column can be added here rather than invented in every response.
+    // Tenants are the one resource `-A` cannot span: they ARE the span. Answer
+    // before the fan-out, which would otherwise ask each tenant to list the set
+    // it belongs to and print it once per membership.
+    if resource == "tenants" {
+        return get_tenants(&client, json).await;
+    }
+
     if all_tenants {
         return get_all_tenants(&client, resource, name, json).await;
     }
@@ -699,6 +707,48 @@ async fn secrets_across_workspaces(client: &Client, workspace: Option<&str>) -> 
         }
     }
     Ok(Value::Array(out))
+}
+
+/// `nook get tenants` — which tenants may this token act in, and what is each
+/// one called.
+///
+/// The missing half of `-T`. Every other command took a tenant slug and
+/// nothing printed the set of valid ones, so the only way to find a slug was to
+/// run `-A` on some unrelated resource and read the TENANT column — and that
+/// only shows tenants that happen to own a row of that resource. An empty
+/// tenant was invisible.
+///
+/// HOME marks the token's own tenant: the one every command uses when `-T` and
+/// `NOOK_TENANT_ID` are both absent.
+async fn get_tenants(client: &Client, json: bool) -> Result<()> {
+    let value = client.get("/api/v1/me/tenants").await?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&value)?);
+        return Ok(());
+    }
+    let rows = value.as_array().cloned().unwrap_or_default();
+    if rows.is_empty() {
+        eprintln!("No tenants found.");
+        return Ok(());
+    }
+    let rows: Vec<Value> = rows
+        .into_iter()
+        .map(|mut t| {
+            if let Some(obj) = t.as_object_mut() {
+                // The server already resolved which tenant this request acted
+                // in, honouring `-T`/`NOOK_TENANT_ID` — so `current` is the
+                // scope you actually have, not a guess reconstructed here.
+                let current = obj.get("current").and_then(Value::as_bool) == Some(true);
+                obj.insert(
+                    "scope".into(),
+                    Value::String(if current { "CURRENT" } else { "-" }.into()),
+                );
+            }
+            t
+        })
+        .collect();
+    print_table("tenants", &rows);
+    Ok(())
 }
 
 /// `-A` — the same listing, once per tenant, merged with a TENANT column.
@@ -905,6 +955,8 @@ fn columns(resource: &str, first: &Value) -> Vec<&'static str> {
         "tasks" => vec!["title", "column_id", "branch", "pr_url"],
         "events" => vec!["occurred_at", "kind", "actor_type"],
         "themes" => vec!["name", "slug"],
+        // SLUG leads after NAME because the slug is what `-T` takes.
+        "tenants" => vec!["name", "slug", "role", "scope", "id"],
         _ => first
             .as_object()
             .map(|o| {
@@ -1589,12 +1641,15 @@ pub async fn migrate_workspaces(apply: bool) -> Result<()> {
 }
 
 /// `nook delete <resource> <name>` — the escape hatch for cleanup.
-pub async fn delete(kind: &str, names: &[String]) -> Result<()> {
+pub async fn delete(kind: &str, names: &[String], tenant: Option<&str>) -> Result<()> {
     let resource = resolve_resource(kind)?;
     if !matches!(resource, "sessions" | "workspaces" | "tasks") {
         bail!("delete is only supported for sessions, workspaces and tasks");
     }
-    let client = Client::from_config()?;
+    let mut client = Client::from_config()?;
+    if let Some(t) = tenant {
+        client.set_tenant(Some(t.to_string()));
+    }
     let list = client.get(&format!("/api/v1/{resource}")).await?;
     let rows = list.as_array().cloned().unwrap_or_default();
 
@@ -1657,7 +1712,7 @@ pub async fn delete(kind: &str, names: &[String]) -> Result<()> {
 /// Only sessions the reconciler manages come back. Anything hand-started is
 /// gone for good, so those are listed separately before the confirmation rather
 /// than quietly swept up with the rest.
-pub async fn rollout_restart(target: &str, yes: bool) -> Result<()> {
+pub async fn rollout_restart(target: &str, yes: bool, tenant: Option<&str>) -> Result<()> {
     // `workspace/foo`, `workspaces/foo` or bare `foo` — the kubectl spelling
     // and the obvious one both work.
     let want = target
@@ -1671,7 +1726,10 @@ pub async fn rollout_restart(target: &str, yes: bool) -> Result<()> {
         })
         .unwrap_or(target);
 
-    let client = Client::from_config()?;
+    let mut client = Client::from_config()?;
+    if let Some(t) = tenant {
+        client.set_tenant(Some(t.to_string()));
+    }
     let workspaces = client.get("/api/v1/workspaces").await?;
     let ws = pick_one(
         workspaces.as_array().cloned().unwrap_or_default(),

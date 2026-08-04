@@ -365,6 +365,10 @@ enum Command {
         /// One or more names or ids. An id may be any unambiguous prefix.
         #[arg(required = true)]
         names: Vec<String>,
+        /// Act in one of your other tenants. Slug or id. Overrides
+        /// NOOK_TENANT_ID; without either you get your home tenant.
+        #[arg(short = 'T', long)]
+        tenant: Option<String>,
     },
 
     /// Migrate this machine's checkouts from the flat legacy workspace root
@@ -912,9 +916,17 @@ async fn main() -> Result<()> {
             }
         }
         Command::Import { path, link } => cli::import(path.as_deref(), link).await,
-        Command::Delete { resource, names } => cli::delete(&resource, &names).await,
+        Command::Delete {
+            resource,
+            names,
+            tenant,
+        } => cli::delete(&resource, &names, tenant.as_deref()).await,
         Command::Rollout { cmd } => match cmd {
-            RolloutCmd::Restart { target, yes } => cli::rollout_restart(&target, yes).await,
+            RolloutCmd::Restart {
+                target,
+                yes,
+                tenant,
+            } => cli::rollout_restart(&target, yes, tenant.as_deref()).await,
         },
         Command::MigrateWorkspaces { apply } => cli::migrate_workspaces(apply).await,
         Command::Login { token, server } => match token {
@@ -1108,6 +1120,10 @@ enum RolloutCmd {
         /// Skip the confirmation. Every session in the workspace is killed.
         #[arg(short = 'y', long)]
         yes: bool,
+        /// Act in one of your other tenants. Slug or id. Overrides
+        /// NOOK_TENANT_ID; without either you get your home tenant.
+        #[arg(short = 'T', long)]
+        tenant: Option<String>,
     },
 }
 
