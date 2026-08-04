@@ -914,24 +914,47 @@ fn age_of(ts: &str) -> Option<String> {
     })
 }
 
-/// How much of an id to show.
+/// The SHORTEST id a table will print. A floor, not a promise — see
+/// `unique_id_len`, which widens past it whenever these rows need it.
 ///
-/// Measured, not guessed. These are uuidv7s, whose leading characters ARE a
-/// millisecond timestamp — and the reconciler starts sessions in pairs, so the
-/// leading characters are exactly what collides. Across 33 real sessions, 8
-/// characters produced twelve colliding prefixes. 12 was unique on that data but
-/// still sits inside the timestamp, so two sessions started in the same
-/// millisecond would print the same thing.
+/// Measured, not guessed. These are uuidv7s, and 18 characters buys the full
+/// 48-bit millisecond timestamp, the version nibble (always `7`, so no entropy
+/// at all) and then just THREE hex digits — twelve bits, 4096 values, of the
+/// random half. Two rows written in the same millisecond collide with
+/// probability about 1/4096, and a burst of ten at roughly one percent.
 ///
-/// 18 clears the 48-bit timestamp and reaches the random half, so collisions
-/// stop being a matter of how fast the reconciler happens to be.
+/// That is not theoretical. Across 6,918 production rows: sessions, tasks and
+/// checkouts are all distinct at 18, but 6,429 events yield only 6,353 distinct
+/// prefixes — 76 collisions, because events are written in bursts. 8 characters
+/// collides everywhere; 12 already collides among sessions.
+///
+/// Truncation is safe anyway, and that is the point: `pick_one` refuses an
+/// ambiguous match and lists FULL ids, so the worst case is "type more
+/// characters" and never "acted on the wrong row". This constant is the floor
+/// for readability; correctness comes from the guard, not the length.
 pub const SHORT_ID: usize = 18;
+
+/// The shortest prefix that tells THESE ids apart, never below [`SHORT_ID`].
+///
+/// git's short-sha rule. A fixed width cannot be right for every table — 18 is
+/// comfortable for sessions and provably too short for events — so the table
+/// widens to whatever the rows in front of it require, rather than betting that
+/// the chosen number outlives the next burst of writes.
+fn unique_id_len(ids: &[&str]) -> usize {
+    let longest = ids.iter().map(|i| i.chars().count()).max().unwrap_or(0);
+    for len in SHORT_ID..longest {
+        let mut seen: std::collections::BTreeSet<&str> = Default::default();
+        if ids.iter().all(|i| seen.insert(i.get(..len).unwrap_or(i))) {
+            return len;
+        }
+    }
+    longest
+}
 
 fn render_value(key: &str, v: &Value) -> String {
     match v {
         Value::Null => "-".into(),
         Value::String(s) if s.is_empty() => "-".into(),
-        Value::String(s) if key == "id" => s.chars().take(SHORT_ID).collect(),
         Value::String(s) => s.clone(),
         // Raw byte counts are unreadable at a glance and are always the widest
         // column on the line.
@@ -1002,10 +1025,21 @@ fn print_table_with(resource: &str, rows: &[Value], with_tenant: bool) {
         .map(|c| c.rsplit('.').next().unwrap_or(c).to_uppercase())
         .collect();
     let mut widths: Vec<usize> = headers.iter().map(|h| h.len()).collect();
-    let body: Vec<Vec<String>> = rows
+    let mut body: Vec<Vec<String>> = rows
         .iter()
         .map(|r| cols.iter().map(|c| cell(r, c)).collect())
         .collect();
+    // Ids arrive whole and are shortened HERE, where every row is visible, so
+    // the width can be the shortest that keeps this table's ids distinct. Doing
+    // it per-cell could only ever apply a fixed guess.
+    if let Some(idx) = cols.iter().position(|c| *c == "id") {
+        let ids: Vec<&str> = body.iter().map(|r| r[idx].as_str()).collect();
+        let len = unique_id_len(&ids);
+        for row in body.iter_mut() {
+            row[idx] = row[idx].chars().take(len).collect();
+        }
+    }
+
     for row in &body {
         for (i, v) in row.iter().enumerate() {
             widths[i] = widths[i].max(v.chars().count());
@@ -3699,5 +3733,46 @@ mod git_ssh_tests {
         assert_ne!(a.path, b.path);
         assert_eq!(std::fs::read_to_string(&a.path).unwrap().trim(), "A");
         assert_eq!(std::fs::read_to_string(&b.path).unwrap().trim(), "B");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::unique_id_len;
+
+    #[test]
+    fn distinct_ids_stop_at_the_floor() {
+        let ids = [
+            "019fcc2e-ccfc-75c2-864e-2aed7bc20318",
+            "019fcc2e-7e37-7c80-91b3-77c5e0a14d92",
+        ];
+        assert_eq!(unique_id_len(&ids), super::SHORT_ID);
+    }
+
+    /// The case live data cannot produce on demand but production has 76 of:
+    /// two uuidv7s from the same millisecond, identical through the timestamp
+    /// AND the twelve random bits that 18 characters reaches.
+    #[test]
+    fn ids_that_collide_at_the_floor_widen() {
+        let ids = [
+            "019fcc2e-ccfc-75c2-864e-2aed7bc20318",
+            "019fcc2e-ccfc-75c2-91b3-77c5e0a14d92",
+        ];
+        let n = unique_id_len(&ids);
+        assert!(n > super::SHORT_ID, "expected widening, got {n}");
+        assert_ne!(ids[0][..n], ids[1][..n], "widened but still ambiguous");
+    }
+
+    /// Genuinely identical ids cannot be told apart at any width. It must
+    /// terminate at the full length rather than loop or panic.
+    #[test]
+    fn identical_ids_terminate_at_full_length() {
+        let ids = ["019fcc2e-ccfc-75c2-864e-2aed7bc20318"; 2];
+        assert_eq!(unique_id_len(&ids), ids[0].len());
+    }
+
+    #[test]
+    fn no_rows_is_not_a_panic() {
+        assert_eq!(unique_id_len(&[]), 0);
     }
 }
