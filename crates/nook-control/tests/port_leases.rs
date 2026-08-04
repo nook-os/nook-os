@@ -469,3 +469,191 @@ async fn re_leasing_the_same_requirement_is_idempotent() {
 
     bed.teardown().await;
 }
+
+// ── excluded ports (MAIN-301 follow-on) ─────────────────────────────────────
+//
+// A range is a promise that nothing else is listening in it, and on a real
+// machine that promise is sometimes false for a number or two. Exclusions are
+// the operator saying so — POLICY, not an observation, which is why they are
+// stored rather than sampled and why nothing auto-populates them.
+
+async fn exclude(bed: &TestBed, tenant: TenantId, node: NodeId, ports: &[i32]) {
+    bed.app_state()
+        .await
+        .nodes
+        .set_port_exclusions(node, tenant, Some(ports.to_vec()))
+        .await
+        .expect("exclude");
+}
+
+#[tokio::test]
+async fn an_excluded_port_is_skipped_and_the_next_one_is_taken() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let tenant = bed.tenant("ports").await;
+    let node = node_with(&bed, tenant, Some((4200, 4204))).await;
+    let ws = bed.workspace(tenant).await;
+    let state = bed.app_state().await;
+    declare(&bed, tenant, ws, &[("app", "PORT", true)]).await;
+
+    // The allocator takes the LOWEST free port, so excluding it is what proves
+    // the skip rather than coincidence.
+    exclude(&bed, tenant, node, &[4200, 4201]).await;
+    let s = session_on(&bed, tenant, node, Some(ws), "excl").await;
+    let leased = port_leases::lease_for(&state, tenant, node, Some(ws), s)
+        .await
+        .expect("lease");
+
+    assert_eq!(ports(&leased), vec![4202], "4200 and 4201 are ruled out");
+
+    bed.teardown().await;
+}
+
+#[tokio::test]
+async fn a_port_excluded_outside_the_range_changes_nothing() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let tenant = bed.tenant("ports").await;
+    let node = node_with(&bed, tenant, Some((4200, 4204))).await;
+    let ws = bed.workspace(tenant).await;
+    let state = bed.app_state().await;
+    declare(&bed, tenant, ws, &[("app", "PORT", true)]).await;
+
+    // 443 and 5432 are the ports people think of first, and the allocator was
+    // never going to hand them out — excluding them must not cost a slot.
+    exclude(&bed, tenant, node, &[443, 5432, 9999]).await;
+    let s = session_on(&bed, tenant, node, Some(ws), "excl").await;
+    let leased = port_leases::lease_for(&state, tenant, node, Some(ws), s)
+        .await
+        .expect("lease");
+
+    assert_eq!(ports(&leased), vec![4200]);
+
+    bed.teardown().await;
+}
+
+#[tokio::test]
+async fn excluding_a_port_a_live_session_already_holds_does_not_move_it() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let tenant = bed.tenant("ports").await;
+    let node = node_with(&bed, tenant, Some((4200, 4204))).await;
+    let ws = bed.workspace(tenant).await;
+    let state = bed.app_state().await;
+    declare(&bed, tenant, ws, &[("app", "PORT", true)]).await;
+
+    let s = session_on(&bed, tenant, node, Some(ws), "excl").await;
+    let first = port_leases::lease_for(&state, tenant, node, Some(ws), s)
+        .await
+        .expect("lease");
+    assert_eq!(ports(&first), vec![4200]);
+
+    // THE INVERSE HAZARD. The port is "taken" — by this session, because we
+    // leased it to them. An operator excluding it (or, later, an occupancy scan
+    // feeding one in) must not renumber a running session: its lease is what
+    // every URL and config on that box already points at. A held port wins over
+    // the exclusion, and the exclusion only governs the NEXT allocation.
+    exclude(&bed, tenant, node, &[4200]).await;
+    let again = port_leases::lease_for(&state, tenant, node, Some(ws), s)
+        .await
+        .expect("re-lease");
+
+    assert_eq!(ports(&again), vec![4200], "a restart keeps its own port");
+
+    bed.teardown().await;
+}
+
+#[tokio::test]
+async fn a_required_listener_with_every_port_excluded_says_why() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let tenant = bed.tenant("ports").await;
+    let node = node_with(&bed, tenant, Some((4200, 4201))).await;
+    let ws = bed.workspace(tenant).await;
+    let state = bed.app_state().await;
+    declare(&bed, tenant, ws, &[("app", "PORT", true)]).await;
+
+    exclude(&bed, tenant, node, &[4200, 4201]).await;
+    let s = session_on(&bed, tenant, node, Some(ws), "excl").await;
+    let err = port_leases::lease_for(&state, tenant, node, Some(ws), s)
+        .await
+        .expect_err("nothing left to lease");
+
+    // "every port is leased" would be flatly untrue here — they are free and
+    // ruled out — and would send a reader hunting through sessions.
+    let msg = err.to_string();
+    assert!(msg.contains("excluded"), "should name exclusions: {msg}");
+
+    bed.teardown().await;
+}
+
+#[tokio::test]
+async fn a_port_the_node_could_not_bind_is_avoided_on_the_next_lease() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let tenant = bed.tenant("ports").await;
+    let node = node_with(&bed, tenant, Some((4200, 4204))).await;
+    let ws = bed.workspace(tenant).await;
+    let state = bed.app_state().await;
+    declare(&bed, tenant, ws, &[("app", "PORT", true)]).await;
+
+    let s = session_on(&bed, tenant, node, Some(ws), "clash").await;
+    let first = port_leases::lease_for(&state, tenant, node, Some(ws), s)
+        .await
+        .expect("lease");
+    assert_eq!(ports(&first), vec![4200]);
+
+    // What the node says after bind() refused: authoritative for this moment,
+    // and spent on a re-lease rather than written to the node's exclusions —
+    // an operator never said 4200 was off-limits, only that it was busy now.
+    state
+        .sessions
+        .release_leases(node, s)
+        .await
+        .expect("release");
+    let second = port_leases::lease_for_avoiding(&state, tenant, node, Some(ws), s, &[4200])
+        .await
+        .expect("re-lease");
+
+    assert_eq!(ports(&second), vec![4201], "avoids the port that would not bind");
+
+    // …and the avoidance is NOT durable. Nothing was written to the node, so a
+    // later session is free to take 4200 again once whatever held it is gone.
+    assert!(
+        port_leases::exclusions_of(&state, node)
+            .await
+            .expect("exclusions")
+            .is_empty(),
+        "a transient clash must never become standing policy"
+    );
+
+    bed.teardown().await;
+}
+
+#[tokio::test]
+async fn repeated_clashes_run_out_of_range_rather_than_looping() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let tenant = bed.tenant("ports").await;
+    let node = node_with(&bed, tenant, Some((4200, 4201))).await;
+    let ws = bed.workspace(tenant).await;
+    let state = bed.app_state().await;
+    declare(&bed, tenant, ws, &[("app", "PORT", true)]).await;
+
+    // Each retry avoids strictly more ports, so a machine where everything is
+    // occupied terminates with the allocator's own refusal instead of the node
+    // and the control plane trading StartSession forever.
+    let s = session_on(&bed, tenant, node, Some(ws), "doomed").await;
+    let err = port_leases::lease_for_avoiding(&state, tenant, node, Some(ws), s, &[4200, 4201])
+        .await
+        .expect_err("nothing bindable left");
+    assert!(err.to_string().contains("no free port"), "{err}");
+
+    bed.teardown().await;
+}

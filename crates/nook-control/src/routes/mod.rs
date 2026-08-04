@@ -287,6 +287,13 @@ pub fn build_router(state: AppState) -> Router {
             get(nodes::get_ports).put(nodes::set_ports),
         )
         .route(
+            // Its OWN route, not a field on the range's body: that body treats
+            // "neither start nor end" as CLEAR THE RANGE, so setting only
+            // exclusions there would silently unset the range (MAIN-301).
+            "/nodes/{id}/ports/exclusions",
+            axum::routing::put(nodes::set_port_exclusions),
+        )
+        .route(
             "/nodes/{id}/leases/{session}",
             delete_route(nodes::release_lease),
         )

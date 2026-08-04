@@ -148,6 +148,22 @@ pub enum NodeToControl {
         session_id: SessionId,
         message: String,
     },
+    /// The node could not take one or more of the ports it was leased, so it did
+    /// NOT start the session (MAIN-301 follow-on).
+    ///
+    /// The authoritative check. A range promises nothing else is listening in
+    /// it and an exclusion list records what an operator already knows, but
+    /// only `bind()` can answer for certain, and only at the moment of use —
+    /// so this is the one signal that cannot be stale.
+    PortsUnavailable {
+        session_id: SessionId,
+        /// The ports that would not bind. Not "all its ports".
+        ports: Vec<i32>,
+        /// Echoed from the `StartSession` that failed, so the control plane can
+        /// bound its retries without keeping per-session state.
+        #[serde(default)]
+        attempt: u8,
+    },
     Error {
         context: String,
         message: String,
@@ -330,6 +346,11 @@ pub enum ControlToNode {
         /// what keeps the node as ignorant of frameworks as the broker is.
         #[serde(default)]
         ports: Vec<nook_types::LeasedPort>,
+        /// Which try this is. Rides in the message rather than in a table so a
+        /// re-send after a port clash cannot loop forever, and so nothing has to
+        /// be cleaned up when a session finally starts.
+        #[serde(default)]
+        attempt: u8,
     },
     /// Install a runtime credential this node did not obtain (MAIN-283).
     ///

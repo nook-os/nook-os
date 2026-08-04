@@ -14,6 +14,24 @@ use crate::config::NodeConfig;
 use crate::{capabilities, discovery, sessions, tmux};
 
 const HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// Can this machine actually take that port right now?
+///
+/// Bind and immediately drop. There IS a race between the drop and the app's
+/// own bind, and it is the right trade: the alternative is holding the socket
+/// and handing a live fd through tmux to an arbitrary runtime. What this
+/// catches is the case that actually happens — something has been sitting on
+/// the port for minutes — not a microsecond-wide dead heat.
+///
+/// `0.0.0.0` rather than a loopback probe: a listener on 127.0.0.1 blocks a
+/// later wildcard bind, so checking the wildcard is what answers "will the app
+/// get this", and checking loopback alone would call an occupied port free.
+fn port_is_free(port: i32) -> bool {
+    let Ok(p) = u16::try_from(port) else {
+        return false;
+    };
+    std::net::TcpListener::bind(("0.0.0.0", p)).is_ok()
+}
 const DISCOVERY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(300);
 /// How often to reconsider our certificate.
 ///
@@ -424,25 +442,56 @@ pub async fn connect_once(cfg: &NodeConfig) -> Result<()> {
                 cols,
                 rows,
                 ports,
+                attempt,
             } => {
-                // An empty path is the control plane's signal for an ad-hoc
-                // terminal: a shell with no workspace, run in this machine's
-                // home directory.
-                let cwd = if workspace_path.is_empty() {
-                    std::env::var("HOME").unwrap_or_else(|_| "/".into())
+                // THE authoritative check (MAIN-301 follow-on). Everything
+                // upstream of here is a belief: the range is a promise that
+                // nothing else listens in it, the exclusion list is what an
+                // operator already knew, and neither can see a container that
+                // came up thirty seconds ago. Only bind() knows, and only here.
+                //
+                // Checked BEFORE tmux exists, so a clash costs a re-lease
+                // rather than a session whose app dies on start with an
+                // EADDRINUSE nobody reads.
+                let taken: Vec<i32> = ports
+                    .iter()
+                    .filter(|p| !port_is_free(p.port))
+                    .map(|p| p.port)
+                    .collect();
+                if !taken.is_empty() {
+                    tracing::warn!(
+                        %session_id,
+                        ?taken,
+                        attempt,
+                        "leased ports are already in use here — not starting, asking for others"
+                    );
+                    let _ = ctl_tx
+                        .send(NodeToControl::PortsUnavailable {
+                            session_id,
+                            ports: taken,
+                            attempt,
+                        })
+                        .await;
                 } else {
-                    workspace_path
-                };
-                let _ = session_tx.send(sessions::Cmd::Start {
-                    workspace_id: workspace_id.map(|w| w.0.to_string()),
-                    tenant_id: tenant_id.map(|t| t.0.to_string()),
-                    session_id,
-                    runtime,
-                    cwd,
-                    cols,
-                    rows,
-                    ports,
-                });
+                    // An empty path is the control plane's signal for an ad-hoc
+                    // terminal: a shell with no workspace, run in this machine's
+                    // home directory.
+                    let cwd = if workspace_path.is_empty() {
+                        std::env::var("HOME").unwrap_or_else(|_| "/".into())
+                    } else {
+                        workspace_path
+                    };
+                    let _ = session_tx.send(sessions::Cmd::Start {
+                        workspace_id: workspace_id.map(|w| w.0.to_string()),
+                        tenant_id: tenant_id.map(|t| t.0.to_string()),
+                        session_id,
+                        runtime,
+                        cwd,
+                        cols,
+                        rows,
+                        ports,
+                    });
+                }
             }
             ControlToNode::StartAuthSession {
                 session_id,

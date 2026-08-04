@@ -28,6 +28,8 @@ export function NodePorts({
   const [start, setStart] = useState("");
   const [end, setEnd] = useState("");
   const [busy, setBusy] = useState(false);
+  const [editingExcl, setEditingExcl] = useState(false);
+  const [excl, setExcl] = useState("");
 
   // Typed explicitly rather than inferred: the generated client's response
   // union is wide enough that a bare `.data` loses the shape, and a `leases`
@@ -45,7 +47,46 @@ export function NodePorts({
     setEnd(data.range ? String(data.range.end) : "");
   }, [editing, data]);
 
+  useEffect(() => {
+    if (!editingExcl || !data) return;
+    setExcl((data.excluded ?? []).join(", "));
+  }, [editingExcl, data]);
+
   const refresh = () => queryClient.invalidateQueries({ queryKey: ["ports", nodeId] });
+
+  // `4510, 4700-4705` → the ports it names. Ranges are accepted because a
+  // machine's foreign occupants come in blocks as often as singly.
+  const parsePorts = (text: string): number[] => {
+    const out: number[] = [];
+    for (const part of text.split(",").map((p) => p.trim()).filter(Boolean)) {
+      const dash = part.indexOf("-");
+      if (dash > 0) {
+        const a = Number(part.slice(0, dash).trim());
+        const b = Number(part.slice(dash + 1).trim());
+        if (Number.isFinite(a) && Number.isFinite(b) && b >= a) {
+          for (let p = a; p <= b; p++) out.push(p);
+        }
+      } else {
+        const n = Number(part);
+        if (Number.isFinite(n)) out.push(n);
+      }
+    }
+    return [...new Set(out)].sort((a, b) => a - b);
+  };
+
+  const saveExclusions = async () => {
+    setBusy(true);
+    // Its OWN endpoint. The range body reads "neither start nor end" as CLEAR
+    // THE RANGE, so posting exclusions there would silently unset it.
+    const { error } = await api.PUT("/api/v1/nodes/{id}/ports/exclusions", {
+      params: { path: { id: nodeId } },
+      body: { ports: parsePorts(excl) },
+    });
+    setBusy(false);
+    if (error) return; // the server refuses a list that empties the range
+    setEditingExcl(false);
+    refresh();
+  };
 
   const save = async () => {
     setBusy(true);
@@ -78,6 +119,13 @@ export function NodePorts({
 
   const range = data?.range ?? null;
   const leases = data?.leases ?? [];
+  const excluded = data?.excluded ?? [];
+  // Only the ones INSIDE the range cost capacity; 443 and 5432 are the ports
+  // people think of first and the allocator was never going to hand them out.
+  const bitingCount = range
+    ? excluded.filter((p) => p >= range.start && p <= range.end).length
+    : 0;
+  const usable = range ? range.end - range.start + 1 - bitingCount : 0;
 
   return (
     <Panel
@@ -146,6 +194,69 @@ export function NodePorts({
             )}
           </div>
         )}
+
+        {/* Deliberately its own block, above leases and styled apart. The two
+            are unavailable for opposite reasons and on opposite timescales: a
+            LEASE is a port working correctly, held by us, back on its own when
+            the session dies. An EXCLUSION is a standing decision that nothing
+            reclaims. Showing them as one list of "unavailable ports" is what
+            would let somebody treat a busy port as a broken one. */}
+        <div>
+          <div
+            className="faint small"
+            style={{ marginBottom: 4, display: "flex", gap: 8, alignItems: "center" }}
+          >
+            <span>excluded · {excluded.length}</span>
+            {canEdit &&
+              (editingExcl ? (
+                <>
+                  <button className="btn small" disabled={busy} onClick={saveExclusions}>
+                    save
+                  </button>
+                  <button
+                    className="btn small"
+                    disabled={busy}
+                    onClick={() => setEditingExcl(false)}
+                  >
+                    cancel
+                  </button>
+                </>
+              ) : (
+                <button className="btn small" onClick={() => setEditingExcl(true)}>
+                  edit
+                </button>
+              ))}
+          </div>
+          {editingExcl ? (
+            <div style={{ display: "grid", gap: 4 }}>
+              <input
+                className="input"
+                placeholder="4510, 4700-4705"
+                aria-label="excluded ports"
+                value={excl}
+                onChange={(e) => setExcl(e.target.value)}
+              />
+              <span className="faint small">
+                Ports something else owns on this machine — including one that is
+                not listening right now but will be after a reboot, which is the
+                case nothing else catches. Blank to clear.
+              </span>
+            </div>
+          ) : excluded.length === 0 ? (
+            <span className="faint small">none — the whole range is available</span>
+          ) : (
+            <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
+              <span className="mono">{excluded.join(", ")}</span>
+              {/* Capacity is what an operator is really choosing: a workspace
+                  leases one port per declared listener, all at once. */}
+              {range && (
+                <span className="faint small">
+                  {usable} of {range.end - range.start + 1} usable
+                </span>
+              )}
+            </div>
+          )}
+        </div>
 
         <div>
           <div className="faint small" style={{ marginBottom: 4 }}>

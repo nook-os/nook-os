@@ -937,8 +937,20 @@ async fn main() -> Result<()> {
                 target,
                 range,
                 clear,
+                exclude,
+                exclude_clear,
                 tenant,
-            } => cli::set_ports(&target, range.as_deref(), clear, tenant.as_deref()).await,
+            } => {
+                cli::set_ports(
+                    &target,
+                    range.as_deref(),
+                    clear,
+                    exclude.as_deref(),
+                    exclude_clear,
+                    tenant.as_deref(),
+                )
+                .await
+            }
         },
         Command::Rollout { cmd } => match cmd {
             RolloutCmd::Restart {
@@ -1143,11 +1155,22 @@ enum SetCmd {
         /// `node/<name-or-id>`, or just the name or id. An id may be any
         /// unambiguous prefix.
         target: String,
-        /// `<start>-<end>`, e.g. `4200-4299`. Omit with --clear.
+        /// `<start>-<end>`, e.g. `4200-4299`. Omit with --clear or --exclude.
         range: Option<String>,
         /// Take the range away, so the node leases nothing.
         #[arg(long, conflicts_with = "range")]
         clear: bool,
+        /// Ports on this machine to never lease, comma-separated. Ranges are
+        /// allowed: `--exclude 4510,4700-4705`. Replaces the whole list.
+        ///
+        /// For a port something else owns HERE — a stray container, a vendor
+        /// agent — including one that is not listening right now but will be
+        /// after a reboot, which is the case nothing else catches.
+        #[arg(long, value_name = "PORTS")]
+        exclude: Option<String>,
+        /// Drop every exclusion on this node.
+        #[arg(long, conflicts_with = "exclude")]
+        exclude_clear: bool,
         /// Act in one of your other tenants. Slug or id. Overrides
         /// NOOK_TENANT_ID; without either you get your home tenant.
         #[arg(short = 'T', long)]

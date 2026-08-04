@@ -430,6 +430,68 @@ pub async fn set_ports(
     Ok(Json(ports_of(&state, &node).await?))
 }
 
+/// `PUT /api/v1/nodes/{id}/ports/exclusions` — ports this node must never lease.
+///
+/// The operator saying "something else owns this number on this machine". A
+/// range promises nothing else is listening in it, and on a real box that
+/// promise is sometimes false for one or two numbers; without this the only fix
+/// was to move the whole range, renumbering every session on it.
+///
+/// REFUSES to leave the range unusable. Excluding every port in it would be
+/// accepted by the storage, satisfy every validation an operator could see, and
+/// then fail at session start with "no free port" — a message that would send a
+/// reader hunting for leases rather than at the list they just typed.
+#[utoipa::path(put, path = "/api/v1/nodes/{id}/ports/exclusions",
+    operation_id = "set_node_port_exclusions",
+    params(("id" = String, Path,)),
+    request_body = nook_types::SetNodePortExclusionsRequest,
+    responses((status = 200, body = NodePorts), (status = 400), (status = 403), (status = 404)))]
+pub async fn set_port_exclusions(
+    State(state): State<AppState>,
+    auth: AuthCtx,
+    Path(id): Path<NodeId>,
+    Json(req): Json<nook_types::SetNodePortExclusionsRequest>,
+) -> ApiResult<Json<NodePorts>> {
+    auth.require_user()?;
+    let node = visible_node(&state, &auth, id).await?;
+    require_owner(&state, &auth, &node, "set its excluded ports").await?;
+
+    let mut ports = req.ports;
+    ports.sort_unstable();
+    ports.dedup();
+    if let Some(bad) = ports.iter().find(|p| **p < 1 || **p > 65535) {
+        return Err(ApiError::BadRequest(format!(
+            "{bad} is not a port — they run from 1 to 65535"
+        )));
+    }
+
+    // The guard. Capacity is what an operator is really editing here, and the
+    // number that matters is how many ports SURVIVE, because a workspace leases
+    // one per declared listener: a repo declaring 11 needs 11 free at once.
+    let (range, _) = crate::services::port_leases::range_of(&state, id).await?;
+    if let Some(r) = &range {
+        let total = (r.end - r.start + 1) as usize;
+        let inside = ports
+            .iter()
+            .filter(|p| **p >= r.start && **p <= r.end)
+            .count();
+        if inside >= total {
+            return Err(ApiError::BadRequest(format!(
+                "that excludes every port in {}-{} — the node could never start a session. \
+                 Widen the range first, or exclude fewer.",
+                r.start, r.end
+            )));
+        }
+    }
+
+    let node = state
+        .nodes
+        .set_port_exclusions(id, auth.tenant_id, Some(ports))
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    Ok(Json(ports_of(&state, &node).await?))
+}
+
 /// `DELETE /api/v1/nodes/{id}/leases/{session}` — hand a port back without
 /// ending its session (AC-6).
 ///
@@ -478,6 +540,7 @@ async fn ports_of(state: &AppState, node: &Node) -> ApiResult<NodePorts> {
         source,
         advertised: crate::services::port_leases::advertised(&node.capabilities),
         leases: state.sessions.leases_on(node.id).await?,
+        excluded: crate::services::port_leases::exclusions_of(state, node.id).await?,
     })
 }
 

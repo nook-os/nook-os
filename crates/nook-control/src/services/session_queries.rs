@@ -204,6 +204,7 @@ pub async fn create_session_at(
             cols: 120,
             rows: 32,
             ports: ports.clone(),
+            attempt: 0,
         },
     );
     if !sent {
@@ -286,6 +287,7 @@ pub async fn create_ad_hoc_session(
             cols: 120,
             rows: 32,
             ports: ports.clone(),
+            attempt: 0,
         },
     );
     if !sent {

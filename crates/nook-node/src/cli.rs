@@ -1768,6 +1768,40 @@ pub async fn delete(kind: &str, names: &[String], tenant: Option<&str>) -> Resul
 /// Only sessions the reconciler manages come back. Anything hand-started is
 /// gone for good, so those are listed separately before the confirmation rather
 /// than quietly swept up with the rest.
+/// `4510,4700-4705` → the ports it names, sorted and deduplicated.
+///
+/// Ranges are accepted because a machine's foreign occupants come in blocks as
+/// often as singly, and making somebody expand one by hand is how a typo gets
+/// into a list nothing else will ever re-read.
+fn parse_port_list(spec: &str) -> Result<Vec<i32>> {
+    let mut out = Vec::new();
+    for part in spec.split(',').map(str::trim).filter(|p| !p.is_empty()) {
+        match part.split_once('-') {
+            Some((a, b)) => {
+                let a: i32 = a
+                    .trim()
+                    .parse()
+                    .with_context(|| format!("'{a}' is not a port number"))?;
+                let b: i32 = b
+                    .trim()
+                    .parse()
+                    .with_context(|| format!("'{b}' is not a port number"))?;
+                if b < a {
+                    bail!("'{part}' ends before it starts");
+                }
+                out.extend(a..=b);
+            }
+            None => out.push(
+                part.parse()
+                    .with_context(|| format!("'{part}' is not a port number"))?,
+            ),
+        }
+    }
+    out.sort_unstable();
+    out.dedup();
+    Ok(out)
+}
+
 /// `nook set ports node/<name> <start>-<end>` — the range a node may lease from.
 ///
 /// The setting existed and only the UI could reach it, which made the one
@@ -1781,6 +1815,8 @@ pub async fn set_ports(
     target: &str,
     range: Option<&str>,
     clear: bool,
+    exclude: Option<&str>,
+    exclude_clear: bool,
     tenant: Option<&str>,
 ) -> Result<()> {
     // `node/azul` and `azul` both work, the same leniency `rollout` has.
@@ -1794,6 +1830,19 @@ pub async fn set_ports(
             }
         })
         .unwrap_or(target);
+
+    // Exclusions go to their OWN endpoint: the range body reads "neither start
+    // nor end" as CLEAR THE RANGE, so posting only exclusions there would
+    // silently unset it.
+    let exclusions: Option<Vec<i32>> = match (exclude, exclude_clear) {
+        (Some(list), _) => Some(parse_port_list(list)?),
+        (None, true) => Some(Vec::new()),
+        (None, false) => None,
+    };
+    let touching_range = range.is_some() || clear;
+    if !touching_range && exclusions.is_none() {
+        bail!("give a range like 4200-4299, --clear, --exclude <ports>, or --exclude-clear");
+    }
 
     let body = match (range, clear) {
         (Some(r), _) => {
@@ -1813,7 +1862,9 @@ pub async fn set_ports(
             serde_json::json!({ "start": start, "end": end })
         }
         (None, true) => serde_json::json!({}),
-        (None, false) => bail!("give a range like 4200-4299, or --clear to remove it"),
+        // Not an error any more: this call may be exclusions-only, and the
+        // range must then be left exactly as it is.
+        (None, false) => serde_json::Value::Null,
     };
 
     let mut client = Client::from_config()?;
@@ -1833,9 +1884,20 @@ pub async fn set_ports(
         .context("node row has no id")?;
     let name = node.get("name").and_then(Value::as_str).unwrap_or(want);
 
-    let got = client
-        .put(&format!("/api/v1/nodes/{id}/ports"), body)
-        .await?;
+    let mut got = client.get(&format!("/api/v1/nodes/{id}/ports")).await?;
+    if !body.is_null() {
+        got = client
+            .put(&format!("/api/v1/nodes/{id}/ports"), body)
+            .await?;
+    }
+    if let Some(ports) = exclusions {
+        got = client
+            .put(
+                &format!("/api/v1/nodes/{id}/ports/exclusions"),
+                serde_json::json!({ "ports": ports }),
+            )
+            .await?;
+    }
 
     // `NodePorts`, not a bare range: the endpoint answers with the range IN
     // FORCE plus where it came from, because an operator override and the
@@ -1862,6 +1924,36 @@ pub async fn set_ports(
         // Says what the state MEANS, because "no range" reads like a failure
         // and is the thing that refuses required listeners.
         _ => println!("✓ {name} advertises no port range — it will lease nothing"),
+    }
+    let excluded: Vec<i64> = got
+        .get("excluded")
+        .and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(Value::as_i64).collect())
+        .unwrap_or_default();
+    if !excluded.is_empty() {
+        // The USABLE count, not the excluded count: capacity is what an
+        // operator is choosing, and a workspace needs one port per declared
+        // listener all at once.
+        let inside = match (start, end) {
+            (Some(s), Some(e)) => excluded.iter().filter(|p| **p >= s && **p <= e).count(),
+            _ => 0,
+        };
+        print!(
+            "  excluded: {}",
+            excluded
+                .iter()
+                .map(|p| p.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        match (start, end) {
+            (Some(s), Some(e)) => println!(
+                " — {} of {} ports usable",
+                e - s + 1 - inside as i64,
+                e - s + 1
+            ),
+            _ => println!(),
+        }
     }
     Ok(())
 }
