@@ -283,19 +283,62 @@ pub fn logout() -> Result<()> {
 // ssh, no tmux, no knowing which host anything lives on: the control plane
 // already knows, so the CLI asks it.
 
+/// Pick exactly one row by name or id, or refuse and say why.
+///
+/// AMBIGUITY IS AN ERROR, not a coin flip. Every managed session in a workspace
+/// is called "bash (managed)", so "find the first row whose name matches" acted
+/// on whichever one the list happened to return first — and for `delete` that
+/// is a destructive guess. An id (or any unambiguous prefix of one) identifies
+/// exactly one; a name that does not is reported with the candidates so the
+/// caller can pick.
+///
+/// `keys` is the fields worth matching for this resource. The id is matched by
+/// PREFIX, like a short git sha; everything else must match in full, because a
+/// prefix match on names would make `bash` ambiguous with every `bash session`.
+fn pick_one(rows: Vec<Value>, want: &str, keys: &[&str], resource: &str) -> Result<Value> {
+    let hit = |r: &Value| {
+        keys.iter().any(|k| {
+            r.get(*k).and_then(Value::as_str).is_some_and(|v| match *k {
+                "id" => v.len() >= want.len() && v[..want.len()].eq_ignore_ascii_case(want),
+                _ => v.eq_ignore_ascii_case(want),
+            })
+        })
+    };
+    let matches: Vec<Value> = rows.into_iter().filter(|r| hit(r)).collect();
+    match matches.len() {
+        0 => bail!("no {resource} matching '{want}' — try `nook get {resource}`"),
+        1 => Ok(matches.into_iter().next().expect("checked")),
+        n => {
+            let mut msg = format!("'{want}' matches {n} {resource} — name one by id:\n");
+            for r in matches.iter().take(10) {
+                let id = r.get("id").and_then(Value::as_str).unwrap_or("?");
+                let name = r
+                    .get("name")
+                    .or_else(|| r.get("title"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("-");
+                let status = r.get("status").and_then(Value::as_str).unwrap_or("-");
+                // FULL id here, never the short form. If two rows were ever
+                // truncated to the same thing, a list that repeated the
+                // truncation would be a dead end — this is the one place that
+                // has to be able to tell them apart.
+                msg.push_str(&format!("  {id}  {name}  {status}\n"));
+            }
+            if n > 10 {
+                msg.push_str(&format!("  … and {} more\n", n - 10));
+            }
+            bail!("{}", msg.trim_end())
+        }
+    }
+}
+
 /// Find one session by name or id. Names are what people (and agents) can
-/// remember; ids are what survives a rename.
+/// remember; ids are what survives a rename — and what disambiguates the many
+/// sessions sharing a generated name.
 async fn find_session(client: &Client, want: &str) -> Result<Value> {
     let list = client.get("/api/v1/sessions").await?;
     let rows = list.as_array().cloned().unwrap_or_default();
-    rows.into_iter()
-        .find(|r| {
-            ["name", "id"]
-                .iter()
-                .filter_map(|k| r.get(*k).and_then(Value::as_str))
-                .any(|v| v.eq_ignore_ascii_case(want))
-        })
-        .with_context(|| format!("no session named '{want}' — try `nook get sessions`"))
+    pick_one(rows, want, &["name", "id"], "sessions")
 }
 
 /// `nook start <workspace> [--node] [--runtime]` — open a session anywhere in
@@ -563,6 +606,14 @@ pub async fn get(kind: &str, name: Option<&str>, json: bool) -> Result<()> {
         eprintln!("No {resource} found.");
         return Ok(());
     }
+    // READY needs a count the workspaces endpoint does not carry, so the join
+    // happens here — one extra request for the table, none for `--json`, which
+    // has already returned above with the server's own shape untouched.
+    let rows = if resource == "workspaces" {
+        with_session_counts(&client, rows).await
+    } else {
+        rows
+    };
     print_table(resource, &rows);
     Ok(())
 }
@@ -599,6 +650,65 @@ async fn secrets_across_workspaces(client: &Client, workspace: Option<&str>) -> 
     Ok(Value::Array(out))
 }
 
+/// Stamp each workspace with `ready` and `nodes` for the table.
+///
+/// Best-effort: if the sessions call fails the columns read `-` and the rest of
+/// the table still prints. A workspace list that refuses to render because a
+/// second request failed would be a worse answer than a partial one.
+async fn with_session_counts(client: &Client, rows: Vec<Value>) -> Vec<Value> {
+    let sessions = client
+        .get("/api/v1/sessions")
+        .await
+        .ok()
+        .and_then(|v| v.as_array().cloned());
+    rows.into_iter()
+        .map(|mut w| {
+            let Some(obj) = w.as_object_mut() else {
+                return w;
+            };
+            let id = obj.get("id").and_then(Value::as_str).map(str::to_string);
+            let nodes = obj
+                .get("locations")
+                .and_then(Value::as_array)
+                .map(|l| l.len())
+                .unwrap_or(0);
+            // Desired comes from the declared spec. No spec means nothing is
+            // declared, so there is no number to be short of — `-` rather than a
+            // count invented from whatever happens to be running.
+            let desired = obj
+                .get("session_spec")
+                .and_then(|s| s.get("replicas"))
+                .and_then(|r| match r {
+                    Value::String(s) if s == "single" => Some(1),
+                    Value::Object(o) => o.get("count").and_then(Value::as_u64).map(|c| c as usize),
+                    _ => None,
+                });
+            let ready = match (&sessions, &id) {
+                (Some(all), Some(id)) => {
+                    let live = all
+                        .iter()
+                        .filter(|s| s.get("workspace_id").and_then(Value::as_str) == Some(id))
+                        .filter(|s| {
+                            matches!(
+                                s.get("status").and_then(Value::as_str),
+                                Some("running" | "detached")
+                            )
+                        })
+                        .count();
+                    match desired {
+                        Some(d) => format!("{live}/{d}"),
+                        None => format!("{live}/-"),
+                    }
+                }
+                _ => "-".into(),
+            };
+            obj.insert("ready".into(), Value::String(ready));
+            obj.insert("nodes".into(), Value::String(nodes.to_string()));
+            w
+        })
+        .collect()
+}
+
 /// Columns worth showing per resource; unknown resources fall back to
 /// whatever scalar fields the first row has.
 fn columns(resource: &str, first: &Value) -> Vec<&'static str> {
@@ -618,8 +728,21 @@ fn columns(resource: &str, first: &Value) -> Vec<&'static str> {
             "capabilities.runtimes",
             "last_seen_at",
         ],
-        "sessions" => vec!["name", "runtime", "status", "created_at"],
-        "workspaces" => vec!["name", "slug", "git_remote_normalized"],
+        // ID FIRST, and that is the point (kubectl's shape). Every managed
+        // session in a workspace is called "bash (managed)", so a table of
+        // thirty of them named the same thing could not tell you which row to
+        // act on — and `nook delete` matched the FIRST name it found, which is
+        // whichever one the list happened to return. The id is the only handle
+        // that identifies one session, so it is the first column rather than a
+        // `--json` detail. Shown short; `delete`/`send`/`read` take any
+        // unambiguous prefix, exactly as `git` takes a short sha.
+        "sessions" => vec!["id", "name", "runtime", "status", "age"],
+        // `kubectl get deployments`'s shape, because that is what a workspace
+        // IS here: a declared thing the reconciler keeps at a count. READY is
+        // live sessions over desired, NODES the checkouts it can run on. The
+        // remote moved to `-o wide`/`--json`: it never changes and it was the
+        // widest column on the line.
+        "workspaces" => vec!["name", "slug", "ready", "nodes", "age"],
         "secrets" => vec!["workspace", "name", "updated_at"],
         "tasks" => vec!["title", "column_id", "branch", "pr_url"],
         "events" => vec!["occurred_at", "kind", "actor_type"],
@@ -644,6 +767,17 @@ fn columns(resource: &str, first: &Value) -> Vec<&'static str> {
 /// its core count — live under `capabilities`, and a table that could only
 /// read top-level keys could not show any of them.
 fn cell(row: &Value, key: &str) -> String {
+    // `age` is not a field — it is `created_at` read the way a human reads it.
+    // kubectl shows AGE and never a timestamp, because "how long has this been
+    // here" is the question, and an ISO-8601 string makes you do the subtraction
+    // yourself on every row.
+    if key == "age" {
+        return row
+            .get("created_at")
+            .and_then(Value::as_str)
+            .and_then(age_of)
+            .unwrap_or_else(|| "-".into());
+    }
     let mut node = row;
     for part in key.split('.') {
         match node.get(part) {
@@ -654,10 +788,40 @@ fn cell(row: &Value, key: &str) -> String {
     render_value(key, node)
 }
 
+/// An RFC-3339 timestamp as an age: `45m`, `12h`, `8d`. One unit, biggest that
+/// fits, which is all this column is read for.
+fn age_of(ts: &str) -> Option<String> {
+    let then = chrono::DateTime::parse_from_rfc3339(ts).ok()?;
+    let secs = (chrono::Utc::now() - then.with_timezone(&chrono::Utc)).num_seconds();
+    if secs < 0 {
+        return Some("0s".into());
+    }
+    Some(match secs {
+        s if s < 60 => format!("{s}s"),
+        s if s < 3600 => format!("{}m", s / 60),
+        s if s < 86_400 => format!("{}h", s / 3600),
+        s => format!("{}d", s / 86_400),
+    })
+}
+
+/// How much of an id to show.
+///
+/// Measured, not guessed. These are uuidv7s, whose leading characters ARE a
+/// millisecond timestamp — and the reconciler starts sessions in pairs, so the
+/// leading characters are exactly what collides. Across 33 real sessions, 8
+/// characters produced twelve colliding prefixes. 12 was unique on that data but
+/// still sits inside the timestamp, so two sessions started in the same
+/// millisecond would print the same thing.
+///
+/// 18 clears the 48-bit timestamp and reaches the random half, so collisions
+/// stop being a matter of how fast the reconciler happens to be.
+pub const SHORT_ID: usize = 18;
+
 fn render_value(key: &str, v: &Value) -> String {
     match v {
         Value::Null => "-".into(),
         Value::String(s) if s.is_empty() => "-".into(),
+        Value::String(s) if key == "id" => s.chars().take(SHORT_ID).collect(),
         Value::String(s) => s.clone(),
         // Raw byte counts are unreadable at a glance and are always the widest
         // column on the line.
@@ -1202,34 +1366,168 @@ pub async fn migrate_workspaces(apply: bool) -> Result<()> {
 }
 
 /// `nook delete <resource> <name>` — the escape hatch for cleanup.
-pub async fn delete(kind: &str, name: &str) -> Result<()> {
+pub async fn delete(kind: &str, names: &[String]) -> Result<()> {
     let resource = resolve_resource(kind)?;
     if !matches!(resource, "sessions" | "workspaces" | "tasks") {
         bail!("delete is only supported for sessions, workspaces and tasks");
     }
     let client = Client::from_config()?;
     let list = client.get(&format!("/api/v1/{resource}")).await?;
-    let found = list
+    let rows = list.as_array().cloned().unwrap_or_default();
+
+    // RESOLVE THEM ALL BEFORE DELETING ANY. `kubectl delete pod a b c` on a
+    // typo'd name deletes nothing; the alternative — delete two, then fail on
+    // the third — leaves you having to work out what survived.
+    let mut targets: Vec<(String, String)> = Vec::new();
+    for name in names {
+        let row = pick_one(
+            rows.clone(),
+            name,
+            &["name", "slug", "id", "title"],
+            resource,
+        )?;
+        let id = row
+            .get("id")
+            .and_then(Value::as_str)
+            .context("row has no id")?
+            .to_string();
+        let label = row
+            .get("name")
+            .or_else(|| row.get("title"))
+            .and_then(Value::as_str)
+            .unwrap_or(name)
+            .to_string();
+        if targets.iter().any(|(existing, _)| *existing == id) {
+            continue; // named twice, e.g. by id and by name
+        }
+        targets.push((id, label));
+    }
+
+    let mut failed = 0usize;
+    for (id, label) in &targets {
+        match client.delete(&format!("/api/v1/{resource}/{id}")).await {
+            Ok(_) => println!(
+                "✓ Deleted {} {} ({label})",
+                resource.trim_end_matches('s'),
+                id.chars().take(SHORT_ID).collect::<String>()
+            ),
+            // Keep going, and fail at the end. One gone-already row should not
+            // strand the rest of a batch half-done.
+            Err(e) => {
+                failed += 1;
+                eprintln!("✗ {} {id}: {e}", resource.trim_end_matches('s'));
+            }
+        }
+    }
+    anyhow::ensure!(failed == 0, "{failed} of {} failed", targets.len());
+    Ok(())
+}
+
+/// `nook rollout restart workspace/<slug>` — kill a workspace's sessions and
+/// let the reconciler put them back.
+///
+/// Deliberately a KILL and not a restart-in-place: there is no restart-in-place
+/// to have. A session's environment — its leased ports above all — is fixed
+/// when tmux creates it, so the only way to pick up a changed declaration is a
+/// new session. That is exactly `kubectl rollout restart`'s bargain too.
+///
+/// Only sessions the reconciler manages come back. Anything hand-started is
+/// gone for good, so those are listed separately before the confirmation rather
+/// than quietly swept up with the rest.
+pub async fn rollout_restart(target: &str, yes: bool) -> Result<()> {
+    // `workspace/foo`, `workspaces/foo` or bare `foo` — the kubectl spelling
+    // and the obvious one both work.
+    let want = target
+        .split_once('/')
+        .map(|(kind, rest)| {
+            if matches!(kind, "workspace" | "workspaces" | "ws") {
+                rest
+            } else {
+                target
+            }
+        })
+        .unwrap_or(target);
+
+    let client = Client::from_config()?;
+    let workspaces = client.get("/api/v1/workspaces").await?;
+    let ws = pick_one(
+        workspaces.as_array().cloned().unwrap_or_default(),
+        want,
+        &["name", "slug", "id"],
+        "workspaces",
+    )?;
+    let ws_id = ws.get("id").and_then(Value::as_str).context("no id")?;
+    let ws_name = ws.get("name").and_then(Value::as_str).unwrap_or(want);
+
+    let sessions = client.get("/api/v1/sessions").await?;
+    let live: Vec<Value> = sessions
         .as_array()
         .cloned()
         .unwrap_or_default()
         .into_iter()
-        .find(|r| {
-            ["name", "slug", "id", "title"]
-                .iter()
-                .filter_map(|k| r.get(*k).and_then(Value::as_str))
-                .any(|v| v.eq_ignore_ascii_case(name))
-        });
-    let Some(row) = found else {
-        bail!("no {resource} named '{name}'");
-    };
-    let id = row
-        .get("id")
-        .and_then(Value::as_str)
-        .context("row has no id")?;
-    client.delete(&format!("/api/v1/{resource}/{id}")).await?;
-    println!("✓ Deleted {} '{name}'", resource.trim_end_matches('s'));
+        .filter(|s| s.get("workspace_id").and_then(Value::as_str) == Some(ws_id))
+        // A session that already exited has nothing to restart, and killing it
+        // would only add noise to the output.
+        .filter(|s| {
+            matches!(
+                s.get("status").and_then(Value::as_str),
+                Some("running" | "detached" | "starting")
+            )
+        })
+        .collect();
+
+    if live.is_empty() {
+        println!("Nothing to restart — {ws_name} has no live sessions.");
+        return Ok(());
+    }
+
+    println!("Restarting {} session(s) in {ws_name}:", live.len());
+    for s in &live {
+        let id = s.get("id").and_then(Value::as_str).unwrap_or("?");
+        let name = s.get("name").and_then(Value::as_str).unwrap_or("-");
+        let status = s.get("status").and_then(Value::as_str).unwrap_or("-");
+        println!(
+            "  {}  {name}  {status}",
+            id.chars().take(SHORT_ID).collect::<String>()
+        );
+    }
+    println!(
+        "\nThe reconciler restarts the ones it manages. Any session started by \
+         hand is not replaced."
+    );
+
+    if !yes && !confirm("Kill them?")? {
+        println!("Aborted — nothing was killed.");
+        return Ok(());
+    }
+
+    let mut killed = 0usize;
+    for s in &live {
+        let Some(id) = s.get("id").and_then(Value::as_str) else {
+            continue;
+        };
+        match client.delete(&format!("/api/v1/sessions/{id}")).await {
+            Ok(_) => killed += 1,
+            Err(e) => eprintln!("✗ session {id}: {e}"),
+        }
+    }
+    println!("✓ Killed {killed} of {}. Watch them come back:", live.len());
+    println!("    nook get sessions");
     Ok(())
+}
+
+/// A y/N prompt. `false` on anything that is not a clear yes, including a
+/// non-interactive stdin — a rollout that ran because nobody was there to say
+/// no is the failure this guards.
+fn confirm(question: &str) -> Result<bool> {
+    use std::io::Write;
+    print!("{question} [y/N] ");
+    std::io::stdout().flush().ok();
+    let mut line = String::new();
+    if std::io::stdin().read_line(&mut line).is_err() {
+        return Ok(false);
+    }
+    Ok(matches!(line.trim(), "y" | "Y" | "yes" | "Yes"))
 }
 
 // ── teaching the fleet ───────────────────────────────────────────────────────

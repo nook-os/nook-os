@@ -344,11 +344,20 @@ enum Command {
         #[arg(long)]
         link: bool,
     },
-    /// Delete a session, workspace or task by name.
+    /// Restart the sessions of a workspace, the way `kubectl rollout restart`
+    /// restarts a deployment: kill them and let the reconciler bring them back.
+    Rollout {
+        #[command(subcommand)]
+        cmd: RolloutCmd,
+    },
+
+    /// Delete sessions, workspaces or tasks by name or id — several at once.
     Delete {
         /// sessions | workspaces | tasks
         resource: String,
-        name: String,
+        /// One or more names or ids. An id may be any unambiguous prefix.
+        #[arg(required = true)]
+        names: Vec<String>,
     },
 
     /// Migrate this machine's checkouts from the flat legacy workspace root
@@ -887,7 +896,10 @@ async fn main() -> Result<()> {
             }
         }
         Command::Import { path, link } => cli::import(path.as_deref(), link).await,
-        Command::Delete { resource, name } => cli::delete(&resource, &name).await,
+        Command::Delete { resource, names } => cli::delete(&resource, &names).await,
+        Command::Rollout { cmd } => match cmd {
+            RolloutCmd::Restart { target, yes } => cli::rollout_restart(&target, yes).await,
+        },
         Command::MigrateWorkspaces { apply } => cli::migrate_workspaces(apply).await,
         Command::Login { token, server } => match token {
             Some(t) => cli::login(&t, server.as_deref()).await,
@@ -1065,6 +1077,22 @@ enum ContextCommand {
     /// Forget a saved control plane. Does not log you out of it.
     #[command(alias = "rm")]
     Remove { name: String },
+}
+
+#[derive(Subcommand)]
+enum RolloutCmd {
+    /// Kill a workspace's sessions so the reconciler starts fresh ones.
+    ///
+    /// `nook rollout restart workspace/nook-os` — the `kubectl` spelling, and
+    /// `nook rollout restart nook-os` works too. The reconciler is what brings
+    /// them back, so this only does anything for a workspace it manages.
+    Restart {
+        /// `workspace/<slug-or-name>`, or just the slug or name.
+        target: String,
+        /// Skip the confirmation. Every session in the workspace is killed.
+        #[arg(short = 'y', long)]
+        yes: bool,
+    },
 }
 
 #[derive(Subcommand)]
