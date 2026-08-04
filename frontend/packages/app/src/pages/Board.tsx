@@ -1315,13 +1315,33 @@ export function BoardPage() {
   // Remember on every explicit choice; restore only when the URL says nothing.
   // An explicit `?view=` — a deep link, a shared URL, the backlog effect above —
   // still wins, so this never overrides an intent somebody expressed.
+  //
+  // THE CHOICE IS RECORDED ON THE TAB ITSELF, not here, and that is the whole
+  // fix for a trap this pair used to close on you. `writeFilter` only ever
+  // writes `view=backlog` — selecting Board is the DEFAULT, so it writes no key
+  // at all (MAIN-82, and its test pins that URLs stay clean). So "the URL says
+  // nothing" meant two different things: "I just arrived" and "I chose Board".
+  // Restoring on both made Board unreachable — click it, the param vanishes,
+  // this effect reads `backlog` and puts you straight back, forever, because the
+  // effect below only records while the URL HAS a view and so never learned you
+  // had left. A click is the one moment intent is unambiguous; record it there.
   React.useEffect(() => {
     if (params.has("view")) remember(tenantId, "board.view", filter.view);
   }, [tenantId, filter.view, params]);
 
+  // Restores ONCE, on arrival, and never again for the life of this page.
+  //
+  // Belt and braces with the click above, and the half that makes the trap
+  // structurally impossible rather than merely fixed: re-running on every
+  // `params` change is what let a later click be undone at all. Arrival is the
+  // only moment a remembered view should speak; after that the person in front
+  // of the page decides.
+  const restored = React.useRef(false);
   React.useEffect(() => {
+    if (restored.current) return;
     if (params.has("view")) return;
     if (recall(tenantId, "board.view") !== "backlog") return;
+    restored.current = true;
     setParams(
       (prev) => {
         const next = new URLSearchParams(prev);
@@ -1670,7 +1690,10 @@ export function BoardPage() {
               role="tab"
               aria-selected={filter.view === "board"}
               className={`board-tab${filter.view === "board" ? " active" : ""}`}
-              onClick={() => setFilter({ ...filter, view: "board" })}
+              onClick={() => {
+                remember(tenantId, "board.view", "board");
+                setFilter({ ...filter, view: "board" });
+              }}
             >
               Board
             </button>
@@ -1678,7 +1701,10 @@ export function BoardPage() {
               role="tab"
               aria-selected={filter.view === "backlog"}
               className={`board-tab${filter.view === "backlog" ? " active" : ""}`}
-              onClick={() => setFilter({ ...filter, view: "backlog" })}
+              onClick={() => {
+                remember(tenantId, "board.view", "backlog");
+                setFilter({ ...filter, view: "backlog" });
+              }}
             >
               Backlog
               {backlogTasks.length > 0 && (
