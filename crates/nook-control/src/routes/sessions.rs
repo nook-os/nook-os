@@ -446,22 +446,18 @@ pub async fn restart(
         }
     };
 
-    // A restart keeps the ports it already holds rather than re-leasing, so the
-    // unsatisfied set is DERIVED here instead of coming back from the allocator:
-    // a listener the workspace declares and this session holds no lease for is
-    // one it never got. Recomputing it matters — a restart must not look
-    // healthier than the start did (MAIN-377 AC-1).
+    // A restart keeps the ports it already holds, so the unsatisfied set is
+    // derived rather than returned by the allocator. The derivation has to
+    // reproduce the allocator's rules and lives beside them, with tests.
     let held = state.sessions.leases_of(id).await?;
-    let unsatisfied: Vec<String> = crate::services::port_leases::requirements_of(
+    let unsatisfied = crate::services::port_leases::unsatisfied_on_restart(
         &state,
         session.tenant_id,
+        session.node_id,
         session.workspace_id,
+        &held,
     )
-    .await?
-    .into_iter()
-    .filter(|r| !held.iter().any(|l| l.name == r.name))
-    .map(|r| r.name)
-    .collect();
+    .await?;
 
     let sent = state.registry.send_to_node(
         session.node_id,

@@ -775,3 +775,116 @@ async fn a_node_with_no_range_reports_nothing_unsatisfied() {
 
     bed.teardown().await;
 }
+
+// ── what a RESTART reports (MAIN-377 review) ────────────────────────────────
+//
+// A restart keeps its ports rather than re-leasing, so the unsatisfied set is
+// derived rather than returned — and the first cut of that derivation did not
+// reproduce the allocator's rules. Two computations of the same answer diverged
+// because only one of them had tests. These are the tests.
+
+#[tokio::test]
+async fn a_restart_on_a_range_less_node_reports_nothing() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let tenant = bed.tenant("ports").await;
+    let node = node_with(&bed, tenant, None).await;
+    let ws = bed.workspace(tenant).await;
+    let state = bed.app_state().await;
+    declare(
+        &bed,
+        tenant,
+        ws,
+        &[("web", "WEB_PORT", false), ("api", "API_PORT", false)],
+    )
+    .await;
+
+    // THE REGRESSION. Nothing was ever leased here, so `held` is empty and every
+    // declared listener fell through the filter — a session that started clean
+    // came back reporting all of them, on a machine where nothing had changed.
+    // The `.nook.toml` guard this card documents would then exit non-zero.
+    let out = port_leases::unsatisfied_on_restart(&state, tenant, node, Some(ws), &[])
+        .await
+        .expect("derive");
+
+    assert!(
+        out.is_empty(),
+        "a node offering no ports is not a node that ran out: {out:?}"
+    );
+
+    bed.teardown().await;
+}
+
+#[tokio::test]
+async fn a_restart_reports_the_optional_listeners_it_holds_no_lease_for() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let tenant = bed.tenant("ports").await;
+    let node = node_with(&bed, tenant, Some((4400, 4400))).await;
+    let ws = bed.workspace(tenant).await;
+    let state = bed.app_state().await;
+    declare(
+        &bed,
+        tenant,
+        ws,
+        &[
+            ("web", "WEB_PORT", false),
+            ("api", "API_PORT", false),
+            ("dbg", "DBG_PORT", false),
+        ],
+    )
+    .await;
+
+    let s = session_on(&bed, tenant, node, Some(ws), "restarted").await;
+    let first = port_leases::lease_for(&state, tenant, node, Some(ws), s)
+        .await
+        .expect("lease");
+    assert_eq!(
+        first.unsatisfied,
+        vec!["api".to_string(), "dbg".to_string()]
+    );
+
+    // The restart must reach the SAME answer the start did — that is the whole
+    // point of deriving it rather than sending an empty list.
+    let held = state.sessions.leases_of(s).await.expect("held");
+    let again = port_leases::unsatisfied_on_restart(&state, tenant, node, Some(ws), &held)
+        .await
+        .expect("derive");
+
+    assert_eq!(
+        again, first.unsatisfied,
+        "a restart must not look healthier"
+    );
+
+    bed.teardown().await;
+}
+
+#[tokio::test]
+async fn a_restart_never_reports_a_required_listener() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let tenant = bed.tenant("ports").await;
+    let node = node_with(&bed, tenant, Some((4400, 4409))).await;
+    let ws = bed.workspace(tenant).await;
+    let state = bed.app_state().await;
+
+    // A required listener ADDED after the session started: it holds no lease,
+    // so a naive diff would report it. `Leased` says unsatisfied is optional-
+    // only — a required listener is refused by the allocator, never reported —
+    // and refusing the restart instead would fail a session that succeeds today.
+    declare(&bed, tenant, ws, &[("late", "LATE_PORT", true)]).await;
+
+    let out = port_leases::unsatisfied_on_restart(&state, tenant, node, Some(ws), &[])
+        .await
+        .expect("derive");
+
+    assert!(
+        out.is_empty(),
+        "required listeners are refused, never reported: {out:?}"
+    );
+
+    bed.teardown().await;
+}

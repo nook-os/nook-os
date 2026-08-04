@@ -148,17 +148,6 @@ pub fn advertised(capabilities: &serde_json::Value) -> Option<PortRange> {
     })
 }
 
-/// Lease every port a session's workspace declares.
-///
-/// Returns what was leased, in declaration order — empty when the node offers
-/// no range or the workspace declares no listeners, both of which are working
-/// sessions rather than failures.
-///
-/// A REQUIRED listener that cannot be satisfied is an error; an optional one is
-/// skipped. That distinction is the whole reason `required` is on the wire: a
-/// `debug` port going unleased should not stop the app starting, and the app's
-/// own port going unleased should not start a session that then collides on a
-/// hardcoded default — the exact failure this card exists to remove.
 /// What a session got, and what it asked for and did not get.
 ///
 /// The second half used to be dropped on the floor. A consumer reads its port
@@ -175,6 +164,58 @@ pub struct Leased {
     pub unsatisfied: Vec<String>,
 }
 
+/// What a RESTART should report as unsatisfied.
+///
+/// A restart keeps the ports it already holds rather than re-leasing (MAIN-301),
+/// so nothing comes back from the allocator and the set has to be derived: a
+/// declared listener this session holds no lease for is one it never got.
+///
+/// Deriving it means REPRODUCING the allocator's rules, and the first cut did
+/// not — which is the whole reason this is a function with tests rather than a
+/// filter inlined in the route:
+///
+/// * **No range → nothing reported.** `requirements_of` never returns empty for
+///   a workspace-backed session (an undeclared workspace still gets the default
+///   listener), and on a range-less node nothing was ever leased — so every
+///   listener fell through the filter. A session that started clean would come
+///   back reporting everything unsatisfied, and the `.nook.toml` guard this card
+///   documents would then exit non-zero on a machine where nothing had changed.
+/// * **Optional only.** A required listener is refused by the allocator at
+///   start, so it can never be "unsatisfied" — that is the invariant `Leased`
+///   states. One ADDED to the declaration after the session started holds no
+///   lease here; reporting it would break that invariant, and refusing the
+///   restart would fail a session that succeeds today.
+pub async fn unsatisfied_on_restart(
+    state: &AppState,
+    tenant: TenantId,
+    node: NodeId,
+    workspace: Option<WorkspaceId>,
+    held: &[LeasedPort],
+) -> ApiResult<Vec<String>> {
+    let (range, _) = range_of(state, node).await?;
+    if range.is_none() {
+        return Ok(Vec::new());
+    }
+    Ok(requirements_of(state, tenant, workspace)
+        .await?
+        .into_iter()
+        .filter(|r| !r.required)
+        .filter(|r| !held.iter().any(|l| l.name == r.name))
+        .map(|r| r.name)
+        .collect())
+}
+
+/// Lease every port a session's workspace declares.
+///
+/// Returns what was leased, in declaration order — empty when the node offers
+/// no range or the workspace declares no listeners, both of which are working
+/// sessions rather than failures.
+///
+/// A REQUIRED listener that cannot be satisfied is an error; an optional one is
+/// skipped. That distinction is the whole reason `required` is on the wire: a
+/// `debug` port going unleased should not stop the app starting, and the app's
+/// own port going unleased should not start a session that then collides on a
+/// hardcoded default — the exact failure this card exists to remove.
 pub async fn lease_for(
     state: &AppState,
     tenant: TenantId,
