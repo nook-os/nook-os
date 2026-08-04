@@ -50,7 +50,10 @@ the rest, and ends. Re-invocation resumes from live state.
 
 ## 0. Preflight
 
-- `nook whoami` must report a **user** token; `gh auth status` must pass.
+- `nook whoami` must show a **workspace**; `gh auth status` must pass. A user
+  token or a node token inside a managed session both satisfy it — the latter is
+  scoped by the control plane to that session's tenant and workspace. No
+  workspace means unconfined, which disqualifies the pass.
 - You must be in a workspace session (`nook workspace current` prints one) and
   the epic's `workspace_id` must be this workspace — the runner never merges
   another repo's work.

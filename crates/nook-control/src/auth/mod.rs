@@ -853,8 +853,25 @@ async fn retenant(state: &AppState, ctx: AuthCtx, parts: &Parts) -> Result<AuthC
                 )));
             }
         }
+        let Some(owner) = state
+            .identity
+            .tenant_owner_user_id(session.tenant_id.0)
+            .await?
+        else {
+            // No user resolvable in the tenant we would be writing to. Swapping
+            // the tenant while keeping THIS one's user is the identity bug
+            // itself, so decline the swap entirely: the caller stays in the
+            // machine's own tenant, which is wrong but consistent, and `whoami`
+            // now reports the mismatch rather than implying it worked.
+            tracing::warn!(
+                tenant = %session.tenant_id,
+                "no owner for the session's tenant — not re-scoping"
+            );
+            return Ok(ctx);
+        };
         return Ok(AuthCtx {
             tenant_id: session.tenant_id,
+            user_id: UserId(owner),
             ..ctx
         });
     }
