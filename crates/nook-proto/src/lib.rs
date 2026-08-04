@@ -351,6 +351,16 @@ pub enum ControlToNode {
         /// be cleaned up when a session finally starts.
         #[serde(default)]
         attempt: u8,
+        /// Declared listeners this session asked for and did NOT get (MAIN-377).
+        ///
+        /// Travels beside `ports` because it is the other half of the same
+        /// answer. An absent env var has two opposite meanings — "no nook here,
+        /// use your default" and "the node ran out, and your default is the
+        /// literal every other session also falls back to" — and only this can
+        /// tell the session which it is. Empty in the satisfied case, which is
+        /// the overwhelmingly common one.
+        #[serde(default)]
+        unsatisfied: Vec<String>,
     },
     /// Install a runtime credential this node did not obtain (MAIN-283).
     ///

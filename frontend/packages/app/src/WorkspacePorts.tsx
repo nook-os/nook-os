@@ -224,7 +224,11 @@ export function WorkspacePorts({
                   <label
                     className="faint small"
                     style={{ display: "inline-flex", alignItems: "center", gap: 4 }}
-                    title="fail the session start if this one cannot be leased"
+                    title={
+                      r.required
+                        ? "required: if this port cannot be leased the session does not start"
+                        : "optional: the session still starts if this port cannot be leased, and its variable is unset — the app must not fall back to a default, because that default is the literal every other session falls back to too"
+                    }
                   >
                     <input
                       type="checkbox"
@@ -241,6 +245,16 @@ export function WorkspacePorts({
                   >
                     <X size={11} />
                   </button>
+                </div>
+                {/* AC-5: what the setting COSTS, on the row. A person choosing
+                    between the two should not have to read the allocator, and
+                    `optional` is the one whose consequence is invisible — the
+                    session starts either way and the variable is simply
+                    missing. */}
+                <div className="faint small" style={{ paddingLeft: 2 }}>
+                  {r.required
+                    ? "the session will not start unless this port is leased"
+                    : "starts without it — the variable is unset, so the app must fail fast rather than use a default"}
                 </div>
                 {(errors[i]?.name || errors[i]?.env) && (
                   <div className="small" style={{ color: "var(--nook-err)" }}>
@@ -300,7 +314,13 @@ export function WorkspacePorts({
                 </span>
                 <span className="mono faint">{r.env}</span>
                 <Pill>{r.protocol ?? "tcp"}</Pill>
-                {r.required && <Pill tone="warn">required</Pill>}
+                {r.required ? (
+                  <Pill tone="warn">required</Pill>
+                ) : (
+                  <span className="faint small" title="the session starts without it and the variable is unset">
+                    optional — unset if unleased
+                  </span>
+                )}
               </div>
             ))}
           </div>

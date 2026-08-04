@@ -94,8 +94,8 @@ async fn declare(bed: &TestBed, tenant: TenantId, ws: WorkspaceId, reqs: &[(&str
         .expect("declare");
 }
 
-fn ports(leased: &[LeasedPort]) -> Vec<i32> {
-    leased.iter().map(|l| l.port).collect()
+fn ports(leased: &port_leases::Leased) -> Vec<i32> {
+    leased.ports.iter().map(|l| l.port).collect()
 }
 
 /// THE demonstrable win (AC-3): two sessions on one node, two ports.
@@ -157,7 +157,11 @@ async fn a_workspace_declaring_three_listeners_gets_three_ports() {
         .expect("lease");
     assert_eq!(ports(&leased), vec![4000, 4001, 4002]);
     assert_eq!(
-        leased.iter().map(|l| l.env.as_str()).collect::<Vec<_>>(),
+        leased
+            .ports
+            .iter()
+            .map(|l| l.env.as_str())
+            .collect::<Vec<_>>(),
         vec!["PORT", "API_PORT", "DEBUG_PORT"],
         "the env vars are the WORKSPACE's, not this end's"
     );
@@ -189,8 +193,8 @@ async fn an_undeclared_workspace_gets_the_default_listener() {
     let leased = port_leases::lease_for(&state, tenant, node, Some(ws), s)
         .await
         .expect("lease");
-    assert_eq!(leased.len(), 1);
-    assert_eq!(leased[0].env, "NOOK_PORT");
+    assert_eq!(leased.ports.len(), 1);
+    assert_eq!(leased.ports[0].env, "NOOK_PORT");
 
     bed.teardown().await;
 }
@@ -217,6 +221,7 @@ async fn declaring_nothing_and_declaring_none_are_different() {
     assert!(port_leases::lease_for(&state, tenant, node, Some(ws), s)
         .await
         .expect("lease")
+        .ports
         .is_empty());
 
     bed.teardown().await;
@@ -315,7 +320,7 @@ async fn an_optional_listener_is_skipped_when_the_range_is_full() {
         .expect("the required one is satisfiable");
     assert_eq!(ports(&leased), vec![4000]);
     assert_eq!(
-        leased[0].env, "PORT",
+        leased.ports[0].env, "PORT",
         "and the optional one is simply absent"
     );
 
@@ -340,6 +345,7 @@ async fn a_node_with_no_range_leases_nothing() {
     assert!(port_leases::lease_for(&state, tenant, node, Some(ws), s)
         .await
         .expect("no range is not an error")
+        .ports
         .is_empty());
 
     declare(&bed, tenant, ws, &[("web", "PORT", true)]).await;
@@ -658,6 +664,114 @@ async fn repeated_clashes_run_out_of_range_rather_than_looping() {
         .await
         .expect_err("nothing bindable left");
     assert!(err.to_string().contains("no free port"), "{err}");
+
+    bed.teardown().await;
+}
+
+// ── what a session did NOT get (MAIN-377) ───────────────────────────────────
+//
+// A consumer reads its port from an env var, and an ABSENT var had two opposite
+// meanings: "this repo was cloned outside nook, use your default" and "the node
+// ran out, and your default is the shared literal every other session also
+// falls back to". Measured on MAIN-376 with a narrowed range: session 2 leased
+// 2 of 11 and started, session 3 leased 0 of 11 and started, and both collided
+// on the literals that card had just removed. Nothing said a word.
+
+#[tokio::test]
+async fn a_session_is_told_which_optional_listeners_it_did_not_get() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let tenant = bed.tenant("ports").await;
+    // Room for exactly one of the three.
+    let node = node_with(&bed, tenant, Some((4300, 4300))).await;
+    let ws = bed.workspace(tenant).await;
+    let state = bed.app_state().await;
+    declare(
+        &bed,
+        tenant,
+        ws,
+        &[
+            ("web", "WEB_PORT", false),
+            ("api", "API_PORT", false),
+            ("dbg", "DBG_PORT", false),
+        ],
+    )
+    .await;
+
+    let s = session_on(&bed, tenant, node, Some(ws), "starved").await;
+    let leased = port_leases::lease_for(&state, tenant, node, Some(ws), s)
+        .await
+        .expect("optional listeners do not fail the session");
+
+    assert_eq!(ports(&leased), vec![4300], "one port was available");
+    assert_eq!(
+        leased.unsatisfied,
+        vec!["api".to_string(), "dbg".to_string()],
+        "the two it did not get, in declaration order"
+    );
+
+    bed.teardown().await;
+}
+
+#[tokio::test]
+async fn a_fully_satisfied_session_reports_nothing_unsatisfied() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let tenant = bed.tenant("ports").await;
+    let node = node_with(&bed, tenant, Some((4300, 4309))).await;
+    let ws = bed.workspace(tenant).await;
+    let state = bed.app_state().await;
+    declare(
+        &bed,
+        tenant,
+        ws,
+        &[("web", "WEB_PORT", false), ("api", "API_PORT", false)],
+    )
+    .await;
+
+    let s = session_on(&bed, tenant, node, Some(ws), "happy").await;
+    let leased = port_leases::lease_for(&state, tenant, node, Some(ws), s)
+        .await
+        .expect("lease");
+
+    assert_eq!(leased.ports.len(), 2);
+    // EMPTY, so the node exports no variable at all. An empty string and an
+    // unset variable must not both mean success, or `[ -n "$VAR" ]` cannot
+    // tell them apart — which is the whole point of the signal.
+    assert!(
+        leased.unsatisfied.is_empty(),
+        "nothing was skipped, so there is nothing to report"
+    );
+
+    bed.teardown().await;
+}
+
+#[tokio::test]
+async fn a_node_with_no_range_reports_nothing_unsatisfied() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let tenant = bed.tenant("ports").await;
+    let node = node_with(&bed, tenant, None).await;
+    let ws = bed.workspace(tenant).await;
+    let state = bed.app_state().await;
+    declare(&bed, tenant, ws, &[("web", "WEB_PORT", false)]).await;
+
+    let s = session_on(&bed, tenant, node, Some(ws), "no-range").await;
+    let leased = port_leases::lease_for(&state, tenant, node, Some(ws), s)
+        .await
+        .expect("no range is not an error");
+
+    // A machine that offers no ports at all is a working session without them,
+    // not one that lost a race for them. Reporting every listener as skipped
+    // here would make every ordinary session on such a node look broken.
+    assert!(leased.ports.is_empty());
+    assert!(
+        leased.unsatisfied.is_empty(),
+        "no range is not the same as running out"
+    );
 
     bed.teardown().await;
 }

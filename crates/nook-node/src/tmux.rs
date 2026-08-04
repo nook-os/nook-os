@@ -254,6 +254,11 @@ pub fn new_session(
     // the node as framework-agnostic as the broker. Empty when the node
     // advertises no range or the workspace declares no listeners.
     ports: &[nook_types::LeasedPort],
+    // Declared listeners this session did NOT get (MAIN-377). Exported as
+    // `NOOK_PORTS_UNSATISFIED` ONLY when there are some: absent has to keep
+    // meaning "nothing was skipped", or a startup script cannot tell the two
+    // apart with `[ -n "$VAR" ]` and an empty string quietly reads as success.
+    unsatisfied: &[String],
     // Which workspace this checkout is (MAIN-367). Exported as
     // `NOOK_WORKSPACE_ID` so the git-ssh shim can name the repo it is in
     // without asking the control plane about the session first — which is what
@@ -280,10 +285,16 @@ pub fn new_session(
         .iter()
         .map(|p| (p.env.clone(), p.port.to_string()))
         .collect();
-    let extra: Vec<(&str, &str)> = port_s
+    let mut extra: Vec<(&str, &str)> = port_s
         .iter()
         .map(|(env, port)| (env.as_str(), port.as_str()))
         .collect();
+    // Declaration order, comma-separated: the same shape the declaration has,
+    // so a script can split on ',' without learning a new format.
+    let skipped = unsatisfied.join(",");
+    if !skipped.is_empty() {
+        extra.push(("NOOK_PORTS_UNSATISFIED", skipped.as_str()));
+    }
     spawn(
         name,
         cwd,

@@ -442,6 +442,7 @@ pub async fn connect_once(cfg: &NodeConfig) -> Result<()> {
                 cols,
                 rows,
                 ports,
+                unsatisfied,
                 attempt,
             } => {
                 // THE authoritative check (MAIN-301 follow-on). Everything
@@ -490,6 +491,7 @@ pub async fn connect_once(cfg: &NodeConfig) -> Result<()> {
                         cols,
                         rows,
                         ports,
+                        unsatisfied,
                     });
                 }
             }

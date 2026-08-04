@@ -159,13 +159,29 @@ pub fn advertised(capabilities: &serde_json::Value) -> Option<PortRange> {
 /// `debug` port going unleased should not stop the app starting, and the app's
 /// own port going unleased should not start a session that then collides on a
 /// hardcoded default — the exact failure this card exists to remove.
+/// What a session got, and what it asked for and did not get.
+///
+/// The second half used to be dropped on the floor. A consumer reads its port
+/// from an env var, and an ABSENT var has two opposite meanings — "this repo was
+/// cloned outside nook, use your default" and "the node ran out, your default is
+/// the shared literal every other session also falls back to". Nothing
+/// distinguished them, which is what turned `required = false` into a silent
+/// collision (MAIN-377).
+#[derive(Debug, Default, Clone)]
+pub struct Leased {
+    pub ports: Vec<LeasedPort>,
+    /// Declared listeners that could not be leased, in declaration order. Only
+    /// ever optional ones — a required listener refuses the session instead.
+    pub unsatisfied: Vec<String>,
+}
+
 pub async fn lease_for(
     state: &AppState,
     tenant: TenantId,
     node: NodeId,
     workspace: Option<WorkspaceId>,
     session: SessionId,
-) -> ApiResult<Vec<LeasedPort>> {
+) -> ApiResult<Leased> {
     lease_for_avoiding(state, tenant, node, workspace, session, &[]).await
 }
 
@@ -182,10 +198,10 @@ pub async fn lease_for_avoiding(
     workspace: Option<WorkspaceId>,
     session: SessionId,
     avoid: &[i32],
-) -> ApiResult<Vec<LeasedPort>> {
+) -> ApiResult<Leased> {
     let reqs = requirements_of(state, tenant, workspace).await?;
     if reqs.is_empty() {
-        return Ok(Vec::new());
+        return Ok(Leased::default());
     }
     let (range, _) = range_of(state, node).await?;
     let Some(range) = range else {
@@ -199,7 +215,9 @@ pub async fn lease_for_avoiding(
                 r.name, r.env
             )));
         }
-        return Ok(Vec::new());
+        // AC-3: a node that offers no ports is a working session without them,
+        // not one that lost a race. Nothing is reported as unsatisfied.
+        return Ok(Leased::default());
     };
 
     // What this session already holds. A requirement it has a lease for keeps
@@ -213,6 +231,7 @@ pub async fn lease_for_avoiding(
     excluded.dedup();
 
     let mut leased: Vec<LeasedPort> = Vec::new();
+    let mut unsatisfied: Vec<String> = Vec::new();
     for req in reqs {
         if let Some(existing) = held.iter().find(|l| l.name == req.name) {
             leased.push(existing.clone());
@@ -249,11 +268,26 @@ pub async fn lease_for_avoiding(
                     req.name, req.env
                 )));
             }
-            // Optional and unsatisfiable: the session starts without it.
-            None => {}
+            // Optional and unsatisfiable: the session starts without it — and
+            // now SAYS so, to the session and to whoever is reading the log.
+            None => {
+                tracing::warn!(
+                    listener = %req.name,
+                    env = %req.env,
+                    %node,
+                    workspace = ?workspace,
+                    range = %format!("{}-{}", range.start, range.end),
+                    "optional listener went unleased — the session starts without it, \
+                     and its consumer must not fall back to a shared default"
+                );
+                unsatisfied.push(req.name);
+            }
         }
     }
-    Ok(leased)
+    Ok(Leased {
+        ports: leased,
+        unsatisfied,
+    })
 }
 
 /// One requirement, with the allocation race retried. `None` is exhaustion —

@@ -754,7 +754,8 @@ async fn handle_message(
                     tenant_id: session.workspace_id.map(|_| session.tenant_id),
                     cols: 120,
                     rows: 32,
-                    ports: fresh,
+                    ports: fresh.ports,
+                    unsatisfied: fresh.unsatisfied,
                     attempt: attempt + 1,
                 },
             );

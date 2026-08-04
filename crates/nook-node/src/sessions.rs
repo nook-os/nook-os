@@ -48,6 +48,8 @@ pub enum Cmd {
         cols: u16,
         rows: u16,
         ports: Vec<nook_types::LeasedPort>,
+        /// Declared listeners this session did not get (MAIN-377).
+        unsatisfied: Vec<String>,
         /// Exported into the session so the git-ssh shim can name its repo
         /// without a session lookup (MAIN-367). `None` for an ad-hoc terminal.
         workspace_id: Option<String>,
@@ -145,6 +147,7 @@ impl Manager {
                 cols,
                 rows,
                 ports,
+                unsatisfied,
                 workspace_id,
                 tenant_id,
             } => self.start(
@@ -154,6 +157,7 @@ impl Manager {
                 cols,
                 rows,
                 &ports,
+                &unsatisfied,
                 workspace_id.as_deref(),
                 tenant_id.as_deref(),
             ),
@@ -204,6 +208,7 @@ impl Manager {
         cols: u16,
         rows: u16,
         ports: &[nook_types::LeasedPort],
+        unsatisfied: &[String],
         workspace_id: Option<&str>,
         tenant_id: Option<&str>,
     ) {
@@ -228,6 +233,7 @@ impl Manager {
                 runtime,
                 &sid,
                 ports,
+                unsatisfied,
                 workspace_id,
                 tenant_id,
             ) {
