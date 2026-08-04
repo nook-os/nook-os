@@ -371,6 +371,12 @@ enum Command {
         tenant: Option<String>,
     },
 
+    /// Set a mutable property of a fleet object. Currently: a node's port range.
+    Set {
+        #[command(subcommand)]
+        cmd: SetCmd,
+    },
+
     /// Migrate this machine's checkouts from the flat legacy workspace root
     /// into this control plane's per-control-plane slugged root.
     ///
@@ -921,6 +927,14 @@ async fn main() -> Result<()> {
             names,
             tenant,
         } => cli::delete(&resource, &names, tenant.as_deref()).await,
+        Command::Set { cmd } => match cmd {
+            SetCmd::Ports {
+                target,
+                range,
+                clear,
+                tenant,
+            } => cli::set_ports(&target, range.as_deref(), clear, tenant.as_deref()).await,
+        },
         Command::Rollout { cmd } => match cmd {
             RolloutCmd::Restart {
                 target,
@@ -1105,6 +1119,35 @@ enum ContextCommand {
     /// Forget a saved control plane. Does not log you out of it.
     #[command(alias = "rm")]
     Remove { name: String },
+}
+
+#[derive(Subcommand)]
+enum SetCmd {
+    /// The range of ports a node may lease to sessions on it.
+    ///
+    /// `nook set ports node/azul 4200-4299`, or `nook set ports azul
+    /// 4200-4299`. A node with NO range leases nothing, which is the shipped
+    /// default and is why a workspace declaring a REQUIRED listener cannot
+    /// start a session there — deliberately, because a guessed range would hand
+    /// out ports something else is already listening on.
+    ///
+    /// Sizing it is sizing concurrency: a workspace leases one port per declared
+    /// listener, so a range of 100 against a repo declaring 11 is nine
+    /// concurrent sessions, and the tenth is refused by name.
+    Ports {
+        /// `node/<name-or-id>`, or just the name or id. An id may be any
+        /// unambiguous prefix.
+        target: String,
+        /// `<start>-<end>`, e.g. `4200-4299`. Omit with --clear.
+        range: Option<String>,
+        /// Take the range away, so the node leases nothing.
+        #[arg(long, conflicts_with = "range")]
+        clear: bool,
+        /// Act in one of your other tenants. Slug or id. Overrides
+        /// NOOK_TENANT_ID; without either you get your home tenant.
+        #[arg(short = 'T', long)]
+        tenant: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]

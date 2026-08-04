@@ -1712,6 +1712,104 @@ pub async fn delete(kind: &str, names: &[String], tenant: Option<&str>) -> Resul
 /// Only sessions the reconciler manages come back. Anything hand-started is
 /// gone for good, so those are listed separately before the confirmation rather
 /// than quietly swept up with the rest.
+/// `nook set ports node/<name> <start>-<end>` — the range a node may lease from.
+///
+/// The setting existed and only the UI could reach it, which made the one
+/// failure it causes unfixable from a terminal: a workspace declaring a
+/// REQUIRED listener cannot start a session on a node with no range, and the
+/// refusal names the port rather than the node's configuration.
+///
+/// `--clear` is a real operation, not an undo — a node that should lease
+/// nothing is a legitimate state, and the endpoint spells it "neither bound".
+pub async fn set_ports(
+    target: &str,
+    range: Option<&str>,
+    clear: bool,
+    tenant: Option<&str>,
+) -> Result<()> {
+    // `node/azul` and `azul` both work, the same leniency `rollout` has.
+    let want = target
+        .split_once('/')
+        .map(|(kind, rest)| {
+            if matches!(kind, "node" | "nodes") {
+                rest
+            } else {
+                target
+            }
+        })
+        .unwrap_or(target);
+
+    let body = match (range, clear) {
+        (Some(r), _) => {
+            // Parsed HERE rather than posted as text, so a typo is a message
+            // about the range instead of a 400 about a field.
+            let (s, e) = r.split_once('-').with_context(|| {
+                format!("'{r}' is not a range — write it as <start>-<end>, e.g. 4200-4299")
+            })?;
+            let start: u32 = s
+                .trim()
+                .parse()
+                .with_context(|| format!("'{}' is not a port number", s.trim()))?;
+            let end: u32 = e
+                .trim()
+                .parse()
+                .with_context(|| format!("'{}' is not a port number", e.trim()))?;
+            serde_json::json!({ "start": start, "end": end })
+        }
+        (None, true) => serde_json::json!({}),
+        (None, false) => bail!("give a range like 4200-4299, or --clear to remove it"),
+    };
+
+    let mut client = Client::from_config()?;
+    if let Some(t) = tenant {
+        client.set_tenant(Some(t.to_string()));
+    }
+    let nodes = client.get("/api/v1/nodes").await?;
+    let node = pick_one(
+        nodes.as_array().cloned().unwrap_or_default(),
+        want,
+        &["name", "hostname", "id"],
+        "nodes",
+    )?;
+    let id = node
+        .get("id")
+        .and_then(Value::as_str)
+        .context("node row has no id")?;
+    let name = node.get("name").and_then(Value::as_str).unwrap_or(want);
+
+    let got = client
+        .put(&format!("/api/v1/nodes/{id}/ports"), body)
+        .await?;
+
+    // `NodePorts`, not a bare range: the endpoint answers with the range IN
+    // FORCE plus where it came from, because an operator override and the
+    // node's own advertisement are different things that print the same two
+    // numbers. Reading it flat silently reported every success as "no range".
+    let range = got.get("range");
+    let start = range.and_then(|r| r.get("start")).and_then(Value::as_i64);
+    let end = range.and_then(|r| r.get("end")).and_then(Value::as_i64);
+    let source = got
+        .get("source")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    match (start, end) {
+        (Some(s), Some(e)) => {
+            println!("✓ {name} leases {s}-{e} ({} ports, {source})", e - s + 1);
+            // Concurrency, not port count, is the number an operator is
+            // actually choosing — see the note on `SetCmd::Ports`.
+            if let Some(a) = got.get("advertised").and_then(|a| a.get("start")) {
+                if got.get("source").and_then(Value::as_str) == Some("override") {
+                    println!("  the node itself advertises from {a}; this override wins");
+                }
+            }
+        }
+        // Says what the state MEANS, because "no range" reads like a failure
+        // and is the thing that refuses required listeners.
+        _ => println!("✓ {name} advertises no port range — it will lease nothing"),
+    }
+    Ok(())
+}
+
 pub async fn rollout_restart(target: &str, yes: bool, tenant: Option<&str>) -> Result<()> {
     // `workspace/foo`, `workspaces/foo` or bare `foo` — the kubectl spelling
     // and the obvious one both work.
