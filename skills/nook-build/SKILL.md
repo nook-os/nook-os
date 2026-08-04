@@ -23,9 +23,13 @@ The board is NookOS. PRs and CI stay on GitHub.
 
 Before changing the board, GitHub, branches, or files:
 
-- `nook whoami` must report a **user** token. A node token cannot drive the
-  board. If it fails, end the pass and tell the user to
-  `nook login --token nook_user_…`.
+- `nook whoami` must show a **workspace** — that line is what confines this
+  pass to one repo. Either a **user token** (`nook login --token nook_user_…`)
+  or a **node token inside a managed session** satisfies it: the control plane
+  scopes a session's node token to that session's tenant and workspace, which
+  reaches ONE repo where a user token reaches the whole tenant. If `whoami`
+  reports no workspace, end the pass — unconfined means the pick can return
+  another repo's cards.
 - Confirm this is the intended GitHub repository and `origin` is reachable.
 - Detect the repository's default branch with
   `gh repo view --json defaultBranchRef --jq .defaultBranchRef.name`; never

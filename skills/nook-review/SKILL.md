@@ -24,8 +24,22 @@ moves cards and never merges.
 
 ## 0. Preflight
 
-`nook whoami` must report a **user** token, and `gh auth status` must pass. If
+`nook whoami` must show a **workspace**, and `gh auth status` must pass. If
 either fails, end the pass and say which one.
+
+The workspace line is the real check, because it is what confines this pass to
+one repo. Two identities satisfy it:
+
+- a **user token** (`nook login --token nook_user_…`) — a person, tenant-wide;
+- a **node token inside a managed session**, which the control plane scopes to
+  that session's tenant and workspace.
+
+The second is not a downgrade: a session-scoped node token reaches ONE
+workspace, where a user token reaches the whole tenant. What used to be true —
+"a node token cannot drive the board" — stopped being true when scope started
+coming from the session rather than the credential. What still disqualifies a
+run is `whoami` reporting **no workspace**: unconfined means the pick could
+return another repo's cards.
 
 ## 1. Find a PR needing review
 

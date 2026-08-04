@@ -103,6 +103,10 @@ async fn a_node_takes_the_tenant_of_the_session_it_is_running() {
 
     // The shape in production: the machine is homed in one org, the workspace
     // and its session belong to another.
+    // A real tenant has an owner, and the scoping resolves a user THERE — a
+    // fixture without one would decline the swap and pass this test for a
+    // reason production never has.
+    let _ = bed.user(works_org, "owner").await;
     let node = node_in(&bed, machines_org).await;
     let ws = bed.workspace(works_org).await;
     let session = session_on(&bed, works_org, node, ws).await;
@@ -154,6 +158,9 @@ async fn a_finished_session_is_not_a_licence() {
     let works_org = bed.tenant("works-org").await;
     let state = bed.app_state().await;
 
+    // Owned, so what stops the swap below is the session's STATUS and nothing
+    // else — without this the test would pass on an unresolvable owner instead.
+    let _ = bed.user(works_org, "owner").await;
     let node = node_in(&bed, machines_org).await;
     let ws = bed.workspace(works_org).await;
     let session = session_on(&bed, works_org, node, ws).await;
@@ -190,6 +197,35 @@ async fn a_node_claiming_no_session_keeps_its_own_tenant() {
     // The heartbeat path, and every other call a machine makes about itself.
     let ctx = as_node(&state, node, home, None).await.expect("unchanged");
     assert_eq!(ctx.tenant_id, home);
+
+    bed.teardown().await;
+}
+
+#[tokio::test]
+async fn the_user_identity_moves_with_the_tenant() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let machines_org = bed.tenant("machines-org").await;
+    let works_org = bed.tenant("works-org").await;
+    let state = bed.app_state().await;
+
+    let (mine, _) = bed.user(machines_org, "owner").await;
+    let (theirs, _) = bed.user(works_org, "owner").await;
+    assert_ne!(mine, theirs, "a user row is per tenant");
+
+    let node = node_in(&bed, machines_org).await;
+    let ws = bed.workspace(works_org).await;
+    let session = session_on(&bed, works_org, node, ws).await;
+
+    let ctx = as_node(&state, node, machines_org, Some(session))
+        .await
+        .expect("scoped");
+    assert_eq!(ctx.tenant_id, works_org);
+    assert_ne!(
+        ctx.user_id, mine,
+        "must not carry the machine org's user into another tenant"
+    );
 
     bed.teardown().await;
 }

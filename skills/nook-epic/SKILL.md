@@ -89,12 +89,16 @@ may infer) and §5 (ask inline · ask durably · comment).
 ## 0. Preflight
 
 ```bash
-nook whoami          # must report a USER token, not a node token
+nook whoami          # must show a WORKSPACE — that is the confinement
 nook tasks --json    # proves the board is reachable
 ```
 
-If `whoami` fails or reports a node token, end the pass and tell the user to
-`nook login --token nook_user_…`. A node token cannot drive the board.
+If `whoami` fails or reports **no workspace**, end the pass and tell the user to
+`nook login --token nook_user_…`. Either a user token or a node token inside a
+managed session satisfies this: the control plane scopes a session's node token
+to that session's tenant and workspace, so it reaches ONE repo where a user
+token reaches the whole tenant. Unconfined is what disqualifies a run, not the
+kind of credential.
 
 You are confined to your workspace: `nook tasks` scopes to the session's
 workspace, so you only ever see and touch this repo's epics. If `nook workspace
