@@ -751,6 +751,10 @@ pub const WS_BEARER_PROTOCOL: &str = "nook.bearer";
 /// Revocation is a row delete, and expiry (if set) is enforced here.
 /// The header a caller uses to act in one of their OTHER tenants.
 pub const TENANT_HEADER: &str = "x-nook-tenant";
+/// The session a node token is acting FOR. Not a credential — the node token is
+/// the credential; this only says which of the machine's own jobs the request
+/// belongs to, and the control plane checks that claim against its own records.
+pub const SESSION_HEADER: &str = "x-nook-session";
 
 /// Re-scope a caller to the tenant they asked for, if they are a member of it.
 ///
@@ -768,19 +772,97 @@ pub const TENANT_HEADER: &str = "x-nook-tenant";
 /// into every tenant its owner belongs to. The header is ignored for them
 /// rather than refused, because a node has no business sending it and a hard
 /// error would only turn a harmless stray header into an outage.
-async fn retenant(state: &AppState, ctx: AuthCtx, parts: &Parts) -> Result<AuthCtx, ApiError> {
-    let Some(want) = parts
+fn want_header(parts: &Parts) -> Option<String> {
+    parts
         .headers
         .get(TENANT_HEADER)
         .and_then(|v| v.to_str().ok())
         .map(str::trim)
         .filter(|v| !v.is_empty())
-    else {
+        .map(str::to_string)
+}
+
+/// `retenant` for integration tests. The scoping decision is the whole point of
+/// this module and it is unreachable otherwise: every other route into it needs
+/// a real credential, which is not what these tests are about.
+#[doc(hidden)]
+pub async fn retenant_for_test(
+    state: &AppState,
+    ctx: AuthCtx,
+    parts: &mut Parts,
+) -> Result<AuthCtx, ApiError> {
+    retenant(state, ctx, parts).await
+}
+
+async fn retenant(state: &AppState, ctx: AuthCtx, parts: &Parts) -> Result<AuthCtx, ApiError> {
+    // The node branch runs FIRST and without needing the tenant header: a
+    // session's scope comes from the session, so `NOOK_TENANT_ID` is not what
+    // carries it and a request with no header must still be scoped.
+    if let Principal::Node(node) = ctx.principal {
+        // Cross-tenant placement (MAIN-353) runs one org's checkout on another
+        // org's machine, and until now the session there could not ACT in the
+        // tenant it belonged to: its only credential says "I am void", and void
+        // belongs to somebody else. Placement crossed tenants; identity did not.
+        //
+        // The scope comes from the SESSION, not from the header. The node token
+        // proves which machine; the session id proves which work that machine
+        // was given; the control plane checks the session is live and running
+        // HERE. Together they authorise exactly the job already assigned — a
+        // node reaches a tenant only while it is running that tenant's session,
+        // and cannot name one it was never given.
+        //
+        // Deliberately NOT "a node may name any tenant it hosts a checkout for".
+        // That would leave a shared box able to reach every tenant that ever
+        // placed work on it, long after the work ended.
+        let claimed = parts
+            .headers
+            .get(SESSION_HEADER)
+            .and_then(|v| v.to_str().ok())
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .and_then(|v| uuid::Uuid::parse_str(v).ok());
+        let Some(sid) = claimed else {
+            return Ok(ctx); // no session claimed — the machine's own tenant
+        };
+        let Some(session) = state
+            .sessions
+            .by_id_unscoped(nook_types::SessionId(sid))
+            .await?
+        else {
+            return Ok(ctx); // a session we do not know is not authority for anything
+        };
+        if session.node_id != node {
+            return Err(ApiError::ForbiddenMsg(
+                "that session is not running on this machine".into(),
+            ));
+        }
+        // A finished session is not a licence. Its row keeps the tenant, and
+        // honouring it would let a machine act for work that ended.
+        if !matches!(session.status.as_str(), "starting" | "running" | "detached") {
+            return Ok(ctx);
+        }
+        // The header, when present, has to agree with the session — a request
+        // naming a tenant the session is not in was going to be answered about
+        // the wrong one.
+        if let Some(w) = want_header(parts) {
+            let agrees = session.tenant_id.0.to_string().eq_ignore_ascii_case(&w);
+            if !agrees && uuid::Uuid::parse_str(&w).is_ok() {
+                return Err(ApiError::ForbiddenMsg(format!(
+                    "this session belongs to another tenant than '{w}' — a node token \
+                     acts only for the sessions it is running"
+                )));
+            }
+        }
+        return Ok(AuthCtx {
+            tenant_id: session.tenant_id,
+            ..ctx
+        });
+    }
+
+    let Some(want) = want_header(parts) else {
         return Ok(ctx);
     };
-    if !matches!(ctx.principal, Principal::User) {
-        return Ok(ctx);
-    }
+    let want = want.as_str();
     let memberships = state.identity.memberships_of(ctx.user_id).await?;
     // Slug or id, because a person types the slug and a script holds the id —
     // `NOOK_TENANT_ID` in a session is the latter.

@@ -127,6 +127,16 @@ impl Client {
         if let Some(t) = &self.tenant {
             req = req.header("x-nook-tenant", t);
         }
+        // Which of this machine's jobs the call belongs to. Not a credential —
+        // the token is — but under a NODE token it is what carries the tenant:
+        // a session placed cross-tenant belongs to its workspace's org, not to
+        // the machine's, and the control plane checks the claim against its own
+        // records before honouring it. Harmless and ignored under a user token.
+        if let Ok(sid) = std::env::var("NOOK_SESSION_ID") {
+            if !sid.trim().is_empty() {
+                req = req.header("x-nook-session", sid.trim());
+            }
+        }
         if let Some(json) = body {
             req = req.json(&json);
         }
@@ -296,14 +306,38 @@ pub async fn whoami(tenant: Option<&str>) -> Result<()> {
     );
     // WHERE the tenant came from, not just which one it is. A bare slug cannot
     // be told apart from the token's home, and "why is this the wrong tenant"
-    // is the question this command exists to answer — the answer is almost
-    // always that something did or did not set one of these two.
-    let source = match (tenant, ambient_tenant()) {
-        (Some(_), _) => " (from --tenant)",
-        (None, Some(_)) => " (from NOOK_TENANT_ID)",
-        (None, None) => " (home — the token's own)",
-    };
-    println!("tenant:    {}{source}", field("tenant", "slug"));
+    // is the question this command exists to answer.
+    //
+    // ASKED-FOR is not the same as GOT, and saying "from NOOK_TENANT_ID" when
+    // the server ignored the header is the lie this command exists to prevent:
+    // the control plane drops the tenant header for a NODE token, deliberately
+    // and silently, so a session reads its node's tenant while the variable
+    // says otherwise. Compare the two and report the divergence.
+    let asked = tenant
+        .map(|t| (t.to_string(), "--tenant"))
+        .or_else(|| ambient_tenant().map(|t| (t, "NOOK_TENANT_ID")));
+    let slug = field("tenant", "slug");
+    let id = field("tenant", "id");
+    match &asked {
+        Some((want, from))
+            if want.eq_ignore_ascii_case(&slug) || want.eq_ignore_ascii_case(&id) =>
+        {
+            println!("tenant:    {slug} (from {from})");
+        }
+        Some((want, from)) => {
+            println!("tenant:    {slug} — NOT the {want} asked for via {from}");
+            if !client.is_user() {
+                println!(
+                    "           A node token is confined to its own machine and is never \
+                     re-scoped,\n           so the tenant was ignored. Sign in as a person: \
+                     `nook login --token nook_user_…`"
+                );
+            } else {
+                println!("           The control plane did not honour it — check membership.");
+            }
+        }
+        None => println!("tenant:    {slug} (home — the token's own)"),
+    }
 
     // Where this shell is confined, if anywhere. `whoami` is the command people
     // run WHEN CONFUSED, so an unreadable session has to be explained here
