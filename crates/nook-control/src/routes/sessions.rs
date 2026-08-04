@@ -453,6 +453,7 @@ pub async fn restart(
             runtime: session.runtime.clone(),
             workspace_path,
             workspace_id: session.workspace_id,
+            tenant_id: session.workspace_id.map(|_| session.tenant_id),
             cols: 120,
             rows: 32,
             // The SAME ports it already holds (MAIN-301). A restart is the
@@ -460,6 +461,7 @@ pub async fn restart(
             // numbers and break every URL and config that pointed at the old
             // ones. Its leases outlive the process for exactly this reason.
             ports: state.sessions.leases_of(id).await?,
+            attempt: 0,
         },
     );
     if !sent {

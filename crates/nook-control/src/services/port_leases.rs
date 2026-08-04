@@ -100,6 +100,35 @@ pub async fn range_of(state: &AppState, node: NodeId) -> ApiResult<(Option<PortR
     })
 }
 
+/// The ports this node must never lease, lowest first.
+///
+/// Read separately from the range rather than folded into `range_of`, because a
+/// node with NO range still has a meaningful exclusion list: the operator can
+/// rule ports out before ever handing the machine a range, and the two are set
+/// by different commands at different times.
+pub async fn exclusions_of(state: &AppState, node: NodeId) -> ApiResult<Vec<i32>> {
+    let Some(n) = state.nodes.by_id_any_tenant_or_none(node).await? else {
+        return Ok(Vec::new());
+    };
+    // Stored as JSON because it is a list on a column, and read defensively:
+    // a hand-edited row with a string or a null in it must cost the operator
+    // that entry, not the whole exclusion list.
+    let mut out: Vec<i32> = n
+        .port_exclusions
+        .as_ref()
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_i64())
+                .map(|x| x as i32)
+                .collect()
+        })
+        .unwrap_or_default();
+    out.sort_unstable();
+    out.dedup();
+    Ok(out)
+}
+
 /// What the node itself reported, if anything.
 ///
 /// Read as ONE FIELD, not by deserialising the whole `Capabilities` struct.
@@ -137,6 +166,23 @@ pub async fn lease_for(
     workspace: Option<WorkspaceId>,
     session: SessionId,
 ) -> ApiResult<Vec<LeasedPort>> {
+    lease_for_avoiding(state, tenant, node, workspace, session, &[]).await
+}
+
+/// The same, minus ports a node has just told us it could not bind.
+///
+/// `avoid` is NEITHER a lease nor an exclusion, and keeping it out of both is
+/// the point: it is one attempt's knowledge, true for the next few seconds on
+/// one machine. Writing it to the node would turn a transient clash into
+/// permanent policy, and the operator never said so.
+pub async fn lease_for_avoiding(
+    state: &AppState,
+    tenant: TenantId,
+    node: NodeId,
+    workspace: Option<WorkspaceId>,
+    session: SessionId,
+    avoid: &[i32],
+) -> ApiResult<Vec<LeasedPort>> {
     let reqs = requirements_of(state, tenant, workspace).await?;
     if reqs.is_empty() {
         return Ok(Vec::new());
@@ -161,6 +207,10 @@ pub async fn lease_for(
     // retry — and handing it a different number would break every URL and
     // config that pointed at the old one.
     let held = state.sessions.leases_of(session).await?;
+    let mut excluded = exclusions_of(state, node).await?;
+    excluded.extend_from_slice(avoid);
+    excluded.sort_unstable();
+    excluded.dedup();
 
     let mut leased: Vec<LeasedPort> = Vec::new();
     for req in reqs {
@@ -168,17 +218,36 @@ pub async fn lease_for(
             leased.push(existing.clone());
             continue;
         }
-        match lease_one(state, node, session, &range, &req).await? {
+        match lease_one(state, node, session, &range, &excluded, &req).await? {
             Some(port) => leased.push(LeasedPort {
                 name: req.name,
                 env: req.env,
                 port,
             }),
             None if req.required => {
+                // Name the CAUSE, not just the symptom. Once exclusions exist,
+                // "every port is leased" can be flatly untrue — the ports may
+                // be sitting free and ruled out — and that sends a reader
+                // hunting through sessions instead of at the list they set.
+                let inside = excluded
+                    .iter()
+                    .filter(|p| **p >= range.start && **p <= range.end)
+                    .count();
+                let because = if inside > 0 {
+                    format!(
+                        "every port in {}–{} is either leased or excluded ({inside} excluded on this node)",
+                        range.start, range.end
+                    )
+                } else {
+                    format!(
+                        "every port in {}–{} is leased on this node",
+                        range.start, range.end
+                    )
+                };
                 return Err(ApiError::BadRequest(format!(
-                    "no free port for `{}` ({}): every port in {}–{} is leased on this node",
-                    req.name, req.env, range.start, range.end
-                )))
+                    "no free port for `{}` ({}): {because}",
+                    req.name, req.env
+                )));
             }
             // Optional and unsatisfiable: the session starts without it.
             None => {}
@@ -195,6 +264,7 @@ async fn lease_one(
     node: NodeId,
     session: SessionId,
     range: &PortRange,
+    excluded: &[i32],
     req: &PortRequirement,
 ) -> ApiResult<Option<i32>> {
     for _ in 0..RACE_RETRIES {
@@ -203,7 +273,9 @@ async fn lease_one(
         // reads is dense instead of scattered. Computed here rather than in SQL
         // because the range is bounded and `generate_series` is Postgres-only —
         // one round trip either way, and this one runs on both engines.
-        let Some(port) = (range.start..=range.end).find(|p| !held.contains(p)) else {
+        let Some(port) =
+            (range.start..=range.end).find(|p| !held.contains(p) && !excluded.contains(p))
+        else {
             return Ok(None);
         };
         if state

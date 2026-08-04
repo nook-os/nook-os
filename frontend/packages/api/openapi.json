@@ -2396,6 +2396,57 @@
         }
       }
     },
+    "/api/v1/nodes/{id}/ports/exclusions": {
+      "put": {
+        "tags": [
+          "crate::routes::nodes"
+        ],
+        "summary": "`PUT /api/v1/nodes/{id}/ports/exclusions` — ports this node must never lease.",
+        "description": "The operator saying \"something else owns this number on this machine\". A\nrange promises nothing else is listening in it, and on a real box that\npromise is sometimes false for one or two numbers; without this the only fix\nwas to move the whole range, renumbering every session on it.\n\nREFUSES to leave the range unusable. Excluding every port in it would be\naccepted by the storage, satisfy every validation an operator could see, and\nthen fail at session start with \"no free port\" — a message that would send a\nreader hunting for leases rather than at the list they just typed.",
+        "operationId": "set_node_port_exclusions",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetNodePortExclusionsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NodePorts"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": ""
+          },
+          "403": {
+            "description": ""
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      }
+    },
     "/api/v1/nodes/{id}/projects": {
       "post": {
         "tags": [
@@ -11283,6 +11334,9 @@
           "platform": {
             "type": "string"
           },
+          "port_exclusions": {
+            "description": "Ports inside the range this node must never lease (MAIN-301 follow-on).\nOperator POLICY — \"something else owns this number here\" — so it is\ndurable, unlike a live-occupancy snapshot, which is stale as soon as it\nis taken and is deliberately not modelled."
+          },
           "port_range_end": {
             "type": [
               "integer",
@@ -11411,6 +11465,14 @@
                 "description": "The node's own advertisement, kept separate so clearing the override in\nthe UI shows what it will fall back to."
               }
             ]
+          },
+          "excluded": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "format": "int32"
+            },
+            "description": "Ports the operator has ruled out inside the range, lowest first."
           },
           "leases": {
             "type": "array",
@@ -12422,6 +12484,9 @@
                 },
                 "platform": {
                   "type": "string"
+                },
+                "port_exclusions": {
+                  "description": "Ports inside the range this node must never lease (MAIN-301 follow-on).\nOperator POLICY — \"something else owns this number here\" — so it is\ndurable, unlike a live-occupancy snapshot, which is stale as soon as it\nis taken and is deliberately not modelled."
                 },
                 "port_range_end": {
                   "type": [
@@ -13663,6 +13728,19 @@
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/NodeTaint"
+            }
+          }
+        }
+      },
+      "SetNodePortExclusionsRequest": {
+        "type": "object",
+        "description": "Ports to rule out on a node. An EMPTY list clears them — there is no\n\"unset\" here, because a separate absent/empty distinction is exactly what\nmakes the range endpoint's both-or-neither rule easy to trip over.",
+        "properties": {
+          "ports": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "format": "int32"
             }
           }
         }

@@ -763,14 +763,21 @@ impl SettingRepository for DbSettingRepository {
     }
 
     async fn put(&self, write: SettingWrite) -> ApiResult<Setting> {
+        // A tenant-scoped setting has `user_id = NULL`, and the conflict target
+        // has to make two NULLs collide or this upsert quietly becomes an
+        // insert (MAIN-388). Postgres says so on the constraint; SQLite cannot,
+        // so its key is `COALESCE`d to match the expression index 0038 adds.
+        let user_key = type_mapping(self.db.engine()).null_equating_key("user_id");
         Ok(self
             .db
             .query_one(
-                "INSERT INTO settings (id, tenant_id, scope, user_id, key, value)
+                &format!(
+                    "INSERT INTO settings (id, tenant_id, scope, user_id, key, value)
          VALUES ($1, $2, $3, $4, $5, $6)
-         ON CONFLICT (tenant_id, scope, user_id, key)
+         ON CONFLICT (tenant_id, scope, {user_key}, key)
          DO UPDATE SET value = EXCLUDED.value
-         RETURNING *",
+         RETURNING *"
+                ),
                 params![
                     SettingId::new(),
                     write.tenant,

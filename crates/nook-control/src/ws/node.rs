@@ -676,6 +676,89 @@ async fn handle_message(
             )
             .await;
         }
+        NodeToControl::PortsUnavailable {
+            session_id,
+            ports,
+            attempt,
+        } => {
+            // The node tried to bind and could not. This is the ONE port signal
+            // that is never stale, so it wins over everything the allocator
+            // believed — but it is knowledge about this moment on this machine,
+            // not a standing fact, so it is spent on a re-lease and never
+            // written to the node's exclusions. Only a human writes those.
+            const MAX_ATTEMPTS: u8 = 3;
+            let Some(session) = state.sessions.by_id_unscoped(session_id).await? else {
+                return Ok(());
+            };
+            if attempt + 1 >= MAX_ATTEMPTS {
+                // Giving up says which ports and which knob, because after three
+                // clashes the machine has something the allocator cannot see and
+                // a person has to name it.
+                let msg = format!(
+                    "ports {} on this node are in use by something outside nook,                      and re-leasing did not find free ones. Rule them out with                      `nook set ports <node> --exclude {}`",
+                    ports.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(", "),
+                    ports.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(",")
+                );
+                tracing::warn!(%session_id, ?ports, attempt, "giving up after repeated port clashes");
+                state
+                    .nodes
+                    .mark_session_failed(session_id, node_id, &msg)
+                    .await?;
+                return Ok(());
+            }
+
+            tracing::warn!(%session_id, ?ports, attempt, "node could not bind its leased ports — re-leasing");
+            // Drop every lease and take a fresh set. The session has not started,
+            // so nothing points at the old numbers yet and renumbering all of
+            // them is cheaper than tracking which single one clashed.
+            state.sessions.release_leases(node_id, session_id).await?;
+            let fresh = match crate::services::port_leases::lease_for_avoiding(
+                &state,
+                session.tenant_id,
+                node_id,
+                session.workspace_id,
+                session_id,
+                &ports,
+            )
+            .await
+            {
+                Ok(p) => p,
+                Err(e) => {
+                    state
+                        .nodes
+                        .mark_session_failed(session_id, node_id, &e.to_string())
+                        .await?;
+                    return Ok(());
+                }
+            };
+
+            // An ad-hoc terminal has no workspace and so no checkout: an empty
+            // path is the control plane's own signal for "the node's home
+            // directory", which is exactly where it started from.
+            let path = match session.workspace_id {
+                Some(ws) => state
+                    .workspaces
+                    .checkout_path(session.tenant_id, ws, node_id)
+                    .await
+                    .unwrap_or_default()
+                    .unwrap_or_default(),
+                None => String::new(),
+            };
+            state.registry.send_to_node(
+                node_id,
+                nook_proto::ControlToNode::StartSession {
+                    session_id,
+                    runtime: session.runtime.clone(),
+                    workspace_path: path,
+                    workspace_id: session.workspace_id,
+                    tenant_id: session.workspace_id.map(|_| session.tenant_id),
+                    cols: 120,
+                    rows: 32,
+                    ports: fresh,
+                    attempt: attempt + 1,
+                },
+            );
+        }
         NodeToControl::SessionFailed {
             session_id,
             message,

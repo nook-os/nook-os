@@ -681,9 +681,12 @@ pub async fn run(db: &DbPool, cfg: &Config) -> Result<()> {
         // default everywhere else (MAIN-239) — this is the one tenant where the
         // whole point is that a job placed against the seeded workspace runs.
         db.exec(
-            "INSERT INTO settings (id, tenant_id, scope, user_id, key, value)
+            &format!(
+                "INSERT INTO settings (id, tenant_id, scope, user_id, key, value)
          VALUES ($1, $2, 'tenant', NULL, $3, $4)
-         ON CONFLICT (tenant_id, scope, user_id, key) DO UPDATE SET value = EXCLUDED.value",
+         ON CONFLICT (tenant_id, scope, {user_key}, key) DO UPDATE SET value = EXCLUDED.value",
+                user_key = nook_db::dialect::type_mapping(db.engine()).null_equating_key("user_id")
+            ),
             params![
                 uuid::Uuid::now_v7(),
                 tenant.id,
@@ -699,9 +702,12 @@ pub async fn run(db: &DbPool, cfg: &Config) -> Result<()> {
         // workspace is checked out, so the operator node grows a managed bash
         // session for nook-dogfood without anyone opening "+ New Workspace".
         db.exec(
-            "INSERT INTO settings (id, tenant_id, scope, user_id, key, value)
+            &format!(
+                "INSERT INTO settings (id, tenant_id, scope, user_id, key, value)
          VALUES ($1, $2, 'tenant', NULL, $3, $4)
-         ON CONFLICT (tenant_id, scope, user_id, key) DO UPDATE SET value = EXCLUDED.value",
+         ON CONFLICT (tenant_id, scope, {user_key}, key) DO UPDATE SET value = EXCLUDED.value",
+                user_key = nook_db::dialect::type_mapping(db.engine()).null_equating_key("user_id")
+            ),
             params![
                 uuid::Uuid::now_v7(),
                 tenant.id,

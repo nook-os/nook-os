@@ -1,0 +1,17 @@
+-- Ports an operator has declared off-limits on a node, inside its lease range.
+--
+-- A range is a promise that nothing else is listening in it, and on a real
+-- machine that promise is sometimes false: a stray container, a dev server, a
+-- vendor agent squatting one number in the middle. Without this the only fix
+-- was to move the whole range, which renumbers every session on the box.
+--
+-- POLICY, not observation. This is the operator saying "never hand this out",
+-- and it survives reboots and reconnects because it is about the machine, not
+-- about what happened to be bound when someone last looked. A live-occupancy
+-- snapshot is a different thing and deliberately not stored here: it is stale
+-- the moment it is written, and only bind() is authoritative.
+--
+-- (There is no 0038 on this track. The SQLite set used that number for a fix
+-- that has no Postgres twin — Postgres was already correct — and keeping the
+-- numbers aligned across both sets is worth more than a dense sequence.)
+ALTER TABLE public.nodes ADD COLUMN IF NOT EXISTS port_exclusions jsonb;

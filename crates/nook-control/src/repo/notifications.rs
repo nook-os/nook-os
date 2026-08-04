@@ -572,12 +572,19 @@ impl FeedbackRepository for DbFeedbackRepository {
         which: FeedbackSetting,
         value: Value,
     ) -> ApiResult<()> {
+        // User-scoped, so `user_id` is never NULL and this target was never
+        // ambiguous — it goes through the dispatcher anyway so that every
+        // settings upsert names the same key, and the next one copied from here
+        // is right by default (MAIN-388).
         self.db
             .exec(
-                "INSERT INTO settings (id, tenant_id, scope, user_id, key, value)
+                &format!(
+                    "INSERT INTO settings (id, tenant_id, scope, user_id, key, value)
                  VALUES ($1, $2, 'user', $3, $4, $5)
-                 ON CONFLICT (tenant_id, scope, user_id, key)
+                 ON CONFLICT (tenant_id, scope, {user_key}, key)
                  DO UPDATE SET value = EXCLUDED.value",
+                    user_key = type_mapping(self.db.engine()).null_equating_key("user_id")
+                ),
                 params![SettingId::new().0, tenant, user, which.key(), value],
             )
             .await?;

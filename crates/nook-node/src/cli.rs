@@ -9,10 +9,35 @@ use serde_json::Value;
 
 use crate::config::NodeConfig;
 
+/// The tenant a command should act in when nothing on the command line says.
+///
+/// `NOOK_TENANT_ID` is set INSIDE a workspace session, by whoever started it,
+/// so an agent running there is already scoped: `nook create task` resolves one
+/// board instead of asking which. It is per-session and disappears with the
+/// session, which is what makes it safe — it is not a mode anybody has to
+/// remember they are in, and there is no stale global default to get wrong.
+///
+/// `--tenant` overrides it; both fall back to the token's home tenant.
+fn ambient_tenant() -> Option<String> {
+    std::env::var("NOOK_TENANT_ID")
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+}
+
+#[derive(Clone)]
 pub struct Client {
     base: String,
     token: String,
     http: reqwest::Client,
+    /// Which tenant to act in, when it is not the token's home one.
+    ///
+    /// A tenant is this system's namespace. The token's own tenant is HOME and
+    /// stays the default, so every existing caller is unchanged; this is only
+    /// set when something asked to be somewhere else. Sent per request and
+    /// checked against membership server-side, which is why there is no list to
+    /// keep in sync — being added to an org works on the next command.
+    tenant: Option<String>,
 }
 
 impl Client {
@@ -34,6 +59,7 @@ impl Client {
                 base: base.trim_end_matches('/').to_string(),
                 token: auth.token,
                 http: reqwest::Client::new(),
+                tenant: ambient_tenant(),
             });
         }
         let cfg = node.context(
@@ -48,6 +74,7 @@ impl Client {
             base,
             token: cfg.node_token,
             http: reqwest::Client::new(),
+            tenant: ambient_tenant(),
         })
     }
 
@@ -75,6 +102,7 @@ impl Client {
             base,
             token: cfg.node_token,
             http: reqwest::Client::new(),
+            tenant: ambient_tenant(),
         })
     }
 
@@ -96,6 +124,9 @@ impl Client {
             .request(method, &url)
             .bearer_auth(&self.token)
             .header("accept", "application/json");
+        if let Some(t) = &self.tenant {
+            req = req.header("x-nook-tenant", t);
+        }
         if let Some(json) = body {
             req = req.json(&json);
         }
@@ -216,6 +247,7 @@ pub async fn login(token: &str, server: Option<&str>) -> Result<()> {
         base: base.clone(),
         token: token.to_string(),
         http: reqwest::Client::new(),
+        tenant: ambient_tenant(),
     };
     let me = probe
         .get("/api/v1/auth/me")
@@ -239,8 +271,11 @@ pub async fn login(token: &str, server: Option<&str>) -> Result<()> {
 }
 
 /// `nook whoami` — which credential is this CLI using, and for whom?
-pub async fn whoami() -> Result<()> {
-    let client = Client::from_config()?;
+pub async fn whoami(tenant: Option<&str>) -> Result<()> {
+    let mut client = Client::from_config()?;
+    if let Some(t) = tenant {
+        client.set_tenant(Some(t.to_string()));
+    }
     let me = client.get("/api/v1/auth/me").await?;
     let field = |a: &str, b: &str| {
         me.get(a)
@@ -249,9 +284,9 @@ pub async fn whoami() -> Result<()> {
             .unwrap_or("?")
             .to_string()
     };
-    println!("server:  {}", client.base);
+    println!("server:    {}", client.base);
     println!(
-        "as:      {} ({})",
+        "as:        {} ({})",
         field("user", "email"),
         if client.is_user() {
             "user token — can drive any node"
@@ -259,7 +294,60 @@ pub async fn whoami() -> Result<()> {
             "node token — confined to this machine"
         }
     );
-    println!("tenant:  {}", field("tenant", "slug"));
+    // WHERE the tenant came from, not just which one it is. A bare slug cannot
+    // be told apart from the token's home, and "why is this the wrong tenant"
+    // is the question this command exists to answer — the answer is almost
+    // always that something did or did not set one of these two.
+    let source = match (tenant, ambient_tenant()) {
+        (Some(_), _) => " (from --tenant)",
+        (None, Some(_)) => " (from NOOK_TENANT_ID)",
+        (None, None) => " (home — the token's own)",
+    };
+    println!("tenant:    {}{source}", field("tenant", "slug"));
+
+    // Where this shell is confined, if anywhere. `whoami` is the command people
+    // run WHEN CONFUSED, so an unreadable session has to be explained here
+    // rather than raised as an error the way it is everywhere else.
+    let Some(sid) = std::env::var("NOOK_SESSION_ID")
+        .ok()
+        .filter(|s| !s.is_empty())
+    else {
+        println!("session:   not in a nook session — commands act across the tenant");
+        return Ok(());
+    };
+    match client.get(&format!("/api/v1/sessions/{sid}")).await {
+        Ok(s) => {
+            let name = s.get("name").and_then(Value::as_str).unwrap_or("?");
+            let runtime = s.get("runtime").and_then(Value::as_str).unwrap_or("?");
+            let status = s.get("status").and_then(Value::as_str).unwrap_or("?");
+            println!("session:   {name} ({runtime}, {status})");
+            match s.get("workspace_id").and_then(Value::as_str) {
+                Some(ws) => {
+                    let name = client
+                        .get(&format!("/api/v1/workspaces/{ws}"))
+                        .await
+                        .ok()
+                        .and_then(|w| w.get("name").and_then(Value::as_str).map(str::to_string))
+                        .unwrap_or_else(|| ws.to_string());
+                    println!("workspace: {name} — commands scope to this repo");
+                }
+                None => println!("workspace: none (ad-hoc terminal) — no repo confinement"),
+            }
+        }
+        // The exact failure that silently unconfined the CLI. Naming the tenant
+        // it looked in is the whole diagnosis: the session is almost always
+        // real and simply lives somewhere this token was not asked to look.
+        Err(_) => {
+            println!(
+                "session:   {sid} — NOT READABLE in tenant {}",
+                field("tenant", "slug")
+            );
+            println!(
+                "           If it belongs to another tenant, set NOOK_TENANT_ID or pass -T.\n\
+                 \x20          Until then this shell has no workspace confinement."
+            );
+        }
+    }
     Ok(())
 }
 
@@ -283,19 +371,69 @@ pub fn logout() -> Result<()> {
 // ssh, no tmux, no knowing which host anything lives on: the control plane
 // already knows, so the CLI asks it.
 
+/// Pick exactly one row by name or id, or refuse and say why.
+///
+/// AMBIGUITY IS AN ERROR, not a coin flip. Every managed session in a workspace
+/// is called "bash (managed)", so "find the first row whose name matches" acted
+/// on whichever one the list happened to return first — and for `delete` that
+/// is a destructive guess. An id (or any unambiguous prefix of one) identifies
+/// exactly one; a name that does not is reported with the candidates so the
+/// caller can pick.
+///
+/// `keys` is the fields worth matching for this resource. The id is matched by
+/// PREFIX, like a short git sha; everything else must match in full, because a
+/// prefix match on names would make `bash` ambiguous with every `bash session`.
+fn pick_one(rows: Vec<Value>, want: &str, keys: &[&str], resource: &str) -> Result<Value> {
+    let hit = |r: &Value| {
+        keys.iter().any(|k| {
+            r.get(*k).and_then(Value::as_str).is_some_and(|v| match *k {
+                "id" => v.len() >= want.len() && v[..want.len()].eq_ignore_ascii_case(want),
+                _ => v.eq_ignore_ascii_case(want),
+            })
+        })
+    };
+    let matches: Vec<Value> = rows.into_iter().filter(|r| hit(r)).collect();
+    match matches.len() {
+        0 => bail!("no {resource} matching '{want}' — try `nook get {resource}`"),
+        1 => Ok(matches.into_iter().next().expect("checked")),
+        n => {
+            let mut msg = format!("'{want}' matches {n} {resource} — name one by id:\n");
+            for r in matches.iter().take(10) {
+                let id = r.get("id").and_then(Value::as_str).unwrap_or("?");
+                let name = r
+                    .get("name")
+                    .or_else(|| r.get("title"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("-");
+                let status = r.get("status").and_then(Value::as_str).unwrap_or("-");
+                // FULL id here, never the short form. If two rows were ever
+                // truncated to the same thing, a list that repeated the
+                // truncation would be a dead end — this is the one place that
+                // has to be able to tell them apart.
+                msg.push_str(&format!("  {id}  {name}  {status}\n"));
+            }
+            if n > 10 {
+                msg.push_str(&format!("  … and {} more\n", n - 10));
+            }
+            bail!("{}", msg.trim_end())
+        }
+    }
+}
+
+impl Client {
+    /// Point this client at a tenant for the rest of its life.
+    pub fn set_tenant(&mut self, tenant: Option<String>) {
+        self.tenant = tenant;
+    }
+}
+
 /// Find one session by name or id. Names are what people (and agents) can
-/// remember; ids are what survives a rename.
+/// remember; ids are what survives a rename — and what disambiguates the many
+/// sessions sharing a generated name.
 async fn find_session(client: &Client, want: &str) -> Result<Value> {
     let list = client.get("/api/v1/sessions").await?;
     let rows = list.as_array().cloned().unwrap_or_default();
-    rows.into_iter()
-        .find(|r| {
-            ["name", "id"]
-                .iter()
-                .filter_map(|k| r.get(*k).and_then(Value::as_str))
-                .any(|v| v.eq_ignore_ascii_case(want))
-        })
-        .with_context(|| format!("no session named '{want}' — try `nook get sessions`"))
+    pick_one(rows, want, &["name", "id"], "sessions")
 }
 
 /// `nook start <workspace> [--node] [--runtime]` — open a session anywhere in
@@ -520,17 +658,44 @@ fn resolve_resource(kind: &str) -> Result<&'static str> {
         "task" => "tasks",
         "event" | "activity" => "events",
         "theme" => "themes",
+        "tenant" | "namespace" => "tenants",
         other => bail!(
             "unknown resource '{other}' — try: nodes, sessions, workspaces, \
-             secrets, tasks, events, themes"
+             secrets, tasks, events, themes, tenants"
         ),
     })
 }
 
 /// `nook get <resource>` — a table by default, raw JSON with --json.
-pub async fn get(kind: &str, name: Option<&str>, json: bool) -> Result<()> {
+pub async fn get(
+    kind: &str,
+    name: Option<&str>,
+    json: bool,
+    tenant: Option<&str>,
+    all_tenants: bool,
+) -> Result<()> {
     let resource = resolve_resource(kind)?;
-    let client = Client::from_config()?;
+    let mut client = Client::from_config()?;
+    // `--tenant` beats `NOOK_TENANT_ID` beats the token's home. One precedence,
+    // the same one kubectl uses for `-n`.
+    if let Some(t) = tenant {
+        client.set_tenant(Some(t.to_string()));
+    }
+
+    // `-A` is a client-side fan-out over the tenants you are a member of. The
+    // server stays one-tenant-per-request — no endpoint learns to span, and no
+    // credential widens — and the CLI does the joining, which is also why the
+    // TENANT column can be added here rather than invented in every response.
+    // Tenants are the one resource `-A` cannot span: they ARE the span. Answer
+    // before the fan-out, which would otherwise ask each tenant to list the set
+    // it belongs to and print it once per membership.
+    if resource == "tenants" {
+        return get_tenants(&client, json).await;
+    }
+
+    if all_tenants {
+        return get_all_tenants(&client, resource, name, json).await;
+    }
 
     // Secrets live under a workspace; everything else is a flat collection.
     let value = if resource == "secrets" {
@@ -545,24 +710,25 @@ pub async fn get(kind: &str, name: Option<&str>, json: bool) -> Result<()> {
     }
 
     let rows = value.as_array().cloned().unwrap_or_default();
-    let rows: Vec<Value> = match (resource, name) {
-        // `nook get nodes buildbox` filters by name/slug/id.
-        (_, Some(want)) if resource != "secrets" => rows
-            .into_iter()
-            .filter(|r| {
-                ["name", "slug", "id", "title"]
-                    .iter()
-                    .filter_map(|k| r.get(*k).and_then(Value::as_str))
-                    .any(|v| v.eq_ignore_ascii_case(want))
-            })
-            .collect(),
-        _ => rows,
-    };
+    let rows = filter_rows(rows, resource, name);
 
     if rows.is_empty() {
         eprintln!("No {resource} found.");
         return Ok(());
     }
+    // READY needs a count the workspaces endpoint does not carry, so the join
+    // happens here — one extra request for the table, none for `--json`, which
+    // has already returned above with the server's own shape untouched.
+    let rows = if resource == "workspaces" {
+        let sessions = client
+            .get("/api/v1/sessions")
+            .await
+            .ok()
+            .and_then(|v| v.as_array().cloned());
+        with_session_counts(rows, sessions)
+    } else {
+        rows
+    };
     print_table(resource, &rows);
     Ok(())
 }
@@ -599,6 +765,214 @@ async fn secrets_across_workspaces(client: &Client, workspace: Option<&str>) -> 
     Ok(Value::Array(out))
 }
 
+/// `nook get tenants` — which tenants may this token act in, and what is each
+/// one called.
+///
+/// The missing half of `-T`. Every other command took a tenant slug and
+/// nothing printed the set of valid ones, so the only way to find a slug was to
+/// run `-A` on some unrelated resource and read the TENANT column — and that
+/// only shows tenants that happen to own a row of that resource. An empty
+/// tenant was invisible.
+///
+/// HOME marks the token's own tenant: the one every command uses when `-T` and
+/// `NOOK_TENANT_ID` are both absent.
+async fn get_tenants(client: &Client, json: bool) -> Result<()> {
+    let value = client.get("/api/v1/me/tenants").await?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&value)?);
+        return Ok(());
+    }
+    let rows = value.as_array().cloned().unwrap_or_default();
+    if rows.is_empty() {
+        eprintln!("No tenants found.");
+        return Ok(());
+    }
+    let rows: Vec<Value> = rows
+        .into_iter()
+        .map(|mut t| {
+            if let Some(obj) = t.as_object_mut() {
+                // The server already resolved which tenant this request acted
+                // in, honouring `-T`/`NOOK_TENANT_ID` — so `current` is the
+                // scope you actually have, not a guess reconstructed here.
+                let current = obj.get("current").and_then(Value::as_bool) == Some(true);
+                obj.insert(
+                    "scope".into(),
+                    Value::String(if current { "CURRENT" } else { "-" }.into()),
+                );
+            }
+            t
+        })
+        .collect();
+    print_table("tenants", &rows);
+    Ok(())
+}
+
+/// `-A` — the same listing, once per tenant, merged with a TENANT column.
+///
+/// The column appears only when the result actually spans more than one, the
+/// same badge-on-presence rule `home_tenant` uses: a column that is the same
+/// value on every row is noise, and its absence is itself information.
+async fn get_all_tenants(
+    client: &Client,
+    resource: &str,
+    name: Option<&str>,
+    json: bool,
+) -> Result<()> {
+    let tenants = client.get("/api/v1/me/tenants").await?;
+    let tenants = tenants.as_array().cloned().unwrap_or_default();
+    if tenants.is_empty() {
+        bail!("no tenants — `nook whoami` should say who you are");
+    }
+
+    let mut all: Vec<Value> = Vec::new();
+    let mut seen: std::collections::BTreeSet<String> = Default::default();
+    let mut sessions: Vec<Value> = Vec::new();
+    for t in &tenants {
+        let Some(slug) = t.get("slug").and_then(Value::as_str) else {
+            continue;
+        };
+        let mut scoped = client.clone();
+        scoped.set_tenant(Some(slug.to_string()));
+        // One tenant failing must not lose the others: a membership can be
+        // revoked between the list and the fetch, and a partial answer that
+        // says so beats no answer at all.
+        let rows = match scoped.get(&format!("/api/v1/{resource}")).await {
+            Ok(v) => v.as_array().cloned().unwrap_or_default(),
+            Err(e) => {
+                eprintln!("! {slug}: {e}");
+                continue;
+            }
+        };
+        for mut r in rows {
+            // The SAME id from two tenants is one object seen twice, not two
+            // objects. Cross-tenant placement makes every node visible from
+            // every tenant that can use it, so a six-node fleet listed as
+            // twelve rows — the same machines, twice, differing only in which
+            // tenant we happened to ask.
+            let id = r.get("id").and_then(Value::as_str).map(str::to_string);
+            if let Some(id) = &id {
+                if !seen.insert(id.clone()) {
+                    continue;
+                }
+            }
+            if let Some(o) = r.as_object_mut() {
+                // `home_tenant` is the API saying "this lives somewhere else",
+                // and it is the honest label for a deduped row: where the thing
+                // IS, not which of our questions happened to surface it.
+                // `home_tenant` carries the tenant's NAME while everything
+                // else here is keyed by slug, so map it back — a column that
+                // said "hein" on one row and "Engineering Team" on the next
+                // would look like two different kinds of thing.
+                let owner = o
+                    .get("home_tenant")
+                    .and_then(Value::as_str)
+                    .map(|home| {
+                        tenants
+                            .iter()
+                            .find(|t| {
+                                t.get("name").and_then(Value::as_str) == Some(home)
+                                    || t.get("slug").and_then(Value::as_str) == Some(home)
+                            })
+                            .and_then(|t| t.get("slug").and_then(Value::as_str))
+                            .unwrap_or(home)
+                            .to_string()
+                    })
+                    .unwrap_or_else(|| slug.to_string());
+                o.insert("tenant".into(), Value::String(owner));
+            }
+            all.push(r);
+        }
+        // READY counts this tenant's OWN sessions. Fetched inside the loop with
+        // the scoped client — asking once with the home-tenant client counted
+        // nothing for every other tenant, so their workspaces all read 0/-. It
+        // happened to be true while those tenants had no sessions, which is the
+        // worst way for a bug like this to sit.
+        if resource == "workspaces" {
+            if let Ok(v) = scoped.get("/api/v1/sessions").await {
+                sessions.extend(v.as_array().cloned().unwrap_or_default());
+            }
+        }
+    }
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&all)?);
+        return Ok(());
+    }
+    let all = filter_rows(all, resource, name);
+    // Counted AFTER dedup and filtering, so the column appears only when the
+    // rows on screen really do come from more than one tenant.
+    let spanned = all
+        .iter()
+        .filter_map(|r| r.get("tenant").and_then(Value::as_str))
+        .collect::<std::collections::BTreeSet<_>>()
+        .len();
+    if all.is_empty() {
+        eprintln!("No {resource} found in any tenant.");
+        return Ok(());
+    }
+    let all = if resource == "workspaces" {
+        with_session_counts(all, Some(sessions))
+    } else {
+        all
+    };
+    print_table_with(resource, &all, spanned > 1);
+    Ok(())
+}
+
+/// Stamp each workspace with `ready` and `nodes` for the table.
+///
+/// Best-effort: if the sessions call fails the columns read `-` and the rest of
+/// the table still prints. A workspace list that refuses to render because a
+/// second request failed would be a worse answer than a partial one.
+fn with_session_counts(rows: Vec<Value>, sessions: Option<Vec<Value>>) -> Vec<Value> {
+    rows.into_iter()
+        .map(|mut w| {
+            let Some(obj) = w.as_object_mut() else {
+                return w;
+            };
+            let id = obj.get("id").and_then(Value::as_str).map(str::to_string);
+            let nodes = obj
+                .get("locations")
+                .and_then(Value::as_array)
+                .map(|l| l.len())
+                .unwrap_or(0);
+            // Desired comes from the declared spec. No spec means nothing is
+            // declared, so there is no number to be short of — `-` rather than a
+            // count invented from whatever happens to be running.
+            let desired = obj
+                .get("session_spec")
+                .and_then(|s| s.get("replicas"))
+                .and_then(|r| match r {
+                    Value::String(s) if s == "single" => Some(1),
+                    Value::Object(o) => o.get("count").and_then(Value::as_u64).map(|c| c as usize),
+                    _ => None,
+                });
+            let ready = match (&sessions, &id) {
+                (Some(all), Some(id)) => {
+                    let live = all
+                        .iter()
+                        .filter(|s| s.get("workspace_id").and_then(Value::as_str) == Some(id))
+                        .filter(|s| {
+                            matches!(
+                                s.get("status").and_then(Value::as_str),
+                                Some("running" | "detached")
+                            )
+                        })
+                        .count();
+                    match desired {
+                        Some(d) => format!("{live}/{d}"),
+                        None => format!("{live}/-"),
+                    }
+                }
+                _ => "-".into(),
+            };
+            obj.insert("ready".into(), Value::String(ready));
+            obj.insert("nodes".into(), Value::String(nodes.to_string()));
+            w
+        })
+        .collect()
+}
+
 /// Columns worth showing per resource; unknown resources fall back to
 /// whatever scalar fields the first row has.
 fn columns(resource: &str, first: &Value) -> Vec<&'static str> {
@@ -618,12 +992,27 @@ fn columns(resource: &str, first: &Value) -> Vec<&'static str> {
             "capabilities.runtimes",
             "last_seen_at",
         ],
-        "sessions" => vec!["name", "runtime", "status", "created_at"],
-        "workspaces" => vec!["name", "slug", "git_remote_normalized"],
+        // ID FIRST, and that is the point (kubectl's shape). Every managed
+        // session in a workspace is called "bash (managed)", so a table of
+        // thirty of them named the same thing could not tell you which row to
+        // act on — and `nook delete` matched the FIRST name it found, which is
+        // whichever one the list happened to return. The id is the only handle
+        // that identifies one session, so it is the first column rather than a
+        // `--json` detail. Shown short; `delete`/`send`/`read` take any
+        // unambiguous prefix, exactly as `git` takes a short sha.
+        "sessions" => vec!["id", "name", "runtime", "status", "age"],
+        // `kubectl get deployments`'s shape, because that is what a workspace
+        // IS here: a declared thing the reconciler keeps at a count. READY is
+        // live sessions over desired, NODES the checkouts it can run on. The
+        // remote moved to `-o wide`/`--json`: it never changes and it was the
+        // widest column on the line.
+        "workspaces" => vec!["name", "slug", "ready", "nodes", "age"],
         "secrets" => vec!["workspace", "name", "updated_at"],
         "tasks" => vec!["title", "column_id", "branch", "pr_url"],
         "events" => vec!["occurred_at", "kind", "actor_type"],
         "themes" => vec!["name", "slug"],
+        // SLUG leads after NAME because the slug is what `-T` takes.
+        "tenants" => vec!["name", "slug", "role", "scope", "id"],
         _ => first
             .as_object()
             .map(|o| {
@@ -644,6 +1033,17 @@ fn columns(resource: &str, first: &Value) -> Vec<&'static str> {
 /// its core count — live under `capabilities`, and a table that could only
 /// read top-level keys could not show any of them.
 fn cell(row: &Value, key: &str) -> String {
+    // `age` is not a field — it is `created_at` read the way a human reads it.
+    // kubectl shows AGE and never a timestamp, because "how long has this been
+    // here" is the question, and an ISO-8601 string makes you do the subtraction
+    // yourself on every row.
+    if key == "age" {
+        return row
+            .get("created_at")
+            .and_then(Value::as_str)
+            .and_then(age_of)
+            .unwrap_or_else(|| "-".into());
+    }
     let mut node = row;
     for part in key.split('.') {
         match node.get(part) {
@@ -652,6 +1052,59 @@ fn cell(row: &Value, key: &str) -> String {
         }
     }
     render_value(key, node)
+}
+
+/// An RFC-3339 timestamp as an age: `45m`, `12h`, `8d`. One unit, biggest that
+/// fits, which is all this column is read for.
+fn age_of(ts: &str) -> Option<String> {
+    let then = chrono::DateTime::parse_from_rfc3339(ts).ok()?;
+    let secs = (chrono::Utc::now() - then.with_timezone(&chrono::Utc)).num_seconds();
+    if secs < 0 {
+        return Some("0s".into());
+    }
+    Some(match secs {
+        s if s < 60 => format!("{s}s"),
+        s if s < 3600 => format!("{}m", s / 60),
+        s if s < 86_400 => format!("{}h", s / 3600),
+        s => format!("{}d", s / 86_400),
+    })
+}
+
+/// The SHORTEST id a table will print. A floor, not a promise — see
+/// `unique_id_len`, which widens past it whenever these rows need it.
+///
+/// Measured, not guessed. These are uuidv7s, and 18 characters buys the full
+/// 48-bit millisecond timestamp, the version nibble (always `7`, so no entropy
+/// at all) and then just THREE hex digits — twelve bits, 4096 values, of the
+/// random half. Two rows written in the same millisecond collide with
+/// probability about 1/4096, and a burst of ten at roughly one percent.
+///
+/// That is not theoretical. Across 6,918 production rows: sessions, tasks and
+/// checkouts are all distinct at 18, but 6,429 events yield only 6,353 distinct
+/// prefixes — 76 collisions, because events are written in bursts. 8 characters
+/// collides everywhere; 12 already collides among sessions.
+///
+/// Truncation is safe anyway, and that is the point: `pick_one` refuses an
+/// ambiguous match and lists FULL ids, so the worst case is "type more
+/// characters" and never "acted on the wrong row". This constant is the floor
+/// for readability; correctness comes from the guard, not the length.
+pub const SHORT_ID: usize = 18;
+
+/// The shortest prefix that tells THESE ids apart, never below [`SHORT_ID`].
+///
+/// git's short-sha rule. A fixed width cannot be right for every table — 18 is
+/// comfortable for sessions and provably too short for events — so the table
+/// widens to whatever the rows in front of it require, rather than betting that
+/// the chosen number outlives the next burst of writes.
+fn unique_id_len(ids: &[&str]) -> usize {
+    let longest = ids.iter().map(|i| i.chars().count()).max().unwrap_or(0);
+    for len in SHORT_ID..longest {
+        let mut seen: std::collections::BTreeSet<&str> = Default::default();
+        if ids.iter().all(|i| seen.insert(i.get(..len).unwrap_or(i))) {
+            return len;
+        }
+    }
+    longest
 }
 
 fn render_value(key: &str, v: &Value) -> String {
@@ -692,8 +1145,39 @@ fn render_value(key: &str, v: &Value) -> String {
     }
 }
 
+/// `nook get nodes buildbox` narrows a listing to one row by name/slug/id.
+/// Shared so `-A` filters the merged set exactly as a single-tenant get does.
+fn filter_rows(rows: Vec<Value>, resource: &str, name: Option<&str>) -> Vec<Value> {
+    match (resource, name) {
+        (_, Some(want)) if resource != "secrets" => rows
+            .into_iter()
+            .filter(|r| {
+                ["name", "slug", "id", "title"]
+                    .iter()
+                    .filter_map(|k| r.get(*k).and_then(Value::as_str))
+                    .any(|v| v.eq_ignore_ascii_case(want))
+            })
+            .collect(),
+        _ => rows,
+    }
+}
+
 fn print_table(resource: &str, rows: &[Value]) {
-    let cols = columns(resource, &rows[0]);
+    print_table_with(resource, rows, false)
+}
+
+/// `with_tenant` prepends the TENANT column. Only true when the result actually
+/// spans more than one — a column identical on every row tells you nothing, and
+/// its ABSENCE is itself the information that you are looking at one tenant.
+fn print_table_with(resource: &str, rows: &[Value], with_tenant: bool) {
+    let mut cols = columns(resource, &rows[0]);
+    if with_tenant {
+        // After NAME rather than first. kubectl leads with NAMESPACE, but its
+        // pod names are unique-ish sentences; here the name is what you scan
+        // for and the tenant qualifies it, so it reads better one column in.
+        let at = cols.iter().position(|c| *c == "name").map_or(0, |i| i + 1);
+        cols.insert(at, "tenant");
+    }
     // Header names the field, not its path: `CAPABILITIES.AGENT_VERSION` is a
     // location, `AGENT_VERSION` is a column.
     let headers: Vec<String> = cols
@@ -701,10 +1185,21 @@ fn print_table(resource: &str, rows: &[Value]) {
         .map(|c| c.rsplit('.').next().unwrap_or(c).to_uppercase())
         .collect();
     let mut widths: Vec<usize> = headers.iter().map(|h| h.len()).collect();
-    let body: Vec<Vec<String>> = rows
+    let mut body: Vec<Vec<String>> = rows
         .iter()
         .map(|r| cols.iter().map(|c| cell(r, c)).collect())
         .collect();
+    // Ids arrive whole and are shortened HERE, where every row is visible, so
+    // the width can be the shortest that keeps this table's ids distinct. Doing
+    // it per-cell could only ever apply a fixed guess.
+    if let Some(idx) = cols.iter().position(|c| *c == "id") {
+        let ids: Vec<&str> = body.iter().map(|r| r[idx].as_str()).collect();
+        let len = unique_id_len(&ids);
+        for row in body.iter_mut() {
+            row[idx] = row[idx].chars().take(len).collect();
+        }
+    }
+
     for row in &body {
         for (i, v) in row.iter().enumerate() {
             widths[i] = widths[i].max(v.chars().count());
@@ -1202,34 +1697,364 @@ pub async fn migrate_workspaces(apply: bool) -> Result<()> {
 }
 
 /// `nook delete <resource> <name>` — the escape hatch for cleanup.
-pub async fn delete(kind: &str, name: &str) -> Result<()> {
+pub async fn delete(kind: &str, names: &[String], tenant: Option<&str>) -> Result<()> {
     let resource = resolve_resource(kind)?;
     if !matches!(resource, "sessions" | "workspaces" | "tasks") {
         bail!("delete is only supported for sessions, workspaces and tasks");
     }
-    let client = Client::from_config()?;
+    let mut client = Client::from_config()?;
+    if let Some(t) = tenant {
+        client.set_tenant(Some(t.to_string()));
+    }
     let list = client.get(&format!("/api/v1/{resource}")).await?;
-    let found = list
+    let rows = list.as_array().cloned().unwrap_or_default();
+
+    // RESOLVE THEM ALL BEFORE DELETING ANY. `kubectl delete pod a b c` on a
+    // typo'd name deletes nothing; the alternative — delete two, then fail on
+    // the third — leaves you having to work out what survived.
+    let mut targets: Vec<(String, String)> = Vec::new();
+    for name in names {
+        let row = pick_one(
+            rows.clone(),
+            name,
+            &["name", "slug", "id", "title"],
+            resource,
+        )?;
+        let id = row
+            .get("id")
+            .and_then(Value::as_str)
+            .context("row has no id")?
+            .to_string();
+        let label = row
+            .get("name")
+            .or_else(|| row.get("title"))
+            .and_then(Value::as_str)
+            .unwrap_or(name)
+            .to_string();
+        if targets.iter().any(|(existing, _)| *existing == id) {
+            continue; // named twice, e.g. by id and by name
+        }
+        targets.push((id, label));
+    }
+
+    let mut failed = 0usize;
+    for (id, label) in &targets {
+        match client.delete(&format!("/api/v1/{resource}/{id}")).await {
+            Ok(_) => println!(
+                "✓ Deleted {} {} ({label})",
+                resource.trim_end_matches('s'),
+                id.chars().take(SHORT_ID).collect::<String>()
+            ),
+            // Keep going, and fail at the end. One gone-already row should not
+            // strand the rest of a batch half-done.
+            Err(e) => {
+                failed += 1;
+                eprintln!("✗ {} {id}: {e}", resource.trim_end_matches('s'));
+            }
+        }
+    }
+    anyhow::ensure!(failed == 0, "{failed} of {} failed", targets.len());
+    Ok(())
+}
+
+/// `nook rollout restart workspace/<slug>` — kill a workspace's sessions and
+/// let the reconciler put them back.
+///
+/// Deliberately a KILL and not a restart-in-place: there is no restart-in-place
+/// to have. A session's environment — its leased ports above all — is fixed
+/// when tmux creates it, so the only way to pick up a changed declaration is a
+/// new session. That is exactly `kubectl rollout restart`'s bargain too.
+///
+/// Only sessions the reconciler manages come back. Anything hand-started is
+/// gone for good, so those are listed separately before the confirmation rather
+/// than quietly swept up with the rest.
+/// `4510,4700-4705` → the ports it names, sorted and deduplicated.
+///
+/// Ranges are accepted because a machine's foreign occupants come in blocks as
+/// often as singly, and making somebody expand one by hand is how a typo gets
+/// into a list nothing else will ever re-read.
+fn parse_port_list(spec: &str) -> Result<Vec<i32>> {
+    let mut out = Vec::new();
+    for part in spec.split(',').map(str::trim).filter(|p| !p.is_empty()) {
+        match part.split_once('-') {
+            Some((a, b)) => {
+                let a: i32 = a
+                    .trim()
+                    .parse()
+                    .with_context(|| format!("'{a}' is not a port number"))?;
+                let b: i32 = b
+                    .trim()
+                    .parse()
+                    .with_context(|| format!("'{b}' is not a port number"))?;
+                if b < a {
+                    bail!("'{part}' ends before it starts");
+                }
+                out.extend(a..=b);
+            }
+            None => out.push(
+                part.parse()
+                    .with_context(|| format!("'{part}' is not a port number"))?,
+            ),
+        }
+    }
+    out.sort_unstable();
+    out.dedup();
+    Ok(out)
+}
+
+/// `nook set ports node/<name> <start>-<end>` — the range a node may lease from.
+///
+/// The setting existed and only the UI could reach it, which made the one
+/// failure it causes unfixable from a terminal: a workspace declaring a
+/// REQUIRED listener cannot start a session on a node with no range, and the
+/// refusal names the port rather than the node's configuration.
+///
+/// `--clear` is a real operation, not an undo — a node that should lease
+/// nothing is a legitimate state, and the endpoint spells it "neither bound".
+pub async fn set_ports(
+    target: &str,
+    range: Option<&str>,
+    clear: bool,
+    exclude: Option<&str>,
+    exclude_clear: bool,
+    tenant: Option<&str>,
+) -> Result<()> {
+    // `node/azul` and `azul` both work, the same leniency `rollout` has.
+    let want = target
+        .split_once('/')
+        .map(|(kind, rest)| {
+            if matches!(kind, "node" | "nodes") {
+                rest
+            } else {
+                target
+            }
+        })
+        .unwrap_or(target);
+
+    // Exclusions go to their OWN endpoint: the range body reads "neither start
+    // nor end" as CLEAR THE RANGE, so posting only exclusions there would
+    // silently unset it.
+    let exclusions: Option<Vec<i32>> = match (exclude, exclude_clear) {
+        (Some(list), _) => Some(parse_port_list(list)?),
+        (None, true) => Some(Vec::new()),
+        (None, false) => None,
+    };
+    let touching_range = range.is_some() || clear;
+    if !touching_range && exclusions.is_none() {
+        bail!("give a range like 4200-4299, --clear, --exclude <ports>, or --exclude-clear");
+    }
+
+    let body = match (range, clear) {
+        (Some(r), _) => {
+            // Parsed HERE rather than posted as text, so a typo is a message
+            // about the range instead of a 400 about a field.
+            let (s, e) = r.split_once('-').with_context(|| {
+                format!("'{r}' is not a range — write it as <start>-<end>, e.g. 4200-4299")
+            })?;
+            let start: u32 = s
+                .trim()
+                .parse()
+                .with_context(|| format!("'{}' is not a port number", s.trim()))?;
+            let end: u32 = e
+                .trim()
+                .parse()
+                .with_context(|| format!("'{}' is not a port number", e.trim()))?;
+            serde_json::json!({ "start": start, "end": end })
+        }
+        (None, true) => serde_json::json!({}),
+        // Not an error any more: this call may be exclusions-only, and the
+        // range must then be left exactly as it is.
+        (None, false) => serde_json::Value::Null,
+    };
+
+    let mut client = Client::from_config()?;
+    if let Some(t) = tenant {
+        client.set_tenant(Some(t.to_string()));
+    }
+    let nodes = client.get("/api/v1/nodes").await?;
+    let node = pick_one(
+        nodes.as_array().cloned().unwrap_or_default(),
+        want,
+        &["name", "hostname", "id"],
+        "nodes",
+    )?;
+    let id = node
+        .get("id")
+        .and_then(Value::as_str)
+        .context("node row has no id")?;
+    let name = node.get("name").and_then(Value::as_str).unwrap_or(want);
+
+    let mut got = client.get(&format!("/api/v1/nodes/{id}/ports")).await?;
+    if !body.is_null() {
+        got = client
+            .put(&format!("/api/v1/nodes/{id}/ports"), body)
+            .await?;
+    }
+    if let Some(ports) = exclusions {
+        got = client
+            .put(
+                &format!("/api/v1/nodes/{id}/ports/exclusions"),
+                serde_json::json!({ "ports": ports }),
+            )
+            .await?;
+    }
+
+    // `NodePorts`, not a bare range: the endpoint answers with the range IN
+    // FORCE plus where it came from, because an operator override and the
+    // node's own advertisement are different things that print the same two
+    // numbers. Reading it flat silently reported every success as "no range".
+    let range = got.get("range");
+    let start = range.and_then(|r| r.get("start")).and_then(Value::as_i64);
+    let end = range.and_then(|r| r.get("end")).and_then(Value::as_i64);
+    let source = got
+        .get("source")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    match (start, end) {
+        (Some(s), Some(e)) => {
+            println!("✓ {name} leases {s}-{e} ({} ports, {source})", e - s + 1);
+            // Concurrency, not port count, is the number an operator is
+            // actually choosing — see the note on `SetCmd::Ports`.
+            if let Some(a) = got.get("advertised").and_then(|a| a.get("start")) {
+                if got.get("source").and_then(Value::as_str) == Some("override") {
+                    println!("  the node itself advertises from {a}; this override wins");
+                }
+            }
+        }
+        // Says what the state MEANS, because "no range" reads like a failure
+        // and is the thing that refuses required listeners.
+        _ => println!("✓ {name} advertises no port range — it will lease nothing"),
+    }
+    let excluded: Vec<i64> = got
+        .get("excluded")
+        .and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(Value::as_i64).collect())
+        .unwrap_or_default();
+    if !excluded.is_empty() {
+        // The USABLE count, not the excluded count: capacity is what an
+        // operator is choosing, and a workspace needs one port per declared
+        // listener all at once.
+        let inside = match (start, end) {
+            (Some(s), Some(e)) => excluded.iter().filter(|p| **p >= s && **p <= e).count(),
+            _ => 0,
+        };
+        print!(
+            "  excluded: {}",
+            excluded
+                .iter()
+                .map(|p| p.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        match (start, end) {
+            (Some(s), Some(e)) => println!(
+                " — {} of {} ports usable",
+                e - s + 1 - inside as i64,
+                e - s + 1
+            ),
+            _ => println!(),
+        }
+    }
+    Ok(())
+}
+
+pub async fn rollout_restart(target: &str, yes: bool, tenant: Option<&str>) -> Result<()> {
+    // `workspace/foo`, `workspaces/foo` or bare `foo` — the kubectl spelling
+    // and the obvious one both work.
+    let want = target
+        .split_once('/')
+        .map(|(kind, rest)| {
+            if matches!(kind, "workspace" | "workspaces" | "ws") {
+                rest
+            } else {
+                target
+            }
+        })
+        .unwrap_or(target);
+
+    let mut client = Client::from_config()?;
+    if let Some(t) = tenant {
+        client.set_tenant(Some(t.to_string()));
+    }
+    let workspaces = client.get("/api/v1/workspaces").await?;
+    let ws = pick_one(
+        workspaces.as_array().cloned().unwrap_or_default(),
+        want,
+        &["name", "slug", "id"],
+        "workspaces",
+    )?;
+    let ws_id = ws.get("id").and_then(Value::as_str).context("no id")?;
+    let ws_name = ws.get("name").and_then(Value::as_str).unwrap_or(want);
+
+    let sessions = client.get("/api/v1/sessions").await?;
+    let live: Vec<Value> = sessions
         .as_array()
         .cloned()
         .unwrap_or_default()
         .into_iter()
-        .find(|r| {
-            ["name", "slug", "id", "title"]
-                .iter()
-                .filter_map(|k| r.get(*k).and_then(Value::as_str))
-                .any(|v| v.eq_ignore_ascii_case(name))
-        });
-    let Some(row) = found else {
-        bail!("no {resource} named '{name}'");
-    };
-    let id = row
-        .get("id")
-        .and_then(Value::as_str)
-        .context("row has no id")?;
-    client.delete(&format!("/api/v1/{resource}/{id}")).await?;
-    println!("✓ Deleted {} '{name}'", resource.trim_end_matches('s'));
+        .filter(|s| s.get("workspace_id").and_then(Value::as_str) == Some(ws_id))
+        // A session that already exited has nothing to restart, and killing it
+        // would only add noise to the output.
+        .filter(|s| {
+            matches!(
+                s.get("status").and_then(Value::as_str),
+                Some("running" | "detached" | "starting")
+            )
+        })
+        .collect();
+
+    if live.is_empty() {
+        println!("Nothing to restart — {ws_name} has no live sessions.");
+        return Ok(());
+    }
+
+    println!("Restarting {} session(s) in {ws_name}:", live.len());
+    for s in &live {
+        let id = s.get("id").and_then(Value::as_str).unwrap_or("?");
+        let name = s.get("name").and_then(Value::as_str).unwrap_or("-");
+        let status = s.get("status").and_then(Value::as_str).unwrap_or("-");
+        println!(
+            "  {}  {name}  {status}",
+            id.chars().take(SHORT_ID).collect::<String>()
+        );
+    }
+    println!(
+        "\nThe reconciler restarts the ones it manages. Any session started by \
+         hand is not replaced."
+    );
+
+    if !yes && !confirm("Kill them?")? {
+        println!("Aborted — nothing was killed.");
+        return Ok(());
+    }
+
+    let mut killed = 0usize;
+    for s in &live {
+        let Some(id) = s.get("id").and_then(Value::as_str) else {
+            continue;
+        };
+        match client.delete(&format!("/api/v1/sessions/{id}")).await {
+            Ok(_) => killed += 1,
+            Err(e) => eprintln!("✗ session {id}: {e}"),
+        }
+    }
+    println!("✓ Killed {killed} of {}. Watch them come back:", live.len());
+    println!("    nook get sessions");
     Ok(())
+}
+
+/// A y/N prompt. `false` on anything that is not a clear yes, including a
+/// non-interactive stdin — a rollout that ran because nobody was there to say
+/// no is the failure this guards.
+fn confirm(question: &str) -> Result<bool> {
+    use std::io::Write;
+    print!("{question} [y/N] ");
+    std::io::stdout().flush().ok();
+    let mut line = String::new();
+    if std::io::stdin().read_line(&mut line).is_err() {
+        return Ok(false);
+    }
+    Ok(matches!(line.trim(), "y" | "Y" | "yes" | "Yes"))
 }
 
 // ── teaching the fleet ───────────────────────────────────────────────────────
@@ -1400,12 +2225,66 @@ pub struct SessionWorkspace {
     pub name: String,
 }
 
-pub async fn current_session_workspace(client: &Client) -> Option<SessionWorkspace> {
-    let sid = std::env::var("NOOK_SESSION_ID")
+/// What this shell is confined to.
+///
+/// The three states are kept apart on purpose. "Not in a session" and "in a
+/// session I could not read" both used to collapse to `None`, and `None` is the
+/// PERMISSIVE answer — it means "confine to nothing". So an unreadable session
+/// silently widened the caller's scope to the whole tenant.
+pub enum SessionScope {
+    /// No `NOOK_SESSION_ID`: a plain terminal, confined to nothing.
+    Ambient,
+    /// A real session that belongs to no workspace — an ad-hoc terminal.
+    NoWorkspace,
+    Workspace(SessionWorkspace),
+}
+
+impl SessionScope {
+    /// The workspace to scope to, if there is one.
+    pub fn workspace(&self) -> Option<&SessionWorkspace> {
+        match self {
+            SessionScope::Workspace(w) => Some(w),
+            _ => None,
+        }
+    }
+}
+
+pub async fn current_session_scope(client: &Client) -> Result<SessionScope> {
+    let Some(sid) = std::env::var("NOOK_SESSION_ID")
         .ok()
-        .filter(|s| !s.is_empty())?;
-    let session = client.get(&format!("/api/v1/sessions/{sid}")).await.ok()?;
-    let id = session.get("workspace_id")?.as_str()?.to_string();
+        .filter(|s| !s.is_empty())
+    else {
+        return Ok(SessionScope::Ambient);
+    };
+    // A session id that will not resolve is NOT "no session", and must never be
+    // treated as one. Unconfined is the permissive state, so failing open here
+    // hands a builder the run of every repo in the tenant — which is exactly
+    // what happened: a session in one tenant, a token homed in another, a 404,
+    // and `nook tasks` cheerfully returned another workspace's cards.
+    //
+    // Cross-tenant placement makes this ORDINARY, not exotic: the workspace's
+    // tenant and the node's differ routinely, and a `/sessions/{id}` read is
+    // scoped to the caller's tenant, so the miss looks identical to a deleted
+    // session. Refuse, and say which knob fixes it.
+    let session = client
+        .get(&format!("/api/v1/sessions/{sid}"))
+        .await
+        .with_context(|| {
+            format!(
+                "could not read session {sid}, which this shell says it is running in.\n\
+                 If that session belongs to another tenant, name it — set NOOK_TENANT_ID \
+                 or pass -T <tenant> — so the lookup happens there.\n\
+                 Refusing rather than running unconfined, which would let this act on \
+                 another workspace's work."
+            )
+        })?;
+    let Some(id) = session
+        .get("workspace_id")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+    else {
+        return Ok(SessionScope::NoWorkspace);
+    };
     // The name is for humans only; if the lookup fails, the id still confines.
     let name = client
         .get(&format!("/api/v1/workspaces/{id}"))
@@ -1413,7 +2292,7 @@ pub async fn current_session_workspace(client: &Client) -> Option<SessionWorkspa
         .ok()
         .and_then(|w| w.get("name").and_then(|v| v.as_str()).map(str::to_string))
         .unwrap_or_else(|| "workspace".into());
-    Some(SessionWorkspace { id, name })
+    Ok(SessionScope::Workspace(SessionWorkspace { id, name }))
 }
 
 /// `nook agent-state <running|waiting|idle>` — report what the agent in this
@@ -1474,7 +2353,8 @@ pub async fn agent_state(state: &str) -> Result<()> {
 /// caller can treat empty output as "unscoped" without special-casing an error.
 pub async fn workspace_current(json: bool) -> Result<()> {
     let client = Client::from_config()?;
-    match current_session_workspace(&client).await {
+    let scope = current_session_scope(&client).await?;
+    match scope.workspace() {
         Some(ws) if json => {
             println!("{}", serde_json::json!({ "id": ws.id, "name": ws.name }));
         }
@@ -1620,7 +2500,10 @@ pub async fn create_task(opts: CreateTask) -> Result<()> {
     // `nook tasks` — so a filer inside a repo files against that repo by default.
     let workspace_id = match opts.workspace.as_deref() {
         Some(w) => Some(resolve_workspace(&client, w).await?),
-        None => current_session_workspace(&client).await.map(|w| w.id),
+        None => current_session_scope(&client)
+            .await?
+            .workspace()
+            .map(|w| w.id.clone()),
     };
 
     let body = build_create_body(&opts, description, workspace_id);
@@ -1799,7 +2682,10 @@ pub async fn tasks(
     let workspace_id: Option<String> = if let Some(w) = workspace {
         Some(resolve_workspace(&client, w).await?)
     } else if !all_workspaces {
-        current_session_workspace(&client).await.map(|ws| ws.id)
+        current_session_scope(&client)
+            .await?
+            .workspace()
+            .map(|ws| ws.id.clone())
     } else {
         None
     };
@@ -2043,7 +2929,8 @@ pub async fn claim(key: &str, column_type: Option<&str>, any_workspace: bool) ->
     // to none) unless the caller explicitly opts out. So even a mistaken pick
     // cannot become a feature built in the wrong repo.
     if !any_workspace {
-        if let Some(here) = current_session_workspace(&client).await {
+        let scope = current_session_scope(&client).await?;
+        if let Some(here) = scope.workspace() {
             let task = client.get(&format!("/api/v1/tasks/{key}")).await?;
             let task = task.get("task").unwrap_or(&task);
             let task_ws = task.get("workspace_id").and_then(|v| v.as_str());
@@ -3264,5 +4151,46 @@ mod git_ssh_tests {
         assert_ne!(a.path, b.path);
         assert_eq!(std::fs::read_to_string(&a.path).unwrap().trim(), "A");
         assert_eq!(std::fs::read_to_string(&b.path).unwrap().trim(), "B");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::unique_id_len;
+
+    #[test]
+    fn distinct_ids_stop_at_the_floor() {
+        let ids = [
+            "019fcc2e-ccfc-75c2-864e-2aed7bc20318",
+            "019fcc2e-7e37-7c80-91b3-77c5e0a14d92",
+        ];
+        assert_eq!(unique_id_len(&ids), super::SHORT_ID);
+    }
+
+    /// The case live data cannot produce on demand but production has 76 of:
+    /// two uuidv7s from the same millisecond, identical through the timestamp
+    /// AND the twelve random bits that 18 characters reaches.
+    #[test]
+    fn ids_that_collide_at_the_floor_widen() {
+        let ids = [
+            "019fcc2e-ccfc-75c2-864e-2aed7bc20318",
+            "019fcc2e-ccfc-75c2-91b3-77c5e0a14d92",
+        ];
+        let n = unique_id_len(&ids);
+        assert!(n > super::SHORT_ID, "expected widening, got {n}");
+        assert_ne!(ids[0][..n], ids[1][..n], "widened but still ambiguous");
+    }
+
+    /// Genuinely identical ids cannot be told apart at any width. It must
+    /// terminate at the full length rather than loop or panic.
+    #[test]
+    fn identical_ids_terminate_at_full_length() {
+        let ids = ["019fcc2e-ccfc-75c2-864e-2aed7bc20318"; 2];
+        assert_eq!(unique_id_len(&ids), ids[0].len());
+    }
+
+    #[test]
+    fn no_rows_is_not_a_panic() {
+        assert_eq!(unique_id_len(&[]), 0);
     }
 }

@@ -634,6 +634,12 @@ pub struct Node {
     pub port_range_start: Option<i32>,
     #[serde(default)]
     pub port_range_end: Option<i32>,
+    /// Ports inside the range this node must never lease (MAIN-301 follow-on).
+    /// Operator POLICY — "something else owns this number here" — so it is
+    /// durable, unlike a live-occupancy snapshot, which is stale as soon as it
+    /// is taken and is deliberately not modelled.
+    #[serde(default)]
+    pub port_exclusions: Option<serde_json::Value>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -681,6 +687,9 @@ pub struct NodePorts {
     pub advertised: Option<PortRange>,
     /// Live sessions holding a port on this node, lowest port first.
     pub leases: Vec<PortLease>,
+    /// Ports the operator has ruled out inside the range, lowest first.
+    #[serde(default)]
+    pub excluded: Vec<i32>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema)]
@@ -764,6 +773,15 @@ pub struct SetNodePortsRequest {
     pub start: Option<i32>,
     #[serde(default)]
     pub end: Option<i32>,
+}
+
+/// Ports to rule out on a node. An EMPTY list clears them — there is no
+/// "unset" here, because a separate absent/empty distinction is exactly what
+/// makes the range endpoint's both-or-neither rule easy to trip over.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct SetNodePortExclusionsRequest {
+    #[serde(default)]
+    pub ports: Vec<i32>,
 }
 
 /// Replace a node's operator-set labels and taints (MAIN-314). Both fields are

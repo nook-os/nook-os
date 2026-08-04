@@ -1169,6 +1169,34 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/nodes/{id}/ports/exclusions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * `PUT /api/v1/nodes/{id}/ports/exclusions` — ports this node must never lease.
+         * @description The operator saying "something else owns this number on this machine". A
+         *     range promises nothing else is listening in it, and on a real box that
+         *     promise is sometimes false for one or two numbers; without this the only fix
+         *     was to move the whole range, renumbering every session on it.
+         *
+         *     REFUSES to leave the range unusable. Excluding every port in it would be
+         *     accepted by the storage, satisfy every validation an operator could see, and
+         *     then fail at session start with "no free port" — a message that would send a
+         *     reader hunting for leases rather than at the list they just typed.
+         */
+        put: operations["set_node_port_exclusions"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/nodes/{id}/projects": {
         parameters: {
             query?: never;
@@ -4784,6 +4812,13 @@ export interface components {
              */
             owner_person_id?: string | null;
             platform: string;
+            /**
+             * @description Ports inside the range this node must never lease (MAIN-301 follow-on).
+             *     Operator POLICY — "something else owns this number here" — so it is
+             *     durable, unlike a live-occupancy snapshot, which is stale as soon as it
+             *     is taken and is deliberately not modelled.
+             */
+            port_exclusions?: unknown;
             /** Format: int32 */
             port_range_end?: number | null;
             /**
@@ -4859,6 +4894,8 @@ export interface components {
          */
         NodePorts: {
             advertised?: null | components["schemas"]["PortRange"];
+            /** @description Ports the operator has ruled out inside the range, lowest first. */
+            excluded?: number[];
             /** @description Live sessions holding a port on this node, lowest port first. */
             leases: components["schemas"]["PortLease"][];
             range?: null | components["schemas"]["PortRange"];
@@ -5295,6 +5332,13 @@ export interface components {
                  */
                 owner_person_id?: string | null;
                 platform: string;
+                /**
+                 * @description Ports inside the range this node must never lease (MAIN-301 follow-on).
+                 *     Operator POLICY — "something else owns this number here" — so it is
+                 *     durable, unlike a live-occupancy snapshot, which is stale as soon as it
+                 *     is taken and is deliberately not modelled.
+                 */
+                port_exclusions?: unknown;
                 /** Format: int32 */
                 port_range_end?: number | null;
                 /**
@@ -5923,6 +5967,14 @@ export interface components {
                 [key: string]: string;
             };
             taints?: components["schemas"]["NodeTaint"][];
+        };
+        /**
+         * @description Ports to rule out on a node. An EMPTY list clears them — there is no
+         *     "unset" here, because a separate absent/empty distinction is exactly what
+         *     makes the range endpoint's both-or-neither rule easy to trip over.
+         */
+        SetNodePortExclusionsRequest: {
+            ports?: number[];
         };
         /**
          * @description `PUT /nodes/{id}/ports` — set or clear the operator's range. Both `None`
@@ -8810,6 +8862,49 @@ export interface operations {
         requestBody: {
             content: {
                 "application/json": components["schemas"]["SetNodePortsRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NodePorts"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    set_node_port_exclusions: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SetNodePortExclusionsRequest"];
             };
         };
         responses: {

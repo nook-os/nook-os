@@ -326,6 +326,13 @@ enum Command {
         /// Print raw JSON instead of a table.
         #[arg(long)]
         json: bool,
+        /// Act in one of your other tenants. Slug or id. Overrides
+        /// NOOK_TENANT_ID; without either you get your home tenant.
+        #[arg(short = 'T', long)]
+        tenant: Option<String>,
+        /// Every tenant you belong to, with a TENANT column.
+        #[arg(short = 'A', long = "all-tenants")]
+        all_tenants: bool,
         /// Anything after that. `nook get workspace git-ssh` is invoked BY git
         /// as its `GIT_SSH_COMMAND`, which appends ssh's own arguments —
         /// `user@host`, `-o`, a remote command — so they have to be accepted
@@ -344,11 +351,30 @@ enum Command {
         #[arg(long)]
         link: bool,
     },
-    /// Delete a session, workspace or task by name.
+    /// Restart the sessions of a workspace, the way `kubectl rollout restart`
+    /// restarts a deployment: kill them and let the reconciler bring them back.
+    Rollout {
+        #[command(subcommand)]
+        cmd: RolloutCmd,
+    },
+
+    /// Delete sessions, workspaces or tasks by name or id — several at once.
     Delete {
         /// sessions | workspaces | tasks
         resource: String,
-        name: String,
+        /// One or more names or ids. An id may be any unambiguous prefix.
+        #[arg(required = true)]
+        names: Vec<String>,
+        /// Act in one of your other tenants. Slug or id. Overrides
+        /// NOOK_TENANT_ID; without either you get your home tenant.
+        #[arg(short = 'T', long)]
+        tenant: Option<String>,
+    },
+
+    /// Set a mutable property of a fleet object. Currently: a node's port range.
+    Set {
+        #[command(subcommand)]
+        cmd: SetCmd,
     },
 
     /// Migrate this machine's checkouts from the flat legacy workspace root
@@ -379,7 +405,12 @@ enum Command {
         server: Option<String>,
     },
     /// Which credential is this CLI using, and for whom?
-    Whoami,
+    Whoami {
+        /// Act in one of your other tenants. Slug or id. Overrides
+        /// NOOK_TENANT_ID; without either you get your home tenant.
+        #[arg(short = 'T', long)]
+        tenant: Option<String>,
+    },
     /// Forget the user token; fall back to this machine's node token.
     Logout,
 
@@ -875,6 +906,8 @@ async fn main() -> Result<()> {
             resource,
             name,
             json,
+            tenant,
+            all_tenants,
             args,
         } => {
             // `nook get workspace git-ssh` is not a listing at all — it is the
@@ -883,17 +916,55 @@ async fn main() -> Result<()> {
             if resource == "workspace" && name.as_deref() == Some("git-ssh") {
                 cli::git_ssh(&args).await
             } else {
-                cli::get(&resource, name.as_deref(), json).await
+                cli::get(
+                    &resource,
+                    name.as_deref(),
+                    json,
+                    tenant.as_deref(),
+                    all_tenants,
+                )
+                .await
             }
         }
         Command::Import { path, link } => cli::import(path.as_deref(), link).await,
-        Command::Delete { resource, name } => cli::delete(&resource, &name).await,
+        Command::Delete {
+            resource,
+            names,
+            tenant,
+        } => cli::delete(&resource, &names, tenant.as_deref()).await,
+        Command::Set { cmd } => match cmd {
+            SetCmd::Ports {
+                target,
+                range,
+                clear,
+                exclude,
+                exclude_clear,
+                tenant,
+            } => {
+                cli::set_ports(
+                    &target,
+                    range.as_deref(),
+                    clear,
+                    exclude.as_deref(),
+                    exclude_clear,
+                    tenant.as_deref(),
+                )
+                .await
+            }
+        },
+        Command::Rollout { cmd } => match cmd {
+            RolloutCmd::Restart {
+                target,
+                yes,
+                tenant,
+            } => cli::rollout_restart(&target, yes, tenant.as_deref()).await,
+        },
         Command::MigrateWorkspaces { apply } => cli::migrate_workspaces(apply).await,
         Command::Login { token, server } => match token {
             Some(t) => cli::login(&t, server.as_deref()).await,
             None => cli::login_with_provider(server.as_deref()).await,
         },
-        Command::Whoami => cli::whoami().await,
+        Command::Whoami { tenant } => cli::whoami(tenant.as_deref()).await,
         Command::Logout => cli::logout(),
         Command::Start {
             workspace,
@@ -1065,6 +1136,66 @@ enum ContextCommand {
     /// Forget a saved control plane. Does not log you out of it.
     #[command(alias = "rm")]
     Remove { name: String },
+}
+
+#[derive(Subcommand)]
+enum SetCmd {
+    /// The range of ports a node may lease to sessions on it.
+    ///
+    /// `nook set ports node/azul 4200-4299`, or `nook set ports azul
+    /// 4200-4299`. A node with NO range leases nothing, which is the shipped
+    /// default and is why a workspace declaring a REQUIRED listener cannot
+    /// start a session there — deliberately, because a guessed range would hand
+    /// out ports something else is already listening on.
+    ///
+    /// Sizing it is sizing concurrency: a workspace leases one port per declared
+    /// listener, so a range of 100 against a repo declaring 11 is nine
+    /// concurrent sessions, and the tenth is refused by name.
+    Ports {
+        /// `node/<name-or-id>`, or just the name or id. An id may be any
+        /// unambiguous prefix.
+        target: String,
+        /// `<start>-<end>`, e.g. `4200-4299`. Omit with --clear or --exclude.
+        range: Option<String>,
+        /// Take the range away, so the node leases nothing.
+        #[arg(long, conflicts_with = "range")]
+        clear: bool,
+        /// Ports on this machine to never lease, comma-separated. Ranges are
+        /// allowed: `--exclude 4510,4700-4705`. Replaces the whole list.
+        ///
+        /// For a port something else owns HERE — a stray container, a vendor
+        /// agent — including one that is not listening right now but will be
+        /// after a reboot, which is the case nothing else catches.
+        #[arg(long, value_name = "PORTS")]
+        exclude: Option<String>,
+        /// Drop every exclusion on this node.
+        #[arg(long, conflicts_with = "exclude")]
+        exclude_clear: bool,
+        /// Act in one of your other tenants. Slug or id. Overrides
+        /// NOOK_TENANT_ID; without either you get your home tenant.
+        #[arg(short = 'T', long)]
+        tenant: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum RolloutCmd {
+    /// Kill a workspace's sessions so the reconciler starts fresh ones.
+    ///
+    /// `nook rollout restart workspace/nook-os` — the `kubectl` spelling, and
+    /// `nook rollout restart nook-os` works too. The reconciler is what brings
+    /// them back, so this only does anything for a workspace it manages.
+    Restart {
+        /// `workspace/<slug-or-name>`, or just the slug or name.
+        target: String,
+        /// Skip the confirmation. Every session in the workspace is killed.
+        #[arg(short = 'y', long)]
+        yes: bool,
+        /// Act in one of your other tenants. Slug or id. Overrides
+        /// NOOK_TENANT_ID; without either you get your home tenant.
+        #[arg(short = 'T', long)]
+        tenant: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
