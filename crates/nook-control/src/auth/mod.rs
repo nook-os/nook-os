@@ -590,11 +590,12 @@ impl FromRequestParts<AppState> for AuthCtx {
             .and_then(|v| v.to_str().ok())
             .and_then(|v| v.strip_prefix("Bearer "))
         {
-            return if bearer.starts_with(USER_TOKEN_PREFIX) {
-                user_token_ctx(state, bearer).await
+            let ctx = if bearer.starts_with(USER_TOKEN_PREFIX) {
+                user_token_ctx(state, bearer).await?
             } else {
-                node_token_ctx(state, bearer).await
+                node_token_ctx(state, bearer).await?
             };
+            return retenant(state, ctx, parts).await;
         }
 
         // WebSockets cannot carry an Authorization header — the browser API has
@@ -748,6 +749,57 @@ pub const WS_BEARER_PROTOCOL: &str = "nook.bearer";
 /// it may drive any machine in their tenant. That is the whole reason it
 /// exists — a node token deliberately cannot, and scripts still need to.
 /// Revocation is a row delete, and expiry (if set) is enforced here.
+/// The header a caller uses to act in one of their OTHER tenants.
+pub const TENANT_HEADER: &str = "x-nook-tenant";
+
+/// Re-scope a caller to the tenant they asked for, if they are a member of it.
+///
+/// A tenant is this system's namespace, and the token's own `tenant_id` is the
+/// HOME one — the default, unchanged when nothing asks otherwise, so every
+/// existing caller behaves exactly as before.
+///
+/// Membership is re-read per request rather than baked into the credential.
+/// That is the whole point: a token minted before you joined an org can reach
+/// it, and one minted before you LEFT cannot — no re-issue, no cached list to
+/// go stale, which is the failure a stored tenant list would have.
+///
+/// NODES ARE NEVER RE-SCOPED. A node token is confined to its own machine on
+/// purpose; letting a header move it would hand every compromised box a way
+/// into every tenant its owner belongs to. The header is ignored for them
+/// rather than refused, because a node has no business sending it and a hard
+/// error would only turn a harmless stray header into an outage.
+async fn retenant(state: &AppState, ctx: AuthCtx, parts: &Parts) -> Result<AuthCtx, ApiError> {
+    let Some(want) = parts
+        .headers
+        .get(TENANT_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    else {
+        return Ok(ctx);
+    };
+    if !matches!(ctx.principal, Principal::User) {
+        return Ok(ctx);
+    }
+    let memberships = state.identity.memberships_of(ctx.user_id).await?;
+    // Slug or id, because a person types the slug and a script holds the id —
+    // `NOOK_TENANT_ID` in a session is the latter.
+    let found = memberships.iter().find(|m| {
+        m.slug.eq_ignore_ascii_case(want) || m.tenant_id.0.to_string().eq_ignore_ascii_case(want)
+    });
+    let Some(m) = found else {
+        // Deliberately NOT 404: whether a tenant exists is not something a
+        // non-member gets to learn from a probe.
+        return Err(ApiError::ForbiddenMsg(format!(
+            "not a member of tenant '{want}'"
+        )));
+    };
+    Ok(AuthCtx {
+        tenant_id: m.tenant_id,
+        ..ctx
+    })
+}
+
 async fn user_token_ctx(state: &AppState, token: &str) -> Result<AuthCtx, ApiError> {
     // Shared with chat via `nook-auth`: the token hash + lookup + last-used
     // touch are one implementation, so the two services cannot drift.

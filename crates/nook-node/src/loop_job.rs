@@ -670,6 +670,12 @@ fn drive_session(
         &status_path,
         seed,
         workspace_id,
+        // No NOOK_TENANT_ID for a loop job, deliberately. It already carries a
+        // tenant-SCOPED token (`NOOK_TOKEN`, issued as the job's initiator), and
+        // an identity beats a hint: `nook` inside acts in the job's tenant
+        // because of who it is, not because of a variable it was told. Adding a
+        // second source of truth here is how the two drift.
+        None,
     ) {
         return (false, format!("could not launch session: {e}"));
     }

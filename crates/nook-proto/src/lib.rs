@@ -6,7 +6,7 @@
 //! a future optimization). All enums are adjacently tagged for clean
 //! generated TypeScript.
 
-use nook_types::{AuthProfile, Capabilities, NodeId, SessionId, WorkspaceId};
+use nook_types::{AuthProfile, Capabilities, NodeId, SessionId, TenantId, WorkspaceId};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
@@ -306,6 +306,17 @@ pub enum ControlToNode {
         /// (MAIN-367). `None` for an ad-hoc terminal, which is in no workspace.
         #[serde(default)]
         workspace_id: Option<WorkspaceId>,
+        /// Which TENANT this session belongs to, exported as `NOOK_TENANT_ID`
+        /// so a `nook` command inside it is already scoped and an agent never
+        /// has to guess which board or workspace it means.
+        ///
+        /// The WORKSPACE's tenant, never the node's. Cross-tenant placement
+        /// (MAIN-353) runs one org's checkout on another org's machine, so the
+        /// node's own `tenant_slug` is the wrong answer in exactly the case
+        /// this exists for. `None` for an ad-hoc terminal, which is in no
+        /// workspace and so in no tenant.
+        #[serde(default)]
+        tenant_id: Option<TenantId>,
         cols: u16,
         rows: u16,
         /// The ports leased to this session (MAIN-301), each carrying the env

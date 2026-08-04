@@ -420,6 +420,7 @@ pub async fn connect_once(cfg: &NodeConfig) -> Result<()> {
                 runtime,
                 workspace_path,
                 workspace_id,
+                tenant_id,
                 cols,
                 rows,
                 ports,
@@ -434,6 +435,7 @@ pub async fn connect_once(cfg: &NodeConfig) -> Result<()> {
                 };
                 let _ = session_tx.send(sessions::Cmd::Start {
                     workspace_id: workspace_id.map(|w| w.0.to_string()),
+                    tenant_id: tenant_id.map(|t| t.0.to_string()),
                     session_id,
                     runtime,
                     cwd,

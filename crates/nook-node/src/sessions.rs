@@ -51,6 +51,11 @@ pub enum Cmd {
         /// Exported into the session so the git-ssh shim can name its repo
         /// without a session lookup (MAIN-367). `None` for an ad-hoc terminal.
         workspace_id: Option<String>,
+        /// The tenant this session's workspace belongs to, exported as
+        /// `NOOK_TENANT_ID` so `nook` inside it is already scoped. The
+        /// WORKSPACE's tenant, not this node's — they differ under
+        /// cross-tenant placement, which is the case it exists for.
+        tenant_id: Option<String>,
     },
     StartAuth {
         session_id: SessionId,
@@ -141,6 +146,7 @@ impl Manager {
                 rows,
                 ports,
                 workspace_id,
+                tenant_id,
             } => self.start(
                 session_id,
                 &runtime,
@@ -149,6 +155,7 @@ impl Manager {
                 rows,
                 &ports,
                 workspace_id.as_deref(),
+                tenant_id.as_deref(),
             ),
             Cmd::StartAuth {
                 session_id,
@@ -198,6 +205,7 @@ impl Manager {
         rows: u16,
         ports: &[nook_types::LeasedPort],
         workspace_id: Option<&str>,
+        tenant_id: Option<&str>,
     ) {
         // The runtime string is the executable to launch. Restrict to the
         // known set so the control plane can't run arbitrary commands.
@@ -221,6 +229,7 @@ impl Manager {
                 &sid,
                 ports,
                 workspace_id,
+                tenant_id,
             ) {
                 return self.session_failed(session_id, e.to_string());
             }

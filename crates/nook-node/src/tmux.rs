@@ -260,6 +260,11 @@ pub fn new_session(
     // keeps a credential fetch off the session-content authorization path.
     // `None` for an ad-hoc terminal, which is in no workspace.
     workspace_id: Option<&str>,
+    // Which tenant this session's workspace belongs to, exported as
+    // `NOOK_TENANT_ID`. It is what makes `nook create task` inside a session
+    // unambiguous without a flag: the session already knows which org it is in,
+    // so an agent never has to be told, and never has to guess.
+    tenant_id: Option<&str>,
 ) -> Result<()> {
     // Preflight, so the failure names its own cause. tmux's own message for a
     // missing -c directory is terse and arrives with no session attached, and
@@ -287,6 +292,7 @@ pub fn new_session(
         &login_command(command),
         session_id,
         workspace_id,
+        tenant_id,
         &extra,
     )
 }
@@ -314,7 +320,7 @@ pub fn new_auth_session(
     // `exec` binds the pane to the login command, so quitting it ends the
     // session — which is the "authorization done, clean up" signal (AC-4).
     let launch = format!("{} -l -i -c 'exec {runtime} {login_args}'", login_shell());
-    spawn(name, cwd, cols, rows, &launch, session_id, None, &[])
+    spawn(name, cwd, cols, rows, &launch, session_id, None, None, &[])
 }
 
 /// Start a loop-job session (MAIN-161): the same PTY machinery as
@@ -333,6 +339,7 @@ pub fn new_job_session(
     status_file: &str,
     seed: Option<&str>,
     workspace_id: Option<&str>,
+    tenant_id: Option<&str>,
 ) -> Result<()> {
     if !std::path::Path::new(cwd).is_dir() {
         anyhow::bail!("checkout {cwd} does not exist on this node");
@@ -355,6 +362,10 @@ pub fn new_job_session(
         &job_launch_command(runtime, status_file),
         session_id,
         workspace_id,
+        // A loop job runs in a workspace, so it has a tenant like any other
+        // session — and an agent inside it is exactly who must not be asked
+        // "which board?".
+        tenant_id,
         &env,
     )
 }
@@ -401,6 +412,10 @@ fn spawn(
     // constructors diverge, and a loop-job session — the workload the whole
     // credential path exists for — silently got the command and not the id.
     workspace_id: Option<&str>,
+    // The tenant that workspace belongs to (`NOOK_TENANT_ID`). Set HERE for the
+    // same reason the workspace id is: every session constructor goes through
+    // `spawn`, so a new one cannot quietly ship without it.
+    tenant_id: Option<&str>,
     extra_env: &[(&str, &str)],
 ) -> Result<()> {
     apply_server_defaults();
@@ -442,6 +457,12 @@ fn spawn(
         ws_pair = format!("NOOK_WORKSPACE_ID={ws}");
         args.push("-e");
         args.push(&ws_pair);
+    }
+    let tenant_pair;
+    if let Some(t) = tenant_id {
+        tenant_pair = format!("NOOK_TENANT_ID={t}");
+        args.push("-e");
+        args.push(&tenant_pair);
     }
     // Owned strings for any extra env, kept alive alongside `args`.
     let extra: Vec<String> = extra_env.iter().map(|(k, v)| format!("{k}={v}")).collect();

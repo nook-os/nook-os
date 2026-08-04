@@ -9,10 +9,35 @@ use serde_json::Value;
 
 use crate::config::NodeConfig;
 
+/// The tenant a command should act in when nothing on the command line says.
+///
+/// `NOOK_TENANT_ID` is set INSIDE a workspace session, by whoever started it,
+/// so an agent running there is already scoped: `nook create task` resolves one
+/// board instead of asking which. It is per-session and disappears with the
+/// session, which is what makes it safe — it is not a mode anybody has to
+/// remember they are in, and there is no stale global default to get wrong.
+///
+/// `--tenant` overrides it; both fall back to the token's home tenant.
+fn ambient_tenant() -> Option<String> {
+    std::env::var("NOOK_TENANT_ID")
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+}
+
+#[derive(Clone)]
 pub struct Client {
     base: String,
     token: String,
     http: reqwest::Client,
+    /// Which tenant to act in, when it is not the token's home one.
+    ///
+    /// A tenant is this system's namespace. The token's own tenant is HOME and
+    /// stays the default, so every existing caller is unchanged; this is only
+    /// set when something asked to be somewhere else. Sent per request and
+    /// checked against membership server-side, which is why there is no list to
+    /// keep in sync — being added to an org works on the next command.
+    tenant: Option<String>,
 }
 
 impl Client {
@@ -34,6 +59,7 @@ impl Client {
                 base: base.trim_end_matches('/').to_string(),
                 token: auth.token,
                 http: reqwest::Client::new(),
+                tenant: ambient_tenant(),
             });
         }
         let cfg = node.context(
@@ -48,6 +74,7 @@ impl Client {
             base,
             token: cfg.node_token,
             http: reqwest::Client::new(),
+            tenant: ambient_tenant(),
         })
     }
 
@@ -75,6 +102,7 @@ impl Client {
             base,
             token: cfg.node_token,
             http: reqwest::Client::new(),
+            tenant: ambient_tenant(),
         })
     }
 
@@ -96,6 +124,9 @@ impl Client {
             .request(method, &url)
             .bearer_auth(&self.token)
             .header("accept", "application/json");
+        if let Some(t) = &self.tenant {
+            req = req.header("x-nook-tenant", t);
+        }
         if let Some(json) = body {
             req = req.json(&json);
         }
@@ -216,6 +247,7 @@ pub async fn login(token: &str, server: Option<&str>) -> Result<()> {
         base: base.clone(),
         token: token.to_string(),
         http: reqwest::Client::new(),
+        tenant: ambient_tenant(),
     };
     let me = probe
         .get("/api/v1/auth/me")
@@ -329,6 +361,13 @@ fn pick_one(rows: Vec<Value>, want: &str, keys: &[&str], resource: &str) -> Resu
             }
             bail!("{}", msg.trim_end())
         }
+    }
+}
+
+impl Client {
+    /// Point this client at a tenant for the rest of its life.
+    pub fn set_tenant(&mut self, tenant: Option<String>) {
+        self.tenant = tenant;
     }
 }
 
@@ -571,9 +610,28 @@ fn resolve_resource(kind: &str) -> Result<&'static str> {
 }
 
 /// `nook get <resource>` — a table by default, raw JSON with --json.
-pub async fn get(kind: &str, name: Option<&str>, json: bool) -> Result<()> {
+pub async fn get(
+    kind: &str,
+    name: Option<&str>,
+    json: bool,
+    tenant: Option<&str>,
+    all_tenants: bool,
+) -> Result<()> {
     let resource = resolve_resource(kind)?;
-    let client = Client::from_config()?;
+    let mut client = Client::from_config()?;
+    // `--tenant` beats `NOOK_TENANT_ID` beats the token's home. One precedence,
+    // the same one kubectl uses for `-n`.
+    if let Some(t) = tenant {
+        client.set_tenant(Some(t.to_string()));
+    }
+
+    // `-A` is a client-side fan-out over the tenants you are a member of. The
+    // server stays one-tenant-per-request — no endpoint learns to span, and no
+    // credential widens — and the CLI does the joining, which is also why the
+    // TENANT column can be added here rather than invented in every response.
+    if all_tenants {
+        return get_all_tenants(&client, resource, name, json).await;
+    }
 
     // Secrets live under a workspace; everything else is a flat collection.
     let value = if resource == "secrets" {
@@ -588,19 +646,7 @@ pub async fn get(kind: &str, name: Option<&str>, json: bool) -> Result<()> {
     }
 
     let rows = value.as_array().cloned().unwrap_or_default();
-    let rows: Vec<Value> = match (resource, name) {
-        // `nook get nodes buildbox` filters by name/slug/id.
-        (_, Some(want)) if resource != "secrets" => rows
-            .into_iter()
-            .filter(|r| {
-                ["name", "slug", "id", "title"]
-                    .iter()
-                    .filter_map(|k| r.get(*k).and_then(Value::as_str))
-                    .any(|v| v.eq_ignore_ascii_case(want))
-            })
-            .collect(),
-        _ => rows,
-    };
+    let rows = filter_rows(rows, resource, name);
 
     if rows.is_empty() {
         eprintln!("No {resource} found.");
@@ -648,6 +694,70 @@ async fn secrets_across_workspaces(client: &Client, workspace: Option<&str>) -> 
         }
     }
     Ok(Value::Array(out))
+}
+
+/// `-A` — the same listing, once per tenant, merged with a TENANT column.
+///
+/// The column appears only when the result actually spans more than one, the
+/// same badge-on-presence rule `home_tenant` uses: a column that is the same
+/// value on every row is noise, and its absence is itself information.
+async fn get_all_tenants(
+    client: &Client,
+    resource: &str,
+    name: Option<&str>,
+    json: bool,
+) -> Result<()> {
+    let tenants = client.get("/api/v1/me/tenants").await?;
+    let tenants = tenants.as_array().cloned().unwrap_or_default();
+    if tenants.is_empty() {
+        bail!("no tenants — `nook whoami` should say who you are");
+    }
+
+    let mut all: Vec<Value> = Vec::new();
+    let mut spanned = 0usize;
+    for t in &tenants {
+        let Some(slug) = t.get("slug").and_then(Value::as_str) else {
+            continue;
+        };
+        let mut scoped = client.clone();
+        scoped.set_tenant(Some(slug.to_string()));
+        // One tenant failing must not lose the others: a membership can be
+        // revoked between the list and the fetch, and a partial answer that
+        // says so beats no answer at all.
+        let rows = match scoped.get(&format!("/api/v1/{resource}")).await {
+            Ok(v) => v.as_array().cloned().unwrap_or_default(),
+            Err(e) => {
+                eprintln!("! {slug}: {e}");
+                continue;
+            }
+        };
+        if !rows.is_empty() {
+            spanned += 1;
+        }
+        for mut r in rows {
+            if let Some(o) = r.as_object_mut() {
+                o.insert("tenant".into(), Value::String(slug.to_string()));
+            }
+            all.push(r);
+        }
+    }
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&all)?);
+        return Ok(());
+    }
+    let all = filter_rows(all, resource, name);
+    if all.is_empty() {
+        eprintln!("No {resource} found in any tenant.");
+        return Ok(());
+    }
+    let all = if resource == "workspaces" {
+        with_session_counts(client, all).await
+    } else {
+        all
+    };
+    print_table_with(resource, &all, spanned > 1);
+    Ok(())
 }
 
 /// Stamp each workspace with `ready` and `nodes` for the table.
@@ -856,8 +966,35 @@ fn render_value(key: &str, v: &Value) -> String {
     }
 }
 
+/// `nook get nodes buildbox` narrows a listing to one row by name/slug/id.
+/// Shared so `-A` filters the merged set exactly as a single-tenant get does.
+fn filter_rows(rows: Vec<Value>, resource: &str, name: Option<&str>) -> Vec<Value> {
+    match (resource, name) {
+        (_, Some(want)) if resource != "secrets" => rows
+            .into_iter()
+            .filter(|r| {
+                ["name", "slug", "id", "title"]
+                    .iter()
+                    .filter_map(|k| r.get(*k).and_then(Value::as_str))
+                    .any(|v| v.eq_ignore_ascii_case(want))
+            })
+            .collect(),
+        _ => rows,
+    }
+}
+
 fn print_table(resource: &str, rows: &[Value]) {
-    let cols = columns(resource, &rows[0]);
+    print_table_with(resource, rows, false)
+}
+
+/// `with_tenant` prepends the TENANT column. Only true when the result actually
+/// spans more than one — a column identical on every row tells you nothing, and
+/// its ABSENCE is itself the information that you are looking at one tenant.
+fn print_table_with(resource: &str, rows: &[Value], with_tenant: bool) {
+    let mut cols = columns(resource, &rows[0]);
+    if with_tenant {
+        cols.insert(0, "tenant");
+    }
     // Header names the field, not its path: `CAPABILITIES.AGENT_VERSION` is a
     // location, `AGENT_VERSION` is a column.
     let headers: Vec<String> = cols

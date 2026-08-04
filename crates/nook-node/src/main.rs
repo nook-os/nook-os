@@ -326,6 +326,13 @@ enum Command {
         /// Print raw JSON instead of a table.
         #[arg(long)]
         json: bool,
+        /// Act in one of your other tenants. Slug or id. Overrides
+        /// NOOK_TENANT_ID; without either you get your home tenant.
+        #[arg(short = 'T', long)]
+        tenant: Option<String>,
+        /// Every tenant you belong to, with a TENANT column.
+        #[arg(short = 'A', long = "all-tenants")]
+        all_tenants: bool,
         /// Anything after that. `nook get workspace git-ssh` is invoked BY git
         /// as its `GIT_SSH_COMMAND`, which appends ssh's own arguments —
         /// `user@host`, `-o`, a remote command — so they have to be accepted
@@ -884,6 +891,8 @@ async fn main() -> Result<()> {
             resource,
             name,
             json,
+            tenant,
+            all_tenants,
             args,
         } => {
             // `nook get workspace git-ssh` is not a listing at all — it is the
@@ -892,7 +901,14 @@ async fn main() -> Result<()> {
             if resource == "workspace" && name.as_deref() == Some("git-ssh") {
                 cli::git_ssh(&args).await
             } else {
-                cli::get(&resource, name.as_deref(), json).await
+                cli::get(
+                    &resource,
+                    name.as_deref(),
+                    json,
+                    tenant.as_deref(),
+                    all_tenants,
+                )
+                .await
             }
         }
         Command::Import { path, link } => cli::import(path.as_deref(), link).await,

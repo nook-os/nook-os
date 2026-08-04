@@ -198,6 +198,9 @@ pub async fn create_session_at(
             runtime: runtime.to_string(),
             workspace_path: workspace_path.to_string(),
             workspace_id: Some(workspace_id),
+            // The WORKSPACE's tenant, which is the one this session belongs to
+            // even when the node is homed elsewhere.
+            tenant_id: Some(tenant),
             cols: 120,
             rows: 32,
             ports: ports.clone(),
@@ -277,6 +280,9 @@ pub async fn create_ad_hoc_session(
             // An ad-hoc terminal is in no workspace, so there is no repo whose
             // key it could want.
             workspace_id: None,
+            // …and no workspace means no tenant to scope its `nook` commands
+            // to, so it falls back to the token's home like any other caller.
+            tenant_id: None,
             cols: 120,
             rows: 32,
             ports: ports.clone(),
