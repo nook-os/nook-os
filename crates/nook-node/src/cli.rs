@@ -1921,12 +1921,66 @@ pub struct SessionWorkspace {
     pub name: String,
 }
 
-pub async fn current_session_workspace(client: &Client) -> Option<SessionWorkspace> {
-    let sid = std::env::var("NOOK_SESSION_ID")
+/// What this shell is confined to.
+///
+/// The three states are kept apart on purpose. "Not in a session" and "in a
+/// session I could not read" both used to collapse to `None`, and `None` is the
+/// PERMISSIVE answer — it means "confine to nothing". So an unreadable session
+/// silently widened the caller's scope to the whole tenant.
+pub enum SessionScope {
+    /// No `NOOK_SESSION_ID`: a plain terminal, confined to nothing.
+    Ambient,
+    /// A real session that belongs to no workspace — an ad-hoc terminal.
+    NoWorkspace,
+    Workspace(SessionWorkspace),
+}
+
+impl SessionScope {
+    /// The workspace to scope to, if there is one.
+    pub fn workspace(&self) -> Option<&SessionWorkspace> {
+        match self {
+            SessionScope::Workspace(w) => Some(w),
+            _ => None,
+        }
+    }
+}
+
+pub async fn current_session_scope(client: &Client) -> Result<SessionScope> {
+    let Some(sid) = std::env::var("NOOK_SESSION_ID")
         .ok()
-        .filter(|s| !s.is_empty())?;
-    let session = client.get(&format!("/api/v1/sessions/{sid}")).await.ok()?;
-    let id = session.get("workspace_id")?.as_str()?.to_string();
+        .filter(|s| !s.is_empty())
+    else {
+        return Ok(SessionScope::Ambient);
+    };
+    // A session id that will not resolve is NOT "no session", and must never be
+    // treated as one. Unconfined is the permissive state, so failing open here
+    // hands a builder the run of every repo in the tenant — which is exactly
+    // what happened: a session in one tenant, a token homed in another, a 404,
+    // and `nook tasks` cheerfully returned another workspace's cards.
+    //
+    // Cross-tenant placement makes this ORDINARY, not exotic: the workspace's
+    // tenant and the node's differ routinely, and a `/sessions/{id}` read is
+    // scoped to the caller's tenant, so the miss looks identical to a deleted
+    // session. Refuse, and say which knob fixes it.
+    let session = client
+        .get(&format!("/api/v1/sessions/{sid}"))
+        .await
+        .with_context(|| {
+            format!(
+                "could not read session {sid}, which this shell says it is running in.\n\
+                 If that session belongs to another tenant, name it — set NOOK_TENANT_ID \
+                 or pass -T <tenant> — so the lookup happens there.\n\
+                 Refusing rather than running unconfined, which would let this act on \
+                 another workspace's work."
+            )
+        })?;
+    let Some(id) = session
+        .get("workspace_id")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+    else {
+        return Ok(SessionScope::NoWorkspace);
+    };
     // The name is for humans only; if the lookup fails, the id still confines.
     let name = client
         .get(&format!("/api/v1/workspaces/{id}"))
@@ -1934,7 +1988,7 @@ pub async fn current_session_workspace(client: &Client) -> Option<SessionWorkspa
         .ok()
         .and_then(|w| w.get("name").and_then(|v| v.as_str()).map(str::to_string))
         .unwrap_or_else(|| "workspace".into());
-    Some(SessionWorkspace { id, name })
+    Ok(SessionScope::Workspace(SessionWorkspace { id, name }))
 }
 
 /// `nook agent-state <running|waiting|idle>` — report what the agent in this
@@ -1995,7 +2049,8 @@ pub async fn agent_state(state: &str) -> Result<()> {
 /// caller can treat empty output as "unscoped" without special-casing an error.
 pub async fn workspace_current(json: bool) -> Result<()> {
     let client = Client::from_config()?;
-    match current_session_workspace(&client).await {
+    let scope = current_session_scope(&client).await?;
+    match scope.workspace() {
         Some(ws) if json => {
             println!("{}", serde_json::json!({ "id": ws.id, "name": ws.name }));
         }
@@ -2141,7 +2196,10 @@ pub async fn create_task(opts: CreateTask) -> Result<()> {
     // `nook tasks` — so a filer inside a repo files against that repo by default.
     let workspace_id = match opts.workspace.as_deref() {
         Some(w) => Some(resolve_workspace(&client, w).await?),
-        None => current_session_workspace(&client).await.map(|w| w.id),
+        None => current_session_scope(&client)
+            .await?
+            .workspace()
+            .map(|w| w.id.clone()),
     };
 
     let body = build_create_body(&opts, description, workspace_id);
@@ -2320,7 +2378,10 @@ pub async fn tasks(
     let workspace_id: Option<String> = if let Some(w) = workspace {
         Some(resolve_workspace(&client, w).await?)
     } else if !all_workspaces {
-        current_session_workspace(&client).await.map(|ws| ws.id)
+        current_session_scope(&client)
+            .await?
+            .workspace()
+            .map(|ws| ws.id.clone())
     } else {
         None
     };
@@ -2564,7 +2625,8 @@ pub async fn claim(key: &str, column_type: Option<&str>, any_workspace: bool) ->
     // to none) unless the caller explicitly opts out. So even a mistaken pick
     // cannot become a feature built in the wrong repo.
     if !any_workspace {
-        if let Some(here) = current_session_workspace(&client).await {
+        let scope = current_session_scope(&client).await?;
+        if let Some(here) = scope.workspace() {
             let task = client.get(&format!("/api/v1/tasks/{key}")).await?;
             let task = task.get("task").unwrap_or(&task);
             let task_ws = task.get("workspace_id").and_then(|v| v.as_str());

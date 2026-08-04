@@ -106,6 +106,20 @@ pub trait TypeMapping {
     /// so this is for operands known non-NULL — the read-cursor advance, whose
     /// column is `NOT NULL` on both tracks.
     fn greatest(&self, a: &str, b: &str) -> String;
+    /// A nullable column as it must appear in a uniqueness key that treats two
+    /// NULLs as EQUAL (MAIN-388).
+    ///
+    /// The engines disagree on the default and only Postgres can be told
+    /// otherwise: it declares `UNIQUE NULLS NOT DISTINCT`, so the bare column
+    /// is already right. SQLite follows the SQL default where every NULL is
+    /// distinct and has no such modifier, so the key has to be made NULL-free
+    /// with `COALESCE` — as an expression, which means an index rather than a
+    /// table constraint.
+    ///
+    /// Getting this wrong does not error: the row simply never collides, the
+    /// upsert inserts instead of updating, and the OLDEST value wins every
+    /// subsequent read. Use this anywhere a partially-NULL key is upserted.
+    fn null_equating_key(&self, col: &str) -> String;
 }
 
 // ── time-math (interval arithmetic) ──────────────────────────────────────────
@@ -226,6 +240,12 @@ impl TypeMapping for Postgres {
     fn greatest(&self, a: &str, b: &str) -> String {
         format!("GREATEST({a}, {b})")
     }
+
+    fn null_equating_key(&self, col: &str) -> String {
+        // `UNIQUE NULLS NOT DISTINCT` on the constraint already makes two NULLs
+        // collide, so the column stands as written.
+        col.to_string()
+    }
 }
 
 impl TimeMath for Postgres {
@@ -298,6 +318,12 @@ impl TypeMapping for Sqlite {
         // SQLite's scalar `max(a, b)` — distinct from the aggregate `max(x)`,
         // which is the same keyword with one argument.
         format!("MAX({a}, {b})")
+    }
+
+    fn null_equating_key(&self, col: &str) -> String {
+        // The empty string is safe as the stand-in because every column this is
+        // applied to holds an id, and no id is ever `''`.
+        format!("COALESCE({col}, '')")
     }
 }
 
@@ -492,6 +518,14 @@ mod tests {
     fn greatest_is_the_engines_own_two_argument_maximum() {
         assert_eq!(Sqlite.greatest("a.x", "b.x"), "MAX(a.x, b.x)");
         assert_ne!(Sqlite.greatest("a", "b"), Postgres.greatest("a", "b"));
+    }
+
+    #[test]
+    fn a_null_equating_key_is_bare_on_postgres_and_coalesced_on_sqlite() {
+        // Postgres says it on the constraint (`NULLS NOT DISTINCT`), so the
+        // column is untouched; SQLite cannot, so the NULL leaves the key.
+        assert_eq!(Postgres.null_equating_key("user_id"), "user_id");
+        assert_eq!(Sqlite.null_equating_key("user_id"), "COALESCE(user_id, '')");
     }
 
     #[test]
