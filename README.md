@@ -70,7 +70,7 @@ cp .env.example .env    # point OIDC_* at your IdP, or keep AUTH_DEV_MODE=true
 ./run.sh                # destroys and recreates the entire dev environment
 ```
 
-Open **http://localhost:5173** and sign in with your identity provider (or the dev sign-in). The stack comes up with a containerized node (`dev-node`) that already has demo workspaces discovered.
+Open **http://localhost:5173** and sign in with your identity provider (or the dev sign-in). (That port is the default, not a fixed address: every port the stack publishes is `${VAR:-default}` and `.nook.toml` declares them, so a nook session leases its own set and two checkouts can run at once. `NOOK_WEB_PORT` is the one to check if 5173 is not where it landed.) The stack comes up with a containerized node (`dev-node`) that already has demo workspaces discovered.
 
 Everything runs in containers with the source bind-mounted: `cargo watch` rebuilds the control plane and node on save; Vite hot-reloads the web app. `docker compose down -v` destroys everything; `./run.sh` brings it all back identically.
 
@@ -93,7 +93,7 @@ Nodes connect **outbound** over WebSocket — no inbound SSH, no public ports, n
 ## For AI clients (MCP)
 
 ```text
-endpoint:  http://localhost:8080/mcp   (streamable HTTP)
+endpoint:  http://localhost:8080/mcp   (streamable HTTP; 8080 is NOOK_CONTROL_PORT's default)
 auth:      Authorization: Bearer $MCP_TOKEN   (from .env)
 tools:     list_workspaces · list_nodes · list_sessions · start_session ·
            send_to_session · get_activity · get_notes · append_note · create_task

@@ -26,6 +26,21 @@
 # loops on, and a ticket ready to draft a spec against. The ONE manual step is
 # the Claude device login below.
 set -euo pipefail
+
+# Where THIS checkout's control plane and web app actually are (MAIN-376).
+#
+# These used to be safe literals, because every checkout published 8080 and
+# 5173. They are not any more: a session leases its own ports, so a hardcoded
+# `localhost:8080` here either fails the health gate against a stack that is
+# perfectly healthy, or — worse, on a machine running a second checkout —
+# SUCCEEDS against that other stack and writes `contexts.toml` pointing at it,
+# with a token minted there. MAIN-341's promise is that `contexts.toml` is valid
+# after every reseed; addressing somebody else's control plane breaks it
+# silently.
+#
+# Same defaults as `docker-compose.yml`, so a plain clone is unchanged (AC-3).
+CONTROL_URL="http://localhost:${NOOK_CONTROL_PORT:-8080}"
+WEB_URL="http://localhost:${NOOK_WEB_PORT:-5173}"
 cd "$(dirname "$0")"
 
 say() { printf '\033[33m▸ %s\033[0m\n' "$*"; }
@@ -245,14 +260,14 @@ refresh_dev_cli_context() {
   # Sign in as the seeded dev identity. The seed puts that user in the same
   # tenant the operator node joins, which is what makes a placed job find an
   # executor (AC-4).
-  if ! curl -fsS -c "$jar" -X POST http://localhost:8080/api/v1/auth/dev-login \
+  if ! curl -fsS -c "$jar" -X POST "$CONTROL_URL"/api/v1/auth/dev-login \
       -H 'Content-Type: application/json' \
       -d "{\"email\":\"$DEV_EMAIL\"}" >/dev/null 2>&1; then
     rm -f "$jar"
     echo "  (dev-login unavailable — leaving the nook CLI context alone)"
     return 0
   fi
-  token="$(curl -fsS -b "$jar" -X POST http://localhost:8080/api/v1/tokens \
+  token="$(curl -fsS -b "$jar" -X POST "$CONTROL_URL"/api/v1/tokens \
       -H 'Content-Type: application/json' -d '{"name":"dev cli"}' 2>/dev/null \
     | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')"
   rm -f "$jar"
@@ -261,7 +276,7 @@ refresh_dev_cli_context() {
     warn "Could not mint a dev CLI token — \`nook\` may 401 against dev."
     return 0
   fi
-  if nook login --token "$token" --server http://localhost:8080 >/dev/null 2>&1; then
+  if nook login --token "$token" --server "$CONTROL_URL" >/dev/null 2>&1; then
     say "nook CLI signed in to dev as $DEV_EMAIL."
   else
     warn "Minted a dev token but \`nook login\` refused it."
@@ -315,10 +330,10 @@ docker compose up $BUILD -d
 
 say "Waiting for control plane..."
 for _ in $(seq 1 120); do
-  if curl -fsS http://localhost:8080/healthz >/dev/null 2>&1; then break; fi
+  if curl -fsS "$CONTROL_URL"/healthz >/dev/null 2>&1; then break; fi
   sleep 1
 done
-curl -fsS http://localhost:8080/healthz >/dev/null || { echo "control plane failed to become healthy"; docker compose logs control-plane | tail -50; exit 1; }
+curl -fsS "$CONTROL_URL"/healthz >/dev/null || { echo "control plane failed to become healthy"; docker compose logs control-plane | tail -50; exit 1; }
 
 # The agent the loop runs on — offered here, after the stack is healthy, so the
 # operator-node is actually up to run the flow in.
@@ -331,9 +346,9 @@ refresh_dev_cli_context
 
 say "NookOS is up."
 echo
-echo "  Web UI:        http://localhost:5173"
-echo "  API:           http://localhost:8080  (docs at /docs)"
-echo "  MCP:           http://localhost:8080/mcp"
+echo "  Web UI:        $WEB_URL"
+echo "  API:           $CONTROL_URL  (docs at /docs)"
+echo "  MCP:           $CONTROL_URL/mcp"
 echo
 echo "  Fleet Claude login (specs/loops):"
 echo "    ./run.sh --claude-login          # log in, or switch accounts"
@@ -345,4 +360,4 @@ echo "    2. open the board, pick \"Add a greeting command to the dogfood repo\"
 echo "    3. its /loop page → Draft a spec"
 echo
 echo "  Add this machine as a node:"
-echo "    cargo run -p nook-node -- join --server http://localhost:8080 --token <token from UI>"
+echo "    cargo run -p nook-node -- join --server $CONTROL_URL --token <token from UI>"

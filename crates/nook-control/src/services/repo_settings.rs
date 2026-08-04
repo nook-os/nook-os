@@ -365,9 +365,97 @@ env  = "PORT"
         // the documentation everyone will copy.
         let src = include_str!("../../../../.nook.toml");
         let ports = parse(src).expect("our own file parses").expect("declares");
-        assert!(
-            ports.iter().any(|p| p.env == "NOOK_PORT"),
-            "the dogfood convention is still declared: {ports:?}"
+        assert!(!ports.is_empty(), "declares at least one listener");
+
+        // The two collisions the server and the lease table also reject, caught
+        // here for our OWN file so a bad edit fails the build rather than a
+        // session start.
+        let mut names: Vec<&str> = ports.iter().map(|p| p.name.as_str()).collect();
+        let before = names.len();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(before, names.len(), "listener names are unique: {ports:?}");
+        let mut envs: Vec<&str> = ports.iter().map(|p| p.env.as_str()).collect();
+        envs.sort_unstable();
+        envs.dedup();
+        assert_eq!(
+            before,
+            envs.len(),
+            "listener variables are unique: {ports:?}"
         );
+    }
+
+    /// Declaring a port and never reading it is the half of MAIN-376 that is
+    /// easy to skip — nook leases a number, exports the variable, and an app
+    /// that ignores it collides anyway. The declaration is only true if
+    /// something consumes it, so the build checks that rather than trusting it.
+    ///
+    /// Compose is the consumer for this repo: every host binding is
+    /// `${VAR:-<previous default>}`. Both directions are asserted, because each
+    /// catches a different mistake — a declared listener nothing reads, and a
+    /// published port nobody declared (the collision this card exists to fix).
+    #[test]
+    fn every_declared_port_is_read_by_the_compose_file() {
+        let declared = parse(include_str!("../../../../.nook.toml"))
+            .expect("our own file parses")
+            .expect("declares");
+        let compose = include_str!("../../../../docker-compose.yml");
+
+        for p in &declared {
+            assert!(
+                compose.contains(&format!("${{{}:-", p.env)),
+                "{} is declared but no compose binding reads it",
+                p.env
+            );
+        }
+
+        // Every published host port must come from a variable. A bare
+        // `- "5432:5432"` is exactly the hardcoded literal that makes two
+        // checkouts fight, so it fails here.
+        //
+        // Keyed on being inside a `ports:` block, NOT on quoting. The first cut
+        // matched `- "`, which got it wrong in both directions: an unquoted
+        // `- 1234:1234` is valid YAML and slipped straight through, and a quoted
+        // volume or command containing a colon would have failed for no reason.
+        // The block is the thing that means "these are published ports".
+        let mut in_ports = false;
+        let mut ports_indent = 0usize;
+        for line in compose.lines() {
+            if line.trim().is_empty() || line.trim_start().starts_with('#') {
+                continue;
+            }
+            let indent = line.len() - line.trim_start().len();
+            // A list item under `ports:` may sit at the SAME indent as the key
+            // — both `ports:\n  - "x"` and `ports:\n- "x"` are valid YAML — so
+            // only a non-item line at that indent means we have left the block.
+            // Keying purely on indent closed it before the first entry in the
+            // flush style and read nothing.
+            if in_ports && indent <= ports_indent && !line.trim_start().starts_with("- ") {
+                in_ports = false;
+            }
+            if line.trim_start().starts_with("ports:") {
+                in_ports = true;
+                ports_indent = indent;
+                continue;
+            }
+            if !in_ports {
+                continue;
+            }
+            let Some(entry) = line.trim().strip_prefix("- ") else {
+                continue;
+            };
+            // Strip quotes and any trailing `# comment`, then take the HOST side.
+            let entry = entry.trim().trim_matches('"').trim_matches('\'');
+            let entry = entry.split('#').next().unwrap_or("").trim();
+            let entry = entry.trim_matches('"').trim_matches('\'');
+            if !entry.contains(':') {
+                continue; // a bare container port publishes a RANDOM host port
+            }
+            assert!(
+                entry.starts_with("${"),
+                "docker-compose.yml publishes {entry:?} on a literal host port — declare it in \
+                 .nook.toml and read it as ${{VAR:-default}}, or two checkouts of this repo collide"
+            );
+        }
     }
 }
