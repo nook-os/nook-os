@@ -405,7 +405,12 @@ enum Command {
         server: Option<String>,
     },
     /// Which credential is this CLI using, and for whom?
-    Whoami,
+    Whoami {
+        /// Act in one of your other tenants. Slug or id. Overrides
+        /// NOOK_TENANT_ID; without either you get your home tenant.
+        #[arg(short = 'T', long)]
+        tenant: Option<String>,
+    },
     /// Forget the user token; fall back to this machine's node token.
     Logout,
 
@@ -947,7 +952,7 @@ async fn main() -> Result<()> {
             Some(t) => cli::login(&t, server.as_deref()).await,
             None => cli::login_with_provider(server.as_deref()).await,
         },
-        Command::Whoami => cli::whoami().await,
+        Command::Whoami { tenant } => cli::whoami(tenant.as_deref()).await,
         Command::Logout => cli::logout(),
         Command::Start {
             workspace,

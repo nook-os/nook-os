@@ -271,8 +271,11 @@ pub async fn login(token: &str, server: Option<&str>) -> Result<()> {
 }
 
 /// `nook whoami` — which credential is this CLI using, and for whom?
-pub async fn whoami() -> Result<()> {
-    let client = Client::from_config()?;
+pub async fn whoami(tenant: Option<&str>) -> Result<()> {
+    let mut client = Client::from_config()?;
+    if let Some(t) = tenant {
+        client.set_tenant(Some(t.to_string()));
+    }
     let me = client.get("/api/v1/auth/me").await?;
     let field = |a: &str, b: &str| {
         me.get(a)
@@ -281,9 +284,9 @@ pub async fn whoami() -> Result<()> {
             .unwrap_or("?")
             .to_string()
     };
-    println!("server:  {}", client.base);
+    println!("server:    {}", client.base);
     println!(
-        "as:      {} ({})",
+        "as:        {} ({})",
         field("user", "email"),
         if client.is_user() {
             "user token — can drive any node"
@@ -291,7 +294,60 @@ pub async fn whoami() -> Result<()> {
             "node token — confined to this machine"
         }
     );
-    println!("tenant:  {}", field("tenant", "slug"));
+    // WHERE the tenant came from, not just which one it is. A bare slug cannot
+    // be told apart from the token's home, and "why is this the wrong tenant"
+    // is the question this command exists to answer — the answer is almost
+    // always that something did or did not set one of these two.
+    let source = match (tenant, ambient_tenant()) {
+        (Some(_), _) => " (from --tenant)",
+        (None, Some(_)) => " (from NOOK_TENANT_ID)",
+        (None, None) => " (home — the token's own)",
+    };
+    println!("tenant:    {}{source}", field("tenant", "slug"));
+
+    // Where this shell is confined, if anywhere. `whoami` is the command people
+    // run WHEN CONFUSED, so an unreadable session has to be explained here
+    // rather than raised as an error the way it is everywhere else.
+    let Some(sid) = std::env::var("NOOK_SESSION_ID")
+        .ok()
+        .filter(|s| !s.is_empty())
+    else {
+        println!("session:   not in a nook session — commands act across the tenant");
+        return Ok(());
+    };
+    match client.get(&format!("/api/v1/sessions/{sid}")).await {
+        Ok(s) => {
+            let name = s.get("name").and_then(Value::as_str).unwrap_or("?");
+            let runtime = s.get("runtime").and_then(Value::as_str).unwrap_or("?");
+            let status = s.get("status").and_then(Value::as_str).unwrap_or("?");
+            println!("session:   {name} ({runtime}, {status})");
+            match s.get("workspace_id").and_then(Value::as_str) {
+                Some(ws) => {
+                    let name = client
+                        .get(&format!("/api/v1/workspaces/{ws}"))
+                        .await
+                        .ok()
+                        .and_then(|w| w.get("name").and_then(Value::as_str).map(str::to_string))
+                        .unwrap_or_else(|| ws.to_string());
+                    println!("workspace: {name} — commands scope to this repo");
+                }
+                None => println!("workspace: none (ad-hoc terminal) — no repo confinement"),
+            }
+        }
+        // The exact failure that silently unconfined the CLI. Naming the tenant
+        // it looked in is the whole diagnosis: the session is almost always
+        // real and simply lives somewhere this token was not asked to look.
+        Err(_) => {
+            println!(
+                "session:   {sid} — NOT READABLE in tenant {}",
+                field("tenant", "slug")
+            );
+            println!(
+                "           If it belongs to another tenant, set NOOK_TENANT_ID or pass -T.\n\
+                 \x20          Until then this shell has no workspace confinement."
+            );
+        }
+    }
     Ok(())
 }
 
