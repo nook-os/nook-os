@@ -5555,11 +5555,7 @@ export interface components {
              */
             protocol?: string;
             /**
-             * @description Whether the session should refuse to start when this one cannot be
-             *     leased. A `debug` listener is usually optional; the app's own port is
-             *     usually not.
-             *
-             *     **What each setting costs, because the default is inherited silently.**
+             * @description **What each setting costs, because the default is inherited silently.**
              *     `true` refuses the session with a message naming the listener — loud,
              *     recoverable. `false` starts it and leaves the variable UNSET, which used
              *     to be indistinguishable from "this repo was cloned outside nook" and so
@@ -5569,6 +5565,26 @@ export interface components {
              *     safe for an app that checks it and still unsafe for one that does not.
              */
             required?: boolean;
+            /**
+             * @description Whether the session should refuse to start when this one cannot be
+             *     leased. A `debug` listener is usually optional; the app's own port is
+             *     usually not.
+             *
+             *     Which session runtimes this listener is for. EMPTY means every runtime,
+             *     which is the default and is what keeps an untouched `.nook.toml`
+             *     leasing exactly what it leases today (MAIN-378 AC-4).
+             *
+             *     The opt-in that fixes the ceiling. A declaration belongs to the
+             *     WORKSPACE, so before this every session in a repo leased the whole set —
+             *     a shell and an agent as much as the session actually running the app.
+             *     Eleven listeners against a 100-port range is nine concurrent sessions,
+             *     and most of them bind nothing.
+             *
+             *     DECLARED, never guessed (AC-3): nothing inspects the process tree or
+             *     waits to see whether something binds. The repo says which runtimes need
+             *     the port, in a form its author can read.
+             */
+            runtimes?: string[];
         };
         /**
          * @description Post a message to a channel. `parent_message_id`, when set, makes this a

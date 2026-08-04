@@ -455,6 +455,7 @@ pub async fn restart(
         session.tenant_id,
         session.node_id,
         session.workspace_id,
+        &session.runtime,
         &held,
     )
     .await?;

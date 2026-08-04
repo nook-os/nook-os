@@ -723,6 +723,21 @@ pub struct PortRequirement {
     /// leased. A `debug` listener is usually optional; the app's own port is
     /// usually not.
     ///
+    /// Which session runtimes this listener is for. EMPTY means every runtime,
+    /// which is the default and is what keeps an untouched `.nook.toml`
+    /// leasing exactly what it leases today (MAIN-378 AC-4).
+    ///
+    /// The opt-in that fixes the ceiling. A declaration belongs to the
+    /// WORKSPACE, so before this every session in a repo leased the whole set —
+    /// a shell and an agent as much as the session actually running the app.
+    /// Eleven listeners against a 100-port range is nine concurrent sessions,
+    /// and most of them bind nothing.
+    ///
+    /// DECLARED, never guessed (AC-3): nothing inspects the process tree or
+    /// waits to see whether something binds. The repo says which runtimes need
+    /// the port, in a form its author can read.
+    #[serde(default)]
+    pub runtimes: Vec<String>,
     /// **What each setting costs, because the default is inherited silently.**
     /// `true` refuses the session with a message naming the listener — loud,
     /// recoverable. `false` starts it and leaves the variable UNSET, which used
