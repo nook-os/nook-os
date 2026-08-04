@@ -147,6 +147,11 @@ pub async fn sync_from_checkout(
 ) {
     use base64::Engine;
 
+    // Every arm below used to be a bare `return`. That made a working sync and
+    // a broken one produce byte-identical output — nothing — so the only way to
+    // tell which you had was to query the database and know the field's name.
+    // A feature whose failure is indistinguishable from its success is one
+    // nobody can operate, so each dead end now says which one it was.
     let Some(rx) = state.registry.request_op(node, |request_id| {
         nook_proto::ControlToNode::ReadWorkspaceFile {
             request_id,
@@ -154,15 +159,32 @@ pub async fn sync_from_checkout(
             name: FILE.to_string(),
         }
     }) else {
-        return; // node went away between reporting and now
-    };
-    let Ok(Ok(payload)) = tokio::time::timeout(std::time::Duration::from_secs(15), rx).await else {
+        // Ordinary: the node reported a scan and dropped before we asked.
+        tracing::debug!(%workspace, %node, "no {FILE} read — node went away after its scan");
         return;
     };
+    let payload = match tokio::time::timeout(std::time::Duration::from_secs(15), rx).await {
+        Ok(Ok(p)) => p,
+        // NOT ordinary. A node that never answers leaves the declaration stuck
+        // at whatever it last was, and every port this repo asks for silently
+        // stops being requested — the exact shape of failure this card exists
+        // to prevent, so it is a warning rather than a debug line.
+        Ok(Err(e)) => {
+            tracing::warn!(%workspace, %node, error = %e, "{FILE} read failed — port declaration not refreshed");
+            return;
+        }
+        Err(_) => {
+            tracing::warn!(%workspace, %node, checkout_path, "{FILE} read timed out after 15s — port declaration not refreshed");
+            return;
+        }
+    };
     if !payload.ok {
-        return; // no such file — the ordinary case, and not a declaration
+        // The ordinary case for most repos: they simply do not declare.
+        tracing::debug!(%workspace, checkout_path, "no {FILE} in this checkout");
+        return;
     }
     let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(&payload.message) else {
+        tracing::warn!(%workspace, %node, "{FILE} came back undecodable — port declaration not refreshed");
         return;
     };
     let Ok(source) = String::from_utf8(bytes) else {
@@ -187,16 +209,35 @@ pub async fn apply(
 ) {
     match parse(source) {
         Err(e) => report_invalid(state, tenant, workspace, checkout_path, &e.to_string()).await,
-        // A settings file that says nothing about ports changes nothing.
-        Ok(None) => {}
+        // A settings file that says nothing about ports changes nothing — but
+        // say so, because "present and silent about ports" and "absent" have
+        // very different fixes and used to look the same from outside.
+        Ok(None) => {
+            tracing::debug!(%workspace, checkout_path, "{FILE} declares no ports — leaving the stored requirement alone");
+        }
         Ok(Some(ports)) => {
+            let count = ports.len();
+            let required = ports.iter().filter(|p| p.required).count();
             let stored = serde_json::to_value(&ports).unwrap_or(serde_json::Value::Null);
-            if let Err(e) = state
+            match state
                 .workspaces
                 .set_port_requirements(tenant, workspace, Some(stored))
                 .await
             {
-                tracing::warn!(%workspace, error = %e, "could not store .nook.toml's ports");
+                // Debug, not info: this re-reads on EVERY scan, so an info line
+                // here would be one per workspace per scan forever. The number
+                // of REQUIRED listeners rides along because that is the figure
+                // that decides whether a session can start at all — a node with
+                // no range refuses every one of them.
+                Ok(_) => tracing::debug!(
+                    %workspace,
+                    listeners = count,
+                    required,
+                    "stored {FILE}'s port declaration"
+                ),
+                Err(e) => {
+                    tracing::warn!(%workspace, error = %e, "could not store .nook.toml's ports")
+                }
             }
         }
     }
