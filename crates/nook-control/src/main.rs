@@ -183,6 +183,11 @@ async fn serve(db: nook_db::DbPool, cfg: Config) -> Result<()> {
     // — and it logs any task still pointing at the reclaimed path.
     nook_control::services::workspace_reaper::start(state.clone());
 
+    // Terminated sessions accumulate from ordinary human use as much as from
+    // loops, so this one is NOT behind `loops.enabled` — an operator who turned
+    // loops off would otherwise collect rows forever with no way to stop it.
+    nook_control::services::session_reaper::start(state.clone());
+
     // Converge sessions to what workspaces declare (MAIN-316). Every replica
     // runs it; a partial unique index on live managed sessions per
     // (workspace, node) is what makes one starter win rather than a lease.

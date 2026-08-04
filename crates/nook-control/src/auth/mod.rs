@@ -794,8 +794,33 @@ async fn retenant(state: &AppState, ctx: AuthCtx, parts: &Parts) -> Result<AuthC
             "not a member of tenant '{want}'"
         )));
     };
+
+    // THE USER ID MOVES TOO, and forgetting that is a real bug rather than a
+    // tidiness point: a person has one `users` row PER TENANT, so the id that
+    // identifies them in `hein` identifies nobody in `engineering-team`.
+    //
+    // Swapping only `tenant_id` left every check that reads `user_id` asking
+    // about the wrong row. `GET /sessions` was the one that showed it —
+    // `is_tenant_admin` said no, so the list fell back to "sessions you
+    // created", matched the home-tenant id against none of them, and returned
+    // an empty list for a tenant with sessions plainly running. Empty, not
+    // an error, which is the worst shape for a scoping bug to take.
+    //
+    // `user_in_tenant` is both halves at once: it resolves the sibling row
+    // through `person_id` AND returns None unless the grant is live, so a
+    // membership revoked a moment ago cannot be re-scoped into.
+    let Some(user_id) = state
+        .identity
+        .user_in_tenant(ctx.user_id, m.tenant_id)
+        .await?
+    else {
+        return Err(ApiError::ForbiddenMsg(format!(
+            "not a member of tenant '{want}'"
+        )));
+    };
     Ok(AuthCtx {
         tenant_id: m.tenant_id,
+        user_id,
         ..ctx
     })
 }

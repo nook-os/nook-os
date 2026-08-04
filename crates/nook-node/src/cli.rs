@@ -656,7 +656,12 @@ pub async fn get(
     // happens here — one extra request for the table, none for `--json`, which
     // has already returned above with the server's own shape untouched.
     let rows = if resource == "workspaces" {
-        with_session_counts(&client, rows).await
+        let sessions = client
+            .get("/api/v1/sessions")
+            .await
+            .ok()
+            .and_then(|v| v.as_array().cloned());
+        with_session_counts(rows, sessions)
     } else {
         rows
     };
@@ -714,7 +719,8 @@ async fn get_all_tenants(
     }
 
     let mut all: Vec<Value> = Vec::new();
-    let mut spanned = 0usize;
+    let mut seen: std::collections::BTreeSet<String> = Default::default();
+    let mut sessions: Vec<Value> = Vec::new();
     for t in &tenants {
         let Some(slug) = t.get("slug").and_then(Value::as_str) else {
             continue;
@@ -731,14 +737,54 @@ async fn get_all_tenants(
                 continue;
             }
         };
-        if !rows.is_empty() {
-            spanned += 1;
-        }
         for mut r in rows {
+            // The SAME id from two tenants is one object seen twice, not two
+            // objects. Cross-tenant placement makes every node visible from
+            // every tenant that can use it, so a six-node fleet listed as
+            // twelve rows — the same machines, twice, differing only in which
+            // tenant we happened to ask.
+            let id = r.get("id").and_then(Value::as_str).map(str::to_string);
+            if let Some(id) = &id {
+                if !seen.insert(id.clone()) {
+                    continue;
+                }
+            }
             if let Some(o) = r.as_object_mut() {
-                o.insert("tenant".into(), Value::String(slug.to_string()));
+                // `home_tenant` is the API saying "this lives somewhere else",
+                // and it is the honest label for a deduped row: where the thing
+                // IS, not which of our questions happened to surface it.
+                // `home_tenant` carries the tenant's NAME while everything
+                // else here is keyed by slug, so map it back — a column that
+                // said "hein" on one row and "Engineering Team" on the next
+                // would look like two different kinds of thing.
+                let owner = o
+                    .get("home_tenant")
+                    .and_then(Value::as_str)
+                    .map(|home| {
+                        tenants
+                            .iter()
+                            .find(|t| {
+                                t.get("name").and_then(Value::as_str) == Some(home)
+                                    || t.get("slug").and_then(Value::as_str) == Some(home)
+                            })
+                            .and_then(|t| t.get("slug").and_then(Value::as_str))
+                            .unwrap_or(home)
+                            .to_string()
+                    })
+                    .unwrap_or_else(|| slug.to_string());
+                o.insert("tenant".into(), Value::String(owner));
             }
             all.push(r);
+        }
+        // READY counts this tenant's OWN sessions. Fetched inside the loop with
+        // the scoped client — asking once with the home-tenant client counted
+        // nothing for every other tenant, so their workspaces all read 0/-. It
+        // happened to be true while those tenants had no sessions, which is the
+        // worst way for a bug like this to sit.
+        if resource == "workspaces" {
+            if let Ok(v) = scoped.get("/api/v1/sessions").await {
+                sessions.extend(v.as_array().cloned().unwrap_or_default());
+            }
         }
     }
 
@@ -747,12 +793,19 @@ async fn get_all_tenants(
         return Ok(());
     }
     let all = filter_rows(all, resource, name);
+    // Counted AFTER dedup and filtering, so the column appears only when the
+    // rows on screen really do come from more than one tenant.
+    let spanned = all
+        .iter()
+        .filter_map(|r| r.get("tenant").and_then(Value::as_str))
+        .collect::<std::collections::BTreeSet<_>>()
+        .len();
     if all.is_empty() {
         eprintln!("No {resource} found in any tenant.");
         return Ok(());
     }
     let all = if resource == "workspaces" {
-        with_session_counts(client, all).await
+        with_session_counts(all, Some(sessions))
     } else {
         all
     };
@@ -765,12 +818,8 @@ async fn get_all_tenants(
 /// Best-effort: if the sessions call fails the columns read `-` and the rest of
 /// the table still prints. A workspace list that refuses to render because a
 /// second request failed would be a worse answer than a partial one.
-async fn with_session_counts(client: &Client, rows: Vec<Value>) -> Vec<Value> {
-    let sessions = client
-        .get("/api/v1/sessions")
-        .await
-        .ok()
-        .and_then(|v| v.as_array().cloned());
+fn with_session_counts(rows: Vec<Value>, sessions: Option<Vec<Value>>) -> Vec<Value> {
+    let sessions = sessions;
     rows.into_iter()
         .map(|mut w| {
             let Some(obj) = w.as_object_mut() else {
@@ -1016,7 +1065,11 @@ fn print_table(resource: &str, rows: &[Value]) {
 fn print_table_with(resource: &str, rows: &[Value], with_tenant: bool) {
     let mut cols = columns(resource, &rows[0]);
     if with_tenant {
-        cols.insert(0, "tenant");
+        // After NAME rather than first. kubectl leads with NAMESPACE, but its
+        // pod names are unique-ish sentences; here the name is what you scan
+        // for and the tenant qualifies it, so it reads better one column in.
+        let at = cols.iter().position(|c| *c == "name").map_or(0, |i| i + 1);
+        cols.insert(at, "tenant");
     }
     // Header names the field, not its path: `CAPABILITIES.AGENT_VERSION` is a
     // location, `AGENT_VERSION` is a column.

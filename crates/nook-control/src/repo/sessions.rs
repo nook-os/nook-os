@@ -18,7 +18,7 @@
 //! signature, and row mapping lives inside the impl (AC-2).
 
 use async_trait::async_trait;
-use nook_db::dialect::type_mapping;
+use nook_db::dialect::{time_math, type_mapping};
 use nook_db::{params, CiMatch, Db, DbPool, Postgres};
 use nook_types::*;
 
@@ -123,6 +123,19 @@ pub trait SessionRepository: Send + Sync {
     async fn mark_viewer_presence(&self, id: SessionId, watched: bool) -> ApiResult<u64>;
 
     async fn delete(&self, id: SessionId, tenant: TenantId) -> ApiResult<u64>;
+
+    /// Tenants holding at least one reapable session, so the sweep only asks
+    /// about tenants that have work. Derived from the sessions themselves
+    /// rather than from a tenant list: the reaper's business is rows, and a
+    /// tenant with nothing to reclaim is a setting lookup nobody needed.
+    async fn tenants_with_terminated(&self) -> ApiResult<Vec<TenantId>>;
+
+    /// Hard-delete this tenant's `exited`/`error` sessions that ended more than
+    /// `retention_days` ago. Returns how many went.
+    ///
+    /// `detached` is NOT terminated — tmux still holds it and a browser can
+    /// reattach — so it is never matched here.
+    async fn reap_terminated(&self, tenant: TenantId, retention_days: i64) -> ApiResult<u64>;
 
     /// The LIVE managed sessions of one workspace, as `(session, checkout, node)`.
     ///
@@ -389,6 +402,41 @@ impl SessionRepository for DbSessionRepository {
                 params![id],
             )
             .await?)
+    }
+
+    async fn tenants_with_terminated(&self) -> ApiResult<Vec<TenantId>> {
+        Ok(self
+            .db
+            .query_all::<(TenantId,)>(
+                "SELECT DISTINCT tenant_id FROM sessions
+                 WHERE status IN ('exited', 'error') AND ended_at IS NOT NULL",
+                params![],
+            )
+            .await?
+            .into_iter()
+            .map(|(t,)| t)
+            .collect())
+    }
+
+    async fn reap_terminated(&self, tenant: TenantId, retention_days: i64) -> ApiResult<u64> {
+        // `ended_at IS NOT NULL` is load-bearing, not defensive: a row that
+        // reached a terminal status without one has no age, and comparing NULL
+        // would silently never match — better to leave it and have it show up
+        // than to invent a timestamp for it.
+        self.db
+            .exec(
+                &format!(
+                    "DELETE FROM sessions
+                     WHERE tenant_id = $1
+                       AND status IN ('exited', 'error')
+                       AND ended_at IS NOT NULL
+                       AND ended_at < {}",
+                    time_math(self.db.engine()).now_minus_scaled("$2", "1 day")
+                ),
+                params![tenant, retention_days],
+            )
+            .await
+            .map_err(Into::into)
     }
 
     async fn delete(&self, id: SessionId, tenant: TenantId) -> ApiResult<u64> {
@@ -813,6 +861,30 @@ impl SessionRepository for FakeSessionRepository {
         let mut s = self.inner.lock().unwrap();
         let before = s.len();
         s.retain(|x| !(x.id == id && x.tenant_id == tenant));
+        Ok((before - s.len()) as u64)
+    }
+
+    async fn tenants_with_terminated(&self) -> ApiResult<Vec<TenantId>> {
+        let s = self.inner.lock().unwrap();
+        let mut out: Vec<TenantId> = s
+            .iter()
+            .filter(|x| matches!(x.status.as_str(), "exited" | "error") && x.ended_at.is_some())
+            .map(|x| x.tenant_id)
+            .collect();
+        out.sort_by_key(|t| t.0);
+        out.dedup();
+        Ok(out)
+    }
+
+    async fn reap_terminated(&self, tenant: TenantId, retention_days: i64) -> ApiResult<u64> {
+        let cutoff = chrono::Utc::now() - chrono::Duration::days(retention_days);
+        let mut s = self.inner.lock().unwrap();
+        let before = s.len();
+        s.retain(|x| {
+            !(x.tenant_id == tenant
+                && matches!(x.status.as_str(), "exited" | "error")
+                && x.ended_at.is_some_and(|e| e < cutoff))
+        });
         Ok((before - s.len()) as u64)
     }
 
