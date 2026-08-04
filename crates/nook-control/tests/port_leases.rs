@@ -620,7 +620,11 @@ async fn a_port_the_node_could_not_bind_is_avoided_on_the_next_lease() {
         .await
         .expect("re-lease");
 
-    assert_eq!(ports(&second), vec![4201], "avoids the port that would not bind");
+    assert_eq!(
+        ports(&second),
+        vec![4201],
+        "avoids the port that would not bind"
+    );
 
     // …and the avoidance is NOT durable. Nothing was written to the node, so a
     // later session is free to take 4200 again once whatever held it is gone.
