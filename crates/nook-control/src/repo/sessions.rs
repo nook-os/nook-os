@@ -18,8 +18,8 @@
 //! signature, and row mapping lives inside the impl (AC-2).
 
 use async_trait::async_trait;
-use nook_db::dialect::{time_math, type_mapping};
-use nook_db::{params, CiMatch, Db, DbPool, Postgres};
+use nook_db::dialect::{ci_match, time_math, type_mapping};
+use nook_db::{params, Db, DbPool};
 use nook_types::*;
 
 use crate::error::ApiResult;
@@ -368,7 +368,7 @@ impl SessionRepository for DbSessionRepository {
                        AND status IN ({live})
                      ORDER BY (name = $3) DESC, created_at DESC LIMIT 1",
                     live = session_status::LIVE_SQL,
-                    ci = Postgres.ci_match("name", "'%feedback%'")
+                    ci = ci_match(self.db.engine()).ci_match("name", "'%feedback%'")
                 ),
                 params![tenant, workspace, name],
             )

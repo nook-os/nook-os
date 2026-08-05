@@ -10,7 +10,6 @@ use openidconnect::{
 use serde::Deserialize;
 use utoipa::ToSchema;
 
-use nook_db::{CiMatch, Postgres};
 use nook_types::{DevAccountsResponse, MeResponse, PurgeTestTenantsResponse};
 
 use crate::auth::{
@@ -677,16 +676,10 @@ pub async fn dev_accounts(
         .filter(|s| !s.is_empty())
         .map(|s| format!("%{s}%"));
 
-    // `$1` matches any of the three columns; a NULL `$1` matches all rows.
-    let _filter = format!(
-        "($1::text IS NULL OR {} OR {} OR {})",
-        Postgres.ci_match("u.email", "$1"),
-        Postgres.ci_match("u.display_name", "$1"),
-        Postgres.ci_match("t.slug", "$1"),
-    );
-
     // One call: the page and its total share a filter whose construction
-    // belongs with the SQL, not here.
+    // belongs with the SQL, not here — `dev_accounts_page` builds it per engine
+    // (MAIN-421). A dead `let _filter` hardcoding the Postgres arm survived that
+    // move; deleting it is the whole of this site.
     let (accounts, total) = state
         .identity
         .dev_accounts_page(pattern, DEV_ACCOUNTS_CAP)
