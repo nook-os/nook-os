@@ -15,8 +15,9 @@ use anyhow::{Context, Result};
 
 /// The skills that ship inside the binary and install as first-class citizens —
 /// the fleet-driving `nookos` skill plus the loop skills (spec, build, review,
-/// epic). Embedded rather than read from a repo: the whole point of `nook skills
-/// install` is that nobody had to clone anything.
+/// epic, and the two merge authorities). Embedded rather than read from a repo:
+/// the whole point of `nook skills install` is that nobody had to clone
+/// anything.
 const EMBEDDED: &[(&str, &str)] = &[
     ("nookos", include_str!("../../../../skills/nookos/SKILL.md")),
     (
@@ -41,6 +42,15 @@ const EMBEDDED: &[(&str, &str)] = &[
     (
         "nook-epic-runner",
         include_str!("../../../../skills/nook-epic-runner/SKILL.md"),
+    ),
+    // The OTHER merge authority, and the difference is what it does with
+    // trouble: the epic runner halts the run, which is right for a supervised
+    // twenty-minute pass and wrong for an unattended night, where one bad PR at
+    // 1am would leave everything after it unmerged until morning. Yolo skips,
+    // records the cause, and keeps going (MAIN-419).
+    (
+        "nook-yolo",
+        include_str!("../../../../skills/nook-yolo/SKILL.md"),
     ),
 ];
 
@@ -327,14 +337,17 @@ mod tests {
     /// here.
     #[test]
     fn the_embedded_skills_look_like_the_real_ones() {
-        // All six ship, in order, and each is a real document rather than an
+        // All seven ship, in order, and each is a real document rather than an
         // empty file — an `include_str!` at the wrong path still compiles if the
         // file exists, and an agent handed a stub fails in a way nobody traces
         // back here.
         //
         // `nook-epic-runner` joined the set in MAIN-344: it was the one loop
         // skill never embedded, so a node had four fifths of the loop and the
-        // pass that actually lands work was the missing fifth.
+        // pass that actually lands work was the missing fifth. `nook-yolo`
+        // joined in MAIN-419 — the same merge authority scoped to the whole
+        // board and told to skip rather than halt, which is what makes an
+        // unattended night possible.
         let names: Vec<&str> = EMBEDDED.iter().map(|(n, _)| *n).collect();
         assert_eq!(
             names,
@@ -344,7 +357,8 @@ mod tests {
                 "nook-build",
                 "nook-review",
                 "nook-epic",
-                "nook-epic-runner"
+                "nook-epic-runner",
+                "nook-yolo"
             ]
         );
         for (name, content) in EMBEDDED {
