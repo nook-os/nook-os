@@ -46,6 +46,14 @@ from a test). The shared `DATABASE_URL` database serves only the running dev
 stack. (Global-count assertions still make no sense — but that's ordinary test
 hygiene now, not a shared-DB workaround.)
 
+## CLI shape — the top level is frozen (MAIN-157)
+
+New `nook` commands land as `nook <plural-noun> <verb>`; the thirty existing flat
+verbs are grandfathered and only shrink. Read `docs/cli-style.md` before adding
+one — it also carries the skills-sweep rule (a renamed verb must update
+`skills/` in the SAME ticket). `cli_surface` in `crates/nook-node/src/main.rs`
+enforces it.
+
 ## Comments — the exception, not the default
 
 Write code that does not need explaining, then explain only what code cannot say.

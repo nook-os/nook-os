@@ -1868,3 +1868,138 @@ async fn status() -> Result<()> {
     );
     Ok(())
 }
+
+/// The top-level namespace freeze (MAIN-157).
+///
+/// The CLI's top level accreted a flat verb per feature until it held thirty of
+/// them. `nook get sessions` and `nook interactions ask` show the shape it
+/// should have had — a plural noun, then a verb — and nothing stopped the next
+/// ticket adding a thirty-first. This is what stops it.
+///
+/// **Groups are not frozen; leaves are.** A new `nook <noun> <verb>` group IS
+/// the convention and needs no permission, so adding one passes. A new FLAT
+/// verb is what the freeze refuses. Snapshotting everything would have made the
+/// guard refuse the very thing it exists to encourage.
+///
+/// The surface is read from clap rather than from the source text, so it is the
+/// CLI a user actually gets — `#[command(name = …)]` renames included.
+#[cfg(test)]
+mod cli_surface {
+    use super::*;
+    use clap::CommandFactory;
+
+    /// Every flat top-level verb as of MAIN-157, sorted.
+    ///
+    /// **The ratchet: additions are refused, removals are welcome.** Each
+    /// removal is MAIN-139 burying one more verb under a noun, so this list
+    /// only ever shrinks. It is not a target to keep at thirty — it is a
+    /// high-water mark to erode.
+    const FROZEN_LEAVES: &[&str] = &[
+        "agent-state",
+        "claim",
+        "comment",
+        "delete",
+        "enroll",
+        "exec",
+        "get",
+        "import",
+        "join",
+        "label",
+        "login",
+        "logout",
+        "migrate-workspaces",
+        "notify",
+        "read",
+        "relate",
+        "renew",
+        "run",
+        "send",
+        "set-description",
+        "setup",
+        "start",
+        "status",
+        "task",
+        "tasks",
+        "taught",
+        "teach",
+        "unteach",
+        "update",
+        "whoami",
+    ];
+
+    /// Top-level entries split into `(flat verbs, noun groups)`. A group is a
+    /// command that has subcommands of its own — `context`, `operator`, `k8s` —
+    /// which is exactly what "put it under a noun" produces.
+    fn surface() -> (Vec<String>, Vec<String>) {
+        let cmd = Cli::command();
+        let (groups, leaves): (Vec<_>, Vec<_>) = cmd
+            .get_subcommands()
+            .partition(|s| s.get_subcommands().next().is_some());
+        let name = |v: Vec<&clap::Command>| {
+            let mut v: Vec<String> = v.into_iter().map(|s| s.get_name().to_string()).collect();
+            v.sort();
+            v
+        };
+        (name(leaves), name(groups))
+    }
+
+    #[test]
+    fn the_top_level_gains_no_new_flat_verbs() {
+        let (leaves, _) = surface();
+        let frozen: Vec<String> = FROZEN_LEAVES.iter().map(|s| s.to_string()).collect();
+        if leaves == frozen {
+            return;
+        }
+
+        let added: Vec<&String> = leaves.iter().filter(|l| !frozen.contains(l)).collect();
+        let removed: Vec<&String> = frozen.iter().filter(|f| !leaves.contains(f)).collect();
+
+        let mut msg = String::new();
+        if !added.is_empty() {
+            msg.push_str(&format!(
+                "\nNew top-level verb(s): {added:?}\n\n\
+                 The top level is FROZEN. New commands land as `nook <plural-noun> <verb>` \n\
+                 (e.g. `issues move`, `interactions ask`) — see docs/cli-style.md.\n\n\
+                 Add it under a noun, or amend this frozen list deliberately — the reviewer\n\
+                 will see it.\n\n\
+                 A new NOUN GROUP needs no permission and does not trip this test; only a\n\
+                 flat verb does.\n"
+            ));
+        }
+        if !removed.is_empty() {
+            msg.push_str(&format!(
+                "\nVerb(s) gone from the top level: {removed:?}\n\n\
+                 Good — that is MAIN-139 progress. Delete them from FROZEN_LEAVES; the list\n\
+                 only ever shrinks.\n"
+            ));
+        }
+        msg.push_str(
+            "\nEITHER WAY, SWEEP THE SKILLS. Adding, renaming or removing a CLI verb means\n\
+             grepping skills/ for every affected command, updating each hit, bumping each\n\
+             touched skill's `version:`, and noting the required `nook teach` re-run in the\n\
+             PR — in the SAME ticket, never as follow-up. A skill teaching a command that no\n\
+             longer exists fails on a fleet nobody has re-taught.\n",
+        );
+        panic!("{msg}");
+    }
+
+    /// The other half of the ruling on MAIN-157: a noun group is the shape we
+    /// WANT, so it must be able to appear without touching the frozen list.
+    /// This pins that freedom, so a future tightening of the guard cannot
+    /// quietly turn the convention into something that also needs permission.
+    #[test]
+    fn noun_groups_are_not_frozen() {
+        let (leaves, groups) = surface();
+        assert!(
+            groups.len() >= 11,
+            "expected the existing noun groups; found {groups:?}"
+        );
+        for g in &groups {
+            assert!(
+                !FROZEN_LEAVES.contains(&g.as_str()),
+                "{g} is a noun group and must not be in the flat-verb freeze"
+            );
+            assert!(!leaves.contains(g), "{g} cannot be both a group and a leaf");
+        }
+    }
+}
