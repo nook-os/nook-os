@@ -282,36 +282,43 @@ fn push_scalar(flat: &mut Vec<DbValue>, v: DbValue, next: &mut usize) -> usize {
 /// with its flattened group and, for a list group, rewriting the Postgres
 /// array-membership operator that wraps it into SQLite's `IN` / `NOT IN`.
 fn rewrite_membership(sql: &str, groups: &[Vec<usize>], is_list: &[bool]) -> String {
-    let bytes = sql.as_bytes();
+    // Iterate CHARACTERS, not bytes (MAIN-309). Everything this walk does not
+    // rewrite is re-emitted verbatim, and the byte form of that used to be
+    // `bytes[i] as char` — a Latin-1 reinterpretation, so any multi-byte
+    // character became one mojibake `char` per byte. Placeholders are pure
+    // ASCII, so scanning them is unaffected; it is only the passthrough that
+    // ever needed to know about UTF-8.
     let mut out = String::with_capacity(sql.len() + 16);
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'$' && i + 1 < bytes.len() && bytes[i + 1].is_ascii_digit() {
-            let mut j = i + 1;
-            let mut n = 0usize;
-            while j < bytes.len() && bytes[j].is_ascii_digit() {
-                n = n * 10 + (bytes[j] - b'0') as usize;
-                j += 1;
-            }
-            let g = &groups[n - 1];
-            if is_list[n - 1] {
-                // The `<op> ANY(` / `<op> ALL(` opening this placeholder is
-                // already in `out`; convert it to `IN (` / `NOT IN (`.
-                open_membership(&mut out);
-                if g.is_empty() {
-                    out.push_str("NULL");
-                } else {
-                    let joined = g.iter().map(|i| format!("${i}")).collect::<Vec<_>>();
-                    out.push_str(&joined.join(", "));
-                }
+    let mut chars = sql.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '$' {
+            out.push(c);
+            continue;
+        }
+        // `$` with no digit after it is not a placeholder — emit it as it came.
+        if !chars.peek().is_some_and(char::is_ascii_digit) {
+            out.push('$');
+            continue;
+        }
+        let mut n = 0usize;
+        while let Some(d) = chars.peek().copied().filter(char::is_ascii_digit) {
+            n = n * 10 + (d as u8 - b'0') as usize;
+            chars.next();
+        }
+        let g = &groups[n - 1];
+        if is_list[n - 1] {
+            // The `<op> ANY(` / `<op> ALL(` opening this placeholder is
+            // already in `out`; convert it to `IN (` / `NOT IN (`.
+            open_membership(&mut out);
+            if g.is_empty() {
+                out.push_str("NULL");
             } else {
-                out.push('$');
-                out.push_str(&g[0].to_string());
+                let joined = g.iter().map(|i| format!("${i}")).collect::<Vec<_>>();
+                out.push_str(&joined.join(", "));
             }
-            i = j;
         } else {
-            out.push(bytes[i] as char);
-            i += 1;
+            out.push('$');
+            out.push_str(&g[0].to_string());
         }
     }
     out
@@ -895,6 +902,54 @@ mod tests {
         );
         assert_eq!(sql, "SELECT * FROM t WHERE a = $1 AND b = $2");
         assert_eq!(params.len(), 2);
+    }
+
+    /// Non-ASCII in the query text survives the rewrite byte-identical
+    /// (MAIN-309).
+    ///
+    /// `rewrite_membership` re-emits everything it is not rewriting. It used to
+    /// do that with `bytes[i] as char`, which is a Latin-1 reinterpretation
+    /// rather than a UTF-8 decode: every multi-byte character came out as one
+    /// mojibake `char` per byte. Nothing in the tree tripped it — this arm is
+    /// SQLite-only and no query carried non-ASCII — so the failure mode was a
+    /// silent corruption waiting for the first query that did.
+    ///
+    /// An em-dash is the probe because the repo's own SQL comments are full of
+    /// them; `é` and `→` cover the 2- and 3-byte cases.
+    #[test]
+    fn non_ascii_text_survives_the_rewrite() {
+        let sql = "SELECT * FROM t WHERE note = $1 -- em—dash, é, →\n  AND id = ANY($2)";
+        let (out, _) = expand_lists(
+            sql,
+            vec![
+                DbValue::Text(Some("x".into())),
+                DbValue::I64List(vec![7, 8]),
+            ],
+        );
+        // The rewrite still happened…
+        assert!(
+            out.contains("IN ($2, $3)"),
+            "membership still rewritten: {out}"
+        );
+        // …and every character outside it came through unchanged.
+        assert!(
+            out.contains("-- em—dash, é, →"),
+            "non-ASCII must survive byte-identical, got: {out}"
+        );
+    }
+
+    /// The same guarantee where it is easiest to corrupt silently: inside a
+    /// string literal, which reaches the database as DATA rather than as syntax.
+    #[test]
+    fn non_ascii_in_a_string_literal_survives() {
+        let (out, _) = expand_lists(
+            "SELECT * FROM t WHERE label = 'naïve café — ok' AND id = ANY($1)",
+            vec![DbValue::I64List(vec![1])],
+        );
+        assert!(
+            out.contains("'naïve café — ok'"),
+            "a literal's bytes must be untouched, got: {out}"
+        );
     }
 
     #[test]
