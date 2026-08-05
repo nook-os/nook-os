@@ -4812,6 +4812,34 @@
         }
       }
     },
+    "/api/v1/sessions/{id}/stop": {
+      "post": {
+        "tags": [
+          "crate::routes::sessions"
+        ],
+        "summary": "Stop a session: keep the row, drop the machine (MAIN-415).",
+        "description": "The difference from `kill` is what the row says afterwards, and that\ndifference is the whole feature. A killed session is `exited` — it died, and\nthe reconciler will start a replacement because it no longer satisfies the\nworkspace's declaration. A stopped one is `stopped`: still declared, so\nnothing replaces it, and still openable, because `restart` starts its tmux\nagain.\n\nThe status is written BEFORE the node is told, and that order matters. The\nnode answers a kill with `SessionExited`, and if the row were still live\nwhen that arrived it would be rewritten to `exited` — every Stop would land\nas a crash. `mark_session_exited` is guarded on LIVE, so once this row says\n`stopped` the report is a no-op.\n\nNothing frees the ports here on purpose: MAIN-301's allocator drops the\nleases of non-live sessions as its first step, and `stopped` is not live, so\nthey return at the moment somebody needs one (AC-4).",
+        "operationId": "stop_session",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": ""
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      }
+    },
     "/api/v1/sessions/{id}/windows": {
       "post": {
         "tags": [

@@ -1501,8 +1501,11 @@ impl WorkspaceRepository for DbWorkspaceRepository {
         Ok(self
             .db
             .query_scalar::<i64>(
-                "SELECT count(*) FROM sessions
-                 WHERE workspace_id = $1 AND status IN ('starting', 'running', 'detached')",
+                &format!(
+                    "SELECT count(*) FROM sessions
+                 WHERE workspace_id = $1 AND status IN ({live})",
+                    live = crate::session_status::LIVE_SQL
+                ),
                 params![workspace],
             )
             .await?)

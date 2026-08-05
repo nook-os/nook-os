@@ -178,6 +178,77 @@ pub async fn kill(
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
 
+/// Stop a session: keep the row, drop the machine (MAIN-415).
+///
+/// The difference from `kill` is what the row says afterwards, and that
+/// difference is the whole feature. A killed session is `exited` — it died, and
+/// the reconciler will start a replacement because it no longer satisfies the
+/// workspace's declaration. A stopped one is `stopped`: still declared, so
+/// nothing replaces it, and still openable, because `restart` starts its tmux
+/// again.
+///
+/// The status is written BEFORE the node is told, and that order matters. The
+/// node answers a kill with `SessionExited`, and if the row were still live
+/// when that arrived it would be rewritten to `exited` — every Stop would land
+/// as a crash. `mark_session_exited` is guarded on LIVE, so once this row says
+/// `stopped` the report is a no-op.
+///
+/// Nothing frees the ports here on purpose: MAIN-301's allocator drops the
+/// leases of non-live sessions as its first step, and `stopped` is not live, so
+/// they return at the moment somebody needs one (AC-4).
+#[utoipa::path(post, path = "/api/v1/sessions/{id}/stop",
+    operation_id = "stop_session",
+    params(("id" = String, Path,)),
+    responses((status = 204), (status = 404)))]
+pub async fn stop(
+    State(state): State<AppState>,
+    auth: AuthCtx,
+    Path(id): Path<SessionId>,
+) -> ApiResult<axum::http::StatusCode> {
+    let session = session_for_content(&state, &auth, id).await?;
+    // A node may only touch sessions running on itself.
+    auth.require_node_self(session.node_id)?;
+
+    // A no-op on a session that already ended: `mark_stopped` is guarded on
+    // LIVE, so stopping something dead neither rewrites its status nor claims
+    // to have stopped anything.
+    let changed = state.sessions.mark_stopped(auth.tenant_id, id).await?;
+    if changed == 0 {
+        return Ok(axum::http::StatusCode::NO_CONTENT);
+    }
+
+    state.registry.send_to_node(
+        session.node_id,
+        ControlToNode::KillSession { session_id: id },
+    );
+
+    state.registry.publish(
+        auth.tenant_id,
+        UiEvent::SessionStatus {
+            session_id: id,
+            status: crate::session_status::STOPPED.into(),
+        },
+    );
+    state.registry.publish_session(
+        id,
+        nook_proto::AttachServerMessage::Status {
+            status: crate::session_status::STOPPED.into(),
+        },
+    );
+    state.registry.drop_attachment(id);
+
+    events::record(
+        &state,
+        auth.tenant_id,
+        EventDraft::new("session.stopped")
+            .actor("user", auth.user_id.0)
+            .session(id)
+            .node(session.node_id),
+    )
+    .await;
+    Ok(axum::http::StatusCode::NO_CONTENT)
+}
+
 /// Type into a session, as if a human were at the keyboard.
 ///
 /// This is what makes a session drivable from a script: no browser, no SSH,
@@ -520,7 +591,7 @@ pub async fn delete(
     // A node may only touch sessions running on itself.
     auth.require_node_self(session.node_id)?;
 
-    if matches!(session.status.as_str(), "starting" | "running" | "detached") {
+    if crate::session_status::is_live(&session.status) {
         state.registry.send_to_node(
             session.node_id,
             ControlToNode::KillSession { session_id: id },

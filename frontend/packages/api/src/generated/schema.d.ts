@@ -2149,6 +2149,41 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/sessions/{id}/stop": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Stop a session: keep the row, drop the machine (MAIN-415).
+         * @description The difference from `kill` is what the row says afterwards, and that
+         *     difference is the whole feature. A killed session is `exited` — it died, and
+         *     the reconciler will start a replacement because it no longer satisfies the
+         *     workspace's declaration. A stopped one is `stopped`: still declared, so
+         *     nothing replaces it, and still openable, because `restart` starts its tmux
+         *     again.
+         *
+         *     The status is written BEFORE the node is told, and that order matters. The
+         *     node answers a kill with `SessionExited`, and if the row were still live
+         *     when that arrived it would be rewritten to `exited` — every Stop would land
+         *     as a crash. `mark_session_exited` is guarded on LIVE, so once this row says
+         *     `stopped` the report is a no-op.
+         *
+         *     Nothing frees the ports here on purpose: MAIN-301's allocator drops the
+         *     leases of non-live sessions as its first step, and `stopped` is not live, so
+         *     they return at the moment somebody needs one (AC-4).
+         */
+        post: operations["stop_session"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/sessions/{id}/windows": {
         parameters: {
             query?: never;
@@ -10772,6 +10807,31 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["Session"];
                 };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    stop_session: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             404: {
                 headers: {

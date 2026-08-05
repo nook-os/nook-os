@@ -11,6 +11,7 @@ pub mod repo;
 pub mod routes;
 pub mod seed;
 pub mod services;
+pub mod session_status;
 pub mod state;
 pub mod ws;
 

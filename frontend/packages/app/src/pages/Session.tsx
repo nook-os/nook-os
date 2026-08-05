@@ -580,6 +580,10 @@ export function SessionPage() {
     });
   };
 
+  // A stopped session is NOT dead — it is parked, and the same "restart"
+  // control brings it back — but it does share the "nothing to attach to"
+  // shape, so it gets the same affordance under a different name (AC-2/AC-6).
+  const stopped = status === "stopped";
   const dead = status === "exited" || status === "error";
   // The node holds no live WebSocket — a seeded/synthetic node that reads
   // `online` in the database but never connected, or a real node that dropped.
@@ -673,7 +677,11 @@ export function SessionPage() {
               {offline ? "node offline" : status}
             </Pill>
             {session.checkout && <CheckoutChip checkout={session.checkout} />}
-            {dead ? (
+            {stopped ? (
+              <button className="btn small" onClick={restart} title="start this session again">
+                <RotateCw size={12} /> start
+              </button>
+            ) : dead ? (
               <button className="btn small" onClick={restart} title="restart session">
                 <RotateCw size={12} /> restart
               </button>

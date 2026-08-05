@@ -316,7 +316,9 @@ export function SessionNavigator({ activeId }: { activeId?: string }) {
               {!collapsed &&
                 f.sessions.map((s) => {
                   const st = sessionStatus[s.id];
-                  const dead = st === "exited" || st === "error" || st === "killed";
+                  // `stopped` is deliberately absent: it is not dead, it is parked, and
+          // opening it starts it again (MAIN-415 AC-6).
+          const dead = st === "exited" || st === "error" || st === "killed";
                   const agent = dead ? undefined : agentState[s.id]?.state;
                   return (
                     <button

@@ -838,7 +838,7 @@ async fn retenant(state: &AppState, ctx: AuthCtx, parts: &Parts) -> Result<AuthC
         }
         // A finished session is not a licence. Its row keeps the tenant, and
         // honouring it would let a machine act for work that ended.
-        if !matches!(session.status.as_str(), "starting" | "running" | "detached") {
+        if !crate::session_status::is_live(&session.status) {
             return Ok(ctx);
         }
         // The header, when present, has to agree with the session — a request

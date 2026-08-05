@@ -296,15 +296,21 @@ impl OperatorRepository for DbOperatorRepository {
 
     async fn tenants_page(&self, args: &PageArgs) -> ApiResult<DbPage<OperatorTenant>> {
         Ok(ListSpec {
-            select: "SELECT t.id, t.slug, t.org_id, t.created_at,
+            // "Active" here is OCCUPANCY — what this tenant is running right
+            // now — so a stopped session is not counted (MAIN-415 AC-5).
+            select: concat!(
+                "SELECT t.id, t.slug, t.org_id, t.created_at,
                 (SELECT count(*) FROM users u WHERE u.tenant_id = t.id)    AS members,
                 (SELECT count(*) FROM nodes n WHERE n.tenant_id = t.id)    AS nodes,
                 (SELECT count(*) FROM sessions s
                   WHERE s.tenant_id = t.id
-                    AND s.status IN ('starting','running','detached'))     AS active_sessions,
+                    AND s.status IN (",
+                crate::live_sql!(),
+                "))     AS active_sessions,
                 (SELECT count(*) FROM workspaces w WHERE w.tenant_id = t.id) AS workspaces,
                 t.name AS name
-         FROM tenants t",
+         FROM tenants t"
+            ),
             id: "id",
             search: &["slug", "name"],
         }
@@ -314,12 +320,18 @@ impl OperatorRepository for DbOperatorRepository {
 
     async fn nodes_page(&self, args: &PageArgs) -> ApiResult<DbPage<OperatorNode>> {
         Ok(ListSpec {
-            select: "SELECT n.id, n.name, n.platform, n.status, n.last_seen_at, n.resources,
+            // Occupancy again: this is what the node is carrying, and a stopped
+            // session carries nothing (MAIN-415 AC-4/AC-5).
+            select: concat!(
+                "SELECT n.id, n.name, n.platform, n.status, n.last_seen_at, n.resources,
                 n.tenant_id, t.slug AS tenant_slug,
                 (SELECT count(*) FROM sessions s
                   WHERE s.node_id = n.id
-                    AND s.status IN ('starting','running','detached')) AS active_sessions
-         FROM nodes n JOIN tenants t ON t.id = n.tenant_id",
+                    AND s.status IN (",
+                crate::live_sql!(),
+                ")) AS active_sessions
+         FROM nodes n JOIN tenants t ON t.id = n.tenant_id"
+            ),
             id: "id",
             search: &["name", "tenant_slug", "platform", "status"],
         }

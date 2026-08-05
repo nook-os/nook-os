@@ -242,6 +242,8 @@ export function SessionTabs({ activeId }: { activeId?: string }) {
             {!g.collapsed &&
               g.tabs.map((t) => {
           const st = sessionStatus[t.id];
+          // `stopped` is deliberately absent: it is not dead, it is parked, and
+          // opening it starts it again (MAIN-415 AC-6).
           const dead = st === "exited" || st === "error" || st === "killed";
           const dragged = dragId ? visible.find((x) => x.id === dragId) : null;
           // A drop is only legal within the same pin group (AC-3), so the

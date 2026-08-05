@@ -1229,9 +1229,10 @@ impl NodeRepository for DbNodeRepository {
                 &format!(
                     "UPDATE sessions SET status = 'exited', ended_at = {now}, updated_at = {now}
                      WHERE node_id = $1
-                       AND status IN ('starting', 'running', 'detached')
+                       AND status IN ({live})
                        AND (tmux_session IS NULL OR tmux_session != ALL($2))",
-                    now = type_mapping(self.db.engine()).now()
+                    now = type_mapping(self.db.engine()).now(),
+                    live = crate::session_status::LIVE_SQL
                 ),
                 params![node, live_tmux_sessions.to_vec()],
             )
@@ -1242,8 +1243,11 @@ impl NodeRepository for DbNodeRepository {
         let rows: Vec<(Uuid,)> = self
             .db
             .query_all(
-                "SELECT id FROM sessions
-                 WHERE node_id = $1 AND status IN ('starting', 'running', 'detached')",
+                &format!(
+                    "SELECT id FROM sessions
+                 WHERE node_id = $1 AND status IN ({live})",
+                    live = crate::session_status::LIVE_SQL
+                ),
                 params![node],
             )
             .await?;
@@ -1275,8 +1279,9 @@ impl NodeRepository for DbNodeRepository {
             .exec(
                 &format!(
                     "UPDATE sessions SET status = 'exited', ended_at = {now}, updated_at = {now}
-                     WHERE id = $1 AND node_id = $2",
-                    now = type_mapping(self.db.engine()).now()
+                     WHERE id = $1 AND node_id = $2 AND status IN ({live})",
+                    now = type_mapping(self.db.engine()).now(),
+                    live = crate::session_status::LIVE_SQL
                 ),
                 params![session, node],
             )
@@ -2359,7 +2364,7 @@ impl NodeRepository for FakeNodeRepository {
         let mut s = self.inner.lock().unwrap();
         let mut n = 0;
         for sess in s.sessions.iter_mut() {
-            let believed_live = matches!(sess.status.as_str(), "starting" | "running" | "detached");
+            let believed_live = crate::session_status::is_live(&sess.status);
             let gone = match &sess.tmux_session {
                 None => true,
                 Some(t) => !live_tmux_sessions.contains(t),
@@ -2379,9 +2384,7 @@ impl NodeRepository for FakeNodeRepository {
             .unwrap()
             .sessions
             .iter()
-            .filter(|x| {
-                x.node == node && matches!(x.status.as_str(), "starting" | "running" | "detached")
-            })
+            .filter(|x| x.node == node && crate::session_status::is_live(&x.status))
             .map(|x| x.id)
             .collect())
     }
@@ -2415,8 +2418,12 @@ impl NodeRepository for FakeNodeRepository {
             match s
                 .sessions
                 .iter_mut()
-                .find(|x| x.id == session && x.node == node)
-            {
+                // Mirrors the database's guard: only a LIVE session ends. A
+                // stopped one stays stopped when the node reports the tmux it
+                // was told to kill.
+                .find(|x| {
+                    x.id == session && x.node == node && crate::session_status::is_live(&x.status)
+                }) {
                 Some(x) => {
                     x.status = "exited".into();
                     1

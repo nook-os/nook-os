@@ -183,6 +183,7 @@ use utoipa::OpenApi;
         crate::routes::sessions::create,
         crate::routes::sessions::open_terminal,
         crate::routes::sessions::kill,
+        crate::routes::sessions::stop,
         crate::routes::sessions::update,
         crate::routes::sessions::restart,
         crate::routes::sessions::delete,
