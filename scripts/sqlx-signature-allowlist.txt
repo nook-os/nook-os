@@ -41,10 +41,6 @@ crates/nook-testkit/src/lib.rs               # the `pool: PgPool` escape hatch i
 crates/nook-control/tests/checkout_kind.rs
 crates/nook-control/tests/executor_selection.rs
 crates/nook-control/tests/interactions.rs
-crates/nook-control/tests/job_reaper.rs
-crates/nook-control/tests/loop_job_execution.rs
-crates/nook-control/tests/loop_job_messages.rs
-crates/nook-control/tests/loop_jobs.rs
 crates/nook-control/tests/loops_switch.rs
 crates/nook-control/tests/migrate_paths.rs
 crates/nook-control/tests/multi_instance.rs
