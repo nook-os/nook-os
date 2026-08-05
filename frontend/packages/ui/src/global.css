@@ -116,7 +116,12 @@ textarea {
 .nook-app {
   display: grid;
   grid-template-columns: 46px 1fr;
-  grid-template-rows: 40px 1fr 24px;
+  /* Named, because the compact top bar becomes a scroll container and its
+     dropdowns have to escape it by going `fixed` — which means something has
+     to know how far down the bar ends. One definition, so the row and the
+     menus beneath it cannot drift apart. */
+  --nook-topbar-h: 40px;
+  grid-template-rows: var(--nook-topbar-h) 1fr 24px;
   grid-template-areas:
     "topbar topbar"
     "rail main"
@@ -6076,7 +6081,11 @@ tr:hover .row-action,
     /* One column. The rail leaves the side and becomes a row under the
        status strip, where a thumb reaches it. */
     grid-template-columns: 1fr;
-    grid-template-rows: auto 1fr auto auto;
+    /* The bar is one non-wrapping row here (its tabs are hidden and its labels
+       collapse to icons), so `auto` only ever resolved to the same height this
+       states outright — and stating it is what lets a `fixed` dropdown sit
+       directly under the bar without measuring anything. */
+    grid-template-rows: var(--nook-topbar-h) 1fr auto auto;
     grid-template-areas:
       "topbar"
       "main"
@@ -6137,6 +6146,31 @@ tr:hover .row-action,
   }
   .nook-topbar::-webkit-scrollbar {
     display: none;
+  }
+  /* The team and workspace menus have to LEAVE the bar.
+   *
+   * `overflow-x: auto` above makes the bar a scroll container, and a scroll
+   * container clips its absolutely-positioned descendants no matter what
+   * z-index they carry — CSS also forces the other axis to `auto` the moment
+   * one axis stops being `visible`, so a menu hanging BELOW the bar was cut
+   * off at its bottom edge. It read as "the dropdown is behind the content";
+   * it was never a layering problem, and raising z-index could not have fixed
+   * it.
+   *
+   * `fixed` takes them out of that container entirely. They span the width at
+   * this size rather than hanging off the trigger, which is the phone shape
+   * anyway — a 220px menu anchored to a button near the right edge would run
+   * off screen. */
+  .team-switcher-menu,
+  .ws-switcher-menu {
+    position: fixed;
+    top: calc(var(--nook-topbar-h) + 4px);
+    left: 6px;
+    right: 6px;
+    min-width: 0;
+    max-height: calc(100vh - var(--nook-topbar-h) - 24px);
+    overflow-y: auto;
+    z-index: 400;
   }
   .nook-topbar .nook-tabs {
     display: none;
