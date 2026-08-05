@@ -264,3 +264,86 @@ async fn operator_authorize_does_not_grant_node_use() {
 
     bed.teardown().await;
 }
+
+/// The same finding, pinned on the ROUTE rather than on the permission system.
+///
+/// `a_tenant_admin_holds_node_manage_but_not_the_operator_gate` asserts that a
+/// tenant admin fails `require(.., Deployment)`. That is a true and useful fact
+/// about `AuthCtx`, but it is green whatever scope this HANDLER passes —
+/// measured: reverting the gate to `Scope::Tenant(tenant)` leaves all six of
+/// the tests above passing. Only calling the handler can catch that.
+///
+/// The two failures are distinguishable, which is what makes the assertion
+/// sharp: the gate refuses with a 403, while a caller who gets THROUGH it
+/// reaches an offline node and is told so.
+#[tokio::test]
+async fn the_route_itself_refuses_a_tenant_admin() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let theirs = bed.tenant("their-tenant").await;
+    let (admin, person) = bed.user(theirs, "owner").await;
+    let node = bed.node(theirs, person).await;
+    let state = bed.app_state().await;
+    state
+        .operator
+        .grant_tenant_role(admin.0, "tenant_admin", theirs, admin.0)
+        .await
+        .expect("grant tenant_admin");
+
+    let err = format!(
+        "{:?}",
+        nook_control::routes::operator::authorize_runtime(
+            axum::extract::State(state.clone()),
+            ctx(admin, theirs),
+            axum::extract::Path(node),
+            axum::Json(AuthorizeRuntimeRequest {
+                runtime: "claude".into(),
+            }),
+        )
+        .await
+        .expect_err("the route must refuse a tenant admin")
+    );
+    assert!(
+        !err.contains("offline"),
+        "refused for the wrong reason — it cleared the gate and only stopped at \
+         the offline node, which is the vulnerability this pins: {err}"
+    );
+
+    bed.teardown().await;
+}
+
+/// The other side, without which the test above would pass against a gate that
+/// refused everybody: a deployment operator CLEARS it and is stopped only by
+/// the node being offline.
+#[tokio::test]
+async fn the_route_admits_a_deployment_operator() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let (operator, op_home) = an_operator(&bed).await;
+    let theirs = bed.tenant("someone-else").await;
+    let (_, owner) = bed.user(theirs, "owner").await;
+    let node = bed.node(theirs, owner).await;
+    let state = bed.app_state().await;
+
+    let err = format!(
+        "{:?}",
+        nook_control::routes::operator::authorize_runtime(
+            axum::extract::State(state.clone()),
+            ctx(operator, op_home),
+            axum::extract::Path(node),
+            axum::Json(AuthorizeRuntimeRequest {
+                runtime: "claude".into(),
+            }),
+        )
+        .await
+        .expect_err("a bed's node is never online")
+    );
+    assert!(
+        err.contains("offline"),
+        "the operator must clear the gate and stop at the node, not at a 403: {err}"
+    );
+
+    bed.teardown().await;
+}
