@@ -58,6 +58,42 @@
 # That is what makes `false` a real choice rather than a silent one. It does not
 # make it the safe default: an app that ignores the variable still collides.
 
+# ── WHICH SESSIONS NEED THESE (MAIN-378) ────────────────────────────────────
+#
+# `runtimes` on a listener says which session runtimes need it, and OMITTING the
+# key means every runtime. That is the mechanism this repo does NOT use, and the
+# absence below is deliberate — this comment is here so nobody reads it as an
+# oversight and "fixes" it.
+#
+# The first cut scoped all eleven to `["bash", "zsh"]`, reasoning that CLAUDE.md
+# describes the stack coming up once per checkout and agents then editing
+# against containers that rebuild themselves. **The owner's 2026-08-05 ruling
+# reversed that: agent sessions — `claude` and every other runtime that can run
+# the stack — keep their ports.**
+#
+# The reason is the failure direction. An agent following the documented
+# `docker compose up -d` loop with no variables set falls through every
+# `${VAR:-<literal>}` below and binds 8080 / 5432 / 5173 — the shared literals
+# MAIN-376 removed — and it is not even told: `NOOK_PORTS_UNSATISFIED` fires for
+# a listener that was WANTED and unavailable, never for one this runtime never
+# asked for, so a runtime-scoped-out session gets neither the ports nor the
+# notice. Silently binding a shared literal is unrecoverable and invisible; an
+# exhausted range refuses BY NAME and is recoverable. Safety wins over the
+# capacity number.
+#
+# **And "every runtime that can run the stack" is written as ABSENCE rather than
+# a list, because a list goes stale in exactly the dangerous direction.** Every
+# runtime here gets a shell and can therefore run `docker compose up -d`;
+# spelling out `["bash", "zsh", "claude", "codex", "hermes"]` would mean the
+# next runtime somebody adds silently leases nothing and rebinds 8080 — the very
+# bug the ruling closed, deferred until nobody is looking for it. There is no
+# enumeration to keep current if there is no enumeration.
+#
+# So the ceiling here is still nine concurrent sessions against a 100-port node,
+# for every session type. That is the accepted cost, not an oversight: MAIN-378
+# is the MECHANISM, and this repo is not a repo the mechanism helps. A repo whose
+# agent sessions genuinely cannot publish anything is where it pays off.
+
 # The control plane: the browser door and the agent (mTLS) door.
 [[ports]]
 name = "control"

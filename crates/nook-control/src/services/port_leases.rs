@@ -54,6 +54,9 @@ pub fn default_requirements() -> Vec<PortRequirement> {
         env: "NOOK_PORT".into(),
         protocol: "tcp".into(),
         required: false,
+        // Every runtime: the zero-config default must keep behaving as it does
+        // today for a repo that has declared nothing at all (AC-4).
+        runtimes: Vec::new(),
     }]
 }
 
@@ -164,6 +167,19 @@ pub struct Leased {
     pub unsatisfied: Vec<String>,
 }
 
+/// Is this listener for a session running `runtime`?
+///
+/// EMPTY means every runtime, and that default is load-bearing: an untouched
+/// `.nook.toml` must keep leasing exactly what it leases today (MAIN-378 AC-4),
+/// so saying nothing has to mean "all", never "none".
+///
+/// Matched case-insensitively because a declaration is hand-written and
+/// `Bash` meaning something different from `bash` would be a trap with no
+/// upside.
+pub fn wants(req: &PortRequirement, runtime: &str) -> bool {
+    req.runtimes.is_empty() || req.runtimes.iter().any(|r| r.eq_ignore_ascii_case(runtime))
+}
+
 /// What a RESTART should report as unsatisfied.
 ///
 /// A restart keeps the ports it already holds rather than re-leasing (MAIN-301),
@@ -190,6 +206,7 @@ pub async fn unsatisfied_on_restart(
     tenant: TenantId,
     node: NodeId,
     workspace: Option<WorkspaceId>,
+    runtime: &str,
     held: &[LeasedPort],
 ) -> ApiResult<Vec<String>> {
     let (range, _) = range_of(state, node).await?;
@@ -199,6 +216,9 @@ pub async fn unsatisfied_on_restart(
     Ok(requirements_of(state, tenant, workspace)
         .await?
         .into_iter()
+        // Same runtime filter the allocator applied: a listener this runtime
+        // never asks for was not "unsatisfied", it was not wanted.
+        .filter(|r| wants(r, runtime))
         .filter(|r| !r.required)
         .filter(|r| !held.iter().any(|l| l.name == r.name))
         .map(|r| r.name)
@@ -222,8 +242,9 @@ pub async fn lease_for(
     node: NodeId,
     workspace: Option<WorkspaceId>,
     session: SessionId,
+    runtime: &str,
 ) -> ApiResult<Leased> {
-    lease_for_avoiding(state, tenant, node, workspace, session, &[]).await
+    lease_for_avoiding(state, tenant, node, workspace, session, runtime, &[]).await
 }
 
 /// The same, minus ports a node has just told us it could not bind.
@@ -238,10 +259,17 @@ pub async fn lease_for_avoiding(
     node: NodeId,
     workspace: Option<WorkspaceId>,
     session: SessionId,
+    runtime: &str,
     avoid: &[i32],
 ) -> ApiResult<Leased> {
-    let reqs = requirements_of(state, tenant, workspace).await?;
+    let reqs: Vec<PortRequirement> = requirements_of(state, tenant, workspace)
+        .await?
+        .into_iter()
+        .filter(|r| wants(r, runtime))
+        .collect();
     if reqs.is_empty() {
+        // Either the repo declares nothing, or nothing it declares is for this
+        // runtime. Both are working sessions without ports, not failures.
         return Ok(Leased::default());
     }
     let (range, _) = range_of(state, node).await?;

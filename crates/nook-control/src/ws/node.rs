@@ -718,6 +718,7 @@ async fn handle_message(
                 node_id,
                 session.workspace_id,
                 session_id,
+                &session.runtime,
                 &ports,
             )
             .await

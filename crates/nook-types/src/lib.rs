@@ -733,6 +733,21 @@ pub struct PortRequirement {
     /// safe for an app that checks it and still unsafe for one that does not.
     #[serde(default)]
     pub required: bool,
+    /// Which session runtimes this listener is for. EMPTY means every runtime,
+    /// which is the default and is what keeps an untouched `.nook.toml`
+    /// leasing exactly what it leases today (MAIN-378 AC-4).
+    ///
+    /// The opt-in that fixes the ceiling. A declaration belongs to the
+    /// WORKSPACE, so before this every session in a repo leased the whole set —
+    /// a shell and an agent as much as the session actually running the app.
+    /// Eleven listeners against a 100-port range is nine concurrent sessions,
+    /// and most of them bind nothing.
+    ///
+    /// DECLARED, never guessed (AC-3): nothing inspects the process tree or
+    /// waits to see whether something binds. The repo says which runtimes need
+    /// the port, in a form its author can read.
+    #[serde(default)]
+    pub runtimes: Vec<String>,
 }
 
 fn default_protocol() -> String {

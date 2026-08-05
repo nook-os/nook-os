@@ -181,6 +181,7 @@ pub async fn create_session_at(
         node_id,
         Some(workspace_id),
         session.id,
+        runtime,
     )
     .await
     {
@@ -261,16 +262,17 @@ pub async fn create_ad_hoc_session(
 
     // No workspace, so nothing declares a listener and nothing is leased — an
     // $HOME terminal is not a repo.
-    let ports =
-        match crate::services::port_leases::lease_for(state, tenant, node_id, None, session.id)
-            .await
-        {
-            Ok(p) => p,
-            Err(e) => {
-                state.sessions.mark_failed_to_start(session.id).await?;
-                return Err(e);
-            }
-        };
+    let ports = match crate::services::port_leases::lease_for(
+        state, tenant, node_id, None, session.id, runtime,
+    )
+    .await
+    {
+        Ok(p) => p,
+        Err(e) => {
+            state.sessions.mark_failed_to_start(session.id).await?;
+            return Err(e);
+        }
+    };
 
     let sent = state.registry.send_to_node(
         node_id,
