@@ -25,6 +25,10 @@ serde_json = "1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 tokio = { version = "1", features = ["time"] }
 tauri-plugin-shell = "2.3.5"
+# A local install generates its own session secret and its own node join token
+# (MAIN-398). Both are credentials, so they come from a CSPRNG rather than
+# anything derived from the clock or the path.
+rand = "0.9"
 
 [lib]
 name = "nookos_desktop_lib"

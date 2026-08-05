@@ -354,7 +354,17 @@ fn free_port() -> Result<u16, String> {
 /// exactly the ones MAIN-376 showed go wrong silently. `PUBLIC_BASE_URL` and
 /// `WEB_ORIGIN` must carry the CHOSEN port: left at a default they point every
 /// task-key link, invite and agent-authored URL at a port nothing is serving.
-fn control_plane_env(db_path: &std::path::Path, port: u16) -> Vec<(String, String)> {
+///
+/// Both doors are bound to LOOPBACK. The control plane's own defaults are
+/// `0.0.0.0:8080` and `0.0.0.0:8081`, which are right for a server and wrong
+/// for a laptop: they publish a control plane to the coffee-shop wifi, and they
+/// are fixed numbers that collide with a dev stack on the same machine.
+fn control_plane_env(
+    db_path: &std::path::Path,
+    port: u16,
+    agent_port: u16,
+    secrets: &LocalSecrets,
+) -> Vec<(String, String)> {
     let base = format!("http://127.0.0.1:{port}");
     vec![
         // `sqlite://` selects the engine by URL, the same way boot does
@@ -368,10 +378,160 @@ fn control_plane_env(db_path: &std::path::Path, port: u16) -> Vec<(String, Strin
         // fatal, which is right for a server and wrong for a desktop app whose
         // database is a file the user can corrupt.
         ("APP_ENV".into(), "desktop".into()),
-        ("NOOK_CONTROL_PORT".into(), port.to_string()),
+        // The variable the control plane actually reads. `NOOK_CONTROL_PORT` —
+        // which this used to set — is a COMPOSE-side variable that publishes a
+        // host port; the process itself has never read it, so the chosen port
+        // was silently ignored and the health poll could never succeed.
+        ("CONTROL_PLANE_BIND".into(), format!("127.0.0.1:{port}")),
+        ("NOOK_AGENT_BIND".into(), format!("127.0.0.1:{agent_port}")),
+        // Required — with it unset the process exits at config load with
+        // "SESSION_SECRET is required" before binding anything. Persisted
+        // rather than fresh per launch so a restart does not sign the user out.
+        ("SESSION_SECRET".into(), secrets.session_secret.clone()),
+        // What the bundled node trades for an identity (MAIN-398). Seeded into
+        // the local tenant at boot; see `nook_infra::Config::local_join_token`.
+        ("NOOK_LOCAL_JOIN_TOKEN".into(), secrets.join_token.clone()),
         ("PUBLIC_BASE_URL".into(), base.clone()),
         ("WEB_ORIGIN".into(), base),
     ]
+}
+
+// ── the local node (MAIN-398) ────────────────────────────────────────────────
+//
+// Sessions run on NODES, so a control plane with none can show a board and open
+// nothing. The bundled node is an ordinary node that happens to join over
+// loopback: same join, same protocol, same session handling as any machine in a
+// fleet (NG-1 — none of that changes here).
+
+/// The two credentials a local install generates once and then keeps.
+///
+/// Kept rather than regenerated because both are agreements between two
+/// processes across restarts. A fresh `session_secret` invalidates every browser
+/// session, so the person is signed out every launch; a fresh `join_token` is
+/// one the already-joined node has no use for.
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct LocalSecrets {
+    pub session_secret: String,
+    pub join_token: String,
+}
+
+/// A credential from the OS CSPRNG. Alphanumeric so it survives a TOML string
+/// and a shell environment without escaping.
+fn random_secret(prefix: &str, len: usize) -> String {
+    use rand::distr::Alphanumeric;
+    use rand::Rng;
+    let body: String = rand::rng()
+        .sample_iter(&Alphanumeric)
+        .take(len)
+        .map(char::from)
+        .collect();
+    format!("{prefix}{body}")
+}
+
+/// Read this install's secrets, generating them on first run.
+///
+/// A file that is missing, unreadable or half-written is replaced rather than
+/// treated as fatal: it is regenerable state, and refusing to start because of
+/// it would strand an install that nothing else is wrong with.
+fn load_or_create_secrets(dir: &std::path::Path) -> Result<LocalSecrets, String> {
+    let path = dir.join("local-secrets.json");
+    if let Some(s) = fs::read_to_string(&path)
+        .ok()
+        .and_then(|t| serde_json::from_str::<LocalSecrets>(&t).ok())
+        .filter(|s| !s.session_secret.is_empty() && !s.join_token.is_empty())
+    {
+        return Ok(s);
+    }
+    let secrets = LocalSecrets {
+        session_secret: random_secret("", 48),
+        join_token: random_secret("nook_join_", 32),
+    };
+    let text = serde_json::to_string(&secrets).map_err(|e| e.to_string())?;
+    fs::write(&path, text).map_err(|e| format!("could not write {}: {e}", path.display()))?;
+    restrict_to_owner(&path);
+    Ok(secrets)
+}
+
+/// Best-effort `0600`. A failure is not fatal — the file is already inside the
+/// app-data directory, and refusing to start over a chmod would be worse than
+/// the exposure it prevents.
+fn restrict_to_owner(path: &std::path::Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o600));
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+}
+
+/// Where the bundled node keeps its identity — NOT `~/.config/nook`.
+///
+/// That path belongs to the person's own `nook` CLI. A desktop install writing
+/// `node.toml` there would overwrite the identity of a machine they joined to a
+/// real fleet, and `nook join` overwrites without asking.
+fn node_config_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("no app-data directory: {e}"))?
+        .join("node");
+    fs::create_dir_all(&dir).map_err(|e| format!("could not create {}: {e}", dir.display()))?;
+    Ok(dir)
+}
+
+/// The ports the local node advertises for MAIN-301 leasing (AC-5).
+///
+/// A choice, not a default. It continues this repo's own convention (the
+/// operator node leases `4100-4199`, the dev node `4200-4299`), sits well below
+/// the ephemeral range a kernel hands out on its own, and 100 ports is nine
+/// concurrent sessions at eleven declared listeners each. Advertising nothing
+/// was the alternative and is worse: a workspace with a `required` listener
+/// then cannot start a session at all, and the allocator already recovers from
+/// a port that turns out to be busy (`lease_for_avoiding`).
+const LOCAL_PORT_RANGE: &str = "4300-4399";
+
+/// The environment both `nook join` and `nook run` get.
+fn node_env(config_dir: &std::path::Path) -> Vec<(String, String)> {
+    vec![
+        ("NOOK_CONFIG_DIR".into(), config_dir.display().to_string()),
+        ("NOOK_PORT_RANGE".into(), LOCAL_PORT_RANGE.into()),
+    ]
+}
+
+/// The join spec handed to `nook join --config`.
+///
+/// A file rather than `--token` on the command line: process arguments are
+/// readable by every other user on the machine, and this one enrolls a node.
+/// No escaping is needed because both values are constructed here — the token
+/// is alphanumeric by generation and the URL is a loopback address.
+fn join_spec_toml(base_url: &str, token: &str) -> String {
+    format!("server = \"{base_url}\"\ntoken = \"{token}\"\n")
+}
+
+/// How long the node must stay up before a restart stops counting as a flap.
+const NODE_SETTLED_SECS: u64 = 30;
+
+/// Consecutive fast failures before the UI is told rather than shown a node
+/// that keeps almost-starting (AC-2).
+const NODE_FLAPPING_AFTER: u32 = 3;
+
+/// Backoff between restarts: 1s doubling to a 32s ceiling.
+///
+/// A node that cannot start at all — a missing binary, a control plane that
+/// went away — must not spin a core while the window sits there.
+fn restart_delay(consecutive_failures: u32) -> std::time::Duration {
+    std::time::Duration::from_secs(1 << consecutive_failures.min(5))
+}
+
+/// Append to a bounded tail. A boot log is unbounded and the UI wants its end,
+/// which is where the failure is.
+fn push_tail(buf: &mut String, line: &str) {
+    buf.push_str(line);
+    if buf.len() > 16_384 {
+        let cut = buf.len() - 8_192;
+        *buf = buf.split_off(cut);
+    }
 }
 
 /// Where the local database lives, under the OS-conventional app-data directory
@@ -407,6 +567,15 @@ pub struct LocalStack {
     /// could not start explains itself rather than showing nothing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Whether the bundled node PROCESS is running (MAIN-398 AC-2). Not whether
+    /// the control plane has seen it: that is what the Nodes page shows, and
+    /// this is the half only the shell can know.
+    #[serde(default)]
+    pub node_ready: bool,
+    /// Set once the node has failed to stay up several times running, so a node
+    /// that is quietly gone is visible rather than merely absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node_error: Option<String>,
 }
 
 #[tauri::command]
@@ -467,23 +636,33 @@ fn start_local_stack(app: tauri::AppHandle) {
             }
         };
         let fail = |msg: String| LocalStack {
-            base_url: String::new(),
-            ready: false,
             error: Some(msg),
+            ..LocalStack::default()
         };
 
         let db = match local_db_path(&app) {
             Ok(p) => p,
             Err(e) => return set(fail(e)),
         };
-        let port = match free_port() {
-            Ok(p) => p,
+        let secrets = match db
+            .parent()
+            .ok_or_else(|| "the database path has no directory".to_string())
+            .and_then(load_or_create_secrets)
+        {
+            Ok(s) => s,
             Err(e) => return set(fail(e)),
+        };
+        // Both doors get their own free port. Binding them is all-or-nothing in
+        // the control plane, so a fixed agent port that something else holds
+        // takes the whole boot down with it.
+        let (port, agent_port) = match (free_port(), free_port()) {
+            (Ok(p), Ok(a)) => (p, a),
+            (Err(e), _) | (_, Err(e)) => return set(fail(e)),
         };
         let base = format!("http://127.0.0.1:{port}");
 
         let cmd = match app.shell().sidecar("nook-control") {
-            Ok(c) => c.envs(control_plane_env(&db, port)),
+            Ok(c) => c.envs(control_plane_env(&db, port, agent_port, &secrets)),
             Err(e) => return set(fail(format!("the bundled control plane is missing: {e}"))),
         };
         let (mut rx, _child) = match cmd.spawn() {
@@ -504,14 +683,7 @@ fn start_local_stack(app: tauri::AppHandle) {
                     }
                     _ => continue,
                 };
-                let mut l = sink.lock().unwrap();
-                l.push_str(&line);
-                // Keep the tail only: a boot log is unbounded and the UI wants
-                // the end of it, which is where the failure is.
-                if l.len() > 16_384 {
-                    let cut = l.len() - 8_192;
-                    *l = l.split_off(cut);
-                }
+                push_tail(&mut sink.lock().unwrap(), &line);
             }
         });
 
@@ -519,11 +691,14 @@ fn start_local_stack(app: tauri::AppHandle) {
         // the actual contract, and a log format is not.
         for _ in 0..120 {
             if healthy(&base).await {
-                return set(LocalStack {
-                    base_url: base,
+                set(LocalStack {
+                    base_url: base.clone(),
                     ready: true,
-                    error: None,
+                    ..LocalStack::default()
                 });
+                // Only now: the node has nothing to join until the control
+                // plane answers.
+                return supervise_local_node(app, base, secrets.join_token);
             }
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         }
@@ -531,6 +706,144 @@ fn start_local_stack(app: tauri::AppHandle) {
         set(fail(format!(
             "the control plane did not answer {base}/healthz within 60s\n\n{tail}"
         )));
+    });
+}
+
+/// What one `nook run` did before it stopped.
+struct NodeRun {
+    ran_for: std::time::Duration,
+    tail: String,
+}
+
+/// Enroll this machine's bundled node, once ever (AC-1).
+///
+/// Guarded by `node.toml` rather than a flag of our own: that file IS the
+/// record of having joined, and re-joining an existing node rotates its token
+/// on the server, which would strand the config we already hold.
+async fn join_local_node(
+    app: &tauri::AppHandle,
+    base: &str,
+    token: &str,
+    dir: &std::path::Path,
+) -> Result<(), String> {
+    use tauri_plugin_shell::process::CommandEvent;
+    use tauri_plugin_shell::ShellExt;
+
+    if dir.join("node.toml").exists() {
+        return Ok(());
+    }
+    let spec = dir.join("join.toml");
+    fs::write(&spec, join_spec_toml(base, token))
+        .map_err(|e| format!("could not write {}: {e}", spec.display()))?;
+    restrict_to_owner(&spec);
+
+    let run = async {
+        let (mut rx, _child) = app
+            .shell()
+            .sidecar("nook")
+            .map_err(|e| format!("the bundled node is missing: {e}"))?
+            .envs(node_env(dir))
+            .args(["join", "--config", &spec.display().to_string()])
+            .spawn()
+            .map_err(|e| format!("could not start the node: {e}"))?;
+
+        let mut tail = String::new();
+        let mut code = None;
+        while let Some(ev) = rx.recv().await {
+            match ev {
+                CommandEvent::Stdout(b) | CommandEvent::Stderr(b) => {
+                    push_tail(&mut tail, &String::from_utf8_lossy(&b));
+                }
+                CommandEvent::Terminated(p) => code = p.code,
+                _ => {}
+            }
+        }
+        match code {
+            Some(0) => Ok(()),
+            _ => Err(format!("the node could not join {base}\n\n{tail}")),
+        }
+    }
+    .await;
+
+    // The spec carries a credential; it does not outlive the command that
+    // needed it, on either path.
+    let _ = fs::remove_file(&spec);
+    run
+}
+
+/// Run the node once, returning when it stops.
+async fn run_node_once(app: &tauri::AppHandle, dir: &std::path::Path) -> Result<NodeRun, String> {
+    use tauri_plugin_shell::process::CommandEvent;
+    use tauri_plugin_shell::ShellExt;
+
+    let (mut rx, _child) = app
+        .shell()
+        .sidecar("nook")
+        .map_err(|e| format!("the bundled node is missing: {e}"))?
+        .envs(node_env(dir))
+        .args(["run"])
+        .spawn()
+        .map_err(|e| format!("could not start the node: {e}"))?;
+
+    let started = std::time::Instant::now();
+    let mut tail = String::new();
+    while let Some(ev) = rx.recv().await {
+        if let CommandEvent::Stdout(b) | CommandEvent::Stderr(b) = ev {
+            push_tail(&mut tail, &String::from_utf8_lossy(&b));
+        }
+    }
+    Ok(NodeRun {
+        ran_for: started.elapsed(),
+        tail,
+    })
+}
+
+/// Join once, then keep the node running for as long as the app is up (AC-2).
+fn supervise_local_node(app: tauri::AppHandle, base: String, token: String) {
+    tauri::async_runtime::spawn(async move {
+        let node = |ready: bool, error: Option<String>| {
+            if let Some(st) = app.try_state::<LocalStackState>() {
+                let mut s = st.0.lock().unwrap();
+                s.node_ready = ready;
+                s.node_error = error;
+            }
+        };
+
+        let dir = match node_config_dir(&app) {
+            Ok(d) => d,
+            Err(e) => return node(false, Some(e)),
+        };
+        if let Err(e) = join_local_node(&app, &base, &token, &dir).await {
+            return node(false, Some(e));
+        }
+
+        let mut consecutive = 0u32;
+        loop {
+            node(true, None);
+            let run = match run_node_once(&app, &dir).await {
+                Ok(r) => r,
+                // Spawning failed rather than the node exiting: the binary is
+                // missing or unrunnable, and retrying that on a timer would only
+                // hide it.
+                Err(e) => return node(false, Some(e)),
+            };
+            consecutive = if run.ran_for >= std::time::Duration::from_secs(NODE_SETTLED_SECS) {
+                0
+            } else {
+                consecutive + 1
+            };
+            node(
+                false,
+                (consecutive >= NODE_FLAPPING_AFTER).then(|| {
+                    format!(
+                        "the local node has stopped {consecutive} times without staying up — \
+                         sessions will not start\n\n{}",
+                        run.tail
+                    )
+                }),
+            );
+            tokio::time::sleep(restart_delay(consecutive)).await;
+        }
     });
 }
 
@@ -1025,6 +1338,29 @@ mod boot_tests {
         std::net::TcpListener::bind(("127.0.0.1", p)).expect("the chosen port binds");
     }
 
+    fn secrets() -> LocalSecrets {
+        LocalSecrets {
+            session_secret: "s3cr3t".into(),
+            join_token: "nook_join_abc".into(),
+        }
+    }
+
+    fn env_of(port: u16, agent_port: u16) -> Vec<(String, String)> {
+        control_plane_env(
+            std::path::Path::new("/tmp/x/nook.db"),
+            port,
+            agent_port,
+            &secrets(),
+        )
+    }
+
+    fn get(env: &[(String, String)], k: &str) -> String {
+        env.iter()
+            .find(|(n, _)| n == k)
+            .map(|(_, v)| v.clone())
+            .unwrap_or_else(|| panic!("{k} is not set"))
+    }
+
     /// AC-4: the URLs carry the CHOSEN port.
     ///
     /// MAIN-376's lesson, and the reason this is asserted rather than assumed:
@@ -1032,19 +1368,132 @@ mod boot_tests {
     /// invite and agent-authored URL to a port nothing is serving.
     #[test]
     fn the_public_urls_carry_the_chosen_port() {
-        let env = control_plane_env(std::path::Path::new("/tmp/x/nook.db"), 41007);
-        let get = |k: &str| {
-            env.iter()
-                .find(|(n, _)| n == k)
-                .map(|(_, v)| v.clone())
-                .unwrap_or_else(|| panic!("{k} is not set"))
-        };
-        assert_eq!(get("PUBLIC_BASE_URL"), "http://127.0.0.1:41007");
-        assert_eq!(get("WEB_ORIGIN"), "http://127.0.0.1:41007");
-        assert_eq!(get("NOOK_CONTROL_PORT"), "41007");
+        let env = env_of(41007, 41008);
+        assert_eq!(get(&env, "PUBLIC_BASE_URL"), "http://127.0.0.1:41007");
+        assert_eq!(get(&env, "WEB_ORIGIN"), "http://127.0.0.1:41007");
         for (_, v) in &env {
             assert!(!v.contains("8080"), "no 8080 literal may survive: {v}");
         }
+    }
+
+    /// AC-4: and the control plane actually BINDS it.
+    ///
+    /// The variable this asserts is the one the process reads. MAIN-396 set
+    /// `NOOK_CONTROL_PORT`, which is a compose-side variable that publishes a
+    /// host port — `nook_infra::Config` has never looked at it — so the chosen
+    /// port was ignored, the server came up on `0.0.0.0:8080`, and the health
+    /// poll it was gating could not succeed.
+    #[test]
+    fn both_doors_bind_the_chosen_ports_on_loopback() {
+        let env = env_of(41007, 41008);
+        assert_eq!(get(&env, "CONTROL_PLANE_BIND"), "127.0.0.1:41007");
+        assert_eq!(get(&env, "NOOK_AGENT_BIND"), "127.0.0.1:41008");
+        for k in ["CONTROL_PLANE_BIND", "NOOK_AGENT_BIND"] {
+            assert!(
+                !get(&env, k).starts_with("0.0.0.0"),
+                "{k} must not publish a desktop control plane to the network"
+            );
+        }
+    }
+
+    /// AC-4: without this the child exits at config load, before binding
+    /// anything, and the only symptom is a health check that never passes.
+    #[test]
+    fn the_session_secret_is_supplied() {
+        let env = env_of(1, 2);
+        assert_eq!(get(&env, "SESSION_SECRET"), "s3cr3t");
+    }
+
+    /// AC-1: the join token reaches the control plane so it can seed it, and
+    /// the person is never in the loop.
+    #[test]
+    fn the_join_token_is_handed_to_the_control_plane() {
+        let env = env_of(1, 2);
+        assert_eq!(get(&env, "NOOK_LOCAL_JOIN_TOKEN"), "nook_join_abc");
+        // Not the dev variable: that one also seeds the dogfood workspace, a
+        // dev identity and loops-on, none of which belong on a laptop.
+        assert!(
+            !env.iter().any(|(n, _)| n == "NOOK_DEV_JOIN_TOKEN"),
+            "the dev variable drags compose-stack scaffolding along with it"
+        );
+    }
+
+    /// AC-1: a generated token is a credential, and it has to survive being
+    /// written into TOML and read back without escaping.
+    #[test]
+    fn generated_secrets_are_long_and_alphanumeric() {
+        let token = random_secret("nook_join_", 32);
+        assert!(token.starts_with("nook_join_"));
+        let body = &token["nook_join_".len()..];
+        assert_eq!(body.len(), 32);
+        assert!(
+            body.chars().all(|c| c.is_ascii_alphanumeric()),
+            "{token} would need escaping"
+        );
+        assert_ne!(
+            random_secret("", 48),
+            random_secret("", 48),
+            "two calls must not agree"
+        );
+    }
+
+    /// AC-1: the spec `nook join --config` reads.
+    #[test]
+    fn the_join_spec_names_the_local_server_and_token() {
+        let spec = join_spec_toml("http://127.0.0.1:41007", "nook_join_abc");
+        assert_eq!(
+            spec,
+            "server = \"http://127.0.0.1:41007\"\ntoken = \"nook_join_abc\"\n"
+        );
+    }
+
+    /// AC-5: the node advertises the chosen range, and AC-3's root is left to
+    /// the node's own default rather than overridden here.
+    #[test]
+    fn the_node_advertises_its_port_range_and_its_own_config_dir() {
+        let env = node_env(std::path::Path::new("/home/a/.local/share/nook/node"));
+        assert_eq!(get(&env, "NOOK_PORT_RANGE"), "4300-4399");
+        assert_eq!(
+            get(&env, "NOOK_CONFIG_DIR"),
+            "/home/a/.local/share/nook/node",
+            "never ~/.config/nook — that is the person's own CLI identity"
+        );
+        assert!(
+            !env.iter().any(|(n, _)| n == "NOOK_WORKSPACE_ROOT"),
+            "AC-3 takes the node's own ~/.nook/workspace/<tenant> default"
+        );
+    }
+
+    /// AC-2: backoff grows and then stops growing. A node that cannot start
+    /// must neither spin nor drift into never retrying.
+    #[test]
+    fn restart_backoff_climbs_to_a_ceiling() {
+        assert_eq!(restart_delay(0).as_secs(), 1);
+        assert_eq!(restart_delay(1).as_secs(), 2);
+        assert_eq!(restart_delay(3).as_secs(), 8);
+        assert_eq!(restart_delay(5).as_secs(), 32);
+        assert_eq!(restart_delay(50).as_secs(), 32, "capped, not overflowing");
+    }
+
+    /// AC-2: the log tail stays bounded, so a chatty node cannot grow the
+    /// state the UI reads without limit.
+    #[test]
+    fn the_log_tail_is_bounded_and_keeps_the_end() {
+        let mut buf = String::new();
+        for i in 0..4000 {
+            push_tail(&mut buf, &format!("line {i}\n"));
+        }
+        assert!(buf.len() <= 16_384, "bounded, was {}", buf.len());
+        assert!(buf.ends_with("line 3999\n"), "the END is what explains it");
+    }
+
+    /// AC-2: the state the webview reads distinguishes "no node yet" from
+    /// "the node is gone", which is the difference AC-2 is about.
+    #[test]
+    fn a_fresh_state_reports_no_node_and_no_node_failure() {
+        let s = LocalStack::default();
+        assert!(!s.node_ready);
+        assert!(s.node_error.is_none());
     }
 
     /// AC-1: a SQLite URL at the app-data path, and an APP_ENV that is not
@@ -1052,20 +1501,20 @@ mod boot_tests {
     /// production arm makes an unaccountable ledger fatal.
     #[test]
     fn the_database_is_sqlite_at_the_given_path_and_env_is_not_production() {
-        let env = control_plane_env(std::path::Path::new("/home/a/.local/share/nook/nook.db"), 1);
-        let url = env
-            .iter()
-            .find(|(n, _)| n == "DATABASE_URL")
-            .map(|(_, v)| v.clone())
-            .unwrap();
+        let env = control_plane_env(
+            std::path::Path::new("/home/a/.local/share/nook/nook.db"),
+            1,
+            2,
+            &secrets(),
+        );
+        let url = get(&env, "DATABASE_URL");
         assert_eq!(url, "sqlite:///home/a/.local/share/nook/nook.db");
         assert!(
             url.starts_with("sqlite://"),
             "engine is selected by URL scheme"
         );
 
-        let app_env = env.iter().find(|(n, _)| n == "APP_ENV").unwrap().1.clone();
-        assert_ne!(app_env, "production");
+        assert_ne!(get(&env, "APP_ENV"), "production");
     }
 
     /// The state the webview reads starts as not-ready with no error, so the UI

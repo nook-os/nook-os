@@ -91,6 +91,14 @@ export interface LocalStack {
   ready: boolean;
   /** The child's own log tail, present only when it never became healthy. */
   error?: string;
+  /**
+   * Whether the bundled node process is running (MAIN-398). Absent on a shell
+   * that predates it — which is not the same as a node that is down, so read it
+   * as unknown rather than false.
+   */
+  node_ready?: boolean;
+  /** Set once the node has repeatedly failed to stay up, with its log tail. */
+  node_error?: string;
 }
 
 /**

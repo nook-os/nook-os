@@ -382,8 +382,15 @@ pub async fn run(db: &DbPool, cfg: &Config) -> Result<()> {
         }
     };
 
-    // Well-known join token so the compose node can auto-join on boot.
-    if let Some(token) = &cfg.dev_join_token {
+    // Well-known join token so the compose node can auto-join on boot — or, on
+    // a desktop install, so the bundled node can (MAIN-398). Either variable
+    // seeds the row; only `dev_join_token` gates the dogfood block far below,
+    // which is scaffolding for the compose stack and wrong on a laptop.
+    if let Some(token) = cfg
+        .dev_join_token
+        .as_ref()
+        .or(cfg.local_join_token.as_ref())
+    {
         db.exec(
             &format!(
                 "INSERT INTO join_tokens (id, tenant_id, token_hash, name, expires_at)
