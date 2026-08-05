@@ -193,7 +193,7 @@ pub async fn reconcile_status(
             .map(|id| ReconcileBlocker {
                 node_id: *id,
                 node_name: named.get(id).cloned().unwrap_or_default(),
-                reason: "needs_clone".to_string(),
+                reason: nook_types::NodeBlocker::NeedsClone,
             })
             .collect(),
         eligible: (plan.desired.saturating_sub(plan.shortfall)) as u32,
