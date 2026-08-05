@@ -11,9 +11,22 @@
 # line for a failure that is already covered.
 #
 # EVERY LINE NAMES THE CARD THAT OWNS IT, because a list of failures with no
-# owner is where failures go to be forgotten — the guard's self-test enforces
-# it. Tests that are Postgres-only BY DESIGN have no card and never get deleted,
-# so they are not in this file at all: see scripts/sqlite-ci-engine-specific.txt.
+# owner is where failures go to be forgotten. Tests that are Postgres-only BY
+# DESIGN have no card and never get deleted, so they are not in this file at
+# all: see scripts/sqlite-ci-engine-specific.txt.
+#
+# WHAT THE SELF-TEST ACTUALLY CHECKS, and the gap that leaves (MAIN-423). It
+# greps each entry for `MAIN-NN` — a SPELLING rule, not an ownership one. The
+# guard proper never sees the tag at all: `strip()` deletes everything after
+# `#` before parsing. So a line can name a card that is closed, or one that
+# never existed, and CI stays green while the work it describes has no owner
+# left to delete it. That is not hypothetical: 16 of these lines named
+# MAIN-289 for weeks after that card went Done — its four children landed,
+# nothing carried the remainder, and no check could notice. Re-tagged to
+# MAIN-423 on 2026-08-05.
+#
+# So when you CLOSE a card, grep this file for its number before you do.
+# Nothing else will.
 #
 # Measured on two full runs of `cargo test --workspace --no-fail-fast` under
 # sqlite://, which produced identical failure sets — nothing here is flaky.
@@ -54,18 +67,18 @@ squash_restamp             # raw sqlx / bed.pool in the test itself (MAIN-268)
 task_checkout_ids          # raw sqlx / bed.pool in the test itself (MAIN-268)
 tenant_isolation           # raw sqlx / bed.pool in the test itself (MAIN-268)
 
-# ── production still emits Postgres SQL (MAIN-289, the dialect sweep) ──
-node_enrolment             # production still emits Postgres SQL on this path (MAIN-289)
-node_owner                 # production still emits Postgres SQL on this path (MAIN-289)
-nook_worker:lib            # production still emits Postgres SQL on this path (MAIN-289)
-overview_visibility        # production still emits Postgres SQL on this path (MAIN-289)
-task_parent                # production still emits Postgres SQL on this path (MAIN-289)
-task_type                  # production still emits Postgres SQL on this path (MAIN-289)
-task_workspace             # production still emits Postgres SQL on this path (MAIN-289)
-taught_skills              # production still emits Postgres SQL on this path (MAIN-289)
-visibility_agreement       # production still emits Postgres SQL on this path (MAIN-289)
+# ── production still emits Postgres SQL (MAIN-423, the dialect-sweep residue) ──
+node_enrolment             # production still emits Postgres SQL on this path (MAIN-423)
+node_owner                 # production still emits Postgres SQL on this path (MAIN-423)
+nook_worker:lib            # production still emits Postgres SQL on this path (MAIN-423)
+overview_visibility        # production still emits Postgres SQL on this path (MAIN-423)
+task_parent                # production still emits Postgres SQL on this path (MAIN-423)
+task_type                  # production still emits Postgres SQL on this path (MAIN-423)
+task_workspace             # production still emits Postgres SQL on this path (MAIN-423)
+taught_skills              # production still emits Postgres SQL on this path (MAIN-423)
+visibility_agreement       # production still emits Postgres SQL on this path (MAIN-423)
 
-# ── production decodes a raw uuid that is TEXT on SQLite (MAIN-289) ──
+# ── production decodes a raw uuid that is TEXT on SQLite (MAIN-423) ──
 #
 # `identity::org_of` reads `tenants.org_id` into a bare `uuid::Uuid`, which wants
 # 16 bytes; on SQLite the column is a 36-char TEXT and the decode fails with
@@ -82,8 +95,8 @@ visibility_agreement       # production still emits Postgres SQL on this path (M
 # decode error is also not an Ok — so it would read green against a database
 # that never answered the question. That is why the whole binary is excluded
 # rather than the two loud cases.
-rbac_across_tenants        # org_of decodes a raw uuid; TEXT on SQLite (MAIN-289)
-implicit_tenant_admin      # org_of decodes a raw uuid; TEXT on SQLite (MAIN-289)
+rbac_across_tenants        # org_of decodes a raw uuid; TEXT on SQLite (MAIN-423)
+implicit_tenant_admin      # org_of decodes a raw uuid; TEXT on SQLite (MAIN-423)
 
 # ── still production Postgres SQL, re-tagged by MAIN-293 ──
 #
@@ -94,10 +107,10 @@ implicit_tenant_admin      # org_of decodes a raw uuid; TEXT on SQLite (MAIN-289
 # gone; what remains here is the second, which is production emitting Postgres
 # SQL and belongs to the dialect sweep. `local_accounts` passed outright and its
 # line is deleted.
-backlog_invisible          # production calls gen_random_uuid() and a :: cast (MAIN-289)
-dev_signin                 # production emits Postgres-only syntax (MAIN-289)
-task_visibility            # production calls gen_random_uuid() directly — routes/tenants.rs, routes/verify_email.rs (MAIN-289)
-tenant_ca                  # production emits Postgres-only syntax (MAIN-289)
+backlog_invisible          # production calls gen_random_uuid() and a :: cast (MAIN-423)
+dev_signin                 # production emits Postgres-only syntax (MAIN-423)
+task_visibility            # production calls gen_random_uuid() directly — routes/tenants.rs, routes/verify_email.rs (MAIN-423)
+tenant_ca                  # production emits Postgres-only syntax (MAIN-423)
 
 # ── chat's production SQL is still Postgres, re-tagged by MAIN-294 ──
 #
@@ -112,4 +125,4 @@ tenant_ca                  # production emits Postgres-only syntax (MAIN-289)
 # call `GREATEST`, so the queries fail with `no such table: public.users` and
 # `unrecognized token: ":"`. That is production emitting Postgres SQL, which is
 # the dialect sweep's — and MAIN-294 NG-3 put it explicitly out of scope.
-nook_chat:main             # chat's repos emit `public.`-qualified SQL and GREATEST (MAIN-289)
+nook_chat:main             # chat's repos emit `public.`-qualified SQL and GREATEST (MAIN-423)
