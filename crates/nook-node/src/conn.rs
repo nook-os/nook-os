@@ -546,6 +546,143 @@ pub async fn connect_once(cfg: &NodeConfig) -> Result<()> {
             ControlToNode::DetachSession { session_id } => {
                 let _ = session_tx.send(sessions::Cmd::Detach { session_id });
             }
+            // Proxy one HTTP request to a local port and STREAM the answer back
+            // (MAIN-402 AC-2).
+            //
+            // Spawned, never awaited here: this is the socket's read loop, and
+            // awaiting a whole HTTP exchange in it would freeze every terminal
+            // on this machine until the upstream answered — the failure mode
+            // MAIN-362 spent a card removing.
+            ControlToNode::TunnelRequest {
+                version,
+                request_id,
+                port,
+                method,
+                path,
+                headers,
+                body_b64,
+            } => {
+                let tx = ctl_tx.clone();
+                tokio::spawn(async move {
+                    use base64::Engine;
+                    let fail = |m: String| NodeToControl::TunnelFailed {
+                        request_id,
+                        message: m,
+                    };
+
+                    // A KNOWN frame carrying a meaning this build does not
+                    // share. Refusing by name is the "degrade rather than
+                    // misparse" half of AC-1 — obeying it would be worse than
+                    // not understanding it.
+                    if version > nook_proto::TUNNEL_PROTOCOL_VERSION {
+                        let _ = tx
+                            .send(fail(format!(
+                                "tunnel frame v{version} is newer than this node's \
+                                 v{}; upgrade the node",
+                                nook_proto::TUNNEL_PROTOCOL_VERSION
+                            )))
+                            .await;
+                        return;
+                    }
+
+                    let body = match base64::engine::general_purpose::STANDARD.decode(&body_b64) {
+                        Ok(b) => b,
+                        Err(e) => {
+                            let _ = tx.send(fail(format!("undecodable body: {e}"))).await;
+                            return;
+                        }
+                    };
+
+                    // Loopback only. A tunnel exists to reach something running
+                    // on THIS machine; letting the URL name any host would make
+                    // every node an open proxy into its own network.
+                    let url = format!("http://127.0.0.1:{port}{path}");
+                    let method = match reqwest::Method::from_bytes(method.as_bytes()) {
+                        Ok(m) => m,
+                        Err(_) => {
+                            let _ = tx.send(fail(format!("bad method: {method}"))).await;
+                            return;
+                        }
+                    };
+                    let client = reqwest::Client::new();
+                    let mut req = client.request(method, &url).body(body);
+                    for (k, v) in &headers {
+                        req = req.header(k, v);
+                    }
+                    let mut resp = match req.send().await {
+                        Ok(r) => r,
+                        Err(e) => {
+                            let _ = tx.send(fail(format!("upstream on port {port}: {e}"))).await;
+                            return;
+                        }
+                    };
+
+                    let status = resp.status().as_u16();
+                    let out_headers: Vec<(String, String)> = resp
+                        .headers()
+                        .iter()
+                        .map(|(k, v)| {
+                            (
+                                k.as_str().to_string(),
+                                v.to_str().unwrap_or_default().to_string(),
+                            )
+                        })
+                        .collect();
+                    if tx
+                        .send(NodeToControl::TunnelResponse {
+                            request_id,
+                            version: nook_proto::TUNNEL_PROTOCOL_VERSION,
+                            status,
+                            headers: out_headers,
+                        })
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
+
+                    // The body, a chunk at a time. `chunk()` rather than
+                    // reading to end: a tunnel that buffers the response is a
+                    // memory bug waiting for somebody to curl a large file
+                    // through it, which is the whole of AC-2.
+                    let mut seq = 0u64;
+                    loop {
+                        match resp.chunk().await {
+                            Ok(Some(bytes)) => {
+                                let frame = NodeToControl::TunnelChunk {
+                                    request_id,
+                                    seq,
+                                    data_b64: base64::engine::general_purpose::STANDARD
+                                        .encode(&bytes),
+                                    last: false,
+                                };
+                                seq += 1;
+                                if tx.send(frame).await.is_err() {
+                                    return;
+                                }
+                            }
+                            Ok(None) => break,
+                            Err(e) => {
+                                // Mid-stream death. The receiver has already
+                                // seen a status, so this is the only way to
+                                // tell it the body is short.
+                                let _ = tx.send(fail(format!("upstream ended early: {e}"))).await;
+                                return;
+                            }
+                        }
+                    }
+                    // Explicit end. A stream that finishes by going quiet is
+                    // indistinguishable from one that died.
+                    let _ = tx
+                        .send(NodeToControl::TunnelChunk {
+                            request_id,
+                            seq,
+                            data_b64: String::new(),
+                            last: true,
+                        })
+                        .await;
+                });
+            }
             ControlToNode::GetGitStatus {
                 request_id,
                 workspace_path,

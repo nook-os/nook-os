@@ -77,6 +77,22 @@ pub struct Registry {
     /// request id → the instance the answer must go back to.
     remote_pending_ops: DashMap<Uuid, Uuid>,
     remote_pending_git: DashMap<Uuid, Uuid>,
+    /// In-flight tunnel requests issued by THIS replica (MAIN-402 AC-3).
+    ///
+    /// A sender rather than a `oneshot`, because a tunnel answer is a head
+    /// frame plus an unbounded run of chunks and the caller consumes them as
+    /// they arrive — buffering the body here would be the memory bug AC-2 is
+    /// avoiding on the node.
+    ///
+    /// In memory only, so a restart drops every tunnel in flight (MAIN-9 NG-8).
+    /// That is the intended behaviour and not a gap: a half-streamed response
+    /// cannot be resumed from a table, and pretending otherwise would leave a
+    /// client waiting on a stream nobody is writing.
+    pending_tunnels: DashMap<Uuid, mpsc::Sender<nook_proto::NodeToControl>>,
+    /// Tunnel requests relayed here FROM another replica: which one to send the
+    /// frames back to. Unlike its single-shot siblings this entry outlives many
+    /// frames and is removed on the terminal one.
+    remote_pending_tunnels: DashMap<Uuid, Uuid>,
     /// Other instances with live viewers for sessions our nodes own.
     remote_viewers: DashMap<SessionId, HashSet<Uuid>>,
     bus_tx: OnceLock<mpsc::UnboundedSender<Outbound>>,
@@ -136,6 +152,8 @@ impl Registry {
             lease_cache: DashMap::new(),
             remote_pending_ops: DashMap::new(),
             remote_pending_git: DashMap::new(),
+            pending_tunnels: DashMap::new(),
+            remote_pending_tunnels: DashMap::new(),
             remote_viewers: DashMap::new(),
             bus_tx: OnceLock::new(),
             bus_ready: watch::channel(false).0,
@@ -491,6 +509,59 @@ impl Registry {
         }
     }
 
+    // ── Tunnels (MAIN-402) ─────────────────────────────────────────────────
+
+    /// Register interest in a tunnel request's frames and hand back the stream.
+    ///
+    /// Called by whoever is about to send the `TunnelRequest`, BEFORE sending
+    /// it — the node can answer faster than the caller can register, and a
+    /// frame arriving with no entry is dropped.
+    pub fn open_tunnel(&self, request_id: Uuid) -> mpsc::Receiver<nook_proto::NodeToControl> {
+        // Bounded: a client that stops reading must slow the stream down rather
+        // than let the node fill this replica's memory with chunks nobody
+        // wants. 64 is a body's worth of chunks in flight, not a body.
+        let (tx, rx) = mpsc::channel(64);
+        self.pending_tunnels.insert(request_id, tx);
+        rx
+    }
+
+    /// Stop tracking a tunnel — the caller gave up, or the exchange finished.
+    /// Idempotent, so both the terminal frame and a dropped client can call it.
+    pub fn close_tunnel(&self, request_id: Uuid) {
+        self.pending_tunnels.remove(&request_id);
+        self.remote_pending_tunnels.remove(&request_id);
+    }
+
+    /// A frame arrived from a node: hand it to the local waiter, or relay it to
+    /// the replica that issued the request (AC-4).
+    ///
+    /// The terminal frame — a chunk marked `last`, or `TunnelFailed` — also
+    /// closes the entry, which is the whole difference from `complete_op`:
+    /// there, arriving IS finishing.
+    pub fn tunnel_frame(&self, request_id: Uuid, frame: nook_proto::NodeToControl) {
+        let terminal = matches!(
+            &frame,
+            nook_proto::NodeToControl::TunnelFailed { .. }
+                | nook_proto::NodeToControl::TunnelChunk { last: true, .. }
+        );
+
+        if let Some(entry) = self.pending_tunnels.get(&request_id) {
+            // `try_send` rather than `send`: this runs on the node's read loop,
+            // and awaiting here would stall every other message from that
+            // machine — the failure MAIN-362 spent a card removing.
+            let _ = entry.try_send(frame);
+        } else if let Some(requester) = self.remote_pending_tunnels.get(&request_id).map(|r| *r) {
+            self.queue(Outbound::Direct {
+                to: requester,
+                msg: BusMessage::TunnelFrame { request_id, frame },
+            });
+        }
+
+        if terminal {
+            self.close_tunnel(request_id);
+        }
+    }
+
     // ── Terminal attachments ───────────────────────────────────────────────
 
     pub fn attachment_sender(&self, session: SessionId) -> broadcast::Sender<AttachServerMessage> {
@@ -762,6 +833,9 @@ impl Registry {
                         Some((rid, RequestKind::Git)) => {
                             self.remote_pending_git.insert(rid, requester);
                         }
+                        Some((rid, RequestKind::Tunnel)) => {
+                            self.remote_pending_tunnels.insert(rid, requester);
+                        }
                         None => {}
                     }
                 }
@@ -770,6 +844,20 @@ impl Registry {
                     .is_some_and(|tx| tx.try_send(msg).is_ok());
                 if !delivered {
                     tracing::debug!(%node_id, "bus ToNode for a node we don't hold");
+                }
+            }
+            BusMessage::TunnelFrame { request_id, frame } => {
+                // Only the three tunnel variants are legal here; anything else
+                // is a peer sending something this replica should not act on.
+                if matches!(
+                    &frame,
+                    nook_proto::NodeToControl::TunnelResponse { .. }
+                        | nook_proto::NodeToControl::TunnelChunk { .. }
+                        | nook_proto::NodeToControl::TunnelFailed { .. }
+                ) {
+                    self.tunnel_frame(request_id, frame);
+                } else {
+                    tracing::warn!(%request_id, "bus TunnelFrame carrying a non-tunnel frame");
                 }
             }
             BusMessage::OpReply {
@@ -902,6 +990,9 @@ fn session_of(msg: &ControlToNode) -> Option<SessionId> {
 enum RequestKind {
     Op,
     Git,
+    /// A stream, not a oneshot: the entry it creates has to survive every chunk
+    /// and is removed on the terminal frame instead of on the first reply.
+    Tunnel,
 }
 
 /// Request id (and reply family) carried by a control message, if any.
@@ -913,6 +1004,7 @@ fn request_kind(msg: &ControlToNode) -> Option<(Uuid, RequestKind)> {
         | ControlToNode::InitProject { request_id, .. }
         | ControlToNode::CaptureSession { request_id, .. } => Some((*request_id, RequestKind::Op)),
         ControlToNode::GetGitStatus { request_id, .. } => Some((*request_id, RequestKind::Git)),
+        ControlToNode::TunnelRequest { request_id, .. } => Some((*request_id, RequestKind::Tunnel)),
         _ => None,
     }
 }

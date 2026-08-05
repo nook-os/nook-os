@@ -214,6 +214,40 @@ pub enum NodeToControl {
         message: String,
     },
     Pong,
+    /// The head of a tunnel response: status and headers, before any body.
+    ///
+    /// Separate from the chunks so the control plane can start writing a real
+    /// HTTP response the moment the node has one, rather than waiting for a
+    /// body it is deliberately not buffering.
+    TunnelResponse {
+        request_id: uuid::Uuid,
+        #[serde(default = "crate::tunnel_v1")]
+        version: u16,
+        status: u16,
+        headers: Vec<crate::TunnelHeader>,
+    },
+    /// One streamed piece of a tunnel response body.
+    ///
+    /// `seq` exists because the relay in a multi-replica control plane is not a
+    /// single socket end to end: frames cross the bus, and "they arrived in
+    /// order" is an assumption rather than a guarantee. `last` marks the end
+    /// explicitly — a stream that ends by the sender going quiet is
+    /// indistinguishable from one that died.
+    TunnelChunk {
+        request_id: uuid::Uuid,
+        seq: u64,
+        data_b64: String,
+        last: bool,
+    },
+    /// The node could not complete the exchange: nothing listening on the port,
+    /// the upstream died mid-response, or a `version` it does not understand.
+    ///
+    /// A terminal frame, like `last`. Anything holding this request can drop it
+    /// on receipt.
+    TunnelFailed {
+        request_id: uuid::Uuid,
+        message: String,
+    },
 }
 
 /// What to do with a session's terminals (tmux windows/panes).
@@ -595,7 +629,53 @@ pub enum ControlToNode {
         body: String,
     },
     Ping,
+    /// Proxy ONE HTTP request to a port on this node (MAIN-402 AC-2).
+    ///
+    /// The request is buffered — it has already been read whole by the time the
+    /// control plane sends it — but the RESPONSE is streamed back as
+    /// [`NodeToControl::TunnelChunk`]s. A tunnel that buffers the response is a
+    /// memory bug waiting for somebody to curl a large file through it.
+    TunnelRequest {
+        /// See [`TUNNEL_PROTOCOL_VERSION`]. Absent means generation 1.
+        #[serde(default = "tunnel_v1")]
+        version: u16,
+        /// Correlates every frame of this exchange, in both directions and
+        /// across control-plane replicas.
+        request_id: uuid::Uuid,
+        /// The port on the node's own loopback to connect to.
+        port: u16,
+        method: String,
+        /// Path AND query, exactly as received — splitting them here would mean
+        /// re-encoding, and re-encoding a query string is how a signature check
+        /// on the other side starts failing.
+        path: String,
+        headers: Vec<TunnelHeader>,
+        /// Base64, because this frame is JSON and a body is not text.
+        body_b64: String,
+    },
 }
+
+pub mod tunnel;
+
+/// The generation of the tunnel frames below (MAIN-402 AC-1).
+///
+/// Bumped when a frame's MEANING changes, not when a field is added — an added
+/// field carries `#[serde(default)]` and needs no bump. A node compares this to
+/// its own and refuses a request it cannot honour, with
+/// [`NodeToControl::TunnelFailed`] naming the version it understands. That is
+/// the difference between degrading and misparsing: an unknown VARIANT is
+/// already skipped by the node's read loop, but a known variant with a meaning
+/// it does not share would otherwise be obeyed wrongly and silently.
+pub const TUNNEL_PROTOCOL_VERSION: u16 = 1;
+
+/// The default for a peer that predates the field — the first generation.
+fn tunnel_v1() -> u16 {
+    1
+}
+
+/// One header, as it crosses the wire. A `Vec` of these rather than a map,
+/// because HTTP allows repeats (`set-cookie`) and a map would silently keep one.
+pub type TunnelHeader = (String, String);
 
 /// Live events pushed to browsers over `/api/v1/ws/ui`.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
