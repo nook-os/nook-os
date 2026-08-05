@@ -14,11 +14,10 @@ use nook_control::services::taskwork::{present_checkout_at, prune_target};
 use nook_db::{params, Db};
 use nook_testkit::TestBed;
 use nook_types::*;
-use sqlx::PgPool;
 
 /// A present (or missing) checkout row on `node` at `path`, returning its id.
 async fn checkout(
-    db: &PgPool,
+    bed: &TestBed,
     tenant: TenantId,
     node: NodeId,
     ws: WorkspaceId,
@@ -26,20 +25,15 @@ async fn checkout(
     missing: bool,
 ) -> NodeWorkspaceId {
     let id = NodeWorkspaceId::new();
-    sqlx::query(
-        "INSERT INTO node_workspaces
+    bed.db()
+        .exec(
+            "INSERT INTO node_workspaces
              (id, tenant_id, node_id, workspace_id, path, kind, missing_at)
          VALUES ($1, $2, $3, $4, $5, 'clone', CASE WHEN $6 THEN now() ELSE NULL END)",
-    )
-    .bind(id)
-    .bind(tenant)
-    .bind(node)
-    .bind(ws)
-    .bind(path)
-    .bind(missing)
-    .execute(db)
-    .await
-    .expect("checkout");
+            params![id, tenant, node, ws, path, missing],
+        )
+        .await
+        .expect("checkout");
     id
 }
 
@@ -47,7 +41,7 @@ async fn checkout(
 /// checkout id. Returns the loaded `TaskItem`.
 #[allow(clippy::too_many_arguments)]
 async fn task(
-    db: &PgPool,
+    bed: &TestBed,
     tenant: TenantId,
     board: BoardId,
     column: ColumnId,
@@ -56,23 +50,26 @@ async fn task(
     checkout_id: Option<NodeWorkspaceId>,
 ) -> TaskItem {
     let id = TaskId::new();
-    sqlx::query(
-        "INSERT INTO tasks
+    bed.db()
+        .exec(
+            "INSERT INTO tasks
              (id, tenant_id, board_id, column_id, title, position,
               worktree_path, worktree_node_id, checkout_id)
          VALUES ($1, $2, $3, $4, 't', 0, $5, $6, $7)",
-    )
-    .bind(id)
-    .bind(tenant)
-    .bind(board)
-    .bind(column)
-    .bind(worktree_path)
-    .bind(worktree_node)
-    .bind(checkout_id)
-    .execute(db)
-    .await
-    .expect("task");
-    db.query_one("SELECT * FROM tasks WHERE id = $1", params![id])
+            params![
+                id,
+                tenant,
+                board,
+                column,
+                worktree_path.map(str::to_string),
+                worktree_node.map(|n| n.0),
+                checkout_id.map(|c| c.0)
+            ],
+        )
+        .await
+        .expect("task");
+    bed.db()
+        .query_one("SELECT * FROM tasks WHERE id = $1", params![id])
         .await
         .expect("load task")
 }
@@ -84,29 +81,31 @@ async fn fixture(bed: &TestBed) -> (TenantId, BoardId, ColumnId, WorkspaceId, No
     let node = bed.node(tenant, person).await;
     let ws = bed.workspace(tenant).await;
     let board = BoardId::new();
-    sqlx::query(
-        "INSERT INTO boards (id, tenant_id, name, key, provider) VALUES ($1,$2,'b',$3,'local')",
-    )
-    .bind(board)
-    .bind(tenant)
-    .bind(format!("B{}", &board.0.simple().to_string()[..6]).to_uppercase())
-    .execute(&bed.pool)
-    .await
-    .expect("board");
+    bed.db()
+        .exec(
+            "INSERT INTO boards (id, tenant_id, name, key, provider) VALUES ($1,$2,'b',$3,'local')",
+            params![
+                board,
+                tenant,
+                format!("B{}", &board.0.simple().to_string()[..6]).to_uppercase()
+            ],
+        )
+        .await
+        .expect("board");
     let col = ColumnId::new();
-    sqlx::query("INSERT INTO board_columns (id, board_id, name, position, type) VALUES ($1,$2,'Todo',0,'unstarted')")
-        .bind(col)
-        .bind(board)
-        .execute(&bed.pool)
+    bed.db()
+        .exec(
+            "INSERT INTO board_columns (id, board_id, name, position, type) VALUES ($1,$2,'Todo',0,'unstarted')",
+            params![col, board],
+        )
         .await
         .expect("column");
     (tenant, board, col, ws, node)
 }
 
-async fn checkout_of(db: &PgPool, id: TaskId) -> Option<NodeWorkspaceId> {
-    sqlx::query_scalar("SELECT checkout_id FROM tasks WHERE id = $1")
-        .bind(id)
-        .fetch_one(db)
+async fn checkout_of(bed: &TestBed, id: TaskId) -> Option<NodeWorkspaceId> {
+    bed.db()
+        .query_scalar("SELECT checkout_id FROM tasks WHERE id = $1", params![id])
         .await
         .expect("read checkout_id")
 }
@@ -114,9 +113,10 @@ async fn checkout_of(db: &PgPool, id: TaskId) -> Option<NodeWorkspaceId> {
 // ── AC-2: migration backfill ─────────────────────────────────────────────────
 
 /// The exact backfill statement from 0027, run against fixture data.
-async fn run_backfill(db: &PgPool) {
-    sqlx::query(
-        "UPDATE tasks t
+async fn run_backfill(bed: &TestBed) {
+    bed.db()
+        .exec(
+            "UPDATE tasks t
          SET checkout_id = nw.id
          FROM node_workspaces nw
          WHERE t.checkout_id IS NULL
@@ -125,10 +125,10 @@ async fn run_backfill(db: &PgPool) {
            AND nw.node_id = t.worktree_node_id
            AND nw.path = t.worktree_path
            AND nw.missing_at IS NULL",
-    )
-    .execute(db)
-    .await
-    .expect("backfill");
+            params![],
+        )
+        .await
+        .expect("backfill");
 }
 
 #[tokio::test]
@@ -139,9 +139,9 @@ async fn backfill_sets_matching_present_checkout_and_leaves_others_null() {
     let (tenant, board, col, ws, node) = fixture(&bed).await;
 
     // A task with a live worktree that resolves to a present checkout.
-    let present = checkout(&bed.pool, tenant, node, ws, "/srv/wt-a", false).await;
+    let present = checkout(&bed, tenant, node, ws, "/srv/wt-a", false).await;
     let matched = task(
-        &bed.pool,
+        &bed,
         tenant,
         board,
         col,
@@ -152,9 +152,9 @@ async fn backfill_sets_matching_present_checkout_and_leaves_others_null() {
     .await;
 
     // A task whose worktree path resolves only to a MISSING checkout → stays NULL.
-    checkout(&bed.pool, tenant, node, ws, "/srv/wt-gone", true).await;
+    checkout(&bed, tenant, node, ws, "/srv/wt-gone", true).await;
     let gone = task(
-        &bed.pool,
+        &bed,
         tenant,
         board,
         col,
@@ -165,25 +165,21 @@ async fn backfill_sets_matching_present_checkout_and_leaves_others_null() {
     .await;
 
     // A task with no worktree at all → stays NULL.
-    let bare = task(&bed.pool, tenant, board, col, None, None, None).await;
+    let bare = task(&bed, tenant, board, col, None, None, None).await;
 
-    run_backfill(&bed.pool).await;
+    run_backfill(&bed).await;
 
-    assert_eq!(checkout_of(&bed.pool, matched.id).await, Some(present));
+    assert_eq!(checkout_of(&bed, matched.id).await, Some(present));
     assert_eq!(
-        checkout_of(&bed.pool, gone.id).await,
+        checkout_of(&bed, gone.id).await,
         None,
         "missing checkout → NULL"
     );
-    assert_eq!(
-        checkout_of(&bed.pool, bare.id).await,
-        None,
-        "no worktree → NULL"
-    );
+    assert_eq!(checkout_of(&bed, bare.id).await, None, "no worktree → NULL");
 
     // Idempotent: a re-run does not disturb the already-set value.
-    run_backfill(&bed.pool).await;
-    assert_eq!(checkout_of(&bed.pool, matched.id).await, Some(present));
+    run_backfill(&bed).await;
+    assert_eq!(checkout_of(&bed, matched.id).await, Some(present));
 
     bed.teardown().await;
 }
@@ -197,8 +193,8 @@ async fn present_checkout_at_matches_present_rows_only() {
     };
     let (tenant, _board, _col, ws, node) = fixture(&bed).await;
 
-    let present = checkout(&bed.pool, tenant, node, ws, "/srv/live", false).await;
-    checkout(&bed.pool, tenant, node, ws, "/srv/dead", true).await;
+    let present = checkout(&bed, tenant, node, ws, "/srv/live", false).await;
+    checkout(&bed, tenant, node, ws, "/srv/dead", true).await;
 
     assert_eq!(
         present_checkout_at(
@@ -249,9 +245,9 @@ async fn prune_target_prefers_the_checkout_id_then_falls_back_to_the_legacy_pair
 
     // checkout_id set to a present row → resolves that row's path/node, even when
     // the legacy strings point elsewhere.
-    let live = checkout(&bed.pool, tenant, node, ws, "/srv/by-id", false).await;
+    let live = checkout(&bed, tenant, node, ws, "/srv/by-id", false).await;
     let by_id = task(
-        &bed.pool,
+        &bed,
         tenant,
         board,
         col,
@@ -267,9 +263,9 @@ async fn prune_target_prefers_the_checkout_id_then_falls_back_to_the_legacy_pair
     );
 
     // checkout_id points at a MISSING row → fall back to the legacy pair.
-    let dead = checkout(&bed.pool, tenant, node, ws, "/srv/dead", true).await;
+    let dead = checkout(&bed, tenant, node, ws, "/srv/dead", true).await;
     let fallback = task(
-        &bed.pool,
+        &bed,
         tenant,
         board,
         col,
@@ -286,7 +282,7 @@ async fn prune_target_prefers_the_checkout_id_then_falls_back_to_the_legacy_pair
 
     // No id, legacy only → the legacy pair.
     let legacy_only = task(
-        &bed.pool,
+        &bed,
         tenant,
         board,
         col,
@@ -301,7 +297,7 @@ async fn prune_target_prefers_the_checkout_id_then_falls_back_to_the_legacy_pair
     );
 
     // Neither → None (the "no worktree to prune" case).
-    let bare = task(&bed.pool, tenant, board, col, None, None, None).await;
+    let bare = task(&bed, tenant, board, col, None, None, None).await;
     assert_eq!(prune_target(&state, &bare).await.unwrap(), None);
 
     bed.teardown().await;
