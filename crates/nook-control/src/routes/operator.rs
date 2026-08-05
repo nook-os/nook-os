@@ -539,10 +539,25 @@ pub async fn authorize_runtime(
     Path(id): Path<NodeId>,
     Json(req): Json<AuthorizeRuntimeRequest>,
 ) -> ApiResult<Json<nook_types::Session>> {
-    // Unscoped, then gated — the same order `revoke_node` uses, and the reason
-    // an operator can act on a tenant they are not a member of.
+    // Unscoped lookup, then gated — the same order `revoke_node` uses, and the
+    // reason an operator can act on a tenant they are not a member of.
     let tenant = crate::routes::nodes::node_tenant(&state, id).await?;
-    auth.require(&state, Permission::NodeManage, Scope::Tenant(tenant))
+    // DEPLOYMENT scope, not `Scope::Tenant(tenant)` (AC-2: "the deployment-
+    // operator gate … INSTEAD OF the tenant node-manager check").
+    //
+    // `NodeManage` is not exclusive to operators — a tenant- or org-scoped
+    // node-manager holds it too. Gating on it per-tenant would let such a
+    // manager start a runtime-login session on a COLLEAGUE'S PERSONAL machine,
+    // which `POST /nodes/{id}/authorize` refuses by design: personal nodes take
+    // `require_person_owns_node` there, and only shared/operator nodes take
+    // `NodeManage`. This endpoint drops that split deliberately — it is the
+    // operator's fleet-wide capability — so the gate has to be the thing that
+    // actually means "deployment operator".
+    //
+    // It is the same fact the opt-out gate below turns on, in the other
+    // direction: `NodeManage` is held everywhere by an operator, which is why
+    // the owner's veto cannot be gated on it either.
+    auth.require(&state, Permission::NodeManage, Scope::Deployment)
         .await?;
 
     // The owner's veto (AC-6), checked BEFORE anything is started. A 403 rather

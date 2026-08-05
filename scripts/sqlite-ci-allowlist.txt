@@ -94,6 +94,7 @@ visibility_agreement       # production still emits Postgres SQL on this path (M
 # that never answered the question. That is why the whole binary is excluded
 # rather than the two loud cases.
 rbac_across_tenants        # org_of decodes a raw uuid; TEXT on SQLite (MAIN-423)
+operator_authorize_runtime # org_of decodes a raw uuid; TEXT on SQLite (MAIN-423) — only the cross-tenant case reaches it; the other four tests pass
 implicit_tenant_admin      # org_of decodes a raw uuid; TEXT on SQLite (MAIN-423)
 
 # ── still production Postgres SQL, re-tagged by MAIN-293 ──

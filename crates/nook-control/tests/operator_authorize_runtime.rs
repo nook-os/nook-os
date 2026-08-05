@@ -112,6 +112,61 @@ async fn an_ordinary_member_is_refused_the_operator_gate() {
     bed.teardown().await;
 }
 
+/// A tenant admin holds `node.manage` — and must still NOT pass this gate.
+///
+/// The review finding on #324. The first cut gated on
+/// `NodeManage, Scope::Tenant(<node's tenant>)`, but `node.manage` is not
+/// exclusive to operators: `0001_init.sql` grants it to `tenant_admin` as well
+/// as `operator`. So a tenant admin could have started a runtime-login session
+/// on a COLLEAGUE'S PERSONAL machine — which `POST /nodes/{id}/authorize`
+/// refuses by design, taking `require_person_owns_node` for personal nodes and
+/// `NodeManage` only for shared ones.
+///
+/// AC-2 already settled it: "the deployment-operator gate … INSTEAD OF the
+/// tenant node-manager check". This pins that the two are different, so a
+/// future simplification back to `Scope::Tenant` cannot pass silently.
+#[tokio::test]
+async fn a_tenant_admin_holds_node_manage_but_not_the_operator_gate() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let theirs = bed.tenant("their-tenant").await;
+    let (admin, _) = bed.user(theirs, "owner").await;
+    let state = bed.app_state().await;
+    state
+        .operator
+        .grant_tenant_role(admin.0, "tenant_admin", theirs, admin.0)
+        .await
+        .expect("grant tenant_admin");
+
+    // They DO hold it on their own tenant — that is the whole point of the
+    // finding: the permission is real, the SCOPE is what separates the roles.
+    ctx(admin, theirs)
+        .require(
+            &state,
+            nook_control::auth::perm::Permission::NodeManage,
+            nook_control::auth::perm::Scope::Tenant(theirs),
+        )
+        .await
+        .expect("a tenant admin holds node.manage in their own tenant");
+
+    // And they do NOT hold it at deployment scope, which is what the operator
+    // endpoint now requires.
+    let refused = ctx(admin, theirs)
+        .require(
+            &state,
+            nook_control::auth::perm::Permission::NodeManage,
+            nook_control::auth::perm::Scope::Deployment,
+        )
+        .await;
+    assert!(
+        refused.is_err(),
+        "a tenant admin must not pass the deployment-operator gate"
+    );
+
+    bed.teardown().await;
+}
+
 /// AC-6. The owner's decline is stored on the node and is what the endpoint
 /// reads before it starts anything.
 #[tokio::test]
