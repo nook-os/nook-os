@@ -64,6 +64,20 @@ export function SessionTabs({ activeId }: { activeId?: string }) {
   const [dragId, setDragId] = useState<string | null>(null);
   const [dropAt, setDropAt] = useState<{ id: string; after: boolean } | null>(null);
 
+  // Closing a tab, from the ✕ and from a middle-click, through ONE definition.
+  // Two copies is how the two controls drift into meaning different things —
+  // and the middle button's whole contract is "exactly what the ✕ does".
+  const closeTab = React.useCallback(
+    (id: string) => {
+      store.close(id);
+      // Closing the tab you are looking at has to move you somewhere;
+      // `/sessions` lands on the next tab, or the empty state when that was
+      // the last one.
+      if (id === activeId) navigate("/sessions");
+    },
+    [store, activeId, navigate],
+  );
+
   const endDrag = () => {
     setDragId(null);
     setDropAt(null);
@@ -293,6 +307,16 @@ export function SessionTabs({ activeId }: { activeId?: string }) {
               draggable
               onClick={() => navigate(`/sessions/${t.id}`)}
               onDoubleClick={() => renameSession(t.id, t.name)}
+              // Middle-click closes, the way it does in every browser and
+              // editor. `onAuxClick` rather than `onMouseDown`, so a middle
+              // press that drifts off the tab does not close it.
+              onAuxClick={(e) => {
+                if (e.button !== 1) return;
+                // Chrome would otherwise start autoscroll on the strip.
+                e.preventDefault();
+                e.stopPropagation();
+                closeTab(t.id);
+              }}
               onDragStart={(e) => {
                 setDragId(t.id);
                 e.dataTransfer.effectAllowed = "move";
@@ -358,23 +382,20 @@ export function SessionTabs({ activeId }: { activeId?: string }) {
                 </span>
               )}
               {t.pinned && <Pin size={10} className="session-tab-pin" />}
-              {/* Stops the click reaching the tab, which would navigate to the
-                  session we are about to end. */}
               {/* Closes the TAB. The session keeps running and nothing is
                   confirmed, because nothing is destroyed (AC-2 / NG-1) — the
                   navigator is how you open it again. Ending a session is the
-                  right-click menu's job now. */}
+                  right-click menu's job now.
+
+                  `stopPropagation` keeps the click off the tab underneath,
+                  which would navigate to the tab we are closing. */}
               <button
                 className="session-tab-close"
                 aria-label={`close ${t.name}`}
                 title="close this tab — the session keeps running"
                 onClick={(e) => {
                   e.stopPropagation();
-                  store.close(t.id);
-                  // Closing the tab you are looking at has to move you
-                  // somewhere; `/sessions` lands on the next tab, or the empty
-                  // state when that was the last one.
-                  if (t.id === activeId) navigate("/sessions");
+                  closeTab(t.id);
                 }}
               >
                 <X size={10} />
