@@ -872,14 +872,60 @@ pub struct SessionSpec {
     pub replicas: Replicas,
 }
 
+/// Why one node is not running a session for a spec (MAIN-431).
+///
+/// One vocabulary for every ground, shared by the status endpoint and the
+/// dry-run preview so the two cannot describe the same refusal differently.
+/// It replaces a bare `bool` on the eligibility side and a `reason: String`
+/// on the reporting side — "not eligible" and the literal `"needs_clone"`
+/// were the only two things either could say.
+///
+/// Internally tagged, so a client reads `kind` and then the fields that
+/// ground carries. Each variant holds what makes it ACTIONABLE: knowing a
+/// selector did not match is not useful without knowing which key, what was
+/// wanted, and what the node actually has.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum NodeBlocker {
+    /// The node is not connected. A session cannot start on it, and counting
+    /// it toward `replicas` would report a desired state nothing can reach.
+    Offline,
+    /// The node reported its runtimes and this spec's is not among them —
+    /// the session would only fail at start there.
+    ///
+    /// A node that reported NO runtimes never produces this: empty means
+    /// unknown (an older node), not incapable.
+    RuntimeUnavailable {
+        wanted: String,
+        /// What the node said it can launch.
+        available: Vec<String>,
+    },
+    /// A `node_selector` key the node does not match.
+    SelectorMismatch {
+        key: String,
+        wanted: String,
+        /// The node's value, or `null` when it has no such label at all —
+        /// which is a different situation from holding a different value.
+        actual: Option<String>,
+    },
+    /// A taint the spec does not tolerate. Key AND effect: tolerating
+    /// `gpu:NoSchedule` says nothing about `gpu` under another effect.
+    UntoleratedTaint { key: String, effect: String },
+    /// Eligible in every other way, but the workspace's checkout is not on it
+    /// yet (MAIN-317 clones it). Deliberately in the same vocabulary while
+    /// being reported through a SEPARATE field — a node that needs a clone is
+    /// not excluded, it is waiting.
+    NeedsClone,
+}
+
 /// A node the reconciler cannot use yet, and why (MAIN-319).
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct ReconcileBlocker {
     pub node_id: NodeId,
     pub node_name: String,
-    /// `needs_clone` — matches the selector and tolerates the taints, but the
-    /// workspace's checkout is not on it yet (MAIN-317 clones it).
-    pub reason: String,
+    /// Structural since MAIN-431 — this was a `String` whose only value was
+    /// ever the literal `"needs_clone"`.
+    pub reason: NodeBlocker,
 }
 
 /// Desired versus actual for one workspace (MAIN-319 AC-3).
@@ -914,6 +960,54 @@ pub struct ReconcileStatus {
     pub blocked: Vec<ReconcileBlocker>,
     /// How many nodes match the selector and tolerate the taints.
     pub eligible: u32,
+}
+
+/// Preview what the reconciler would do with a CANDIDATE spec (MAIN-431).
+/// The spec is required on purpose (NG-7): `reconcile-status` already answers
+/// for the saved one.
+#[derive(Debug, Clone, Deserialize, ToSchema)]
+pub struct ReconcilePreviewRequest {
+    pub spec: SessionSpec,
+}
+
+/// One node a preview found usable, by id and by the name a person knows it as.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct PreviewNode {
+    pub node_id: NodeId,
+    pub node_name: String,
+}
+
+/// One node a preview excluded, with EVERY ground it failed on (MAIN-431
+/// AC-2) — a person choosing a selector needs "offline, and also tainted",
+/// not whichever refusal happened to be checked first.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct PreviewBlockedNode {
+    pub node_id: NodeId,
+    pub node_name: String,
+    /// In the fixed evaluation order: offline → runtime → selector → taint.
+    pub reasons: Vec<NodeBlocker>,
+}
+
+/// What a candidate spec would do, computed by the reconciler's own planner
+/// and written nowhere (MAIN-431 AC-8).
+///
+/// `needs_clone` is deliberately a separate field from `ineligible` (AC-9): a
+/// node that matches but lacks the checkout is not excluded, it is waiting —
+/// same vocabulary, different answer to "should I fix my selector".
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ReconcilePreview {
+    /// Eligible nodes holding a checkout: where the plan can place today.
+    pub matched: Vec<PreviewNode>,
+    /// Eligible nodes the workspace's checkout has not reached yet.
+    pub needs_clone: Vec<ReconcileBlocker>,
+    /// Nodes the spec cannot use, each with every applicable ground.
+    pub ineligible: Vec<PreviewBlockedNode>,
+    pub desired: u32,
+    pub placed: u32,
+    pub shortfall: u32,
+    /// The workspace declares no ports, so it is held to one session per node
+    /// (MAIN-361) — a spec-level condition, never a per-node reason.
+    pub capped: bool,
 }
 
 /// Set or clear a workspace's [`SessionSpec`] (MAIN-315). `spec: null` clears

@@ -41,19 +41,30 @@ function pairsOf(o: Record<string, string>): Pair[] {
   return Object.entries(o).map(([k, v]) => ({ k, v }));
 }
 
+/// A blocker, in the words a person can act on (MAIN-431: the reason is
+/// structural now, so the pill can say WHY instead of just naming the node).
+function blockerText(b: Schemas["NodeBlocker"]): string {
+  switch (b.kind) {
+    case "offline":
+      return "offline";
+    case "runtime_unavailable":
+      return `no ${b.wanted} runtime (has ${b.available.join(", ") || "none"})`;
+    case "selector_mismatch":
+      return `${b.key}=${b.wanted} wanted, ${
+        b.actual == null ? `no ${b.key} label` : `has ${b.actual}`
+      }`;
+    case "untolerated_taint":
+      return `tainted ${b.key}:${b.effect}`;
+    case "needs_clone":
+      return "waiting on a clone";
+  }
+}
+
 /// The status line, in the one sentence a person actually wants.
 function StatusLine({
   status,
 }: {
-  status: {
-    enabled: boolean;
-    managed: boolean;
-    desired: number;
-    running: number;
-    shortfall: number;
-    eligible: number;
-    blocked: { node_id: string; node_name: string; reason: string }[];
-  };
+  status: Schemas["ReconcileStatus"];
 }) {
   if (!status.managed) {
     return (
@@ -80,8 +91,13 @@ function StatusLine({
           {status.shortfall} short
           {status.blocked.length > 0 && (
             <>
-              {" — waiting on a clone to "}
-              {status.blocked.map((b) => b.node_name || b.node_id).join(", ")}
+              {" — "}
+              {status.blocked
+                .map(
+                  (b) =>
+                    `${b.node_name || b.node_id}: ${blockerText(b.reason)}`,
+                )
+                .join(", ")}
             </>
           )}
         </span>

@@ -149,6 +149,10 @@ pub fn build_router(state: AppState) -> Router {
             get(workspaces::reconcile_status),
         )
         .route(
+            "/workspaces/{id}/reconcile-preview",
+            post(workspaces::reconcile_preview),
+        )
+        .route(
             "/workspaces/{id}/session-spec",
             get(workspaces::get_session_spec).put(workspaces::set_session_spec),
         )
