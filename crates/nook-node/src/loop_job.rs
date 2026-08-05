@@ -131,6 +131,28 @@ fn repo_slug(repo_url: &str) -> String {
 /// a local path. The key lives in a 0600 file for the length of the git command
 /// and `TransientKey`'s Drop removes it — including on the error paths, which is
 /// why the guard is bound rather than passed inline.
+/// The clone cache for this repo, refreshed — but never created (MAIN-406).
+///
+/// Fails rather than cloning when the mirror is absent. That is the difference
+/// between "run a review where the repo already lives" and "fetch any repo a
+/// job names onto a shared machine", and it is why review does not reuse
+/// `ensure_mirror_in`.
+fn existing_mirror_in(
+    base: &Path,
+    repo_url: &str,
+    ssh_key: Option<&str>,
+) -> Result<PathBuf, String> {
+    let cache = base.join(format!("{}.git", repo_slug(repo_url)));
+    if !cache.join("HEAD").exists() {
+        return Err(format!(
+            "no clone cache at {} for {repo_url}",
+            cache.display()
+        ));
+    }
+    crate::gitops::run_git_remote(&["fetch", "--prune"], Some(&cache), ssh_key)?;
+    Ok(cache)
+}
+
 fn ensure_mirror_in(base: &Path, repo_url: &str, ssh_key: Option<&str>) -> Result<PathBuf, String> {
     let cache = base.join(format!("{}.git", repo_slug(repo_url)));
     if cache.join("HEAD").exists() {
@@ -275,6 +297,92 @@ pub fn deliver_message(job_id: &str, body: &str) -> Result<(), String> {
     crate::tmux::send_keys(&tmux_name, &line).map_err(|e| e.to_string())
 }
 
+/// Whether a token value is actually a credential.
+///
+/// A pure seam, and it exists for a testing reason as much as a reading one:
+/// asserting this through `gh_is_authenticated` means mutating process-global
+/// environment variables, and two tests doing that in one binary race on
+/// parallel threads — an intermittent red nobody can reproduce. With the
+/// predicate extracted, the tests touch no environment at all.
+///
+/// Empty and whitespace are NOT credentials: that is the shape an unset compose
+/// variable takes, and it would otherwise pass here and fail at the API.
+fn token_is_usable(v: Option<&str>) -> bool {
+    v.is_some_and(|t| !t.trim().is_empty())
+}
+
+/// Whether this node can act on GitHub at all (MAIN-406 AC-4 / MAIN-143 AC-5).
+///
+/// `GH_TOKEN`/`GITHUB_TOKEN` first because that is how split 3 will provision
+/// the operator, then a logged-in `gh` for a developer machine. Checked as a
+/// PREFLIGHT rather than left to the skill: the skill's own escalation is a
+/// comment on a PR, which is precisely what it cannot post without this.
+fn gh_is_authenticated() -> Result<(), String> {
+    let env = |k: &str| std::env::var(k).ok();
+    if token_is_usable(env("GH_TOKEN").as_deref())
+        || token_is_usable(env("GITHUB_TOKEN").as_deref())
+    {
+        return Ok(());
+    }
+    match std::process::Command::new("gh")
+        .args(["auth", "status"])
+        .output()
+    {
+        Ok(o) if o.status.success() => Ok(()),
+        Ok(_) => Err("gh is installed but not authenticated".into()),
+        Err(_) => Err("no GH_TOKEN and no gh on PATH".into()),
+    }
+}
+
+/// Which skill a job kind runs (MAIN-406 AC-2), or `None` when this build has
+/// no mapping for it.
+///
+/// One place a reader can find, rather than a condition at the launch site.
+///
+/// `Option`, not a defaulted string, so the drift is VISIBLE. The first cut
+/// returned `&str` with a `_ => "nook-spec"` arm, which made the test that was
+/// supposed to catch an unmapped kind vacuous: every input satisfied it,
+/// including the two that were already wrong. `epic-run` and `build` were
+/// resolving to `nook-spec` with a green suite. The fallback still exists —
+/// applied at the call site, so behaviour is unchanged (NG-4) — but it is no
+/// longer able to hide from the test.
+fn skill_for(kind: &str) -> Option<&'static str> {
+    match kind {
+        "spec" => Some("nook-spec"),
+        "decompose" => Some("nook-epic"),
+        "review" => Some("nook-review"),
+        _ => None,
+    }
+}
+
+/// Kinds a node may advertise that deliberately have no mapping here YET.
+///
+/// `skills/nook-build/` and `skills/nook-epic-runner/` both exist on disk, so
+/// what is missing is the mapping, not the skill. Giving them arms would change
+/// how those kinds execute, which MAIN-406 NG-4 forbids — so they are recorded
+/// as a known gap with an owner rather than silently falling back with nothing
+/// naming it. The test below fails if a kind is neither mapped nor listed here,
+/// which is what the mapping test was meant to do all along.
+// Read only by the test below — the record is the point, not a runtime lookup.
+// Scoped to the non-test build, where it genuinely is unused: in the test
+// build it IS read, and a blanket allow there would hide a real orphan.
+#[cfg_attr(not(test), allow(dead_code))]
+const UNMAPPED_KINDS: &[(&str, &str)] = &[
+    ("epic-run", "MAIN-144 owns the epic-run job kind"),
+    ("build", "MAIN-383 owns the build job kind"),
+];
+
+/// Whether this kind may CREATE the clone cache, or only use one already there.
+///
+/// A review job targets a WORKSPACE rather than a ticket, and runs on a shared
+/// operator whose whole point is that the repo is already cached (MAIN-406
+/// AC-1). Cloning on demand there would turn "review this repo" into an
+/// unbounded fetch of any repo a job names, on a machine several tenants share.
+/// So review uses what exists and says so when nothing does (AC-3).
+fn may_create_cache(kind: &str) -> bool {
+    kind != "review"
+}
+
 /// Run one loop job to completion. Blocking; call under `spawn_blocking`.
 pub fn run(cfg: NodeConfig, out: Sender<NodeToControl>, job: LoopJob) {
     let LoopJob {
@@ -301,12 +409,36 @@ pub fn run(cfg: NodeConfig, out: Sender<NodeToControl>, job: LoopJob) {
         &job_id,
         format!("preparing workspace from {repo_url} @ {branch}"),
     );
-    let cache = match ensure_mirror_in(&base, &repo_url, ssh_key.as_deref()) {
-        Ok(c) => c,
-        Err(e) => {
-            finished(&out, &job_id, false, format!("clone cache failed: {e}"));
-            unregister(&dirname);
-            return;
+    let cache = if may_create_cache(&kind) {
+        match ensure_mirror_in(&base, &repo_url, ssh_key.as_deref()) {
+            Ok(c) => c,
+            Err(e) => {
+                finished(&out, &job_id, false, format!("clone cache failed: {e}"));
+                unregister(&dirname);
+                return;
+            }
+        }
+    } else {
+        match existing_mirror_in(&base, &repo_url, ssh_key.as_deref()) {
+            Ok(c) => c,
+            Err(e) => {
+                // Names the workspace AND the node, because the reader of this
+                // message is deciding WHERE to place the job next, and "no
+                // checkout" without either is unactionable (AC-3).
+                finished(
+                    &out,
+                    &job_id,
+                    false,
+                    format!(
+                        "{e} — workspace {} has no checkout on node {}; a review job \
+                         uses the existing clone cache rather than cloning on demand",
+                        workspace_id.as_deref().unwrap_or("<unknown>"),
+                        cfg.node_name
+                    ),
+                );
+                unregister(&dirname);
+                return;
+            }
         }
     };
     let worktree = match add_job_worktree_in(&wt_base, &cache, &branch, &job_id) {
@@ -318,12 +450,34 @@ pub fn run(cfg: NodeConfig, out: Sender<NodeToControl>, job: LoopJob) {
         }
     };
 
-    // `decompose` walks an epic into sub-tickets; everything else is a spec pass.
-    let skill = if kind == "decompose" {
-        "nook-epic"
-    } else {
-        "nook-spec"
-    };
+    // The fallback lives here, not in the map (see `skill_for`): `spec` is the
+    // original kind and an unknown one is refused upstream by
+    // `capabilities::KNOWN_LOOP_KINDS`, so a kind reaching this line is one
+    // this build advertises.
+    let skill = skill_for(&kind).unwrap_or("nook-spec");
+
+    // A review pass with no GitHub credential reads every PR as "nothing to
+    // review" and exits zero — a silent empty pass, which MAIN-143 AC-5 names as
+    // the thing never to allow. Provisioning the token is split 3's (NG-2); this
+    // card's duty is to fail cleanly when it is absent rather than report a pass
+    // that examined nothing.
+    if kind == "review" {
+        if let Err(e) = gh_is_authenticated() {
+            finished(
+                &out,
+                &job_id,
+                false,
+                format!(
+                    "{e} — a review pass needs a GitHub credential (GH_TOKEN, or a \
+                     logged-in gh). Without one every PR reads as \"nothing to \
+                     review\" and the job would report success having examined none."
+                ),
+            );
+            unregister(&dirname);
+            return;
+        }
+    }
+
     // AC-5: a skill the agent has never heard of makes `/nook-spec` ordinary
     // prose. The agent reads it, does nothing in particular, and the job
     // "succeeds" having produced no ticket — the exact silent no-op this card
@@ -842,6 +996,100 @@ fn exit_is_ok(status: Option<i32>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// AC-2: every advertised kind either maps to a skill or is a RECORDED gap.
+    ///
+    /// The first version of this test could not fail. It asserted
+    /// `skill_for(k).starts_with("nook-")` against a function whose fallback
+    /// was `"nook-spec"` — so every input passed, including `epic-run` and
+    /// `build`, which were silently resolving to the spec skill while both
+    /// their skills existed on disk. A guard that reports green while the drift
+    /// it names is present is worse than no guard: the next person reads the
+    /// test name and stops looking.
+    ///
+    /// Now the mapping returns `Option`, and a kind must be in one list or the
+    /// other. Adding a kind to `KNOWN_LOOP_KINDS` without either fails here.
+    #[test]
+    fn every_advertised_kind_is_mapped_or_recorded_as_unmapped() {
+        assert_eq!(skill_for("spec"), Some("nook-spec"));
+        assert_eq!(skill_for("decompose"), Some("nook-epic"));
+        assert_eq!(skill_for("review"), Some("nook-review"));
+
+        for k in crate::capabilities::KNOWN_LOOP_KINDS {
+            let mapped = skill_for(k).is_some();
+            let recorded = UNMAPPED_KINDS.iter().any(|(n, _)| n == k);
+            assert!(
+                mapped ^ recorded,
+                "{k} must be either mapped or recorded as unmapped, never both \
+                 and never neither — mapped={mapped} recorded={recorded}"
+            );
+        }
+    }
+
+    /// The recorded gaps are real gaps: each names an owner, and none of them
+    /// is a kind that actually has a mapping.
+    #[test]
+    fn the_unmapped_kinds_are_advertised_and_owned() {
+        for (kind, owner) in UNMAPPED_KINDS {
+            assert!(
+                crate::capabilities::KNOWN_LOOP_KINDS.contains(kind),
+                "{kind} is recorded as unmapped but is not advertised at all"
+            );
+            assert!(
+                owner.contains("MAIN-"),
+                "{kind}'s exemption must name the card that owns it, got {owner:?}"
+            );
+            assert!(skill_for(kind).is_none(), "{kind} is mapped after all");
+        }
+    }
+
+    /// AC-1/AC-3: review uses an existing clone cache and never creates one.
+    ///
+    /// The distinction is the whole point — a shared operator caches the repos
+    /// it hosts, and letting a review job clone on demand would turn "review
+    /// this repo" into an unbounded fetch of whatever a job names, on a machine
+    /// several tenants share.
+    #[test]
+    fn only_review_is_barred_from_creating_the_clone_cache() {
+        assert!(!may_create_cache("review"));
+        assert!(may_create_cache("spec"));
+        assert!(may_create_cache("decompose"));
+    }
+
+    /// AC-4 / MAIN-143 AC-5: what counts as a credential.
+    ///
+    /// Asserts the real predicate `gh_is_authenticated` uses, and touches NO
+    /// environment. The first cut set `GH_TOKEN` in one test and cleared it in
+    /// another in the same binary — Rust runs those on parallel threads, so a
+    /// `remove_var` landing between the other test's `set_var` and its read
+    /// made it fall through to `gh auth status` and fail on CI. The `unsafe`
+    /// block's SAFETY comment claimed this test was the only writer of those
+    /// names; it was not, and the comment was the wrong kind of confident.
+    #[test]
+    fn an_empty_or_absent_token_is_not_a_credential() {
+        assert!(token_is_usable(Some("ghp_realish")));
+        assert!(!token_is_usable(Some("")), "empty is not a credential");
+        assert!(
+            !token_is_usable(Some("   ")),
+            "whitespace is the shape an unset compose variable takes"
+        );
+        assert!(!token_is_usable(None), "absent is not a credential");
+    }
+
+    /// AC-3: a missing cache is a NAMED failure, not a hang and not a clone.
+    #[test]
+    fn a_missing_cache_names_the_path_and_the_repo_instead_of_cloning() {
+        let empty = std::env::temp_dir().join(format!("nook-406-{}", std::process::id()));
+        let err = existing_mirror_in(&empty, "git@example.test:acme/api.git", None)
+            .expect_err("an absent mirror must not be created");
+        assert!(err.contains("no clone cache"), "{err}");
+        assert!(err.contains("acme/api"), "names the repo: {err}");
+        assert!(
+            !empty.exists(),
+            "it must not have created anything at {}",
+            empty.display()
+        );
+    }
 
     #[test]
     fn exit_status_decides_success_honestly() {
