@@ -529,7 +529,7 @@ mod tests {
                 "dead-lettered"
             );
             let reason: String = bed
-                .pool
+                .db()
                 .query_scalar(
                     "SELECT reason FROM work_queue_dead WHERE work_type = $1",
                     params![&ty],
@@ -573,7 +573,7 @@ mod tests {
                 "not dead after one failure"
             );
             let locked_future: bool = bed
-                .pool
+                .db()
                 .query_scalar(
                     &format!(
                         "SELECT locked_until > {} FROM work_queue WHERE id = $1",
@@ -864,7 +864,7 @@ mod tests {
                 "left the live queue"
             );
             let reason: String = bed
-                .pool
+                .db()
                 .query_scalar(
                     "SELECT reason FROM work_queue_dead WHERE work_type = $1",
                     params![&ty],

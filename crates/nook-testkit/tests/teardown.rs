@@ -2,7 +2,7 @@
 //! thing at teardown; `NOOK_KEEP_TEST_DATA` keeps it for debugging. Proven here
 //! against `pg_database` — the database itself vanishes, not just its rows.
 //! Needs a **Postgres** `DATABASE_URL`; skips cleanly without one, and skips on
-//! a SQLite bed because `pg_database` and `bed.pool` are both Postgres-only
+//! a SQLite bed because `pg_database` and a raw `PgPool` are both Postgres-only
 //! (MAIN-242 AC-4). The SQLite half of the same contract — teardown removes the
 //! file, `keep` preserves it — lives in `tests/dual_engine.rs`.
 
@@ -69,8 +69,10 @@ async fn keep_preserves_the_database() {
     );
 
     // Don't leak the kept database: the Drop guard also honours keep and won't
-    // remove it, so drop it by hand.
-    bed.pool.close().await;
+    // remove it, so drop it by hand. The bed's own pool is no longer reachable
+    // from here (MAIN-268 removed `bed.pool`), which costs nothing: `WITH
+    // (FORCE)` below terminates its connections server-side, which is the same
+    // mechanism the Drop guard has always relied on.
     let base = std::env::var("DATABASE_URL").unwrap();
     let admin = PgPool::connect(&base).await.unwrap();
     sqlx::query(&format!("DROP DATABASE IF EXISTS \"{name}\" WITH (FORCE)"))

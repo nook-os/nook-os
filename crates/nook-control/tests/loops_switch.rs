@@ -172,7 +172,7 @@ async fn a_job_queued_while_off_waits_and_runs_after_enable() {
     // gate it consults, and that the job is untouched.
     assert!(!loops::any_enabled(&settings).await);
     let after: LoopJob = bed
-        .pool
+        .db()
         .query_one("SELECT * FROM loop_jobs WHERE id = $1", params![job.id])
         .await
         .expect("the job still exists");

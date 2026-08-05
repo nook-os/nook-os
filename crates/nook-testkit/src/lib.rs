@@ -40,11 +40,12 @@
 //! - [`TestBed::db`] is the **engine-agnostic** one — an [`EnginePool`], the same
 //!   type production code takes. Anything written against it runs on either
 //!   engine. New tests should use it.
-//! - [`TestBed::pool`] is a **Postgres-only escape**, kept because ~650 existing
-//!   call sites bind raw `sqlx` queries against it and converting them is the
-//!   next unit of work, not this one (MAIN-242 NG-1). On a SQLite bed it is an
-//!   inert handle that has never connected and never will; touching it fails,
-//!   loudly and by design. Tests that use it are Postgres-leg tests.
+//! There is no second surface. The `pool: PgPool` escape hatch that stood
+//! beside `db` through the conversion is gone (MAIN-268): every test now
+//! reaches its database engine-agnostically, and the guard in
+//! `scripts/check-sqlx-signatures.sh` stops a new one appearing. A test that
+//! genuinely needs raw Postgres — multi-statement SQL, or `pg_database` —
+//! takes its own connection from [`TestBed::database_url`] and says why.
 //!
 //! Gate on [`TestBed::engine`] (or [`TestBed::is_postgres`]) when a test is
 //! Postgres-only for a real reason — querying `pg_database`, say.
@@ -54,7 +55,6 @@ use nook_control::state::AppState;
 use nook_db::{params, Db, Engine, EnginePool};
 use nook_infra::Config;
 use nook_types::{NodeId, TenantId, UserId, WorkspaceId};
-use sqlx::postgres::PgPoolOptions;
 use sqlx::{Connection, PgConnection, PgPool};
 use std::path::{Path, PathBuf};
 use tokio::sync::OnceCell;
@@ -258,50 +258,19 @@ enum Arm {
     },
 }
 
-/// A pool that has never opened a connection and never will, for the `pool`
-/// field on a SQLite bed.
-///
-/// The field cannot simply be absent: it is `pub`, and ~650 call sites bind
-/// `sqlx` queries against it, so on a SQLite bed it has to hold *something*.
-/// What it holds is chosen for one property — it cannot reach a real server.
-/// The host is a `.invalid` name, which RFC 2606 guarantees never resolves.
-///
-/// The tempting alternative, a lazy pool aimed at the real `DATABASE_URL`, is
-/// the trap this exists to avoid: it would **work**, silently running an
-/// allegedly-isolated test against the shared dev database.
-///
-/// **The failure is safe but not self-explanatory**, and that is worth knowing
-/// rather than discovering. The hostname was picked hoping it would appear in
-/// the error; it does not — sqlx reports connection failures without the
-/// target, so what you actually get is:
-///
-/// ```text
-/// error communicating with database: failed to lookup address information: Name or service not known
-/// ```
-///
-/// (A Unix-socket path in place of the host was tried too, and is elided the
-/// same way.) If you have landed here from that message: you used `bed.pool` on
-/// a SQLite bed. Use [`TestBed::db`], or gate the test with
-/// [`TestBed::is_postgres`].
-fn inert_pg_pool() -> PgPool {
-    PgPoolOptions::new()
-        .connect_lazy("postgres://nobody@bed-pool-is-postgres-only-use-bed-db.invalid/none")
-        .expect("a syntactically valid URL parses without connecting")
-}
-
 /// A prepared, **private** test world: a freshly created, migrated, and seeded
 /// database plus opt-in setup surfaces, dropped whole at teardown.
 pub struct TestBed {
-    /// **Postgres-only escape.** The raw pool for this test's private database,
-    /// for fixture SQL written directly against `sqlx`.
+    /// The engine-agnostic pool, and the **only** one a test can reach.
     ///
-    /// On a **SQLite** bed this is [`inert_pg_pool`] — a handle that has never
-    /// connected — so a test that uses it is a Postgres-leg test and fails
-    /// rather than quietly doing something else. Use [`TestBed::db`] for
-    /// anything that should run on both engines.
-    pub pool: PgPool,
-    /// The engine-agnostic pool, and the real one: on Postgres it wraps `pool`,
-    /// on SQLite it is the only pool there is.
+    /// The `pub pool: PgPool` escape hatch that sat beside this is gone
+    /// (MAIN-268). While it existed, every consumer of it was a Postgres-leg
+    /// test by construction, and on a SQLite bed it had to hold an inert
+    /// handle aimed at a `.invalid` host so that using it failed instead of
+    /// silently running an allegedly-isolated test against the shared dev
+    /// database. Nothing needs that shape now: `db` is the surface, and a test
+    /// that genuinely needs raw multi-statement Postgres SQL takes its own
+    /// connection from [`TestBed::database_url`].
     db: EnginePool,
     /// What was created, and how to undo it.
     arm: Arm,
@@ -363,8 +332,7 @@ impl TestBed {
             .expect("connect to the fresh test database");
 
         TestBed {
-            db: EnginePool::from_pg(pool.clone()),
-            pool,
+            db: EnginePool::from_pg(pool),
             arm: Arm::Pg { base_url, db_name },
             keep,
             dropped: false,
@@ -463,7 +431,6 @@ impl TestBed {
             .expect("seed the private SQLite test database");
 
         TestBed {
-            pool: inert_pg_pool(),
             db,
             arm: Arm::Sqlite { path },
             keep,
@@ -616,7 +583,7 @@ impl TestBed {
         self.dropped = true;
         match &self.arm {
             Arm::Pg { base_url, db_name } => {
-                self.pool.close().await;
+                self.db.pg().close().await;
                 let _ = drop_database(base_url, db_name).await;
             }
             Arm::Sqlite { path } => {
@@ -694,7 +661,7 @@ impl Drop for TestBed {
         // it), drop the database anyway. Drop is sync, so the async work runs on
         // a throwaway current-thread runtime on a fresh OS thread.
         //
-        // This thread must NEVER touch `self.pool` (MAIN-185): the pool's
+        // This thread must NEVER touch `self.db`'s pool (MAIN-185): the pool's
         // connections are I/O objects registered with the TEST's runtime, and
         // the `join()` below has that runtime frozen — closing them from here
         // deadlocks both threads (gdb-verified; the hang that ate whole CI jobs).
