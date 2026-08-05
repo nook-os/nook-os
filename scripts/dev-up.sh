@@ -26,7 +26,7 @@ say() { printf '\033[36m▸ %s\033[0m\n' "$1"; }
 # checkouts fight over the same container names and volumes. Derive it from the
 # directory so it is stable per worktree and needs no configuration.
 if [ -z "${COMPOSE_PROJECT_NAME:-}" ]; then
-  COMPOSE_PROJECT_NAME="nook-$(basename "$PWD" | tr -c 'a-zA-Z0-9_-' '-' | tr 'A-Z' 'a-z')"
+  COMPOSE_PROJECT_NAME="nook-$(basename "$PWD" | tr -c '[:alnum:]_-' '-' | tr '[:upper:]' '[:lower:]')"
   export COMPOSE_PROJECT_NAME
 fi
 say "Compose project: $COMPOSE_PROJECT_NAME"
