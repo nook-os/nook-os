@@ -779,7 +779,34 @@ async fn start_clone(
                             .await
                         {
                             Ok(()) => {
-                                tracing::info!(%workspace, node = %node, %path, "clone-on-demand: cloned and recorded checkout")
+                                tracing::info!(%workspace, node = %node, %path, "clone-on-demand: cloned and recorded checkout");
+                                // A new checkout wants the workspace's `.env`,
+                                // and the control plane cannot deliver it — the
+                                // secrets are sealed with a password the server
+                                // never sees. So it ANNOUNCES, and an unlocked
+                                // browser replays the unlock, which is what
+                                // actually writes the file (MAIN-317 AC-2, as
+                                // re-scoped by the 2026-08-04 ruling).
+                                //
+                                // Discovery has always done this. Pinning the
+                                // row here with `associate_clone`, instead of
+                                // waiting for the node's next scan, is what
+                                // made the reconciler skip it — so a checkout
+                                // the RECONCILER created never announced and no
+                                // browser ever learned to push env to it.
+                                //
+                                // Not gated on the row being new, unlike
+                                // discovery's call: `associate_clone` is
+                                // idempotent and does not report which it did.
+                                // It costs nothing to be wrong here — clone-on-
+                                // demand only runs for a node with no checkout,
+                                // `announce_new_checkout` returns immediately
+                                // when the workspace has no secrets, and a
+                                // repeat announce re-pushes the same file.
+                                crate::services::secrets::announce_new_checkout(
+                                    &state, tenant, workspace, node, &path,
+                                )
+                                .await;
                             }
                             Err(e) => {
                                 tracing::warn!(%workspace, node = %node, error = %e, "clone-on-demand: cloned but could not record checkout")
