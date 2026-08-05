@@ -11,43 +11,39 @@ use nook_control::services::{jobs, loops};
 use nook_db::{params, Db};
 use nook_testkit::TestBed;
 use nook_types::*;
-use sqlx::PgPool;
 
 /// A board + column + task to hang a job on.
-async fn target(db: &PgPool, tenant: TenantId, creator: UserId) -> TaskId {
+async fn target(bed: &TestBed, tenant: TenantId, creator: UserId) -> TaskId {
     let board = BoardId::new();
-    sqlx::query(
-        "INSERT INTO boards (id, tenant_id, name, key, provider) VALUES ($1,$2,'b',$3,'local')",
-    )
-    .bind(board)
-    .bind(tenant)
-    .bind(format!("L{}", &board.0.simple().to_string()[26..]).to_uppercase())
-    .execute(db)
-    .await
-    .expect("board");
+    bed.db()
+        .exec(
+            "INSERT INTO boards (id, tenant_id, name, key, provider) VALUES ($1,$2,'b',$3,'local')",
+            params![
+                board,
+                tenant,
+                format!("L{}", &board.0.simple().to_string()[26..]).to_uppercase()
+            ],
+        )
+        .await
+        .expect("board");
     let col = ColumnId::new();
-    sqlx::query(
-        "INSERT INTO board_columns (id, board_id, name, position, type)
+    bed.db()
+        .exec(
+            "INSERT INTO board_columns (id, board_id, name, position, type)
          VALUES ($1,$2,'Triage',0,'unstarted')",
-    )
-    .bind(col)
-    .bind(board)
-    .execute(db)
-    .await
-    .expect("column");
+            params![col, board],
+        )
+        .await
+        .expect("column");
     let id = TaskId::new();
-    sqlx::query(
-        "INSERT INTO tasks (id, tenant_id, board_id, column_id, title, type, number, created_by)
+    bed.db()
+        .exec(
+            "INSERT INTO tasks (id, tenant_id, board_id, column_id, title, type, number, created_by)
          VALUES ($1,$2,$3,$4,'t','task',1,$5)",
-    )
-    .bind(id)
-    .bind(tenant)
-    .bind(board)
-    .bind(col)
-    .bind(creator)
-    .execute(db)
-    .await
-    .expect("task");
+            params![id, tenant, board, col, creator],
+        )
+        .await
+        .expect("task");
     id
 }
 
@@ -116,17 +112,14 @@ async fn a_user_scoped_row_cannot_turn_the_fleet_on() {
     let tenant = bed.tenant("loops").await;
     let (user, _p) = bed.user(tenant, "member").await;
 
-    sqlx::query(
-        "INSERT INTO settings (id, tenant_id, scope, user_id, key, value)
+    bed.db()
+        .exec(
+            "INSERT INTO settings (id, tenant_id, scope, user_id, key, value)
          VALUES ($1, $2, 'user', $3, $4, 'true'::jsonb)",
-    )
-    .bind(SettingId::new())
-    .bind(tenant)
-    .bind(user)
-    .bind(loops::KEY)
-    .execute(&bed.pool)
-    .await
-    .expect("user-scoped setting");
+            params![SettingId::new(), tenant, user, loops::KEY],
+        )
+        .await
+        .expect("user-scoped setting");
 
     let db = bed.db();
     // The real settings repository over this bed — the same one AppState
@@ -151,7 +144,7 @@ async fn a_job_queued_while_off_waits_and_runs_after_enable() {
     };
     let tenant = bed.tenant("loops").await;
     let (user, person) = bed.user(tenant, "owner").await;
-    let task = target(&bed.pool, tenant, user).await;
+    let task = target(&bed, tenant, user).await;
     let state = bed.app_state().await;
     let db = bed.db();
     // The real settings repository over this bed — the same one AppState
@@ -188,15 +181,15 @@ async fn a_job_queued_while_off_waits_and_runs_after_enable() {
 
     // Now give it somewhere to run and turn loops on.
     let node = bed.node(tenant, person).await;
-    sqlx::query(
-        "UPDATE nodes SET status = 'online',
+    bed.db()
+        .exec(
+            "UPDATE nodes SET status = 'online',
              capabilities = '{\"loop_kinds\":[\"spec\",\"decompose\"],\"runtime_auth\":[{\"runtime\":\"claude\",\"state\":\"authorized\"}]}'::jsonb
          WHERE id = $1",
-    )
-    .bind(node)
-    .execute(&bed.pool)
-    .await
-    .expect("an eligible executor");
+            params![node],
+        )
+        .await
+        .expect("an eligible executor");
     loops::set(&settings, tenant, true).await.expect("enable");
     assert!(loops::any_enabled(&settings).await);
 

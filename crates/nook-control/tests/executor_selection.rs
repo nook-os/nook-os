@@ -6,93 +6,90 @@
 
 use nook_control::services::jobs;
 use nook_control::state::AppState;
+use nook_db::{params, Db};
 use nook_types::*;
 use serde_json::json;
-use sqlx::PgPool;
 use uuid::Uuid;
 
 use nook_testkit::TestBed;
 
 /// A board + column + a team-visible task to anchor a job on.
-async fn target_task(db: &PgPool, tenant: TenantId, creator: UserId) -> TaskId {
+async fn target_task(bed: &TestBed, tenant: TenantId, creator: UserId) -> TaskId {
     let board = BoardId::new();
-    sqlx::query(
-        "INSERT INTO boards (id, tenant_id, name, key, provider) VALUES ($1,$2,'b',$3,'local')",
-    )
-    .bind(board)
-    .bind(tenant)
-    // The RANDOM tail of the v7 uuid — its leading bytes are a shared timestamp,
-    // so two boards made in the same test would collide on a prefix-derived key.
-    .bind(format!("B{}", &board.0.simple().to_string()[26..32]).to_uppercase())
-    .execute(db)
-    .await
-    .expect("board");
+    bed.db()
+        .exec(
+            "INSERT INTO boards (id, tenant_id, name, key, provider) VALUES ($1,$2,'b',$3,'local')",
+            // The RANDOM tail of the v7 uuid — its leading bytes are a shared
+            // timestamp, so two boards made in the same test would collide on a
+            // prefix-derived key.
+            params![
+                board,
+                tenant,
+                format!("B{}", &board.0.simple().to_string()[26..32]).to_uppercase()
+            ],
+        )
+        .await
+        .expect("board");
     let col = ColumnId::new();
-    sqlx::query(
-        "INSERT INTO board_columns (id, board_id, name, position, type)
+    bed.db()
+        .exec(
+            "INSERT INTO board_columns (id, board_id, name, position, type)
          VALUES ($1,$2,'Triage',0,'unstarted')",
-    )
-    .bind(col)
-    .bind(board)
-    .execute(db)
-    .await
-    .expect("column");
+            params![col, board],
+        )
+        .await
+        .expect("column");
     let task = TaskId::new();
-    sqlx::query(
-        "INSERT INTO tasks (id, tenant_id, board_id, column_id, title, type, created_by)
+    bed.db()
+        .exec(
+            "INSERT INTO tasks (id, tenant_id, board_id, column_id, title, type, created_by)
          VALUES ($1,$2,$3,$4,'t','task',$5)",
-    )
-    .bind(task)
-    .bind(tenant)
-    .bind(board)
-    .bind(col)
-    .bind(creator)
-    .execute(db)
-    .await
-    .expect("task");
+            params![task, tenant, board, col, creator],
+        )
+        .await
+        .expect("task");
     task
 }
 
 /// A queued spec job on `target`, requested by `user`.
-async fn queued_job(db: &PgPool, tenant: TenantId, user: UserId, target: TaskId) -> JobId {
+async fn queued_job(bed: &TestBed, tenant: TenantId, user: UserId, target: TaskId) -> JobId {
     let id = JobId::new();
-    sqlx::query(
-        "INSERT INTO loop_jobs (id, tenant_id, kind, target_task_id, requested_by, state)
+    bed.db()
+        .exec(
+            "INSERT INTO loop_jobs (id, tenant_id, kind, target_task_id, requested_by, state)
          VALUES ($1,$2,'spec',$3,$4,'queued')",
-    )
-    .bind(id)
-    .bind(tenant)
-    .bind(target)
-    .bind(user)
-    .execute(db)
-    .await
-    .expect("job");
+            params![id, tenant, target, user],
+        )
+        .await
+        .expect("job");
     id
 }
 
 /// Insert a node with an explicit status, owner, and capabilities jsonb.
 async fn node(
-    db: &PgPool,
+    bed: &TestBed,
     tenant: TenantId,
     owner: Option<Uuid>,
     status: &str,
     caps: serde_json::Value,
 ) -> NodeId {
     let id = NodeId::new();
-    sqlx::query(
-        "INSERT INTO nodes (id, tenant_id, name, node_token_hash, status, owner_person_id, capabilities)
+    bed.db()
+        .exec(
+            "INSERT INTO nodes (id, tenant_id, name, node_token_hash, status, owner_person_id, capabilities)
          VALUES ($1,$2,$3,$4,$5,$6,$7)",
-    )
-    .bind(id)
-    .bind(tenant)
-    .bind(format!("n-{}", id.0.simple()))
-    .bind(format!("h-{}", id.0.simple()))
-    .bind(status)
-    .bind(owner)
-    .bind(caps)
-    .execute(db)
-    .await
-    .expect("node");
+            params![
+                id,
+                tenant,
+                format!("n-{}", id.0.simple()),
+                format!("h-{}", id.0.simple()),
+                status,
+                owner,
+                caps
+            ],
+        )
+        .await
+        .expect("node");
     id
 }
 
@@ -117,8 +114,8 @@ fn caps(state: &str, operator: bool) -> serde_json::Value {
 async fn setup(bed: &TestBed) -> (AppState, TenantId, UserId, Uuid, JobId) {
     let tenant = bed.tenant("exec").await;
     let (user, person) = bed.user(tenant, "owner").await;
-    let target = target_task(&bed.pool, tenant, user).await;
-    let job = queued_job(&bed.pool, tenant, user, target).await;
+    let target = target_task(&bed, tenant, user).await;
+    let job = queued_job(&bed, tenant, user, target).await;
     (bed.app_state().await, tenant, user, person, job)
 }
 
@@ -129,14 +126,14 @@ async fn own_node_is_preferred_over_the_operator() {
     };
     let (state, tenant, _user, person, job) = setup(&bed).await;
     let mine = node(
-        &bed.pool,
+        &bed,
         tenant,
         Some(person),
         "online",
         caps("authorized", false),
     )
     .await;
-    let _operator = node(&bed.pool, tenant, None, "online", caps("authorized", true)).await;
+    let _operator = node(&bed, tenant, None, "online", caps("authorized", true)).await;
 
     let placed = jobs::select_executor(&state, tenant, job)
         .await
@@ -160,14 +157,14 @@ async fn operator_is_the_fallback_when_no_owned_node_is_eligible() {
     let (state, tenant, _user, person, job) = setup(&bed).await;
     // The requester's own node is online but NOT authorized — skipped.
     let _mine = node(
-        &bed.pool,
+        &bed,
         tenant,
         Some(person),
         "online",
         caps("not_authorized", false),
     )
     .await;
-    let operator = node(&bed.pool, tenant, None, "online", caps("authorized", true)).await;
+    let operator = node(&bed, tenant, None, "online", caps("authorized", true)).await;
 
     let placed = jobs::select_executor(&state, tenant, job)
         .await
@@ -190,7 +187,7 @@ async fn no_eligible_executor_leaves_the_job_queued_with_a_reason() {
     let (state, tenant, _user, person, job) = setup(&bed).await;
     // Owned node online but unauthorized; no operator at all.
     let _mine = node(
-        &bed.pool,
+        &bed,
         tenant,
         Some(person),
         "online",
@@ -210,15 +207,9 @@ async fn no_eligible_executor_leaves_the_job_queued_with_a_reason() {
     );
 
     // An offline owned node yields the 'no node online' reason instead.
-    let job2 = queued_job(
-        &bed.pool,
-        tenant,
-        _user,
-        target_task(&bed.pool, tenant, _user).await,
-    )
-    .await;
+    let job2 = queued_job(&bed, tenant, _user, target_task(&bed, tenant, _user).await).await;
     let _offline = node(
-        &bed.pool,
+        &bed,
         tenant,
         Some(person),
         "offline",
@@ -246,7 +237,7 @@ async fn ineligible_runtime_is_skipped() {
         "loop_kinds": ["spec", "decompose"],
         "runtime_auth": [{ "id": "codex", "label": "Codex", "runtime": "codex", "state": "authorized" }]
     });
-    let _mine = node(&bed.pool, tenant, Some(person), "online", other).await;
+    let _mine = node(&bed, tenant, Some(person), "online", other).await;
 
     let placed = jobs::select_executor(&state, tenant, job)
         .await
@@ -266,7 +257,7 @@ async fn concurrent_selection_claims_a_job_exactly_once() {
     };
     let (state, tenant, _user, person, job) = setup(&bed).await;
     let mine = node(
-        &bed.pool,
+        &bed,
         tenant,
         Some(person),
         "online",
@@ -289,12 +280,14 @@ async fn concurrent_selection_claims_a_job_exactly_once() {
     assert_eq!(a.executor_node_id, Some(mine));
     assert_eq!(b.executor_node_id, Some(mine));
 
-    let (state_str, exec): (String, Option<NodeId>) =
-        sqlx::query_as("SELECT state, executor_node_id FROM loop_jobs WHERE id = $1")
-            .bind(job)
-            .fetch_one(&bed.pool)
-            .await
-            .unwrap();
+    let (state_str, exec): (String, Option<NodeId>) = bed
+        .db()
+        .query_one(
+            "SELECT state, executor_node_id FROM loop_jobs WHERE id = $1",
+            params![job],
+        )
+        .await
+        .unwrap();
     assert_eq!(state_str, "claimed");
     assert_eq!(exec, Some(mine));
 
@@ -331,7 +324,7 @@ async fn a_job_of_a_kind_no_node_declares_stays_queued_with_the_reason() {
     // Online, authorized, owned — and declares only `decompose`. The job is
     // `spec`, so this node is not a candidate.
     node(
-        &bed.pool,
+        &bed,
         tenant,
         Some(person),
         "online",
@@ -359,7 +352,7 @@ async fn a_node_declaring_the_kind_is_placed() {
     };
     let (state, tenant, _user, person, job) = setup(&bed).await;
     let mine = node(
-        &bed.pool,
+        &bed,
         tenant,
         Some(person),
         "online",
@@ -386,7 +379,7 @@ async fn a_shared_operator_declaring_build_is_still_refused_build_work() {
     };
     let (state, tenant, _user, person, _job) = setup(&bed).await;
     let op = node(
-        &bed.pool,
+        &bed,
         tenant,
         None,
         "online",
@@ -441,15 +434,16 @@ async fn a_node_at_capacity_is_skipped_and_the_job_waits() {
     let (state, tenant, user, person, job) = setup(&bed).await;
     let mut caps = caps_declaring(&["spec"], false);
     caps["max_loop_jobs"] = json!(1);
-    let mine = node(&bed.pool, tenant, Some(person), "online", caps).await;
+    let mine = node(&bed, tenant, Some(person), "online", caps).await;
 
     // One job already in flight on that node fills its single slot.
-    let target = target_task(&bed.pool, tenant, user).await;
-    let held = queued_job(&bed.pool, tenant, user, target).await;
-    sqlx::query("UPDATE loop_jobs SET state = 'running', executor_node_id = $2 WHERE id = $1")
-        .bind(held)
-        .bind(mine)
-        .execute(&bed.pool)
+    let target = target_task(&bed, tenant, user).await;
+    let held = queued_job(&bed, tenant, user, target).await;
+    bed.db()
+        .exec(
+            "UPDATE loop_jobs SET state = 'running', executor_node_id = $2 WHERE id = $1",
+            params![held, mine],
+        )
         .await
         .expect("occupy");
 
@@ -464,9 +458,11 @@ async fn a_node_at_capacity_is_skipped_and_the_job_waits() {
     );
 
     // The slot frees; the same job places without anything else changing.
-    sqlx::query("UPDATE loop_jobs SET state = 'completed' WHERE id = $1")
-        .bind(held)
-        .execute(&bed.pool)
+    bed.db()
+        .exec(
+            "UPDATE loop_jobs SET state = 'completed' WHERE id = $1",
+            params![held],
+        )
         .await
         .expect("free");
     let placed = jobs::select_executor(&state, tenant, job)
@@ -487,7 +483,7 @@ async fn a_zero_capacity_node_never_claims() {
     let (state, tenant, _user, person, job) = setup(&bed).await;
     let mut caps = caps_declaring(&["spec"], false);
     caps["max_loop_jobs"] = json!(0);
-    node(&bed.pool, tenant, Some(person), "online", caps).await;
+    node(&bed, tenant, Some(person), "online", caps).await;
 
     let placed = jobs::select_executor(&state, tenant, job)
         .await
