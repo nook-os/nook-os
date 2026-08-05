@@ -37,13 +37,10 @@ crates/nook-control/tests/sqlite_person_id_default.rs  # sqlx::Row to read pragm
 crates/nook-testkit/src/lib.rs               # the `pool: PgPool` escape hatch itself
 
 # ── Awaiting the testkit conversion (MAIN-267 and its siblings) ─────────────
-# 33 nook-control integration tests still bind raw sqlx against bed.pool.
 # Each line goes when its file is converted.
-crates/nook-control/tests/auth_request_path.rs
 crates/nook-control/tests/checkout_kind.rs
 crates/nook-control/tests/executor_selection.rs
 crates/nook-control/tests/interactions.rs
-crates/nook-control/tests/invite_registration.rs
 crates/nook-control/tests/job_reaper.rs
 crates/nook-control/tests/loop_job_execution.rs
 crates/nook-control/tests/loop_job_messages.rs
@@ -52,10 +49,6 @@ crates/nook-control/tests/loops_switch.rs
 crates/nook-control/tests/migrate_dev_tolerance.rs
 crates/nook-control/tests/migrate_paths.rs
 crates/nook-control/tests/multi_instance.rs
-crates/nook-control/tests/notebook.rs
-crates/nook-control/tests/notifications.rs
-crates/nook-control/tests/oidc_degraded.rs
-crates/nook-control/tests/placement_and_gitops_auth.rs
 crates/nook-control/tests/reconcile_tombstones.rs
 crates/nook-control/tests/repo_completeness.rs
 crates/nook-control/tests/squash_restamp.rs

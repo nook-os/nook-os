@@ -8,72 +8,69 @@
 //! and asserts only about them (a private `TestBed` database, so isolation is
 //! total either way).
 
+use nook_db::{params, Db, EnginePool};
 use nook_testkit::TestBed;
-use sqlx::PgPool;
 use uuid::Uuid;
 
 /// The real migration, run verbatim — no drift between what the test proves and
 /// what ships.
+///
+/// It is TWO statements, and `Db` has no multi-statement path (MAIN-393), so
+/// running it stays on `bed.pool` and `sqlx::raw_sql`. Splitting it here would
+/// be exactly the drift the line above exists to prevent.
 const BACKFILL_SQL: &str = include_str!("../migrations/0022_backfill_auth_mode.sql");
 
-async fn tenant(pool: &PgPool) -> Uuid {
+async fn tenant(db: &EnginePool) -> Uuid {
     let id = Uuid::now_v7();
     // auth_mode defaults to NULL — the pre-lock state the backfill targets.
-    sqlx::query("INSERT INTO tenants (id, slug, name) VALUES ($1, $2, $2)")
-        .bind(id)
-        .bind(format!("m169-{}", Uuid::now_v7().simple()))
-        .execute(pool)
-        .await
-        .expect("tenant");
+    db.exec(
+        "INSERT INTO tenants (id, slug, name) VALUES ($1, $2, $2)",
+        params![id, format!("m169-{}", Uuid::now_v7().simple())],
+    )
+    .await
+    .expect("tenant");
     id
 }
 
 /// A user with a local password set.
-async fn user_with_password(pool: &PgPool, tenant: Uuid) -> Uuid {
+async fn user_with_password(db: &EnginePool, tenant: Uuid) -> Uuid {
     let id = Uuid::now_v7();
-    sqlx::query(
+    db.exec(
         "INSERT INTO users (id, tenant_id, display_name, email, password_hash)
          VALUES ($1, $2, 'L', $3, 'argon2-hash')",
+        params![id, tenant, format!("l-{}@example.test", id.simple())],
     )
-    .bind(id)
-    .bind(tenant)
-    .bind(format!("l-{}@example.test", id.simple()))
-    .execute(pool)
     .await
     .expect("local user");
     id
 }
 
 /// A user with a federated identity and NO local password (an OIDC account).
-async fn user_with_identity(pool: &PgPool, tenant: Uuid) -> Uuid {
+async fn user_with_identity(db: &EnginePool, tenant: Uuid) -> Uuid {
     let id = Uuid::now_v7();
-    sqlx::query(
+    db.exec(
         "INSERT INTO users (id, tenant_id, display_name, email)
          VALUES ($1, $2, 'O', $3)",
+        params![id, tenant, format!("o-{}@example.test", id.simple())],
     )
-    .bind(id)
-    .bind(tenant)
-    .bind(format!("o-{}@example.test", id.simple()))
-    .execute(pool)
     .await
     .expect("oidc user");
-    sqlx::query(
+    db.exec(
         "INSERT INTO identities (id, user_id, issuer, subject)
          VALUES ($1, $2, 'https://idp.example.test', $3)",
+        params![Uuid::now_v7(), id, id.simple().to_string()],
     )
-    .bind(Uuid::now_v7())
-    .bind(id)
-    .bind(id.simple().to_string())
-    .execute(pool)
     .await
     .expect("identity");
     id
 }
 
-async fn mode_of(pool: &PgPool, tenant: Uuid) -> Option<String> {
-    let (m,): (Option<String>,) = sqlx::query_as("SELECT auth_mode FROM tenants WHERE id = $1")
-        .bind(tenant)
-        .fetch_one(pool)
+async fn mode_of(db: &EnginePool, tenant: Uuid) -> Option<String> {
+    let (m,): (Option<String>,) = db
+        .query_one(
+            "SELECT auth_mode FROM tenants WHERE id = $1",
+            params![tenant],
+        )
         .await
         .expect("read auth_mode");
     m
@@ -84,53 +81,56 @@ async fn backfill_classifies_only_unambiguous_tenants() {
     let Some(mut bed) = TestBed::new().await else {
         return;
     };
+    let db = bed.db();
+    // The escape hatch survives here for `raw_sql` alone — see BACKFILL_SQL.
     let pool = bed.pool.clone();
 
     // OIDC-only: an identity, no local password → 'oidc'.
-    let oidc_only = tenant(&pool).await;
-    user_with_identity(&pool, oidc_only).await;
+    let oidc_only = tenant(&db).await;
+    user_with_identity(&db, oidc_only).await;
 
     // Local-only: a password, no identity → 'local'.
-    let local_only = tenant(&pool).await;
-    user_with_password(&pool, local_only).await;
+    let local_only = tenant(&db).await;
+    user_with_password(&db, local_only).await;
 
     // Mixed: both signals → left NULL (a human must decide).
-    let mixed = tenant(&pool).await;
-    user_with_identity(&pool, mixed).await;
-    user_with_password(&pool, mixed).await;
+    let mixed = tenant(&db).await;
+    user_with_identity(&db, mixed).await;
+    user_with_password(&db, mixed).await;
 
     // Empty: neither → left NULL.
-    let empty = tenant(&pool).await;
+    let empty = tenant(&db).await;
 
     sqlx::raw_sql(BACKFILL_SQL)
         .execute(&pool)
         .await
         .expect("backfill runs");
 
-    assert_eq!(mode_of(&pool, oidc_only).await.as_deref(), Some("oidc"));
-    assert_eq!(mode_of(&pool, local_only).await.as_deref(), Some("local"));
-    assert_eq!(mode_of(&pool, mixed).await, None, "mixed stays undecided");
-    assert_eq!(mode_of(&pool, empty).await, None, "empty stays undecided");
+    assert_eq!(mode_of(&db, oidc_only).await.as_deref(), Some("oidc"));
+    assert_eq!(mode_of(&db, local_only).await.as_deref(), Some("local"));
+    assert_eq!(mode_of(&db, mixed).await, None, "mixed stays undecided");
+    assert_eq!(mode_of(&db, empty).await, None, "empty stays undecided");
 
     // Idempotent: a second run changes nothing.
     sqlx::raw_sql(BACKFILL_SQL)
         .execute(&pool)
         .await
         .expect("backfill re-runs");
-    assert_eq!(mode_of(&pool, oidc_only).await.as_deref(), Some("oidc"));
-    assert_eq!(mode_of(&pool, local_only).await.as_deref(), Some("local"));
+    assert_eq!(mode_of(&db, oidc_only).await.as_deref(), Some("oidc"));
+    assert_eq!(mode_of(&db, local_only).await.as_deref(), Some("local"));
 
     // And it never overwrites a mode that is already set.
-    let already = tenant(&pool).await;
-    sqlx::query("UPDATE tenants SET auth_mode = 'local' WHERE id = $1")
-        .bind(already)
-        .execute(&pool)
-        .await
-        .unwrap();
-    user_with_identity(&pool, already).await; // would say 'oidc' if it re-ran
+    let already = tenant(&db).await;
+    db.exec(
+        "UPDATE tenants SET auth_mode = 'local' WHERE id = $1",
+        params![already],
+    )
+    .await
+    .unwrap();
+    user_with_identity(&db, already).await; // would say 'oidc' if it re-ran
     sqlx::raw_sql(BACKFILL_SQL).execute(&pool).await.unwrap();
     assert_eq!(
-        mode_of(&pool, already).await.as_deref(),
+        mode_of(&db, already).await.as_deref(),
         Some("local"),
         "an already-committed mode is never rewritten"
     );
@@ -145,28 +145,28 @@ async fn has_local_credentials_tracks_password_presence() {
     let Some(mut bed) = TestBed::new().await else {
         return;
     };
-    let pool = bed.pool.clone();
+    let db = bed.db();
 
-    let has = tenant(&pool).await;
-    user_with_password(&pool, has).await;
+    let has = tenant(&db).await;
+    user_with_password(&db, has).await;
 
-    let none = tenant(&pool).await;
-    user_with_identity(&pool, none).await; // OIDC account: no password here
+    let none = tenant(&db).await;
+    user_with_identity(&db, none).await; // OIDC account: no password here
 
-    async fn local_creds(pool: &PgPool, tenant: Uuid) -> i64 {
-        let (n,): (i64,) = sqlx::query_as(
-            "SELECT count(*) FROM users WHERE tenant_id = $1 AND password_hash IS NOT NULL",
-        )
-        .bind(tenant)
-        .fetch_one(pool)
-        .await
-        .unwrap();
+    async fn local_creds(db: &EnginePool, tenant: Uuid) -> i64 {
+        let (n,): (i64,) = db
+            .query_one(
+                "SELECT count(*) FROM users WHERE tenant_id = $1 AND password_hash IS NOT NULL",
+                params![tenant],
+            )
+            .await
+            .unwrap();
         n
     }
 
-    assert!(local_creds(&pool, has).await > 0, "a password user counts");
+    assert!(local_creds(&db, has).await > 0, "a password user counts");
     assert_eq!(
-        local_creds(&pool, none).await,
+        local_creds(&db, none).await,
         0,
         "an OIDC-only tenant has no break-glass credential"
     );
