@@ -9,80 +9,72 @@
 use nook_control::auth::{AuthCtx, Principal};
 use nook_control::error::ApiError;
 use nook_control::services::interactions;
+use nook_db::{params, Db};
 use nook_types::*;
-use sqlx::PgPool;
 use uuid::Uuid;
 
 use nook_testkit::TestBed;
 
 /// A board + column + a task with the given visibility, created by `creator`.
-async fn task(db: &PgPool, tenant: TenantId, creator: UserId, visibility: &str) -> TaskId {
+async fn task(bed: &TestBed, tenant: TenantId, creator: UserId, visibility: &str) -> TaskId {
     let board = BoardId::new();
-    sqlx::query(
-        "INSERT INTO boards (id, tenant_id, name, key, provider) VALUES ($1,$2,'b',$3,'local')",
-    )
-    .bind(board)
-    .bind(tenant)
-    .bind(format!("B{}", &board.0.simple().to_string()[26..32]).to_uppercase())
-    .execute(db)
-    .await
-    .expect("board");
+    bed.db()
+        .exec(
+            "INSERT INTO boards (id, tenant_id, name, key, provider) VALUES ($1,$2,'b',$3,'local')",
+            params![
+                board,
+                tenant,
+                format!("B{}", &board.0.simple().to_string()[26..32]).to_uppercase()
+            ],
+        )
+        .await
+        .expect("board");
     let col = ColumnId::new();
-    sqlx::query(
-        "INSERT INTO board_columns (id, board_id, name, position, type)
+    bed.db()
+        .exec(
+            "INSERT INTO board_columns (id, board_id, name, position, type)
          VALUES ($1,$2,'Triage',0,'unstarted')",
-    )
-    .bind(col)
-    .bind(board)
-    .execute(db)
-    .await
-    .expect("column");
+            params![col, board],
+        )
+        .await
+        .expect("column");
     let id = TaskId::new();
-    sqlx::query(
-        "INSERT INTO tasks (id, tenant_id, board_id, column_id, title, type, created_by, visibility)
+    bed.db()
+        .exec(
+            "INSERT INTO tasks (id, tenant_id, board_id, column_id, title, type, created_by, visibility)
          VALUES ($1,$2,$3,$4,'t','task',$5,$6)",
-    )
-    .bind(id)
-    .bind(tenant)
-    .bind(board)
-    .bind(col)
-    .bind(creator)
-    .bind(visibility)
-    .execute(db)
-    .await
-    .expect("task");
+            params![id, tenant, board, col, creator, visibility],
+        )
+        .await
+        .expect("task");
     id
 }
 
 /// A claimed job on `target`, executed by `node` — the shape the anti-spoof gate
 /// checks against.
 async fn claimed_job(
-    db: &PgPool,
+    bed: &TestBed,
     tenant: TenantId,
     user: UserId,
     target: TaskId,
     node: NodeId,
 ) -> JobId {
     let id = JobId::new();
-    sqlx::query(
-        "INSERT INTO loop_jobs (id, tenant_id, kind, target_task_id, requested_by, state, executor_node_id)
+    bed.db()
+        .exec(
+            "INSERT INTO loop_jobs (id, tenant_id, kind, target_task_id, requested_by, state, executor_node_id)
          VALUES ($1,$2,'spec',$3,$4,'claimed',$5)",
-    )
-    .bind(id)
-    .bind(tenant)
-    .bind(target)
-    .bind(user)
-    .bind(node)
-    .execute(db)
-    .await
-    .expect("job");
+            params![id, tenant, target, user, node],
+        )
+        .await
+        .expect("job");
     id
 }
 
 /// A job on `target`, executed by `node`, in the given lifecycle state — the
 /// bridging tests need a `running` job (the state a mid-run ask fires from).
 async fn job_in_state(
-    db: &PgPool,
+    bed: &TestBed,
     tenant: TenantId,
     user: UserId,
     target: TaskId,
@@ -90,56 +82,54 @@ async fn job_in_state(
     state: &str,
 ) -> JobId {
     let id = JobId::new();
-    sqlx::query(
-        "INSERT INTO loop_jobs (id, tenant_id, kind, target_task_id, requested_by, state, executor_node_id)
+    bed.db()
+        .exec(
+            "INSERT INTO loop_jobs (id, tenant_id, kind, target_task_id, requested_by, state, executor_node_id)
          VALUES ($1,$2,'spec',$3,$4,$5,$6)",
-    )
-    .bind(id)
-    .bind(tenant)
-    .bind(target)
-    .bind(user)
-    .bind(state)
-    .bind(node)
-    .execute(db)
-    .await
-    .expect("job");
+            params![id, tenant, target, user, state, node],
+        )
+        .await
+        .expect("job");
     id
 }
 
 /// The job's current lifecycle state, read straight from the row — what a
 /// restarted control plane would see, since the pause is database state.
-async fn job_state(db: &PgPool, id: JobId) -> String {
-    sqlx::query_scalar("SELECT state FROM loop_jobs WHERE id = $1")
-        .bind(id)
-        .fetch_one(db)
+async fn job_state(bed: &TestBed, id: JobId) -> String {
+    bed.db()
+        .query_scalar("SELECT state FROM loop_jobs WHERE id = $1", params![id])
         .await
         .expect("job state")
 }
 
 /// The concatenated transcript content for a job, oldest first.
-async fn transcript_text(db: &PgPool, id: JobId) -> String {
-    let lines: Vec<String> =
-        sqlx::query_scalar("SELECT content FROM loop_job_transcript WHERE job_id = $1 ORDER BY id")
-            .bind(id)
-            .fetch_all(db)
-            .await
-            .expect("transcript");
+async fn transcript_text(bed: &TestBed, id: JobId) -> String {
+    let lines: Vec<String> = bed
+        .db()
+        .query_scalar_all(
+            "SELECT content FROM loop_job_transcript WHERE job_id = $1 ORDER BY id",
+            params![id],
+        )
+        .await
+        .expect("transcript");
     lines.join("\n")
 }
 
-async fn node(db: &PgPool, tenant: TenantId) -> NodeId {
+async fn node(bed: &TestBed, tenant: TenantId) -> NodeId {
     let id = NodeId::new();
-    sqlx::query(
-        "INSERT INTO nodes (id, tenant_id, name, node_token_hash, status)
+    bed.db()
+        .exec(
+            "INSERT INTO nodes (id, tenant_id, name, node_token_hash, status)
          VALUES ($1,$2,$3,$4,'offline')",
-    )
-    .bind(id)
-    .bind(tenant)
-    .bind(format!("n-{}", id.0.simple()))
-    .bind(format!("h-{}", id.0.simple()))
-    .execute(db)
-    .await
-    .expect("node");
+            params![
+                id,
+                tenant,
+                format!("n-{}", id.0.simple()),
+                format!("h-{}", id.0.simple())
+            ],
+        )
+        .await
+        .expect("node");
     id
 }
 
@@ -180,7 +170,7 @@ async fn pending_answered_lifecycle() {
     };
     let tenant = bed.tenant("ix").await;
     let (user, _p) = bed.user(tenant, "owner").await;
-    let t = task(&bed.pool, tenant, user, "team").await;
+    let t = task(&bed, tenant, user, "team").await;
     let state = bed.app_state().await;
 
     let req = CreateInteractionRequest {
@@ -229,7 +219,7 @@ async fn first_answer_wins_under_concurrency() {
     let tenant = bed.tenant("ix").await;
     let (u1, _p1) = bed.user(tenant, "owner").await;
     let (u2, _p2) = bed.user(tenant, "member").await;
-    let t = task(&bed.pool, tenant, u1, "team").await; // team-visible to both
+    let t = task(&bed, tenant, u1, "team").await; // team-visible to both
     let state = bed.app_state().await;
 
     let created = interactions::create(
@@ -281,7 +271,7 @@ async fn a_private_subject_refuses_without_leaking_the_prompt() {
     let tenant = bed.tenant("ix").await;
     let (owner, _po) = bed.user(tenant, "owner").await; // creator of the private card
     let (other, _px) = bed.user(tenant, "member").await; // a teammate who cannot see it
-    let private = task(&bed.pool, tenant, owner, "private").await;
+    let private = task(&bed, tenant, owner, "private").await;
     let state = bed.app_state().await;
 
     // The card's creator can raise an interaction on it.
@@ -327,8 +317,8 @@ async fn list_pending_is_visibility_scoped() {
     let tenant = bed.tenant("ix").await;
     let (owner, _po) = bed.user(tenant, "owner").await;
     let (other, _px) = bed.user(tenant, "member").await;
-    let team = task(&bed.pool, tenant, owner, "team").await;
-    let private = task(&bed.pool, tenant, owner, "private").await;
+    let team = task(&bed, tenant, owner, "team").await;
+    let private = task(&bed, tenant, owner, "private").await;
     let state = bed.app_state().await;
 
     let i_team = interactions::create(
@@ -404,10 +394,10 @@ async fn a_node_cannot_pause_a_job_it_does_not_run() {
     };
     let tenant = bed.tenant("ix").await;
     let (user, _p) = bed.user(tenant, "owner").await;
-    let t = task(&bed.pool, tenant, user, "team").await;
-    let runner = node(&bed.pool, tenant).await;
-    let intruder = node(&bed.pool, tenant).await;
-    let job = claimed_job(&bed.pool, tenant, user, t, runner).await;
+    let t = task(&bed, tenant, user, "team").await;
+    let runner = node(&bed, tenant).await;
+    let intruder = node(&bed, tenant).await;
+    let job = claimed_job(&bed, tenant, user, t, runner).await;
     let state = bed.app_state().await;
 
     let job_ask = |job_id: JobId| CreateInteractionRequest {
@@ -466,9 +456,9 @@ async fn a_node_pulls_its_own_answer_even_on_a_private_card() {
     // — not the node's user visibility — can resolve the pull.
     let (node_user, _pu) = bed.user(tenant, "owner").await;
     let (author, _pa) = bed.user(tenant, "member").await;
-    let private = task(&bed.pool, tenant, author, "private").await;
-    let runner = node(&bed.pool, tenant).await;
-    let job = claimed_job(&bed.pool, tenant, author, private, runner).await;
+    let private = task(&bed, tenant, author, "private").await;
+    let runner = node(&bed, tenant).await;
+    let job = claimed_job(&bed, tenant, author, private, runner).await;
     let state = bed.app_state().await;
 
     // The executor raises a job-scoped pause on the private card.
@@ -523,10 +513,10 @@ async fn a_job_scoped_ask_pauses_and_the_answer_resumes_the_run() {
     };
     let tenant = bed.tenant("ix").await;
     let (user, _p) = bed.user(tenant, "owner").await;
-    let t = task(&bed.pool, tenant, user, "team").await;
-    let runner = node(&bed.pool, tenant).await;
+    let t = task(&bed, tenant, user, "team").await;
+    let runner = node(&bed, tenant).await;
     // A RUNNING job — the state a mid-run ask fires from.
-    let job = job_in_state(&bed.pool, tenant, user, t, runner, "running").await;
+    let job = job_in_state(&bed, tenant, user, t, runner, "running").await;
     let state = bed.app_state().await;
 
     // The executor raises a job-scoped ask → the job pauses (AC-1) and the
@@ -547,11 +537,11 @@ async fn a_job_scoped_ask_pauses_and_the_answer_resumes_the_run() {
 
     // Pause is DATABASE state — a restarted CP would read it straight from the row.
     assert_eq!(
-        job_state(&bed.pool, job).await,
+        job_state(&bed, job).await,
         "waiting_on_human",
         "a job-scoped ask pauses the run (persisted)"
     );
-    let after_ask = transcript_text(&bed.pool, job).await;
+    let after_ask = transcript_text(&bed, job).await;
     assert!(
         after_ask.contains("Which store?") && after_ask.contains("Postgres, Redis"),
         "the question (with choices) is on the transcript: {after_ask:?}"
@@ -563,12 +553,12 @@ async fn a_job_scoped_ask_pauses_and_the_answer_resumes_the_run() {
         .await
         .expect("answer");
     assert_eq!(
-        job_state(&bed.pool, job).await,
+        job_state(&bed, job).await,
         "running",
         "answering resumes the paused run"
     );
     assert!(
-        transcript_text(&bed.pool, job)
+        transcript_text(&bed, job)
             .await
             .contains("answered: Postgres"),
         "the answer is on the transcript"
@@ -584,9 +574,9 @@ async fn failing_a_job_cancels_its_pending_ask_and_answering_reports_it() {
     };
     let tenant = bed.tenant("ix").await;
     let (user, _p) = bed.user(tenant, "owner").await;
-    let t = task(&bed.pool, tenant, user, "team").await;
-    let runner = node(&bed.pool, tenant).await;
-    let job = job_in_state(&bed.pool, tenant, user, t, runner, "running").await;
+    let t = task(&bed, tenant, user, "team").await;
+    let runner = node(&bed, tenant).await;
+    let job = job_in_state(&bed, tenant, user, t, runner, "running").await;
     let state = bed.app_state().await;
 
     let created = interactions::create(
@@ -600,7 +590,7 @@ async fn failing_a_job_cancels_its_pending_ask_and_answering_reports_it() {
     )
     .await
     .expect("pause raised");
-    assert_eq!(job_state(&bed.pool, job).await, "waiting_on_human");
+    assert_eq!(job_state(&bed, job).await, "waiting_on_human");
 
     // The job fails (a node reporting failure) → its pending ask is canceled
     // (AC-3), because a paused ask on dead work is moot.

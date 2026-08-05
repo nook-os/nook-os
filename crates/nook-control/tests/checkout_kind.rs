@@ -15,10 +15,10 @@
 use nook_control::repo::sessions::DbSessionRepository;
 use nook_control::repo::workspaces::DbWorkspaceRepository;
 use nook_control::services::{discovery, session_queries};
+use nook_db::{params, Db, EnginePool};
 use nook_proto::DiscoveredWorkspace;
 use nook_testkit::TestBed;
 use nook_types::{NodeId, NodeWorkspaceId, SessionId, TenantId, WorkspaceId};
-use sqlx::PgPool;
 use uuid::Uuid;
 
 struct Fixture {
@@ -28,39 +28,40 @@ struct Fixture {
     remote: String,
 }
 
-async fn seed(db: &PgPool) -> Fixture {
+async fn seed(bed: &TestBed) -> Fixture {
     let tenant = TenantId::new();
     let node = NodeId::new();
     let workspace = WorkspaceId::new();
     let remote = format!("git@github.com:acme/m222-{}.git", Uuid::now_v7().simple());
     let normalized = discovery::normalize_remote(&remote);
-    sqlx::query("INSERT INTO tenants (id, slug, name) VALUES ($1, $2, $2)")
-        .bind(tenant)
-        .bind(format!("t-{}", Uuid::now_v7().simple()))
-        .execute(db)
+    bed.db()
+        .exec(
+            "INSERT INTO tenants (id, slug, name) VALUES ($1, $2, $2)",
+            params![tenant, format!("t-{}", Uuid::now_v7().simple())],
+        )
         .await
         .expect("tenant");
-    sqlx::query(
-        "INSERT INTO nodes (id, tenant_id, name, node_token_hash, status)
+    bed.db()
+        .exec(
+            "INSERT INTO nodes (id, tenant_id, name, node_token_hash, status)
          VALUES ($1, $2, 'dev-box', $3, 'online')",
-    )
-    .bind(node)
-    .bind(tenant)
-    .bind(format!("h-{}", Uuid::now_v7().simple()))
-    .execute(db)
-    .await
-    .expect("node");
-    sqlx::query(
-        "INSERT INTO workspaces (id, tenant_id, name, slug, git_remote_normalized)
+            params![node, tenant, format!("h-{}", Uuid::now_v7().simple())],
+        )
+        .await
+        .expect("node");
+    bed.db()
+        .exec(
+            "INSERT INTO workspaces (id, tenant_id, name, slug, git_remote_normalized)
          VALUES ($1, $2, 'acme/repo', $3, $4)",
-    )
-    .bind(workspace)
-    .bind(tenant)
-    .bind(format!("w-{}", Uuid::now_v7().simple()))
-    .bind(&normalized)
-    .execute(db)
-    .await
-    .expect("workspace");
+            params![
+                workspace,
+                tenant,
+                format!("w-{}", Uuid::now_v7().simple()),
+                normalized.clone()
+            ],
+        )
+        .await
+        .expect("workspace");
     Fixture {
         tenant,
         node,
@@ -72,7 +73,7 @@ async fn seed(db: &PgPool) -> Fixture {
 /// Insert a checkout row directly, controlling kind, age, branch, and presence.
 #[allow(clippy::too_many_arguments)]
 async fn seed_checkout(
-    db: &PgPool,
+    bed: &TestBed,
     f: &Fixture,
     id: NodeWorkspaceId,
     path: &str,
@@ -81,35 +82,38 @@ async fn seed_checkout(
     discovered_secs_ago: i64,
     missing: bool,
 ) {
-    sqlx::query(
-        "INSERT INTO node_workspaces
+    bed.db()
+        .exec(
+            "INSERT INTO node_workspaces
            (id, tenant_id, node_id, workspace_id, path, git_branch, git_status, kind,
             discovered_at, missing_at)
          VALUES ($1,$2,$3,$4,$5,$6,'{}',$7,
                  now() - ($8 * interval '1 second'),
                  CASE WHEN $9 THEN now() ELSE NULL END)",
-    )
-    .bind(id)
-    .bind(f.tenant)
-    .bind(f.node)
-    .bind(f.workspace)
-    .bind(path)
-    .bind(branch)
-    .bind(kind)
-    .bind(discovered_secs_ago)
-    .bind(missing)
-    .execute(db)
-    .await
-    .expect("checkout");
+            params![
+                id,
+                f.tenant,
+                f.node,
+                f.workspace,
+                path,
+                branch,
+                kind,
+                discovered_secs_ago,
+                missing
+            ],
+        )
+        .await
+        .expect("checkout");
 }
 
-async fn kind_of(db: &PgPool, path: &str) -> String {
-    sqlx::query_as::<_, (String,)>("SELECT kind FROM node_workspaces WHERE path = $1")
-        .bind(path)
-        .fetch_one(db)
+async fn kind_of(bed: &TestBed, path: &str) -> String {
+    bed.db()
+        .query_scalar(
+            "SELECT kind FROM node_workspaces WHERE path = $1",
+            params![path],
+        )
         .await
         .expect("kind")
-        .0
 }
 
 #[tokio::test]
@@ -117,7 +121,7 @@ async fn discovery_writes_kind_from_the_report() {
     let Some(mut bed) = TestBed::new().await else {
         return;
     };
-    let f = seed(&bed.pool).await;
+    let f = seed(&bed).await;
     let state = bed.app_state().await;
 
     let d = |path: &str, worktree: bool| DiscoveredWorkspace {
@@ -138,9 +142,9 @@ async fn discovery_writes_kind_from_the_report() {
     .await
     .expect("reconcile");
 
-    assert_eq!(kind_of(&bed.pool, "/w/primary").await, "clone");
+    assert_eq!(kind_of(&bed, "/w/primary").await, "clone");
     assert_eq!(
-        kind_of(&bed.pool, "/w/feature").await,
+        kind_of(&bed, "/w/feature").await,
         "worktree",
         "the node's worktree report drives kind directly"
     );
@@ -153,24 +157,25 @@ async fn backfill_converts_worktree_jsonb_to_kind() {
     let Some(mut bed) = TestBed::new().await else {
         return;
     };
-    let f = seed(&bed.pool).await;
+    let f = seed(&bed).await;
     // Legacy rows: kind left at the 'clone' default, the truth only in the jsonb.
     let mk = |path: &'static str, worktree: bool| {
-        let pool = bed.pool.clone();
+        let db = bed.db();
         let (tenant, node, workspace) = (f.tenant, f.node, f.workspace);
         async move {
-            sqlx::query(
+            db.exec(
                 "INSERT INTO node_workspaces
                    (id, tenant_id, node_id, workspace_id, path, git_status, kind)
                  VALUES ($1,$2,$3,$4,$5,$6,'clone')",
+                params![
+                    NodeWorkspaceId::new(),
+                    tenant,
+                    node,
+                    workspace,
+                    path,
+                    serde_json::json!({ "worktree": worktree })
+                ],
             )
-            .bind(NodeWorkspaceId::new())
-            .bind(tenant)
-            .bind(node)
-            .bind(workspace)
-            .bind(path)
-            .bind(serde_json::json!({ "worktree": worktree }))
-            .execute(&pool)
             .await
             .expect("legacy row");
         }
@@ -179,17 +184,18 @@ async fn backfill_converts_worktree_jsonb_to_kind() {
     mk("/legacy/feature", true).await;
 
     // The migration's backfill statement, verbatim.
-    sqlx::query(
-        "UPDATE node_workspaces SET kind = 'worktree'
+    bed.db()
+        .exec(
+            "UPDATE node_workspaces SET kind = 'worktree'
          WHERE kind = 'clone' AND (git_status ->> 'worktree')::boolean IS TRUE",
-    )
-    .execute(&bed.pool)
-    .await
-    .expect("backfill");
+            params![],
+        )
+        .await
+        .expect("backfill");
 
-    assert_eq!(kind_of(&bed.pool, "/legacy/feature").await, "worktree");
+    assert_eq!(kind_of(&bed, "/legacy/feature").await, "worktree");
     assert_eq!(
-        kind_of(&bed.pool, "/legacy/primary").await,
+        kind_of(&bed, "/legacy/primary").await,
         "clone",
         "a non-worktree row is untouched"
     );
@@ -202,22 +208,16 @@ async fn the_deterministic_pick_is_clone_only_and_present_only() {
     let Some(mut bed) = TestBed::new().await else {
         return;
     };
-    let f = seed(&bed.pool).await;
+    let f = seed(&bed).await;
     let clone = NodeWorkspaceId::new();
     let worktree = NodeWorkspaceId::new();
     let missing_clone = NodeWorkspaceId::new();
     // The worktree is the NEWEST (would win a bare discovered_at order); a second
     // clone is present but MISSING; the real clone is the oldest.
+    seed_checkout(&bed, &f, clone, "/w/clone", "clone", "main", 300, false).await;
+    seed_checkout(&bed, &f, worktree, "/w/wt", "worktree", "feat", 1, false).await;
     seed_checkout(
-        &bed.pool, &f, clone, "/w/clone", "clone", "main", 300, false,
-    )
-    .await;
-    seed_checkout(
-        &bed.pool, &f, worktree, "/w/wt", "worktree", "feat", 1, false,
-    )
-    .await;
-    seed_checkout(
-        &bed.pool,
+        &bed,
         &f,
         missing_clone,
         "/w/gone",
@@ -229,19 +229,18 @@ async fn the_deterministic_pick_is_clone_only_and_present_only() {
     .await;
 
     // The exact pick the four audited sites run (AC-3).
-    let picked: Option<NodeWorkspaceId> = sqlx::query_as::<_, (NodeWorkspaceId,)>(
-        "SELECT id FROM node_workspaces
+    let picked: Option<NodeWorkspaceId> = bed
+        .db()
+        .query_opt::<(NodeWorkspaceId,)>(
+            "SELECT id FROM node_workspaces
          WHERE tenant_id = $1 AND workspace_id = $2 AND node_id = $3
            AND kind = 'clone' AND missing_at IS NULL
          ORDER BY discovered_at LIMIT 1",
-    )
-    .bind(f.tenant)
-    .bind(f.workspace)
-    .bind(f.node)
-    .fetch_optional(&bed.pool)
-    .await
-    .expect("pick")
-    .map(|(id,)| id);
+            params![f.tenant, f.workspace, f.node],
+        )
+        .await
+        .expect("pick")
+        .map(|(id,)| id);
 
     assert_eq!(
         picked,
@@ -257,47 +256,42 @@ async fn create_binds_checkout_by_path() {
     let Some(mut bed) = TestBed::new().await else {
         return;
     };
-    let f = seed(&bed.pool).await;
+    let f = seed(&bed).await;
     let clone = NodeWorkspaceId::new();
     let wt = NodeWorkspaceId::new();
     let gone = NodeWorkspaceId::new();
-    seed_checkout(
-        &bed.pool, &f, clone, "/w/clone", "clone", "main", 100, false,
-    )
-    .await;
-    seed_checkout(&bed.pool, &f, wt, "/w/wt", "worktree", "feat", 50, false).await;
-    seed_checkout(&bed.pool, &f, gone, "/w/gone", "clone", "main", 10, true).await;
+    seed_checkout(&bed, &f, clone, "/w/clone", "clone", "main", 100, false).await;
+    seed_checkout(&bed, &f, wt, "/w/wt", "worktree", "feat", 50, false).await;
+    seed_checkout(&bed, &f, gone, "/w/gone", "clone", "main", 10, true).await;
 
     // The exact resolution create_session_at runs to bind `checkout_id`.
-    let resolve = |path: &'static str, pool: PgPool, node: NodeId| async move {
-        sqlx::query_as::<_, (NodeWorkspaceId,)>(
+    let resolve = |path: &'static str, db: EnginePool, node: NodeId| async move {
+        db.query_opt::<(NodeWorkspaceId,)>(
             "SELECT id FROM node_workspaces WHERE node_id = $1 AND path = $2 AND missing_at IS NULL",
+            params![node, path],
         )
-        .bind(node)
-        .bind(path)
-        .fetch_optional(&pool)
         .await
         .expect("resolve")
         .map(|(id,)| id)
     };
 
     assert_eq!(
-        resolve("/w/clone", bed.pool.clone(), f.node).await,
+        resolve("/w/clone", bed.db(), f.node).await,
         Some(clone),
         "an explicit clone path binds that exact row"
     );
     assert_eq!(
-        resolve("/w/wt", bed.pool.clone(), f.node).await,
+        resolve("/w/wt", bed.db(), f.node).await,
         Some(wt),
         "an explicit worktree path binds that exact row — kind is not filtered when a path is named"
     );
     assert_eq!(
-        resolve("/w/nope", bed.pool.clone(), f.node).await,
+        resolve("/w/nope", bed.db(), f.node).await,
         None,
         "an unknown path binds nothing (NULL checkout_id)"
     );
     assert_eq!(
-        resolve("/w/gone", bed.pool.clone(), f.node).await,
+        resolve("/w/gone", bed.db(), f.node).await,
         None,
         "a tombstoned checkout at that path is never bound"
     );
@@ -310,45 +304,29 @@ async fn hydrate_fills_the_checkout_summary_and_leaves_ad_hoc_null() {
     let Some(mut bed) = TestBed::new().await else {
         return;
     };
-    let f = seed(&bed.pool).await;
+    let f = seed(&bed).await;
     let wt = NodeWorkspaceId::new();
-    seed_checkout(
-        &bed.pool,
-        &f,
-        wt,
-        "/w/wt",
-        "worktree",
-        "feature/x",
-        10,
-        false,
-    )
-    .await;
+    seed_checkout(&bed, &f, wt, "/w/wt", "worktree", "feature/x", 10, false).await;
 
     // A session bound to that worktree, and an ad-hoc session bound to nothing.
     let bound = SessionId::new();
     let adhoc = SessionId::new();
-    sqlx::query(
-        "INSERT INTO sessions (id, tenant_id, workspace_id, node_id, name, runtime, status, checkout_id)
+    bed.db()
+        .exec(
+            "INSERT INTO sessions (id, tenant_id, workspace_id, node_id, name, runtime, status, checkout_id)
          VALUES ($1,$2,$3,$4,'s','bash','running',$5)",
-    )
-    .bind(bound)
-    .bind(f.tenant)
-    .bind(f.workspace)
-    .bind(f.node)
-    .bind(wt)
-    .execute(&bed.pool)
-    .await
-    .expect("bound session");
-    sqlx::query(
-        "INSERT INTO sessions (id, tenant_id, node_id, name, runtime, status)
+            params![bound, f.tenant, f.workspace, f.node, wt],
+        )
+        .await
+        .expect("bound session");
+    bed.db()
+        .exec(
+            "INSERT INTO sessions (id, tenant_id, node_id, name, runtime, status)
          VALUES ($1,$2,$3,'term','bash','running')",
-    )
-    .bind(adhoc)
-    .bind(f.tenant)
-    .bind(f.node)
-    .execute(&bed.pool)
-    .await
-    .expect("adhoc session");
+            params![adhoc, f.tenant, f.node],
+        )
+        .await
+        .expect("adhoc session");
 
     let sessions = session_queries::list_sessions(
         &DbSessionRepository::new(bed.db()),
@@ -386,56 +364,54 @@ async fn restart_reuses_the_bound_checkout_then_falls_back_when_it_is_gone() {
     let Some(mut bed) = TestBed::new().await else {
         return;
     };
-    let f = seed(&bed.pool).await;
+    let f = seed(&bed).await;
     let clone = NodeWorkspaceId::new();
     let wt = NodeWorkspaceId::new();
-    seed_checkout(
-        &bed.pool, &f, clone, "/w/clone", "clone", "main", 300, false,
-    )
-    .await;
-    seed_checkout(&bed.pool, &f, wt, "/w/wt", "worktree", "feat", 1, false).await;
+    seed_checkout(&bed, &f, clone, "/w/clone", "clone", "main", 300, false).await;
+    seed_checkout(&bed, &f, wt, "/w/wt", "worktree", "feat", 1, false).await;
 
     // The restart binding query (AC-4): the session started in the worktree.
-    let bound_path = |cid: NodeWorkspaceId, pool: PgPool| async move {
-        sqlx::query_as::<_, (String,)>(
+    let bound_path = |cid: NodeWorkspaceId, db: EnginePool| async move {
+        db.query_opt::<(String,)>(
             "SELECT path FROM node_workspaces WHERE id = $1 AND missing_at IS NULL",
+            params![cid],
         )
-        .bind(cid)
-        .fetch_optional(&pool)
         .await
         .expect("bound")
         .map(|(p,)| p)
     };
     assert_eq!(
-        bound_path(wt, bed.pool.clone()).await.as_deref(),
+        bound_path(wt, bed.db()).await.as_deref(),
         Some("/w/wt"),
         "restart reuses the exact checkout the session started in"
     );
 
     // Prune the worktree → the binding resolves to nothing → fall back to the
     // deterministic clone pick (AC-4's NULL/missing fallback).
-    sqlx::query("UPDATE node_workspaces SET missing_at = now() WHERE id = $1")
-        .bind(wt)
-        .execute(&bed.pool)
+    bed.db()
+        .exec(
+            "UPDATE node_workspaces SET missing_at = now() WHERE id = $1",
+            params![wt],
+        )
         .await
         .unwrap();
     assert_eq!(
-        bound_path(wt, bed.pool.clone()).await,
+        bound_path(wt, bed.db()).await,
         None,
         "a pruned binding no longer resolves"
     );
-    let fallback: Option<String> = sqlx::query_as::<_, (String,)>(
-        "SELECT path FROM node_workspaces
+    let fallback: Option<String> = bed
+        .db()
+        .query_opt::<(String,)>(
+            "SELECT path FROM node_workspaces
          WHERE workspace_id = $1 AND node_id = $2
            AND kind = 'clone' AND missing_at IS NULL
          ORDER BY discovered_at LIMIT 1",
-    )
-    .bind(f.workspace)
-    .bind(f.node)
-    .fetch_optional(&bed.pool)
-    .await
-    .expect("fallback")
-    .map(|(p,)| p);
+            params![f.workspace, f.node],
+        )
+        .await
+        .expect("fallback")
+        .map(|(p,)| p);
     assert_eq!(
         fallback.as_deref(),
         Some("/w/clone"),
@@ -446,23 +422,21 @@ async fn restart_reuses_the_bound_checkout_then_falls_back_when_it_is_gone() {
     // the clone, so its summary chip names where it now runs — not the pruned
     // worktree it started in.
     let s = SessionId::new();
-    sqlx::query(
-        "INSERT INTO sessions (id, tenant_id, workspace_id, node_id, name, runtime, status, checkout_id)
+    bed.db()
+        .exec(
+            "INSERT INTO sessions (id, tenant_id, workspace_id, node_id, name, runtime, status, checkout_id)
          VALUES ($1,$2,$3,$4,'s','bash','running',$5)",
-    )
-    .bind(s)
-    .bind(f.tenant)
-    .bind(f.workspace)
-    .bind(f.node)
-    .bind(wt) // started in the (now pruned) worktree
-    .execute(&bed.pool)
-    .await
-    .expect("session");
+            // started in the (now pruned) worktree
+            params![s, f.tenant, f.workspace, f.node, wt],
+        )
+        .await
+        .expect("session");
     // The exact rebind the restart handler performs on fallback.
-    sqlx::query("UPDATE sessions SET checkout_id = $2 WHERE id = $1")
-        .bind(s)
-        .bind(clone)
-        .execute(&bed.pool)
+    bed.db()
+        .exec(
+            "UPDATE sessions SET checkout_id = $2 WHERE id = $1",
+            params![s, clone],
+        )
         .await
         .unwrap();
     let sessions = session_queries::list_sessions(
