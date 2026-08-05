@@ -10,14 +10,15 @@
 
 use nook_db::{params, Db, EnginePool};
 use nook_testkit::TestBed;
+use sqlx::PgPool;
 use uuid::Uuid;
 
 /// The real migration, run verbatim — no drift between what the test proves and
 /// what ships.
 ///
 /// It is TWO statements, and `Db` has no multi-statement path (MAIN-393), so
-/// running it stays on `bed.pool` and `sqlx::raw_sql`. Splitting it here would
-/// be exactly the drift the line above exists to prevent.
+/// running it needs `sqlx::raw_sql` against a raw Postgres pool. Splitting it
+/// here would be exactly the drift the line above exists to prevent.
 const BACKFILL_SQL: &str = include_str!("../migrations/0022_backfill_auth_mode.sql");
 
 async fn tenant(db: &EnginePool) -> Uuid {
@@ -82,8 +83,16 @@ async fn backfill_classifies_only_unambiguous_tenants() {
         return;
     };
     let db = bed.db();
-    // The escape hatch survives here for `raw_sql` alone — see BACKFILL_SQL.
-    let pool = bed.pool.clone();
+    // Its OWN pool, from the bed's URL, for `raw_sql` alone — see BACKFILL_SQL.
+    // `bed.pool` used to hand this out; MAIN-268 removed it, and this is the one
+    // consumer with a reason the engine-neutral API cannot serve.
+    let Some(url) = bed.database_url() else {
+        // SQLite: `database_url` is None, and a Postgres migration file is not
+        // the thing to run there anyway.
+        bed.teardown().await;
+        return;
+    };
+    let pool = PgPool::connect(&url).await.expect("own pool for raw_sql");
 
     // OIDC-only: an identity, no local password → 'oidc'.
     let oidc_only = tenant(&db).await;
@@ -135,6 +144,7 @@ async fn backfill_classifies_only_unambiguous_tenants() {
         "an already-committed mode is never rewritten"
     );
 
+    pool.close().await;
     bed.teardown().await;
 }
 

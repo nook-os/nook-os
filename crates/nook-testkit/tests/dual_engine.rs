@@ -91,48 +91,6 @@ async fn the_bed_is_on_the_engine_the_url_named() {
     bed.teardown().await;
 }
 
-/// AC-6 — a `sqlite://` bed never opens a Postgres connection.
-///
-/// The `pool` field still exists on a SQLite bed because ~650 Postgres-leg call
-/// sites need it to (NG-1). This pins the two things that makes safe: it has
-/// opened nothing, and it is not secretly pointed at the real server — where it
-/// would *work*, and quietly run an allegedly-isolated test against the shared
-/// dev database.
-#[tokio::test]
-async fn a_sqlite_bed_opens_no_postgres_connection() {
-    let Some(mut bed) = TestBed::new().await else {
-        return;
-    };
-    if bed.is_postgres() {
-        bed.teardown().await;
-        return;
-    }
-
-    assert_eq!(
-        bed.pool.size(),
-        0,
-        "the escape-hatch pool must never have connected"
-    );
-    // Using it fails rather than succeeding. That is the whole guarantee, and
-    // it is the one that matters: a pool aimed at the real server would have
-    // *worked*, running this supposedly-isolated test against the shared dev
-    // database. The error text is deliberately NOT asserted — sqlx omits the
-    // connection target, so there is nothing engine-specific in it to pin, and
-    // a test asserting the generic phrasing would only break on a sqlx upgrade.
-    // The explanation lives on `inert_pg_pool`'s doc comment instead.
-    sqlx::query("SELECT 1")
-        .execute(&bed.pool)
-        .await
-        .expect_err("bed.pool must not work on a SQLite bed");
-    assert_eq!(
-        bed.pool.size(),
-        0,
-        "and it still has not connected after the attempt"
-    );
-
-    bed.teardown().await;
-}
-
 /// AC-2/AC-6 — teardown removes the SQLite artifact, and `keep` preserves it.
 /// The Postgres half of this contract is `tests/teardown.rs`; this is its twin,
 /// asserted against the filesystem rather than `pg_database`.

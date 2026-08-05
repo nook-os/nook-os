@@ -11,6 +11,7 @@
 //! `nook_testkit::TestBed` (MAIN-156).
 
 use nook_control::services::identity::{email_is_verified, login_identity, IdentityClaims};
+use nook_db::{params, Db};
 use nook_testkit::TestBed;
 use nook_types::TenantId;
 use uuid::Uuid;
@@ -61,17 +62,15 @@ async fn each_new_user_gets_their_own_tenant() {
     assert_eq!(b_user.role, "owner");
 
     // Neither can see the other: scoping is by tenant, and the tenants differ.
-    let (shared,): (i64,) = sqlx::query_as(
-        "SELECT count(*) FROM tenant_members
+    let (shared,): (i64,) = bed
+        .db()
+        .query_one(
+            "SELECT count(*) FROM tenant_members
          WHERE principal_id IN ($1, $2) AND tenant_id IN ($3, $4)",
-    )
-    .bind(a_user.id.0)
-    .bind(b_user.id.0)
-    .bind(a_tenant.id)
-    .bind(b_tenant.id)
-    .fetch_one(&bed.pool)
-    .await
-    .unwrap();
+            params![a_user.id.0, b_user.id.0, a_tenant.id, b_tenant.id],
+        )
+        .await
+        .unwrap();
     assert_eq!(
         shared, 2,
         "each user belongs to exactly one of the two tenants"
@@ -100,9 +99,12 @@ async fn returning_user_keeps_their_tenant() {
     assert_eq!(first_tenant.id, again_tenant.id);
     assert_eq!(first_user.id, again_user.id);
 
-    let (tenant_count,): (i64,) = sqlx::query_as("SELECT count(*) FROM tenants WHERE id = $1")
-        .bind(first_tenant.id)
-        .fetch_one(&bed.pool)
+    let (tenant_count,): (i64,) = bed
+        .db()
+        .query_one(
+            "SELECT count(*) FROM tenants WHERE id = $1",
+            params![first_tenant.id],
+        )
         .await
         .unwrap();
     assert_eq!(tenant_count, 1);
@@ -126,15 +128,15 @@ async fn membership_row_mirrors_the_personal_tenant() {
         .await
         .expect("dave signs in");
 
-    let row: Option<(String, String)> = sqlx::query_as(
-        "SELECT principal_type, role FROM tenant_members
+    let row: Option<(String, String)> = bed
+        .db()
+        .query_opt(
+            "SELECT principal_type, role FROM tenant_members
          WHERE tenant_id = $1 AND principal_id = $2",
-    )
-    .bind(tenant.id)
-    .bind(user.id.0)
-    .fetch_optional(&bed.pool)
-    .await
-    .unwrap();
+            params![tenant.id, user.id.0],
+        )
+        .await
+        .unwrap();
 
     let (principal_type, role) = row.expect("membership row was not written");
     assert_eq!(principal_type, "user");
@@ -297,18 +299,22 @@ async fn oidc_email_verified_claim_sets_the_timestamp_and_predicate() {
         .expect("unverified user signs in");
 
     // The column reflects the claim…
-    let (v_at,): (Option<chrono::DateTime<chrono::Utc>>,) =
-        sqlx::query_as("SELECT email_verified_at FROM identities WHERE subject = $1")
-            .bind(&v_sub)
-            .fetch_one(&bed.pool)
-            .await
-            .unwrap();
-    let (u_at,): (Option<chrono::DateTime<chrono::Utc>>,) =
-        sqlx::query_as("SELECT email_verified_at FROM identities WHERE subject = $1")
-            .bind(&u_sub)
-            .fetch_one(&bed.pool)
-            .await
-            .unwrap();
+    let (v_at,): (Option<chrono::DateTime<chrono::Utc>>,) = bed
+        .db()
+        .query_one(
+            "SELECT email_verified_at FROM identities WHERE subject = $1",
+            params![v_sub.clone()],
+        )
+        .await
+        .unwrap();
+    let (u_at,): (Option<chrono::DateTime<chrono::Utc>>,) = bed
+        .db()
+        .query_one(
+            "SELECT email_verified_at FROM identities WHERE subject = $1",
+            params![u_sub.clone()],
+        )
+        .await
+        .unwrap();
 
     // …and so does the predicate.
     let v_pred = email_is_verified(
