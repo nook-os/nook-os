@@ -57,16 +57,36 @@ review, say so and end the pass.
 
 ## 2. Read the contract and code
 
-- Parse the issue key from `Closes NOOK-NN` in the PR body and read the whole
-  issue:
+- Parse the issue key from the `Closes <KEY>` line in the PR body and read the
+  whole issue:
 
   ```bash
-  nook task NOOK-42
+  nook task <KEY>
   ```
 
+  **`<KEY>` is whatever that line names — do not assume a prefix.** Boards do
+  not share one: a second board's keys may be `ACME-7`. Take the key verbatim
+  from the PR body rather than matching a shape you expect.
+
   That returns the description, labels, comments, blockers, and the issue
-  `type` (`task`/`bug`/`epic`/`story`/`chore`). No linked issue is a must-fix
-  finding.
+  `type` (`task`/`bug`/`epic`/`story`/`chore`).
+
+  **No `Closes` line at all → `needs-human-review`, unchanged.** This is
+  deliberate and stays that way: with no key there is no contract, so there is
+  nothing to review against, and guessing one — from the branch name, the title,
+  or the diff — would produce a verdict about the wrong ticket. A later reader
+  should not "improve" this into a silent inference. Escalate and stop.
+
+- **The PR title must read `<Imperative present-tense sentence> (KEY).`** — a
+  complete sentence, capitalized, imperative, present tense, key in parentheses,
+  period after the parenthesis: `Add a session navigator (MAIN-42).` A title
+  that does not match is a `[DEFECT]` must-fix, so it comes back through
+  `loop-changes-requested` and the builder repairs it.
+
+  **Check this only when the ticket resolved** — i.e. `Closes` was present and
+  `nook task` returned the issue. A PR with no key is already going to
+  `needs-human-review`, and adding a title finding on top would just be noise on
+  a PR nobody is going to repair automatically.
 - **Account for the type.** An `epic` is a tracker/roadmap parent, not a unit of
   work — it decomposes into buildable children and should have no PR closing it.
   A PR whose `Closes` points at an `epic` is either closing a tracker or built
@@ -145,7 +165,7 @@ Mirror the verdict onto the board issue so the decision is durable where the
 contract lives:
 
 ```bash
-nook comment NOOK-42 'Loop review of COMMIT_SHA — <verdict line>: <pr url>'
+nook comment <KEY> 'Loop review of COMMIT_SHA — <verdict line>: <pr url>'
 ```
 
 Then set GitHub labels based on the verdict, checking existing labels before
