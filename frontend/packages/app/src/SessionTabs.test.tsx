@@ -11,6 +11,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
+import { ContextMenuProvider } from "./contextMenu";
 
 const SESSIONS = [
   { id: "s1", name: "alpha", runtime: "bash", status: "running", node_id: "n1" },
@@ -56,10 +57,12 @@ function renderStrip() {
   return render(
     <QueryClientProvider client={qc}>
       <MemoryRouter initialEntries={["/sessions/s1"]}>
+        <ContextMenuProvider>
         <Routes>
           <Route path="/sessions/:id" element={<SessionTabs activeId="s1" />} />
           <Route path="/sessions" element={<div>THE INDEX</div>} />
         </Routes>
+        </ContextMenuProvider>
       </MemoryRouter>
     </QueryClientProvider>,
   );
@@ -110,5 +113,19 @@ describe("SessionTabs — the strip is the working set", () => {
     fireEvent.click(screen.getByLabelText("close alpha"));
     // Otherwise the terminal below stays attached to a session with no tab.
     expect(await screen.findByText("THE INDEX")).toBeTruthy();
+  });
+});
+
+describe("SessionTabs — Stop is NOT reachable from a tab (MAIN-416 NG-2)", () => {
+  it("offers no Stop on a tab's context menu", async () => {
+    // The invariant the whole epic turns on: close, end and stop are three
+    // different things, and the strip only ever offers the first two. A Stop
+    // here would put "remove the tab" and "end the process" one row apart in
+    // the same menu, which is the confusion child 2 and 3 exist to remove.
+    renderStrip();
+    fireEvent.contextMenu(await screen.findByText("alpha"));
+    // The menu really did open — otherwise the absence below proves nothing.
+    expect(await screen.findByText("Rename Session…")).toBeTruthy();
+    expect(screen.queryByText(/stop/i)).toBeNull();
   });
 });

@@ -39,6 +39,7 @@ import {
 import { useLive } from "../live";
 import { useWorkspaceContext } from "../context";
 import { ScopeChip } from "../layout";
+import { stopPrompt } from "../sessionActions";
 import { useWorkingSet } from "../workingSetTabs";
 import { SessionShell } from "../SessionNavigator";
 import { SessionTabs } from "../SessionTabs";
@@ -608,6 +609,26 @@ export function SessionPage() {
     queryClient.invalidateQueries();
   };
 
+  /** Stop this session (MAIN-416 AC-3). Offered here and in the pane, never on
+   *  a tab — close and stop must never be confusable.
+   *
+   *  Beside `kill` rather than instead of it, and they say different things:
+   *  kill ENDS the session and a managed one comes back on the next reconcile
+   *  pass; stop keeps the row and the declaration, so nothing replaces it and
+   *  opening it starts it again. */
+  const stop = async () => {
+    if (!(await askConfirm(stopPrompt({ name: session.name, managed: session.managed }))))
+      return;
+    const { error } = await api.POST("/api/v1/sessions/{id}/stop", {
+      params: { path: { id: session.id } },
+    });
+    if (error) {
+      await notify("Could not stop it", "The control plane refused the stop.");
+      return;
+    }
+    queryClient.invalidateQueries();
+  };
+
   const kill = async () => {
     // Say the blast radius out loud. Kill ends the whole tmux session, so a
     // session holding four terminals loses four terminals — which is a
@@ -707,6 +728,11 @@ export function SessionPage() {
             <Link className="btn small" to="/sessions/list" title="all sessions">
               <List size={12} /> all
             </Link>
+            {!dead && !stopped && (
+              <button className="btn small" onClick={stop} title="stop this session — the row is kept and it can be opened again">
+                stop
+              </button>
+            )}
             <button className="btn danger small" onClick={kill}>
               kill
             </button>
