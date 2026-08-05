@@ -260,7 +260,10 @@ impl Queue for SqsQueue {
             .message_attributes(ATTR_MAX, Self::num_attr(work.max_attempts as i64))
             .message_attributes(ATTR_PAYLOAD, Self::bin_attr(work.payload));
         if let Some(delay) = work.delay {
-            // SQS delay is integer seconds, capped at 900 (15 min).
+            // SQS delay is integer seconds, capped at 900 (15 min). The clamp
+            // is SILENT and documented on `NewWork::delay` (MAIN-412): a caller
+            // asking for an hour gets fifteen minutes and no error. Not changed
+            // here — whether a clamp should warn or reject is its own decision.
             req = req.delay_seconds((delay.as_secs() as i32).clamp(0, 900));
         }
         req.send().await.context("sqs enqueue")?;
@@ -273,6 +276,10 @@ impl Queue for SqsQueue {
         max: usize,
         visibility: Duration,
     ) -> Result<Vec<WorkEnvelope>> {
+        // `as_secs()` TRUNCATES: a sub-second visibility becomes 0, and every
+        // message claimed below is visible again at once — redelivered while
+        // this consumer still holds it. Documented on `Queue::receive`
+        // (MAIN-412); callers pass whole seconds.
         let vis_secs = visibility.as_secs() as i32;
         let mut out: Vec<WorkEnvelope> = Vec::new();
         let mut no_progress = 0u32;
@@ -420,6 +427,9 @@ impl Queue for SqsQueue {
                 .change_message_visibility()
                 .queue_url(&self.queue_url)
                 .receipt_handle(handle)
+                // Truncating again (MAIN-412), and worse here: a sub-second
+                // value turns a call meant to BUY time into an immediate
+                // release. Documented on `Queue::extend_visibility`.
                 .visibility_timeout(visibility.as_secs() as i32)
                 .send()
                 .await
