@@ -33,12 +33,13 @@ const get = vi.hoisted(() =>
     if (path === "/api/v1/auth/me") return { data: { user: { id: "u1" } } };
     if (path === "/api/v1/workspaces") return { data: [] };
     if (path === "/api/v1/sessions") return { data: (globalThis as any).__sessions };
+    if (path === "/api/v1/settings") return { data: (globalThis as any).__settings };
     return { data: [] };
   }),
 );
 
 vi.mock("@nookos/api", () => ({
-  api: { GET: get, POST: vi.fn(), PATCH: vi.fn(), DELETE: vi.fn() },
+  api: { GET: get, PUT: vi.fn(async () => ({ data: {} })), POST: vi.fn(), PATCH: vi.fn(), DELETE: vi.fn() },
   attachSession: vi.fn(),
 }));
 
@@ -46,8 +47,18 @@ import { SessionsIndex } from "./pages/Session";
 
 /// Render `/sessions` with a stand-in for the session route, so "which session
 /// did it open" is readable as text rather than inferred from a mock.
-function renderAt(sessions: unknown[]) {
+/// `open` is the WORKING SET (MAIN-417): `/sessions` opens the first TAB, and a
+/// session you have not opened is not a tab. Defaults to every seeded session so
+/// the MAIN-321 claims below still read as they did.
+function renderAt(sessions: unknown[], open?: string[]) {
   (globalThis as any).__sessions = sessions;
+  (globalThis as any).__settings = [
+    {
+      key: "sessions.workingset",
+      scope: "user",
+      value: { open: open ?? (sessions as { id: string }[]).map((s) => s.id) },
+    },
+  ];
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
     <QueryClientProvider client={qc}>
@@ -84,7 +95,21 @@ describe("SessionsIndex", () => {
 
   it("shows an empty state, not a redirect, when there are no sessions", async () => {
     renderAt([]);
-    expect(await screen.findByText(/No running sessions/)).toBeTruthy();
+    expect(await screen.findByText(/No tabs open/)).toBeTruthy();
+  });
+
+  it("shows the empty state when sessions exist but NONE are open", async () => {
+    // MAIN-417 AC-5: the working set starts empty after the upgrade, and
+    // `/sessions` must not open a session the user never asked for — that is
+    // the derived strip this card replaced.
+    renderAt(SESSIONS, []);
+    expect(await screen.findByText(/No tabs open/)).toBeTruthy();
+    expect(screen.queryByText("opened:s-first")).toBeNull();
+  });
+
+  it("opens the first TAB, not the first session", async () => {
+    renderAt(SESSIONS, ["s-second"]);
+    expect(await screen.findByText("opened:s-second")).toBeTruthy();
   });
 
   it("keeps the list reachable from the empty state", async () => {
