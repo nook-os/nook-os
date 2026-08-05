@@ -60,27 +60,39 @@
 
 # ── WHICH SESSIONS NEED THESE (MAIN-378) ────────────────────────────────────
 #
-# `runtimes` is the opt-in that fixes the ceiling. A declaration belongs to the
-# WORKSPACE, so before this every session here leased all eleven — an agent
-# reading code exactly as much as the shell running the stack. Against the dev
-# node's 100-port range that is NINE concurrent sessions, and eight of every
-# nine leases were held by sessions that bind nothing.
+# `runtimes` on a listener says which session runtimes need it, and OMITTING the
+# key means every runtime. That is the mechanism this repo does NOT use, and the
+# absence below is deliberate — this comment is here so nobody reads it as an
+# oversight and "fixes" it.
 #
-# Omitting the key means EVERY runtime, which is why a repo that has not been
-# touched keeps leasing exactly what it leased before. This repo has opted in.
+# The first cut scoped all eleven to `["bash", "zsh"]`, reasoning that CLAUDE.md
+# describes the stack coming up once per checkout and agents then editing
+# against containers that rebuild themselves. **The owner's 2026-08-05 ruling
+# reversed that: agent sessions — `claude` and every other runtime that can run
+# the stack — keep their ports.**
 #
-# Scoped to the shells because that is this repo's actual workflow, and
-# CLAUDE.md describes it: `docker compose up -d` brings the stack up ONCE per
-# checkout, then source is bind-mounted and cargo-watch rebuilds inside the
-# containers. Agent sessions edit files and talk to a stack that is already
-# running — they never publish these ports, so leasing them eleven numbers each
-# was pure waste.
+# The reason is the failure direction. An agent following the documented
+# `docker compose up -d` loop with no variables set falls through every
+# `${VAR:-<literal>}` below and binds 8080 / 5432 / 5173 — the shared literals
+# MAIN-376 removed — and it is not even told: `NOOK_PORTS_UNSATISFIED` fires for
+# a listener that was WANTED and unavailable, never for one this runtime never
+# asked for, so a runtime-scoped-out session gets neither the ports nor the
+# notice. Silently binding a shared literal is unrecoverable and invisible; an
+# exhausted range refuses BY NAME and is recoverable. Safety wins over the
+# capacity number.
 #
-# IF AN AGENT NEEDS TO BRING THE STACK UP, add its runtime here. That is a
-# one-line, reviewable change, and it is the right direction for the mistake to
-# point: a session that should have had ports and did not gets
-# `NOOK_PORTS_UNSATISFIED` naming them (MAIN-377), rather than silently binding
-# a shared default.
+# **And "every runtime that can run the stack" is written as ABSENCE rather than
+# a list, because a list goes stale in exactly the dangerous direction.** Every
+# runtime here gets a shell and can therefore run `docker compose up -d`;
+# spelling out `["bash", "zsh", "claude", "codex", "hermes"]` would mean the
+# next runtime somebody adds silently leases nothing and rebinds 8080 — the very
+# bug the ruling closed, deferred until nobody is looking for it. There is no
+# enumeration to keep current if there is no enumeration.
+#
+# So the ceiling here is still nine concurrent sessions against a 100-port node,
+# for every session type. That is the accepted cost, not an oversight: MAIN-378
+# is the MECHANISM, and this repo is not a repo the mechanism helps. A repo whose
+# agent sessions genuinely cannot publish anything is where it pays off.
 
 # The control plane: the browser door and the agent (mTLS) door.
 [[ports]]
@@ -88,14 +100,12 @@ name = "control"
 env = "NOOK_CONTROL_PORT"
 protocol = "tcp"
 required = true
-runtimes = ["bash", "zsh"]
 
 [[ports]]
 name = "agent"
 env = "NOOK_AGENT_PORT"
 protocol = "tcp"
 required = true
-runtimes = ["bash", "zsh"]
 
 # The web app (Vite dev server) — the one a person actually opens.
 [[ports]]
@@ -103,7 +113,6 @@ name = "web"
 env = "NOOK_WEB_PORT"
 protocol = "tcp"
 required = true
-runtimes = ["bash", "zsh"]
 
 # Team chat, its own service.
 [[ports]]
@@ -111,7 +120,6 @@ name = "chat"
 env = "NOOK_CHAT_PORT"
 protocol = "tcp"
 required = true
-runtimes = ["bash", "zsh"]
 
 # Postgres, published so a psql or a GUI on the machine can reach it. The
 # services themselves go over the compose network, not through this.
@@ -120,14 +128,12 @@ name = "postgres"
 env = "NOOK_PG_PORT"
 protocol = "tcp"
 required = true
-runtimes = ["bash", "zsh"]
 
 [[ports]]
 name = "redis"
 env = "NOOK_REDIS_PORT"
 protocol = "tcp"
 required = true
-runtimes = ["bash", "zsh"]
 
 # Object storage: the S3 API and its console are separate listeners.
 [[ports]]
@@ -135,14 +141,12 @@ name = "minio"
 env = "NOOK_MINIO_PORT"
 protocol = "tcp"
 required = true
-runtimes = ["bash", "zsh"]
 
 [[ports]]
 name = "minio-console"
 env = "NOOK_MINIO_CONSOLE_PORT"
 protocol = "tcp"
 required = true
-runtimes = ["bash", "zsh"]
 
 # The SQS-compatible queue.
 [[ports]]
@@ -150,7 +154,6 @@ name = "sqs"
 env = "NOOK_SQS_PORT"
 protocol = "tcp"
 required = true
-runtimes = ["bash", "zsh"]
 
 # Dev mail: SMTP in, web inbox out. Two listeners, one service.
 [[ports]]
@@ -158,11 +161,9 @@ name = "smtp"
 env = "NOOK_SMTP_PORT"
 protocol = "tcp"
 required = true
-runtimes = ["bash", "zsh"]
 
 [[ports]]
 name = "mailpit"
 env = "NOOK_MAILPIT_PORT"
 protocol = "tcp"
 required = true
-runtimes = ["bash", "zsh"]

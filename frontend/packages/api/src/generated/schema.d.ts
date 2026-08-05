@@ -5555,7 +5555,11 @@ export interface components {
              */
             protocol?: string;
             /**
-             * @description **What each setting costs, because the default is inherited silently.**
+             * @description Whether the session should refuse to start when this one cannot be
+             *     leased. A `debug` listener is usually optional; the app's own port is
+             *     usually not.
+             *
+             *     **What each setting costs, because the default is inherited silently.**
              *     `true` refuses the session with a message naming the listener — loud,
              *     recoverable. `false` starts it and leaves the variable UNSET, which used
              *     to be indistinguishable from "this repo was cloned outside nook" and so
@@ -5566,11 +5570,7 @@ export interface components {
              */
             required?: boolean;
             /**
-             * @description Whether the session should refuse to start when this one cannot be
-             *     leased. A `debug` listener is usually optional; the app's own port is
-             *     usually not.
-             *
-             *     Which session runtimes this listener is for. EMPTY means every runtime,
+             * @description Which session runtimes this listener is for. EMPTY means every runtime,
              *     which is the default and is what keeps an untouched `.nook.toml`
              *     leasing exactly what it leases today (MAIN-378 AC-4).
              *

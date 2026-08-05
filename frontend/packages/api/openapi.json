@@ -12939,14 +12939,14 @@
           },
           "required": {
             "type": "boolean",
-            "description": "**What each setting costs, because the default is inherited silently.**\n`true` refuses the session with a message naming the listener — loud,\nrecoverable. `false` starts it and leaves the variable UNSET, which used\nto be indistinguishable from \"this repo was cloned outside nook\" and so\nsent apps to their hardcoded defaults — the shared literals every other\nsession also falls back to. A session that skipped an optional listener\nnow carries `NOOK_PORTS_UNSATISFIED` naming it (MAIN-377), so `false` is\nsafe for an app that checks it and still unsafe for one that does not."
+            "description": "Whether the session should refuse to start when this one cannot be\nleased. A `debug` listener is usually optional; the app's own port is\nusually not.\n\n**What each setting costs, because the default is inherited silently.**\n`true` refuses the session with a message naming the listener — loud,\nrecoverable. `false` starts it and leaves the variable UNSET, which used\nto be indistinguishable from \"this repo was cloned outside nook\" and so\nsent apps to their hardcoded defaults — the shared literals every other\nsession also falls back to. A session that skipped an optional listener\nnow carries `NOOK_PORTS_UNSATISFIED` naming it (MAIN-377), so `false` is\nsafe for an app that checks it and still unsafe for one that does not."
           },
           "runtimes": {
             "type": "array",
             "items": {
               "type": "string"
             },
-            "description": "Whether the session should refuse to start when this one cannot be\nleased. A `debug` listener is usually optional; the app's own port is\nusually not.\n\nWhich session runtimes this listener is for. EMPTY means every runtime,\nwhich is the default and is what keeps an untouched `.nook.toml`\nleasing exactly what it leases today (MAIN-378 AC-4).\n\nThe opt-in that fixes the ceiling. A declaration belongs to the\nWORKSPACE, so before this every session in a repo leased the whole set —\na shell and an agent as much as the session actually running the app.\nEleven listeners against a 100-port range is nine concurrent sessions,\nand most of them bind nothing.\n\nDECLARED, never guessed (AC-3): nothing inspects the process tree or\nwaits to see whether something binds. The repo says which runtimes need\nthe port, in a form its author can read."
+            "description": "Which session runtimes this listener is for. EMPTY means every runtime,\nwhich is the default and is what keeps an untouched `.nook.toml`\nleasing exactly what it leases today (MAIN-378 AC-4).\n\nThe opt-in that fixes the ceiling. A declaration belongs to the\nWORKSPACE, so before this every session in a repo leased the whole set —\na shell and an agent as much as the session actually running the app.\nEleven listeners against a 100-port range is nine concurrent sessions,\nand most of them bind nothing.\n\nDECLARED, never guessed (AC-3): nothing inspects the process tree or\nwaits to see whether something binds. The repo says which runtimes need\nthe port, in a form its author can read."
           }
         }
       },
