@@ -85,6 +85,58 @@ export async function initDesktop(): Promise<DesktopEndpoint | null> {
   return stored;
 }
 
+/** How the bundled local control plane came up — MAIN-396's AC-3 surface. */
+export interface LocalStack {
+  base_url: string;
+  ready: boolean;
+  /** The child's own log tail, present only when it never became healthy. */
+  error?: string;
+}
+
+/**
+ * Ask the shell whether the bundled control plane is serving yet.
+ *
+ * `null` off the desktop, and `null` on a build whose shell predates the
+ * command — an older shell simply has no local stack, which is not an error.
+ *
+ * The webview is deliberately allowed to load before this answers: AC-3's bar
+ * is that a control plane which fails to start shows its LOG, and a window that
+ * renders "starting…" and then the reason is the opposite of the blank window
+ * being avoided.
+ */
+export async function localStack(): Promise<LocalStack | null> {
+  if (!isDesktop()) return null;
+  const call = invoke();
+  if (!call) return null;
+  try {
+    return await call<LocalStack>("local_stack");
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Wait for the bundled control plane, polling until it is serving.
+ *
+ * Resolves with the final state either way — ready, or carrying the log to
+ * render. Polls the SHELL rather than `/healthz` directly: the shell already
+ * holds the child's output, so a failure arrives with its explanation attached
+ * instead of as another connection error.
+ */
+export async function awaitLocalStack(
+  timeoutMs = 90_000,
+  sleep: (ms: number) => Promise<void> = (ms) =>
+    new Promise((r) => setTimeout(r, ms)),
+): Promise<LocalStack | null> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const s = await localStack();
+    if (!s || s.ready || s.error) return s;
+    if (Date.now() >= deadline) return s;
+    await sleep(250);
+  }
+}
+
 /**
  * Add a control plane (or re-authenticate one already stored, replacing its
  * token in place) and make it active. Used by the Connect screen for both

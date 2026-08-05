@@ -325,6 +325,99 @@ struct SidecarInfo {
     path: Option<String>,
 }
 
+// ── local stack boot (MAIN-396) ──────────────────────────────────────────────
+//
+// The bundled control plane needs three things before the webview can load: a
+// database file, a port nothing else holds, and a health check that has
+// actually answered. The parts that can be wrong without a running app are
+// separated out here so they can be tested without one.
+
+/// A port nothing is listening on, chosen by the OS.
+///
+/// Bind `:0`, read what the kernel assigned, drop the listener. There is a race
+/// — anything may take it between the drop and the child's bind — and it is the
+/// standard one, accepted because the alternative is worse: a literal (MAIN-376
+/// is the standing lesson that a hardcoded local port does not fail loudly, it
+/// silently targets whatever else is already there). A dev stack on 8080 and a
+/// second copy of this app both have to coexist with it.
+fn free_port() -> Result<u16, String> {
+    std::net::TcpListener::bind(("127.0.0.1", 0))
+        .map_err(|e| format!("could not find a free port: {e}"))?
+        .local_addr()
+        .map(|a| a.port())
+        .map_err(|e| format!("could not read the chosen port: {e}"))
+}
+
+/// The environment the bundled control plane boots with.
+///
+/// Pure so it can be asserted without launching anything — the values here are
+/// exactly the ones MAIN-376 showed go wrong silently. `PUBLIC_BASE_URL` and
+/// `WEB_ORIGIN` must carry the CHOSEN port: left at a default they point every
+/// task-key link, invite and agent-authored URL at a port nothing is serving.
+fn control_plane_env(db_path: &std::path::Path, port: u16) -> Vec<(String, String)> {
+    let base = format!("http://127.0.0.1:{port}");
+    vec![
+        // `sqlite://` selects the engine by URL, the same way boot does
+        // (MAIN-195). A virgin file is the ordinary case: migrate + seed +
+        // /healthz from nothing is what `tests/sqlite_boot.rs` already proves.
+        (
+            "DATABASE_URL".into(),
+            format!("sqlite://{}", db_path.display()),
+        ),
+        // Never `production`: that arm makes a ledger it cannot account for
+        // fatal, which is right for a server and wrong for a desktop app whose
+        // database is a file the user can corrupt.
+        ("APP_ENV".into(), "desktop".into()),
+        ("NOOK_CONTROL_PORT".into(), port.to_string()),
+        ("PUBLIC_BASE_URL".into(), base.clone()),
+        ("WEB_ORIGIN".into(), base),
+    ]
+}
+
+/// Where the local database lives, under the OS-conventional app-data directory
+/// Tauri resolves (AC-5): `~/.local/share/<id>` on Linux,
+/// `~/Library/Application Support/<id>` on macOS, `%APPDATA%\<id>` on Windows.
+fn local_db_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("no app-data directory: {e}"))?;
+    fs::create_dir_all(&dir).map_err(|e| format!("could not create {}: {e}", dir.display()))?;
+    Ok(dir.join("nook.db"))
+}
+
+/// Whether `/healthz` has answered 200 yet.
+async fn healthy(base: &str) -> bool {
+    reqwest::Client::new()
+        .get(format!("{base}/healthz"))
+        .timeout(std::time::Duration::from_secs(2))
+        .send()
+        .await
+        .is_ok_and(|r| r.status().is_success())
+}
+
+/// How the local stack came up, or did not — what the UI renders instead of a
+/// blank window (AC-3).
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct LocalStack {
+    /// `http://127.0.0.1:<port>` once healthy.
+    pub base_url: String,
+    pub ready: bool,
+    /// Present only on failure: the child's own output, so a control plane that
+    /// could not start explains itself rather than showing nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[tauri::command]
+#[allow(clippy::unused_async)]
+async fn local_stack(state: tauri::State<'_, LocalStackState>) -> Result<LocalStack, String> {
+    Ok(state.0.lock().unwrap().clone())
+}
+
+/// The boot result, shared with the webview through `local_stack`.
+pub struct LocalStackState(pub std::sync::Mutex<LocalStack>);
+
 #[tauri::command]
 fn sidecars(app: tauri::AppHandle) -> Vec<SidecarInfo> {
     use tauri_plugin_shell::ShellExt;
@@ -354,6 +447,93 @@ fn sidecars(app: tauri::AppHandle) -> Vec<SidecarInfo> {
         .collect()
 }
 
+/// Start the bundled control plane and record when it is serving (MAIN-396).
+///
+/// Spawned rather than awaited: `setup` must return for the window to appear,
+/// and AC-3 wants the window up showing progress — a blank window is the thing
+/// being avoided, so the UI is what waits, not the process.
+///
+/// The child's stdout/stderr are kept and handed back on failure. A control
+/// plane that dies during migration says why; without this the user sees an app
+/// that simply never loads.
+fn start_local_stack(app: tauri::AppHandle) {
+    use tauri_plugin_shell::process::CommandEvent;
+    use tauri_plugin_shell::ShellExt;
+
+    tauri::async_runtime::spawn(async move {
+        let set = |s: LocalStack| {
+            if let Some(st) = app.try_state::<LocalStackState>() {
+                *st.0.lock().unwrap() = s;
+            }
+        };
+        let fail = |msg: String| LocalStack {
+            base_url: String::new(),
+            ready: false,
+            error: Some(msg),
+        };
+
+        let db = match local_db_path(&app) {
+            Ok(p) => p,
+            Err(e) => return set(fail(e)),
+        };
+        let port = match free_port() {
+            Ok(p) => p,
+            Err(e) => return set(fail(e)),
+        };
+        let base = format!("http://127.0.0.1:{port}");
+
+        let cmd = match app.shell().sidecar("nook-control") {
+            Ok(c) => c.envs(control_plane_env(&db, port)),
+            Err(e) => return set(fail(format!("the bundled control plane is missing: {e}"))),
+        };
+        let (mut rx, _child) = match cmd.spawn() {
+            Ok(v) => v,
+            Err(e) => return set(fail(format!("could not start the control plane: {e}"))),
+        };
+
+        // Drain the child's output continuously. Reading it only on failure
+        // would deadlock a chatty child on a full pipe, and the log is wanted
+        // precisely in the case where it never becomes healthy.
+        let log = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        let sink = log.clone();
+        tauri::async_runtime::spawn(async move {
+            while let Some(ev) = rx.recv().await {
+                let line = match ev {
+                    CommandEvent::Stdout(b) | CommandEvent::Stderr(b) => {
+                        String::from_utf8_lossy(&b).to_string()
+                    }
+                    _ => continue,
+                };
+                let mut l = sink.lock().unwrap();
+                l.push_str(&line);
+                // Keep the tail only: a boot log is unbounded and the UI wants
+                // the end of it, which is where the failure is.
+                if l.len() > 16_384 {
+                    let cut = l.len() - 8_192;
+                    *l = l.split_off(cut);
+                }
+            }
+        });
+
+        // Poll rather than parse the log for a ready line: /healthz answering is
+        // the actual contract, and a log format is not.
+        for _ in 0..120 {
+            if healthy(&base).await {
+                return set(LocalStack {
+                    base_url: base,
+                    ready: true,
+                    error: None,
+                });
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+        let tail = log.lock().unwrap().clone();
+        set(fail(format!(
+            "the control plane did not answer {base}/healthz within 60s\n\n{tail}"
+        )));
+    });
+}
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
@@ -376,13 +556,17 @@ pub fn run() {
             device_poll,
             update_check,
             update_install,
-            sidecars
+            sidecars,
+            local_stack
         ])
         // Locate the sidecars ONCE at startup and say what was found. This is
         // what makes AC-3 a runtime fact rather than a command nobody calls:
         // the log line names both resolved paths, so "did the binaries ship in
         // this bundle?" is answerable from a signed build without a debugger.
         // It starts neither of them (NG-1).
+        .manage(LocalStackState(
+            std::sync::Mutex::new(LocalStack::default()),
+        ))
         .setup(|app| {
             for s in sidecars(app.handle().clone()) {
                 eprintln!(
@@ -393,6 +577,7 @@ pub fn run() {
                     s.path.as_deref().unwrap_or("<unresolved>")
                 );
             }
+            start_local_stack(app.handle().clone());
             Ok(())
         })
         .run(tauri::generate_context!())
@@ -816,4 +1001,80 @@ async fn update_install(app: tauri::AppHandle) -> Result<(), String> {
         .map_err(|e| format!("update failed: {e}"))?;
 
     app.restart();
+}
+
+#[cfg(test)]
+mod boot_tests {
+    use super::*;
+
+    /// AC-2: the port is chosen at runtime and is genuinely free.
+    ///
+    /// Two calls in a row must not hand back the same number while the first is
+    /// still bound — that is the collision the whole card exists to avoid, and
+    /// it is what a literal guarantees.
+    #[test]
+    fn a_chosen_port_is_free_and_not_a_literal() {
+        let held = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let taken = held.local_addr().unwrap().port();
+
+        let p = free_port().expect("a free port");
+        assert_ne!(p, 0, "0 is the ASK, never the answer");
+        assert_ne!(p, taken, "must not hand back a port already bound");
+
+        // And it is actually bindable — the point of asking the OS.
+        std::net::TcpListener::bind(("127.0.0.1", p)).expect("the chosen port binds");
+    }
+
+    /// AC-4: the URLs carry the CHOSEN port.
+    ///
+    /// MAIN-376's lesson, and the reason this is asserted rather than assumed:
+    /// a stale literal here does not fail — it sends every task-key link,
+    /// invite and agent-authored URL to a port nothing is serving.
+    #[test]
+    fn the_public_urls_carry_the_chosen_port() {
+        let env = control_plane_env(std::path::Path::new("/tmp/x/nook.db"), 41007);
+        let get = |k: &str| {
+            env.iter()
+                .find(|(n, _)| n == k)
+                .map(|(_, v)| v.clone())
+                .unwrap_or_else(|| panic!("{k} is not set"))
+        };
+        assert_eq!(get("PUBLIC_BASE_URL"), "http://127.0.0.1:41007");
+        assert_eq!(get("WEB_ORIGIN"), "http://127.0.0.1:41007");
+        assert_eq!(get("NOOK_CONTROL_PORT"), "41007");
+        for (_, v) in &env {
+            assert!(!v.contains("8080"), "no 8080 literal may survive: {v}");
+        }
+    }
+
+    /// AC-1: a SQLite URL at the app-data path, and an APP_ENV that is not
+    /// production — a desktop database is a file the user can corrupt, and the
+    /// production arm makes an unaccountable ledger fatal.
+    #[test]
+    fn the_database_is_sqlite_at_the_given_path_and_env_is_not_production() {
+        let env = control_plane_env(std::path::Path::new("/home/a/.local/share/nook/nook.db"), 1);
+        let url = env
+            .iter()
+            .find(|(n, _)| n == "DATABASE_URL")
+            .map(|(_, v)| v.clone())
+            .unwrap();
+        assert_eq!(url, "sqlite:///home/a/.local/share/nook/nook.db");
+        assert!(
+            url.starts_with("sqlite://"),
+            "engine is selected by URL scheme"
+        );
+
+        let app_env = env.iter().find(|(n, _)| n == "APP_ENV").unwrap().1.clone();
+        assert_ne!(app_env, "production");
+    }
+
+    /// The state the webview reads starts as not-ready with no error, so the UI
+    /// shows progress rather than either a blank window or a false failure.
+    #[test]
+    fn the_initial_state_is_pending_not_failed() {
+        let s = LocalStack::default();
+        assert!(!s.ready);
+        assert!(s.error.is_none());
+        assert!(s.base_url.is_empty());
+    }
 }

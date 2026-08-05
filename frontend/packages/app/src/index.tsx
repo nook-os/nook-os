@@ -20,7 +20,7 @@ import { DocsPage } from "./pages/Docs";
 import { FeedbackPage } from "./pages/Feedback";
 import { Login } from "./pages/Login";
 import { Connect } from "./pages/Connect";
-import { checkForUpdate, initDesktop, installUpdate, isDesktop, setControlPlaneAccount, type AvailableUpdate } from "./desktop";
+import { awaitLocalStack, checkForUpdate, initDesktop, installUpdate, isDesktop, setControlPlaneAccount, type AvailableUpdate } from "./desktop";
 import { installLinkHandler, registerNavigator } from "./links";
 import { NodeDetail, NodesPage } from "./pages/Nodes";
 import { Notebook } from "./pages/Notebook";
@@ -34,6 +34,26 @@ import { LoopPage } from "./pages/Loop";
 
 /** /operator carried ?section= deep links before it merged into /admin;
  *  preserve them rather than dumping everyone on the first section. */
+/** The bundled control plane failed to start, so say why (MAIN-396 AC-3).
+ *
+ *  The log is rendered verbatim and monospaced: it is the control plane's own
+ *  output, and paraphrasing a migration failure helps nobody. */
+export function LocalStackFailed({ log }: { log: string }) {
+  return (
+    <div style={{ padding: "2rem", fontFamily: "monospace", fontSize: 13 }}>
+      <h1 style={{ fontSize: 15, marginBottom: "0.75rem" }}>
+        The local control plane did not start.
+      </h1>
+      <pre
+        data-testid="local-stack-log"
+        style={{ whiteSpace: "pre-wrap", overflowX: "auto", opacity: 0.85 }}
+      >
+        {log}
+      </pre>
+    </div>
+  );
+}
+
 function LegacyOperatorRedirect() {
   const location = useLocation();
   return <Navigate to={`/admin${location.search}`} replace />;
@@ -78,6 +98,8 @@ function AuthGate() {
   const [update, setUpdate] = useState<AvailableUpdate | null>(null);
   const [endpointReady, setEndpointReady] = useState(!isDesktop());
   const [needsConnect, setNeedsConnect] = useState(false);
+  /** The bundled control plane's own log, when it never became healthy. */
+  const [localStackError, setLocalStackError] = useState<string | null>(null);
   // The active server's URL (desktop only) — prefills the Connect screen when a
   // token expires (AC-6) and names the entry whose account we backfill (AC-1).
   const [activeUrl, setActiveUrl] = useState<string>("");
@@ -95,16 +117,31 @@ function AuthGate() {
 
   useEffect(() => {
     if (!isDesktop()) return;
-    initDesktop()
-      .then((stored) => {
+    let cancelled = false;
+    void (async () => {
+      // Wait on the SHELL, not on a connection error (MAIN-396 AC-3). It holds
+      // the child's output, so a control plane that died during migration
+      // arrives with its reason attached — and the window stays on "Starting…"
+      // meanwhile instead of rendering an app pointed at a dead port.
+      //
+      // `null` here is not a failure: off the desktop, or on a shell that
+      // predates the command, there simply is no local stack to wait for.
+      const stack = await awaitLocalStack();
+      if (cancelled) return;
+      setLocalStackError(stack?.error ?? null);
+      try {
+        const stored = await initDesktop();
+        if (cancelled) return;
         setActiveUrl(stored?.base_url ?? "");
         setNeedsConnect(!stored?.base_url);
-        setEndpointReady(true);
-      })
-      .catch(() => {
-        setNeedsConnect(true);
-        setEndpointReady(true);
-      });
+      } catch {
+        if (!cancelled) setNeedsConnect(true);
+      }
+      if (!cancelled) setEndpointReady(true);
+    })();
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   const { data: me, isLoading, isError, refetch } = useQuery({
@@ -128,6 +165,11 @@ function AuthGate() {
   }, [me, activeUrl]);
 
   if (!endpointReady) return <Empty>Starting…</Empty>;
+  // The bundled control plane died AND there is no other one stored, so this
+  // window has nothing to talk to. Show the child's log — that is AC-3's whole
+  // bar, and the alternative is the blank window it exists to prevent. A user
+  // who HAS a stored control plane is not trapped here: they fall through to it.
+  if (localStackError && needsConnect) return <LocalStackFailed log={localStackError} />;
   if (needsConnect)
     return <Connect onDone={() => { setNeedsConnect(false); refetch(); }} />;
   if (isLoading) return <Empty>Connecting…</Empty>;
