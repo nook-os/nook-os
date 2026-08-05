@@ -15,12 +15,12 @@
 
 use nook_control::repo::workspaces::DbWorkspaceRepository;
 use nook_control::services::discovery::{self, migrate_paths};
+use nook_db::{params, Db};
 use nook_proto::DiscoveredWorkspace;
 use nook_testkit::TestBed;
 use nook_types::{
     BoardId, MigratePathPair, NodeId, NodeWorkspaceId, TaskId, TenantId, WorkspaceId,
 };
-use sqlx::PgPool;
 use uuid::Uuid;
 
 /// The one repo this test moves, and the two on-disk layouts it lives in.
@@ -38,63 +38,66 @@ struct Fixture {
 
 /// A tenant, an online node, a workspace, a primary checkout + sibling worktree,
 /// and a task whose worktree lives at the primary's OLD path.
-async fn seed(db: &PgPool, legacy: &str, slug: &str) -> Fixture {
+async fn seed(bed: &TestBed, legacy: &str, slug: &str) -> Fixture {
     let tenant = TenantId::new();
     let node = NodeId::new();
     let workspace = WorkspaceId::new();
     let remote = format!("git@github.com:acme/m107-{}.git", Uuid::now_v7().simple());
     let normalized = discovery::normalize_remote(&remote);
 
-    sqlx::query("INSERT INTO tenants (id, slug, name) VALUES ($1, $2, $2)")
-        .bind(tenant)
-        .bind(format!("t-{}", Uuid::now_v7().simple()))
-        .execute(db)
+    bed.db()
+        .exec(
+            "INSERT INTO tenants (id, slug, name) VALUES ($1, $2, $2)",
+            params![tenant, format!("t-{}", Uuid::now_v7().simple())],
+        )
         .await
         .expect("tenant");
-    sqlx::query(
-        "INSERT INTO nodes (id, tenant_id, name, node_token_hash, status)
+    bed.db()
+        .exec(
+            "INSERT INTO nodes (id, tenant_id, name, node_token_hash, status)
          VALUES ($1, $2, $3, $3, 'online')",
-    )
-    .bind(node)
-    .bind(tenant)
-    .bind(format!("n-{}", Uuid::now_v7().simple()))
-    .execute(db)
-    .await
-    .expect("node");
-    sqlx::query(
-        "INSERT INTO workspaces (id, tenant_id, name, slug, git_remote_normalized)
+            params![node, tenant, format!("n-{}", Uuid::now_v7().simple())],
+        )
+        .await
+        .expect("node");
+    bed.db()
+        .exec(
+            "INSERT INTO workspaces (id, tenant_id, name, slug, git_remote_normalized)
          VALUES ($1, $2, $3, $4, $5)",
-    )
-    .bind(workspace)
-    .bind(tenant)
-    .bind(format!("acme/w-{}", Uuid::now_v7().simple()))
-    .bind(format!("w-{}", Uuid::now_v7().simple()))
-    .bind(&normalized)
-    .execute(db)
-    .await
-    .expect("workspace");
+            params![
+                workspace,
+                tenant,
+                format!("acme/w-{}", Uuid::now_v7().simple()),
+                format!("w-{}", Uuid::now_v7().simple()),
+                normalized.clone()
+            ],
+        )
+        .await
+        .expect("workspace");
 
     let primary_ws = NodeWorkspaceId::new();
     let worktree_ws = NodeWorkspaceId::new();
     let insert_nw = |id: NodeWorkspaceId, path: String, worktree: bool| {
         let normalized = normalized.clone();
         let remote = remote.clone();
+        let db = bed.db();
         async move {
-            sqlx::query(
+            db.exec(
                 "INSERT INTO node_workspaces
                    (id, tenant_id, node_id, workspace_id, path, git_remote_url,
                     git_remote_normalized, git_branch, git_status)
                  VALUES ($1,$2,$3,$4,$5,$6,$7,'main',$8)",
+                params![
+                    id,
+                    tenant,
+                    node,
+                    workspace,
+                    path,
+                    remote,
+                    normalized,
+                    serde_json::json!({ "dirty": false, "worktree": worktree })
+                ],
             )
-            .bind(id)
-            .bind(tenant)
-            .bind(node)
-            .bind(workspace)
-            .bind(path)
-            .bind(&remote)
-            .bind(&normalized)
-            .bind(serde_json::json!({ "dirty": false, "worktree": worktree }))
-            .execute(db)
             .await
             .expect("node_workspace");
         }
@@ -105,40 +108,43 @@ async fn seed(db: &PgPool, legacy: &str, slug: &str) -> Fixture {
 
     // A board + column + task whose worktree is the primary's OLD path.
     let board = BoardId::new();
-    sqlx::query(
-        "INSERT INTO boards (id, tenant_id, name, key, provider) VALUES ($1,$2,'b',$3,'local')",
-    )
-    .bind(board)
-    .bind(tenant)
-    .bind(format!("B{}", &board.0.simple().to_string()[..6]).to_uppercase())
-    .execute(db)
-    .await
-    .expect("board");
+    bed.db()
+        .exec(
+            "INSERT INTO boards (id, tenant_id, name, key, provider) VALUES ($1,$2,'b',$3,'local')",
+            params![
+                board,
+                tenant,
+                format!("B{}", &board.0.simple().to_string()[..6]).to_uppercase()
+            ],
+        )
+        .await
+        .expect("board");
     let column = Uuid::now_v7();
-    sqlx::query(
-        "INSERT INTO board_columns (id, board_id, name, position, type)
+    bed.db()
+        .exec(
+            "INSERT INTO board_columns (id, board_id, name, position, type)
          VALUES ($1,$2,'In Progress',0,'started')",
-    )
-    .bind(column)
-    .bind(board)
-    .execute(db)
-    .await
-    .expect("column");
+            params![column, board],
+        )
+        .await
+        .expect("column");
     let task = TaskId::new();
-    sqlx::query(
-        "INSERT INTO tasks (id, tenant_id, board_id, column_id, title,
+    bed.db()
+        .exec(
+            "INSERT INTO tasks (id, tenant_id, board_id, column_id, title,
                             worktree_path, worktree_node_id)
          VALUES ($1,$2,$3,$4,'work',$5,$6)",
-    )
-    .bind(task)
-    .bind(tenant)
-    .bind(board)
-    .bind(column)
-    .bind(format!("{legacy}/acme/repo"))
-    .bind(node)
-    .execute(db)
-    .await
-    .expect("task");
+            params![
+                task,
+                tenant,
+                board,
+                column,
+                format!("{legacy}/acme/repo"),
+                node
+            ],
+        )
+        .await
+        .expect("task");
 
     Fixture {
         tenant,
@@ -151,19 +157,25 @@ async fn seed(db: &PgPool, legacy: &str, slug: &str) -> Fixture {
     }
 }
 
-async fn nw_path(db: &PgPool, id: NodeWorkspaceId) -> Option<String> {
-    sqlx::query_as::<_, (String,)>("SELECT path FROM node_workspaces WHERE id = $1")
-        .bind(id)
-        .fetch_optional(db)
+async fn nw_path(bed: &TestBed, id: NodeWorkspaceId) -> Option<String> {
+    bed.db()
+        .query_opt::<(String,)>(
+            "SELECT path FROM node_workspaces WHERE id = $1",
+            params![id],
+        )
         .await
         .expect("query")
         .map(|(p,)| p)
 }
 
-async fn task_worktree(db: &PgPool, id: TaskId) -> Option<String> {
-    sqlx::query_as::<_, (Option<String>,)>("SELECT worktree_path FROM tasks WHERE id = $1")
-        .bind(id)
-        .fetch_one(db)
+async fn task_worktree(bed: &TestBed, id: TaskId) -> Option<String> {
+    // ONE row whose column is nullable — not "no row". `query_one` keeps that
+    // distinction: a missing task still panics rather than reading as unset.
+    bed.db()
+        .query_one::<(Option<String>,)>(
+            "SELECT worktree_path FROM tasks WHERE id = $1",
+            params![id],
+        )
         .await
         .expect("query")
         .0
@@ -176,7 +188,7 @@ async fn rewrites_both_tables_and_preserves_row_ids() {
     };
     let legacy = "/home/u/.nook/workspace";
     let slug = "/home/u/.nook/workspace/cp.example.com";
-    let f = seed(&bed.pool, legacy, slug).await;
+    let f = seed(&bed, legacy, slug).await;
 
     let pairs = vec![
         MigratePathPair {
@@ -197,15 +209,15 @@ async fn rewrites_both_tables_and_preserves_row_ids() {
 
     // Same row ids, new paths — identity preserved, not delete-and-reinsert.
     assert_eq!(
-        nw_path(&bed.pool, f.primary_ws).await.as_deref(),
+        nw_path(&bed, f.primary_ws).await.as_deref(),
         Some(format!("{slug}/acme/repo").as_str())
     );
     assert_eq!(
-        nw_path(&bed.pool, f.worktree_ws).await.as_deref(),
+        nw_path(&bed, f.worktree_ws).await.as_deref(),
         Some(format!("{slug}/acme/repo__feature").as_str())
     );
     assert_eq!(
-        task_worktree(&bed.pool, f.task).await.as_deref(),
+        task_worktree(&bed, f.task).await.as_deref(),
         Some(format!("{slug}/acme/repo").as_str()),
         "the task follows its worktree to the new path"
     );
@@ -221,7 +233,7 @@ async fn refuses_a_path_that_does_not_belong_to_the_node() {
     };
     let legacy = "/home/u/.nook/workspace";
     let slug = "/home/u/.nook/workspace/cp.example.com";
-    let f = seed(&bed.pool, legacy, slug).await;
+    let f = seed(&bed, legacy, slug).await;
 
     // One real pair and one that names a path this node does not hold.
     let pairs = vec![
@@ -246,7 +258,7 @@ async fn refuses_a_path_that_does_not_belong_to_the_node() {
     // And nothing moved — the refusal is before any write, so the real pair's
     // row is untouched too.
     assert_eq!(
-        nw_path(&bed.pool, f.primary_ws).await.as_deref(),
+        nw_path(&bed, f.primary_ws).await.as_deref(),
         Some(format!("{legacy}/acme/repo").as_str()),
         "a refused request leaves every row where it was"
     );
@@ -261,7 +273,7 @@ async fn a_followup_discovery_of_the_new_paths_churns_nothing() {
     };
     let legacy = "/home/u/.nook/workspace";
     let slug = "/home/u/.nook/workspace/cp.example.com";
-    let f = seed(&bed.pool, legacy, slug).await;
+    let f = seed(&bed, legacy, slug).await;
 
     let pairs = vec![
         MigratePathPair {
@@ -278,12 +290,14 @@ async fn a_followup_discovery_of_the_new_paths_churns_nothing() {
         .expect("migrate");
 
     // The state of this node's checkouts right after the rewrite.
-    let before: Vec<(NodeWorkspaceId, String)> =
-        sqlx::query_as("SELECT id, path FROM node_workspaces WHERE node_id = $1 ORDER BY path")
-            .bind(f.node)
-            .fetch_all(&bed.pool)
-            .await
-            .expect("before");
+    let before: Vec<(NodeWorkspaceId, String)> = bed
+        .db()
+        .query_all(
+            "SELECT id, path FROM node_workspaces WHERE node_id = $1 ORDER BY path",
+            params![f.node],
+        )
+        .await
+        .expect("before");
     assert_eq!(before.len(), 2);
 
     // Now the agent connects and discovery reports the NEW paths. Because the
@@ -314,21 +328,26 @@ async fn a_followup_discovery_of_the_new_paths_churns_nothing() {
         .await
         .expect("reconcile");
 
-    let after: Vec<(NodeWorkspaceId, String)> =
-        sqlx::query_as("SELECT id, path FROM node_workspaces WHERE node_id = $1 ORDER BY path")
-            .bind(f.node)
-            .fetch_all(&bed.pool)
-            .await
-            .expect("after");
+    let after: Vec<(NodeWorkspaceId, String)> = bed
+        .db()
+        .query_all(
+            "SELECT id, path FROM node_workspaces WHERE node_id = $1 ORDER BY path",
+            params![f.node],
+        )
+        .await
+        .expect("after");
 
     assert_eq!(
         before, after,
         "a discovery of the new paths changes no rows"
     );
     // The workspace was already known; reconcile must not spawn a second one.
-    let ws_count: (i64,) = sqlx::query_as("SELECT count(*) FROM workspaces WHERE id = $1")
-        .bind(f.workspace)
-        .fetch_one(&bed.pool)
+    let ws_count: (i64,) = bed
+        .db()
+        .query_one(
+            "SELECT count(*) FROM workspaces WHERE id = $1",
+            params![f.workspace],
+        )
         .await
         .expect("ws count");
     assert_eq!(ws_count.0, 1);

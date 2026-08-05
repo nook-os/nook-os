@@ -16,46 +16,44 @@ fn lease_nodes(bed: &nook_testkit::TestBed) -> nook_control::repo::nodes::DbNode
 }
 
 use nook_control::ws::registry::{NodeHandle, OpPayload, Registry};
+use nook_db::{params, Db};
 use nook_proto::ControlToNode;
 use nook_testkit::TestBed;
 use nook_types::{NodeId, TenantId};
-use sqlx::PgPool;
 use uuid::Uuid;
 
 /// Insert a throwaway tenant + node row; returns the node id.
-async fn seed_node(pool: &PgPool) -> (TenantId, NodeId) {
+async fn seed_node(bed: &TestBed) -> (TenantId, NodeId) {
     let tenant = TenantId::new();
     let node = NodeId::new();
-    sqlx::query("INSERT INTO tenants (id, slug, name) VALUES ($1, $2, $2)")
-        .bind(tenant)
-        .bind(format!("t-{}", Uuid::now_v7().simple()))
-        .execute(pool)
+    bed.db()
+        .exec(
+            "INSERT INTO tenants (id, slug, name) VALUES ($1, $2, $2)",
+            params![tenant, format!("t-{}", Uuid::now_v7().simple())],
+        )
         .await
         .expect("seed tenant");
-    sqlx::query(
-        "INSERT INTO nodes (id, tenant_id, name, node_token_hash, status)
+    bed.db()
+        .exec(
+            "INSERT INTO nodes (id, tenant_id, name, node_token_hash, status)
          VALUES ($1, $2, $3, $3, 'online')",
-    )
-    .bind(node)
-    .bind(tenant)
-    .bind(format!("n-{}", Uuid::now_v7().simple()))
-    .execute(pool)
-    .await
-    .expect("seed node");
+            params![node, tenant, format!("n-{}", Uuid::now_v7().simple())],
+        )
+        .await
+        .expect("seed node");
     (tenant, node)
 }
 
-async fn claim_lease(pool: &PgPool, node: NodeId, instance: Uuid) {
-    sqlx::query(
-        "UPDATE nodes SET owning_instance_id = $2,
+async fn claim_lease(bed: &TestBed, node: NodeId, instance: Uuid) {
+    bed.db()
+        .exec(
+            "UPDATE nodes SET owning_instance_id = $2,
             lease_expires_at = now() + interval '45 seconds'
          WHERE id = $1",
-    )
-    .bind(node)
-    .bind(instance)
-    .execute(pool)
-    .await
-    .expect("claim lease");
+            params![node, instance],
+        )
+        .await
+        .expect("claim lease");
 }
 
 /// Both instances see the current owner via the lease table, and a takeover
@@ -66,28 +64,30 @@ async fn lease_takeover_flips_ownership() {
         eprintln!("skipping: DATABASE_URL not set / postgres unreachable");
         return;
     };
-    let (_tenant, node) = seed_node(&bed.pool).await;
+    let (_tenant, node) = seed_node(&bed).await;
 
     let a = Arc::new(Registry::new());
     let b = Arc::new(Registry::new());
 
     // Instance A owns the node.
-    claim_lease(&bed.pool, node, a.instance_id()).await;
+    claim_lease(&bed, node, a.instance_id()).await;
     a.refresh_lease_cache(&lease_nodes(&bed)).await;
     b.refresh_lease_cache(&lease_nodes(&bed)).await;
     assert!(a.node_online(node), "owner sees node online");
     assert!(b.node_online(node), "peer sees node online via lease");
 
     // Takeover: the node reconnects to B (last writer wins).
-    claim_lease(&bed.pool, node, b.instance_id()).await;
+    claim_lease(&bed, node, b.instance_id()).await;
     a.refresh_lease_cache(&lease_nodes(&bed)).await;
     b.refresh_lease_cache(&lease_nodes(&bed)).await;
     assert!(a.node_online(node), "peer A sees node online via B's lease");
 
     // Expired lease means offline everywhere.
-    sqlx::query("UPDATE nodes SET lease_expires_at = now() - interval '1 second' WHERE id = $1")
-        .bind(node)
-        .execute(&bed.pool)
+    bed.db()
+        .exec(
+            "UPDATE nodes SET lease_expires_at = now() - interval '1 second' WHERE id = $1",
+            params![node],
+        )
         .await
         .unwrap();
     a.refresh_lease_cache(&lease_nodes(&bed)).await;
@@ -106,7 +106,7 @@ async fn send_to_node_routes_across_instances() {
         eprintln!("skipping: DATABASE_URL not set / postgres unreachable");
         return;
     };
-    let (tenant, node) = seed_node(&bed.pool).await;
+    let (tenant, node) = seed_node(&bed).await;
 
     let a = Arc::new(Registry::new());
     let b = Arc::new(Registry::new());
@@ -126,7 +126,7 @@ async fn send_to_node_routes_across_instances() {
             tx,
         },
     );
-    claim_lease(&bed.pool, node, b.instance_id()).await;
+    claim_lease(&bed, node, b.instance_id()).await;
     a.refresh_lease_cache(&lease_nodes(&bed)).await;
 
     // A sends; the frame must arrive on B's channel via NOTIFY.
@@ -148,7 +148,7 @@ async fn op_reply_routes_back_to_requester() {
         eprintln!("skipping: DATABASE_URL not set / postgres unreachable");
         return;
     };
-    let (tenant, node) = seed_node(&bed.pool).await;
+    let (tenant, node) = seed_node(&bed).await;
 
     let a = Arc::new(Registry::new());
     let b = Arc::new(Registry::new());
@@ -167,7 +167,7 @@ async fn op_reply_routes_back_to_requester() {
             tx,
         },
     );
-    claim_lease(&bed.pool, node, b.instance_id()).await;
+    claim_lease(&bed, node, b.instance_id()).await;
     a.refresh_lease_cache(&lease_nodes(&bed)).await;
 
     // A asks for a clone on B's node.
