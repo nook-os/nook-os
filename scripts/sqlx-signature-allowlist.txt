@@ -38,6 +38,3 @@ crates/nook-testkit/src/lib.rs               # the `pool: PgPool` escape hatch i
 
 # ── Awaiting the testkit conversion (MAIN-267 and its siblings) ─────────────
 # Each line goes when its file is converted.
-crates/nook-control/tests/migrate_paths.rs
-crates/nook-control/tests/multi_instance.rs
-crates/nook-control/tests/repo_completeness.rs

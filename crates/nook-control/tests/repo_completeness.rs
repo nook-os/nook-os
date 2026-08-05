@@ -18,10 +18,10 @@ use nook_control::error::ApiError;
 use nook_control::mcp_backend::McpBackend;
 use nook_control::routes::workspaces::{associate_cloned_checkout, clone_to_node};
 use nook_control::services::kanban::{KanbanProvider, LocalBoardProvider};
+use nook_db::{params, Db};
 use nook_mcp::{McpCaller, NookBackend};
 use nook_testkit::TestBed;
 use nook_types::*;
-use sqlx::PgPool;
 use uuid::Uuid;
 
 fn user_ctx(user: UserId, tenant: TenantId) -> AuthCtx {
@@ -35,14 +35,13 @@ fn user_ctx(user: UserId, tenant: TenantId) -> AuthCtx {
 }
 
 /// Insert a workspace with a chosen name/slug and no remote yet.
-async fn workspace(db: &PgPool, tenant: TenantId, name: &str, slug: &str) -> WorkspaceId {
+async fn workspace(bed: &TestBed, tenant: TenantId, name: &str, slug: &str) -> WorkspaceId {
     let id = WorkspaceId::new();
-    sqlx::query("INSERT INTO workspaces (id, tenant_id, name, slug) VALUES ($1, $2, $3, $4)")
-        .bind(id)
-        .bind(tenant)
-        .bind(name)
-        .bind(slug)
-        .execute(db)
+    bed.db()
+        .exec(
+            "INSERT INTO workspaces (id, tenant_id, name, slug) VALUES ($1, $2, $3, $4)",
+            params![id, tenant, name, slug],
+        )
         .await
         .expect("workspace");
     id
@@ -50,32 +49,31 @@ async fn workspace(db: &PgPool, tenant: TenantId, name: &str, slug: &str) -> Wor
 
 /// A checkout row carrying a raw remote URL — the shape discovery writes.
 async fn checkout(
-    db: &PgPool,
+    bed: &TestBed,
     tenant: TenantId,
     node: NodeId,
     ws: WorkspaceId,
     path: &str,
     url: &str,
 ) {
-    sqlx::query(
-        "INSERT INTO node_workspaces (id, tenant_id, node_id, workspace_id, path, git_remote_url, kind)
+    bed.db()
+        .exec(
+            "INSERT INTO node_workspaces (id, tenant_id, node_id, workspace_id, path, git_remote_url, kind)
          VALUES ($1, $2, $3, $4, $5, $6, 'clone')",
-    )
-    .bind(NodeWorkspaceId::new())
-    .bind(tenant)
-    .bind(node)
-    .bind(ws)
-    .bind(path)
-    .bind(url)
-    .execute(db)
-    .await
-    .expect("checkout");
+            params![NodeWorkspaceId::new(), tenant, node, ws, path, url],
+        )
+        .await
+        .expect("checkout");
 }
 
-async fn remote_of(db: &PgPool, ws: WorkspaceId) -> Option<String> {
-    sqlx::query_scalar("SELECT git_remote_url FROM workspaces WHERE id = $1")
-        .bind(ws)
-        .fetch_one(db)
+async fn remote_of(bed: &TestBed, ws: WorkspaceId) -> Option<String> {
+    // ONE row, nullable column — `query_one` so a missing workspace panics
+    // rather than reading as "no remote".
+    bed.db()
+        .query_scalar::<Option<String>>(
+            "SELECT git_remote_url FROM workspaces WHERE id = $1",
+            params![ws],
+        )
         .await
         .expect("read git_remote_url")
 }
@@ -92,9 +90,9 @@ async fn backfill_adopts_agreeing_remotes_and_leaves_disagreeing_null() {
     let node = bed.node(tenant, person).await;
 
     // Agreeing: two checkouts, one URL → adopt it.
-    let agree = workspace(&bed.pool, tenant, "agree", "agree").await;
+    let agree = workspace(&bed, tenant, "agree", "agree").await;
     checkout(
-        &bed.pool,
+        &bed,
         tenant,
         node,
         agree,
@@ -103,7 +101,7 @@ async fn backfill_adopts_agreeing_remotes_and_leaves_disagreeing_null() {
     )
     .await;
     checkout(
-        &bed.pool,
+        &bed,
         tenant,
         node,
         agree,
@@ -113,9 +111,9 @@ async fn backfill_adopts_agreeing_remotes_and_leaves_disagreeing_null() {
     .await;
 
     // Disagreeing: two checkouts, two URLs → leave NULL.
-    let clash = workspace(&bed.pool, tenant, "clash", "clash").await;
+    let clash = workspace(&bed, tenant, "clash", "clash").await;
     checkout(
-        &bed.pool,
+        &bed,
         tenant,
         node,
         clash,
@@ -124,7 +122,7 @@ async fn backfill_adopts_agreeing_remotes_and_leaves_disagreeing_null() {
     )
     .await;
     checkout(
-        &bed.pool,
+        &bed,
         tenant,
         node,
         clash,
@@ -134,8 +132,9 @@ async fn backfill_adopts_agreeing_remotes_and_leaves_disagreeing_null() {
     .await;
 
     // The migration's backfill statement, verbatim.
-    sqlx::query(
-        "WITH agreed AS (
+    bed.db()
+        .exec(
+            "WITH agreed AS (
              SELECT workspace_id, min(git_remote_url) AS url
              FROM node_workspaces
              WHERE git_remote_url IS NOT NULL
@@ -146,18 +145,18 @@ async fn backfill_adopts_agreeing_remotes_and_leaves_disagreeing_null() {
          SET git_remote_url = a.url
          FROM agreed a
          WHERE w.id = a.workspace_id AND w.git_remote_url IS NULL",
-    )
-    .execute(&bed.pool)
-    .await
-    .expect("backfill");
+            params![],
+        )
+        .await
+        .expect("backfill");
 
     assert_eq!(
-        remote_of(&bed.pool, agree).await.as_deref(),
+        remote_of(&bed, agree).await.as_deref(),
         Some("git@github.com:acme/a.git"),
         "agreeing checkouts backfill the workspace remote"
     );
     assert_eq!(
-        remote_of(&bed.pool, clash).await,
+        remote_of(&bed, clash).await,
         None,
         "disagreeing checkouts leave the remote NULL"
     );
@@ -182,27 +181,28 @@ async fn clone_association_pins_the_workspace_by_id_not_the_remote() {
 
     // A DECOY workspace already owns this remote's normalized form — the thing
     // discovery would match on. The clone must NOT associate to it.
-    let decoy = workspace(&bed.pool, tenant, "decoy", "decoy").await;
-    sqlx::query("UPDATE workspaces SET git_remote_normalized = $2 WHERE id = $1")
-        .bind(decoy)
-        .bind(&normalized)
-        .execute(&bed.pool)
+    let decoy = workspace(&bed, tenant, "decoy", "decoy").await;
+    bed.db()
+        .exec(
+            "UPDATE workspaces SET git_remote_normalized = $2 WHERE id = $1",
+            params![decoy, normalized.clone()],
+        )
         .await
         .expect("seed decoy remote");
 
-    let target = workspace(&bed.pool, tenant, "target", "target").await;
+    let target = workspace(&bed, tenant, "target", "target").await;
     associate_cloned_checkout(&state, tenant, node, target, "/srv/target", url)
         .await
         .expect("associate");
 
-    let owner: WorkspaceId = sqlx::query_scalar(
-        "SELECT workspace_id FROM node_workspaces WHERE node_id = $1 AND path = $2",
-    )
-    .bind(node)
-    .bind("/srv/target")
-    .fetch_one(&bed.pool)
-    .await
-    .expect("the associated checkout");
+    let owner: WorkspaceId = bed
+        .db()
+        .query_scalar(
+            "SELECT workspace_id FROM node_workspaces WHERE node_id = $1 AND path = $2",
+            params![node, "/srv/target"],
+        )
+        .await
+        .expect("the associated checkout");
     assert_eq!(
         owner, target,
         "the checkout is pinned to the target id, never re-derived onto the remote's decoy owner"
@@ -220,7 +220,7 @@ async fn clone_to_node_rejects_a_workspace_without_a_stored_url() {
     let tenant = bed.tenant("rc").await;
     let (user, person) = bed.user(tenant, "member").await;
     let node = bed.node(tenant, person).await;
-    let ws = workspace(&bed.pool, tenant, "no-url", "no-url").await;
+    let ws = workspace(&bed, tenant, "no-url", "no-url").await;
 
     let err = clone_to_node(
         State(state),
@@ -252,11 +252,12 @@ async fn clone_to_node_refuses_a_node_the_caller_cannot_use() {
     // Node owned by someone else, not shared → the caller may not use it.
     let stranger = Uuid::now_v7();
     let node = bed.node(tenant, stranger).await;
-    let ws = workspace(&bed.pool, tenant, "has-url", "has-url").await;
-    sqlx::query("UPDATE workspaces SET git_remote_url = $2 WHERE id = $1")
-        .bind(ws)
-        .bind("git@github.com:acme/x.git")
-        .execute(&bed.pool)
+    let ws = workspace(&bed, tenant, "has-url", "has-url").await;
+    bed.db()
+        .exec(
+            "UPDATE workspaces SET git_remote_url = $2 WHERE id = $1",
+            params![ws, "git@github.com:acme/x.git"],
+        )
         .await
         .expect("set url");
 
@@ -291,10 +292,10 @@ async fn resolve_workspace_by_id_slug_and_ambiguous_name() {
         state: bed.app_state().await,
     };
 
-    let solo = workspace(&bed.pool, tenant, "solo", "solo-slug").await;
+    let solo = workspace(&bed, tenant, "solo", "solo-slug").await;
     // Two workspaces share a NAME but have distinct (unique) slugs.
-    let dup_a = workspace(&bed.pool, tenant, "dup", "dup-a").await;
-    let _dup_b = workspace(&bed.pool, tenant, "dup", "dup-b").await;
+    let dup_a = workspace(&bed, tenant, "dup", "dup-a").await;
+    let _dup_b = workspace(&bed, tenant, "dup", "dup-b").await;
 
     // By id (unique).
     assert_eq!(
@@ -335,26 +336,27 @@ async fn resolve_workspace_by_id_slug_and_ambiguous_name() {
 // ── AC-4: the work tools authorize as the caller ─────────────────────────────
 
 /// A board with one `unstarted` column, plus a task on it.
-async fn board_with_task(db: &PgPool, tenant: TenantId, bed: &TestBed) -> (BoardId, TaskId) {
+async fn board_with_task(tenant: TenantId, bed: &TestBed) -> (BoardId, TaskId) {
     let board = BoardId::new();
-    sqlx::query(
-        "INSERT INTO boards (id, tenant_id, name, key, provider) VALUES ($1,$2,'b',$3,'local')",
-    )
-    .bind(board)
-    .bind(tenant)
-    .bind(format!("B{}", &board.0.simple().to_string()[..6]).to_uppercase())
-    .execute(db)
-    .await
-    .expect("board");
-    sqlx::query(
-        "INSERT INTO board_columns (id, board_id, name, position, type)
+    bed.db()
+        .exec(
+            "INSERT INTO boards (id, tenant_id, name, key, provider) VALUES ($1,$2,'b',$3,'local')",
+            params![
+                board,
+                tenant,
+                format!("B{}", &board.0.simple().to_string()[..6]).to_uppercase()
+            ],
+        )
+        .await
+        .expect("board");
+    bed.db()
+        .exec(
+            "INSERT INTO board_columns (id, board_id, name, position, type)
          VALUES ($1,$2,'Todo',0,'unstarted')",
-    )
-    .bind(Uuid::now_v7())
-    .bind(board)
-    .execute(db)
-    .await
-    .expect("column");
+            params![Uuid::now_v7(), board],
+        )
+        .await
+        .expect("column");
     let provider = LocalBoardProvider {
         repo: std::sync::Arc::new(nook_control::repo::tasks::DbTaskRepository::new(bed.db())),
     };
@@ -388,7 +390,7 @@ async fn dispatch_task_threads_the_caller_and_reaches_placement() {
     };
     let tenant = bed.tenant("rc").await;
     let (user, person) = bed.user(tenant, "member").await;
-    let (_board, task) = board_with_task(&bed.pool, tenant, &bed).await;
+    let (_board, task) = board_with_task(tenant, &bed).await;
     let backend = McpBackend {
         state: bed.app_state().await,
     };
@@ -423,17 +425,18 @@ async fn start_work_refuses_a_node_the_caller_cannot_use() {
     };
     let tenant = bed.tenant("rc").await;
     let (user, person) = bed.user(tenant, "member").await;
-    let (_board, task) = board_with_task(&bed.pool, tenant, &bed).await;
+    let (_board, task) = board_with_task(tenant, &bed).await;
     // Pin the task to a node owned by a stranger. Passing `node = None` routes
     // start-work through `task.assigned_node_id`, so spawn authorization runs
     // against that node without needing it ONLINE (resolve-by-name would demand a
     // live registry connection a test cannot stand up).
     let stranger = Uuid::now_v7();
     let node = bed.node(tenant, stranger).await;
-    sqlx::query("UPDATE tasks SET assigned_node_id = $2 WHERE id = $1")
-        .bind(task)
-        .bind(node)
-        .execute(&bed.pool)
+    bed.db()
+        .exec(
+            "UPDATE tasks SET assigned_node_id = $2 WHERE id = $1",
+            params![task, node],
+        )
         .await
         .expect("pin the task to the stranger's node");
     let backend = McpBackend {
