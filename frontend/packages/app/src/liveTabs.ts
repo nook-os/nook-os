@@ -23,10 +23,21 @@ export interface LiveTabs {
   loaded: boolean;
 }
 
-export function useLiveTabs(): LiveTabs {
+export interface LiveTabsOptions {
+  /** Ignore the workspace context and return every workspace's sessions.
+   *
+   *  For the session navigator (MAIN-414), which exists to find a session you
+   *  have NOT got open — including one in a workspace you are not scoped to.
+   *  The strip keeps the scoping; this is an opt-in for the one caller whose
+   *  whole job is the wider view. */
+  allWorkspaces?: boolean;
+}
+
+export function useLiveTabs(opts: LiveTabsOptions = {}): LiveTabs {
   const prefs = useSessionTabPrefs((s) => s.prefs);
   const prune = useSessionTabPrefs((s) => s.prune);
-  const selectedWorkspaceId = useWorkspaceContext((s) => s.selectedWorkspaceId);
+  const scoped = useWorkspaceContext((s) => s.selectedWorkspaceId);
+  const selectedWorkspaceId = opts.allWorkspaces ? null : scoped;
 
   // Unscoped by workspace on purpose — the workspace context filters the strip
   // below, but the QUERY must see everything or a session on another machine
