@@ -136,6 +136,51 @@ impl DbError {
         }
     }
 
+    /// Is this worth RETRYING, or is it the database telling us we are wrong?
+    ///
+    /// The distinction a background worker needs (MAIN-409): a connection that
+    /// blipped is a reason to back off and try again, while a missing database
+    /// or a table that does not exist is a reason to stop and say so — retrying
+    /// forever against those is not resilience, it is a silent outage.
+    ///
+    /// Lives here rather than at the call site because answering it means
+    /// reaching into `sqlx::Error` and the driver's SQLSTATE, which is exactly
+    /// what this type exists to keep out of callers' signatures.
+    ///
+    /// Deliberately CONSERVATIVE: only the cases that are unambiguously a
+    /// transport or availability blip say `true`. Anything unrecognised is
+    /// treated as fatal by the caller, which is no worse than the behaviour
+    /// this replaced (the worker exited on every error) and never spins on a
+    /// bug.
+    pub fn is_transient(&self) -> bool {
+        match self {
+            // Opening the pool failed — the database was not reachable at all.
+            // Almost always a restart or a network blip; a wrong URL surfaces
+            // as this too, but that fails identically on every retry and stays
+            // visible in the log.
+            DbError::Connect(_) => true,
+            DbError::Query(e) => match e {
+                // The socket went away mid-query, or the pool could not hand
+                // out a connection in time. Both are availability, not intent.
+                sqlx::Error::Io(_) | sqlx::Error::PoolTimedOut => true,
+                // The server closed the connection or spoke unexpectedly —
+                // a failover or a restart, from the client's point of view.
+                sqlx::Error::Protocol(_) => true,
+                // The database ITSELF answered. It knows what it does not have,
+                // so this is about the query or the schema, not the link.
+                // `57P01` (admin_shutdown) and `57P02` (crash_shutdown) are the
+                // exceptions: the server is going away, and it said so.
+                sqlx::Error::Database(d) => {
+                    matches!(d.code().as_deref(), Some("57P01") | Some("57P02"))
+                }
+                _ => false,
+            },
+            // A scheme we cannot run is a configuration error and will be one
+            // forever.
+            DbError::UnsupportedScheme(_) | DbError::NotYetSupported(_) => false,
+        }
+    }
+
     /// Did a `query_one` find nothing?
     ///
     /// The other branch worth a caller's attention: it is a 404, not a 500.
