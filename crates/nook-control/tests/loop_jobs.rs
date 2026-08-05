@@ -9,34 +9,35 @@ use std::time::Duration;
 
 use nook_control::services::jobs;
 use nook_control::state::AppState;
+use nook_db::{params, Db};
 use nook_types::*;
-use sqlx::PgPool;
 
 use nook_testkit::TestBed;
 
 /// A board with one column to hang tasks on.
-async fn board(db: &PgPool, tenant: TenantId) -> (BoardId, ColumnId) {
+async fn board(bed: &TestBed, tenant: TenantId) -> (BoardId, ColumnId) {
     let board = BoardId::new();
-    sqlx::query(
-        "INSERT INTO boards (id, tenant_id, name, key, provider) VALUES ($1,$2,$3,$4,'local')",
-    )
-    .bind(board)
-    .bind(tenant)
-    .bind("b")
-    .bind(format!("B{}", &board.0.simple().to_string()[..6]).to_uppercase())
-    .execute(db)
-    .await
-    .expect("board");
+    bed.db()
+        .exec(
+            "INSERT INTO boards (id, tenant_id, name, key, provider) VALUES ($1,$2,$3,$4,'local')",
+            params![
+                board,
+                tenant,
+                "b",
+                format!("B{}", &board.0.simple().to_string()[..6]).to_uppercase()
+            ],
+        )
+        .await
+        .expect("board");
     let col = ColumnId::new();
-    sqlx::query(
-        "INSERT INTO board_columns (id, board_id, name, position, type)
+    bed.db()
+        .exec(
+            "INSERT INTO board_columns (id, board_id, name, position, type)
          VALUES ($1, $2, 'Triage', 0, 'unstarted')",
-    )
-    .bind(col)
-    .bind(board)
-    .execute(db)
-    .await
-    .expect("column");
+            params![col, board],
+        )
+        .await
+        .expect("column");
     (board, col)
 }
 
@@ -44,7 +45,7 @@ async fn board(db: &PgPool, tenant: TenantId) -> (BoardId, ColumnId) {
 /// optionally in `workspace`. Team-visible so any tenant user may open a job on
 /// it.
 async fn task(
-    db: &PgPool,
+    bed: &TestBed,
     tenant: TenantId,
     board: BoardId,
     col: ColumnId,
@@ -53,21 +54,23 @@ async fn task(
     workspace: Option<WorkspaceId>,
 ) -> TaskId {
     let id = TaskId::new();
-    sqlx::query(
-        "INSERT INTO tasks (id, tenant_id, board_id, column_id, title, type, created_by, workspace_id)
+    bed.db()
+        .exec(
+            "INSERT INTO tasks (id, tenant_id, board_id, column_id, title, type, created_by, workspace_id)
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
-    )
-    .bind(id)
-    .bind(tenant)
-    .bind(board)
-    .bind(col)
-    .bind(format!("t-{}", id.0.simple()))
-    .bind(type_)
-    .bind(creator)
-    .bind(workspace)
-    .execute(db)
-    .await
-    .expect("task");
+            params![
+                id,
+                tenant,
+                board,
+                col,
+                format!("t-{}", id.0.simple()),
+                type_,
+                creator,
+                workspace.map(|w| w.0)
+            ],
+        )
+        .await
+        .expect("task");
     id
 }
 
@@ -75,7 +78,7 @@ async fn task(
 async fn fixture(bed: &TestBed) -> (AppState, TenantId, UserId, BoardId, ColumnId) {
     let tenant = bed.tenant("jobs").await;
     let (user, _person) = bed.user(tenant, "owner").await;
-    let (b, c) = board(&bed.pool, tenant).await;
+    let (b, c) = board(bed, tenant).await;
     (bed.app_state().await, tenant, user, b, c)
 }
 
@@ -86,7 +89,7 @@ async fn create_enqueues_a_work_item_and_records_an_event() {
     };
     let (state, tenant, user, b, c) = fixture(&bed).await;
     let ws = bed.workspace(tenant).await;
-    let target = task(&bed.pool, tenant, b, c, "task", user, Some(ws)).await;
+    let target = task(&bed, tenant, b, c, "task", user, Some(ws)).await;
 
     let detail = jobs::create(
         &state,
@@ -125,12 +128,14 @@ async fn create_enqueues_a_work_item_and_records_an_event() {
     assert_eq!(payload_id, detail.job.id, "payload names the created job");
 
     // AC-4: a job.created event was recorded for this tenant.
-    let (events,): (i64,) =
-        sqlx::query_as("SELECT count(*) FROM events WHERE tenant_id = $1 AND kind = 'job.created'")
-            .bind(tenant)
-            .fetch_one(&bed.pool)
-            .await
-            .unwrap();
+    let (events,): (i64,) = bed
+        .db()
+        .query_one(
+            "SELECT count(*) FROM events WHERE tenant_id = $1 AND kind = 'job.created'",
+            params![tenant],
+        )
+        .await
+        .unwrap();
     assert_eq!(events, 1, "job.created recorded");
 
     bed.teardown().await;
@@ -142,8 +147,8 @@ async fn decompose_requires_an_epic_target() {
         return;
     };
     let (state, tenant, user, b, c) = fixture(&bed).await;
-    let plain = task(&bed.pool, tenant, b, c, "task", user, None).await;
-    let epic = task(&bed.pool, tenant, b, c, "epic", user, None).await;
+    let plain = task(&bed, tenant, b, c, "task", user, None).await;
+    let epic = task(&bed, tenant, b, c, "epic", user, None).await;
 
     let err = jobs::create(
         &state,
@@ -196,7 +201,7 @@ async fn lifecycle_allows_legal_transitions_and_refuses_illegal_ones() {
         return;
     };
     let (state, tenant, user, b, c) = fixture(&bed).await;
-    let target = task(&bed.pool, tenant, b, c, "task", user, None).await;
+    let target = task(&bed, tenant, b, c, "task", user, None).await;
 
     let spec = CreateLoopJobRequest {
         kind: "spec".into(),
@@ -240,7 +245,7 @@ async fn cancel_works_from_live_states_and_is_refused_once_terminal() {
         return;
     };
     let (state, tenant, user, b, c) = fixture(&bed).await;
-    let target = task(&bed.pool, tenant, b, c, "task", user, None).await;
+    let target = task(&bed, tenant, b, c, "task", user, None).await;
 
     let waiting = jobs::create(
         &state,
@@ -315,7 +320,7 @@ async fn transcript_appends_and_reads_back_in_order() {
         return;
     };
     let (state, tenant, user, b, c) = fixture(&bed).await;
-    let target = task(&bed.pool, tenant, b, c, "task", user, None).await;
+    let target = task(&bed, tenant, b, c, "task", user, None).await;
     let id = jobs::create(
         &state,
         tenant,
@@ -360,7 +365,7 @@ async fn rerun_forks_a_fresh_queued_job_linked_to_its_predecessor() {
         return;
     };
     let (state, tenant, user, b, c) = fixture(&bed).await;
-    let epic = task(&bed.pool, tenant, b, c, "epic", user, None).await;
+    let epic = task(&bed, tenant, b, c, "epic", user, None).await;
     let orig = jobs::create(
         &state,
         tenant,
@@ -418,18 +423,14 @@ async fn private_target_job_is_hidden_from_a_non_owner() {
 
     // A private card created by `owner`.
     let secret = TaskId::new();
-    sqlx::query(
-        "INSERT INTO tasks (id, tenant_id, board_id, column_id, title, type, created_by, visibility)
+    bed.db()
+        .exec(
+            "INSERT INTO tasks (id, tenant_id, board_id, column_id, title, type, created_by, visibility)
          VALUES ($1,$2,$3,$4,'secret','task',$5,'private')",
-    )
-    .bind(secret)
-    .bind(tenant)
-    .bind(b)
-    .bind(c)
-    .bind(owner)
-    .execute(&bed.pool)
-    .await
-    .expect("private task");
+            params![secret, tenant, b, c, owner],
+        )
+        .await
+        .expect("private task");
 
     // The owner may open a job on it and read it back.
     let id = jobs::create(
@@ -488,7 +489,7 @@ async fn list_for_task_returns_the_tickets_jobs_newest_first_and_is_visibility_g
     };
     let (state, tenant, owner, b, c) = fixture(&bed).await;
     let ws = bed.workspace(tenant).await;
-    let target = task(&bed.pool, tenant, b, c, "task", owner, Some(ws)).await;
+    let target = task(&bed, tenant, b, c, "task", owner, Some(ws)).await;
 
     // Two jobs on the same ticket (the second re-runs the first, say).
     let first = jobs::create(
@@ -533,10 +534,12 @@ async fn list_for_task_returns_the_tickets_jobs_newest_first_and_is_visibility_g
     // A private-card ticket's jobs stay private — a non-owner gets NotFound, not
     // an empty list, so the ticket's existence never leaks (MAIN-128 AC-5).
     let (intruder, _p) = bed.user(tenant, "member").await;
-    let secret = task(&bed.pool, tenant, b, c, "task", owner, Some(ws)).await;
-    sqlx::query("UPDATE tasks SET visibility = 'private' WHERE id = $1")
-        .bind(secret)
-        .execute(&bed.pool)
+    let secret = task(&bed, tenant, b, c, "task", owner, Some(ws)).await;
+    bed.db()
+        .exec(
+            "UPDATE tasks SET visibility = 'private' WHERE id = $1",
+            params![secret],
+        )
         .await
         .unwrap();
     jobs::create(
@@ -571,28 +574,22 @@ async fn jobs_accept_a_board_key_and_reject_unknown() {
     let state = bed.app_state().await;
     let tenant = bed.tenant("jobs-key").await;
     let (user, _p) = bed.user(tenant, "member").await;
-    let (board, col) = board(&bed.pool, tenant).await;
+    let (board, col) = board(&bed, tenant).await;
 
     // A task WITH a number, so it has a resolvable key (the `task` helper leaves
     // `number` null — a keyless fixture that could not be addressed by key).
     let task_id = TaskId::new();
-    sqlx::query(
-        "INSERT INTO tasks (id, tenant_id, board_id, column_id, title, type, created_by, number)
+    bed.db()
+        .exec(
+            "INSERT INTO tasks (id, tenant_id, board_id, column_id, title, type, created_by, number)
          VALUES ($1,$2,$3,$4,$5,$6,$7,42)",
-    )
-    .bind(task_id)
-    .bind(tenant)
-    .bind(board)
-    .bind(col)
-    .bind("keyed")
-    .bind("task")
-    .bind(user)
-    .execute(&bed.pool)
-    .await
+            params![task_id, tenant, board, col, "keyed", "task", user],
+        )
+        .await
     .expect("numbered task");
-    let board_key: String = sqlx::query_scalar("SELECT key FROM boards WHERE id = $1")
-        .bind(board)
-        .fetch_one(&bed.pool)
+    let board_key: String = bed
+        .db()
+        .query_scalar("SELECT key FROM boards WHERE id = $1", params![board])
         .await
         .unwrap();
     let key = format!("{board_key}-42");
@@ -677,7 +674,7 @@ async fn a_second_dispatcher_cannot_re_place_a_job_that_is_already_claimed() {
         return;
     };
     let (state, tenant, user, b, c) = fixture(&bed).await;
-    let target = task(&bed.pool, tenant, b, c, "task", user, None).await;
+    let target = task(&bed, tenant, b, c, "task", user, None).await;
 
     use nook_control::repo::jobs::NewLoopJob;
     let id = JobId::new();

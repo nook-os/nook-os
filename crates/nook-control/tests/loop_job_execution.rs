@@ -10,7 +10,6 @@ use nook_control::services::jobs;
 use nook_control::ws::registry::NodeHandle;
 use nook_db::{params, Db};
 use nook_types::*;
-use sqlx::PgPool;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
@@ -18,87 +17,84 @@ use nook_testkit::TestBed;
 
 /// A board (with a known key) + column + task (with a known number), so the
 /// dispatched message's `target_task_key` is `<key>-<number>`.
-async fn task_with_key(db: &PgPool, tenant: TenantId, key: &str, number: i32) -> TaskId {
+async fn task_with_key(bed: &TestBed, tenant: TenantId, key: &str, number: i32) -> TaskId {
     let board = BoardId::new();
-    sqlx::query(
-        "INSERT INTO boards (id, tenant_id, name, key, provider) VALUES ($1,$2,'b',$3,'local')",
-    )
-    .bind(board)
-    .bind(tenant)
-    .bind(key)
-    .execute(db)
-    .await
-    .expect("board");
+    bed.db()
+        .exec(
+            "INSERT INTO boards (id, tenant_id, name, key, provider) VALUES ($1,$2,'b',$3,'local')",
+            params![board, tenant, key],
+        )
+        .await
+        .expect("board");
     let col = ColumnId::new();
-    sqlx::query(
-        "INSERT INTO board_columns (id, board_id, name, position, type)
+    bed.db()
+        .exec(
+            "INSERT INTO board_columns (id, board_id, name, position, type)
          VALUES ($1,$2,'Triage',0,'unstarted')",
-    )
-    .bind(col)
-    .bind(board)
-    .execute(db)
-    .await
-    .expect("column");
+            params![col, board],
+        )
+        .await
+        .expect("column");
     let id = TaskId::new();
-    sqlx::query(
-        "INSERT INTO tasks (id, tenant_id, board_id, column_id, title, type, number)
+    bed.db()
+        .exec(
+            "INSERT INTO tasks (id, tenant_id, board_id, column_id, title, type, number)
          VALUES ($1,$2,$3,$4,'t','task',$5)",
-    )
-    .bind(id)
-    .bind(tenant)
-    .bind(board)
-    .bind(col)
-    .bind(number)
-    .execute(db)
-    .await
-    .expect("task");
+            params![id, tenant, board, col, number],
+        )
+        .await
+        .expect("task");
     id
 }
 
-async fn node(db: &PgPool, tenant: TenantId) -> NodeId {
+async fn node(bed: &TestBed, tenant: TenantId) -> NodeId {
     let id = NodeId::new();
-    sqlx::query(
-        "INSERT INTO nodes (id, tenant_id, name, node_token_hash, status)
+    bed.db()
+        .exec(
+            "INSERT INTO nodes (id, tenant_id, name, node_token_hash, status)
          VALUES ($1,$2,$3,$4,'online')",
-    )
-    .bind(id)
-    .bind(tenant)
-    .bind(format!("n-{}", id.0.simple()))
-    .bind(format!("h-{}", id.0.simple()))
-    .execute(db)
-    .await
-    .expect("node");
+            params![
+                id,
+                tenant,
+                format!("n-{}", id.0.simple()),
+                format!("h-{}", id.0.simple())
+            ],
+        )
+        .await
+        .expect("node");
     id
 }
 
 /// A `node_workspaces` row carrying a clonable remote + branch.
 async fn node_workspace(
-    db: &PgPool,
+    bed: &TestBed,
     tenant: TenantId,
     node: NodeId,
     ws: WorkspaceId,
     url: Option<&str>,
     branch: Option<&str>,
 ) {
-    sqlx::query(
-        "INSERT INTO node_workspaces (id, tenant_id, node_id, workspace_id, path, git_remote_url, git_branch)
+    bed.db()
+        .exec(
+            "INSERT INTO node_workspaces (id, tenant_id, node_id, workspace_id, path, git_remote_url, git_branch)
          VALUES ($1,$2,$3,$4,$5,$6,$7)",
-    )
-    .bind(Uuid::now_v7())
-    .bind(tenant)
-    .bind(node)
-    .bind(ws)
-    .bind(format!("/checkouts/{}", ws.0.simple()))
-    .bind(url)
-    .bind(branch)
-    .execute(db)
-    .await
-    .expect("node_workspace");
+            params![
+                Uuid::now_v7(),
+                tenant,
+                node,
+                ws,
+                format!("/checkouts/{}", ws.0.simple()),
+                url.map(str::to_string),
+                branch.map(str::to_string)
+            ],
+        )
+        .await
+        .expect("node_workspace");
 }
 
 /// A job in `state` on `target`, optionally already claimed by `executor`.
 async fn job(
-    db: &PgPool,
+    bed: &TestBed,
     tenant: TenantId,
     target: TaskId,
     ws: Option<WorkspaceId>,
@@ -106,39 +102,44 @@ async fn job(
     executor: Option<NodeId>,
 ) -> JobId {
     let id = JobId::new();
-    sqlx::query(
-        "INSERT INTO loop_jobs
+    bed.db()
+        .exec(
+            "INSERT INTO loop_jobs
             (id, tenant_id, kind, target_task_id, workspace_id, requested_by, state, executor_node_id)
          VALUES ($1,$2,'spec',$3,$4,$5,$6,$7)",
-    )
-    .bind(id)
-    .bind(tenant)
-    .bind(target)
-    .bind(ws)
-    .bind(Uuid::now_v7()) // requested_by — a person id; unused here
-    .bind(state)
-    .bind(executor)
-    .execute(db)
-    .await
-    .expect("job");
+            params![
+                id,
+                tenant,
+                target,
+                ws.map(|w| w.0),
+                Uuid::now_v7(), // requested_by — a person id; unused here
+                state,
+                executor.map(|n| n.0)
+            ],
+        )
+        .await
+        .expect("job");
     id
 }
 
-async fn load(db: &PgPool, id: JobId) -> LoopJob {
+async fn load(bed: &TestBed, id: JobId) -> LoopJob {
     // Through the `Db` surface, not raw sqlx: row mapping is `FromDbRow` since
     // MAIN-327, and a DTO no longer implements sqlx's `FromRow` at all.
-    db.query_one("SELECT * FROM loop_jobs WHERE id = $1", params![id])
+    bed.db()
+        .query_one("SELECT * FROM loop_jobs WHERE id = $1", params![id])
         .await
         .expect("load job")
 }
 
-async fn transcript_text(db: &PgPool, id: JobId) -> String {
-    let lines: Vec<(String,)> =
-        sqlx::query_as("SELECT content FROM loop_job_transcript WHERE job_id = $1 ORDER BY id")
-            .bind(id)
-            .fetch_all(db)
-            .await
-            .expect("transcript");
+async fn transcript_text(bed: &TestBed, id: JobId) -> String {
+    let lines: Vec<(String,)> = bed
+        .db()
+        .query_all(
+            "SELECT content FROM loop_job_transcript WHERE job_id = $1 ORDER BY id",
+            params![id],
+        )
+        .await
+        .expect("transcript");
     lines
         .into_iter()
         .map(|(c,)| c)
@@ -153,10 +154,10 @@ async fn dispatch_runs_the_job_and_sends_run_to_the_node() {
     };
     let tenant = bed.tenant("lje").await;
     let ws = bed.workspace(tenant).await;
-    let target = task_with_key(&bed.pool, tenant, "ACME", 7).await;
-    let n = node(&bed.pool, tenant).await;
+    let target = task_with_key(&bed, tenant, "ACME", 7).await;
+    let n = node(&bed, tenant).await;
     node_workspace(
-        &bed.pool,
+        &bed,
         tenant,
         n,
         ws,
@@ -164,7 +165,7 @@ async fn dispatch_runs_the_job_and_sends_run_to_the_node() {
         Some("trunk"),
     )
     .await;
-    let j = job(&bed.pool, tenant, target, Some(ws), "claimed", Some(n)).await;
+    let j = job(&bed, tenant, target, Some(ws), "claimed", Some(n)).await;
     let state = bed.app_state().await;
 
     // Register a live connection for the node so `send_to_node` succeeds and we
@@ -178,12 +179,12 @@ async fn dispatch_runs_the_job_and_sends_run_to_the_node() {
         },
     );
 
-    jobs::dispatch_to_node(&state, tenant, &load(&bed.pool, j).await)
+    jobs::dispatch_to_node(&state, tenant, &load(&bed, j).await)
         .await
         .expect("dispatch");
 
     // The job is now running…
-    assert_eq!(load(&bed.pool, j).await.state, "running");
+    assert_eq!(load(&bed, j).await.state, "running");
     // …and the node was told to run it, with the resolved repo + ticket key.
     match rx.try_recv().expect("a RunLoopJob was sent") {
         nook_proto::ControlToNode::RunLoopJob {
@@ -211,11 +212,11 @@ async fn dispatch_fails_the_job_when_there_is_no_remote() {
     };
     let tenant = bed.tenant("lje").await;
     let ws = bed.workspace(tenant).await;
-    let target = task_with_key(&bed.pool, tenant, "ACME", 8).await;
-    let n = node(&bed.pool, tenant).await;
+    let target = task_with_key(&bed, tenant, "ACME", 8).await;
+    let n = node(&bed, tenant).await;
     // A node_workspaces row exists but carries no remote URL.
-    node_workspace(&bed.pool, tenant, n, ws, None, None).await;
-    let j = job(&bed.pool, tenant, target, Some(ws), "claimed", Some(n)).await;
+    node_workspace(&bed, tenant, n, ws, None, None).await;
+    let j = job(&bed, tenant, target, Some(ws), "claimed", Some(n)).await;
     let state = bed.app_state().await;
     let (tx, _rx) = mpsc::channel(4);
     state.registry.register_node(
@@ -226,12 +227,12 @@ async fn dispatch_fails_the_job_when_there_is_no_remote() {
         },
     );
 
-    jobs::dispatch_to_node(&state, tenant, &load(&bed.pool, j).await)
+    jobs::dispatch_to_node(&state, tenant, &load(&bed, j).await)
         .await
         .expect("dispatch");
 
-    assert_eq!(load(&bed.pool, j).await.state, "failed");
-    assert!(transcript_text(&bed.pool, j)
+    assert_eq!(load(&bed, j).await.state, "failed");
+    assert!(transcript_text(&bed, j)
         .await
         .contains("no known git remote"));
 
@@ -245,10 +246,10 @@ async fn dispatch_fails_the_job_when_the_node_is_offline() {
     };
     let tenant = bed.tenant("lje").await;
     let ws = bed.workspace(tenant).await;
-    let target = task_with_key(&bed.pool, tenant, "ACME", 9).await;
-    let n = node(&bed.pool, tenant).await;
+    let target = task_with_key(&bed, tenant, "ACME", 9).await;
+    let n = node(&bed, tenant).await;
     node_workspace(
-        &bed.pool,
+        &bed,
         tenant,
         n,
         ws,
@@ -256,16 +257,16 @@ async fn dispatch_fails_the_job_when_the_node_is_offline() {
         Some("main"),
     )
     .await;
-    let j = job(&bed.pool, tenant, target, Some(ws), "claimed", Some(n)).await;
+    let j = job(&bed, tenant, target, Some(ws), "claimed", Some(n)).await;
     let state = bed.app_state().await;
     // Node is NOT registered — `send_to_node` returns false.
 
-    jobs::dispatch_to_node(&state, tenant, &load(&bed.pool, j).await)
+    jobs::dispatch_to_node(&state, tenant, &load(&bed, j).await)
         .await
         .expect("dispatch");
 
-    assert_eq!(load(&bed.pool, j).await.state, "failed");
-    assert!(transcript_text(&bed.pool, j).await.contains("offline"));
+    assert_eq!(load(&bed, j).await.state, "failed");
+    assert!(transcript_text(&bed, j).await.contains("offline"));
 
     bed.teardown().await;
 }
@@ -276,22 +277,22 @@ async fn finish_completes_or_fails_with_the_tail() {
         return;
     };
     let tenant = bed.tenant("lje").await;
-    let target = task_with_key(&bed.pool, tenant, "ACME", 10).await;
-    let n = node(&bed.pool, tenant).await;
-    let ok_job = job(&bed.pool, tenant, target, None, "running", Some(n)).await;
-    let bad_job = job(&bed.pool, tenant, target, None, "running", Some(n)).await;
+    let target = task_with_key(&bed, tenant, "ACME", 10).await;
+    let n = node(&bed, tenant).await;
+    let ok_job = job(&bed, tenant, target, None, "running", Some(n)).await;
+    let bad_job = job(&bed, tenant, target, None, "running", Some(n)).await;
     let state = bed.app_state().await;
 
     jobs::finish(&state, tenant, ok_job, true, "")
         .await
         .expect("finish ok");
-    assert_eq!(load(&bed.pool, ok_job).await.state, "completed");
+    assert_eq!(load(&bed, ok_job).await.state, "completed");
 
     jobs::finish(&state, tenant, bad_job, false, "panic: boom at line 3")
         .await
         .expect("finish fail");
-    assert_eq!(load(&bed.pool, bad_job).await.state, "failed");
-    assert!(transcript_text(&bed.pool, bad_job)
+    assert_eq!(load(&bed, bad_job).await.state, "failed");
+    assert!(transcript_text(&bed, bad_job)
         .await
         .contains("boom at line 3"));
 
@@ -304,14 +305,14 @@ async fn a_disconnect_fails_only_this_nodes_live_jobs() {
         return;
     };
     let tenant = bed.tenant("lje").await;
-    let target = task_with_key(&bed.pool, tenant, "ACME", 11).await;
-    let n = node(&bed.pool, tenant).await;
-    let other = node(&bed.pool, tenant).await;
+    let target = task_with_key(&bed, tenant, "ACME", 11).await;
+    let n = node(&bed, tenant).await;
+    let other = node(&bed, tenant).await;
 
-    let claimed = job(&bed.pool, tenant, target, None, "claimed", Some(n)).await;
-    let running = job(&bed.pool, tenant, target, None, "running", Some(n)).await;
-    let done = job(&bed.pool, tenant, target, None, "completed", Some(n)).await;
-    let elsewhere = job(&bed.pool, tenant, target, None, "running", Some(other)).await;
+    let claimed = job(&bed, tenant, target, None, "claimed", Some(n)).await;
+    let running = job(&bed, tenant, target, None, "running", Some(n)).await;
+    let done = job(&bed, tenant, target, None, "completed", Some(n)).await;
+    let elsewhere = job(&bed, tenant, target, None, "running", Some(other)).await;
     let state = bed.app_state().await;
 
     jobs::fail_stranded_for_node(&state, tenant, n)
@@ -319,26 +320,26 @@ async fn a_disconnect_fails_only_this_nodes_live_jobs() {
         .expect("fail stranded");
 
     assert_eq!(
-        load(&bed.pool, claimed).await.state,
+        load(&bed, claimed).await.state,
         "failed",
         "claimed → failed"
     );
     assert_eq!(
-        load(&bed.pool, running).await.state,
+        load(&bed, running).await.state,
         "failed",
         "running → failed"
     );
     assert_eq!(
-        load(&bed.pool, done).await.state,
+        load(&bed, done).await.state,
         "completed",
         "terminal untouched"
     );
     assert_eq!(
-        load(&bed.pool, elsewhere).await.state,
+        load(&bed, elsewhere).await.state,
         "running",
         "another node's job is untouched"
     );
-    assert!(transcript_text(&bed.pool, running)
+    assert!(transcript_text(&bed, running)
         .await
         .contains("disconnected"));
 
@@ -352,10 +353,10 @@ async fn resolve_repo_prefers_the_executor_then_falls_back() {
     };
     let tenant = bed.tenant("lje").await;
     let ws = bed.workspace(tenant).await;
-    let executor = node(&bed.pool, tenant).await;
-    let bystander = node(&bed.pool, tenant).await;
+    let executor = node(&bed, tenant).await;
+    let bystander = node(&bed, tenant).await;
     node_workspace(
-        &bed.pool,
+        &bed,
         tenant,
         executor,
         ws,
@@ -364,7 +365,7 @@ async fn resolve_repo_prefers_the_executor_then_falls_back() {
     )
     .await;
     node_workspace(
-        &bed.pool,
+        &bed,
         tenant,
         bystander,
         ws,
@@ -383,7 +384,7 @@ async fn resolve_repo_prefers_the_executor_then_falls_back() {
     assert_eq!(branch, "main");
 
     // A node with no row for this workspace falls back to any usable remote.
-    let stranger = node(&bed.pool, tenant).await;
+    let stranger = node(&bed, tenant).await;
     let fallback = jobs::resolve_repo(&state, tenant, ws, stranger)
         .await
         .expect("resolve");
@@ -404,13 +405,14 @@ async fn resolve_repo_falls_back_to_the_workspace_own_remote() {
     // this fallback the job died with "no known git remote" for a workspace that
     // plainly had one; now it resolves to the workspace's own remote, branch
     // defaulting to `main`.
-    sqlx::query("UPDATE workspaces SET git_remote_url = $1 WHERE id = $2")
-        .bind("/workspace/nook-dogfood.git")
-        .bind(ws)
-        .execute(&bed.pool)
+    bed.db()
+        .exec(
+            "UPDATE workspaces SET git_remote_url = $1 WHERE id = $2",
+            params!["/workspace/nook-dogfood.git", ws],
+        )
         .await
         .expect("set workspace remote");
-    let stranger = node(&bed.pool, tenant).await;
+    let stranger = node(&bed, tenant).await;
     let state = bed.app_state().await;
     let (url, branch) = jobs::resolve_repo(&state, tenant, ws, stranger)
         .await
@@ -428,10 +430,10 @@ async fn a_node_cannot_touch_a_job_it_does_not_execute() {
         return;
     };
     let tenant = bed.tenant("lje").await;
-    let target = task_with_key(&bed.pool, tenant, "ACME", 12).await;
-    let runner = node(&bed.pool, tenant).await;
-    let intruder = node(&bed.pool, tenant).await;
-    let j = job(&bed.pool, tenant, target, None, "running", Some(runner)).await;
+    let target = task_with_key(&bed, tenant, "ACME", 12).await;
+    let runner = node(&bed, tenant).await;
+    let intruder = node(&bed, tenant).await;
+    let j = job(&bed, tenant, target, None, "running", Some(runner)).await;
     let state = bed.app_state().await;
 
     // An intruder node's transcript + finish are dropped (security): a node token
@@ -443,12 +445,12 @@ async fn a_node_cannot_touch_a_job_it_does_not_execute() {
         .await
         .expect("call returns ok");
     assert_eq!(
-        load(&bed.pool, j).await.state,
+        load(&bed, j).await.state,
         "running",
         "intruder cannot end it"
     );
     assert!(
-        transcript_text(&bed.pool, j).await.is_empty(),
+        transcript_text(&bed, j).await.is_empty(),
         "intruder cannot inject a transcript line"
     );
 
@@ -456,11 +458,11 @@ async fn a_node_cannot_touch_a_job_it_does_not_execute() {
     jobs::transcript_from_node(&state, tenant, runner, j, "agent", "real output")
         .await
         .expect("executor transcript");
-    assert!(transcript_text(&bed.pool, j).await.contains("real output"));
+    assert!(transcript_text(&bed, j).await.contains("real output"));
     jobs::finish_from_node(&state, tenant, runner, j, true, "")
         .await
         .expect("executor finish");
-    assert_eq!(load(&bed.pool, j).await.state, "completed");
+    assert_eq!(load(&bed, j).await.state, "completed");
 
     bed.teardown().await;
 }
@@ -482,9 +484,9 @@ async fn a_steering_message_is_recorded_once() {
     let tenant = bed.tenant("lje").await;
     let (user, _person) = bed.user(tenant, "owner").await;
     let ws = bed.workspace(tenant).await;
-    let target = task_with_key(&bed.pool, tenant, "ACME", 42).await;
-    let n = node(&bed.pool, tenant).await;
-    let j = job(&bed.pool, tenant, target, Some(ws), "running", Some(n)).await;
+    let target = task_with_key(&bed, tenant, "ACME", 42).await;
+    let n = node(&bed, tenant).await;
+    let j = job(&bed, tenant, target, Some(ws), "running", Some(n)).await;
     let state = bed.app_state().await;
 
     let body = "check the tenant before you draft";
@@ -492,7 +494,7 @@ async fn a_steering_message_is_recorded_once() {
         .await
         .expect("steering message accepted");
 
-    let lines = transcript_text(&bed.pool, j).await;
+    let lines = transcript_text(&bed, j).await;
     let mine = lines.matches(body).count();
     assert_eq!(
         mine, 1,
