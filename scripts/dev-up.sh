@@ -26,7 +26,9 @@ say() { printf '\033[36m▸ %s\033[0m\n' "$1"; }
 # checkouts fight over the same container names and volumes. Derive it from the
 # directory so it is stable per worktree and needs no configuration.
 if [ -z "${COMPOSE_PROJECT_NAME:-}" ]; then
-  COMPOSE_PROJECT_NAME="nook-$(basename "$PWD" | tr -c '[:alnum:]_-' '-' | tr '[:upper:]' '[:lower:]')"
+  # `tr -c` would convert the trailing newline too, leaving a stray hyphen
+  # (MAIN-430 AC-5) — drop it before translating rather than after.
+  COMPOSE_PROJECT_NAME="nook-$(basename "$PWD" | tr -d '\n' | tr -c '[:alnum:]_-' '-' | tr '[:upper:]' '[:lower:]')"
   export COMPOSE_PROJECT_NAME
 fi
 say "Compose project: $COMPOSE_PROJECT_NAME"
@@ -39,15 +41,35 @@ say "Compose project: $COMPOSE_PROJECT_NAME"
 #   failed to open .../aws-sigv4-1.5.1/.cargo-ok — File exists (os error 17)
 #
 # and the loser exits 101 with no file change to make cargo-watch retry — a
-# control plane that is "Up" and never serves. A primary checkout never sees it
-# because its registry was populated long ago; a SECOND stack has an empty
-# volume by definition, which is why this surfaced only once two stacks were
-# possible. Prewarming is skipped once the volume exists, so it costs one
-# fetch per project, ever.
-if ! docker volume inspect "${COMPOSE_PROJECT_NAME}_cargo-registry" >/dev/null 2>&1; then
-  say "Cold cargo registry — fetching dependencies once before the workers start"
-  docker compose run --rm --no-deps --entrypoint "" control-plane cargo fetch \
-    || say "  (fetch failed — continuing; the services will populate it themselves)"
+# control plane that is "Up" and never serves.
+#
+# The gate is a MARKER INSIDE the volume, not the volume's existence (MAIN-430).
+# Existence cannot work: the `docker compose run` that fetches is itself what
+# creates the volume, so a failed fetch left an existing-but-empty volume that
+# the next run skipped — one transient failure permanently disarming the guard
+# for that project, on exactly the cold-volume case it exists to protect. The
+# marker is written only after a fetch that succeeded, so a failure simply
+# leaves the next run to try again.
+#
+# One container start does the check and the work together: warm exits
+# immediately, cold fetches and marks.
+say "Checking the cargo registry"
+if ! docker compose run --rm --no-deps --entrypoint "" control-plane sh -c '
+      marker=/usr/local/cargo/registry/.nook-prewarmed
+      if [ -f "$marker" ]; then exit 0; fi
+      echo "▸ cold registry — fetching dependencies once before the workers start"
+      cargo fetch && touch "$marker"
+    '; then
+  # Fatal, deliberately. Proceeding would start the three writers against a
+  # registry that is cold precisely because the fetch failed — the silent race
+  # above, which presents as a healthy container that never answers. A loud
+  # stop here is recoverable; that is not.
+  echo "✗ could not prewarm the cargo registry" >&2
+  echo "  Starting now would run the three cargo-watch services against a cold" >&2
+  echo "  shared registry, whose loser exits 101 and never retries." >&2
+  echo "  Fix the cause (network, disk, registry auth) and re-run this script —" >&2
+  echo "  it retries automatically, because nothing was marked as warmed." >&2
+  exit 1
 fi
 
 if [ "${1:-}" = "--build" ]; then
