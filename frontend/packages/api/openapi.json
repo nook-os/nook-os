@@ -11194,6 +11194,14 @@
           }
         }
       },
+      "ManagedPurpose": {
+        "type": "string",
+        "description": "What a MANAGED session exists to do (MAIN-326).\n\nThe reconciler runs two declarations per workspace, and this is what keeps\nthem apart: `sessions_one_managed_per_checkout_purpose` is unique on\n`(checkout_id, managed_purpose)`, so a repo's clone can hold both a person's\nterminal and the always-on review loop without either counting as the\nother's replica. Without it the second declaration's session would be read\nas a duplicate of the first and stopped on the next pass.",
+        "enum": [
+          "access",
+          "review_loop"
+        ]
+      },
       "MeResponse": {
         "type": "object",
         "description": "The signed-in caller with their tenant.",
@@ -13552,6 +13560,10 @@
           "managed": {
             "type": "boolean",
             "description": "Who owns this session: the reconciler (`true`, started for the\nworkspace's [`SessionSpec`]) or a person (`false`, hand-started).\n\nStored since MAIN-316 and surfaced here by MAIN-318, because it is the\none thing about a session a caller cannot work out for itself — a\nhand-started terminal in a managed workspace, on an eligible node, with\nthe spec's runtime, looks exactly like a replica.\n\nIt decides which removal a UI may offer. Killing a managed session is\nnot removing it: the next reconcile pass sees a checkout with no live\nmanaged session and starts another. Removing one means editing the\ndeclaration — lower the workspace's replicas — and the only honest way\nto offer that button is to know which kind of session this is."
+          },
+          "managed_purpose": {
+            "$ref": "#/components/schemas/ManagedPurpose",
+            "description": "What the reconciler is keeping this session for (MAIN-326). Meaningless\non a hand-started session, where it reads [`ManagedPurpose::Access`]\nbecause the column is `NOT NULL`."
           },
           "name": {
             "type": "string"

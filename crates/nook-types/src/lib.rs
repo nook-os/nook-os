@@ -1079,6 +1079,75 @@ pub struct WorkspaceLocation {
 
 // ── Sessions ─────────────────────────────────────────────────────────────────
 
+/// What a MANAGED session exists to do (MAIN-326).
+///
+/// The reconciler runs two declarations per workspace, and this is what keeps
+/// them apart: `sessions_one_managed_per_checkout_purpose` is unique on
+/// `(checkout_id, managed_purpose)`, so a repo's clone can hold both a person's
+/// terminal and the always-on review loop without either counting as the
+/// other's replica. Without it the second declaration's session would be read
+/// as a duplicate of the first and stopped on the next pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ManagedPurpose {
+    /// A terminal for a person to attach to — everything children 1-6 of the
+    /// declarative-sessions epic reconcile, and what an unmanaged session's
+    /// `NOT NULL` column reads as.
+    #[default]
+    Access,
+    /// The control plane's own always-on review loop for the repo, run on a
+    /// `role=loop` node. Declared by the control plane, never by a workspace.
+    ReviewLoop,
+}
+
+impl ManagedPurpose {
+    /// The stored form. A plain string column rather than an enum type, so
+    /// adding a purpose is a code change and not a migration.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Access => "access",
+            Self::ReviewLoop => "review_loop",
+        }
+    }
+
+    /// Decode a stored value, falling back to [`Access`](Self::Access) on
+    /// anything this build does not know.
+    ///
+    /// The fallback cannot mis-steer the reconciler: it selects by purpose in
+    /// SQL (`live_managed`), so a row written by a newer build is simply not
+    /// returned to a planner that never asked for it — it is left running
+    /// rather than adopted and stopped. This decode only ever decides what the
+    /// session API *reports*, and reporting the default beats failing the whole
+    /// row read and making the session vanish from every list.
+    fn from_stored(raw: &str) -> Self {
+        match raw {
+            "review_loop" => Self::ReviewLoop,
+            _ => Self::Access,
+        }
+    }
+}
+
+impl std::fmt::Display for ManagedPurpose {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl nook_db::IntoDbValue for ManagedPurpose {
+    fn into_db_value(self) -> nook_db::DbValue {
+        nook_db::DbValue::Text(Some(self.as_str().to_string()))
+    }
+}
+
+impl nook_db::FromDbColumn for ManagedPurpose {
+    fn from_db_column(row: &nook_db::DbRow, name: &str) -> Result<Self, nook_db::DbError> {
+        Ok(Self::from_stored(&row.get::<String>(name)?))
+    }
+    fn from_db_column_at(row: &nook_db::DbRow, index: usize) -> Result<Self, nook_db::DbError> {
+        Ok(Self::from_stored(&row.get_at::<String>(index)?))
+    }
+}
+
 /// Status values: `starting` | `running` | `detached` | `exited` | `error`.
 /// Runtime is an open string: "claude", "hermes", "codex", "bash", "zsh", ...
 #[derive(Debug, Clone, Serialize, Deserialize, nook_db::FromDbRow, ToSchema)]
@@ -1118,6 +1187,11 @@ pub struct Session {
     /// to offer that button is to know which kind of session this is.
     #[serde(default)]
     pub managed: bool,
+    /// What the reconciler is keeping this session for (MAIN-326). Meaningless
+    /// on a hand-started session, where it reads [`ManagedPurpose::Access`]
+    /// because the column is `NOT NULL`.
+    #[serde(default)]
+    pub managed_purpose: ManagedPurpose,
     /// The ports leased to this session (MAIN-301), one per satisfied
     /// [`PortRequirement`], each delivered into the session as its own env
     /// var. Empty when the node offers no range or the workspace declares no

@@ -78,6 +78,7 @@ async fn made(
             created_by: None,
             checkout_id: Some(checkout),
             managed,
+            managed_purpose: ManagedPurpose::Access,
         })
         .await
         .expect("create session")
@@ -108,7 +109,7 @@ async fn actual(bed: &TestBed, tenant: TenantId, workspace: WorkspaceId) -> Vec<
     bed.app_state()
         .await
         .sessions
-        .live_managed(tenant, workspace)
+        .live_managed(tenant, workspace, None)
         .await
         .expect("live managed")
         .into_iter()

@@ -727,7 +727,7 @@ async fn handle_message(
             // them is cheaper than tracking which single one clashed.
             state.sessions.release_leases(node_id, session_id).await?;
             let fresh = match crate::services::port_leases::lease_for_avoiding(
-                &state,
+                state,
                 session.tenant_id,
                 node_id,
                 session.workspace_id,
@@ -772,6 +772,9 @@ async fn handle_message(
                     ports: fresh.ports,
                     unsatisfied: fresh.unsatisfied,
                     attempt: attempt + 1,
+                    // Re-leasing after a port clash is still the same declared
+                    // session; it must come back doing its job (MAIN-326).
+                    managed_purpose: session.managed.then_some(session.managed_purpose),
                 },
             );
         }

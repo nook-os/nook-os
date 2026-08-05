@@ -114,8 +114,8 @@ fn caps(state: &str, operator: bool) -> serde_json::Value {
 async fn setup(bed: &TestBed) -> (AppState, TenantId, UserId, Uuid, JobId) {
     let tenant = bed.tenant("exec").await;
     let (user, person) = bed.user(tenant, "owner").await;
-    let target = target_task(&bed, tenant, user).await;
-    let job = queued_job(&bed, tenant, user, target).await;
+    let target = target_task(bed, tenant, user).await;
+    let job = queued_job(bed, tenant, user, target).await;
     (bed.app_state().await, tenant, user, person, job)
 }
 

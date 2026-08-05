@@ -59,6 +59,7 @@ async fn session_on(
             created_by: None,
             checkout_id: None,
             managed: false,
+            managed_purpose: ManagedPurpose::Access,
         })
         .await
         .expect("session")

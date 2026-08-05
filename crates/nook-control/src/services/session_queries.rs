@@ -114,6 +114,8 @@ pub async fn create_session(
         &workspace_path,
         // Hand-started: ad-hoc, and the reconciler must never touch it.
         false,
+        // …so its purpose is never read. `Access` is the column's default.
+        ManagedPurpose::Access,
     )
     .await
 }
@@ -134,6 +136,9 @@ pub async fn create_session_at(
     // refuses a duplicate BEFORE `StartSession` goes to the node — marking
     // afterwards left the losing replica's session running and unattributed.
     managed: bool,
+    // Which declaration this session answers (MAIN-326). Ignored when `managed`
+    // is false, and `Access` is the only thing a person's session ever is.
+    managed_purpose: ManagedPurpose,
 ) -> ApiResult<Session> {
     use crate::error::ApiError;
 
@@ -167,6 +172,7 @@ pub async fn create_session_at(
             created_by,
             checkout_id,
             managed,
+            managed_purpose,
         })
         .await?;
 
@@ -207,6 +213,9 @@ pub async fn create_session_at(
             ports: ports.ports.clone(),
             unsatisfied: ports.unsatisfied.clone(),
             attempt: 0,
+            // Only a managed session has a purpose to act on; a hand-started
+            // one is a terminal and nothing drives it (MAIN-326).
+            managed_purpose: managed.then_some(managed_purpose),
         },
     );
     if !sent {
@@ -257,6 +266,7 @@ pub async fn create_ad_hoc_session(
             checkout_id: None,
             // Ad-hoc: an $HOME terminal or a runtime-authorize session.
             managed: false,
+            managed_purpose: ManagedPurpose::Access,
         })
         .await?;
 
@@ -292,6 +302,8 @@ pub async fn create_ad_hoc_session(
             ports: ports.ports.clone(),
             unsatisfied: ports.unsatisfied.clone(),
             attempt: 0,
+            // An ad-hoc terminal is nobody's declaration.
+            managed_purpose: None,
         },
     );
     if !sent {
@@ -344,6 +356,7 @@ pub async fn create_auth_session(
             checkout_id: None,
             // Ad-hoc: an $HOME terminal or a runtime-authorize session.
             managed: false,
+            managed_purpose: ManagedPurpose::Access,
         })
         .await?;
 

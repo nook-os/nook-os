@@ -15,7 +15,6 @@ use nook_testkit::TestBed;
 use sqlx::migrate::MigrateError;
 use std::path::PathBuf;
 use std::process::Command;
-use std::str::FromStr;
 
 /// Path to the repo root's copy of the heal script, absolute so the test's CWD
 /// does not matter.

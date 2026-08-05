@@ -444,6 +444,7 @@ pub async fn connect_once(cfg: &NodeConfig) -> Result<()> {
                 ports,
                 unsatisfied,
                 attempt,
+                managed_purpose,
             } => {
                 // THE authoritative check (MAIN-301 follow-on). Everything
                 // upstream of here is a belief: the range is a promise that
@@ -492,6 +493,7 @@ pub async fn connect_once(cfg: &NodeConfig) -> Result<()> {
                         rows,
                         ports,
                         unsatisfied,
+                        managed_purpose,
                     });
                 }
             }

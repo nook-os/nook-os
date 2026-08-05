@@ -4760,6 +4760,18 @@ export interface components {
              */
             version: number;
         };
+        /**
+         * @description What a MANAGED session exists to do (MAIN-326).
+         *
+         *     The reconciler runs two declarations per workspace, and this is what keeps
+         *     them apart: `sessions_one_managed_per_checkout_purpose` is unique on
+         *     `(checkout_id, managed_purpose)`, so a repo's clone can hold both a person's
+         *     terminal and the always-on review loop without either counting as the
+         *     other's replica. Without it the second declaration's session would be read
+         *     as a duplicate of the first and stopped on the next pass.
+         * @enum {string}
+         */
+        ManagedPurpose: "access" | "review_loop";
         /** @description The signed-in caller with their tenant. */
         MeResponse: {
             /**
@@ -5921,6 +5933,12 @@ export interface components {
              *     to offer that button is to know which kind of session this is.
              */
             managed?: boolean;
+            /**
+             * @description What the reconciler is keeping this session for (MAIN-326). Meaningless
+             *     on a hand-started session, where it reads [`ManagedPurpose::Access`]
+             *     because the column is `NOT NULL`.
+             */
+            managed_purpose?: components["schemas"]["ManagedPurpose"];
             name: string;
             node_id: components["schemas"]["NodeId"];
             /**

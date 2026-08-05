@@ -548,6 +548,10 @@ pub async fn restart(
             // ones. Its leases outlive the process for exactly this reason.
             ports: held,
             attempt: 0,
+            // The same session coming back, so it comes back doing the same
+            // job: a review loop restarted as a bare terminal would sit there
+            // reviewing nothing (MAIN-326).
+            managed_purpose: session.managed.then_some(session.managed_purpose),
         },
     );
     if !sent {

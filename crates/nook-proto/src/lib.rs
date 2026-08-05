@@ -395,6 +395,17 @@ pub enum ControlToNode {
         /// the overwhelmingly common one.
         #[serde(default)]
         unsatisfied: Vec<String>,
+        /// What the control plane is keeping this session for (MAIN-326), when
+        /// it is a managed one. `None` — an ad-hoc terminal or a hand-started
+        /// session — is the overwhelmingly common case and means "just open the
+        /// runtime", which is all this message ever did before.
+        ///
+        /// A PURPOSE, never a command. The node maps it to a fixed line it types
+        /// once the runtime is up, for the same reason `StartAuthSession`
+        /// carries a runtime rather than a login command: nothing on this wire
+        /// should be able to choose what runs on a machine.
+        #[serde(default)]
+        managed_purpose: Option<nook_types::ManagedPurpose>,
     },
     /// Install a runtime credential this node did not obtain (MAIN-283).
     ///

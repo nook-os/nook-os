@@ -233,6 +233,23 @@ fn derived_labels(node: &Node) -> std::collections::BTreeMap<String, String> {
     {
         out.insert("arch".to_string(), arch.to_string());
     }
+    // The deployment's own loop machine (MAIN-326). A shared operator node IS
+    // the executor — that is what `NOOK_SHARED_OPERATOR` declares it to be — so
+    // the label the review-loop spec selects on is derived from it rather than
+    // typed by hand, and a fleet gets its always-on review loops without anyone
+    // remembering to label the box.
+    //
+    // Derived only for the shared operator, which leaves `role=loop` available
+    // as a CUSTOM label on any other machine: a deployment that runs its loops
+    // somewhere else says so, and nothing here overrules it.
+    if node
+        .capabilities
+        .get("shared_operator")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
+        out.insert("role".to_string(), "loop".to_string());
+    }
     out
 }
 
@@ -792,4 +809,78 @@ pub async fn update(
     )
     .await;
     Ok(axum::http::StatusCode::ACCEPTED)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A node reporting `capabilities`, with the operator-set labels a person
+    /// typed. Only the fields placement reads matter; the rest is filler.
+    fn node_with(capabilities: serde_json::Value, labels: serde_json::Value) -> Node {
+        Node {
+            id: NodeId(uuid::Uuid::nil()),
+            tenant_id: TenantId(uuid::Uuid::nil()),
+            name: "n".into(),
+            hostname: "n".into(),
+            platform: "linux".into(),
+            capabilities,
+            resources: serde_json::json!({}),
+            status: "online".into(),
+            last_seen_at: None,
+            owner_person_id: None,
+            shared: false,
+            labels,
+            taints: serde_json::json!([]),
+            home_tenant: None,
+            created_at: chrono::Utc::now(),
+            port_range_start: None,
+            port_range_end: None,
+            port_exclusions: None,
+            updated_at: chrono::Utc::now(),
+        }
+    }
+
+    /// MAIN-326 AC-2. The shared operator IS the deployment's loop machine, so
+    /// the label the review-loop spec selects on is derived rather than typed —
+    /// a fleet gets its review loops without anyone remembering to label a box.
+    #[test]
+    fn the_shared_operator_is_labelled_the_loop_node() {
+        let operator = node_with(
+            serde_json::json!({ "shared_operator": true }),
+            serde_json::json!({}),
+        );
+        assert_eq!(
+            placement_of(&operator)
+                .labels
+                .get("role")
+                .map(String::as_str),
+            Some("loop")
+        );
+    }
+
+    #[test]
+    fn an_ordinary_node_is_not() {
+        let personal = node_with(serde_json::json!({}), serde_json::json!({}));
+        assert!(!placement_of(&personal).labels.contains_key("role"));
+    }
+
+    /// The other half of "derived only for the shared operator": a deployment
+    /// that runs its loops on some other machine says so with a custom label,
+    /// and nothing here overrules it. `os` proves the derived-wins rule is
+    /// still in force for the labels that ARE derived unconditionally.
+    #[test]
+    fn a_hand_labelled_loop_node_survives() {
+        let chosen = node_with(
+            serde_json::json!({}),
+            serde_json::json!({ "role": "loop", "os": "plan9" }),
+        );
+        let p = placement_of(&chosen);
+        assert_eq!(p.labels.get("role").map(String::as_str), Some("loop"));
+        assert_eq!(
+            p.labels.get("os").map(String::as_str),
+            Some("linux"),
+            "a node cannot be relabelled into another operating system"
+        );
+    }
 }

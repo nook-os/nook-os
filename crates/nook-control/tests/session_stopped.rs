@@ -66,6 +66,7 @@ async fn managed_session(bed: &TestBed, f: &Fixture) -> SessionId {
             created_by: None,
             checkout_id: Some(f.checkout),
             managed: true,
+            managed_purpose: ManagedPurpose::Access,
         })
         .await
         .expect("session")
@@ -83,7 +84,7 @@ async fn a_stopped_managed_session_still_satisfies_the_declaration() {
 
     let before = state
         .sessions
-        .live_managed(f.tenant, f.workspace)
+        .live_managed(f.tenant, f.workspace, None)
         .await
         .unwrap();
     assert_eq!(before.len(), 1, "the running session satisfies it");
@@ -95,7 +96,7 @@ async fn a_stopped_managed_session_still_satisfies_the_declaration() {
     // would start a replacement and the stop would look like it never happened.
     let after = state
         .sessions
-        .live_managed(f.tenant, f.workspace)
+        .live_managed(f.tenant, f.workspace, None)
         .await
         .unwrap();
     assert_eq!(
@@ -264,6 +265,7 @@ async fn a_workspace_with_no_checkout_is_still_unsatisfied() {
             created_by: None,
             checkout_id: None,
             managed: true,
+            managed_purpose: ManagedPurpose::Access,
         })
         .await
         .expect("session")
@@ -273,7 +275,7 @@ async fn a_workspace_with_no_checkout_is_still_unsatisfied() {
     assert!(
         state
             .sessions
-            .live_managed(f.tenant, f.workspace)
+            .live_managed(f.tenant, f.workspace, None)
             .await
             .unwrap()
             .is_empty(),

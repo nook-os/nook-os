@@ -252,6 +252,7 @@ pub async fn start_work(
         &worktree_path,
         // Start-work is a person taking a ticket: ad-hoc, not reconciled.
         false,
+        ManagedPurpose::Access,
     )
     .await?;
 
