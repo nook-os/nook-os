@@ -29,7 +29,7 @@
 use async_trait::async_trait;
 use nook_db::dialect::{json, type_mapping};
 use nook_db::paging::{DbPage, ListSpec, PageArgs};
-use nook_db::{params, Db, DbPool};
+use nook_db::{params, Db, DbPool, DbValue};
 use nook_types::*;
 use std::collections::HashMap;
 use uuid::Uuid;
@@ -1234,7 +1234,7 @@ impl NodeRepository for DbNodeRepository {
                     now = type_mapping(self.db.engine()).now(),
                     live = crate::session_status::LIVE_SQL
                 ),
-                params![node, live_tmux_sessions.to_vec()],
+                params![node, DbValue::TextList(live_tmux_sessions.to_vec())],
             )
             .await?)
     }

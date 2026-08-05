@@ -28,7 +28,7 @@
 
 use async_trait::async_trait;
 use nook_db::dialect::{atomic_claim, ci_match, time_math, type_mapping};
-use nook_db::{params, Db, DbPool};
+use nook_db::{params, Db, DbPool, DbValue};
 use nook_types::*;
 use std::collections::HashMap;
 use uuid::Uuid;
@@ -1586,18 +1586,18 @@ impl TaskRepository for DbTaskRepository {
                     p.priority,
                     p.unassigned_only,
                     p.assignee,
-                    p.labels,
-                    p.not_labels,
+                    DbValue::TextList(p.labels),
+                    DbValue::TextList(p.not_labels),
                     p.is_blocked,
                     p.created_after,
                     p.limit,
                     p.archived,
                     p.q,
-                    p.types,
+                    DbValue::TextList(p.types),
                     viewer,
                     p.parent,
                     p.backlog,
-                    p.visibility,
+                    DbValue::TextList(p.visibility),
                     p.node
                 ],
             )

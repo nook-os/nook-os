@@ -46,15 +46,32 @@ pub enum DbValue {
     Uuid(Option<uuid::Uuid>),
     Timestamptz(Option<chrono::DateTime<chrono::Utc>>),
     Json(Option<serde_json::Value>),
-    /// A `text[]` array parameter (Postgres `= ANY($n)`).
+    /// A `text[]` **`= ANY($n)` operand**: list-expanded to one placeholder per
+    /// element on SQLite. Wrong in a `VALUES`/`SET` position — see
+    /// [`DbValue::TextArray`], which is why there is no `From<Vec<String>>`.
     TextList(Vec<String>),
     /// A `uuid[]` array parameter (Postgres `= ANY($n)`).
+    ///
+    /// Operand-only, and unlike `TextList` that is not a hazard: **no `uuid[]`
+    /// column exists in either schema** (MAIN-310 AC-4), so there is no column
+    /// position for one to land in wrongly.
     UuidList(Vec<uuid::Uuid>),
     /// A `bigint[]` array parameter (Postgres `= ANY($n)`).
+    ///
+    /// Operand-only, for the same measured reason as [`DbValue::UuidList`]: no
+    /// `bigint[]` column exists.
     I64List(Vec<i64>),
-    /// A nullable `text[]` COLUMN value (e.g. inserting `choices text[]`) — a
-    /// single array bind, NOT an `= ANY` operand, so it is not list-expanded.
+    /// A nullable `text[]` **COLUMN value** (e.g. inserting `choices text[]`) —
+    /// a single array bind, NOT an `= ANY` operand, so it is not list-expanded.
     OptTextArray(Option<Vec<String>>),
+    /// A non-nullable `text[]` **COLUMN value** — one bind, never expanded.
+    ///
+    /// The counterpart to `OptTextArray` for a `NOT NULL text[]` column
+    /// (MAIN-310). Before it existed, a caller with a plain `Vec<String>` had
+    /// to write `Some(v)` to reach the array arm, so correct SQL depended on
+    /// knowing that `Vec<String>` and `Option<Vec<String>>` bind differently —
+    /// a property of the Rust type, not of the SQL position it lands in.
+    TextArray(Vec<String>),
 }
 
 impl DbValue {
@@ -116,10 +133,8 @@ into_db_value! {
     &serde_json::Value => |v| DbValue::Json(Some(v.clone())),
     Vec<u8> => |v| DbValue::Bytes(Some(v)),
     Option<Vec<u8>> => |v| DbValue::Bytes(v),
-    Vec<String> => |v| DbValue::TextList(v),
     Vec<uuid::Uuid> => |v| DbValue::UuidList(v),
     Vec<i64> => |v| DbValue::I64List(v),
-    &[String] => |v| DbValue::TextList(v.to_vec()),
     &[uuid::Uuid] => |v| DbValue::UuidList(v.to_vec()),
     &[i64] => |v| DbValue::I64List(v.to_vec()),
     Option<Vec<String>> => |v| DbValue::OptTextArray(v),
@@ -169,6 +184,7 @@ fn pg_args(params: Vec<DbValue>) -> Result<PgArguments, sqlx::Error> {
             DbValue::UuidList(x) => a.add(x).map_err(add_err)?,
             DbValue::I64List(x) => a.add(x).map_err(add_err)?,
             DbValue::OptTextArray(x) => a.add(x).map_err(add_err)?,
+            DbValue::TextArray(x) => a.add(x).map_err(add_err)?,
         }
     }
     Ok(a)
@@ -210,6 +226,7 @@ fn sqlite_args(
             DbValue::OptTextArray(x) => a
                 .add(x.as_deref().map(crate::row::text_array_to_json))
                 .map_err(add_err)?,
+            DbValue::TextArray(x) => a.add(crate::row::text_array_to_json(&x)).map_err(add_err)?,
         }
     }
     Ok((rewritten, a))
@@ -1040,5 +1057,63 @@ mod tests {
         );
         assert_eq!(sql, "WHERE x = ANY($1) AND y IN ($2)");
         assert_eq!(params.len(), 2);
+    }
+
+    /// A `text[]` COLUMN value binds as ONE parameter (MAIN-310 AC-3).
+    ///
+    /// This is the shape that used to be reachable by accident: a plain
+    /// `Vec<String>` converted to `TextList`, which is list-expanded, so a
+    /// three-element array in a `VALUES` position emitted three placeholders
+    /// where the column wanted one — corrupt SQL rather than a wrong value, and
+    /// no type error anywhere. `TextArray` is the non-optional column arm.
+    #[test]
+    fn a_text_array_column_value_is_one_parameter() {
+        let (sql, params) = expand_lists(
+            "INSERT INTO notification_channels (id, levels) VALUES ($1, $2)",
+            vec![
+                DbValue::Uuid(Some(uuid::Uuid::nil())),
+                DbValue::TextArray(vec!["info".into(), "warn".into(), "error".into()]),
+            ],
+        );
+        assert_eq!(
+            sql, "INSERT INTO notification_channels (id, levels) VALUES ($1, $2)",
+            "a column array must not rewrite the statement"
+        );
+        assert_eq!(params.len(), 2, "three elements, still one bind");
+        assert!(matches!(params[1], DbValue::TextArray(ref v) if v.len() == 3));
+    }
+
+    /// The same three strings in the two positions, side by side — the whole
+    /// point of the split. `TextList` expands, `TextArray` does not.
+    #[test]
+    fn the_operand_expands_and_the_column_value_does_not() {
+        let three = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        let (operand, operand_params) =
+            expand_lists("WHERE k = ANY($1)", vec![DbValue::TextList(three.clone())]);
+        let (column, column_params) = expand_lists("SET k = $1", vec![DbValue::TextArray(three)]);
+
+        assert_eq!(operand, "WHERE k IN ($1, $2, $3)");
+        assert_eq!(operand_params.len(), 3);
+        assert_eq!(column, "SET k = $1");
+        assert_eq!(column_params.len(), 1);
+    }
+
+    /// AC-4: the sibling list types stay operand-only, and that is safe for a
+    /// MEASURED reason rather than an assumed one — no `uuid[]` or `bigint[]`
+    /// column exists in either schema, so there is no column position for one
+    /// to land in wrongly. This test pins the expansion they are relied on for;
+    /// if such a column is ever added, it needs its own array variant and this
+    /// comment is the note saying so.
+    #[test]
+    fn uuid_and_i64_lists_remain_operand_only() {
+        let (sql, params) = expand_lists(
+            "WHERE a = ANY($1) AND b = ANY($2)",
+            vec![
+                DbValue::UuidList(vec![uuid::Uuid::nil(), uuid::Uuid::nil()]),
+                DbValue::I64List(vec![1, 2, 3]),
+            ],
+        );
+        assert_eq!(sql, "WHERE a IN ($1, $2) AND b IN ($3, $4, $5)");
+        assert_eq!(params.len(), 5);
     }
 }

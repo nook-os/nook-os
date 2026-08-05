@@ -6,7 +6,7 @@
 //! whole point of the card: before it, a `text[]` DTO had a `SqliteRow` impl
 //! that returned an error, so the second of those runs could not exist.
 
-use nook_db::{params, Db, FromDbRow};
+use nook_db::{params, Db, DbValue, FromDbRow};
 use nook_testkit::TestBed;
 use nook_types::*;
 use uuid::Uuid;
@@ -47,11 +47,16 @@ async fn seed(bed: &TestBed, tenant: TenantId, levels: &[&str], kinds: &[&str]) 
         .exec(
             "INSERT INTO notification_channels (id, tenant_id, kind, name, config, levels, kinds)
              VALUES ($1, $2, 'webhook', 'n', '{}', $3, $4)",
+            // `TextArray` is the non-optional text[] COLUMN arm (MAIN-310).
+            // This used to be `Some(..)`, which reached the array binding only
+            // as a side effect of `Option<Vec<String>>` converting differently
+            // from `Vec<String>` — the accident that card removed. Naming the
+            // position is what makes this a round-trip of the column bind.
             params![
                 id,
                 tenant,
-                Some(levels.iter().map(|s| s.to_string()).collect::<Vec<_>>()),
-                Some(kinds.iter().map(|s| s.to_string()).collect::<Vec<_>>())
+                DbValue::TextArray(levels.iter().map(|s| s.to_string()).collect()),
+                DbValue::TextArray(kinds.iter().map(|s| s.to_string()).collect())
             ],
         )
         .await
