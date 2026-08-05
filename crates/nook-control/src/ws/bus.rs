@@ -58,6 +58,25 @@ pub enum BusMessage {
         files: Vec<nook_types::GitFileStatus>,
         diff: String,
     },
+    /// A tunnel frame travelling back to the replica that ISSUED the request
+    /// (MAIN-402 AC-4).
+    ///
+    /// The single-shot pattern beside it — `OpReply`, `GitReply` — cannot carry
+    /// this: those resolve one `oneshot` and are done, while a tunnel response
+    /// is a head frame followed by an unbounded run of chunks, and every one of
+    /// them has to find the same waiting request on a replica that never held
+    /// the node's socket.
+    ///
+    /// `frame` is a `NodeToControl` because that is what the node actually
+    /// sent and re-encoding it here would be a second definition of the same
+    /// thing (`SessionFrame` carries `AttachServerMessage` for the same
+    /// reason). Only the three tunnel variants are legal — `TunnelResponse`,
+    /// `TunnelChunk`, `TunnelFailed`; anything else is dropped by the receiver
+    /// rather than trusted.
+    TunnelFrame {
+        request_id: Uuid,
+        frame: nook_proto::NodeToControl,
+    },
     /// Terminal frame for viewers attached on the receiving instance.
     SessionFrame {
         session_id: SessionId,
@@ -257,4 +276,136 @@ async fn fetch_outbox(pool: &DbPool, id: i64) -> Option<BusMessage> {
 /// the field" — see `BusMessage::GitReply`.
 pub(crate) fn yes() -> bool {
     true
+}
+
+#[cfg(test)]
+mod tunnel_relay_tests {
+    use super::*;
+    use nook_proto::NodeToControl;
+
+    /// MAIN-402 AC-5: a tunnel frame survives the bus.
+    ///
+    /// The relay is JSON over `LISTEN/NOTIFY`, so "it compiles" says nothing
+    /// about whether the frame that comes out the other side is the one that
+    /// went in. This is the only place that can tell — the alternative is
+    /// discovering a renamed field with a live tunnel and two replicas.
+    fn round_trip(msg: BusMessage) -> BusMessage {
+        let wire = serde_json::to_string(&msg).expect("encode");
+        serde_json::from_str(&wire).expect("decode")
+    }
+
+    #[test]
+    fn a_response_head_survives_the_relay() {
+        let id = Uuid::now_v7();
+        let back = round_trip(BusMessage::TunnelFrame {
+            request_id: id,
+            frame: NodeToControl::TunnelResponse {
+                request_id: id,
+                version: nook_proto::TUNNEL_PROTOCOL_VERSION,
+                status: 204,
+                // Repeats are the reason headers are a Vec and not a map — a
+                // map would keep one `set-cookie` and drop the rest, silently.
+                headers: vec![
+                    ("set-cookie".into(), "a=1".into()),
+                    ("set-cookie".into(), "b=2".into()),
+                ],
+            },
+        });
+        match back {
+            BusMessage::TunnelFrame {
+                request_id,
+                frame:
+                    NodeToControl::TunnelResponse {
+                        status, headers, ..
+                    },
+            } => {
+                assert_eq!(request_id, id);
+                assert_eq!(status, 204);
+                assert_eq!(headers.len(), 2, "both repeats survive: {headers:?}");
+            }
+            other => panic!("wrong variant back: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_chunk_keeps_its_sequence_and_its_end_marker() {
+        let id = Uuid::now_v7();
+        let back = round_trip(BusMessage::TunnelFrame {
+            request_id: id,
+            frame: NodeToControl::TunnelChunk {
+                request_id: id,
+                seq: 7,
+                data_b64: "aGVsbG8=".into(),
+                last: true,
+            },
+        });
+        match back {
+            BusMessage::TunnelFrame {
+                frame:
+                    NodeToControl::TunnelChunk {
+                        seq,
+                        data_b64,
+                        last,
+                        ..
+                    },
+                ..
+            } => {
+                assert_eq!(seq, 7);
+                assert_eq!(data_b64, "aGVsbG8=");
+                // `last` is what tells the far end the body is complete rather
+                // than stalled; losing it in transit would hang the response.
+                assert!(last);
+            }
+            other => panic!("wrong variant back: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_failure_survives_with_its_reason() {
+        let id = Uuid::now_v7();
+        let back = round_trip(BusMessage::TunnelFrame {
+            request_id: id,
+            frame: NodeToControl::TunnelFailed {
+                request_id: id,
+                message: "nothing listening on port 3000".into(),
+            },
+        });
+        match back {
+            BusMessage::TunnelFrame {
+                frame: NodeToControl::TunnelFailed { message, .. },
+                ..
+            } => assert!(message.contains("port 3000"), "{message}"),
+            other => panic!("wrong variant back: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_request_frame_survives_and_defaults_its_version() {
+        // The `#[serde(default)]` on `version` is what lets a peer that predates
+        // the field be understood as generation 1 rather than rejected — assert
+        // it against a wire form with the field genuinely absent.
+        let id = Uuid::now_v7();
+        let wire = serde_json::json!({
+            "type": "tunnel_request",
+            "data": {
+                "request_id": id,
+                "port": 3000,
+                "method": "GET",
+                "path": "/x?y=1",
+                "headers": [],
+                "body_b64": ""
+            }
+        })
+        .to_string();
+        let back: ControlToNode = serde_json::from_str(&wire).expect("decode");
+        match back {
+            ControlToNode::TunnelRequest { version, path, .. } => {
+                assert_eq!(version, 1, "an absent version is generation 1");
+                // The query survives intact — re-encoding it is how a signature
+                // check on the other side starts failing.
+                assert_eq!(path, "/x?y=1");
+            }
+            other => panic!("wrong variant back: {other:?}"),
+        }
+    }
 }

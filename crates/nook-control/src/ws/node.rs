@@ -676,6 +676,20 @@ async fn handle_message(
             )
             .await;
         }
+        // Tunnel frames go straight to whoever is waiting on this request —
+        // locally, or on the replica that issued it (MAIN-402 AC-3/AC-4). The
+        // registry owns that routing; this arm only names the request.
+        frame @ (NodeToControl::TunnelResponse { .. }
+        | NodeToControl::TunnelChunk { .. }
+        | NodeToControl::TunnelFailed { .. }) => {
+            let request_id = match &frame {
+                NodeToControl::TunnelResponse { request_id, .. }
+                | NodeToControl::TunnelChunk { request_id, .. }
+                | NodeToControl::TunnelFailed { request_id, .. } => *request_id,
+                _ => unreachable!("the pattern above admits nothing else"),
+            };
+            state.registry.tunnel_frame(request_id, frame);
+        }
         NodeToControl::PortsUnavailable {
             session_id,
             ports,
