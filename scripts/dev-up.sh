@@ -31,6 +31,25 @@ if [ -z "${COMPOSE_PROJECT_NAME:-}" ]; then
 fi
 say "Compose project: $COMPOSE_PROJECT_NAME"
 
+# Populate the cargo registry with ONE process before the three that share it
+# start (MAIN-425). control-plane, chat and worker each mount `cargo-registry`
+# and each run `cargo watch`, so on a COLD volume all three race to unpack the
+# same crates and lose:
+#
+#   failed to open .../aws-sigv4-1.5.1/.cargo-ok — File exists (os error 17)
+#
+# and the loser exits 101 with no file change to make cargo-watch retry — a
+# control plane that is "Up" and never serves. A primary checkout never sees it
+# because its registry was populated long ago; a SECOND stack has an empty
+# volume by definition, which is why this surfaced only once two stacks were
+# possible. Prewarming is skipped once the volume exists, so it costs one
+# fetch per project, ever.
+if ! docker volume inspect "${COMPOSE_PROJECT_NAME}_cargo-registry" >/dev/null 2>&1; then
+  say "Cold cargo registry — fetching dependencies once before the workers start"
+  docker compose run --rm --no-deps --entrypoint "" control-plane cargo fetch \
+    || say "  (fetch failed — continuing; the services will populate it themselves)"
+fi
+
 if [ "${1:-}" = "--build" ]; then
   say "Rebuilding images..."
   docker compose up -d --build
