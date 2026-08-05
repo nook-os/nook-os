@@ -51,10 +51,25 @@ spec:
   cooldownPeriod: {{ $ka.cooldownPeriod }}
   triggers:
     {{- if eq $provider "database" }}
-    # Scale on ready (visible, unlocked) rows waiting in the queue table.
+    # Scale on READY rows — visible, unlocked, and past their `not_before`.
+    #
+    # `crates/nook-infra/src/queue/database.rs` IS AUTHORITATIVE for what ready
+    # means: `receive` claims exactly this set, and `describe` counts exactly
+    # this set. Any change there has to be mirrored here, because a trigger that
+    # counts more than the worker can claim scales up for work nobody can do.
+    #
+    # That is the bug this replaced (MAIN-411). The `not_before` term was
+    # missing, so a delayed job — a retry backing off, a scheduled send — was
+    # counted the moment it was enqueued, and KEDA started workers that found
+    # nothing to claim and idled until the cooldown.
+    #
+    # The PARENTHESES around the `OR` are load-bearing. `AND` binds tighter, so
+    # without them the condition reads `locked_until IS NULL OR (locked_until <=
+    # now() AND not_before <= now())` — which counts every unlocked row whatever
+    # its `not_before`, i.e. exactly the bug, silently reintroduced.
     - type: postgresql
       metadata:
-        query: "SELECT count(*) FROM work_queue WHERE locked_until IS NULL OR locked_until < now()"
+        query: "SELECT count(*) FROM work_queue WHERE (locked_until IS NULL OR locked_until <= now()) AND not_before <= now()"
         targetQueryValue: {{ $ka.targetQueueLength | quote }}
       authenticationRef:
         name: {{ $name }}-auth
