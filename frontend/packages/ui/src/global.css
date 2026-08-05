@@ -1672,10 +1672,266 @@ table.nook-table tr.clickable { cursor: pointer; }
 
 .session-view {
   display: flex;
-  flex-direction: column;
+  /* A ROW since MAIN-414: the navigator is the first column, the tabs and the
+     terminal are the second. `.session-stack` keeps the old column stacking. */
+  flex-direction: row;
   height: 100%;
   min-height: 0;
+  position: relative;
+  overflow: hidden;
 }
+.session-stack {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+}
+
+/* ── Session navigator (MAIN-414) ───────────────────────────────────────── */
+
+/* Window chrome, not a content sidebar: it shares the terminal's background,
+   is separated by one hairline, and the only thing that moves is the width. */
+.session-nav {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  flex: none;
+  min-height: 0;
+  background: var(--nook-bg);
+  border-right: 1px solid var(--nook-border);
+  font-size: 12px;
+  /* The motion is on APPEARANCE, not on width. Transitioning width would put a
+     140ms lag between the pointer and the drag handle, which reads as the pane
+     resisting you — so opening slides and settles, and resizing tracks the
+     mouse exactly. */
+  animation: session-nav-in 140ms ease-out;
+}
+@keyframes session-nav-in {
+  from { opacity: 0; transform: translateX(-10px); }
+  to { opacity: 1; transform: none; }
+}
+/* Tight window, unpinned: float over the terminal instead of squeezing it. */
+.session-nav.overlay {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 20;
+  box-shadow: 6px 0 18px rgba(0, 0, 0, 0.55);
+}
+.session-nav-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: var(--nook-titlebar-h);
+  flex: none;
+  padding: 0 4px 0 8px;
+  border-bottom: 1px solid var(--nook-border);
+}
+.session-nav-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--nook-fg-faint);
+  cursor: pointer;
+}
+.session-nav-icon:hover { color: var(--nook-fg-bright); border-color: var(--nook-border); }
+.session-nav-icon.on { color: var(--nook-accent); }
+
+.nav-team { position: relative; min-width: 0; }
+.nav-team-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 100%;
+  padding: 2px 4px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--nook-fg-dim);
+  font: inherit;
+  cursor: pointer;
+}
+.nav-team-btn:hover { color: var(--nook-fg-bright); border-color: var(--nook-border); }
+.nav-team-name {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--nook-fg-bright);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.nav-team-menu {
+  position: absolute;
+  top: calc(100% + 3px);
+  left: 0;
+  z-index: 30;
+  min-width: 170px;
+  background: var(--nook-bg-panel);
+  border: 1px solid var(--nook-border);
+  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.5);
+}
+.nav-team-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 5px 8px;
+  border: 0;
+  background: transparent;
+  color: var(--nook-fg-dim);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.nav-team-item:hover { background: var(--nook-bg-panel); color: var(--nook-fg-bright); }
+.nav-team-item.current { color: var(--nook-fg-bright); }
+.nav-team-item .check { width: 12px; display: inline-flex; }
+
+.session-nav-find {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+  padding: 5px 8px;
+  border-bottom: 1px solid var(--nook-border);
+  color: var(--nook-fg-faint);
+}
+.session-nav-find input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  color: var(--nook-fg-bright);
+  font: inherit;
+  outline: none;
+}
+.session-nav-find input::placeholder { color: var(--nook-fg-faint); }
+
+.session-nav-tree { flex: 1; min-height: 0; overflow-y: auto; padding: 4px 0 10px; }
+.session-nav-empty { padding: 10px 10px; }
+
+.session-nav-folder-head {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  width: 100%;
+  padding: 4px 8px;
+  border: 0;
+  /* The SAME expression the tab-group chip uses, so a repo is literally the
+     same colour in the pane and in the strip. */
+  --group: hsl(var(--group-hue) 60% 58%);
+  border-left: 2px solid var(--group);
+  background: transparent;
+  color: var(--nook-fg-dim);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.session-nav-folder-head:hover { background: var(--nook-bg-panel); color: var(--nook-fg-bright); }
+.session-nav-folder-name {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.session-nav-folder-head > svg { flex: none; }
+.session-nav-folder-count {
+  margin-left: auto;
+  color: var(--nook-fg-faint);
+  font-size: 11px;
+}
+
+.session-nav-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 3px 8px 3px 20px;
+  border: 0;
+  --group: hsl(var(--group-hue) 60% 58%);
+  border-left: 2px solid color-mix(in srgb, var(--group) 35%, transparent);
+  background: transparent;
+  color: var(--nook-fg-dim);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  /* One row per session, always. Letting the runtime or the machine badge wrap
+     turns a scannable tree into ragged two-line entries. */
+  white-space: nowrap;
+  overflow: hidden;
+}
+.session-nav-item:hover { background: var(--nook-bg-panel); color: var(--nook-fg-bright); }
+.session-nav-item.active {
+  background: var(--nook-bg-panel);
+  color: var(--nook-fg-bright);
+  border-left-color: var(--group);
+}
+.session-nav-item-name {
+  /* The name is the only thing that gives way when the pane is narrow. */
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.session-nav-item-runtime { flex: none; color: var(--nook-fg-faint); font-size: 11px; }
+.session-nav-item-node {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 2px;
+  margin-left: auto;
+  color: var(--nook-fg-faint);
+  font-size: 10px;
+}
+.session-nav-item > svg { flex: none; }
+.session-nav-item .ok { color: var(--nook-accent); }
+.session-nav-item .err { color: var(--nook-err); }
+.session-nav-item .waiting { color: var(--nook-warn); }
+.session-nav-item .running { color: var(--nook-accent); }
+
+/* The drag handle: a 4px strip on the trailing edge that only shows itself
+   when the pointer is on it. */
+.session-nav-resize {
+  position: absolute;
+  top: 0;
+  right: -2px;
+  bottom: 0;
+  width: 5px;
+  cursor: col-resize;
+}
+.session-nav-resize:hover { background: var(--nook-accent); opacity: 0.5; }
+
+/* The pull-tab. AC-2: shut is not hidden — this stays welded to the edge, in
+   the chrome, so the pane is never lost to a shortcut nobody remembers. */
+.session-nav-tab {
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  width: 20px;
+  padding: 8px 0;
+  border: 0;
+  border-right: 1px solid var(--nook-border);
+  background: var(--nook-bg);
+  color: var(--nook-fg-faint);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: color 120ms ease, background 120ms ease;
+  animation: session-nav-in 140ms ease-out;
+}
+.session-nav-tab:hover { color: var(--nook-accent); background: var(--nook-bg-panel); }
+.session-nav-tab-label { writing-mode: vertical-rl; }
 .session-tabs {
   display: flex;
   align-items: stretch;

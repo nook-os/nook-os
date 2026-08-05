@@ -40,6 +40,7 @@ import { useLive } from "../live";
 import { useWorkspaceContext } from "../context";
 import { ScopeChip } from "../layout";
 import { useLiveTabs } from "../liveTabs";
+import { SessionShell } from "../SessionNavigator";
 import { SessionTabs } from "../SessionTabs";
 import { SessionWindows, SplitButtons } from "../SessionWindows";
 import { SessionOwner } from "../sessionOwner";
@@ -636,7 +637,7 @@ export function SessionPage() {
   };
 
   return (
-    <div className="session-view">
+    <SessionShell activeId={session.id}>
       <RememberSession sessionId={session.id} />
       <SessionTabs activeId={session.id} />
       <div
@@ -782,7 +783,7 @@ export function SessionPage() {
           </>
         )}
       </div>
-    </div>
+    </SessionShell>
   );
 }
 
@@ -841,8 +842,10 @@ export function SessionsIndex() {
 
   return (
     // No <SessionTabs/> here: with no tabs it renders nothing, and mounting it
-    // would only run the same hook a second time.
-    <div className="session-view">
+    // would only run the same hook a second time. The navigator DOES render —
+    // "no sessions in this workspace" and "no sessions anywhere" are different
+    // answers, and the pane is where the second one is visible.
+    <SessionShell>
       <div className="nook-grid" style={{ gridTemplateColumns: "1fr", flex: 1, minHeight: 0 }}>
         <Panel
           title="Sessions"
@@ -865,7 +868,7 @@ export function SessionsIndex() {
           </Empty>
         </Panel>
       </div>
-    </div>
+    </SessionShell>
   );
 }
 
@@ -949,7 +952,7 @@ export function SessionsPage() {
   const allShownPicked = shown.length > 0 && shown.every((s) => picked.has(s.id));
 
   return (
-    <div className="session-view">
+    <SessionShell>
       <SessionTabs />
       <div
         className="nook-grid"
@@ -1085,7 +1088,7 @@ export function SessionsPage() {
         )}
       </Panel>
       </div>
-    </div>
+    </SessionShell>
   );
 }
 

@@ -21,25 +21,21 @@ import { useWorkspaceContext } from "./context";
 import { tenantSwitcherModel } from "./tenants";
 import { notify } from "./dialogs";
 
-export function TenantSwitcher({ me }: { me: MeResponse }) {
-  const [open, setOpen] = useState(false);
+/** The switcher's model plus the act of switching, so a SECOND control can
+ *  offer it without a second implementation.
+ *
+ *  MAIN-414's navigator header switches teams too. Copying the POST would mean
+ *  two places deciding what re-scoping means, and the failure would be silent:
+ *  one of them forgetting to drop the workspace scope leaves the app pointed at
+ *  a workspace that belongs to the team you just left. */
+export function useTenantSwitch(me: MeResponse) {
   const [busy, setBusy] = useState(false);
-  const ref = useRef<HTMLDivElement>(null);
   const queryClient = useQueryClient();
   const navigate = useNavigate();
   const { select } = useWorkspaceContext();
   const model = tenantSwitcherModel(me);
 
-  useEffect(() => {
-    const close = (e: MouseEvent) => {
-      if (!ref.current?.contains(e.target as Node)) setOpen(false);
-    };
-    document.addEventListener("mousedown", close);
-    return () => document.removeEventListener("mousedown", close);
-  }, []);
-
   const switchTo = async (tenantId: string) => {
-    setOpen(false);
     if (tenantId === model.currentId || busy) return;
     setBusy(true);
     const { error, response } = await api.POST("/api/v1/me/tenant", {
@@ -56,6 +52,27 @@ export function TenantSwitcher({ me }: { me: MeResponse }) {
     select(null);
     navigate("/");
     queryClient.invalidateQueries();
+  };
+
+  return { model, switchTo, busy };
+}
+
+export function TenantSwitcher({ me }: { me: MeResponse }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  const { model, switchTo: doSwitch, busy } = useTenantSwitch(me);
+
+  useEffect(() => {
+    const close = (e: MouseEvent) => {
+      if (!ref.current?.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", close);
+    return () => document.removeEventListener("mousedown", close);
+  }, []);
+
+  const switchTo = async (tenantId: string) => {
+    setOpen(false);
+    await doSwitch(tenantId);
   };
 
   // Ctrl+Shift+T cycles to the next team — the zero-click path, which is the
