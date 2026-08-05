@@ -42,12 +42,51 @@ describe("the filed ports ticket is a build contract", () => {
     // variable; an app that ignores it collides exactly as before, and the cap
     // lifts on the declaration alone — so a ticket that only asks for
     // `.nook.toml` can be closed with the bug still in place.
-    expect(flat).toMatch(/reads its port from that variable/i);
-    expect(flat).toMatch(/No hardcoded port literal/i);
+    expect(flat).toMatch(/reads its port from its declared variable/i);
   });
 
-  it("demands proof that two instances coexist", () => {
-    expect(flat).toMatch(/Two instances run on one machine at once/i);
+  // ── MAIN-426: the three ways the previous body could be satisfied while
+  // leaving the collision in place. Each test names the hole it closes.
+
+  it("makes the builder SHOW the listeners they found", () => {
+    // Without an inventory, partial coverage is invisible: declaring three of
+    // eleven produces the same artifact as declaring all of them.
+    expect(flat).toMatch(/bind-site inventory/i);
+    expect(flat).toMatch(/file:line/i);
+    expect(flat).toMatch(/one row per listener/i);
+  });
+
+  it("demands the second instance be EXERCISED, not merely started", () => {
+    // "Both come up and neither reports a port in use" tests binding only, and
+    // misses every port-DERIVED value — the vite proxy bug this repo already
+    // documents would have passed it.
+    expect(flat).toMatch(/exercised, not\s+merely started/i);
+    expect(flat).toMatch(/port-derived values/i);
+    expect(flat).toMatch(/redirect and callback urls/i);
+  });
+
+  it("rejects assertion in place of evidence, including a green suite", () => {
+    expect(flat).toMatch(/"i checked" is not evidence/i);
+    expect(flat).toMatch(/green test suite is not evidence/i);
+  });
+
+  it("requires a guard wired into the repo's own test command", () => {
+    // Both directions, or it only half works — and it must not flag the
+    // fallback literal AC-3 positively requires, or it gets suppressed
+    // everywhere and protects nothing.
+    expect(flat).toMatch(/guard, wired into this repo's own test command/i);
+    expect(flat).toMatch(/declared `env` that nothing reads/i);
+    expect(flat).toMatch(/must not flag a fallback literal/i);
+  });
+
+  it("names what the guard's consumer may be, for a non-compose repo", () => {
+    expect(flat).toMatch(/compose file, the application's own bind site, a helm\s+chart, a procfile, a systemd unit/i);
+  });
+
+  it("says a fallback literal is CORRECT", () => {
+    // A naive "no port literals" grep flags the `unwrap_or` arm AC-3 requires.
+    // Measured on this repo: ~24 such literals, nearly all correct.
+    expect(flat).toMatch(/literal is correct as the fallback/i);
   });
 
   it("keeps the app working outside nook", () => {
@@ -57,6 +96,21 @@ describe("the filed ports ticket is a build contract", () => {
 
   it("does not force a listener on a repo that binds none", () => {
     expect(flat).toMatch(/empty `\[\[ports\]\]` list is a valid statement/i);
+  });
+
+  it("makes an empty declaration cost evidence, not just an assertion", () => {
+    // The shortcut that made the previous body worse than useless: an empty
+    // list LIFTS THE CAP, so "binds nothing" was the fastest way to close the
+    // ticket — and if wrong, every hardcoded port stayed with no protection.
+    expect(flat).toMatch(/say so WITH the search that\s+came back empty/i);
+    expect(flat).toMatch(/it is not the cheap way out/i);
+    expect(flat).toMatch(/worse than leaving\s+this ticket open/i);
+  });
+
+  it("still lets an honest 'binds nothing' close cheaply", () => {
+    // The evidence is a search that came back empty, not a proof of absence.
+    expect(flat).toMatch(/not meant to tax the honest case/i);
+    expect(flat).toMatch(/one grep and its\s+output closes this ticket/i);
   });
 });
 
