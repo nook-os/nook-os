@@ -112,6 +112,31 @@ impl From<sqlx::Error> for DbError {
     }
 }
 
+/// Is this driver error the transport, or the database's own answer?
+///
+/// One function so [`DbError::is_transient`]'s two arms cannot drift: the rule
+/// is the same whether the failure happened while connecting or while querying,
+/// and the first cut of that predicate got it wrong precisely by having two
+/// rules.
+fn driver_error_is_transient(e: &sqlx::Error) -> bool {
+    match e {
+        // Nobody answered, or the pool could not hand out a connection in time.
+        // Availability, not intent.
+        sqlx::Error::Io(_) | sqlx::Error::PoolTimedOut => true,
+        // The peer closed the connection or spoke unexpectedly — a failover or
+        // a restart, from the client's point of view.
+        sqlx::Error::Protocol(_) => true,
+        // The database ITSELF answered. It knows what it does not have, so this
+        // is about the query, the schema or the credentials — never the link.
+        // `57P01` (admin_shutdown) and `57P02` (crash_shutdown) are the
+        // exceptions: the server is going away, and it said so.
+        sqlx::Error::Database(d) => {
+            matches!(d.code().as_deref(), Some("57P01") | Some("57P02"))
+        }
+        _ => false,
+    }
+}
+
 impl DbError {
     /// Did a write collide with a unique constraint?
     ///
@@ -133,6 +158,38 @@ impl DbError {
         match self {
             DbError::Query(sqlx::Error::Database(d)) => d.constraint(),
             _ => None,
+        }
+    }
+
+    /// Is this worth RETRYING, or is it the database telling us we are wrong?
+    ///
+    /// The distinction a background worker needs (MAIN-409): a connection that
+    /// blipped is a reason to back off and try again, while a missing database
+    /// or a table that does not exist is a reason to stop and say so — retrying
+    /// forever against those is not resilience, it is a silent outage.
+    ///
+    /// Lives here rather than at the call site because answering it means
+    /// reaching into `sqlx::Error` and the driver's SQLSTATE, which is exactly
+    /// what this type exists to keep out of callers' signatures.
+    ///
+    /// Deliberately CONSERVATIVE: only the cases that are unambiguously a
+    /// transport or availability blip say `true`. Anything unrecognised is
+    /// treated as fatal by the caller, which is no worse than the behaviour
+    /// this replaced (the worker exited on every error) and never spins on a
+    /// bug.
+    pub fn is_transient(&self) -> bool {
+        match self {
+            // CONNECT and QUERY are classified by the same rule, deliberately.
+            // The first cut said `Connect(_) => true` unconditionally, and that
+            // is wrong for the case AC-3 names by name: a server that answers
+            // the startup packet with `3D000 database does not exist` — or
+            // `28P01 invalid password` — has ANSWERED, and no amount of
+            // retrying changes what it said. Only the failures that never got
+            // an answer are worth trying again.
+            DbError::Connect(e) | DbError::Query(e) => driver_error_is_transient(e),
+            // A scheme we cannot run is a configuration error and will be one
+            // forever.
+            DbError::UnsupportedScheme(_) | DbError::NotYetSupported(_) => false,
         }
     }
 
@@ -239,6 +296,126 @@ pub async fn connect(url: &str, max_connections: u32) -> Result<DbPool, DbError>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// MAIN-409 AC-3: what a background worker may retry, and what it must not.
+    ///
+    /// The case that matters is the one the first cut got wrong — `Connect`
+    /// was transient unconditionally, so a URL naming a database that does not
+    /// exist retried at the ceiling forever, which is the outage AC-3 names
+    /// with the alarm switched off.
+    mod transience {
+        use super::*;
+
+        /// A `Database` error carrying one SQLSTATE.
+        ///
+        /// `PgDatabaseError` has no public constructor, so this implements the
+        /// public `DatabaseError` trait instead. That is not a weaker test: the
+        /// predicate reads `code()` and nothing else, so this exercises the
+        /// exact path the driver's own error takes through it.
+        #[derive(Debug)]
+        struct Coded(String);
+
+        impl std::fmt::Display for Coded {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "SQLSTATE {}", self.0)
+            }
+        }
+        impl std::error::Error for Coded {}
+        impl sqlx::error::DatabaseError for Coded {
+            fn message(&self) -> &str {
+                "test"
+            }
+            fn code(&self) -> Option<std::borrow::Cow<'_, str>> {
+                Some(std::borrow::Cow::Borrowed(&self.0))
+            }
+            fn kind(&self) -> sqlx::error::ErrorKind {
+                sqlx::error::ErrorKind::Other
+            }
+            fn as_error(&self) -> &(dyn std::error::Error + Send + Sync + 'static) {
+                self
+            }
+            fn as_error_mut(&mut self) -> &mut (dyn std::error::Error + Send + Sync + 'static) {
+                self
+            }
+            fn into_error(self: Box<Self>) -> Box<dyn std::error::Error + Send + Sync + 'static> {
+                self
+            }
+        }
+
+        fn db_err(code: &str) -> sqlx::Error {
+            sqlx::Error::Database(Box::new(Coded(code.to_string())))
+        }
+
+        #[test]
+        fn a_server_that_answered_is_never_retried_however_it_failed() {
+            // 3D000 invalid_catalog_name — "database does not exist", AC-3's
+            // own example. 28P01 invalid_password — the same shape: answered,
+            // and the answer will not change.
+            for code in ["3D000", "28P01", "42P01"] {
+                assert!(
+                    !DbError::Connect(db_err(code)).is_transient(),
+                    "{code} on connect must be fatal"
+                );
+                assert!(
+                    !DbError::Query(db_err(code)).is_transient(),
+                    "{code} on query must be fatal"
+                );
+            }
+        }
+
+        #[test]
+        fn a_server_going_away_is_retried_from_either_arm() {
+            // The carve-out: the server SAID it is shutting down, so the next
+            // attempt reaches a different process rather than the same refusal.
+            for code in ["57P01", "57P02"] {
+                assert!(DbError::Connect(db_err(code)).is_transient(), "{code}");
+                assert!(DbError::Query(db_err(code)).is_transient(), "{code}");
+            }
+        }
+
+        #[test]
+        fn nobody_answering_is_retried() {
+            let io = || sqlx::Error::Io(std::io::Error::other("connection refused"));
+            assert!(DbError::Connect(io()).is_transient());
+            assert!(DbError::Query(io()).is_transient());
+            assert!(DbError::Connect(sqlx::Error::PoolTimedOut).is_transient());
+        }
+
+        #[test]
+        fn the_two_arms_answer_identically() {
+            // The property the shared classifier exists to hold. Two rules is
+            // how the first cut ended up retrying a missing database forever.
+            for e in [
+                sqlx::Error::PoolTimedOut,
+                sqlx::Error::Io(std::io::Error::other("x")),
+                db_err("3D000"),
+                db_err("57P01"),
+            ] {
+                assert_eq!(
+                    DbError::Connect(clone_err(&e)).is_transient(),
+                    DbError::Query(clone_err(&e)).is_transient(),
+                    "connect and query disagree about {e:?}"
+                );
+            }
+        }
+
+        /// `sqlx::Error` is not `Clone`; rebuild the same shape for the second
+        /// arm rather than asserting on two different errors.
+        fn clone_err(e: &sqlx::Error) -> sqlx::Error {
+            match e {
+                sqlx::Error::PoolTimedOut => sqlx::Error::PoolTimedOut,
+                sqlx::Error::Io(_) => sqlx::Error::Io(std::io::Error::other("x")),
+                sqlx::Error::Database(d) => db_err(d.code().as_deref().unwrap_or("")),
+                other => panic!("unhandled in this test helper: {other:?}"),
+            }
+        }
+
+        #[test]
+        fn a_scheme_we_cannot_run_is_forever() {
+            assert!(!DbError::UnsupportedScheme("mysql".into()).is_transient());
+            assert!(!DbError::NotYetSupported(Engine::Sqlite).is_transient());
+        }
+    }
 
     #[test]
     fn detects_postgres_variants() {

@@ -31,6 +31,12 @@ const POLL_INTERVAL: Duration = Duration::from_secs(1);
 /// Backoff base and ceiling for a failing handler.
 const BACKOFF_BASE: Duration = Duration::from_secs(2);
 const BACKOFF_MAX: Duration = Duration::from_secs(300);
+/// Backoff base and ceiling for a failing DRAIN — the loop itself, not an item
+/// (MAIN-409). Shorter than the handler's: a blip that stopped the whole worker
+/// is the thing we most want to recover from quickly, and there is no item
+/// being held invisible while we wait.
+const DRAIN_BACKOFF_BASE: Duration = Duration::from_millis(500);
+const DRAIN_BACKOFF_MAX: Duration = Duration::from_secs(30);
 
 /// A handler for one `work_type`. Because delivery is at-least-once, `handle`
 /// **must be idempotent** — key its effects on `work.id` (or a natural key in
@@ -246,9 +252,34 @@ pub async fn drain_once(queue: &dyn Queue, registry: &Registry, types: &[String]
     Ok(n)
 }
 
+/// How long to wait before the `n`th consecutive drain retry, doubling from
+/// [`DRAIN_BACKOFF_BASE`] and capped at [`DRAIN_BACKOFF_MAX`].
+///
+/// Bounded on purpose (MAIN-409 AC-2): an unbounded backoff on a database that
+/// comes back after an hour means the queue stays undrained long after it could
+/// have resumed, and the log goes quiet exactly when somebody is looking.
+fn drain_backoff(consecutive: u32) -> Duration {
+    let shift = consecutive.saturating_sub(1).min(16);
+    DRAIN_BACKOFF_BASE
+        .saturating_mul(1u32 << shift)
+        .min(DRAIN_BACKOFF_MAX)
+}
+
 /// The receive loop. Drains batches until `shutdown` flips true; a shutdown that
 /// arrives mid-batch lets the current batch finish before the next iteration
 /// exits, so in-flight work completes rather than being abandoned (AC-1).
+///
+/// **A transient drain failure does not end the worker** (MAIN-409). It used to:
+/// `drain_once(...).await?` propagated, so one database hiccup exited the
+/// process, and dev compose has no restart policy — the queue then sat
+/// undrained until somebody noticed a missing container. A worker whose failure
+/// mode is "stop existing" is not a background worker.
+///
+/// What is FATAL is stated rather than implied: anything
+/// [`DbError::is_transient`](nook_db::DbError::is_transient) does not vouch for,
+/// including an error that is not a database error at all. Retrying forever
+/// against a missing table is a silent outage wearing resilience's clothes,
+/// so those still end the process with the reason in the log.
 pub async fn run(
     queue: Arc<dyn Queue>,
     registry: Registry,
@@ -256,11 +287,45 @@ pub async fn run(
     mut shutdown: tokio::sync::watch::Receiver<bool>,
 ) -> Result<()> {
     tracing::info!(?types, "worker draining");
+    let mut consecutive_failures: u32 = 0;
     loop {
         if *shutdown.borrow_and_update() {
             break;
         }
-        let handled = drain_once(&*queue, &registry, &types).await?;
+        let handled = match drain_once(&*queue, &registry, &types).await {
+            Ok(n) => {
+                consecutive_failures = 0;
+                n
+            }
+            Err(e) => {
+                let transient = e
+                    .downcast_ref::<nook_db::DbError>()
+                    .is_some_and(|db| db.is_transient());
+                if !transient {
+                    tracing::error!(
+                        error = ?e,
+                        "worker stopping: this drain failure is not a transient one, and \
+                         retrying it would only hide it"
+                    );
+                    return Err(e);
+                }
+                consecutive_failures = consecutive_failures.saturating_add(1);
+                let wait = drain_backoff(consecutive_failures);
+                // Every retry logs the error (AC-2): a database that is down for
+                // an hour should be an hour of warnings, not silence.
+                tracing::warn!(
+                    error = ?e,
+                    consecutive_failures,
+                    backoff_ms = wait.as_millis() as u64,
+                    "drain failed transiently — backing off and retrying"
+                );
+                tokio::select! {
+                    _ = tokio::time::sleep(wait) => {}
+                    _ = shutdown.changed() => {}
+                }
+                continue;
+            }
+        };
         if handled == 0 {
             // Idle: wait a beat, but wake immediately on shutdown.
             tokio::select! {
@@ -545,6 +610,143 @@ mod tests {
                 1,
                 "a panic is a failure, not a loss"
             );
+        })
+        .await;
+    }
+
+    /// A queue that fails the first `fail_times` receives, then delegates to the
+    /// real one. Everything else passes straight through, so the drain that
+    /// follows the injected failure is a genuine drain against a real database.
+    struct FlakyReceive {
+        inner: Arc<dyn Queue>,
+        remaining: AtomicUsize,
+        /// What the failure looks like coming out of `nook-db` — the same type
+        /// the real queue would surface, so the worker classifies it exactly as
+        /// it would in production rather than through a stand-in.
+        transient: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl Queue for FlakyReceive {
+        async fn enqueue(&self, work: NewWork) -> Result<Uuid> {
+            self.inner.enqueue(work).await
+        }
+        async fn receive(
+            &self,
+            types: &[String],
+            max: usize,
+            visibility: Duration,
+        ) -> Result<Vec<WorkEnvelope>> {
+            if self.remaining.load(Ordering::SeqCst) > 0 {
+                self.remaining.fetch_sub(1, Ordering::SeqCst);
+                let e = if self.transient {
+                    // `Io` is unambiguously the transport, which is what
+                    // `is_transient` vouches for.
+                    nook_db::DbError::Query(sqlx::Error::Io(std::io::Error::other(
+                        "connection reset by peer",
+                    )))
+                } else {
+                    nook_db::DbError::UnsupportedScheme("mysql".into())
+                };
+                return Err(anyhow::Error::new(e));
+            }
+            self.inner.receive(types, max, visibility).await
+        }
+        async fn ack(&self, id: Uuid) -> Result<()> {
+            self.inner.ack(id).await
+        }
+        async fn nack(&self, id: Uuid, disposition: Nack) -> Result<()> {
+            self.inner.nack(id, disposition).await
+        }
+        async fn extend_visibility(&self, id: Uuid, visibility: Duration) -> Result<()> {
+            self.inner.extend_visibility(id, visibility).await
+        }
+        async fn describe(&self) -> Result<nook_infra::queue::QueueStats> {
+            self.inner.describe().await
+        }
+    }
+
+    #[test]
+    fn drain_backoff_grows_and_is_capped() {
+        // AC-2: bounded. An unbounded backoff on a database that comes back
+        // after an hour leaves the queue undrained long after it could have
+        // resumed, and the log goes quiet exactly when somebody is looking.
+        assert_eq!(drain_backoff(1), DRAIN_BACKOFF_BASE);
+        assert_eq!(drain_backoff(2), DRAIN_BACKOFF_BASE * 2);
+        assert_eq!(drain_backoff(3), DRAIN_BACKOFF_BASE * 4);
+        assert_eq!(drain_backoff(99), DRAIN_BACKOFF_MAX);
+        // Never zero — a "backoff" that does not wait is a spin.
+        assert!(drain_backoff(0) >= DRAIN_BACKOFF_BASE);
+    }
+
+    #[tokio::test]
+    async fn a_transient_drain_failure_is_survived_and_the_work_still_drains() {
+        // AC-1 / AC-4. Before this, `drain_once(...).await?` propagated: the
+        // first error below ended `run()` and the item sat in the queue.
+        nook_testkit::deadline(60, async {
+            let Some((bed, q)) = setup().await else {
+                return;
+            };
+            let ty = unique_type("flaky");
+            let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let mut reg = Registry::new();
+            reg.register(ty.clone(), Arc::new(Recorder(seen.clone())));
+            q.enqueue(work(&ty)).await.unwrap();
+
+            let flaky: Arc<dyn Queue> = Arc::new(FlakyReceive {
+                inner: q.clone(),
+                remaining: AtomicUsize::new(2),
+                transient: true,
+            });
+            let (tx, rx) = tokio::sync::watch::channel(false);
+            let handle = tokio::spawn(run(flaky, reg, vec![ty.clone()], rx));
+
+            for _ in 0..100 {
+                if count_in(&bed.db(), "work_queue", &ty).await == 0 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            tx.send(true).unwrap();
+            tokio::time::timeout(Duration::from_secs(10), handle)
+                .await
+                .expect("run returns after shutdown")
+                .unwrap()
+                .expect("run survived the transient failures");
+
+            assert_eq!(
+                seen.lock().unwrap().len(),
+                1,
+                "the work drained after the injected failures"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn a_fatal_drain_failure_still_ends_the_worker() {
+        // AC-3. Retrying forever against a database that will never answer is
+        // not an improvement on exiting — it is the same outage with the alarm
+        // switched off.
+        nook_testkit::deadline(60, async {
+            let Some((_bed, q)) = setup().await else {
+                return;
+            };
+            let ty = unique_type("fatal");
+            let reg = Registry::new();
+            let fatal: Arc<dyn Queue> = Arc::new(FlakyReceive {
+                inner: q.clone(),
+                remaining: AtomicUsize::new(1),
+                transient: false,
+            });
+            let (_tx, rx) = tokio::sync::watch::channel(false);
+            let err = tokio::time::timeout(Duration::from_secs(10), run(fatal, reg, vec![ty], rx))
+                .await
+                .expect("run returns promptly rather than retrying")
+                .expect_err("a fatal error ends the worker");
+            // And the reason travels with it, rather than being swallowed into
+            // a generic "worker died".
+            assert!(err.to_string().contains("mysql"), "{err}");
         })
         .await;
     }
