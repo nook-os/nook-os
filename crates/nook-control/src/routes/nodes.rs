@@ -578,6 +578,46 @@ async fn visible_node(state: &AppState, auth: &AuthCtx, id: NodeId) -> ApiResult
     Ok(node)
 }
 
+/// `POST /api/v1/nodes/{id}/operator-authorize-optout` — the owner declines (or
+/// restores) operator-authorize on this machine (MAIN-276 AC-6).
+///
+/// **Owner only, and deliberately not `node.manage`.** This is the one bound an
+/// owner holds against the deployment operator, so a permission the operator
+/// themselves holds everywhere would make it self-defeating: they could simply
+/// clear the flag and proceed. `require_person_owns_node` is the same
+/// chokepoint `set_shared` uses, and it answers to ownership rather than role.
+///
+/// An ownerless node has nobody to decline on its behalf and is refused there.
+#[utoipa::path(post, path = "/api/v1/nodes/{id}/operator-authorize-optout",
+    operation_id = "set_operator_authorize_optout",
+    params(("id" = String, Path,)),
+    request_body = SetOperatorAuthorizeOptoutRequest,
+    responses((status = 200, body = Node), (status = 403), (status = 404)))]
+pub async fn set_operator_authorize_optout(
+    State(state): State<AppState>,
+    auth: AuthCtx,
+    Path(id): Path<NodeId>,
+    Json(req): Json<SetOperatorAuthorizeOptoutRequest>,
+) -> ApiResult<Json<Node>> {
+    auth.require_user()?;
+    crate::auth::require_person_owns_node(&state, auth.tenant_id, Some(auth.user_id), id).await?;
+    let node = state
+        .nodes
+        .set_operator_authorize_optout(id, auth.tenant_id, req.optout)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    crate::events::record(
+        &state,
+        auth.tenant_id,
+        crate::events::EventDraft::new("node.operator_authorize_optout")
+            .actor("user", auth.user_id.0)
+            .node(id)
+            .payload(serde_json::json!({ "optout": req.optout })),
+    )
+    .await;
+    Ok(Json(node))
+}
+
 /// `POST /api/v1/nodes/{id}/authorize` — launch a runtime's login flow in a
 /// session on the node so it can be device-authorized from the UI (MAIN-126).
 ///
@@ -832,6 +872,7 @@ mod tests {
             shared: false,
             labels,
             taints: serde_json::json!([]),
+            operator_authorize_optout: false,
             home_tenant: None,
             created_at: chrono::Utc::now(),
             port_range_start: None,

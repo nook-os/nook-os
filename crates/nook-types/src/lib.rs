@@ -617,6 +617,16 @@ pub struct Node {
     pub labels: serde_json::Value,
     /// Operator-set taints, `[{"key": …, "effect": …}]` (MAIN-314).
     pub taints: serde_json::Value,
+    /// The owner has declined operator-authorize on this machine (MAIN-276).
+    ///
+    /// Default `false`: authorizing a runtime is the deployment operator's by
+    /// default, because it is their hardware. This is the owner's veto on that
+    /// one capability, and it is theirs alone to set.
+    ///
+    /// It says nothing about whether work may RUN here — authorize and
+    /// permit-work are separate gates, and MAIN-278 owns the second.
+    #[serde(default)]
+    pub operator_authorize_optout: bool,
     /// The name of this node's HOME tenant, set only when that is not the
     /// tenant you are acting in (MAIN-353) — your own machine, reached from
     /// another of your orgs. `None` for the ordinary case, so a UI can render
@@ -918,6 +928,12 @@ pub struct SetSessionSpecRequest {
 #[derive(Debug, Clone, Deserialize, ToSchema)]
 pub struct SetSharedRequest {
     pub shared: bool,
+}
+
+/// The owner's veto on operator-authorize for one machine (MAIN-276 AC-6).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct SetOperatorAuthorizeOptoutRequest {
+    pub optout: bool,
 }
 
 // ── Skills ───────────────────────────────────────────────────────────────────

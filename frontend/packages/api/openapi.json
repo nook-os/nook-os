@@ -11359,6 +11359,10 @@
           "name": {
             "type": "string"
           },
+          "operator_authorize_optout": {
+            "type": "boolean",
+            "description": "The owner has declined operator-authorize on this machine (MAIN-276).\n\nDefault `false`: authorizing a runtime is the deployment operator's by\ndefault, because it is their hardware. This is the owner's veto on that\none capability, and it is theirs alone to set.\n\nIt says nothing about whether work may RUN here — authorize and\npermit-work are separate gates, and MAIN-278 owns the second."
+          },
           "owner_person_id": {
             "type": [
               "string",
@@ -12509,6 +12513,10 @@
                 },
                 "name": {
                   "type": "string"
+                },
+                "operator_authorize_optout": {
+                  "type": "boolean",
+                  "description": "The owner has declined operator-authorize on this machine (MAIN-276).\n\nDefault `false`: authorizing a runtime is the deployment operator's by\ndefault, because it is their hardware. This is the owner's veto on that\none capability, and it is theirs alone to set.\n\nIt says nothing about whether work may RUN here — authorize and\npermit-work are separate gates, and MAIN-278 owns the second."
                 },
                 "owner_person_id": {
                   "type": [

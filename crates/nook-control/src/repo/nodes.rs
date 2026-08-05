@@ -220,6 +220,17 @@ pub trait NodeRepository: Send + Sync {
         shared: bool,
     ) -> ApiResult<Option<Node>>;
 
+    /// The owner declines (or restores) operator-authorize on this machine
+    /// (MAIN-276 AC-6). Tenant-scoped like `set_shared`, because the caller is
+    /// always the owner acting in their own tenant — the operator can never
+    /// reach this one.
+    async fn set_operator_authorize_optout(
+        &self,
+        id: NodeId,
+        tenant: TenantId,
+        optout: bool,
+    ) -> ApiResult<Option<Node>>;
+
     /// Replace a node's operator-set labels and taints (MAIN-314). Both are a
     /// full replacement — a partial update of a set cannot say what was deleted.
     async fn set_placement(
@@ -482,7 +493,7 @@ pub trait TenantCaRepository: Send + Sync {
 /// decodes from, and the reason two SELECTs cannot drift apart.
 const NODE_COLUMNS: &str = "id, tenant_id, name, hostname, platform, capabilities, resources, \
      status, last_seen_at, owner_person_id, shared, created_at, updated_at, labels, taints, \
-     port_range_start, port_range_end, port_exclusions";
+     port_range_start, port_range_end, port_exclusions, operator_authorize_optout";
 
 /// The tenant node list's sort allowlist — the paged endpoint's contract half.
 pub const NODE_PAGE_SORTS: &[(&str, &str)] = &[
@@ -761,6 +772,26 @@ impl NodeRepository for DbNodeRepository {
                     type_mapping(self.db.engine()).now()
                 ),
                 params![id, tenant, shared],
+            )
+            .await?)
+    }
+
+    async fn set_operator_authorize_optout(
+        &self,
+        id: NodeId,
+        tenant: TenantId,
+        optout: bool,
+    ) -> ApiResult<Option<Node>> {
+        Ok(self
+            .db
+            .query_opt(
+                &format!(
+                    "UPDATE nodes SET operator_authorize_optout = $3, updated_at = {}
+                     WHERE id = $1 AND tenant_id = $2
+                     RETURNING {NODE_COLUMNS}",
+                    type_mapping(self.db.engine()).now()
+                ),
+                params![id, tenant, optout],
             )
             .await?)
     }
@@ -1566,6 +1597,7 @@ impl FakeNodeRepository {
                 updated_at: now,
                 labels: serde_json::json!({}),
                 taints: serde_json::json!([]),
+                operator_authorize_optout: false,
                 home_tenant: None,
                 port_range_start: None,
                 port_range_end: None,
@@ -1920,6 +1952,23 @@ impl NodeRepository for FakeNodeRepository {
             }))
     }
 
+    async fn set_operator_authorize_optout(
+        &self,
+        id: NodeId,
+        tenant: TenantId,
+        optout: bool,
+    ) -> ApiResult<Option<Node>> {
+        let mut s = self.inner.lock().unwrap();
+        Ok(s.nodes
+            .iter_mut()
+            .find(|n| n.node.id == id && n.node.tenant_id == tenant)
+            .map(|n| {
+                n.node.operator_authorize_optout = optout;
+                n.node.updated_at = chrono::Utc::now();
+                n.node.clone()
+            }))
+    }
+
     async fn by_token_hash(&self, token_hash: &str) -> ApiResult<Option<NodeIdentity>> {
         Ok(self
             .inner
@@ -1968,6 +2017,7 @@ impl NodeRepository for FakeNodeRepository {
                 shared: false,
                 labels: serde_json::json!({}),
                 taints: serde_json::json!([]),
+                operator_authorize_optout: false,
                 home_tenant: None,
                 port_range_start: None,
                 port_range_end: None,

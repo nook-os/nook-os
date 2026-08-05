@@ -635,6 +635,17 @@ impl Draft {
         self.payload = p;
         self
     }
+    /// Address this notification to ONE person instead of the tenant.
+    ///
+    /// The field has always existed and the read path already honours it
+    /// (`notifications` filters on `user_id IS NULL OR user_id = $me`); nothing
+    /// had needed to set it until MAIN-276, where telling the whole tenant that
+    /// somebody's machine was authorized would be both noise and a small
+    /// disclosure.
+    pub fn user(mut self, u: uuid::Uuid) -> Self {
+        self.user_id = Some(u);
+        self
+    }
 }
 
 /// Write it, push it to every connected client, and hand it to the channels.
