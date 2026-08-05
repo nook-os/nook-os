@@ -32,7 +32,13 @@ frontend/apps/desktop/src-tauri/gen/
 # In-container cargo target mount points
 /target-docker
 /target-docker-node
-deploy/dev-certs/agent.key
+# Dev agent TLS — BOTH halves, generated per checkout by
+# scripts/dev-bootstrap.sh. The certificate used to be tracked while its
+# key was ignored, which handed every fresh worktree a certificate it had
+# no key for and a control plane that booted and died (MAIN-425). Nothing
+# pins this cert — the node computes its fingerprint at runtime — so a
+# per-checkout pair is equivalent and costs nothing.
+deploy/dev-certs/
 
 certs/
 

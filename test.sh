@@ -125,6 +125,7 @@ run_lint() {
     scripts/check-nested-dialect.sh scripts/check-nested-dialect.test.sh \
     scripts/check-sqlite-ci.sh scripts/check-sqlite-ci.test.sh \
     scripts/squash-migrations.sh \
+    scripts/dev-bootstrap.sh scripts/dev-up.sh \
     || die "shellcheck"
   pass_if_ran "shell scripts clean"
 

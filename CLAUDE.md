@@ -3,6 +3,10 @@
 ## Dev loop — DOCKER FIRST
 
 - **Everything runs in containers.** `docker compose up -d` (or `./run.sh` for a clean recreate) starts postgres, control plane, node, the **operator node** (the shared loop machine — MAIN-125/140; its first build is slow, then layer-cached; skip it with `--scale operator-node=0`), and web. Source is bind-mounted; **cargo watch runs INSIDE the control-plane and node containers** and rebuilds on save. Vite hot-reloads in the web container. Never run the services host-native.
+- **A fresh worktree boots with `./scripts/dev-up.sh` and nothing hand-copied (MAIN-425).** A nook session gets the repo's TRACKED files only, and the stack needs two gitignored things: `.env` (compose refuses to start without it) and `deploy/dev-certs/agent.{crt,key}` (the control plane boots, then dies reading the key). `scripts/dev-bootstrap.sh` creates both, idempotently; `dev-up.sh` runs it and then `docker compose up -d`. `run.sh` calls the same bootstrap, so a fresh worktree and a reset primary checkout cannot drift.
+  - **`dev-up.sh` only BOOTS; `run.sh` DESTROYS and reseeds.** Use `run.sh` to reset your own checkout, `dev-up.sh` for a second stack you want alongside it — `run.sh`'s `down -v` would take the shared volumes with it.
+  - It derives `COMPOSE_PROJECT_NAME` from the directory, which is what stops two checkouts fighting over container names and volumes. Ports come from the environment (`.nook.toml`'s eleven), so a session's leases apply automatically and a plain clone gets the defaults.
+  - **Both cert halves are generated per checkout and gitignored.** `agent.crt` used to be tracked while `agent.key` was not, which handed every fresh worktree a certificate it had no key for. Nothing pins the cert — the node computes its fingerprint at runtime — so a per-checkout pair is equivalent.
 - Edit → save → the container rebuilds automatically. Poll `http://localhost:8080/healthz` to know the control plane is back.
 - `./scripts/dev-server.sh logs` tails the Rust services; `restart` force-restarts the control plane.
 - **Dev email goes to Mailpit.** The dev control plane is wired `MAIL_PROVIDER=smtp` → `mailpit:1025`, so verification and invite emails land in a live inbox — read them at `http://localhost:8025`. Prod is unaffected (shipped default is `MAIL_PROVIDER` unset → `capture`, which delivers nothing).
@@ -76,6 +80,16 @@ strip existing comments: leave them unless you are changing that code.
 - Write new migrations idempotently (`CREATE TABLE IF NOT EXISTS`) so a database that already got the change by other means converges instead of failing. Idempotency is also what makes re-apply-after-merge safe: once a branch's migration polluted the shared dev DB (below), the *merged* copy re-running against that same database must converge, not fail.
 - **`sqlx::migrate!` embeds migrations at compile time.** Adding a `.sql` file does not by itself trigger a rebuild — touch `crates/nook-control/src/lib.rs` (where `MIGRATOR` lives) or the container will keep running the old set and silently skip your migration.
 - **Ledger-ahead-of-tree is a dev hazard, tolerated in dev, fatal in prod (MAIN-224).** A branch carrying migration N runs against the shared dev DB — most often an inline `#[cfg(test)]` module in nook-control or nook-chat that connects straight to `DATABASE_URL` and runs `MIGRATOR.run`, so *any* `./test.sh` from a branch/worktree with a new migration records N — or a stack boot from that checkout. Afterwards every checkout *without* that `.sql` file used to fail boot with *"migration N was previously applied but is missing in the resolved migrations,"* and switching the bind-mounted tree to any branch behind the ledger bricked the control plane. Now the boot path (`nook_db::migrate::run_with_dev_tolerance`) runs both services' migrators with sqlx's `ignore_missing` **when `APP_ENV != production`**: it emits a loud WARN naming each unknown version and this failure class, then proceeds. Production keeps the strict fatal error, so real schema drift is never masked. This tolerates a *missing* version only — a *modified* migration (checksum mismatch) stays fatal everywhere.
+- **A MODIFIED migration in a reused dev volume is a different failure, and the
+  answer is to recreate the volume (MAIN-425).** A worktree directory keeps its
+  pgdata across branch switches, so version N can have been applied from an
+  abandoned branch whose `N_*.sql` differed; boot then dies with *"migration N
+  was previously applied but has been modified"* — fatal in dev too, because the
+  tolerance covers a MISSING version and never a changed one. `dev-db-heal.sh`
+  now DETECTS this and refuses to touch it: deleting the row would re-apply N
+  onto a schema that already has it, and the checksum is the only proof the
+  schema matches the repo. `docker compose down -v && ./run.sh`, or for a second
+  stack `COMPOSE_PROJECT_NAME=<its project> docker compose down -v`.
 - **Heal the ledger with `scripts/dev-db-heal.sh`.** It lists ledger rows with no matching local migration file; `--fix` deletes exactly those (asks first; `--yes` skips the prompt; `--chat` targets `chat._sqlx_migrations`). It refuses when `APP_ENV=production` and refuses any `DATABASE_URL` whose host is not local or a compose service name — deliberately strict, better to refuse a legitimate dev URL than to touch prod.
 - **The SQLite track's `0001` is HAND-OWNED and frozen (MAIN-236).**
   `crates/nook-control/migrations_sqlite/0001_init.sql` and nook-chat's twin were
