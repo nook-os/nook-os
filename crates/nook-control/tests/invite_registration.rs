@@ -14,27 +14,29 @@ use nook_control::error::ApiResult;
 use nook_control::routes::invites;
 use nook_control::services::{identity, local_auth};
 use nook_control::state::AppState;
+use nook_db::{params, Db};
 use nook_testkit::TestBed;
 use nook_types::*;
-use sqlx::PgPool;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use uuid::Uuid;
 
 /// A pending invite for `email` with `role`, returning the plaintext token.
-async fn add_invite(db: &PgPool, tenant: TenantId, email: &str, role: &str) -> String {
+async fn add_invite(bed: &TestBed, tenant: TenantId, email: &str, role: &str) -> String {
     let token = format!("inv-{}", Uuid::now_v7().simple());
-    sqlx::query(
-        "INSERT INTO invites (id, tenant_id, email, role, token_hash, status, expires_at)
+    bed.db()
+        .exec(
+            "INSERT INTO invites (id, tenant_id, email, role, token_hash, status, expires_at)
          VALUES ($1, $2, $3, $4, $5, 'pending', now() + interval '14 days')",
-    )
-    .bind(Uuid::now_v7())
-    .bind(tenant)
-    .bind(email)
-    .bind(role)
-    .bind(nook_auth::hash_token(&token))
-    .execute(db)
-    .await
-    .unwrap();
+            params![
+                Uuid::now_v7(),
+                tenant,
+                email,
+                role,
+                nook_auth::hash_token(&token)
+            ],
+        )
+        .await
+        .unwrap();
     token
 }
 
@@ -52,29 +54,31 @@ async fn register(state: &AppState, req: RegisterInviteRequest, ip: u8) -> ApiRe
     .map(|_| ())
 }
 
-async fn member_count(db: &PgPool, tenant: TenantId, user: Uuid) -> i64 {
-    sqlx::query_scalar(
-        "SELECT count(*) FROM tenant_members
+async fn member_count(bed: &TestBed, tenant: TenantId, user: Uuid) -> i64 {
+    bed.db()
+        .query_scalar(
+            "SELECT count(*) FROM tenant_members
          WHERE tenant_id = $1 AND principal_type = 'user' AND principal_id = $2",
-    )
-    .bind(tenant)
-    .bind(user)
-    .fetch_one(db)
-    .await
-    .unwrap()
+            params![tenant, user],
+        )
+        .await
+        .unwrap()
 }
 
-async fn user_by_email(db: &PgPool, tenant: TenantId, email: &str) -> Option<(Uuid, String, bool)> {
-    sqlx::query_as(
-        "SELECT id, username, password_hash IS NOT NULL
+async fn user_by_email(
+    bed: &TestBed,
+    tenant: TenantId,
+    email: &str,
+) -> Option<(Uuid, String, bool)> {
+    bed.db()
+        .query_opt::<(Uuid, Option<String>, bool)>(
+            "SELECT id, username, password_hash IS NOT NULL
          FROM users WHERE tenant_id = $1 AND lower(email) = lower($2)",
-    )
-    .bind(tenant)
-    .bind(email)
-    .fetch_optional(db)
-    .await
-    .unwrap()
-    .map(|(id, u, has_pw): (Uuid, Option<String>, bool)| (id, u.unwrap_or_default(), has_pw))
+            params![tenant, email],
+        )
+        .await
+        .unwrap()
+        .map(|(id, u, has_pw)| (id, u.unwrap_or_default(), has_pw))
 }
 
 #[tokio::test]
@@ -86,7 +90,7 @@ async fn register_makes_an_unverified_memberless_user_and_leaves_the_invite_pend
     let state = bed.app_state().await;
     let tenant = bed.tenant("t").await;
     let email = format!("pm-{}@example.test", Uuid::now_v7().simple());
-    let token = add_invite(&bed.pool, tenant, &email, "admin").await;
+    let token = add_invite(&bed, tenant, &email, "admin").await;
 
     register(
         &state,
@@ -102,17 +106,13 @@ async fn register_makes_an_unverified_memberless_user_and_leaves_the_invite_pend
     .await
     .expect("registration succeeds");
 
-    let (user, username, has_pw) = user_by_email(&bed.pool, tenant, &email)
+    let (user, username, has_pw) = user_by_email(&bed, tenant, &email)
         .await
         .expect("the account was created with the invite email");
     assert!(has_pw, "a local account has a password");
     assert!(username.starts_with("pat"), "the chosen username stuck");
     // No membership yet (AC-5 / NG-3): acceptance is separate.
-    assert_eq!(
-        member_count(&bed.pool, tenant, user).await,
-        0,
-        "no membership"
-    );
+    assert_eq!(member_count(&bed, tenant, user).await, 0, "no membership");
     // Unverified — no verified identity row.
     assert!(
         !identity::email_is_verified(
@@ -124,9 +124,12 @@ async fn register_makes_an_unverified_memberless_user_and_leaves_the_invite_pend
         "the account starts unverified"
     );
     // The invite is untouched (AC-5).
-    let status: String = sqlx::query_scalar("SELECT status FROM invites WHERE token_hash = $1")
-        .bind(nook_auth::hash_token(&token))
-        .fetch_one(&bed.pool)
+    let status: String = bed
+        .db()
+        .query_scalar(
+            "SELECT status FROM invites WHERE token_hash = $1",
+            params![nook_auth::hash_token(&token)],
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -157,7 +160,7 @@ async fn login_by_username_or_email_works_for_a_memberless_user() {
     .await
     .expect("register_invited");
     assert_eq!(
-        member_count(&bed.pool, tenant, user.id.0).await,
+        member_count(&bed, tenant, user.id.0).await,
         0,
         "no membership"
     );
@@ -233,16 +236,14 @@ async fn identity_context_resolves_the_session_but_tenant_scoped_rejects_it() {
 
     // A live session for the memberless user.
     let sid = Uuid::now_v7();
-    sqlx::query(
-        "INSERT INTO sessions_auth (id, user_id, tenant_id, expires_at)
+    bed.db()
+        .exec(
+            "INSERT INTO sessions_auth (id, user_id, tenant_id, expires_at)
          VALUES ($1, $2, $3, now() + interval '1 hour')",
-    )
-    .bind(sid)
-    .bind(user.id.0)
-    .bind(tenant)
-    .execute(&bed.pool)
-    .await
-    .unwrap();
+            params![sid, user.id.0, tenant],
+        )
+        .await
+        .unwrap();
 
     // Identity-only resolution succeeds and reports non-membership...
     let (resolved, is_member) = nook_auth::resolve_session_identity(&bed.db(), sid)
@@ -269,7 +270,7 @@ async fn acceptance_needs_a_verified_email_then_creates_membership_with_the_invi
     };
     let tenant = bed.tenant("t").await;
     let email = format!("acc-{}@example.test", Uuid::now_v7().simple());
-    let token = add_invite(&bed.pool, tenant, &email, "admin").await;
+    let token = add_invite(&bed, tenant, &email, "admin").await;
     let user = local_auth::register_invited(
         &nook_control::repo::identity::DbIdentityRepository::new(bed.db()),
         tenant,
@@ -294,7 +295,7 @@ async fn acceptance_needs_a_verified_email_then_creates_membership_with_the_invi
     .unwrap();
     assert!(!declined.accepted, "unverified acceptance is declined");
     assert_eq!(
-        member_count(&bed.pool, tenant, user.id.0).await,
+        member_count(&bed, tenant, user.id.0).await,
         0,
         "still no membership"
     );
@@ -318,15 +319,15 @@ async fn acceptance_needs_a_verified_email_then_creates_membership_with_the_invi
     .unwrap();
     assert!(accepted.accepted, "a verified account accepts");
     assert_eq!(accepted.tenant_id, tenant);
-    let role: Option<String> = sqlx::query_scalar(
-        "SELECT role FROM tenant_members
+    let role: Option<String> = bed
+        .db()
+        .query_scalar_opt(
+            "SELECT role FROM tenant_members
          WHERE tenant_id = $1 AND principal_type = 'user' AND principal_id = $2",
-    )
-    .bind(tenant)
-    .bind(user.id.0)
-    .fetch_optional(&bed.pool)
-    .await
-    .unwrap();
+            params![tenant, user.id.0],
+        )
+        .await
+        .unwrap();
     assert_eq!(
         role.as_deref(),
         Some("admin"),
@@ -343,7 +344,7 @@ async fn a_mismatched_or_invalid_invite_creates_no_membership() {
     };
     let tenant = bed.tenant("t").await;
     // The invite was addressed to someone else.
-    let token = add_invite(&bed.pool, tenant, "someone-else@example.test", "member").await;
+    let token = add_invite(&bed, tenant, "someone-else@example.test", "member").await;
     let email = format!("me-{}@example.test", Uuid::now_v7().simple());
     let user = local_auth::register_invited(
         &nook_control::repo::identity::DbIdentityRepository::new(bed.db()),
@@ -375,7 +376,7 @@ async fn a_mismatched_or_invalid_invite_creates_no_membership() {
     .await
     .unwrap();
     assert!(!declined.accepted, "an email mismatch is declined");
-    assert_eq!(member_count(&bed.pool, tenant, user.id.0).await, 0);
+    assert_eq!(member_count(&bed, tenant, user.id.0).await, 0);
 
     // An unknown token is declined too.
     let bad = invites::accept_core(
@@ -388,7 +389,7 @@ async fn a_mismatched_or_invalid_invite_creates_no_membership() {
     .await
     .unwrap();
     assert!(!bad.accepted);
-    assert_eq!(member_count(&bed.pool, tenant, user.id.0).await, 0);
+    assert_eq!(member_count(&bed, tenant, user.id.0).await, 0);
 
     bed.teardown().await;
 }
@@ -401,7 +402,7 @@ async fn accept_moves_the_memberless_session_onto_the_accepted_tenant() {
     let state = bed.app_state().await;
     let tenant = bed.tenant("t").await;
     let email = format!("sw-{}@example.test", Uuid::now_v7().simple());
-    let token = add_invite(&bed.pool, tenant, &email, "member").await;
+    let token = add_invite(&bed, tenant, &email, "member").await;
     let user = local_auth::register_invited(
         &nook_control::repo::identity::DbIdentityRepository::new(bed.db()),
         tenant,
@@ -422,16 +423,14 @@ async fn accept_moves_the_memberless_session_onto_the_accepted_tenant() {
     .unwrap();
 
     let sid = Uuid::now_v7();
-    sqlx::query(
-        "INSERT INTO sessions_auth (id, user_id, tenant_id, expires_at)
+    bed.db()
+        .exec(
+            "INSERT INTO sessions_auth (id, user_id, tenant_id, expires_at)
          VALUES ($1, $2, $3, now() + interval '1 hour')",
-    )
-    .bind(sid)
-    .bind(user.id.0)
-    .bind(tenant)
-    .execute(&bed.pool)
-    .await
-    .unwrap();
+            params![sid, user.id.0, tenant],
+        )
+        .await
+        .unwrap();
 
     // Accept through the handler as an identity-only, non-member caller.
     let id = IdentityCtx {
@@ -453,9 +452,12 @@ async fn accept_moves_the_memberless_session_onto_the_accepted_tenant() {
 
     // The session's active tenant is now the accepted one (AC-2 "becomes active")
     // — here the same single tenant, and the memberless→member transition holds.
-    let active: Uuid = sqlx::query_scalar("SELECT tenant_id FROM sessions_auth WHERE id = $1")
-        .bind(sid)
-        .fetch_one(&bed.pool)
+    let active: Uuid = bed
+        .db()
+        .query_scalar(
+            "SELECT tenant_id FROM sessions_auth WHERE id = $1",
+            params![sid],
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -463,7 +465,7 @@ async fn accept_moves_the_memberless_session_onto_the_accepted_tenant() {
         "the accepted tenant is set active on the session"
     );
     assert_eq!(
-        member_count(&bed.pool, tenant, user.id.0).await,
+        member_count(&bed, tenant, user.id.0).await,
         1,
         "now a member"
     );
@@ -485,7 +487,7 @@ async fn duplicate_email_registration_is_indistinguishable_and_harmless() {
     let state = bed.app_state().await;
     let tenant = bed.tenant("t").await;
     let email = format!("dup-{}@example.test", Uuid::now_v7().simple());
-    let token = add_invite(&bed.pool, tenant, &email, "member").await;
+    let token = add_invite(&bed, tenant, &email, "member").await;
 
     let first = RegisterInviteRequest {
         token: token.clone(),
@@ -496,7 +498,7 @@ async fn duplicate_email_registration_is_indistinguishable_and_harmless() {
     register(&state, first, 21)
         .await
         .expect("first registration");
-    let (existing_id, existing_username, _) = user_by_email(&bed.pool, tenant, &email)
+    let (existing_id, existing_username, _) = user_by_email(&bed, tenant, &email)
         .await
         .expect("account exists");
 
@@ -513,16 +515,16 @@ async fn duplicate_email_registration_is_indistinguishable_and_harmless() {
         .await
         .expect("duplicate registration returns the generic success shape, not an error");
 
-    let count: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM users WHERE tenant_id = $1 AND lower(email) = lower($2)",
-    )
-    .bind(tenant)
-    .bind(&email)
-    .fetch_one(&bed.pool)
-    .await
-    .unwrap();
+    let count: i64 = bed
+        .db()
+        .query_scalar(
+            "SELECT count(*) FROM users WHERE tenant_id = $1 AND lower(email) = lower($2)",
+            params![tenant, email.clone()],
+        )
+        .await
+        .unwrap();
     assert_eq!(count, 1, "no second account for the same email");
-    let (still_id, still_username, _) = user_by_email(&bed.pool, tenant, &email).await.unwrap();
+    let (still_id, still_username, _) = user_by_email(&bed, tenant, &email).await.unwrap();
     assert_eq!(still_id, existing_id, "the existing account is unchanged");
     assert_eq!(
         still_username, existing_username,
@@ -539,13 +541,15 @@ async fn registration_is_refused_on_an_oidc_tenant() {
     };
     let state = bed.app_state().await;
     let tenant = bed.tenant("t").await;
-    sqlx::query("UPDATE tenants SET auth_mode = 'oidc' WHERE id = $1")
-        .bind(tenant)
-        .execute(&bed.pool)
+    bed.db()
+        .exec(
+            "UPDATE tenants SET auth_mode = 'oidc' WHERE id = $1",
+            params![tenant],
+        )
         .await
         .unwrap();
     let email = format!("oidc-{}@example.test", Uuid::now_v7().simple());
-    let token = add_invite(&bed.pool, tenant, &email, "member").await;
+    let token = add_invite(&bed, tenant, &email, "member").await;
 
     let refused = register(
         &state,
@@ -563,7 +567,7 @@ async fn registration_is_refused_on_an_oidc_tenant() {
         "local registration is refused on an OIDC tenant"
     );
     assert!(
-        user_by_email(&bed.pool, tenant, &email).await.is_none(),
+        user_by_email(&bed, tenant, &email).await.is_none(),
         "nothing was created"
     );
 

@@ -12,7 +12,6 @@ use nook_control::state::AppState;
 use nook_db::{params, Db};
 use nook_testkit::TestBed;
 use nook_types::*;
-use sqlx::PgPool;
 use uuid::Uuid;
 
 fn claims(subject: &str, name: &str) -> IdentityClaims {
@@ -68,34 +67,33 @@ async fn make_task(
         .expect("create task")
 }
 
-async fn seed_label(pool: &PgPool, tenant: TenantId, name: &str) {
+async fn seed_label(bed: &TestBed, tenant: TenantId, name: &str) {
     // Ensure the label exists — idempotent, because a freshly-seeded tenant
     // already carries the agent-loop labels (`agent-ready`, `blocked`) from
     // `seed::run`, and this helper only needs the row present, not net-new.
-    sqlx::query(
-        "INSERT INTO labels (id, tenant_id, name) VALUES ($1, $2, $3)
+    bed.db()
+        .exec(
+            "INSERT INTO labels (id, tenant_id, name) VALUES ($1, $2, $3)
          ON CONFLICT (tenant_id, name) DO NOTHING",
-    )
-    .bind(Uuid::now_v7())
-    .bind(tenant)
-    .bind(name)
-    .execute(pool)
-    .await
-    .expect("seed label");
+            params![Uuid::now_v7(), tenant, name],
+        )
+        .await
+        .expect("seed label");
 }
 
 /// Notifications for a tenant of a given kind — the fan-out inserts the row
 /// synchronously in `raise` before spawning delivery, so it is queryable the
 /// moment the route returns.
-async fn notes(pool: &PgPool, tenant: TenantId, kind: &str) -> Vec<Notification> {
-    pool.query_all(
-        "SELECT id, tenant_id, user_id, level, title, body, kind, link, payload,
+async fn notes(bed: &TestBed, tenant: TenantId, kind: &str) -> Vec<Notification> {
+    bed.db()
+        .query_all(
+            "SELECT id, tenant_id, user_id, level, title, body, kind, link, payload,
                 read_at, created_at
          FROM notifications WHERE tenant_id = $1 AND kind = $2 ORDER BY created_at",
-        params![tenant, kind],
-    )
-    .await
-    .expect("notes")
+            params![tenant, kind],
+        )
+        .await
+        .expect("notes")
 }
 
 #[tokio::test]
@@ -112,25 +110,27 @@ async fn comments_and_escalation_labels_notify() {
         .expect("owner signs in");
     let a = owner.id;
 
-    let board: BoardId = sqlx::query_scalar(
-        "INSERT INTO boards (id, tenant_id, name, key, provider)
+    let board: BoardId = bed
+        .db()
+        .query_scalar(
+            "INSERT INTO boards (id, tenant_id, name, key, provider)
          VALUES ($1, $2, 'b', $3, 'local') RETURNING id",
-    )
-    .bind(BoardId::new())
-    .bind(tenant.id)
-    .bind(format!("N{}", &Uuid::now_v7().simple().to_string()[..6]).to_uppercase())
-    .fetch_one(&bed.pool)
-    .await
-    .expect("board");
-    sqlx::query(
-        "INSERT INTO board_columns (id, board_id, name, position, type)
+            params![
+                BoardId::new(),
+                tenant.id,
+                format!("N{}", &Uuid::now_v7().simple().to_string()[..6]).to_uppercase()
+            ],
+        )
+        .await
+        .expect("board");
+    bed.db()
+        .exec(
+            "INSERT INTO board_columns (id, board_id, name, position, type)
          VALUES ($1, $2, 'Todo', 0, 'unstarted')",
-    )
-    .bind(Uuid::now_v7())
-    .bind(board)
-    .execute(&bed.pool)
-    .await
-    .expect("column");
+            params![Uuid::now_v7(), board],
+        )
+        .await
+        .expect("column");
 
     let team = make_task(&state, tenant.id, board, a, "shared work", "team").await;
     let secret = make_task(&state, tenant.id, board, a, "hush hush", "private").await;
@@ -148,7 +148,7 @@ async fn comments_and_escalation_labels_notify() {
     .await
     .expect("comment on team card");
 
-    let comment_notes = notes(&bed.pool, tenant.id, "task.comment.created").await;
+    let comment_notes = notes(&bed, tenant.id, "task.comment.created").await;
     assert_eq!(comment_notes.len(), 1, "one comment notification");
     let n = &comment_notes[0];
     assert!(
@@ -178,16 +178,14 @@ async fn comments_and_escalation_labels_notify() {
     .await
     .expect("comment on private card");
     assert_eq!(
-        notes(&bed.pool, tenant.id, "task.comment.created")
-            .await
-            .len(),
+        notes(&bed, tenant.id, "task.comment.created").await.len(),
         1,
         "a private card's comment must not add a notification"
     );
 
     // ── AC-2: an escalation label notifies; an ordinary one is silent ───────
-    seed_label(&bed.pool, tenant.id, "blocked").await;
-    seed_label(&bed.pool, tenant.id, "frontend").await;
+    seed_label(&bed, tenant.id, "blocked").await;
+    seed_label(&bed, tenant.id, "frontend").await;
 
     let _ = nook_control::routes::labels::add(
         State(state.clone()),
@@ -196,7 +194,7 @@ async fn comments_and_escalation_labels_notify() {
     )
     .await
     .expect("add blocked");
-    let label_notes = notes(&bed.pool, tenant.id, "task.label.added").await;
+    let label_notes = notes(&bed, tenant.id, "task.label.added").await;
     assert_eq!(label_notes.len(), 1, "blocked raises one notification");
     assert!(
         label_notes[0].body.contains("blocked"),
@@ -212,7 +210,7 @@ async fn comments_and_escalation_labels_notify() {
     .await
     .expect("add frontend");
     assert_eq!(
-        notes(&bed.pool, tenant.id, "task.label.added").await.len(),
+        notes(&bed, tenant.id, "task.label.added").await.len(),
         1,
         "an ordinary label must stay silent"
     );

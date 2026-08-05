@@ -14,28 +14,31 @@ use nook_control::routes::gitops;
 use nook_control::services::schedule::{clone_hosts, pick, Placement};
 use nook_control::state::AppState;
 use nook_control::ws::registry::NodeHandle;
+use nook_db::{params, Db};
 use nook_proto::ControlToNode;
 use nook_testkit::TestBed;
 use nook_types::*;
-use sqlx::PgPool;
 use uuid::Uuid;
 
 /// An owned node, registered ONLINE in the registry so `pick` treats it as a live
 /// candidate (the seam `dispatch_ownership` uses).
 async fn online_node(state: &AppState, tenant: TenantId, owner: Uuid) -> NodeId {
     let id = NodeId::new();
-    sqlx::query(
-        "INSERT INTO nodes (id, tenant_id, name, node_token_hash, status, owner_person_id, resources)
+    state
+        .db
+        .exec(
+            "INSERT INTO nodes (id, tenant_id, name, node_token_hash, status, owner_person_id, resources)
          VALUES ($1, $2, $3, $4, 'online', $5, '{\"mem_total\": 32}'::jsonb)",
-    )
-    .bind(id)
-    .bind(tenant)
-    .bind(format!("n-{}", id.0.simple()))
-    .bind(format!("h-{}", id.0.simple()))
-    .bind(owner)
-    .execute(state.db.pg())
-    .await
-    .expect("node");
+            params![
+                id,
+                tenant,
+                format!("n-{}", id.0.simple()),
+                format!("h-{}", id.0.simple()),
+                owner
+            ],
+        )
+        .await
+        .expect("node");
     let (tx, _rx) = tokio::sync::mpsc::channel::<ControlToNode>(4);
     state.registry.register_node(
         id,
@@ -49,45 +52,43 @@ async fn online_node(state: &AppState, tenant: TenantId, owner: Uuid) -> NodeId 
 
 /// A board with an `unstarted` (Todo) column and a task on it, in `ws`, visible
 /// to the tenant — the fixture `dispatch` needs.
-async fn board_task(pool: &PgPool, tenant: TenantId, ws: WorkspaceId, creator: UserId) -> TaskId {
+async fn board_task(bed: &TestBed, tenant: TenantId, ws: WorkspaceId, creator: UserId) -> TaskId {
     let board = BoardId::new();
-    sqlx::query(
-        "INSERT INTO boards (id, tenant_id, name, key, provider) VALUES ($1,$2,'b',$3,'local')",
-    )
-    .bind(board)
-    .bind(tenant)
-    // The random tail, not the shared v7 timestamp prefix, so two boards created
-    // milliseconds apart don't collide on the unique (tenant, key).
-    .bind(format!("B{}", &board.0.simple().to_string()[26..]).to_uppercase())
-    .execute(pool)
-    .await
-    .expect("board");
+    bed.db()
+        .exec(
+            "INSERT INTO boards (id, tenant_id, name, key, provider) VALUES ($1,$2,'b',$3,'local')",
+            // The random tail, not the shared v7 timestamp prefix, so two boards
+            // created milliseconds apart don't collide on the unique (tenant, key).
+            params![
+                board,
+                tenant,
+                format!("B{}", &board.0.simple().to_string()[26..]).to_uppercase()
+            ],
+        )
+        .await
+        .expect("board");
     let col = ColumnId::new();
-    sqlx::query("INSERT INTO board_columns (id, board_id, name, position, type) VALUES ($1,$2,'Todo',0,'unstarted')")
-        .bind(col)
-        .bind(board)
-        .execute(pool)
+    bed.db()
+        .exec(
+            "INSERT INTO board_columns (id, board_id, name, position, type) VALUES ($1,$2,'Todo',0,'unstarted')",
+            params![col, board],
+        )
         .await
         .expect("column");
     let task = TaskId::new();
-    sqlx::query(
-        "INSERT INTO tasks (id, tenant_id, board_id, column_id, title, position, workspace_id, visibility, created_by)
+    bed.db()
+        .exec(
+            "INSERT INTO tasks (id, tenant_id, board_id, column_id, title, position, workspace_id, visibility, created_by)
          VALUES ($1, $2, $3, $4, 't', 0, $5, 'team', $6)",
-    )
-    .bind(task)
-    .bind(tenant)
-    .bind(board)
-    .bind(col)
-    .bind(ws)
-    .bind(creator)
-    .execute(pool)
-    .await
-    .expect("task");
+            params![task, tenant, board, col, ws, creator],
+        )
+        .await
+        .expect("task");
     task
 }
 
 async fn checkout(
-    db: &PgPool,
+    bed: &TestBed,
     tenant: TenantId,
     node: NodeId,
     ws: WorkspaceId,
@@ -96,18 +97,12 @@ async fn checkout(
     missing: bool,
 ) -> NodeWorkspaceId {
     let id = NodeWorkspaceId::new();
-    sqlx::query(
-        "INSERT INTO node_workspaces (id, tenant_id, node_id, workspace_id, path, kind, missing_at)
+    bed.db()
+        .exec(
+            "INSERT INTO node_workspaces (id, tenant_id, node_id, workspace_id, path, kind, missing_at)
          VALUES ($1, $2, $3, $4, $5, $6, CASE WHEN $7 THEN now() ELSE NULL END)",
-    )
-    .bind(id)
-    .bind(tenant)
-    .bind(node)
-    .bind(ws)
-    .bind(path)
-    .bind(kind)
-    .bind(missing)
-    .execute(db)
+            params![id, tenant, node, ws, path, kind, missing],
+        )
     .await
     .expect("checkout");
     id
@@ -137,11 +132,11 @@ async fn clone_hosts_counts_only_present_clones() {
     let ws = bed.workspace(tenant).await;
 
     // A present clone on `node` — a host, pinned to its id.
-    let clone = checkout(&bed.pool, tenant, node, ws, "/srv/clone", "clone", false).await;
+    let clone = checkout(&bed, tenant, node, ws, "/srv/clone", "clone", false).await;
     // A worktree on the same node — NOT a host on its own.
-    checkout(&bed.pool, tenant, node, ws, "/srv/wt", "worktree", false).await;
+    checkout(&bed, tenant, node, ws, "/srv/wt", "worktree", false).await;
     // A tombstoned clone on `other` — NOT a host.
-    checkout(&bed.pool, tenant, other, ws, "/srv/gone", "clone", true).await;
+    checkout(&bed, tenant, other, ws, "/srv/gone", "clone", true).await;
 
     let repo = nook_control::repo::workspaces::DbWorkspaceRepository::new(bed.db());
     let hosts = clone_hosts(&repo, tenant, ws).await.unwrap();
@@ -177,16 +172,7 @@ async fn pick_places_on_a_clone_host_and_needs_clone_otherwise() {
 
     // A workspace with a CLONE checkout on the node → Placed, pinned to its id.
     let ws_clone = bed.workspace(tenant).await;
-    let clone = checkout(
-        &bed.pool,
-        tenant,
-        node,
-        ws_clone,
-        "/srv/clone",
-        "clone",
-        false,
-    )
-    .await;
+    let clone = checkout(&bed, tenant, node, ws_clone, "/srv/clone", "clone", false).await;
     match pick(&state, tenant, Some(user), Some(ws_clone))
         .await
         .unwrap()
@@ -207,7 +193,7 @@ async fn pick_places_on_a_clone_host_and_needs_clone_otherwise() {
 
     // A workspace present only as a WORKTREE on the node → NeedsClone (AC-2).
     let ws_wt = bed.workspace(tenant).await;
-    checkout(&bed.pool, tenant, node, ws_wt, "/srv/wt", "worktree", false).await;
+    checkout(&bed, tenant, node, ws_wt, "/srv/wt", "worktree", false).await;
     match pick(&state, tenant, Some(user), Some(ws_wt)).await.unwrap() {
         Placement::NeedsClone { node_id } => assert_eq!(node_id, node),
         other => panic!("expected NeedsClone, got {other:?}"),
@@ -228,17 +214,8 @@ async fn dispatch_flags_needs_clone_only_without_a_clone_host() {
 
     // Hosted as a clone → placed, no needs-clone flag.
     let ws_clone = bed.workspace(tenant).await;
-    checkout(
-        &bed.pool,
-        tenant,
-        node,
-        ws_clone,
-        "/srv/clone",
-        "clone",
-        false,
-    )
-    .await;
-    let task_a = board_task(&bed.pool, tenant, ws_clone, user).await;
+    checkout(&bed, tenant, node, ws_clone, "/srv/clone", "clone", false).await;
+    let task_a = board_task(&bed, tenant, ws_clone, user).await;
     let a = nook_control::services::taskwork::dispatch(&state, tenant, user, Some(user), task_a)
         .await
         .unwrap();
@@ -247,8 +224,8 @@ async fn dispatch_flags_needs_clone_only_without_a_clone_host() {
 
     // Hosted only as a worktree → node still assigned, but needs_clone surfaces.
     let ws_wt = bed.workspace(tenant).await;
-    checkout(&bed.pool, tenant, node, ws_wt, "/srv/wt", "worktree", false).await;
-    let task_b = board_task(&bed.pool, tenant, ws_wt, user).await;
+    checkout(&bed, tenant, node, ws_wt, "/srv/wt", "worktree", false).await;
+    let task_b = board_task(&bed, tenant, ws_wt, user).await;
     let b = nook_control::services::taskwork::dispatch(&state, tenant, user, Some(user), task_b)
         .await
         .unwrap();
@@ -412,7 +389,7 @@ async fn dispatch_assigns_a_node_without_moving_the_card() {
     let (user, person) = bed.user(tenant, "owner").await;
     let _node = online_node(&state, tenant, person).await;
     let ws = bed.workspace(tenant).await;
-    let task = board_task(&bed.pool, tenant, ws, user).await;
+    let task = board_task(&bed, tenant, ws, user).await;
     let before = state
         .tasks
         .get_row(tenant, task)

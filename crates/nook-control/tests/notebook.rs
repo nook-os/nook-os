@@ -10,9 +10,9 @@ use nook_control::error::ApiError;
 use nook_control::routes::notebook;
 use nook_control::routes::notebook::NoteListQuery;
 use nook_control::services::identity::{login_identity, IdentityClaims};
+use nook_db::{params, Db};
 use nook_testkit::TestBed;
 use nook_types::*;
-use sqlx::PgPool;
 use uuid::Uuid;
 
 fn claims(subject: &str, name: &str) -> IdentityClaims {
@@ -37,10 +37,9 @@ fn auth(user: UserId, tenant: TenantId) -> AuthCtx {
     }
 }
 
-async fn person_of(db: &PgPool, user: UserId) -> Uuid {
-    sqlx::query_scalar::<_, Uuid>("SELECT person_id FROM users WHERE id = $1")
-        .bind(user)
-        .fetch_one(db)
+async fn person_of(bed: &TestBed, user: UserId) -> Uuid {
+    bed.db()
+        .query_scalar("SELECT person_id FROM users WHERE id = $1", params![user])
         .await
         .expect("person_id")
 }
@@ -72,7 +71,7 @@ async fn notebook_is_person_scoped_encrypted_and_reparents() {
     let (b_user, b_tenant) = login_identity(&state, claims(&b_sub, "Bob"))
         .await
         .expect("bob signs in");
-    let person_a = person_of(&bed.pool, a_user.id).await;
+    let person_a = person_of(&bed, a_user.id).await;
     let a = auth(a_user.id, a_tenant.id);
     let b = auth(b_user.id, b_tenant.id);
 
@@ -105,9 +104,12 @@ async fn notebook_is_person_scoped_encrypted_and_reparents() {
     assert_eq!(note.folder_id, Some(folder.id));
 
     // ── At rest it is ciphertext (AC-2) ─────────────────────────────────────
-    let stored: Vec<u8> = sqlx::query_scalar("SELECT content_enc FROM user_notes WHERE id = $1")
-        .bind(note.id)
-        .fetch_one(&bed.pool)
+    let stored: Vec<u8> = bed
+        .db()
+        .query_scalar(
+            "SELECT content_enc FROM user_notes WHERE id = $1",
+            params![note.id],
+        )
         .await
         .expect("content_enc");
     assert_ne!(
@@ -136,17 +138,14 @@ async fn notebook_is_person_scoped_encrypted_and_reparents() {
     let t2 = bed.tenant("t2").await;
     // A second user row for person A (custom person_id → kept as a raw insert).
     let a2_user = UserId::new();
-    sqlx::query(
-        "INSERT INTO users (id, tenant_id, person_id, display_name, email)
+    bed.db()
+        .exec(
+            "INSERT INTO users (id, tenant_id, person_id, display_name, email)
          VALUES ($1, $2, $3, 'Alice', $4)",
-    )
-    .bind(a2_user)
-    .bind(t2)
-    .bind(person_a)
-    .bind(format!("{a_sub}+t2@example.test"))
-    .execute(&bed.pool)
-    .await
-    .expect("alice in tenant 2");
+            params![a2_user, t2, person_a, format!("{a_sub}+t2@example.test")],
+        )
+        .await
+        .expect("alice in tenant 2");
     let a2 = auth(a2_user, t2);
     let a2_list = notebook::list_notes(State(state.clone()), a2, Query(NoteListQuery { q: None }))
         .await
@@ -385,12 +384,14 @@ async fn notebook_hardening_cycles_blanks_and_length() {
     )
     .await;
     assert!(is_400(&cyc), "moving A under its descendant B is a 400");
-    let a_parent: Option<UserNoteFolderId> =
-        sqlx::query_scalar("SELECT parent_id FROM user_note_folders WHERE id = $1")
-            .bind(a.id)
-            .fetch_one(&bed.pool)
-            .await
-            .unwrap();
+    let a_parent: Option<UserNoteFolderId> = bed
+        .db()
+        .query_scalar(
+            "SELECT parent_id FROM user_note_folders WHERE id = $1",
+            params![a.id],
+        )
+        .await
+        .unwrap();
     assert_eq!(
         a_parent, None,
         "A's parent is unchanged after the rejected move"
@@ -452,9 +453,12 @@ async fn notebook_hardening_cycles_blanks_and_length() {
         ),
         "a blank rename is a 400, not a silent COALESCE no-op"
     );
-    let a_name: String = sqlx::query_scalar("SELECT name FROM user_note_folders WHERE id = $1")
-        .bind(a.id)
-        .fetch_one(&bed.pool)
+    let a_name: String = bed
+        .db()
+        .query_scalar(
+            "SELECT name FROM user_note_folders WHERE id = $1",
+            params![a.id],
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -732,9 +736,12 @@ async fn notebook_person_vault_and_seal_contract() {
 
     // ── At rest: the vault layer peels only to the SEALED ciphertext, which the
     //    server cannot open; only the passphrase does ─────────────────────────
-    let stored: Vec<u8> = sqlx::query_scalar("SELECT content_enc FROM user_notes WHERE id = $1")
-        .bind(note.id)
-        .fetch_one(&bed.pool)
+    let stored: Vec<u8> = bed
+        .db()
+        .query_scalar(
+            "SELECT content_enc FROM user_notes WHERE id = $1",
+            params![note.id],
+        )
         .await
         .unwrap();
     let unwrapped = state.vault.decrypt(&stored).unwrap();
@@ -851,9 +858,12 @@ async fn notebook_person_vault_and_seal_contract() {
     .0;
     assert!(!un.sealed, "back to unsealed");
     assert_eq!(un.content_md.as_deref(), Some(recovered.as_str()));
-    let after: Vec<u8> = sqlx::query_scalar("SELECT content_enc FROM user_notes WHERE id = $1")
-        .bind(note.id)
-        .fetch_one(&bed.pool)
+    let after: Vec<u8> = bed
+        .db()
+        .query_scalar(
+            "SELECT content_enc FROM user_notes WHERE id = $1",
+            params![note.id],
+        )
         .await
         .unwrap();
     assert_eq!(

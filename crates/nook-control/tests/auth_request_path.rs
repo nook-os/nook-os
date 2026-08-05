@@ -12,74 +12,74 @@ use axum::Json;
 use nook_control::auth::{AuthCtx, Principal};
 use nook_control::error::ApiError;
 use nook_control::state::AppState;
+use nook_db::{params, Db, EnginePool};
 use nook_testkit::TestBed;
 use nook_types::{AuthSessionId, SwitchTenantRequest, TenantId, UserId};
-use sqlx::PgPool;
 use uuid::Uuid;
 
-async fn seed_tenant(pool: &PgPool) -> TenantId {
+async fn seed_tenant(bed: &TestBed) -> TenantId {
     let id = TenantId::new();
-    sqlx::query("INSERT INTO tenants (id, slug, name) VALUES ($1, $2, $2)")
-        .bind(id)
-        .bind(format!("authp-{}", Uuid::now_v7().simple()))
-        .execute(pool)
+    bed.db()
+        .exec(
+            "INSERT INTO tenants (id, slug, name) VALUES ($1, $2, $2)",
+            params![id, format!("authp-{}", Uuid::now_v7().simple())],
+        )
         .await
         .expect("seed tenant");
     id
 }
 
 /// A member user in `tenant`, linked to `person`, with a live grant.
-async fn seed_member(pool: &PgPool, tenant: TenantId, person: Uuid) -> UserId {
+async fn seed_member(bed: &TestBed, tenant: TenantId, person: Uuid) -> UserId {
     let id = UserId::new();
-    sqlx::query(
-        "INSERT INTO users (id, tenant_id, display_name, email, role, person_id)
+    bed.db()
+        .exec(
+            "INSERT INTO users (id, tenant_id, display_name, email, role, person_id)
          VALUES ($1, $2, 'P', $3, 'member', $4)",
-    )
-    .bind(id)
-    .bind(tenant)
-    .bind(format!("{}@example.test", Uuid::now_v7().simple()))
-    .bind(person)
-    .execute(pool)
-    .await
-    .expect("user");
-    grant(pool, tenant, id).await;
+            params![
+                id,
+                tenant,
+                format!("{}@example.test", Uuid::now_v7().simple()),
+                person
+            ],
+        )
+        .await
+        .expect("user");
+    grant(bed, tenant, id).await;
     id
 }
 
-async fn grant(pool: &PgPool, tenant: TenantId, user: UserId) {
-    sqlx::query(
-        "INSERT INTO tenant_members (id, tenant_id, principal_type, principal_id, role)
+async fn grant(bed: &TestBed, tenant: TenantId, user: UserId) {
+    bed.db()
+        .exec(
+            "INSERT INTO tenant_members (id, tenant_id, principal_type, principal_id, role)
          VALUES ($1, $2, 'user', $3, 'member')",
-    )
-    .bind(Uuid::new_v4())
-    .bind(tenant)
-    .bind(user)
-    .execute(pool)
-    .await
-    .expect("grant");
+            params![Uuid::new_v4(), tenant, user],
+        )
+        .await
+        .expect("grant");
 }
 
-async fn revoke(pool: &PgPool, tenant: TenantId, user: UserId) {
-    sqlx::query("DELETE FROM tenant_members WHERE tenant_id = $1 AND principal_id = $2")
-        .bind(tenant)
-        .bind(user)
-        .execute(pool)
+async fn revoke(bed: &TestBed, tenant: TenantId, user: UserId) {
+    bed.db()
+        .exec(
+            "DELETE FROM tenant_members WHERE tenant_id = $1 AND principal_id = $2",
+            params![tenant, user],
+        )
         .await
         .expect("revoke");
 }
 
-async fn seed_session(pool: &PgPool, user: UserId, tenant: TenantId) -> Uuid {
+async fn seed_session(bed: &TestBed, user: UserId, tenant: TenantId) -> Uuid {
     let sid = Uuid::new_v4();
-    sqlx::query(
-        "INSERT INTO sessions_auth (id, user_id, tenant_id, expires_at)
+    bed.db()
+        .exec(
+            "INSERT INTO sessions_auth (id, user_id, tenant_id, expires_at)
          VALUES ($1, $2, $3, now() + interval '1 hour')",
-    )
-    .bind(sid)
-    .bind(user)
-    .bind(tenant)
-    .execute(pool)
-    .await
-    .expect("session");
+            params![sid, user, tenant],
+        )
+        .await
+        .expect("session");
     sid
 }
 
@@ -101,9 +101,9 @@ async fn one_query_keeps_401_no_session_distinct_from_403_revoked_grant() {
         return;
     };
     let state = bed.app_state().await;
-    let t = seed_tenant(&bed.pool).await;
-    let me = seed_member(&bed.pool, t, Uuid::new_v4()).await;
-    let sid = seed_session(&bed.pool, me, t).await;
+    let t = seed_tenant(&bed).await;
+    let me = seed_member(&bed, t, Uuid::new_v4()).await;
+    let sid = seed_session(&bed, me, t).await;
 
     // A live session + grant resolves.
     let ok = extract(&state, sid).await.expect("member resolves");
@@ -113,7 +113,7 @@ async fn one_query_keeps_401_no_session_distinct_from_403_revoked_grant() {
 
     // Grant revoked, session still valid → 403 (NOT 401): the fold must not
     // collapse a live-session-without-grant into "no session".
-    revoke(&bed.pool, t, me).await;
+    revoke(&bed, t, me).await;
     let forbidden = extract(&state, sid).await.expect_err("revoked → error");
     assert!(
         matches!(forbidden, ApiError::Forbidden),
@@ -121,7 +121,7 @@ async fn one_query_keeps_401_no_session_distinct_from_403_revoked_grant() {
     );
 
     // No session row at all → 401.
-    grant(&bed.pool, t, me).await; // re-grant, so only the session is missing
+    grant(&bed, t, me).await; // re-grant, so only the session is missing
     let gone = extract(&state, Uuid::new_v4())
         .await
         .expect_err("unknown session → error");
@@ -131,9 +131,11 @@ async fn one_query_keeps_401_no_session_distinct_from_403_revoked_grant() {
     );
 
     // An expired session → 401 (the `expires_at > now()` guard survived the fold).
-    sqlx::query("UPDATE sessions_auth SET expires_at = now() - interval '1 minute' WHERE id = $1")
-        .bind(sid)
-        .execute(&bed.pool)
+    bed.db()
+        .exec(
+            "UPDATE sessions_auth SET expires_at = now() - interval '1 minute' WHERE id = $1",
+            params![sid],
+        )
         .await
         .unwrap();
     let expired = extract(&state, sid).await.expect_err("expired → error");
@@ -153,8 +155,8 @@ async fn a_user_token_switch_is_refused_browser_only() {
         return;
     };
     let state = bed.app_state().await;
-    let t = seed_tenant(&bed.pool).await;
-    let me = seed_member(&bed.pool, t, Uuid::new_v4()).await;
+    let t = seed_tenant(&bed).await;
+    let me = seed_member(&bed, t, Uuid::new_v4()).await;
 
     // A user token: Principal::User, but NOT a cookie session.
     let token_ctx = AuthCtx {
@@ -187,8 +189,8 @@ async fn a_vanished_cookie_session_switch_is_401() {
         return;
     };
     let state = bed.app_state().await;
-    let t = seed_tenant(&bed.pool).await;
-    let me = seed_member(&bed.pool, t, Uuid::new_v4()).await;
+    let t = seed_tenant(&bed).await;
+    let me = seed_member(&bed, t, Uuid::new_v4()).await;
 
     // A cookie session (marker true), member of `t`, but its sessions_auth row
     // does not exist — so the membership check passes and the UPDATE hits 0 rows.
@@ -222,11 +224,11 @@ async fn a_switch_is_audited_from_both_tenants() {
     };
     let state = bed.app_state().await;
     let person = Uuid::new_v4();
-    let a = seed_tenant(&bed.pool).await; // source
-    let b = seed_tenant(&bed.pool).await; // destination
-    let me_a = seed_member(&bed.pool, a, person).await;
-    let _me_b = seed_member(&bed.pool, b, person).await; // same person, member of b too
-    let sid = seed_session(&bed.pool, me_a, a).await;
+    let a = seed_tenant(&bed).await; // source
+    let b = seed_tenant(&bed).await; // destination
+    let me_a = seed_member(&bed, a, person).await;
+    let _me_b = seed_member(&bed, b, person).await; // same person, member of b too
+    let sid = seed_session(&bed, me_a, a).await;
 
     let ctx = AuthCtx {
         session_id: AuthSessionId(sid),
@@ -247,24 +249,24 @@ async fn a_switch_is_audited_from_both_tenants() {
     // is written per side in this scenario).
     // An owned pool clone the per-tenant closure can capture without borrowing
     // `bed` (teardown needs `&mut bed` after these run).
-    let pool = bed.pool.clone();
+    let db: EnginePool = bed.db();
     let payload = |t: TenantId| {
-        let pool = pool.clone();
+        let db = db.clone();
         async move {
-            let (n,): (i64,) = sqlx::query_as(
-                "SELECT count(*) FROM events WHERE tenant_id = $1 AND kind = 'user.tenant_switched'",
-            )
-            .bind(t)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-            let (p,): (serde_json::Value,) = sqlx::query_as(
-                "SELECT payload FROM events WHERE tenant_id = $1 AND kind = 'user.tenant_switched'",
-            )
-            .bind(t)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+            let (n,): (i64,) = db
+                .query_one(
+                    "SELECT count(*) FROM events WHERE tenant_id = $1 AND kind = 'user.tenant_switched'",
+                    params![t],
+                )
+                .await
+                .unwrap();
+            let (p,): (serde_json::Value,) = db
+                .query_one(
+                    "SELECT payload FROM events WHERE tenant_id = $1 AND kind = 'user.tenant_switched'",
+                    params![t],
+                )
+                .await
+                .unwrap();
             (n, p)
         }
     };
@@ -322,9 +324,9 @@ async fn reselecting_the_current_tenant_records_no_departure() {
     };
     let state = bed.app_state().await;
     let person = Uuid::new_v4();
-    let a = seed_tenant(&bed.pool).await;
-    let me_a = seed_member(&bed.pool, a, person).await;
-    let sid = seed_session(&bed.pool, me_a, a).await;
+    let a = seed_tenant(&bed).await;
+    let me_a = seed_member(&bed, a, person).await;
+    let sid = seed_session(&bed, me_a, a).await;
 
     let ctx = AuthCtx {
         session_id: AuthSessionId(sid),
@@ -342,14 +344,15 @@ async fn reselecting_the_current_tenant_records_no_departure() {
     .await
     .expect("re-selecting the current tenant succeeds");
 
-    let directions: Vec<(String,)> = sqlx::query_as(
-        "SELECT payload->>'direction' FROM events
+    let directions: Vec<(String,)> = bed
+        .db()
+        .query_all(
+            "SELECT payload->>'direction' FROM events
          WHERE tenant_id = $1 AND kind = 'user.tenant_switched'",
-    )
-    .bind(a)
-    .fetch_all(&bed.pool)
-    .await
-    .unwrap();
+            params![a],
+        )
+        .await
+        .unwrap();
 
     bed.teardown().await;
 
@@ -369,9 +372,9 @@ async fn nook_auth_resolves_session_and_bearer() {
     let Some(mut bed) = TestBed::new().await else {
         return;
     };
-    let t = seed_tenant(&bed.pool).await;
-    let me = seed_member(&bed.pool, t, Uuid::new_v4()).await;
-    let sid = seed_session(&bed.pool, me, t).await;
+    let t = seed_tenant(&bed).await;
+    let me = seed_member(&bed, t, Uuid::new_v4()).await;
+    let sid = seed_session(&bed, me, t).await;
 
     // Session cookie → the right user + tenant, marked cookie_session.
     let s = nook_auth::resolve_session(&bed.db(), sid)
@@ -383,17 +386,14 @@ async fn nook_auth_resolves_session_and_bearer() {
 
     // A bearer token → the right user + tenant, NOT a cookie session.
     let token = "nook_user_test_abc123";
-    sqlx::query(
-        "INSERT INTO user_tokens (id, tenant_id, user_id, token_hash, name)
+    bed.db()
+        .exec(
+            "INSERT INTO user_tokens (id, tenant_id, user_id, token_hash, name)
          VALUES ($1, $2, $3, $4, 'test')",
-    )
-    .bind(Uuid::new_v4())
-    .bind(t)
-    .bind(me)
-    .bind(nook_auth::hash_token(token))
-    .execute(&bed.pool)
-    .await
-    .unwrap();
+            params![Uuid::new_v4(), t, me, nook_auth::hash_token(token)],
+        )
+        .await
+        .unwrap();
     let b = nook_auth::resolve_bearer(&bed.db(), token)
         .await
         .expect("valid token resolves");
