@@ -43,3 +43,19 @@ export function tenantSwitcherModel(me: MeResponse): TenantSwitcherModel {
     options: [current, ...rest],
   };
 }
+
+/** Where a tenant switch should land you, given where you were.
+ *
+ *  Switching teams re-scopes the data; it is not a request to go somewhere
+ *  else. Sending everybody to the dashboard meant that working in Sessions and
+ *  flipping between two teams — the whole point of a fast switcher — cost a
+ *  click back to Sessions every single time.
+ *
+ *  So: keep the SECTION, drop the DETAIL. `/sessions/<id>` becomes `/sessions`,
+ *  because that id belongs to the team you just left. Leaving it on would 404
+ *  at best, and at worst resolve against something in the new team.
+ */
+export function tenantSwitchDestination(pathname: string): string {
+  const section = pathname.split("/")[1] ?? "";
+  return section ? `/${section}` : "/";
+}
