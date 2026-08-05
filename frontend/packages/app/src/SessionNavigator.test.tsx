@@ -10,6 +10,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
+import { ContextMenuProvider } from "./contextMenu";
 
 const SESSIONS = [
   {
@@ -57,9 +58,20 @@ const get = vi.hoisted(() =>
 );
 const put = vi.hoisted(() => vi.fn(async () => ({ data: {} })));
 
+const post = vi.hoisted(() => vi.fn(async () => ({ data: {} })));
+const patch = vi.hoisted(() => vi.fn(async () => ({ data: {} })));
+const askText = vi.hoisted(() => vi.fn(async () => "renamed"));
+const askConfirm = vi.hoisted(() => vi.fn(async () => true));
+
 vi.mock("@nookos/api", () => ({
-  api: { GET: get, PUT: put, POST: vi.fn(), PATCH: vi.fn(), DELETE: vi.fn() },
+  api: { GET: get, PUT: put, POST: post, PATCH: patch, DELETE: vi.fn() },
   attachSession: vi.fn(),
+}));
+vi.mock("./dialogs", () => ({
+  askConfirm,
+  askText,
+  notify: vi.fn(async () => {}),
+  DialogHost: () => null,
 }));
 
 import { SessionNavigator } from "./SessionNavigator";
@@ -74,9 +86,11 @@ function renderPane(opts: { prefs?: unknown; sessions?: unknown[] } = {}) {
   return render(
     <QueryClientProvider client={qc}>
       <MemoryRouter initialEntries={["/sessions/s1"]}>
+      <ContextMenuProvider>
         <Routes>
           <Route path="/sessions/:id" element={<SessionNavigator activeId="s1" />} />
         </Routes>
+      </ContextMenuProvider>
       </MemoryRouter>
     </QueryClientProvider>,
   );
@@ -84,6 +98,10 @@ function renderPane(opts: { prefs?: unknown; sessions?: unknown[] } = {}) {
 
 beforeEach(() => {
   put.mockClear();
+  post.mockClear();
+  patch.mockClear();
+  askText.mockClear();
+  askConfirm.mockClear();
 });
 afterEach(cleanup);
 
@@ -174,5 +192,57 @@ describe("SessionNavigator", () => {
   it("names the active team on the pane itself", async () => {
     renderPane();
     expect(await screen.findByText("Hein")).toBeTruthy();
+  });
+});
+
+describe("SessionNavigator — rename and stop live HERE (MAIN-416)", () => {
+  it("offers Rename and Stop on a session's context menu", async () => {
+    renderPane();
+    fireEvent.contextMenu(await screen.findByText("alpha"));
+    expect(await screen.findByText("Rename Session…")).toBeTruthy();
+    expect(screen.getByText("Stop Session…")).toBeTruthy();
+  });
+
+  it("renames through the session PATCH, so every viewer sees it", async () => {
+    renderPane();
+    fireEvent.contextMenu(await screen.findByText("alpha"));
+    fireEvent.click(await screen.findByText("Rename Session…"));
+    await waitFor(() =>
+      expect(patch).toHaveBeenCalledWith("/api/v1/sessions/{id}", {
+        params: { path: { id: "s1" } },
+        body: { name: "renamed" },
+      }),
+    );
+  });
+
+  it("refuses an empty name without asking the server", async () => {
+    askText.mockResolvedValueOnce("   ");
+    renderPane();
+    fireEvent.contextMenu(await screen.findByText("alpha"));
+    fireEvent.click(await screen.findByText("Rename Session…"));
+    await waitFor(() => expect(askText).toHaveBeenCalled());
+    expect(patch).not.toHaveBeenCalled();
+  });
+
+  it("stops through the stop endpoint, after a confirm", async () => {
+    renderPane();
+    fireEvent.contextMenu(await screen.findByText("alpha"));
+    fireEvent.click(await screen.findByText("Stop Session…"));
+    await waitFor(() => expect(askConfirm).toHaveBeenCalled());
+    // Not `/kill` — the row survives and the declaration is still satisfied.
+    await waitFor(() =>
+      expect(post).toHaveBeenCalledWith("/api/v1/sessions/{id}/stop", {
+        params: { path: { id: "s1" } },
+      }),
+    );
+  });
+
+  it("does not stop when the confirm is declined", async () => {
+    askConfirm.mockResolvedValueOnce(false);
+    renderPane();
+    fireEvent.contextMenu(await screen.findByText("alpha"));
+    fireEvent.click(await screen.findByText("Stop Session…"));
+    await waitFor(() => expect(askConfirm).toHaveBeenCalled());
+    expect(post).not.toHaveBeenCalled();
   });
 });

@@ -33,9 +33,12 @@ import {
   SquareTerminal,
 } from "lucide-react";
 import { api, type MeResponse } from "@nookos/api";
+import { ContextMenuRegion, type ContextMenuItem } from "./contextMenu";
+import { askConfirm, askText, notify } from "./dialogs";
 import { useLive } from "./live";
 import { useLiveTabs } from "./liveTabs";
 import { useTenantSwitch } from "./TenantSwitcher";
+import { checkSessionName, renameIsANoop, stopPrompt } from "./sessionActions";
 import {
   clampWidth,
   filterFolders,
@@ -193,6 +196,7 @@ function NavTeamMenu({
 
 export function SessionNavigator({ activeId }: { activeId?: string }) {
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
   const { prefs, write, loaded } = useNavPrefs();
   const [term, setTerm] = React.useState("");
   const [shut, setShut] = React.useState<string[]>([]);
@@ -251,6 +255,65 @@ export function SessionNavigator({ activeId }: { activeId?: string }) {
       </button>
     );
   }
+
+  /** Rename the SESSION, so every viewer sees it (AC-1: tenant-wide metadata,
+   *  not a personal label). */
+  const rename = async (id: string, current: string) => {
+    const typed = await askText({
+      title: "Rename session",
+      description:
+        "Everyone in this team sees this name — it is the session's name, not a " +
+        "label of your own.",
+      label: "Session name",
+      value: current,
+      confirmLabel: "rename",
+    });
+    const checked = checkSessionName(typed);
+    if (!checked.ok) {
+      // AC-5: refused here rather than by the server's 400, which would arrive
+      // after the field is gone.
+      if (checked.reason !== "cancelled") await notify("Cannot rename", checked.reason);
+      return;
+    }
+    if (renameIsANoop(current, checked.name)) return;
+    const { error } = await api.PATCH("/api/v1/sessions/{id}", {
+      params: { path: { id } },
+      body: { name: checked.name },
+    });
+    if (error) {
+      await notify("Rename failed", "The control plane rejected the change.");
+      return;
+    }
+    // AC-2: the pane, the tab and the page all read the session list, so one
+    // invalidation updates all three without a reload.
+    queryClient.invalidateQueries();
+  };
+
+  /** Stop the session — from HERE and from the session page, never from a tab
+   *  (AC-3 / NG-2). Close and stop being different actions in different places
+   *  is the confusion this epic exists to remove. */
+  const stop = async (t: (typeof tabs)[number]) => {
+    const prompt = stopPrompt(t);
+    if (!(await askConfirm(prompt))) return;
+    const { error } = await api.POST("/api/v1/sessions/{id}/stop", {
+      params: { path: { id: t.id } },
+    });
+    if (error) {
+      await notify("Could not stop it", "The control plane refused the stop.");
+      return;
+    }
+    queryClient.invalidateQueries();
+  };
+
+  const itemMenu = (t: (typeof tabs)[number]): ContextMenuItem[] => [
+    { label: "Rename Session…", onSelect: () => void rename(t.id, t.name) },
+    {
+      label: "Copy Session ID",
+      onSelect: () => void navigator.clipboard?.writeText(t.id).catch(() => {}),
+    },
+    { separator: true },
+    { label: "Stop Session…", danger: true, onSelect: () => void stop(t) },
+  ];
 
   const folders = filterFolders(navFolders(tabs), term);
   const total = tabs.length;
@@ -325,8 +388,12 @@ export function SessionNavigator({ activeId }: { activeId?: string }) {
           const dead = st === "exited" || st === "error" || st === "killed";
                   const agent = dead ? undefined : agentState[s.id]?.state;
                   return (
-                    <button
+                    <ContextMenuRegion
                       key={s.id}
+                      style={{ display: "contents" }}
+                      items={() => itemMenu(s)}
+                    >
+                    <button
                       className={`session-nav-item${s.id === activeId ? " active" : ""}`}
                       style={{ "--group-hue": f.hue } as React.CSSProperties}
                       title={`${s.name} · ${s.runtime}${s.nodeName ? ` · ${s.nodeName}` : ""}`}
@@ -351,6 +418,7 @@ export function SessionNavigator({ activeId }: { activeId?: string }) {
                         </span>
                       )}
                     </button>
+                    </ContextMenuRegion>
                   );
                 })}
             </div>
