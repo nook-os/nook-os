@@ -46,9 +46,7 @@ crates/nook-control/tests/loop_job_execution.rs
 crates/nook-control/tests/loop_job_messages.rs
 crates/nook-control/tests/loop_jobs.rs
 crates/nook-control/tests/loops_switch.rs
-crates/nook-control/tests/migrate_dev_tolerance.rs
 crates/nook-control/tests/migrate_paths.rs
 crates/nook-control/tests/multi_instance.rs
 crates/nook-control/tests/reconcile_tombstones.rs
 crates/nook-control/tests/repo_completeness.rs
-crates/nook-control/tests/squash_restamp.rs

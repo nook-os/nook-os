@@ -10,10 +10,9 @@
 
 use nook_control::MIGRATOR;
 use nook_db::migrate::{orphan_versions, run_with_dev_tolerance};
+use nook_db::{params, Db, EnginePool};
 use nook_testkit::TestBed;
 use sqlx::migrate::MigrateError;
-use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
-use sqlx::PgPool;
 use std::path::PathBuf;
 use std::process::Command;
 use std::str::FromStr;
@@ -33,13 +32,14 @@ fn swap_db(url: &str, db: &str) -> String {
 
 /// Record a synthetic applied migration that has no matching resolved migration —
 /// exactly the row an unmerged branch's migration leaves in a shared dev ledger.
-async fn insert_orphan(pool: &PgPool, table: &str, version: i64) {
-    sqlx::query(&format!(
-        "INSERT INTO {table} (version, description, success, checksum, execution_time)
+async fn insert_orphan(db: &EnginePool, table: &str, version: i64) {
+    db.exec(
+        &format!(
+            "INSERT INTO {table} (version, description, success, checksum, execution_time)
          VALUES ($1, 'synthetic orphan (MAIN-224 test)', true, '\\x00'::bytea, 0)"
-    ))
-    .bind(version)
-    .execute(pool)
+        ),
+        params![version],
+    )
     .await
     .expect("insert synthetic ledger row");
 }
@@ -49,16 +49,16 @@ async fn dev_boot_proceeds_past_an_orphan_row() {
     let Some(mut bed) = TestBed::new().await else {
         return;
     };
-    insert_orphan(&bed.pool, "_sqlx_migrations", 9999).await;
+    insert_orphan(&bed.db(), "_sqlx_migrations", 9999).await;
 
     // The orphan is detected…
-    let orphans = orphan_versions(&MIGRATOR, &bed.pool)
+    let orphans = orphan_versions(&MIGRATOR, &bed.db())
         .await
         .expect("list orphans");
     assert_eq!(orphans, vec![9999], "the synthetic row is the only orphan");
 
     // …and a dev boot tolerates it (this is what unbricks branch switching).
-    run_with_dev_tolerance(&MIGRATOR, &bed.pool, false)
+    run_with_dev_tolerance(&MIGRATOR, &bed.db(), false)
         .await
         .expect("dev boot proceeds past the orphan row");
 
@@ -70,11 +70,11 @@ async fn production_stays_fatal_on_an_orphan_row() {
     let Some(mut bed) = TestBed::new().await else {
         return;
     };
-    insert_orphan(&bed.pool, "_sqlx_migrations", 9999).await;
+    insert_orphan(&bed.db(), "_sqlx_migrations", 9999).await;
 
     // Production keeps today's strict behaviour, verbatim: the same VersionMissing
     // that would abort the boot — a tolerance leaking here would mask schema drift.
-    let err = run_with_dev_tolerance(&MIGRATOR, &bed.pool, true)
+    let err = run_with_dev_tolerance(&MIGRATOR, &bed.db(), true)
         .await
         .expect_err("production must refuse an applied-but-missing version");
     assert!(
@@ -93,12 +93,15 @@ async fn dev_tolerance_does_not_mask_a_modified_migration() {
     // Corrupt an *applied* migration's checksum — a modified migration, not a
     // missing one. Dev tolerates missing versions; it must never tolerate this
     // (NG-1: this survives a stray row, it never rewrites the ledger).
-    sqlx::query("UPDATE _sqlx_migrations SET checksum = '\\xdeadbeef'::bytea WHERE version = 1")
-        .execute(&bed.pool)
+    bed.db()
+        .exec(
+            "UPDATE _sqlx_migrations SET checksum = '\\xdeadbeef'::bytea WHERE version = 1",
+            params![],
+        )
         .await
         .expect("corrupt an applied checksum");
 
-    let err = run_with_dev_tolerance(&MIGRATOR, &bed.pool, false)
+    let err = run_with_dev_tolerance(&MIGRATOR, &bed.db(), false)
         .await
         .expect_err("a modified migration stays fatal even in dev");
     assert!(
@@ -124,30 +127,34 @@ async fn orphan_query_reads_the_ledger_on_the_pools_search_path() {
 
     // A chat ledger with one orphan, plus a DIFFERENT orphan in public: if the
     // query ignored search_path it would surface 7777 instead of 8888.
-    sqlx::query("CREATE SCHEMA IF NOT EXISTS chat")
-        .execute(&bed.pool)
+    bed.db()
+        .exec("CREATE SCHEMA IF NOT EXISTS chat", params![])
         .await
         .expect("create chat schema");
-    sqlx::query(
-        "CREATE TABLE chat._sqlx_migrations (
+    bed.db()
+        .exec(
+            "CREATE TABLE chat._sqlx_migrations (
              version bigint primary key, description text not null,
              installed_on timestamptz not null default now(), success boolean not null,
              checksum bytea not null, execution_time bigint not null)",
-    )
-    .execute(&bed.pool)
-    .await
-    .expect("create chat ledger");
-    insert_orphan(&bed.pool, "chat._sqlx_migrations", 8888).await;
-    insert_orphan(&bed.pool, "public._sqlx_migrations", 7777).await;
-
-    let opts = PgConnectOptions::from_str(&bed_url)
-        .expect("parse bed url")
-        .options([("search_path", "chat,public")]);
-    let chat_pool = PgPoolOptions::new()
-        .max_connections(1)
-        .connect_with(opts)
+            params![],
+        )
         .await
-        .expect("chat-search_path pool");
+        .expect("create chat ledger");
+    insert_orphan(&bed.db(), "chat._sqlx_migrations", 8888).await;
+    insert_orphan(&bed.db(), "public._sqlx_migrations", 7777).await;
+
+    // The search_path goes in the URL rather than through `PgConnectOptions`,
+    // so the pool comes from `nook_db::connect` like every other pool in the
+    // tree and this file names no sqlx type (MAIN-420 AC-4). The pin itself is
+    // unchanged: libpq reads `options=-c search_path=…`, which is the same
+    // connection parameter the builder set.
+    let chat_pool = nook_db::connect(
+        &format!("{bed_url}?options=-c%20search_path%3Dchat,public"),
+        1,
+    )
+    .await
+    .expect("chat-search_path pool");
 
     let orphans = orphan_versions(&MIGRATOR, &chat_pool)
         .await
@@ -158,7 +165,6 @@ async fn orphan_query_reads_the_ledger_on_the_pools_search_path() {
         "the chat ledger's orphan, not public's — search_path was honoured"
     );
 
-    chat_pool.close().await;
     bed.teardown().await;
 }
 
@@ -207,7 +213,7 @@ async fn heal_script_lists_and_deletes_only_the_orphan() {
         return;
     };
     let bed_url = swap_db(&base_url, bed.db_name());
-    insert_orphan(&bed.pool, "public._sqlx_migrations", 9999).await;
+    insert_orphan(&bed.db(), "public._sqlx_migrations", 9999).await;
 
     // Dry run lists the orphan without deleting it.
     let dry = Command::new("bash")
@@ -221,11 +227,14 @@ async fn heal_script_lists_and_deletes_only_the_orphan() {
         String::from_utf8_lossy(&dry.stdout).contains("9999"),
         "dry run should list the orphan version"
     );
-    let still_there: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM _sqlx_migrations WHERE version = 9999")
-            .fetch_one(&bed.pool)
-            .await
-            .unwrap();
+    let still_there: i64 = bed
+        .db()
+        .query_scalar(
+            "SELECT count(*) FROM _sqlx_migrations WHERE version = 9999",
+            params![],
+        )
+        .await
+        .unwrap();
     assert_eq!(still_there, 1, "dry run must not delete anything");
 
     // --fix --yes deletes exactly the orphan.
@@ -242,18 +251,24 @@ async fn heal_script_lists_and_deletes_only_the_orphan() {
         "fix run failed: {}",
         String::from_utf8_lossy(&fixed.stderr)
     );
-    let orphan_gone: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM _sqlx_migrations WHERE version = 9999")
-            .fetch_one(&bed.pool)
-            .await
-            .unwrap();
+    let orphan_gone: i64 = bed
+        .db()
+        .query_scalar(
+            "SELECT count(*) FROM _sqlx_migrations WHERE version = 9999",
+            params![],
+        )
+        .await
+        .unwrap();
     assert_eq!(orphan_gone, 0, "the orphan row must be deleted");
     // A real applied migration must be untouched.
-    let real_kept: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM _sqlx_migrations WHERE version = 1")
-            .fetch_one(&bed.pool)
-            .await
-            .unwrap();
+    let real_kept: i64 = bed
+        .db()
+        .query_scalar(
+            "SELECT count(*) FROM _sqlx_migrations WHERE version = 1",
+            params![],
+        )
+        .await
+        .unwrap();
     assert_eq!(real_kept, 1, "a genuine migration row must remain");
 
     bed.teardown().await;
