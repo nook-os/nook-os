@@ -53,6 +53,14 @@ export function SessionTabs({ activeId }: { activeId?: string }) {
   // line currently sits (a target tab and whether it drops after it). Both null
   // when nothing is dragging.
   const [collapsed, setCollapsed] = useState<string[]>([]);
+  // The strip scrolls horizontally on a phone, so switching to a tab that is
+  // off-screen would look like nothing happened (MAIN-418 AC-2). Keyed on the
+  // active id, so it also follows a switch made from the pane or the keyboard,
+  // not just a click on the strip itself.
+  const activeRef = React.useRef<HTMLDivElement>(null);
+  React.useEffect(() => {
+    activeRef.current?.scrollIntoView({ block: "nearest", inline: "nearest" });
+  }, [activeId]);
   const [dragId, setDragId] = useState<string | null>(null);
   const [dropAt, setDropAt] = useState<{ id: string; after: boolean } | null>(null);
 
@@ -274,6 +282,7 @@ export function SessionTabs({ activeId }: { activeId?: string }) {
               items={() => tabMenu(t)}
             >
             <div
+              ref={t.id === activeId ? activeRef : undefined}
               className={
                 `session-tab${t.id === activeId ? " active" : ""}` +
                 `${t.pinned ? " pinned" : ""}` +

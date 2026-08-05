@@ -367,6 +367,19 @@ export function TerminalView({
     requestAnimationFrame(refit);
     const observer = new ResizeObserver(() => requestAnimationFrame(refit));
     observer.observe(host);
+
+    // MAIN-418 AC-3: the on-screen keyboard.
+    //
+    // `ResizeObserver` above catches a rotate, because the host's box really
+    // changes. It does NOT catch the keyboard on iOS: Safari leaves the layout
+    // viewport alone and shrinks only the VISUAL one, so the element keeps its
+    // size while half of it sits under the keyboard, and the prompt you are
+    // typing at is the part that is hidden. `visualViewport` is the only thing
+    // that reports it.
+    const vv = typeof window !== "undefined" ? window.visualViewport : null;
+    const onViewport = () => requestAnimationFrame(refit);
+    vv?.addEventListener("resize", onViewport);
+
     term.focus();
 
     return () => {
@@ -374,6 +387,7 @@ export function TerminalView({
       onControls?.(null);
       clearTimeout(voteTimer);
       observer.disconnect();
+      vv?.removeEventListener("resize", onViewport);
       host.removeEventListener("paste", onPaste, true);
       host.removeEventListener("auxclick", onAuxClick);
       dataSub.dispose();

@@ -5,8 +5,8 @@
 // pure `fallbackItems`, so the load-bearing table is checked without a DOM.
 // Plus the dismiss behaviors (Escape, click-away). jsdom only.
 import React from "react";
-import { afterEach, describe, expect, it } from "vitest";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import {
   ContextMenuProvider,
@@ -167,5 +167,73 @@ describe("dismiss", () => {
     await screen.findByText("Region Action");
     fireEvent.mouseDown(document.body);
     expect(screen.queryByText("Region Action")).toBeNull();
+  });
+});
+
+/// MAIN-418 AC-4: a phone has no right-click, so long-press has to open the
+/// same menu — otherwise rename and stop (which live only here since MAIN-416)
+/// are unreachable on a phone.
+describe("long-press (touch)", () => {
+  /// jsdom has no `TouchEvent` constructor, and the listener only reads
+  /// `touches[0].clientX/clientY` and `target`, so a plain Event carrying those
+  /// is exactly what the code under test consumes.
+  function touch(type: string, el: Element, x = 10, y = 10) {
+    const e: any = new Event(type, { bubbles: true });
+    e.touches = type === "touchend" ? [] : [{ clientX: x, clientY: y }];
+    el.dispatchEvent(e);
+  }
+
+  it("opens the region's menu after a press is held", async () => {
+    vi.useFakeTimers();
+    renderApp();
+    touch("touchstart", screen.getByTestId("in-region"));
+    await act(async () => {
+      vi.advanceTimersByTime(600);
+    });
+    vi.useRealTimers();
+    expect(await screen.findByText("Region Action")).toBeTruthy();
+  });
+
+  it("does NOT open when the finger moves — that is a scroll", async () => {
+    // The failure this prevents: scrolling a long session list pops a menu
+    // under your thumb, which then eats the next tap.
+    vi.useFakeTimers();
+    renderApp();
+    const el = screen.getByTestId("in-region");
+    touch("touchstart", el, 10, 10);
+    touch("touchmove", el, 10, 90);
+    await act(async () => {
+      vi.advanceTimersByTime(600);
+    });
+    vi.useRealTimers();
+    expect(screen.queryByText("Region Action")).toBeNull();
+  });
+
+  it("does NOT open when the finger lifts early", async () => {
+    vi.useFakeTimers();
+    renderApp();
+    const el = screen.getByTestId("in-region");
+    touch("touchstart", el);
+    await act(async () => {
+      vi.advanceTimersByTime(200);
+    });
+    touch("touchend", el);
+    await act(async () => {
+      vi.advanceTimersByTime(600);
+    });
+    vi.useRealTimers();
+    expect(screen.queryByText("Region Action")).toBeNull();
+  });
+
+  it("leaves a legacy island's own gesture alone", async () => {
+    vi.useFakeTimers();
+    renderApp();
+    touch("touchstart", screen.getByTestId("in-native"));
+    await act(async () => {
+      vi.advanceTimersByTime(600);
+    });
+    vi.useRealTimers();
+    expect(screen.queryByText("Region Action")).toBeNull();
+    expect(screen.queryByText("Copy")).toBeNull();
   });
 });
