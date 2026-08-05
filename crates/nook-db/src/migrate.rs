@@ -15,7 +15,6 @@
 //! deliberate cleanup; this is the survive-the-boot half.
 
 use sqlx::migrate::{MigrateError, Migrator};
-use sqlx::PgPool;
 
 /// The engine-aware boot step (MAIN-196 AC-2/AC-3): pick the migration set for
 /// the pool in front of us and run it.
@@ -36,7 +35,7 @@ pub async fn run_boot_migrations_for(
 ) -> Result<(), BootMigrateError> {
     match pool.engine() {
         crate::Engine::Postgres => {
-            run_boot_migrations(pg_migrator, pool.pg(), is_production, manifest_text).await
+            run_boot_migrations(pg_migrator, pool, is_production, manifest_text).await
         }
         crate::Engine::Sqlite => {
             sqlite_migrator
@@ -66,11 +65,23 @@ pub async fn run_boot_migrations_for(
 /// or re-stamps the ledger (NG-1).
 pub async fn run_with_dev_tolerance(
     migrator: &Migrator,
-    pool: &PgPool,
+    pool: &crate::DbPool,
     is_production: bool,
 ) -> Result<(), MigrateError> {
+    // SQLite runs the plain migrator (MAIN-420 AC-3). Not a refusal here,
+    // because unlike the re-stamp this function's OTHER half — actually
+    // migrating — is meaningful on every engine; what does not apply is the
+    // tolerance. Dev tolerance exists for a SHARED dev database that branches
+    // take turns migrating, and a SQLite file is nobody's shared database, so
+    // there is no orphan row to forgive. `run_boot_migrations_for` already made
+    // exactly this call at the dispatch level; this moves it inside so a caller
+    // holding an `EnginePool` gets the same answer.
+    if pool.engine() != crate::Engine::Postgres {
+        return migrator.run(pool.sqlite()).await;
+    }
+
     if is_production {
-        return migrator.run(pool).await;
+        return migrator.run(pool.pg()).await;
     }
 
     for version in orphan_versions(migrator, pool).await? {
@@ -97,7 +108,7 @@ pub async fn run_with_dev_tolerance(
         no_tx: migrator.no_tx,
     };
     tolerant.set_ignore_missing(true);
-    tolerant.run(pool).await
+    tolerant.run(pool.pg()).await
 }
 
 /// Ledger versions with no matching resolved migration — the rows a dev boot
@@ -107,7 +118,22 @@ pub async fn run_with_dev_tolerance(
 /// never fails a fresh database. The query is unqualified, so it reads the ledger
 /// through the pool's `search_path`: `chat._sqlx_migrations` for the chat pool
 /// (search_path `chat,public`), `public._sqlx_migrations` for the control plane.
-pub async fn orphan_versions(migrator: &Migrator, pool: &PgPool) -> Result<Vec<i64>, MigrateError> {
+pub async fn orphan_versions(
+    migrator: &Migrator,
+    pool: &crate::DbPool,
+) -> Result<Vec<i64>, MigrateError> {
+    // Postgres-only, and empty rather than an error on SQLite (MAIN-420 AC-3).
+    // This one is a QUESTION, not an action: "which ledger rows have no
+    // migration file". On a SQLite file the honest answer is "none" — its track
+    // starts at its own frozen 0001 and no branch shares it — so returning
+    // empty is the true answer, not a silent no-op standing in for one. The
+    // `to_regclass` probe below is Postgres syntax and would error there
+    // regardless.
+    if pool.engine() != crate::Engine::Postgres {
+        return Ok(Vec::new());
+    }
+    let pool = pool.pg();
+
     // `to_regclass` yields NULL until the ledger has been created; selecting FROM
     // a missing table would error, so gate on existence first.
     let ledger: Option<String> = sqlx::query_scalar("SELECT to_regclass('_sqlx_migrations')::text")
@@ -147,7 +173,7 @@ pub async fn orphan_versions(migrator: &Migrator, pool: &PgPool) -> Result<Vec<i
 /// stray migration, and tolerance already knows how to carry that boot.
 pub async fn run_boot_migrations(
     migrator: &Migrator,
-    pool: &PgPool,
+    pool: &crate::DbPool,
     is_production: bool,
     manifest_text: &str,
 ) -> Result<(), BootMigrateError> {

@@ -113,13 +113,8 @@ async fn main() -> anyhow::Result<()> {
     // the whole control plane to boot would be a far larger change than the one
     // this buys.
     if db.engine() == nook_db::Engine::Postgres {
-        nook_db::migrate::run_boot_migrations(
-            &MIGRATOR,
-            db.pg(),
-            cfg.is_production(),
-            SQUASH_MANIFEST,
-        )
-        .await?;
+        nook_db::migrate::run_boot_migrations(&MIGRATOR, &db, cfg.is_production(), SQUASH_MANIFEST)
+            .await?;
     } else {
         tracing::info!(
             "sqlite: chat's tables come from the control plane's merged 0001 — no chat migrator to run",

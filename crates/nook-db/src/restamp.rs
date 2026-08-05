@@ -35,7 +35,7 @@
 //! and lets MAIN-224's tolerance carry the boot, because a developer's stray
 //! branch row is the overwhelmingly likely cause there.
 
-use sqlx::{PgPool, Row};
+use sqlx::Row;
 
 /// A parsed `squash-manifest.txt`: the single row a recognised pre-squash
 /// ledger collapses to, and the exact ledger that qualifies.
@@ -78,6 +78,21 @@ pub enum RestampError {
          dev) or restore from the pre-squash image — do not hand-edit the ledger."
     )]
     LedgerMismatch { detail: String },
+    /// Asked to re-stamp a SQLite database (MAIN-420 AC-3).
+    ///
+    /// A REFUSAL, not a no-op, and deliberately so. The re-stamp exists to
+    /// rescue databases that applied a PREVIOUS Postgres migration set; a SQLite
+    /// file has no such history — its track starts at its own frozen `0001` — so
+    /// there is nothing to collapse. Returning `Ok` on a SQLite pool would be
+    /// the silent no-op in a re-stamp, which is the worst outcome available:
+    /// a caller could not tell "nothing to do" from "it did nothing".
+    #[error(
+        "the squash re-stamp is Postgres-only: it collapses a ledger left by a \
+         previous Postgres migration set, and a SQLite database has no such \
+         history. `run_boot_migrations_for` never calls it on SQLite; a caller \
+         that reaches it directly is asking for something that does not exist."
+    )]
+    EngineUnsupported,
 }
 
 /// Parse a manifest. `None` when the text carries no `new` line — an absent or
@@ -147,10 +162,18 @@ fn hex_bytes(s: &str) -> Option<Vec<u8>> {
 ///
 /// Runs before the migrator. Idempotent: safe on every boot forever.
 pub async fn restamp(
-    pool: &PgPool,
+    pool: &crate::DbPool,
     manifest: Option<&SquashManifest>,
     table: &str,
 ) -> Result<Restamp, RestampError> {
+    // Engine first, and BEFORE the manifest check: `EnginePool::pg()` panics on
+    // a SQLite pool, and "no manifest" would otherwise answer `Ok` for a
+    // database this can never act on (MAIN-420 AC-3).
+    if pool.engine() != crate::Engine::Postgres {
+        return Err(RestampError::EngineUnsupported);
+    }
+    let pool = pool.pg();
+
     let Some(manifest) = manifest else {
         return Ok(Restamp::NoManifest);
     };
