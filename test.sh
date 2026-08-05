@@ -166,18 +166,13 @@ run_lint() {
   # allow-list names every file whose sweep is still open, and shrinks as they
   # land.
   say "dialect dispatch"
-  # Reported, not fatal, until its own card clears it (MAIN-345). It is red on
-  # main — an unlisted offender and three stale entries — and nothing ran it to
-  # say so. Failing here would make every later check unreachable again, which
-  # is the exact shape of problem this ordering change exists to remove.
-  ./scripts/check-dialect-dispatch.sh || warn_skip "dialect-dispatch guard is RED (pre-existing, its own card)"
-  # Its first assertion is "green on the tree as committed", so it fails for the
-  # same pre-existing reason as the guard above. Reported, not fatal.
-  ./scripts/check-dialect-dispatch.test.sh ||
-    warn_skip "dialect-dispatch self-test is RED (pre-existing, its own card)"
-  # Deliberately no `pass` line here. A green tick after a red guard is the
-  # "a skip is not a pass" mistake this file already warns about elsewhere —
-  # the ▲ above is the whole report until its card lands.
+  # FATAL again since MAIN-421. It spent weeks as `warn_skip "…pre-existing, its
+  # own card"` while the card it named had been archived, so nothing owned the
+  # tail and nothing could find it — a guard that is permanently amber protects
+  # nothing, and this is the line that made it amber.
+  ./scripts/check-dialect-dispatch.sh || die "dialect dispatch"
+  ./scripts/check-dialect-dispatch.test.sh || die "dialect-dispatch self-test"
+  pass_if_ran "no hardcoded dialect outside nook-db"
 
   # MAIN-270 (epic AC-6): only the guard's SELF-TEST runs here. The guard itself
   # needs a SQLite run to judge, which is `./test.sh rust --sqlite` (minutes),

@@ -8,7 +8,8 @@
 
 use std::sync::Arc;
 
-use nook_db::{params, Db, DbPool, Postgres, TimeMath};
+use nook_db::dialect::time_math;
+use nook_db::{params, Db, DbPool};
 use nook_proto::{AttachServerMessage, ControlToNode, UiEvent};
 use nook_types::{NodeId, SessionId, TenantId};
 use serde::{Deserialize, Serialize};
@@ -229,7 +230,7 @@ pub(crate) fn start(
                 .exec(
                     &format!(
                         "DELETE FROM bus_outbox WHERE created_at < {cutoff}",
-                        cutoff = Postgres.now_minus("60 seconds")
+                        cutoff = time_math(pool.engine()).now_minus("60 seconds")
                     ),
                     params![],
                 )
