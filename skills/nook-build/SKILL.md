@@ -50,7 +50,7 @@ Skip every PR carrying `needs-human-review`; it has left the automated repair
 queue until a human resolves the escalation.
 
 If any PR remains, choose the least recently updated one. Read its linked
-board issue (`nook task NOOK-NN`) and the latest `Loop review of COMMIT_SHA`
+board issue (`nook task KEY`) and the latest `Loop review of COMMIT_SHA`
 verdict in that issue's comments. Its card is sitting in **In Review**; move it
 back to In Progress so the board shows it is being worked again (the endpoint
 resolves the name to the `started`-type column):
@@ -58,14 +58,22 @@ resolves the name to the `started`-type column):
 ```bash
 NOOK_SERVER=$(grep '^server' ~/.config/nook/auth.toml | sed 's/.*"\(.*\)"/\1/')
 NOOK_TOKEN=$(grep '^token'  ~/.config/nook/auth.toml | sed 's/.*"\(.*\)"/\1/')
-curl -s -X POST "$NOOK_SERVER/api/v1/tasks/NOOK-NN/move" \
+curl -s -X POST "$NOOK_SERVER/api/v1/tasks/KEY/move" \
   -H "Authorization: Bearer $NOOK_TOKEN" -H 'Content-Type: application/json' \
   -d '{"column":"In Progress"}'
 ```
 
-Then check out its branch, fix only the "Must fix before merge" items, run the
-relevant checks, push, remove `loop-changes-requested`, and comment with what
+Then check out its branch and fix only the "Must fix before merge" items, run
+the relevant checks, remove `loop-changes-requested`, and comment with what
 changed. Submitting the fix parks it back in In Review. End this pass.
+
+**The repair follows §5's commit rules exactly** — it is the same branch, so it
+keeps the same shape:
+
+- **Amend the single commit.** Do not append a "fix review feedback" commit; the
+  branch still carries one commit whose subject is the PR title.
+- **Rebase** if the default branch has moved. Never merge it in.
+- **`git push --force-with-lease`.** Never a bare `--force`.
 
 If a proposed fix would cross an issue non-goal or requires a product decision,
 do not implement it. Comment the exact conflict on both the PR and the issue,
@@ -133,8 +141,15 @@ never uses them.)
 ## 3. Claim (the atomic lock)
 
 ```bash
-nook claim NOOK-42 --column-type started
+nook claim KEY --column-type started
 ```
+
+**`KEY` throughout this document is a placeholder, never a literal to copy.**
+It stands for the **verbatim `key` of the ticket you claimed here** — read it
+from the pick in step 2, or from `nook task <key> --json`. Boards do not all use
+the same prefix: a second board's keys may be `ACME-7`, and a builder that
+copies an example prefix produces a PR naming a ticket that does not exist.
+Every `KEY`, `key-nn-slug` and `MAIN-42` below is that same placeholder.
 
 Claim before reading deeply or writing code. The claim is atomic in the
 database, so two builders polling the same queue cannot both win.
@@ -157,7 +172,7 @@ Target the column *type* (`started`), never a column name. A human renaming
 ## 4. Read
 
 ```bash
-nook task NOOK-42
+nook task KEY
 ```
 
 That returns the whole issue: description, labels, comments, blockers.
@@ -171,12 +186,28 @@ on an unresolved blocker, go to step 8. Never guess.
 ## 5. Build
 
 - Fetch the latest default branch from `origin` and create or resume a branch
-  named `nook-42-short-slug`, using the issue's real key.
+  named from the real key, **lowercased**, plus a short slug:
+  `MAIN-42` → `main-42-short-slug`, `ACME-7` → `acme-7-short-slug`.
 - Implement the acceptance criteria using the repository's existing style,
   architecture, and naming.
 - Add or update tests when the change affects logic, data flow, permissions,
   integrations, or user-visible behavior.
 - Preserve behavior outside the issue contract.
+
+**One atomic commit per branch.** Its subject is byte-identical to the PR title
+from step 7 — same sentence, same key, same trailing period. Further work on the
+ticket **amends** that commit; it does not stack a second one. A branch whose
+history is "do the thing" then "fix review feedback" then "fmt" tells a reviewer
+nothing the diff does not already say, and it makes the PR title and the commit
+subject disagree.
+
+**Bring in the default branch by REBASE only.** Never merge it into the PR
+branch: a merge commit in a one-commit branch is the one shape that cannot be
+amended, and it puts changes in the diff that the PR did not author.
+
+**Update a pushed branch with `git push --force-with-lease`.** Never a bare
+`--force` — with-lease refuses when someone else has pushed since you last
+fetched, which is exactly the case where overwriting is destructive.
 
 ## 6. Verify
 
@@ -190,11 +221,29 @@ unrelated work or generated secrets.
 
 ## 7. Ship
 
-Push and open a PR with `gh pr create`. Its description must include:
+Push and open a PR with `gh pr create`.
+
+**The title is `<Imperative present-tense sentence> (KEY).`** — a complete
+English sentence, capitalized, imperative mood, present tense, with the real key
+in parentheses and the period **after** the closing parenthesis:
+
+```
+Add a session navigator (MAIN-42).
+```
+
+Not `session navigator`, not `MAIN-42: add a session navigator`, not
+`Adds a session navigator (MAIN-42)`. The reviewer checks this shape and a
+non-conforming title comes back as a must-fix.
+
+Its description must include:
 
 - What changed and why
-- `Closes NOOK-42`, using the real board key. This is the only join between
-  the PR and the issue — the review skill parses it.
+- **`Closes KEY` on its own line**, using the real key. This is the reviewer's
+  ONLY join from the PR to its contract — it parses that literal text and
+  nothing else. **Omit it and the PR stops dead**: the reviewer cannot read the
+  issue, cannot check a single acceptance criterion, and escalates to
+  `needs-human-review`, where it waits for a person for a reason that has
+  nothing to do with the code in it.
 - A scope ledger: one evidence line per `AC-N`, one preservation line per
   `NG-N`, and `Other behavior changes: None`
 - Numbered manual test steps matching what was actually built
@@ -209,10 +258,10 @@ while a human reviews and merges (Done means merged, so the builder never puts
 a card there):
 
 ```bash
-nook comment NOOK-42 "PR opened: <url>"
+nook comment KEY "PR opened: <url>"
 NOOK_SERVER=$(grep '^server' ~/.config/nook/auth.toml | sed 's/.*"\(.*\)"/\1/')
 NOOK_TOKEN=$(grep '^token'  ~/.config/nook/auth.toml | sed 's/.*"\(.*\)"/\1/')
-curl -s -X POST "$NOOK_SERVER/api/v1/tasks/NOOK-42/move" \
+curl -s -X POST "$NOOK_SERVER/api/v1/tasks/KEY/move" \
   -H "Authorization: Bearer $NOOK_TOKEN" -H 'Content-Type: application/json' \
   -d '{"column":"In Review"}'
 ```
@@ -225,8 +274,8 @@ Comment one specific question a human can answer asynchronously, then hand the
 work back:
 
 ```bash
-nook comment NOOK-42 'Blocked: the fixture DB has no migrations. Add one, or point the test at the dev DB? Affects AC-2.'
-nook label NOOK-42 blocked
+nook comment KEY 'Blocked: the fixture DB has no migrations. Add one, or point the test at the dev DB? Affects AC-2.'
+nook label KEY blocked
 ```
 
 Then release the claim so the issue is pickable again once a human answers.
@@ -237,7 +286,7 @@ Then release the claim so the issue is pickable again once a human answers.
 > ```bash
 > NOOK_SERVER=$(grep '^server' ~/.config/nook/auth.toml | sed 's/.*"\(.*\)"/\1/')
 > NOOK_TOKEN=$(grep '^token'  ~/.config/nook/auth.toml | sed 's/.*"\(.*\)"/\1/')
-> curl -s -X POST "$NOOK_SERVER/api/v1/tasks/NOOK-42/release" \
+> curl -s -X POST "$NOOK_SERVER/api/v1/tasks/KEY/release" \
 >   -H "Authorization: Bearer $NOOK_TOKEN"
 > ```
 
