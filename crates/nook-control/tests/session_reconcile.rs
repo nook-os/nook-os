@@ -73,6 +73,7 @@ async fn a_session(
             created_by: None,
             checkout_id: checkout,
             managed,
+            managed_purpose: ManagedPurpose::Access,
         })
         .await?
         .id)
@@ -112,7 +113,11 @@ async fn only_sessions_the_reconciler_marked_are_visible_to_it() {
     let hand_started = made(&bed, tenant, Some(ws), node, Some(co), "mine", false).await;
     let mine = made(&bed, tenant, Some(ws), node, Some(co), "managed", true).await;
 
-    let seen = state.sessions.live_managed(tenant, ws).await.expect("read");
+    let seen = state
+        .sessions
+        .live_managed(tenant, ws, None)
+        .await
+        .expect("read");
     assert_eq!(seen.len(), 1, "only the marked one");
     assert_eq!(seen[0].0, mine);
     assert_ne!(seen[0].0, hand_started);
@@ -136,7 +141,12 @@ async fn an_ended_managed_session_is_a_gap_not_a_replica() {
     let co = a_checkout(&bed, tenant, node, ws, "/w/managed").await;
     let s = made(&bed, tenant, Some(ws), node, Some(co), "managed", true).await;
     assert_eq!(
-        state.sessions.live_managed(tenant, ws).await.unwrap().len(),
+        state
+            .sessions
+            .live_managed(tenant, ws, None)
+            .await
+            .unwrap()
+            .len(),
         1
     );
 
@@ -147,7 +157,7 @@ async fn an_ended_managed_session_is_a_gap_not_a_replica() {
     );
     assert!(state
         .sessions
-        .live_managed(tenant, ws)
+        .live_managed(tenant, ws, None)
         .await
         .unwrap()
         .is_empty());
@@ -201,7 +211,12 @@ async fn two_replicas_cannot_both_start_the_same_managed_session() {
     );
 
     assert_eq!(
-        state.sessions.live_managed(tenant, ws).await.unwrap().len(),
+        state
+            .sessions
+            .live_managed(tenant, ws, None)
+            .await
+            .unwrap()
+            .len(),
         1,
         "exactly one survives"
     );
@@ -234,7 +249,12 @@ async fn an_ad_hoc_session_is_not_blocked_by_the_managed_index() {
     made(&bed, tenant, Some(ws), node, None, "person-2", false).await;
 
     assert_eq!(
-        state.sessions.live_managed(tenant, ws).await.unwrap().len(),
+        state
+            .sessions
+            .live_managed(tenant, ws, None)
+            .await
+            .unwrap()
+            .len(),
         1,
         "the ad-hoc ones neither block nor appear"
     );
@@ -271,7 +291,7 @@ async fn live_managed_is_scoped_to_its_tenant_and_workspace() {
     assert_eq!(
         state
             .sessions
-            .live_managed(mine, my_ws)
+            .live_managed(mine, my_ws, None)
             .await
             .unwrap()
             .len(),
@@ -280,7 +300,7 @@ async fn live_managed_is_scoped_to_its_tenant_and_workspace() {
     assert!(
         state
             .sessions
-            .live_managed(mine, their_ws)
+            .live_managed(mine, their_ws, None)
             .await
             .unwrap()
             .is_empty(),

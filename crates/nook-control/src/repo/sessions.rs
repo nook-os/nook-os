@@ -48,6 +48,11 @@ pub struct NewSession {
     /// had already told the node to start: a live, unattributed session the
     /// reconciler could never see again.
     pub managed: bool,
+    /// What the reconciler wants this session FOR (MAIN-326). On the INSERT for
+    /// the same reason `managed` is: it is half the unique index that decides
+    /// the race, so setting it afterwards would let two declarations each think
+    /// they had won the checkout.
+    pub managed_purpose: ManagedPurpose,
 }
 
 /// Which sessions a list call wants.
@@ -149,10 +154,20 @@ pub trait SessionRepository: Send + Sync {
     /// Live only: an exited managed session is a gap the reconciler fills, not
     /// a replica it already has. Managed only: this is the query that makes
     /// "ad-hoc sessions are never touched" true rather than intended.
+    /// The live managed sessions of one workspace; `Some(purpose)` narrows to
+    /// one declaration, `None` takes every one of them (MAIN-326).
+    ///
+    /// Narrowing happens in SQL rather than in the caller because the planner's
+    /// `actual` set is also its stop list: a declaration that could see another
+    /// purpose's sessions would stop them as strays it has no slot for. The
+    /// unfiltered form is for callers asking "is anything here reconciler-owned"
+    /// — workspace deletion, which must not mistake a review loop for a session
+    /// a person started and refuse forever.
     async fn live_managed(
         &self,
         tenant: TenantId,
         workspace: WorkspaceId,
+        purpose: Option<ManagedPurpose>,
     ) -> ApiResult<Vec<(SessionId, NodeWorkspaceId, NodeId)>>;
 
     /// End a managed session — the scale-down half of converging.
@@ -278,8 +293,8 @@ impl SessionRepository for DbSessionRepository {
             .query_one(
                 "INSERT INTO sessions
                    (id, tenant_id, workspace_id, node_id, name, runtime, status,
-                    created_by, checkout_id, managed)
-                 VALUES ($1, $2, $3, $4, $5, $6, 'starting', $7, $8, $9) RETURNING *",
+                    created_by, checkout_id, managed, managed_purpose)
+                 VALUES ($1, $2, $3, $4, $5, $6, 'starting', $7, $8, $9, $10) RETURNING *",
                 params![
                     SessionId::new(),
                     new.tenant,
@@ -289,7 +304,8 @@ impl SessionRepository for DbSessionRepository {
                     new.runtime,
                     new.created_by.map(|u| u.0),
                     new.checkout_id.map(|c| c.0),
-                    new.managed
+                    new.managed,
+                    new.managed_purpose
                 ],
             )
             .await?)
@@ -461,19 +477,23 @@ impl SessionRepository for DbSessionRepository {
         &self,
         tenant: TenantId,
         workspace: WorkspaceId,
+        purpose: Option<ManagedPurpose>,
     ) -> ApiResult<Vec<(SessionId, NodeWorkspaceId, NodeId)>> {
+        // `$3 IS NULL OR …` rather than two query strings: one shape to read,
+        // and the planner's filter cannot drift from the unfiltered count.
         Ok(self
             .db
             .query_all(
                 &format!(
                     "SELECT id, checkout_id, node_id FROM sessions
                  WHERE tenant_id = $1 AND workspace_id = $2 AND managed
+                   AND ($3 IS NULL OR managed_purpose = $3)
                    AND checkout_id IS NOT NULL
                    AND status IN ({declared})
                  ORDER BY checkout_id",
                     declared = session_status::DECLARED_SQL
                 ),
-                params![tenant, workspace],
+                params![tenant, workspace, purpose.map(|p| p.as_str().to_string())],
             )
             .await?)
     }
@@ -736,16 +756,19 @@ impl SessionRepository for FakeSessionRepository {
     async fn create(&self, new: NewSession) -> ApiResult<Session> {
         let now = chrono::Utc::now();
         // The real table refuses a second LIVE managed session on the same
-        // CHECKOUT via a unique index, and that refusal is what arbitrates the
-        // reconciler's race. A fake that accepted it would let a caller test pass
-        // against behaviour the database does not have. Null checkout is excluded
-        // exactly as the partial index excludes it.
+        // CHECKOUT FOR THE SAME PURPOSE via a unique index, and that refusal is
+        // what arbitrates the reconciler's race. A fake that accepted it would
+        // let a caller test pass against behaviour the database does not have.
+        // Null checkout is excluded exactly as the partial index excludes it,
+        // and the purpose is part of the key exactly as it is there — an access
+        // session must not refuse the review loop its own slot (MAIN-326).
         if new.managed {
             let rows = self.inner.lock().unwrap();
             if new.checkout_id.is_some()
                 && rows.iter().any(|x| {
                     x.managed
                         && x.checkout_id == new.checkout_id
+                        && x.managed_purpose == new.managed_purpose
                         && session_status::is_declared(&x.status)
                 })
             {
@@ -770,6 +793,7 @@ impl SessionRepository for FakeSessionRepository {
             ended_at: None,
             checkout_id: new.checkout_id,
             managed: new.managed,
+            managed_purpose: new.managed_purpose,
             checkout: None,
             node_online: None,
             leased_ports: Vec::new(),
@@ -923,6 +947,7 @@ impl SessionRepository for FakeSessionRepository {
         &self,
         tenant: TenantId,
         workspace: WorkspaceId,
+        purpose: Option<ManagedPurpose>,
     ) -> ApiResult<Vec<(SessionId, NodeWorkspaceId, NodeId)>> {
         let mut out: Vec<(SessionId, NodeWorkspaceId, NodeId)> = self
             .inner
@@ -933,6 +958,7 @@ impl SessionRepository for FakeSessionRepository {
                 x.tenant_id == tenant
                     && x.workspace_id == Some(workspace)
                     && x.managed
+                    && purpose.is_none_or(|p| x.managed_purpose == p)
                     && x.checkout_id.is_some()
                     && session_status::is_live(&x.status)
             })

@@ -39,12 +39,27 @@
 //! checkout, not the node: a node holding a clone plus two worktrees runs three
 //! managed sessions. Clone-on-demand ensures a chosen node that has no checkout
 //! yet gets one so the next pass can place against it.
+//!
+//! ## Two declarations, one engine (MAIN-326)
+//!
+//! A workspace's own spec says what a PERSON can attach to. The control plane
+//! has a second thing it wants of every repo — an always-on review loop on the
+//! deployment's loop node — and that is [`review_loop_spec`]: a spec nobody can
+//! edit through the workspace API, selected onto `role=loop`, running
+//! `nook-review` forever.
+//!
+//! It is the same planner, the same clone-on-demand and the same self-healing;
+//! the only additions are which checkouts it may use ([`Slots`]) and a
+//! [`ManagedPurpose`] on the session so the two declarations cannot adopt or
+//! stop each other's work. Ticket-triggered spec/build jobs are a different
+//! mechanism entirely (`job_dispatch`) and are untouched by any of this.
 
 use std::collections::BTreeMap;
 use std::time::Duration;
 
 use nook_types::{
-    NodeId, NodeWorkspaceId, Replicas, SessionId, SessionSpec, TenantId, WorkspaceId,
+    ManagedPurpose, NodeId, NodeWorkspaceId, Replicas, SessionId, SessionSpec, TenantId,
+    WorkspaceId,
 };
 
 use crate::state::AppState;
@@ -530,15 +545,80 @@ async fn pass(state: &AppState, clones: &CloneThrottle) -> crate::error::ApiResu
         if !truthy(Some(&value)) {
             continue;
         }
+        // Once per tenant, not once per workspace: the review loop is agent
+        // work, so it answers to the loops switch as well as to this one.
+        let loops_on = crate::services::loops::enabled(&*state.settings, tenant).await;
         for ws in state.workspaces.list(tenant).await? {
             let spec = explicit.get(&ws.id).cloned().unwrap_or_else(default_spec);
-            if let Err(e) = reconcile_workspace(state, tenant, ws.id, &spec, clones).await {
+            if let Err(e) = reconcile_workspace(
+                state,
+                tenant,
+                ws.id,
+                &spec,
+                clones,
+                ManagedPurpose::Access,
+                Slots::EveryCheckout,
+            )
+            .await
+            {
                 // Per workspace, so one broken declaration does not stop the fleet.
                 tracing::warn!(workspace = %ws.id, error = %e, "workspace reconcile failed");
+            }
+            if !loops_on {
+                continue;
+            }
+            if let Err(e) = reconcile_workspace(
+                state,
+                tenant,
+                ws.id,
+                &review_loop_spec(),
+                clones,
+                ManagedPurpose::ReviewLoop,
+                Slots::ClonesOnly,
+            )
+            .await
+            {
+                tracing::warn!(workspace = %ws.id, error = %e, "review-loop reconcile failed");
             }
         }
     }
     Ok(())
+}
+
+/// The control plane's OWN declaration for a repo (MAIN-326): one always-on
+/// review loop, on the deployment's loop node.
+///
+/// Not a `SessionSpec` on the workspace, and deliberately not editable through
+/// the workspace API — a repo asking to stop having its PRs reviewed, or asking
+/// for its review loop on somebody's laptop, is not a workspace-level choice.
+/// It is a spec only because that is what the planner reads; the values are
+/// this build's, and changing them is a code change.
+///
+/// `Single`, not `All`: the loop posts review verdicts to GitHub and the board,
+/// so a second copy of it on a second loop node would double every comment. One
+/// reviewer per repo is the whole intent, and `Replicas::Single` is how the
+/// planner is told a number cannot be guessed from the fleet's size.
+pub(crate) fn review_loop_spec() -> SessionSpec {
+    SessionSpec {
+        runtime: crate::services::jobs::LOOP_RUNTIME.into(),
+        node_selector: [("role".to_string(), "loop".to_string())]
+            .into_iter()
+            .collect(),
+        tolerations: vec![],
+        replicas: Replicas::Single,
+    }
+}
+
+/// Which of a workspace's checkouts a declaration may place into.
+///
+/// The access spec takes them all — that is per-worktree placement, and a
+/// person wants a terminal in the worktree they are working in. The review loop
+/// takes only primary clones: it reviews the REPO's open PRs, which is one job
+/// per repo per node however many worktrees happen to sit beside the clone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Slots {
+    EveryCheckout,
+    ClonesOnly,
 }
 
 /// Every workspace with a `session_spec`, and the spec parsed. A spec that does
@@ -594,26 +674,63 @@ pub async fn port_safety(
     })
 }
 
+/// The checkouts a declaration may place into, narrowed by `allowed`.
+///
+/// `None` is every present checkout — per-worktree placement, what a person
+/// wants. `Some(ids)` keeps only those, which is how the review loop is held to
+/// primary clones: it reviews the REPO's PRs, so a node with a clone and three
+/// worktrees still runs exactly one of them (MAIN-326).
+fn placement_slots(
+    present: Vec<crate::repo::workspaces::PresentCheckout>,
+    allowed: Option<&[NodeWorkspaceId]>,
+) -> Vec<CheckoutSlot> {
+    present
+        .into_iter()
+        .filter(|c| allowed.is_none_or(|ids| ids.contains(&c.id)))
+        .map(|c| CheckoutSlot {
+            checkout_id: c.id,
+            node_id: c.node_id,
+            path: c.path,
+        })
+        .collect()
+}
+
 async fn reconcile_workspace(
     state: &AppState,
     tenant: TenantId,
     workspace: WorkspaceId,
     spec: &SessionSpec,
     clones: &CloneThrottle,
+    purpose: ManagedPurpose,
+    slots: Slots,
 ) -> crate::error::ApiResult<()> {
     let nodes = node_facts(state, tenant).await?;
-    let checkouts: Vec<CheckoutSlot> = state
-        .workspaces
-        .present_checkouts(tenant, workspace)
-        .await?
-        .into_iter()
-        .map(|c| CheckoutSlot {
-            checkout_id: c.id,
-            node_id: c.node_id,
-            path: c.path,
-        })
-        .collect();
-    let actual = state.sessions.live_managed(tenant, workspace).await?;
+    // Which checkouts this declaration may use. `clone_hosts` is the existing
+    // "rows that make a node a placement host" read, so `ClonesOnly` reuses the
+    // definition of a clone rather than restating it.
+    let allowed: Option<Vec<NodeWorkspaceId>> = match slots {
+        Slots::EveryCheckout => None,
+        Slots::ClonesOnly => Some(
+            state
+                .workspaces
+                .clone_hosts(tenant, workspace)
+                .await?
+                .into_iter()
+                .map(|(_, id)| id)
+                .collect(),
+        ),
+    };
+    let checkouts = placement_slots(
+        state
+            .workspaces
+            .present_checkouts(tenant, workspace)
+            .await?,
+        allowed.as_deref(),
+    );
+    let actual = state
+        .sessions
+        .live_managed(tenant, workspace, Some(purpose))
+        .await?;
     let actual: Vec<Actual> = actual
         .into_iter()
         .map(|(session_id, checkout_id, node_id)| Actual {
@@ -635,6 +752,9 @@ async fn reconcile_workspace(
     if !plan.actions.is_empty() || plan.shortfall > 0 || !plan.needs_clone.is_empty() {
         tracing::info!(
             %workspace,
+            // Two declarations now converge per workspace, so an unlabelled
+            // line would read as one loop contradicting itself.
+            purpose = %purpose,
             desired = plan.desired,
             actual = actual.len(),
             starting = plan.actions.iter().filter(|a| matches!(a, Action::Start { .. })).count(),
@@ -655,7 +775,9 @@ async fn reconcile_workspace(
                 // Losing the race is the NORMAL outcome on a multi-replica
                 // deployment — the unique index means the other replica already
                 // started it. Debug, not warn: it is the mechanism working.
-                if let Err(e) = start_managed(state, tenant, workspace, *node, path, spec).await {
+                if let Err(e) =
+                    start_managed(state, tenant, workspace, *node, path, spec, purpose).await
+                {
                     tracing::debug!(%workspace, node = %node, checkout = %checkout, error = %e, "managed start did not win");
                 }
             }
@@ -876,6 +998,17 @@ pub(crate) async fn node_facts(
     Ok(out)
 }
 
+/// What the session is called in every list a person reads. A review loop looks
+/// exactly like an access session otherwise — same runtime, same checkout, same
+/// node — and "claude (managed)" twice over is the one thing a reader cannot
+/// resolve for themselves.
+fn managed_name(spec: &SessionSpec, purpose: ManagedPurpose) -> String {
+    match purpose {
+        ManagedPurpose::Access => format!("{} (managed)", spec.runtime),
+        ManagedPurpose::ReviewLoop => "review loop (managed)".to_string(),
+    }
+}
+
 /// Start a managed session in a specific checkout. The `path` is that checkout's
 /// working directory — `create_session_at` re-resolves `checkout_id` from it, so
 /// the session binds to the exact clone or worktree the planner chose.
@@ -886,6 +1019,7 @@ async fn start_managed(
     node: NodeId,
     path: &str,
     spec: &SessionSpec,
+    purpose: ManagedPurpose,
 ) -> crate::error::ApiResult<()> {
     // `managed: true` on the INSERT is the whole race arbitration. It used to be
     // a follow-up UPDATE, which meant the losing replica had ALREADY inserted an
@@ -901,9 +1035,10 @@ async fn start_managed(
         workspace,
         node,
         &spec.runtime,
-        Some(format!("{} (managed)", spec.runtime)),
+        Some(managed_name(spec, purpose)),
         path,
         true,
+        purpose,
     )
     .await?;
     Ok(())
@@ -1463,5 +1598,101 @@ mod tests {
         assert!(!truthy(Some(&serde_json::json!(false))));
         assert!(truthy(Some(&serde_json::json!(true))));
         assert!(truthy(Some(&serde_json::json!("true"))));
+    }
+
+    // ── MAIN-326: the control plane's own declaration ────────────────────────
+
+    /// A node that reports the `claude` runtime, so the review-loop spec's
+    /// runtime check does not decide these cases for us.
+    fn loop_capable(n: u8, labels: &[(&str, &str)]) -> NodeFacts {
+        NodeFacts {
+            runtimes: vec!["claude".into()],
+            ..node(n, labels, &[])
+        }
+    }
+
+    /// AC-2. The whole targeting rule is one label, so this is the test that
+    /// says a person's laptop never gets handed the fleet's review loop.
+    #[test]
+    fn the_review_loop_only_lands_on_a_loop_node() {
+        let user_box = loop_capable(1, &[]);
+        let loop_box = loop_capable(2, &[("role", "loop")]);
+        let nodes = [user_box.clone(), loop_box.clone()];
+        let cos = [checkout(1, 1), checkout(2, 2)];
+
+        let p = plan(&review_loop_spec(), &nodes, &cos, &[], PortSafety::Declared);
+        assert_eq!(starts(&p), vec![loop_box.id], "only the loop node");
+        assert!(!starts(&p).contains(&user_box.id));
+    }
+
+    /// A fleet with no loop node at all reports a shortfall rather than placing
+    /// the loop somewhere convenient — the failure has to be visible, because a
+    /// repo silently going unreviewed looks exactly like a repo with no PRs.
+    #[test]
+    fn no_loop_node_is_a_shortfall_not_a_substitute() {
+        let nodes = [loop_capable(1, &[]), loop_capable(2, &[])];
+        let p = plan(
+            &review_loop_spec(),
+            &nodes,
+            &[checkout(1, 1)],
+            &[],
+            PortSafety::Declared,
+        );
+        assert!(starts(&p).is_empty());
+        assert_eq!(p.shortfall, 1);
+    }
+
+    /// `Single`, and the reason for it: a second loop node must not mean two
+    /// agents posting the same verdict on the same PR.
+    #[test]
+    fn two_loop_nodes_still_get_one_review_loop() {
+        let nodes = [
+            loop_capable(1, &[("role", "loop")]),
+            loop_capable(2, &[("role", "loop")]),
+        ];
+        let p = plan(
+            &review_loop_spec(),
+            &nodes,
+            &[checkout(1, 1), checkout(2, 2)],
+            &[],
+            PortSafety::Declared,
+        );
+        assert_eq!(starts(&p).len(), 1);
+    }
+
+    fn present(id: u8, node: u8) -> crate::repo::workspaces::PresentCheckout {
+        crate::repo::workspaces::PresentCheckout {
+            id: NodeWorkspaceId(Uuid::from_u128(2000 + id as u128)),
+            node_id: NodeId(Uuid::from_u128(node as u128)),
+            path: format!("/w/{id}"),
+        }
+    }
+
+    /// AC-1's "per repo". The loop node holds the clone and two worktrees; the
+    /// access declaration wants a terminal in each, the review loop wants one
+    /// reviewer for the repo — not three agents racing each other's PRs.
+    #[test]
+    fn the_review_loop_takes_the_clone_and_not_the_worktrees() {
+        let clone = present(1, 1);
+        let all = vec![clone.clone(), present(2, 1), present(3, 1)];
+
+        assert_eq!(placement_slots(all.clone(), None).len(), 3, "access: each");
+        let only_clone = placement_slots(all, Some(&[clone.id]));
+        assert_eq!(only_clone.len(), 1);
+        assert_eq!(only_clone[0].checkout_id, clone.id);
+    }
+
+    /// The spec is the control plane's, not a workspace's, and its values are
+    /// what the rest of this card is built on — a selector typo would silently
+    /// place nothing at all, which reads as "no loop node" forever.
+    #[test]
+    fn the_review_loop_spec_is_what_the_card_declares() {
+        let s = review_loop_spec();
+        assert_eq!(s.runtime, "claude");
+        assert_eq!(
+            s.node_selector.get("role").map(String::as_str),
+            Some("loop")
+        );
+        assert_eq!(s.replicas, Replicas::Single);
     }
 }

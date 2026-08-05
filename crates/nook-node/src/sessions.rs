@@ -58,6 +58,10 @@ pub enum Cmd {
         /// WORKSPACE's tenant, not this node's — they differ under
         /// cross-tenant placement, which is the case it exists for.
         tenant_id: Option<String>,
+        /// What the control plane declared this session FOR (MAIN-326). `None`
+        /// — a person's terminal — just opens the runtime, which is everything
+        /// this ever did.
+        managed_purpose: Option<nook_types::ManagedPurpose>,
     },
     StartAuth {
         session_id: SessionId,
@@ -150,6 +154,7 @@ impl Manager {
                 unsatisfied,
                 workspace_id,
                 tenant_id,
+                managed_purpose,
             } => self.start(
                 session_id,
                 &runtime,
@@ -160,6 +165,7 @@ impl Manager {
                 &unsatisfied,
                 workspace_id.as_deref(),
                 tenant_id.as_deref(),
+                managed_purpose,
             ),
             Cmd::StartAuth {
                 session_id,
@@ -211,17 +217,41 @@ impl Manager {
         unsatisfied: &[String],
         workspace_id: Option<&str>,
         tenant_id: Option<&str>,
+        managed_purpose: Option<nook_types::ManagedPurpose>,
     ) {
         // The runtime string is the executable to launch. Restrict to the
         // known set so the control plane can't run arbitrary commands.
         if !crate::capabilities::KNOWN_RUNTIMES.contains(&runtime) {
             return self.session_failed(session_id, format!("unknown runtime '{runtime}'"));
         }
+        // A skill this agent has never heard of makes `/nook-review` ordinary
+        // prose: the loop would "start" and then sit in the checkout doing
+        // nothing, forever, looking healthy from every angle. Refuse instead —
+        // the same call `loop_job` makes, and for the same reason. The
+        // reconciler retries next pass, exactly as it does for a missing
+        // runtime, so a node that gets the skill converges without help.
+        if let Some(skill) = managed_purpose.and_then(drive_skill) {
+            if !crate::wizard::skills::is_installed(skill) {
+                return self.session_failed(
+                    session_id,
+                    format!(
+                        "skill {skill} is not installed on this node — the loop skills ship \
+                         with the agent binary and are written on `nook run`; this node is \
+                         running a build that predates them, or could not write its agent \
+                         skill directory"
+                    ),
+                );
+            }
+        }
         let tmux_name = format!("{}{}", tmux::SESSION_PREFIX, session_id.0.simple());
         // Restart of an ended session: discard the old PTY before re-attaching.
         self.sessions.remove(&session_id);
 
-        if !tmux::session_exists(&tmux_name) {
+        // Whether WE created the tmux session, which is the only case that may
+        // be driven: re-attaching to a live review loop must not type a second
+        // `/loop` into an agent already running one.
+        let fresh = !tmux::session_exists(&tmux_name);
+        if fresh {
             // The canonical (hyphenated) uuid, not the tmux name's simple form,
             // so `GET /api/v1/sessions/{id}` inside the session resolves.
             let sid = session_id.0.to_string();
@@ -242,6 +272,11 @@ impl Manager {
         }
         match self.attach_pty(session_id, &tmux_name, cols, rows, false) {
             Ok(()) => {
+                if fresh {
+                    if let Some(skill) = managed_purpose.and_then(drive_skill) {
+                        drive_loop_skill(&tmux_name, skill);
+                    }
+                }
                 let _ = self.ctl.blocking_send(NodeToControl::SessionStarted {
                     session_id,
                     tmux_session: tmux_name,
@@ -512,5 +547,67 @@ impl Manager {
             session_id,
             exit_code: None,
         });
+    }
+}
+
+/// The skill a declared purpose drives, if it drives one (MAIN-326).
+///
+/// A fixed table keyed by purpose — the node chooses the command, never the
+/// wire, exactly as it does for a runtime's login flow. `Access` drives nothing:
+/// it is a terminal for a person, and typing into it would be typing over them.
+fn drive_skill(purpose: nook_types::ManagedPurpose) -> Option<&'static str> {
+    match purpose {
+        nook_types::ManagedPurpose::Access => None,
+        nook_types::ManagedPurpose::ReviewLoop => Some("nook-review"),
+    }
+}
+
+/// The runtime needs a beat to come up before it can take input. We do not read
+/// its output to decide when it is ready — the same constraint `loop_job` works
+/// under — so wait a fixed moment, then type.
+const SKILL_STARTUP_DELAY: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Put a declared session to work: `/loop /<skill>`, typed once the runtime is
+/// up.
+///
+/// `/loop` with NO interval, so the agent paces its own iterations — a review
+/// pass takes as long as the PRs in front of it take, and a fixed interval would
+/// either stack passes on a busy repo or idle on a quiet one.
+///
+/// On its own thread because the delay must not block the session manager: that
+/// thread is what every other terminal on this machine gets its keystrokes
+/// through, and five seconds of it is five seconds of a frozen fleet.
+fn drive_loop_skill(tmux_name: &str, skill: &'static str) {
+    let tmux_name = tmux_name.to_string();
+    std::thread::spawn(move || {
+        std::thread::sleep(SKILL_STARTUP_DELAY);
+        let line = format!("/loop /{skill}");
+        match tmux::send_keys(&tmux_name, &line) {
+            Ok(()) => tracing::info!(session = %tmux_name, %line, "started the declared loop"),
+            // Loud, because the session is now a live agent sitting idle: it
+            // looks exactly like a working review loop from the control plane.
+            Err(e) => {
+                tracing::error!(session = %tmux_name, %line, error = %e, "could not start the declared loop")
+            }
+        }
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nook_types::ManagedPurpose;
+
+    /// The node — never the wire — decides what runs, so this table IS the
+    /// contract. A purpose that mapped to the wrong skill would put a build
+    /// agent on the review loop's node with nobody having asked for one.
+    #[test]
+    fn only_the_review_loop_drives_a_skill() {
+        assert_eq!(drive_skill(ManagedPurpose::ReviewLoop), Some("nook-review"));
+        assert_eq!(
+            drive_skill(ManagedPurpose::Access),
+            None,
+            "a person's terminal is theirs — typing into it types over them"
+        );
     }
 }

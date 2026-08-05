@@ -40,6 +40,7 @@
 //! - [`TestBed::db`] is the **engine-agnostic** one — an [`EnginePool`], the same
 //!   type production code takes. Anything written against it runs on either
 //!   engine. New tests should use it.
+//!
 //! There is no second surface. The `pool: PgPool` escape hatch that stood
 //! beside `db` through the conversion is gone (MAIN-268): every test now
 //! reaches its database engine-agnostically, and the guard in

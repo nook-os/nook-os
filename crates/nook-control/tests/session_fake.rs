@@ -40,6 +40,7 @@ async fn start(
         created_by: creator,
         checkout_id: None,
         managed: false,
+        managed_purpose: ManagedPurpose::Access,
     })
     .await
     .unwrap()
@@ -270,6 +271,7 @@ async fn a_sessions_checkout_summary_is_filled_from_its_binding() {
             created_by: None,
             checkout_id: Some(checkout),
             managed: false,
+            managed_purpose: ManagedPurpose::Access,
         })
         .await
         .unwrap();

@@ -149,7 +149,11 @@ pub async fn reconcile_status(
         .collect();
     let actual: Vec<recon::Actual> = state
         .sessions
-        .live_managed(auth.tenant_id, id)
+        // The WORKSPACE's declaration, which is what this endpoint reports on.
+        // The control plane's review loop (MAIN-326) is not a workspace's to
+        // account for, and counting it here would read as a replica nobody
+        // asked for.
+        .live_managed(auth.tenant_id, id, Some(ManagedPurpose::Access))
         .await?
         .into_iter()
         .map(|(session_id, checkout_id, node_id)| recon::Actual {
@@ -806,7 +810,13 @@ pub async fn delete(
     // "kill them first" could never be satisfied and the workspace could not be
     // deleted at all (MAIN-363). Deleting the declaration is the only way to
     // stop them, so deletion is exactly what may.
-    let managed = state.sessions.live_managed(auth.tenant_id, id).await?;
+    // EVERY purpose, not just the workspace's own: a review loop is equally
+    // something deleting the declaration is the only way to stop, so counting it
+    // as a session "somebody started" would make the workspace undeletable.
+    let managed = state
+        .sessions
+        .live_managed(auth.tenant_id, id, None)
+        .await?;
     let live = state.workspaces.live_session_count(id).await?;
     let unmanaged = live.saturating_sub(managed.len() as i64).max(0);
     if unmanaged > 0 {
