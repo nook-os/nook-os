@@ -65,21 +65,35 @@ export type PaneMode = "push" | "overlay";
  *  uselessness — so an unpinned pane floats instead. */
 export const MIN_CONTENT_WIDTH = 640;
 
+/** MAIN-187's `compact` breakpoint — a phone held upright. Repeated from
+ *  `--nook-bp-compact` because CSS custom properties cannot be read inside a
+ *  media query and JS cannot read one at all; the token exists so both use the
+ *  same number rather than inventing a fourth. */
+export const COMPACT_WIDTH = 640;
+
 export const MIN_PANE_WIDTH = 180;
 export const MAX_PANE_WIDTH = 480;
 export const DEFAULT_PANE_WIDTH = 260;
 
 /**
- * **Pinned means pushed, at any width.** That is the whole point of the pin:
- * "keep it beside the terminal even when things are tight" is a decision only
- * the person looking at the screen can make, and a width threshold that
- * overrode it would silently take it back.
+ * **Pinned means pushed, at any width — except on a phone.** The pin is a
+ * decision only the person looking at the screen can make, and a width
+ * threshold that overrode it would silently take it back; that reasoning holds
+ * right down to a split-screen laptop and is why MAIN-414 gave the pin
+ * precedence.
+ *
+ * It stops holding at `compact` (MAIN-418 AC-1). At 375px there is no "beside"
+ * to keep the terminal in: a pushed 260px pane leaves ~115px of terminal, which
+ * is not a smaller version of the desktop layout but a broken one. So on a
+ * phone the pane is always a drawer over the terminal, and the pin keeps its
+ * meaning everywhere it can be honoured.
  */
 export function paneMode(opts: {
   pinned: boolean;
   viewportWidth: number;
   paneWidth: number;
 }): PaneMode {
+  if (opts.viewportWidth <= COMPACT_WIDTH) return "overlay";
   if (opts.pinned) return "push";
   return opts.viewportWidth - opts.paneWidth < MIN_CONTENT_WIDTH
     ? "overlay"

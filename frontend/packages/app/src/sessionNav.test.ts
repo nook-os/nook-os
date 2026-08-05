@@ -1,6 +1,7 @@
 // MAIN-414: the navigator's rules, which a screenshot cannot check.
 import { describe, expect, it } from "vitest";
 import {
+  COMPACT_WIDTH,
   DEFAULT_NAV_PREFS,
   DEFAULT_PANE_WIDTH,
   MAX_PANE_WIDTH,
@@ -125,10 +126,21 @@ describe("paneMode", () => {
     expect(paneMode({ ...at, pinned: true })).toBe("push");
   });
 
-  it("pinned pushes however narrow it gets", () => {
-    expect(paneMode({ pinned: true, viewportWidth: 320, paneWidth: MAX_PANE_WIDTH })).toBe(
-      "push",
-    );
+  it("pinned pushes however narrow it gets — until a phone", () => {
+    // Above compact the pin still wins at any width (MAIN-414 AC-5).
+    expect(
+      paneMode({ pinned: true, viewportWidth: COMPACT_WIDTH + 1, paneWidth: MAX_PANE_WIDTH }),
+    ).toBe("push");
+  });
+
+  it("is ALWAYS a drawer on a phone, pinned or not (MAIN-418 AC-1)", () => {
+    // At 375px a pushed 260px pane leaves ~115px of terminal: not a smaller
+    // desktop layout, a broken one. The pin keeps its meaning everywhere it
+    // can be honoured, and this is the one width where it cannot.
+    for (const w of [320, 375, 414, COMPACT_WIDTH]) {
+      expect(paneMode({ pinned: true, viewportWidth: w, paneWidth: 260 })).toBe("overlay");
+      expect(paneMode({ pinned: false, viewportWidth: w, paneWidth: 260 })).toBe("overlay");
+    }
   });
 });
 

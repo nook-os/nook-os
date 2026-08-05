@@ -328,6 +328,62 @@ export function ContextMenuProvider({ children }: { children: React.ReactNode })
     return () => document.removeEventListener("contextmenu", onContextMenu, true);
   }, [openAt]);
 
+  // MAIN-418 AC-4: LONG-PRESS opens the same menu on touch.
+  //
+  // A phone has no right-click, so every action that lives only in a context
+  // menu is unreachable without this — and after MAIN-416 that includes rename
+  // and stop, which are the pane's only actions. Long-press is the platform
+  // gesture for it on both iOS and Android.
+  //
+  // ~500ms, cancelled by movement (that is a scroll, not a press) and by the
+  // finger lifting early. `touchend` is not needed to cancel the timer — the
+  // press has already fired by then or been cleared — but a MOVE must cancel,
+  // or scrolling a long list pops a menu under your thumb.
+  useEffect(() => {
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    let startedAt: { x: number; y: number } | null = null;
+
+    const clear = () => {
+      if (timer) clearTimeout(timer);
+      timer = null;
+      startedAt = null;
+    };
+
+    const onStart = (e: TouchEvent) => {
+      if (e.touches.length !== 1) return; // a pinch or a second finger is not a press
+      const t = e.touches[0];
+      startedAt = { x: t.clientX, y: t.clientY };
+      const target = e.target;
+      timer = setTimeout(() => {
+        const resolved = resolveItems(target);
+        // A legacy island still owns its own gesture; do not open two menus.
+        if (resolved === "native") return;
+        openAt(t.clientX, t.clientY, resolved);
+      }, 500);
+    };
+
+    const onMove = (e: TouchEvent) => {
+      if (!startedAt || !e.touches.length) return;
+      const t = e.touches[0];
+      // 10px of slop: a finger resting on a screen is never perfectly still.
+      if (Math.abs(t.clientX - startedAt.x) > 10 || Math.abs(t.clientY - startedAt.y) > 10) {
+        clear();
+      }
+    };
+
+    document.addEventListener("touchstart", onStart, { passive: true });
+    document.addEventListener("touchmove", onMove, { passive: true });
+    document.addEventListener("touchend", clear, { passive: true });
+    document.addEventListener("touchcancel", clear, { passive: true });
+    return () => {
+      clear();
+      document.removeEventListener("touchstart", onStart);
+      document.removeEventListener("touchmove", onMove);
+      document.removeEventListener("touchend", clear);
+      document.removeEventListener("touchcancel", clear);
+    };
+  }, [openAt]);
+
   // AC-5: keyboard invocation — Shift+F10 and the ContextMenu (Menu) key open
   // the menu at the focused element, positioned by its bounding rect.
   useEffect(() => {

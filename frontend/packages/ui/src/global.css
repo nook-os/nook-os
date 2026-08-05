@@ -6373,3 +6373,65 @@ tr:hover .row-action,
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+/* ── Sessions on a phone (MAIN-418) ─────────────────────────────────────────
+   Scoped to the session surfaces on purpose: NG-1 keeps the Board, Nodes and
+   Operator pages out of this card, and NG-3 keeps the desktop layout exactly
+   as it is — everything below is inside a compact media query. */
+@media (max-width: 640px) {
+  /* AC-6: nothing in the session view may make the DOCUMENT scroll sideways.
+     The strip scrolls, the tree scrolls, the page does not. */
+  .session-view {
+    max-width: 100vw;
+    overflow-x: hidden;
+  }
+
+  /* AC-1: a drawer, never a column. `paneMode` already returns `overlay` at
+     this width whatever the pin says; this is the visual half — it takes most
+     of the screen, because a 260px pane on a 375px phone is a column of
+     ellipses. */
+  .session-nav {
+    width: min(86vw, 340px) !important;
+    box-shadow: 8px 0 24px rgba(0, 0, 0, 0.6);
+  }
+  /* Dragging an edge is a mouse gesture and the drawer is width-fixed here. */
+  .session-nav-resize {
+    display: none;
+  }
+
+  /* AC-4: touch targets. 44px is the smaller of the two platform minimums
+     (iOS 44, Android 48); the rows are the things people miss. */
+  .session-nav-item,
+  .session-nav-folder-head {
+    min-height: 44px;
+  }
+  .session-nav-icon,
+  .session-nav-tab {
+    min-width: 44px;
+    min-height: 44px;
+  }
+  .session-tab {
+    min-height: 44px;
+  }
+  .session-tab-close {
+    min-width: 32px;
+    min-height: 32px;
+  }
+
+  /* AC-5: one-handed. The finder is the first thing a thumb reaches for, so it
+     gets a real target rather than a 12px line of text, and 16px stops iOS
+     zooming the page when the field takes focus — which is itself a source of
+     the horizontal scroll AC-6 forbids. */
+  .session-nav-find {
+    min-height: 44px;
+  }
+  .session-nav-find input {
+    font-size: 16px;
+  }
+
+  /* AC-2: the strip scrolls with a finger and keeps its momentum. */
+  .session-tabs {
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior-x: contain;
+  }
+}

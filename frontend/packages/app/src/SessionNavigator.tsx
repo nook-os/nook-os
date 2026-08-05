@@ -42,6 +42,7 @@ import {
   navFolders,
   paneMode,
   parseNavPrefs,
+  COMPACT_WIDTH,
   DEFAULT_NAV_PREFS,
   MAX_PANE_WIDTH,
   MIN_PANE_WIDTH,
@@ -210,6 +211,9 @@ export function SessionNavigator({ activeId }: { activeId?: string }) {
     viewportWidth,
     paneWidth: width,
   });
+  // On a phone the pane covers the terminal, so leaving it open after a pick
+  // would hide the thing you just asked for (MAIN-418 AC-1).
+  const compact = viewportWidth <= COMPACT_WIDTH;
 
   // Drag the trailing edge. Tracked on the document so the pointer may leave
   // the 4px handle mid-drag — which it does, constantly — without the resize
@@ -326,7 +330,10 @@ export function SessionNavigator({ activeId }: { activeId?: string }) {
                       className={`session-nav-item${s.id === activeId ? " active" : ""}`}
                       style={{ "--group-hue": f.hue } as React.CSSProperties}
                       title={`${s.name} · ${s.runtime}${s.nodeName ? ` · ${s.nodeName}` : ""}`}
-                      onClick={() => navigate(`/sessions/${s.id}`)}
+                      onClick={() => {
+                        navigate(`/sessions/${s.id}`);
+                        if (compact) write({ ...prefs, collapsed: true });
+                      }}
                     >
                       {agent === "running" ? (
                         <Loader2 size={11} className="spin running" />
