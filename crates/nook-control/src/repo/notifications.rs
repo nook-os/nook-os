@@ -28,7 +28,7 @@
 
 use async_trait::async_trait;
 use nook_db::dialect::type_mapping;
-use nook_db::{params, Db, DbPool};
+use nook_db::{params, Db, DbPool, DbValue};
 use nook_types::*;
 use serde_json::Value;
 use uuid::Uuid;
@@ -387,13 +387,13 @@ impl NotificationRepository for DbNotificationRepository {
                     new.kind,
                     new.name,
                     new.config,
-                    // `Some(..)` deliberately: a bare `Vec<String>` binds as
-                    // `DbValue::TextList`, which is the `= ANY($n)` operand and
-                    // gets expanded into one placeholder per element on SQLite.
-                    // A text[] COLUMN value is the OptTextArray arm — one bind,
-                    // written as JSON on SQLite (MAIN-327 AC-4).
-                    Some(new.levels),
-                    Some(new.kinds),
+                    // Column values, so the array arm: one bind, written as
+                    // JSON on SQLite (MAIN-327 AC-4). This used to be spelled
+                    // `Some(..)` purely to dodge `Vec<String>`'s expanding
+                    // conversion; MAIN-310 removed that conversion, so the
+                    // position is now named rather than worked around.
+                    DbValue::TextArray(new.levels),
+                    DbValue::TextArray(new.kinds),
                     new.secret
                 ],
             )

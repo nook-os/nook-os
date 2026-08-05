@@ -34,7 +34,7 @@
 use async_trait::async_trait;
 use nook_db::dialect::{json, time_math, type_mapping};
 use nook_db::paging::{DbPage, ListSpec, PageArgs};
-use nook_db::{params, Db, DbPool};
+use nook_db::{params, Db, DbPool, DbValue};
 use nook_types::*;
 
 use crate::error::{ApiError, ApiResult};
@@ -1413,7 +1413,7 @@ impl WorkspaceRepository for DbWorkspaceRepository {
                      WHERE node_id = $1 AND path != ALL($2) AND missing_at IS NULL",
                     type_mapping(self.db.engine()).now()
                 ),
-                params![node, reported_paths.to_vec()],
+                params![node, DbValue::TextList(reported_paths.to_vec())],
             )
             .await?)
     }
@@ -1423,7 +1423,7 @@ impl WorkspaceRepository for DbWorkspaceRepository {
             .db
             .query_scalar_all(
                 "SELECT path FROM node_workspaces WHERE node_id = $1 AND path = ANY($2)",
-                params![node, paths.to_vec()],
+                params![node, DbValue::TextList(paths.to_vec())],
             )
             .await?)
     }
