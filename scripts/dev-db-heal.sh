@@ -15,6 +15,11 @@
 #   scripts/dev-db-heal.sh --fix --yes     delete them without the prompt
 #   scripts/dev-db-heal.sh --chat [...]    target chat's ledger (chat._sqlx_migrations)
 #
+# It also DETECTS the other ledger failure — a version applied from a different
+# file than the tree now holds ("previously applied but has been modified") —
+# and refuses to touch it, because the repair there is to recreate the dev
+# volume, not to rewrite the ledger (MAIN-425 AC-5).
+#
 # Safety (AC-3): it refuses when APP_ENV=production and refuses any DATABASE_URL
 # whose host is not local or a compose service name. The heuristic is deliberately
 # strict — it would rather refuse a legitimate but unusual dev URL than ever touch
@@ -110,6 +115,67 @@ if [[ "$(psql "$DATABASE_URL" -tAc "SELECT to_regclass('$LEDGER')")" == "" ]]; t
 fi
 
 mapfile -t applied < <(psql "$DATABASE_URL" -tAc "SELECT version FROM $LEDGER ORDER BY version")
+
+# ── modified migrations (MAIN-425 AC-5) ─────────────────────────────────────
+# A DIFFERENT failure from the orphan rows above, and one this script must
+# report rather than fix. A reused worktree directory keeps its pgdata volume
+# across branch switches, so version N can have been applied from an abandoned
+# branch whose N_*.sql differed. Boot then dies with "migration N was previously
+# applied but has been modified" — fatal in dev too, because
+# `run_with_dev_tolerance` tolerates a MISSING version and never a changed one.
+#
+# Deleting the row would be the wrong repair twice over: the migrator would
+# re-apply N against a schema that already has it, and the checksum is the only
+# proof that the schema in front of you is the schema the repo describes
+# (CLAUDE.md). So this reports and stops. The answer is to recreate the volume.
+#
+# sqlx checksums a migration with SHA-384 over the file's bytes, which is what
+# makes this comparable without running the migrator.
+modified=()
+if command -v sha384sum >/dev/null; then
+  while IFS='|' read -r v stored; do
+    [[ -z "$v" ]] && continue
+    # Glob rather than `ls | grep`: the version's up-migration, down excluded.
+    f=""
+    for cand in "$MIG_DIR"/"$(printf '%04d' "$v")"_*.sql; do
+      case "$cand" in
+        *.down.sql) continue ;;
+      esac
+      [[ -f "$cand" ]] && { f="$cand"; break; }
+    done
+    [[ -z "$f" ]] && continue   # missing file is the orphan case, handled below
+    actual=$(sha384sum "$f" | cut -d' ' -f1)
+    [[ "$stored" != "$actual" ]] && modified+=("$v|$(basename "$f")")
+  done < <(psql "$DATABASE_URL" -tAc \
+    "SELECT version, encode(checksum, 'hex') FROM $LEDGER ORDER BY version")
+fi
+
+if [[ "${#modified[@]}" -gt 0 ]]; then
+  echo "✗ $LEDGER: ${#modified[@]} migration(s) applied from a DIFFERENT file than the tree holds:" >&2
+  for m in "${modified[@]}"; do
+    echo "    version ${m%%|*}  (${m##*|})" >&2
+  done
+  cat >&2 <<'MSG'
+
+  This is NOT the orphan case and --fix will not touch it. The ledger row is
+  correct about what ran; the tree has since changed underneath it. Deleting the
+  row would re-apply the migration onto a schema that already has it, and the
+  checksum is the only proof the schema matches the repo.
+
+  The dev answer is to recreate the database, which is cheap because a dev
+  volume holds nothing you need:
+
+      docker compose down -v && ./run.sh
+
+  For a SECOND stack, take only its own volumes with it:
+
+      COMPOSE_PROJECT_NAME=<that stack's project> docker compose down -v
+
+  If the modified file is one YOU changed, restore it instead — an applied
+  migration is append-only; the fix is a NEW numbered file.
+MSG
+  exit 1
+fi
 
 orphans=()
 for v in "${applied[@]}"; do

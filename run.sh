@@ -287,11 +287,11 @@ say "Checking prerequisites..."
 command -v docker >/dev/null || { echo "docker is required"; exit 1; }
 docker compose version >/dev/null || { echo "docker compose v2 is required"; exit 1; }
 
-if [ ! -f .env ]; then
-  say "No .env found — creating from .env.example"
-  cp .env.example .env
-  echo "  Edit .env to point OIDC_* at your IdP, or leave AUTH_DEV_MODE=true for dev-login."
-fi
+# One implementation of "what a checkout is missing" — .env and the dev agent
+# certificate — shared with scripts/dev-up.sh so a fresh worktree and a reset
+# primary checkout cannot drift (MAIN-425).
+./scripts/dev-bootstrap.sh
+echo "  Edit .env to point OIDC_* at your IdP, or leave AUTH_DEV_MODE=true for dev-login."
 
 say "Destroying previous environment (docker compose down -v)..."
 docker compose down -v --remove-orphans
