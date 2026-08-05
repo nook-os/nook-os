@@ -9,9 +9,9 @@ use nook_control::auth::{AuthCtx, Principal};
 use nook_control::routes::bulk::bulk_tasks;
 use nook_control::services::identity::{login_identity, IdentityClaims};
 use nook_control::state::AppState;
+use nook_db::{params, Db};
 use nook_testkit::TestBed;
 use nook_types::*;
-use sqlx::PgPool;
 use uuid::Uuid;
 
 fn claims(subject: &str, name: &str) -> IdentityClaims {
@@ -36,46 +36,47 @@ fn auth(user: UserId, tenant: TenantId) -> AuthCtx {
     }
 }
 
-async fn add_member(db: &PgPool, tenant: TenantId, name: &str) -> UserId {
+async fn add_member(bed: &TestBed, tenant: TenantId, name: &str) -> UserId {
     let id = UserId::new();
-    sqlx::query(
-        "INSERT INTO users (id, tenant_id, person_id, display_name, email, role)
+    bed.db()
+        .exec(
+            "INSERT INTO users (id, tenant_id, person_id, display_name, email, role)
          VALUES ($1, $2, gen_random_uuid(), $3, $4, 'member')",
-    )
-    .bind(id)
-    .bind(tenant)
-    .bind(name)
-    .bind(format!("{}-{}@example.test", name, id.0.simple()))
-    .execute(db)
-    .await
-    .expect("member");
+            params![
+                id,
+                tenant,
+                name,
+                format!("{}-{}@example.test", name, id.0.simple())
+            ],
+        )
+        .await
+        .expect("member");
     id
 }
 
-async fn make_board(db: &PgPool, tenant: TenantId) -> BoardId {
-    let board: BoardId = sqlx::query_scalar(
-        "INSERT INTO boards (id, tenant_id, name, key, provider)
+async fn make_board(bed: &TestBed, tenant: TenantId) -> BoardId {
+    let board: BoardId = bed
+        .db()
+        .query_scalar(
+            "INSERT INTO boards (id, tenant_id, name, key, provider)
          VALUES ($1, $2, 'b', $3, 'local') RETURNING id",
-    )
-    .bind(BoardId::new())
-    .bind(tenant)
-    .bind(format!("BK{}", &Uuid::now_v7().simple().to_string()[..6]).to_uppercase())
-    .fetch_one(db)
-    .await
-    .expect("board");
-    for (name, pos, ty) in [("Todo", 0, "unstarted"), ("Done", 1, "completed")] {
-        sqlx::query(
-            "INSERT INTO board_columns (id, board_id, name, position, type)
-             VALUES ($1, $2, $3, $4, $5)",
+            params![
+                BoardId::new(),
+                tenant,
+                format!("BK{}", &Uuid::now_v7().simple().to_string()[..6]).to_uppercase()
+            ],
         )
-        .bind(Uuid::now_v7())
-        .bind(board)
-        .bind(name)
-        .bind(pos)
-        .bind(ty)
-        .execute(db)
         .await
-        .expect("column");
+        .expect("board");
+    for (name, pos, ty) in [("Todo", 0, "unstarted"), ("Done", 1, "completed")] {
+        bed.db()
+            .exec(
+                "INSERT INTO board_columns (id, board_id, name, position, type)
+             VALUES ($1, $2, $3, $4, $5)",
+                params![Uuid::now_v7(), board, name, pos, ty],
+            )
+            .await
+            .expect("column");
     }
     board
 }
@@ -149,8 +150,8 @@ async fn bulk_actions_apply_skip_epics_and_respect_visibility() {
         .await
         .expect("owner in");
     let a = auth(owner.id, tenant.id);
-    let member = add_member(&bed.pool, tenant.id, "mia").await;
-    let board = make_board(&bed.pool, tenant.id).await;
+    let member = add_member(&bed, tenant.id, "mia").await;
+    let board = make_board(&bed, tenant.id).await;
 
     let t1 = make_task(&state, tenant.id, board, owner.id, "one", None).await;
     let t2 = make_task(&state, tenant.id, board, owner.id, "two", None).await;
@@ -161,7 +162,7 @@ async fn bulk_actions_apply_skip_epics_and_respect_visibility() {
     let (other_owner, other_tenant) = login_identity(&state, claims(&osub, "Other"))
         .await
         .expect("other in");
-    let other_board = make_board(&bed.pool, other_tenant.id).await;
+    let other_board = make_board(&bed, other_tenant.id).await;
     let foreign = make_task(
         &state,
         other_tenant.id,
@@ -192,10 +193,10 @@ async fn bulk_actions_apply_skip_epics_and_respect_visibility() {
         Some("not found in your tenant")
     );
     // t1 really changed; the epic and foreign task did not.
-    assert_eq!(task_type(&bed.pool, t1.id).await, "chore");
-    assert_eq!(task_type(&bed.pool, epic.id).await, "epic");
+    assert_eq!(task_type(&bed, t1.id).await, "chore");
+    assert_eq!(task_type(&bed, epic.id).await, "epic");
     assert_eq!(
-        task_type(&bed.pool, foreign.id).await,
+        task_type(&bed, foreign.id).await,
         "task",
         "foreign untouched"
     );
@@ -203,8 +204,8 @@ async fn bulk_actions_apply_skip_epics_and_respect_visibility() {
     // ── priority (happy path) ───────────────────────────────────────────────
     let resp = call(&state, a, req(&[t1.id, t2.id], "priority", Some("2"))).await;
     assert_eq!(resp.updated, 2);
-    assert_eq!(task_priority(&bed.pool, t1.id).await, 2);
-    assert_eq!(task_priority(&bed.pool, t2.id).await, 2);
+    assert_eq!(task_priority(&bed, t1.id).await, 2);
+    assert_eq!(task_priority(&bed, t2.id).await, 2);
 
     // ── agent_ready on/off, epic skipped with its own reason ────────────────
     let resp = call(&state, a, req(&[t1.id, epic.id], "agent_ready", Some("on"))).await;
@@ -214,12 +215,12 @@ async fn bulk_actions_apply_skip_epics_and_respect_visibility() {
         Some("epics are never agent-ready")
     );
     assert!(
-        has_label(&bed.pool, t1.id, "agent-ready").await,
+        has_label(&bed, t1.id, "agent-ready").await,
         "label attached"
     );
     let _ = call(&state, a, req(&[t1.id], "agent_ready", Some("off"))).await;
     assert!(
-        !has_label(&bed.pool, t1.id, "agent-ready").await,
+        !has_label(&bed, t1.id, "agent-ready").await,
         "label removed"
     );
 
@@ -231,72 +232,71 @@ async fn bulk_actions_apply_skip_epics_and_respect_visibility() {
     )
     .await;
     assert_eq!(resp.updated, 1);
-    assert_eq!(task_assignee(&bed.pool, t1.id).await, Some(member.0));
+    assert_eq!(task_assignee(&bed, t1.id).await, Some(member.0));
     let _ = call(&state, a, req(&[t1.id], "assignee", None)).await;
-    assert_eq!(task_assignee(&bed.pool, t1.id).await, None, "unassigned");
+    assert_eq!(task_assignee(&bed, t1.id).await, None, "unassigned");
 
     // ── move to a column by type ────────────────────────────────────────────
     let resp = call(&state, a, req(&[t1.id], "move_column", Some("completed"))).await;
     assert_eq!(resp.updated, 1);
-    assert_eq!(column_type(&bed.pool, t1.id).await, "completed");
+    assert_eq!(column_type(&bed, t1.id).await, "completed");
 
     // ── archive ─────────────────────────────────────────────────────────────
     let resp = call(&state, a, req(&[t2.id], "archive", None)).await;
     assert_eq!(resp.updated, 1);
-    assert!(is_archived(&bed.pool, t2.id).await, "archived_at set");
+    assert!(is_archived(&bed, t2.id).await, "archived_at set");
 
     bed.teardown().await;
 }
 
-async fn task_type(db: &PgPool, id: TaskId) -> String {
-    sqlx::query_scalar::<_, String>("SELECT type FROM tasks WHERE id = $1")
-        .bind(id)
-        .fetch_one(db)
+async fn task_type(bed: &TestBed, id: TaskId) -> String {
+    bed.db()
+        .query_scalar("SELECT type FROM tasks WHERE id = $1", params![id])
         .await
         .unwrap()
 }
-async fn task_priority(db: &PgPool, id: TaskId) -> i32 {
-    sqlx::query_scalar::<_, i32>("SELECT priority FROM tasks WHERE id = $1")
-        .bind(id)
-        .fetch_one(db)
+async fn task_priority(bed: &TestBed, id: TaskId) -> i32 {
+    bed.db()
+        .query_scalar("SELECT priority FROM tasks WHERE id = $1", params![id])
         .await
         .unwrap()
 }
-async fn task_assignee(db: &PgPool, id: TaskId) -> Option<Uuid> {
-    sqlx::query_scalar::<_, Option<Uuid>>("SELECT assignee_user_id FROM tasks WHERE id = $1")
-        .bind(id)
-        .fetch_one(db)
+async fn task_assignee(bed: &TestBed, id: TaskId) -> Option<Uuid> {
+    bed.db()
+        .query_scalar::<Option<Uuid>>(
+            "SELECT assignee_user_id FROM tasks WHERE id = $1",
+            params![id],
+        )
         .await
         .unwrap()
 }
-async fn is_archived(db: &PgPool, id: TaskId) -> bool {
-    sqlx::query_scalar::<_, Option<chrono::DateTime<chrono::Utc>>>(
-        "SELECT archived_at FROM tasks WHERE id = $1",
-    )
-    .bind(id)
-    .fetch_one(db)
-    .await
-    .unwrap()
-    .is_some()
+async fn is_archived(bed: &TestBed, id: TaskId) -> bool {
+    bed.db()
+        .query_scalar::<Option<chrono::DateTime<chrono::Utc>>>(
+            "SELECT archived_at FROM tasks WHERE id = $1",
+            params![id],
+        )
+        .await
+        .unwrap()
+        .is_some()
 }
-async fn column_type(db: &PgPool, id: TaskId) -> String {
-    sqlx::query_scalar::<_, String>(
-        "SELECT c.type FROM tasks t JOIN board_columns c ON c.id = t.column_id WHERE t.id = $1",
-    )
-    .bind(id)
-    .fetch_one(db)
-    .await
-    .unwrap()
+async fn column_type(bed: &TestBed, id: TaskId) -> String {
+    bed.db()
+        .query_scalar(
+            "SELECT c.type FROM tasks t JOIN board_columns c ON c.id = t.column_id WHERE t.id = $1",
+            params![id],
+        )
+        .await
+        .unwrap()
 }
-async fn has_label(db: &PgPool, id: TaskId, name: &str) -> bool {
-    sqlx::query_scalar::<_, i64>(
-        "SELECT count(*) FROM task_labels tl JOIN labels l ON l.id = tl.label_id
+async fn has_label(bed: &TestBed, id: TaskId, name: &str) -> bool {
+    bed.db()
+        .query_scalar::<i64>(
+            "SELECT count(*) FROM task_labels tl JOIN labels l ON l.id = tl.label_id
          WHERE tl.task_id = $1 AND l.name = $2",
-    )
-    .bind(id)
-    .bind(name)
-    .fetch_one(db)
-    .await
-    .unwrap()
+            params![id, name],
+        )
+        .await
+        .unwrap()
         > 0
 }
