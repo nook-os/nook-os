@@ -13,11 +13,27 @@
 //! - **redis** — sorted sets + a job hash, every transition in an atomic Lua
 //!   script (`queue::redis`, MAIN-150). A shared broker for a fleet of workers.
 //!
-//! - **sqs** is a RESERVED name with no implementation yet. The contract is
-//!   deliberately SQS-shaped — a visibility timeout, receive/ack/nack, a
-//!   dead-letter destination — so the day it lands it drops in behind this trait
-//!   with nothing else changing. Selecting it today fails at boot with a pointed
-//!   "not built yet" error rather than silently falling back to the database.
+//! - **sqs** — Amazon SQS, implemented and shipping (`queue::sqs`). The trait's
+//!   contract was drawn SQS-shaped from the start — a visibility timeout,
+//!   receive/ack/nack, a dead-letter destination — so it dropped in behind this
+//!   trait with nothing else changing.
+//!
+//! ## Two things SQS truncates, silently (MAIN-412)
+//!
+//! Neither is wrong, and neither is changing here — but an undocumented silent
+//! clamp is a bug report filed against the wrong subsystem, so both are stated
+//! where a caller meets them ([`NewWork::delay`], [`Queue::receive`],
+//! [`Queue::extend_visibility`]) and summarised here:
+//!
+//! - **A delay is clamped to 900 seconds** (SQS's maximum). Ask for an hour and
+//!   the job runs in fifteen minutes. If you need a longer wait, do not express
+//!   it as a queue delay — store the due time and enqueue when it arrives, or
+//!   re-enqueue with a fresh delay each time it comes back.
+//! - **A sub-second visibility timeout becomes ZERO.** SQS counts whole
+//!   seconds, so `Duration::from_millis(500)` truncates to `0` and the message
+//!   is visible again immediately — redelivered while the first consumer is
+//!   still holding it. Pass at least one second; there is no sub-second
+//!   visibility to be had, on any backend worth relying on.
 //!
 //! ## Delivery semantics — at-least-once
 //!
@@ -50,8 +66,7 @@ pub mod database;
 pub mod redis;
 pub mod sqs;
 
-/// The provider names this build understands. `database` and `redis` are
-/// implemented; `sqs` is a known, reserved name not built yet.
+/// The provider names this build understands. All three are implemented.
 pub const PROVIDERS: &[&str] = &["database", "redis", "sqs"];
 
 /// A unit of durable work as the queue sees it. The `payload` is opaque bytes
@@ -92,6 +107,12 @@ pub struct NewWork {
     pub max_attempts: i32,
     /// A delay before the message first becomes visible. `None` means visible
     /// immediately.
+    ///
+    /// **SQS clamps this to 900 seconds** and says nothing (MAIN-412): ask for
+    /// an hour and the job runs in fifteen minutes. For a longer wait, do not
+    /// express it as a queue delay — store the due time and enqueue when it
+    /// arrives, or re-enqueue with a fresh delay each time the job comes back.
+    /// The database and redis providers honour any delay.
     pub delay: Option<Duration>,
 }
 
@@ -115,6 +136,9 @@ impl NewWork {
     }
 
     /// Hold the message invisible for `delay` before its first delivery.
+    ///
+    /// **On SQS this is clamped to 900 seconds, silently** — see
+    /// [`NewWork::delay`] for what to do instead when you need longer.
     pub fn delay(mut self, delay: Duration) -> Self {
         self.delay = Some(delay);
         self
@@ -167,6 +191,13 @@ pub trait Queue: Send + Sync {
     /// Returns them with `attempts` already incremented for this delivery. A
     /// claimed message must be [`ack`](Queue::ack)ed or it will be redelivered
     /// after `visibility` elapses.
+    ///
+    /// **Pass at least one second** (MAIN-412). SQS counts whole seconds, so a
+    /// sub-second `visibility` truncates to `0` and every message claimed here
+    /// is immediately visible again — redelivered while this consumer is still
+    /// working on it. The failure looks like duplicate processing, not like a
+    /// bad argument, which is why it is said here rather than left to the
+    /// provider.
     async fn receive(
         &self,
         types: &[String],
@@ -184,13 +215,18 @@ pub trait Queue: Send + Sync {
     /// Push a claimed message's visibility deadline out by `visibility` from
     /// now — a long handler renewing its lease so the message is not redelivered
     /// underneath it.
+    ///
+    /// **Pass at least one second** (MAIN-412), for the reason in
+    /// [`receive`](Queue::receive): on SQS a sub-second value truncates to `0`,
+    /// so a call meant to BUY time instead releases the message at once — the
+    /// exact opposite of what the caller asked for.
     async fn extend_visibility(&self, id: Uuid, visibility: Duration) -> Result<()>;
 
     /// Current depth and dead-letter counts. See [`QueueStats`].
     async fn describe(&self) -> Result<QueueStats>;
 }
 
-/// Is `name` a provider this build knows by name (implemented or reserved)?
+/// Is `name` a provider this build knows?
 pub fn is_known_provider(name: &str) -> bool {
     PROVIDERS.contains(&name)
 }

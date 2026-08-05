@@ -121,9 +121,10 @@ pub struct Config {
 
     // ── Queue provider ──────────────────────────────────────────────────
     /// Which durable-work-queue backend to use, chosen by name — `database`
-    /// (default) or the reserved-but-unbuilt `redis` / `sqs`. Explicit, like
-    /// the cache: a queue is a deployment decision, and a hosted broker later
-    /// means a new name here, not inference. See `crate::queue`.
+    /// (default), `redis` or `sqs`, all three implemented (MAIN-412 corrected
+    /// this line, which still called the last two unbuilt). Explicit, like the
+    /// cache: a queue is a deployment decision, and a hosted broker later means
+    /// a new name here, not inference. See `crate::queue`.
     pub queue_provider: String,
     /// `NOOK_REDIS_URL` — the Redis connection for the redis queue provider (and
     /// the future redis cache). Required when `queue_provider = redis`.
@@ -379,9 +380,10 @@ impl Config {
         // The cache provider is selected the same way; an unknown name is a
         // misconfiguration worth stopping for.
         crate::cache::validate_provider(&cfg.cache_provider)?;
-        // Same story for the queue: `sqs` is reserved but unbuilt, so refuse it
-        // at boot rather than silently draining a single-node table a deployment
-        // believed was a shared broker.
+        // Same story for the queue: an unknown NAME is refused at boot rather
+        // than silently draining a single-node table a deployment believed was
+        // a shared broker. All three known names are implemented, so this now
+        // catches typos rather than unbuilt providers.
         crate::queue::validate_provider(&cfg.queue_provider)?;
         // Either selecting `redis` needs a present, parseable NOOK_REDIS_URL —
         // refuse boot on a missing/malformed one rather than silently falling
