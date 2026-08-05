@@ -285,6 +285,11 @@ export function statusTone(status: string): Tone {
     case "detached":
     case "reconnecting":
       return "warn";
+    // Intentional and resumable, so NOT `err` (MAIN-415 AC-6). A stopped
+    // session reading the same red as a crashed one is the whole distinction
+    // this state exists to make, thrown away at the last step.
+    case "stopped":
+      return "dim";
     case "offline":
     case "exited":
     case "error":

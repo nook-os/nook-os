@@ -23,6 +23,7 @@ use nook_db::{params, CiMatch, Db, DbPool, Postgres};
 use nook_types::*;
 
 use crate::error::ApiResult;
+use crate::session_status;
 
 /// A session to create. One struct for all three entry points — a worktree
 /// session, an ad-hoc terminal, a runtime login — because they differ only in
@@ -157,6 +158,12 @@ pub trait SessionRepository: Send + Sync {
     /// End a managed session — the scale-down half of converging.
     async fn mark_ended(&self, tenant: TenantId, id: SessionId) -> ApiResult<u64>;
 
+    /// Stop a live session: the row stays, the tmux goes, the ports come back.
+    ///
+    /// Guarded on LIVE so it is a no-op on a session that already ended, and so
+    /// a second Stop does not rewrite `ended_at`.
+    async fn mark_stopped(&self, tenant: TenantId, id: SessionId) -> ApiResult<u64>;
+
     /// How many OTHER live sessions share this workspace (MAIN-292, moved from
     /// `services::secrets`). Live = `starting`/`running`/`detached`. It is what
     /// says whether an ending session was the last user of the checkout's
@@ -234,7 +241,7 @@ impl SessionRepository for DbSessionRepository {
             sql.push_str(&format!(" AND created_by = ${n}"));
         }
         if filter.active_only {
-            sql.push_str(" AND status IN ('starting', 'running', 'detached')");
+            sql.push_str(&format!(" AND status IN ({})", session_status::LIVE_SQL));
         }
         sql.push_str(" ORDER BY created_at DESC");
         // Binds follow the same order the placeholders were numbered above.
@@ -357,10 +364,11 @@ impl SessionRepository for DbSessionRepository {
                 &format!(
                     "SELECT id, node_id FROM sessions
                      WHERE tenant_id = $1 AND workspace_id = $2
-                       AND (name = $3 OR {})
-                       AND status IN ('starting', 'running', 'detached')
+                       AND (name = $3 OR {ci})
+                       AND status IN ({live})
                      ORDER BY (name = $3) DESC, created_at DESC LIMIT 1",
-                    Postgres.ci_match("name", "'%feedback%'")
+                    live = session_status::LIVE_SQL,
+                    ci = Postgres.ci_match("name", "'%feedback%'")
                 ),
                 params![tenant, workspace, name],
             )
@@ -457,11 +465,14 @@ impl SessionRepository for DbSessionRepository {
         Ok(self
             .db
             .query_all(
-                "SELECT id, checkout_id, node_id FROM sessions
+                &format!(
+                    "SELECT id, checkout_id, node_id FROM sessions
                  WHERE tenant_id = $1 AND workspace_id = $2 AND managed
                    AND checkout_id IS NOT NULL
-                   AND status IN ('starting', 'running', 'detached')
+                   AND status IN ({declared})
                  ORDER BY checkout_id",
+                    declared = session_status::DECLARED_SQL
+                ),
                 params![tenant, workspace],
             )
             .await?)
@@ -474,8 +485,25 @@ impl SessionRepository for DbSessionRepository {
                 &format!(
                     "UPDATE sessions SET status = 'exited', ended_at = {now}, updated_at = {now}
                      WHERE id = $1 AND tenant_id = $2
-                       AND status IN ('starting', 'running', 'detached')",
-                    now = type_mapping(self.db.engine()).now()
+                       AND status IN ({live})",
+                    now = type_mapping(self.db.engine()).now(),
+                    live = session_status::LIVE_SQL
+                ),
+                params![id, tenant],
+            )
+            .await?)
+    }
+
+    async fn mark_stopped(&self, tenant: TenantId, id: SessionId) -> ApiResult<u64> {
+        Ok(self
+            .db
+            .exec(
+                &format!(
+                    "UPDATE sessions SET status = 'stopped', ended_at = {now}, updated_at = {now}
+                     WHERE id = $1 AND tenant_id = $2
+                       AND status IN ({live})",
+                    now = type_mapping(self.db.engine()).now(),
+                    live = session_status::LIVE_SQL
                 ),
                 params![id, tenant],
             )
@@ -486,9 +514,12 @@ impl SessionRepository for DbSessionRepository {
         Ok(self
             .db
             .query_scalar(
-                "SELECT count(*) FROM sessions
+                &format!(
+                    "SELECT count(*) FROM sessions
                  WHERE workspace_id = $1 AND id <> $2
-                   AND status IN ('starting', 'running', 'detached')",
+                   AND status IN ({live})",
+                    live = session_status::LIVE_SQL
+                ),
                 params![workspace, excluding],
             )
             .await?)
@@ -499,10 +530,13 @@ impl SessionRepository for DbSessionRepository {
         // they go now, so the ports they held are free to the read below.
         self.db
             .exec(
-                "DELETE FROM session_port_leases
+                &format!(
+                    "DELETE FROM session_port_leases
                   WHERE node_id = $1
                     AND session_id IN (SELECT id FROM sessions
-                                        WHERE status NOT IN ('starting', 'running', 'detached'))",
+                                        WHERE status NOT IN ({live}))",
+                    live = session_status::LIVE_SQL
+                ),
                 params![node],
             )
             .await?;
@@ -672,10 +706,7 @@ impl SessionRepository for FakeSessionRepository {
                 None => true,
                 Some(c) => x.created_by == Some(c),
             })
-            .filter(|x| {
-                !filter.active_only
-                    || matches!(x.status.as_str(), "starting" | "running" | "detached")
-            })
+            .filter(|x| !filter.active_only || session_status::is_live(&x.status))
             .cloned()
             .collect();
         out.sort_by_key(|s| std::cmp::Reverse(s.created_at));
@@ -715,7 +746,7 @@ impl SessionRepository for FakeSessionRepository {
                 && rows.iter().any(|x| {
                     x.managed
                         && x.checkout_id == new.checkout_id
-                        && matches!(x.status.as_str(), "starting" | "running" | "detached")
+                        && session_status::is_declared(&x.status)
                 })
             {
                 return Err(crate::error::ApiError::Conflict(
@@ -810,7 +841,7 @@ impl SessionRepository for FakeSessionRepository {
             .filter(|x| {
                 x.tenant_id == tenant
                     && x.workspace_id == Some(workspace)
-                    && matches!(x.status.as_str(), "starting" | "running" | "detached")
+                    && session_status::is_live(&x.status)
                     && (x.name == name || x.name.to_lowercase().contains("feedback"))
             })
             .collect();
@@ -903,7 +934,7 @@ impl SessionRepository for FakeSessionRepository {
                     && x.workspace_id == Some(workspace)
                     && x.managed
                     && x.checkout_id.is_some()
-                    && matches!(x.status.as_str(), "starting" | "running" | "detached")
+                    && session_status::is_live(&x.status)
             })
             .map(|x| (x.id, x.checkout_id.unwrap(), x.node_id))
             .collect();
@@ -919,10 +950,26 @@ impl SessionRepository for FakeSessionRepository {
         else {
             return Ok(0);
         };
-        if !matches!(row.status.as_str(), "starting" | "running" | "detached") {
+        if !session_status::is_live(&row.status) {
             return Ok(0);
         }
         row.status = "exited".to_string();
+        row.ended_at = Some(chrono::Utc::now());
+        Ok(1)
+    }
+
+    async fn mark_stopped(&self, tenant: TenantId, id: SessionId) -> ApiResult<u64> {
+        let mut rows = self.inner.lock().unwrap();
+        let Some(row) = rows
+            .iter_mut()
+            .find(|x| x.id == id && x.tenant_id == tenant)
+        else {
+            return Ok(0);
+        };
+        if !session_status::is_live(&row.status) {
+            return Ok(0);
+        }
+        row.status = session_status::STOPPED.to_string();
         row.ended_at = Some(chrono::Utc::now());
         Ok(1)
     }
@@ -936,7 +983,7 @@ impl SessionRepository for FakeSessionRepository {
             .filter(|x| {
                 x.workspace_id == Some(workspace)
                     && x.id != excluding
-                    && matches!(x.status.as_str(), "starting" | "running" | "detached")
+                    && session_status::is_live(&x.status)
             })
             .count() as i64)
     }
@@ -946,7 +993,7 @@ impl SessionRepository for FakeSessionRepository {
             .lock()
             .unwrap()
             .iter()
-            .filter(|x| matches!(x.status.as_str(), "starting" | "running" | "detached"))
+            .filter(|x| session_status::is_live(&x.status))
             .map(|x| x.id)
             .collect();
         let mut leases = self.leases.lock().unwrap();

@@ -423,6 +423,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/sessions/{id}/input", post(sessions::input))
         .route("/sessions/{id}/output", post(sessions::output))
         .route("/sessions/{id}/kill", post(sessions::kill))
+        .route("/sessions/{id}/stop", post(sessions::stop))
         .route("/sessions/{id}/restart", post(sessions::restart))
         .route(
             "/ws/sessions/{id}/attach",
