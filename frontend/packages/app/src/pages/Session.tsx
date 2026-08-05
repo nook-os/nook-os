@@ -39,7 +39,7 @@ import {
 import { useLive } from "../live";
 import { useWorkspaceContext } from "../context";
 import { ScopeChip } from "../layout";
-import { useLiveTabs } from "../liveTabs";
+import { useWorkingSet } from "../workingSetTabs";
 import { SessionShell } from "../SessionNavigator";
 import { SessionTabs } from "../SessionTabs";
 import { SessionWindows, SplitButtons } from "../SessionWindows";
@@ -643,6 +643,7 @@ export function SessionPage() {
   return (
     <SessionShell activeId={session.id}>
       <RememberSession sessionId={session.id} />
+      <OpenInWorkingSet sessionId={session.id} />
       <SessionTabs activeId={session.id} />
       <div
         className="nook-grid session-grid"
@@ -814,6 +815,25 @@ export function SessionPage() {
  *
  *  Written on VIEW rather than on navigation, so it also captures a tab you
  *  landed on by any other route — a deep link, a restart, the strip. */
+/** Opening a session ADDS it to the working set (MAIN-417 AC-2).
+ *
+ *  On VIEW rather than on click, for the same reason `RememberSession` is: the
+ *  pane, a deep link, a restart and the keyboard all land here, and a set that
+ *  only the pane could add to would be empty for everyone who arrived any other
+ *  way. Idempotent — the hook writes nothing when the session is already open,
+ *  so this costs one request the first time you look at a session and none
+ *  afterwards. */
+function OpenInWorkingSet({ sessionId }: { sessionId: string }) {
+  const { open, loaded } = useWorkingSet();
+  React.useEffect(() => {
+    // Not before the stored set has arrived: opening against an assumed-empty
+    // set would write a strip containing only this session and lose the rest.
+    if (loaded) open(sessionId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionId, loaded]);
+  return null;
+}
+
 function RememberSession({ sessionId }: { sessionId: string }) {
   const { data: me } = useQuery({
     queryKey: ["me"],
@@ -827,7 +847,11 @@ function RememberSession({ sessionId }: { sessionId: string }) {
 }
 
 export function SessionsIndex() {
-  const { tabs, loaded } = useLiveTabs();
+  // The WORKING SET, not the live list (MAIN-417): "/sessions opens the first
+  // tab" has to mean the first tab you actually have, and after the upgrade
+  // that set starts empty (AC-5) — landing on a session you never opened would
+  // be the old derived-strip behaviour wearing a new name.
+  const { tabs, loaded } = useWorkingSet();
   const { data: me } = useQuery({
     queryKey: ["me"],
     queryFn: async () => (await api.GET("/api/v1/auth/me")).data ?? null,
@@ -871,7 +895,8 @@ export function SessionsIndex() {
               style={{ display: "inline-flex", alignItems: "center", gap: 8 }}
             >
               <SquareTerminal size={14} />
-              No running sessions — start one with <b>+ New Workspace</b>.
+              No tabs open — pick a session from the pane, or start one with{" "}
+              <b>+ New Workspace</b>.
             </span>
           </Empty>
         </Panel>

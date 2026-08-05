@@ -5,12 +5,17 @@
 // open-set. Every machine signed into the same account shows the same tabs,
 // because the tabs are the sessions.
 //
-// MAIN-324 adds the close control that absence was waiting for. With no local
-// list to drop from, closing can only end the session — and that means two
-// different things: an ad-hoc terminal is killed, a MANAGED one is scaled down,
-// because killing it would only pause it until the next reconcile pass. The
-// decision itself lives in `tabClose.ts` as a pure function, so the semantics
-// are tested without a browser.
+// MAIN-417 gives the membership back. The strip is now a synced per-user
+// working set (`workingSet.ts`), so closing a tab REMOVES IT FROM YOUR SET and
+// nothing else: the session keeps running, nothing is confirmed, and the pane
+// is where you get it back. What MAIN-322 was protecting — the same tabs on
+// every machine — is kept, because the set is stored against the person rather
+// than the browser.
+//
+// Ending a session is now a separate, differently-named action in the
+// right-click menu, where `tabClose.ts`'s MAIN-324 semantics still apply: an
+// ad-hoc terminal is killed, a managed one is scaled down, because killing that
+// one would only pause it until the next reconcile pass.
 import React, { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
@@ -29,9 +34,8 @@ import {
 import { api } from "@nookos/api";
 import { useWorkspaceContext } from "./context";
 import { useLive } from "./live";
-import { useLiveTabs } from "./liveTabs";
 import { useNewWork } from "./newwork";
-import { useSessionTabPrefs } from "./sessionTabsStore";
+import { useWorkingSet } from "./workingSetTabs";
 import { groupTabs, visibleTabs } from "./tabGroups";
 import { useTabHotkeys } from "./tabHotkeys";
 import { askConfirm, askText, notify } from "./dialogs";
@@ -41,14 +45,14 @@ import { ContextMenuRegion, type ContextMenuItem } from "./contextMenu";
 export function SessionTabs({ activeId }: { activeId?: string }) {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
-  const store = useSessionTabPrefs();
+  const store = useWorkingSet();
   const sessionStatus = useLive((s) => s.sessionStatus);
   const agentState = useLive((s) => s.agentState);
   const showNewWork = useNewWork((s) => s.show);
-  const selectedWorkspaceId = useWorkspaceContext((s) => s.selectedWorkspaceId);
   // Drag-to-reorder state: which tab is being dragged, and where the insertion
   // line currently sits (a target tab and whether it drops after it). Both null
   // when nothing is dragging.
+  const [collapsed, setCollapsed] = useState<string[]>([]);
   const [dragId, setDragId] = useState<string | null>(null);
   const [dropAt, setDropAt] = useState<{ id: string; after: boolean } | null>(null);
 
@@ -57,13 +61,14 @@ export function SessionTabs({ activeId }: { activeId?: string }) {
     setDropAt(null);
   };
 
-  // The tab set — every live session of yours, in your order (MAIN-321
-  // moved this to a hook the `/sessions` redirect shares, so "first tab" and
-  // "the session the nav opens" cannot disagree).
-  const { tabs } = useLiveTabs();
+  // The tab set — YOUR OPEN SET, in your order (MAIN-417). Membership is the
+  // set, not the live list, which is what lets a dead session keep its tab.
+  const { tabs } = store;
 
-  // Chrome-style groups by workspace (MAIN-323), each collapsible.
-  const groups = groupTabs(tabs, store.prefs.collapsed, activeId);
+  // Chrome-style groups by workspace (MAIN-323), each collapsible. Collapse
+  // stays per-browser: it is which parts of the strip are folded up right now,
+  // not what is in it, and AC-6 moved only pin and order.
+  const groups = groupTabs(tabs, collapsed, activeId);
   // What is actually on screen. Keyboard switching walks exactly this — landing
   // on a tab inside a collapsed group would move the terminal to a session the
   // strip is not showing.
@@ -102,12 +107,14 @@ export function SessionTabs({ activeId }: { activeId?: string }) {
     queryClient.invalidateQueries();
   };
 
-  /** Close a tab — which ends its session, one way or the other (MAIN-324).
+  /** End the session behind a tab — the destructive action, now reached only
+   *  from the right-click menu and named for what it does (MAIN-324's
+   *  semantics, MAIN-417's placement).
    *
-   *  Both branches confirm first (AC-4). The ad-hoc branch also offers a reboot
-   *  afterwards, because "I meant to close the other one" is the mistake this
-   *  control invites and a confirm alone cannot undo a killed process. */
-  const closeTab = async (t: (typeof tabs)[number]) => {
+   *  Both branches confirm first. The ad-hoc branch also offers a reboot
+   *  afterwards, because "I meant the other one" is the mistake this invites
+   *  and a confirm alone cannot undo a killed process. */
+  const endSession = async (t: (typeof tabs)[number]) => {
     const plan = closePlan(t);
 
     if (plan.kind === "explain") {
@@ -207,9 +214,10 @@ export function SessionTabs({ activeId }: { activeId?: string }) {
     // Named for what it DOES, not "Close" — a menu item that says the same
     // word for "kill this terminal" and "ask the fleet for one fewer session"
     // is the ambiguity AC-3 exists to remove.
+    // "Close Tab" is the ✕ and is not here twice; this is the other thing.
     {
-      label: t.managed ? "Scale Down Workspace…" : "Close Session…",
-      onSelect: () => void closeTab(t),
+      label: t.managed ? "Scale Down Workspace…" : "End Session…",
+      onSelect: () => void endSession(t),
     },
   ];
 
@@ -228,7 +236,11 @@ export function SessionTabs({ activeId }: { activeId?: string }) {
                   "--group-hue": g.hue,
                 } as React.CSSProperties
               }
-              onClick={() => store.toggleCollapsed(g.key)}
+              onClick={() =>
+                setCollapsed((c) =>
+                  c.includes(g.key) ? c.filter((k) => k !== g.key) : [...c, g.key],
+                )
+              }
               title={
                 g.collapsed
                   ? `expand ${g.label} (${g.tabs.length})`
@@ -339,19 +351,21 @@ export function SessionTabs({ activeId }: { activeId?: string }) {
               {t.pinned && <Pin size={10} className="session-tab-pin" />}
               {/* Stops the click reaching the tab, which would navigate to the
                   session we are about to end. */}
+              {/* Closes the TAB. The session keeps running and nothing is
+                  confirmed, because nothing is destroyed (AC-2 / NG-1) — the
+                  navigator is how you open it again. Ending a session is the
+                  right-click menu's job now. */}
               <button
                 className="session-tab-close"
-                aria-label={
-                  t.managed ? `scale down ${t.name}` : `close ${t.name}`
-                }
-                title={
-                  t.managed
-                    ? "scale down this workspace (killing a managed session only pauses it)"
-                    : "close and end this session"
-                }
+                aria-label={`close ${t.name}`}
+                title="close this tab — the session keeps running"
                 onClick={(e) => {
                   e.stopPropagation();
-                  void closeTab(t);
+                  store.close(t.id);
+                  // Closing the tab you are looking at has to move you
+                  // somewhere; `/sessions` lands on the next tab, or the empty
+                  // state when that was the last one.
+                  if (t.id === activeId) navigate("/sessions");
                 }}
               >
                 <X size={10} />
