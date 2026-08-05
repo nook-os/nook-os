@@ -43,8 +43,10 @@ import { FeedbackModalHost, useFeedbackModal } from "./FeedbackModal";
 const SECTIONS = [
   { to: "/", label: "Dashboard", icon: LayoutDashboard, end: true },
   { to: "/mission", label: "Mission Control", icon: Radar },
-  { to: "/workspaces", label: "Workspaces", icon: FolderGit2 },
+  // Sessions above Workspaces: this is where the work actually happens, so it
+  // is the rail's most-clicked destination by a distance.
   { to: "/sessions", label: "Sessions", icon: SquareTerminal },
+  { to: "/workspaces", label: "Workspaces", icon: FolderGit2 },
   { to: "/board", label: "Board", icon: KanbanSquare },
   { to: "/chat", label: "Chat", icon: MessageSquare },
   { to: "/nodes", label: "Nodes", icon: Server },
