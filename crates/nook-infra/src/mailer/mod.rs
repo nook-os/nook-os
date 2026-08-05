@@ -19,10 +19,30 @@
 //!   and tests have something to assert against.
 //! - **smtp** — a real SMTP relay (dev points at Mailpit, prod at the mail host).
 //!
-//! Sending is best-effort and one-shot: no queue, no retry, no bounce handling
-//! (those are a later concern). `send` returns `Result`, so a caller can react
-//! to a failure — but nothing here forces a request path to block on delivery,
-//! and a failed send is logged, never a panic.
+//! # What is queued, and what is not (MAIN-149, MAIN-410)
+//!
+//! This trait is the TRANSPORT: `send` puts one message on the wire and returns
+//! what happened. It has no queue, no retry and no bounce handling of its own,
+//! and it is not going to grow them — durability belongs to the caller.
+//!
+//! Callers split in two, and the split is deliberate rather than half-finished:
+//!
+//! - **Transactional mail — verification and invites — goes through the durable
+//!   queue** as an `email.send` job (MAIN-149). A user is waiting on it, the
+//!   request path must not block on SMTP, and a failure has to be retried and
+//!   then dead-lettered with the real SMTP error rather than lost.
+//! - **The email NOTIFICATION channel sends inline**, from
+//!   `nook_control::services::notify`. `Channel::deliver`'s contract is "I
+//!   attempted delivery, here is what happened" — its result is recorded onto
+//!   the channel row and returned by the test button, which answers 400 with
+//!   the provider's own message. A queued send could only ever answer
+//!   "accepted", which is not what either caller asked. The full reasoning is
+//!   on `Email` in that module.
+//!
+//! So "all mail goes through the queue" is NOT true, and the exception is one
+//! place with one reason. `send` returning `Result` is what lets both callers
+//! work: the queue handler retries on it, and the notification channel reports
+//! it.
 
 use anyhow::Result;
 use async_trait::async_trait;

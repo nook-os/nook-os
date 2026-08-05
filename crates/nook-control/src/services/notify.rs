@@ -499,6 +499,32 @@ impl Channel for Twilio {
 /// sends it). The channel carries only a recipient; there is no per-channel SMTP
 /// (NG-2), no secret.
 ///
+/// # This send is INLINE, and that is deliberate (MAIN-410)
+///
+/// Transactional mail — verification, invites — goes through the durable queue
+/// as an `email.send` job (MAIN-149). This one does not, and the reason is the
+/// contract of the trait it implements rather than anything about email.
+///
+/// **`Channel::deliver` means "I attempted delivery, here is what happened."**
+/// Its `Result` is written straight onto the channel row by `record_outcome`,
+/// which is how the UI says a channel is failing. Enqueueing here would make
+/// that outcome a lie: `deliver` would return `Ok` for "handed to the queue"
+/// while the real answer arrived minutes later somewhere nobody is looking, and
+/// it would mean one word in one trait meant two different things — sent, for
+/// ntfy/slack/webhook, and accepted, for this one.
+///
+/// **And the test button could not work at all.** `test_channel` exists so you
+/// can find out a channel is broken BEFORE the thing it was meant to tell you
+/// about happens; `POST /notification-channels/{id}/test` returns 400 carrying
+/// the provider's own message. That is a caller which must know it was sent,
+/// and a queued send can only ever tell it "accepted".
+///
+/// Note what is NOT the reason: it is not latency, and it is not that
+/// notifications matter less. If `Channel` ever grows an async delivery mode —
+/// one where the outcome is recorded when it is known rather than when it is
+/// attempted — this should move onto the queue with the rest, and every other
+/// channel with it.
+///
 /// Design note (built by nobody here): a future TWO-WAY integration — a
 /// Slack-chat bot that also receives — will implement a SEPARATE trait alongside
 /// `Channel`, never merged into it. `Channel` stays one-way delivery; email is
