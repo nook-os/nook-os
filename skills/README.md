@@ -12,6 +12,7 @@ wrong thing.
 | [`nook-build/SKILL.md`](nook-build/SKILL.md) | The builder: claim the next safe `agent-ready` issue (or fix review feedback), implement it, and open a PR. Run with `/nook-build`; one pass, one unit of work. |
 | [`nook-review/SKILL.md`](nook-review/SKILL.md) | The reviewer: check an open PR against its linked issue and required CI, then post a three-group verdict and set the loop labels. Run with `/nook-review`; never merges. |
 | [`nook-epic/SKILL.md`](nook-epic/SKILL.md) | The epic decomposer: walk opted-in (`auto-spec`) epics and file the next ready sub-ticket from the epic's own body, in the `/nook-spec` shape, into the backlog. Run with `/nook-epic`; unattended, one ticket per pass, escalates instead of guessing. |
+| [`nook-yolo/SKILL.md`](nook-yolo/SKILL.md) | The board-wide overnight merge pass: land every loop-approved PR whose evidence clears, across the whole workspace, unattended. Run with `/loop 20m /nook-yolo`. Writes no code and never pushes; where the epic runner halts on trouble, this skips the PR, records why in the day's ledger, and keeps going. |
 
 ## Format
 
