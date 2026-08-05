@@ -207,7 +207,20 @@ for provider in database redis sqs; do
         --set autoscaling.keda.enabled=true "${extra[@]}")"
   wmatrix "$provider: ScaledObject (KEDA on)" "$on" '^kind: ScaledObject$' 1
   case "$provider" in
-    database) wmatrix "$provider: postgresql trigger" "$on" 'type: postgresql' 1 ;;
+    database)
+      wmatrix "$provider: postgresql trigger" "$on" 'type: postgresql' 1
+      # The trigger's definition of READY must be the queue's own (MAIN-411).
+      # `crates/nook-infra/src/queue/database.rs` is authoritative: `receive`
+      # claims, and `describe` counts, exactly this set. A trigger counting more
+      # than the worker can claim scales up for work nobody can do.
+      wmatrix "$provider: trigger counts only runnable rows" "$on" \
+        'query: "SELECT count\(\*\) FROM work_queue WHERE \(locked_until IS NULL OR locked_until <= now\(\)\) AND not_before <= now\(\)"' 1
+      # The parentheses specifically, because losing them is the silent form of
+      # the bug: `AND` binds tighter, so an unparenthesised `OR` counts every
+      # unlocked row whatever its `not_before`.
+      wmatrix "$provider: trigger's OR is parenthesised" "$on" \
+        'WHERE \(locked_until' 1
+      ;;
     redis)    wmatrix "$provider: redis trigger"      "$on" 'type: redis' 1 ;;
     sqs)      wmatrix "$provider: aws-sqs trigger"    "$on" 'type: aws-sqs-queue' 1 ;;
   esac
