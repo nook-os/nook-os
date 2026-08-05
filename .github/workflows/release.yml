@@ -145,23 +145,41 @@ jobs:
   #
   # Not cross-compiled and not emulated: a desktop bundle is signed and linked
   # against the platform it runs on, so each one is built on that platform.
+  #
+  # Since MAIN-395 it also SHIPS the control plane and the node, as Tauri
+  # sidecars. `needs: binaries` rather than a second compile: AC-2 is that the
+  # bundled binaries are the ones the release already publishes, so a bug can
+  # never be in "the other build" of the same version.
+  #
+  # Windows is deliberately absent from `sidecar` below, and that is the
+  # 2026-08-05 ruling rather than an oversight: neither binary compiles for
+  # `*-pc-windows-msvc` (four unguarded `std::os::unix` sites) and the node
+  # shells out to `tmux`, so a Windows sidecar would ship something that cannot
+  # open a session. `tauri.windows.conf.json` declares no `externalBin`, and the
+  # Windows bundle stays the client app it is today.
   desktop:
     name: desktop (${{ matrix.label }})
-    needs: guard
+    needs: [guard, binaries]
     strategy:
       fail-fast: false
       matrix:
         include:
           - runner: ubuntu-22.04
             label: linux-x86_64
+            sidecar: nook-linux-x86_64
+            triple: x86_64-unknown-linux-gnu
           - runner: macos-14
             label: macos-aarch64
+            sidecar: nook-darwin-aarch64
+            triple: aarch64-apple-darwin
           # macos-13 (Intel) is being retired and its queue never drains, so
           # the Intel bundle is cross-targeted from Apple silicon — routine on
           # macOS, where Xcode ships both SDKs.
           - runner: macos-14
             label: macos-x86_64
             target: x86_64-apple-darwin
+            sidecar: nook-darwin-x86_64
+            triple: x86_64-apple-darwin
           - runner: windows-latest
             label: windows-x86_64
     runs-on: ${{ matrix.runner }}
@@ -247,6 +265,32 @@ jobs:
             echo "APPLE_API_KEY=${{ secrets.APPLE_API_KEY }}"
             echo "APPLE_API_ISSUER=${{ secrets.APPLE_API_ISSUER }}"
           } >> "$GITHUB_ENV"
+
+      # The sidecars, from the `binaries` job — the same artefacts this release
+      # publishes for download. Tauri wants them at
+      # `src-tauri/binaries/<name>-<target-triple>`, which is why the matrix
+      # carries the triple as well as the asset name.
+      - name: Fetch the binaries this release publishes
+        if: matrix.sidecar != ''
+        uses: actions/download-artifact@v4
+        with:
+          name: bin-${{ matrix.sidecar }}
+          path: sidecar-in
+
+      - name: Stage the sidecars
+        if: matrix.sidecar != ''
+        shell: bash
+        run: |
+          set -euo pipefail
+          dest=frontend/apps/desktop/src-tauri/binaries
+          mkdir -p "$dest"
+          control_asset="$(echo '${{ matrix.sidecar }}' | sed 's/^nook-/nook-control-/')"
+          cp "sidecar-in/${{ matrix.sidecar }}" "$dest/nook-${{ matrix.triple }}"
+          cp "sidecar-in/$control_asset"        "$dest/nook-control-${{ matrix.triple }}"
+          chmod +x "$dest"/*
+          # `tauri_build::build()` fails on a missing externalBin, so a silent
+          # typo here would surface as an opaque build-script error much later.
+          ls -l "$dest"
 
       - name: Build the bundle
         working-directory: frontend/apps/desktop

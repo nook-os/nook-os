@@ -227,6 +227,21 @@ jobs:
       - name: Stub the frontend bundle
         run: mkdir -p frontend/apps/web/dist && touch frontend/apps/web/dist/index.html
         working-directory: .
+      # Same shape, same reason (MAIN-395): `tauri_build::build()` copies every
+      # `externalBin` for the host triple and FAILS when one is absent —
+      # verified by deleting them, which turns this job red before a single
+      # lint runs. This job only type-checks Rust, so empty files are the
+      # honest stand-in; the REAL binaries are staged in `release.yml`, from
+      # the same build the release already produces.
+      - name: Stub the sidecars
+        run: |
+          triple=$(rustc -vV | sed -n 's/host: //p')
+          mkdir -p frontend/apps/desktop/src-tauri/binaries
+          for b in nook nook-control; do
+            : > "frontend/apps/desktop/src-tauri/binaries/$b-$triple"
+            chmod +x "frontend/apps/desktop/src-tauri/binaries/$b-$triple"
+          done
+        working-directory: .
       - name: Format
         run: cargo fmt --check
       - name: Clippy
