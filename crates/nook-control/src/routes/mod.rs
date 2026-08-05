@@ -219,6 +219,10 @@ pub fn build_router(state: AppState) -> Router {
             post(operator::promote_ca),
         )
         .route("/operator/nodes/{id}/revoke", post(operator::revoke_node))
+        .route(
+            "/operator/nodes/{id}/authorize",
+            post(operator::authorize_runtime),
+        )
         .route("/operator/nodes/{id}", delete_route(operator::remove_node))
         .route(
             "/operator/orgs/{id}/policy",
@@ -298,6 +302,10 @@ pub fn build_router(state: AppState) -> Router {
             delete_route(nodes::release_lease),
         )
         .route("/nodes/{id}/authorize", post(nodes::authorize))
+        .route(
+            "/nodes/{id}/operator-authorize-optout",
+            post(nodes::set_operator_authorize_optout),
+        )
         // The sessionless replacement (MAIN-290). Coexists with the line
         // above until C5 retires it.
         .route("/runtime-auth", post(runtime_auth::start))

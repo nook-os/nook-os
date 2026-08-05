@@ -4853,6 +4853,17 @@ export interface components {
             last_seen_at?: string | null;
             name: string;
             /**
+             * @description The owner has declined operator-authorize on this machine (MAIN-276).
+             *
+             *     Default `false`: authorizing a runtime is the deployment operator's by
+             *     default, because it is their hardware. This is the owner's veto on that
+             *     one capability, and it is theirs alone to set.
+             *
+             *     It says nothing about whether work may RUN here — authorize and
+             *     permit-work are separate gates, and MAIN-278 owns the second.
+             */
+            operator_authorize_optout?: boolean;
+            /**
              * Format: uuid
              * @description The person who owns this node — its join-token minter, else the tenant
              *     owner (MAIN-119). Session-start is confined to this person (MAIN-130).
@@ -5372,6 +5383,17 @@ export interface components {
                 /** Format: date-time */
                 last_seen_at?: string | null;
                 name: string;
+                /**
+                 * @description The owner has declined operator-authorize on this machine (MAIN-276).
+                 *
+                 *     Default `false`: authorizing a runtime is the deployment operator's by
+                 *     default, because it is their hardware. This is the owner's veto on that
+                 *     one capability, and it is theirs alone to set.
+                 *
+                 *     It says nothing about whether work may RUN here — authorize and
+                 *     permit-work are separate gates, and MAIN-278 owns the second.
+                 */
+                operator_authorize_optout?: boolean;
                 /**
                  * Format: uuid
                  * @description The person who owns this node — its join-token minter, else the tenant

@@ -513,6 +513,113 @@ pub async fn remove_node(
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
 
+/// `POST /api/v1/operator/nodes/{id}/authorize` — log a runtime in on any fleet
+/// node (MAIN-276).
+///
+/// **Ungated by default, deliberately.** The deployment operator owns the
+/// hardware, and "who pays for the AI running on it" is a product decision, not
+/// a security gate. So this reaches ANY node in the fleet, in any tenant, owned
+/// by anyone — the node lookup is unscoped, exactly as `revoke_node`'s is.
+///
+/// Two bounds keep that honest, and they are the whole of AC-5/AC-6: the node's
+/// owner is NOTIFIED every time, and the owner may decline the capability on a
+/// machine they own (`operator_authorize_optout` → 403 here).
+///
+/// **Authorize is not permit-work.** Nothing here grants any ability to start a
+/// session or place a workload on the node; that gate is the owner's and lives
+/// elsewhere (MAIN-278). The two are separate on purpose, and
+/// `operator_authorize_does_not_grant_node_use` is what keeps them separate.
+#[utoipa::path(post, path = "/api/v1/operator/nodes/{id}/authorize",
+    operation_id = "operator_authorize_runtime", params(("id" = String, Path,)),
+    request_body = AuthorizeRuntimeRequest,
+    responses((status = 200, body = Session), (status = 403), (status = 404)))]
+pub async fn authorize_runtime(
+    State(state): State<AppState>,
+    auth: AuthCtx,
+    Path(id): Path<NodeId>,
+    Json(req): Json<AuthorizeRuntimeRequest>,
+) -> ApiResult<Json<nook_types::Session>> {
+    // Unscoped, then gated — the same order `revoke_node` uses, and the reason
+    // an operator can act on a tenant they are not a member of.
+    let tenant = crate::routes::nodes::node_tenant(&state, id).await?;
+    auth.require(&state, Permission::NodeManage, Scope::Tenant(tenant))
+        .await?;
+
+    // The owner's veto (AC-6), checked BEFORE anything is started. A 403 rather
+    // than a 404: the operator can see this node in their own console, so
+    // pretending it does not exist would only be confusing.
+    let node = state
+        .nodes
+        .get(tenant, id)
+        .await?
+        .ok_or(crate::error::ApiError::NotFound)?;
+    if node.operator_authorize_optout {
+        return Err(crate::error::ApiError::ForbiddenMsg(
+            "the owner has declined operator-authorize on this machine".into(),
+        ));
+    }
+
+    // The SAME device-login flow the owner's own `/nodes/{id}/authorize` runs.
+    // Created in the NODE's tenant, which is what lets the node socket confirm
+    // it — the confirming UPDATE is scoped to the tenant the socket presents.
+    let session = crate::services::session_queries::create_auth_session(
+        &state,
+        tenant,
+        Some(auth.user_id),
+        id,
+        &req.runtime,
+    )
+    .await?;
+
+    audit_write(
+        &state,
+        &auth,
+        "node.authorize_runtime",
+        serde_json::json!({ "node": id.0, "runtime": req.runtime }),
+    )
+    .await;
+    notify_node_owner(&state, tenant, id, &node.name, &req.runtime).await;
+
+    Ok(Json(session))
+}
+
+/// Tell the node's owner that the operator logged a runtime into their machine
+/// (AC-5).
+///
+/// Best-effort and never fatal: the authorize has already happened, and failing
+/// the request because a notification could not be addressed would leave the
+/// caller believing nothing occurred. A missing owner is the ordinary case for
+/// an ownerless node, not an error.
+///
+/// Raised in the NODE's tenant, because that is where the owner's membership
+/// lives — raising it in the operator's tenant would file it where the person
+/// being told cannot see it.
+async fn notify_node_owner(
+    state: &AppState,
+    tenant: TenantId,
+    node: NodeId,
+    node_name: &str,
+    runtime: &str,
+) {
+    let Ok(Some(Some(person))) = state.identity.node_owner_person_unscoped(node.0).await else {
+        return;
+    };
+    let Ok(Some(owner)) = state.identity.member_user_by_person(tenant, person).await else {
+        return;
+    };
+    let draft = crate::services::notify::Draft::new(format!(
+        "The operator authorized {runtime} on {node_name}"
+    ))
+    .kind("node.authorize_runtime")
+    .body(format!(
+        "A deployment operator logged {runtime} in on your machine {node_name}. \
+         You can decline operator-authorize on this machine from its node page."
+    ))
+    .payload(serde_json::json!({ "node": node.0, "runtime": runtime }))
+    .user(owner.0);
+    crate::services::notify::raise(state, tenant, draft).await;
+}
+
 /// Who holds what. Needed before granting is meaningful — you cannot revoke a
 /// binding you cannot see.
 #[utoipa::path(get, path = "/api/v1/operator/bindings",
