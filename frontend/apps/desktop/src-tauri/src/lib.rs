@@ -296,10 +296,72 @@ fn nav_guard<R: tauri::Runtime>() -> tauri::plugin::TauriPlugin<R> {
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
+/// Where the bundled control plane and node are, as Tauri resolves them
+/// (MAIN-395 AC-3).
+///
+/// The LOCATING is `tauri-plugin-shell`'s: `shell().sidecar(name)` builds the
+/// very `Command` the boot card will spawn, so a bundle and a `pnpm tauri dev`
+/// run resolve identically and nothing here hardcodes a relative path into
+/// `target/`.
+///
+/// It does NOT start them (NG-1). That leaves one gap the plugin cannot close:
+/// `sidecar()` computes a path and never checks the file is there, so `Ok`
+/// alone would say nothing about whether the binary actually shipped. The
+/// presence probe therefore resolves against `platform::current_exe()` — the
+/// SAME base the plugin resolves against, and Tauri's own API rather than a
+/// guess — purely to `exists()` the result.
+///
+/// Windows returns `present: false` for both, and that is correct rather than
+/// broken: neither binary compiles for Windows and the node shells out to
+/// `tmux`, so the ruling on this card ships Windows as a client app with no
+/// `externalBin` at all (`tauri.windows.conf.json`).
+#[derive(serde::Serialize)]
+struct SidecarInfo {
+    name: String,
+    /// The sidecar API accepted the name and produced a command.
+    resolved: bool,
+    /// A file is actually there — the half `sidecar()` does not answer.
+    present: bool,
+    path: Option<String>,
+}
+
+#[tauri::command]
+fn sidecars(app: tauri::AppHandle) -> Vec<SidecarInfo> {
+    use tauri_plugin_shell::ShellExt;
+
+    let base = tauri::utils::platform::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|p| p.to_path_buf()));
+
+    ["nook", "nook-control"]
+        .into_iter()
+        .map(|name| {
+            let resolved = app.shell().sidecar(name).is_ok();
+            let path = base.as_ref().map(|b| {
+                let mut p = b.join(name);
+                if cfg!(windows) {
+                    p.set_extension("exe");
+                }
+                p
+            });
+            SidecarInfo {
+                name: name.to_string(),
+                resolved,
+                present: path.as_ref().is_some_and(|p| p.exists()),
+                path: path.map(|p| p.display().to_string()),
+            }
+        })
+        .collect()
+}
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_opener::init())
+        // The control plane and the node travel INSIDE the bundle as sidecars
+        // (MAIN-395). This plugin is how they are located; starting them is the
+        // boot card's job, not this one's.
+        .plugin(tauri_plugin_shell::init())
         .plugin(nav_guard())
         .invoke_handler(tauri::generate_handler![
             load_endpoint,
@@ -313,8 +375,26 @@ pub fn run() {
             device_start,
             device_poll,
             update_check,
-            update_install
+            update_install,
+            sidecars
         ])
+        // Locate the sidecars ONCE at startup and say what was found. This is
+        // what makes AC-3 a runtime fact rather than a command nobody calls:
+        // the log line names both resolved paths, so "did the binaries ship in
+        // this bundle?" is answerable from a signed build without a debugger.
+        // It starts neither of them (NG-1).
+        .setup(|app| {
+            for s in sidecars(app.handle().clone()) {
+                eprintln!(
+                    "sidecar {}: resolved={} present={} at {}",
+                    s.name,
+                    s.resolved,
+                    s.present,
+                    s.path.as_deref().unwrap_or("<unresolved>")
+                );
+            }
+            Ok(())
+        })
         .run(tauri::generate_context!())
         .expect("error while running NookOS desktop");
 }

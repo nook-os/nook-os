@@ -40,3 +40,8 @@ certs/
 # committed, and deliberately separate from the host's ~/.claude so swapping
 # the fleet's identity cannot disturb a personal login.
 .nook-secrets/
+
+# Sidecar binaries staged into the desktop bundle (MAIN-395). CI stages the
+# real ones from the `binaries` job; a local `tauri build` or the CI lint job
+# writes stubs here. Either way they are build output, never source.
+frontend/apps/desktop/src-tauri/binaries/

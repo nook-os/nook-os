@@ -24,6 +24,7 @@ serde_json = "1"
 # a request from Rust needs nothing from anyone.
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 tokio = { version = "1", features = ["time"] }
+tauri-plugin-shell = "2.3.5"
 
 [lib]
 name = "nookos_desktop_lib"
