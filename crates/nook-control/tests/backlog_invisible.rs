@@ -235,12 +235,16 @@ async fn claim_refuses_backlog_and_epic_with_distinct_messages() {
     let claimant = UserId::new();
     bed.db()
         .exec(
+            // The person id is BOUND rather than `gen_random_uuid()`: that
+            // function is Postgres-only and this test also runs on SQLite
+            // (MAIN-435).
             "INSERT INTO users (id, tenant_id, person_id, display_name, email)
-         VALUES ($1, $2, gen_random_uuid(), 'Claimant', $3)",
+         VALUES ($1, $2, $4, 'Claimant', $3)",
             params![
                 claimant,
                 tenant,
-                format!("claimant-{}@example.test", claimant.0.simple())
+                format!("claimant-{}@example.test", claimant.0.simple()),
+                uuid::Uuid::now_v7()
             ],
         )
         .await
@@ -284,7 +288,9 @@ async fn claim_refuses_backlog_and_epic_with_distinct_messages() {
     let key: String = bed
         .db()
         .query_scalar(
-            "SELECT b.key || '-' || t.number::text FROM tasks t
+            // Standard CAST, not `::text` — the shorthand is Postgres-only
+            // and this binary also runs on SQLite (MAIN-435).
+            "SELECT b.key || '-' || CAST(t.number AS text) FROM tasks t
          JOIN boards b ON b.id = t.board_id WHERE t.id = $1",
             params![in_backlog],
         )

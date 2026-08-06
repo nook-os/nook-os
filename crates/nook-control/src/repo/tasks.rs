@@ -1465,6 +1465,19 @@ impl TaskRepository for DbTaskRepository {
         viewer: UserId,
         p: PickParams,
     ) -> ApiResult<Vec<TaskItem>> {
+        // Bound alongside the lists themselves, and read before they move.
+        let (labels_len, types_len, vis_len) = (
+            p.labels.len() as i64,
+            p.types.len() as i64,
+            p.visibility.len() as i64,
+        );
+        // Only a uuid spelled exactly as `b.id::text` would render it, so the
+        // set of boards this matches is the same one Postgres matched before.
+        let board_id: Option<uuid::Uuid> = p
+            .board
+            .as_deref()
+            .and_then(|s| uuid::Uuid::parse_str(s).ok())
+            .filter(|u| u.to_string() == p.board.as_deref().unwrap_or_default());
         Ok(self
             .db
             .query_all(
@@ -1474,23 +1487,40 @@ impl TaskRepository for DbTaskRepository {
         JOIN boards b ON b.id = t.board_id
         JOIN board_columns c ON c.id = t.column_id
         WHERE t.tenant_id = $1
-          AND ({b_text} IS NULL OR {bid_text} = $2 OR upper(b.key) = upper($2))
+          -- The id leg compares uuid TO uuid ($24), parsed in Rust, rather than
+          -- rendering the column as text (MAIN-435). A bound uuid reaches SQLite
+          -- as a 16-byte BLOB even where the column is declared TEXT, so
+          -- `CAST(b.id AS text)` yields those raw bytes and never equals the
+          -- hyphenated string a caller passes — the board filter silently
+          -- matched nothing there. $24 is NULL unless $2 is a uuid in exactly
+          -- the canonical spelling `::text` would have produced, so which rows
+          -- match is unchanged on Postgres.
+          AND ({b_text} IS NULL OR b.id = $24 OR upper(b.key) = upper($2))
           AND ({ws} IS NULL OR t.workspace_id = $3)
           AND ({col_text} IS NULL OR c.type = $4)
           AND ({prio_int}  IS NULL OR t.priority = $5)
           AND (NOT {unassigned_bool} OR t.assignee_user_id IS NULL)
           AND ({assignee} IS NULL OR t.assignee_user_id = $7)
-          -- every required label must be present
-          AND (cardinality({labels_arr}) = 0 OR (
+          -- every required label must be present.
+          --
+          -- The list's LENGTH travels as an ordinary bound integer ($21/$22/$23)
+          -- rather than `cardinality(<list>)` (MAIN-435). SQLite has no
+          -- `cardinality`, and more to the point a list parameter is expanded
+          -- in place to one placeholder per element, so any reference to it
+          -- OUTSIDE an `= ANY(…)` reaches the driver as `$a, $b` — a bare
+          -- expression list, which is a syntax error wherever one value was
+          -- expected. Postgres binds the same integer, so the comparison is
+          -- unchanged there.
+          AND ($21 = 0 OR (
                 SELECT count(DISTINCT l.name) FROM task_labels tl
                 JOIN labels l ON l.id = tl.label_id
                 WHERE tl.task_id = t.id AND l.name = ANY($8)
-              ) = cardinality({labels_arr}))
+              ) = $21)
           -- and none of the excluded ones
           AND NOT EXISTS (
                 SELECT 1 FROM task_labels tl
                 JOIN labels l ON l.id = tl.label_id
-                WHERE tl.task_id = t.id AND l.name = ANY({not_labels_arr}))
+                WHERE tl.task_id = t.id AND l.name = ANY($9))
           -- blocked is DERIVED: an unfinished task pointing here with `blocks`
           AND ({blocked_bool} IS NULL OR $10 = EXISTS (
                 SELECT 1 FROM task_relations r
@@ -1513,7 +1543,7 @@ impl TaskRepository for DbTaskRepository {
           -- `epic` passes — an epic is a container, never a unit of work the
           -- loop should pick. Labels (incl. agent-ready) have no bearing.
           AND (t.type = ANY($15)
-               OR (cardinality({types_arr}) = 0 AND t.type <> 'epic'))
+               OR ($22 = 0 AND t.type <> 'epic'))
           -- per-task visibility (MAIN-76): a `private` card is seen only by its
           -- creator or assignee; `team`/`org` are tenant-visible. Same predicate
           -- an agent's claim path enforces, so the list never shows work it
@@ -1522,7 +1552,7 @@ impl TaskRepository for DbTaskRepository {
           -- explicit visibility filter (MAIN-103 AC-3): ANDs with the viewer
           -- predicate above, so it can only NARROW — `visibility=private` still
           -- shows only the caller's own private cards, never a teammate's.
-          AND (cardinality({vis_arr}) = 0 OR t.visibility = ANY($19))
+          AND ($23 = 0 OR t.visibility = ANY($19))
           -- epic children (MAIN-81): when a parent is given, restrict to its
           -- tickets. This spans every column (children live in backlog and on
           -- the board), so it deliberately does NOT constrain the column type.
@@ -1555,7 +1585,6 @@ impl TaskRepository for DbTaskRepository {
                     created = type_mapping(self.db.engine()).cast("$11", "timestamptz"),
                     parent = type_mapping(self.db.engine()).cast("$17", "uuid"),
                     b_text = type_mapping(self.db.engine()).cast("$2", "text"),
-                    bid_text = type_mapping(self.db.engine()).cast("b.id", "text"),
                     col_text = type_mapping(self.db.engine()).cast("$4", "text"),
                     prio_int = type_mapping(self.db.engine()).cast("$5", "int"),
                     unassigned_bool = type_mapping(self.db.engine()).cast("$6", "bool"),
@@ -1572,10 +1601,6 @@ impl TaskRepository for DbTaskRepository {
                         "$14"
                     ),
                     backlog_bool = type_mapping(self.db.engine()).cast("$18", "bool"),
-                    labels_arr = type_mapping(self.db.engine()).cast("$8", "text[]"),
-                    not_labels_arr = type_mapping(self.db.engine()).cast("$9", "text[]"),
-                    types_arr = type_mapping(self.db.engine()).cast("$15", "text[]"),
-                    vis_arr = type_mapping(self.db.engine()).cast("$19", "text[]"),
                     visible = crate::services::tasks::visible_sql("t", "$16"),
                 ),
                 params![
@@ -1598,7 +1623,11 @@ impl TaskRepository for DbTaskRepository {
                     p.parent,
                     p.backlog,
                     DbValue::TextList(p.visibility),
-                    p.node
+                    p.node,
+                    labels_len,
+                    types_len,
+                    vis_len,
+                    board_id
                 ],
             )
             .await?)

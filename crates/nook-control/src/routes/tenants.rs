@@ -391,9 +391,11 @@ mod db_tests {
     async fn member(db: &DbPool, tenant: Uuid, role: &str) -> Uuid {
         let uid = Uuid::new_v4();
         db.exec(
+            // The person id is BOUND rather than `gen_random_uuid()`: that
+            // function is Postgres-only (MAIN-435).
             "INSERT INTO users (id, tenant_id, display_name, email, role, person_id)
-             VALUES ($1, $2, 'M', $3, $4, gen_random_uuid())",
-            params![uid, tenant, format!("{uid}@m5.test"), role],
+             VALUES ($1, $2, 'M', $3, $4, $5)",
+            params![uid, tenant, format!("{uid}@m5.test"), role, Uuid::now_v7()],
         )
         .await
         .unwrap();

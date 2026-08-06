@@ -69,10 +69,7 @@ node_enrolment             # production still emits Postgres SQL on this path (M
 node_owner                 # production still emits Postgres SQL on this path (MAIN-423)
 nook_worker:lib            # production still emits Postgres SQL on this path (MAIN-423)
 overview_visibility        # production still emits Postgres SQL on this path (MAIN-423)
-task_parent                # production still emits Postgres SQL on this path (MAIN-423)
-task_type                  # production still emits Postgres SQL on this path (MAIN-423)
 task_workspace             # production still emits Postgres SQL on this path (MAIN-423)
-visibility_agreement       # production still emits Postgres SQL on this path (MAIN-423)
 
 # ── still production Postgres SQL, re-tagged by MAIN-293 ──
 #
@@ -83,9 +80,7 @@ visibility_agreement       # production still emits Postgres SQL on this path (M
 # gone; what remains here is the second, which is production emitting Postgres
 # SQL and belongs to the dialect sweep. `local_accounts` passed outright and its
 # line is deleted.
-backlog_invisible          # production calls gen_random_uuid() and a :: cast (MAIN-423)
 dev_signin                 # production emits Postgres-only syntax (MAIN-423)
-task_visibility            # production calls gen_random_uuid() directly — routes/tenants.rs, routes/verify_email.rs (MAIN-423)
 tenant_ca                  # production emits Postgres-only syntax (MAIN-423)
 
 # ── chat's production SQL is still Postgres, re-tagged by MAIN-294 ──

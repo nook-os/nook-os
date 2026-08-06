@@ -41,14 +41,17 @@ fn auth(user: UserId, tenant: TenantId) -> AuthCtx {
 async fn add_member(db: &DbPool, tenant: TenantId, name: &str, role: &str) -> UserId {
     let id = UserId::new();
     db.exec(
+        // The person id is BOUND rather than `gen_random_uuid()`: that function
+        // is Postgres-only and this test also runs on SQLite (MAIN-435).
         "INSERT INTO users (id, tenant_id, person_id, display_name, email, role)
-         VALUES ($1, $2, gen_random_uuid(), $3, $4, $5)",
+         VALUES ($1, $2, $6, $3, $4, $5)",
         params![
             id,
             tenant,
             name,
             format!("{}-{}@example.test", name, id.0.simple()),
-            role
+            role,
+            uuid::Uuid::now_v7()
         ],
     )
     .await

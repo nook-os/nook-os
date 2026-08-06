@@ -348,46 +348,34 @@ fn rewrite_membership(sql: &str, groups: &[Vec<usize>], is_list: &[bool]) -> Str
 /// recognised membership open — which never happens for the generated SQL — the
 /// buffer is left exactly as it was.
 fn open_membership(out: &mut String) {
-    let original_len = out.len();
-    trim_end_ws(out);
-    if !out.ends_with('(') {
-        out.truncate(original_len);
-        return;
-    }
-    out.pop(); // the '('
-    trim_end_ws(out);
-    let negated = if ends_with_ci(out, "ALL") {
-        true
-    } else if ends_with_ci(out, "ANY") {
-        false
-    } else {
-        out.truncate(original_len);
+    // Decide on a read-only view, then mutate once (MAIN-435). Both early
+    // returns used to `truncate(original_len)` AFTER `pop()`ing the '(' — and
+    // truncate can only SHORTEN a string, so it could never put that character
+    // back. A '(' opening anything other than ANY/ALL was therefore eaten:
+    // `pick_tasks` sent SQLite `cardinality(CASTNULL AS text[])`, whose error
+    // names `AS` — a token nowhere near the cause.
+    let head = out.trim_end();
+    let Some(head) = head.strip_suffix('(') else {
         return;
     };
-    pop_chars(out, 3); // ANY / ALL
-    trim_end_ws(out);
-    if out.ends_with("!=") || out.ends_with("<>") {
-        pop_chars(out, 2);
-    } else if out.ends_with('=') {
-        pop_chars(out, 1);
-    }
-    trim_end_ws(out);
+    let head = head.trim_end();
+    let negated = if ends_with_ci(head, "ALL") {
+        true
+    } else if ends_with_ci(head, "ANY") {
+        false
+    } else {
+        return;
+    };
+    let head = head[..head.len() - 3].trim_end(); // drop ANY / ALL
+    let head = head
+        .strip_suffix("!=")
+        .or_else(|| head.strip_suffix("<>"))
+        .or_else(|| head.strip_suffix('='))
+        .unwrap_or(head);
+    let keep = head.trim_end().len();
+    out.truncate(keep);
     out.push(' ');
     out.push_str(if negated { "NOT IN (" } else { "IN (" });
-}
-
-/// Drop trailing whitespace from `s` in place.
-fn trim_end_ws(s: &mut String) {
-    while s.chars().next_back().is_some_and(char::is_whitespace) {
-        s.pop();
-    }
-}
-
-/// Drop the last `n` `char`s from `s`.
-fn pop_chars(s: &mut String, n: usize) {
-    for _ in 0..n {
-        s.pop();
-    }
 }
 
 /// ASCII-case-insensitive suffix test on the raw bytes (the keyword is ASCII, so
@@ -953,6 +941,57 @@ mod tests {
             out.contains("-- em—dash, é, →"),
             "non-ASCII must survive byte-identical, got: {out}"
         );
+    }
+
+    /// A list placeholder that is NOT a membership operand leaves the SQL
+    /// around it intact (MAIN-435).
+    ///
+    /// `open_membership` inspects the tail before it commits, because it has to
+    /// undo the look-ahead when the `(` it finds opened something else. It used
+    /// to `pop()` that `(` and then "restore" with `truncate(original_len)` —
+    /// but truncate only SHORTENS, so the paren was gone for good. `pick_tasks`
+    /// reads its label list twice, once as `= ANY($1)` and once inside
+    /// `cardinality(CAST($1 AS text[]))`, and the second reached SQLite as
+    /// `cardinality(CASTNULL AS text[])`: an error reported at `AS`, three
+    /// tokens from the character actually destroyed.
+    ///
+    /// The assertion is on the surviving `CAST(`, not on the whole string,
+    /// because what regressed was one character.
+    #[test]
+    fn a_non_membership_paren_before_a_list_is_not_eaten() {
+        for (label, sql, expect) in [
+            (
+                "empty list",
+                "SELECT cardinality(CAST($1 AS text[]))",
+                "CAST(",
+            ),
+            ("non-empty", "SELECT length(CAST($1 AS text))", "CAST("),
+        ] {
+            let params = vec![if label == "empty list" {
+                DbValue::TextList(vec![])
+            } else {
+                DbValue::TextList(vec!["a".into()])
+            }];
+            let (out, _) = expand_lists(sql, params);
+            assert!(
+                out.contains(expect),
+                "{label}: the '(' opening a non-membership call must survive, got: {out}"
+            );
+        }
+    }
+
+    /// …and the membership rewrite itself is unchanged by that care.
+    #[test]
+    fn membership_still_rewrites_after_the_lookahead_fix() {
+        let (out, _) = expand_lists(
+            "SELECT 1 WHERE a = ANY($1) AND b != ALL($2)",
+            vec![
+                DbValue::TextList(vec!["x".into(), "y".into()]),
+                DbValue::TextList(vec!["z".into()]),
+            ],
+        );
+        assert!(out.contains("a IN ($1, $2)"), "ANY -> IN: {out}");
+        assert!(out.contains("b NOT IN ($3)"), "ALL -> NOT IN: {out}");
     }
 
     /// The same guarantee where it is easiest to corrupt silently: inside a

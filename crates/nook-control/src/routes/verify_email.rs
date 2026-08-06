@@ -245,14 +245,17 @@ mod tests {
     async fn user(db: &DbPool, tenant: Uuid, email: &str, local: bool) -> UserId {
         let id = Uuid::new_v4();
         db.exec(
+            // The person id is BOUND rather than `gen_random_uuid()`: that
+            // function is Postgres-only (MAIN-435).
             "INSERT INTO users (id, tenant_id, display_name, email, username, password_hash, role, person_id)
-             VALUES ($1, $2, 'U', $3, $4, $5, 'member', gen_random_uuid())",
+             VALUES ($1, $2, 'U', $3, $4, $5, 'member', $6)",
             params![
                 id,
                 tenant,
                 email,
                 if local { Some(email) } else { None },
-                if local { Some("argon2$hash") } else { None }
+                if local { Some("argon2$hash") } else { None },
+                Uuid::now_v7()
             ],
         )
         .await
