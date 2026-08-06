@@ -31,9 +31,9 @@
 //!
 //! The bed follows `DATABASE_URL`'s scheme, the same way boot does (MAIN-195):
 //! `postgres://` gives a Postgres bed, `sqlite://` a SQLite one. Until this, the
-//! harness constructed a `PgPool` directly, so SQLite could not be a *tested*
-//! engine no matter how well the app supported it — the CI matrix and the
-//! "first-class engine" claim had nothing underneath them.
+//! harness constructed a raw Postgres pool directly, so SQLite could not be a
+//! *tested* engine no matter how well the app supported it — the CI matrix and
+//! the "first-class engine" claim had nothing underneath them.
 //!
 //! Two surfaces, and the difference matters:
 //!
@@ -41,7 +41,7 @@
 //!   type production code takes. Anything written against it runs on either
 //!   engine. New tests should use it.
 //!
-//! There is no second surface. The `pool: PgPool` escape hatch that stood
+//! There is no second surface. The raw-Postgres-pool escape hatch that stood
 //! beside `db` through the conversion is gone (MAIN-268): every test now
 //! reaches its database engine-agnostically, and the guard in
 //! `scripts/check-sqlx-signatures.sh` stops a new one appearing. A test that
@@ -51,13 +51,11 @@
 //! Gate on [`TestBed::engine`] (or [`TestBed::is_postgres`]) when a test is
 //! Postgres-only for a real reason — querying `pg_database`, say.
 
-use anyhow::{Context, Result};
 use nook_control::state::AppState;
+use nook_db::test_support::{self as lifecycle, AdminConn, Provisioned};
 use nook_db::{params, Db, Engine, EnginePool};
 use nook_infra::Config;
 use nook_types::{NodeId, TenantId, UserId, WorkspaceId};
-use sqlx::{Connection, PgConnection, PgPool};
-use std::path::{Path, PathBuf};
 use tokio::sync::OnceCell;
 use uuid::Uuid;
 
@@ -128,25 +126,20 @@ async fn template_db(base_url: &str) -> &'static str {
             let fp = template_fingerprint();
             let prefix = format!("nook_tmpl_{fp}_");
 
-            let mut admin = PgConnection::connect(base_url)
+            let mut admin = AdminConn::connect(base_url)
                 .await
                 .expect("connect to the base database to manage templates");
 
             // Everything below mutates the shared template set.
-            sqlx::query("SELECT pg_advisory_lock($1)")
-                .bind(TEMPLATE_LOCK)
-                .execute(&mut admin)
+            admin
+                .advisory_lock(TEMPLATE_LOCK)
                 .await
                 .expect("take the template lock");
 
-            let existing: Option<String> = sqlx::query_scalar(
-                "SELECT datname FROM pg_database
-                  WHERE datname LIKE $1 ORDER BY datname DESC LIMIT 1",
-            )
-            .bind(format!("{prefix}%"))
-            .fetch_optional(&mut admin)
-            .await
-            .expect("look for an existing template");
+            let existing = admin
+                .latest_database_like(&format!("{prefix}%"))
+                .await
+                .expect("look for an existing template");
 
             let name = match existing {
                 // Another process already built this exact schema — reuse it.
@@ -154,41 +147,35 @@ async fn template_db(base_url: &str) -> &'static str {
                 Some(found) => found,
                 None => {
                     let name = format!("{prefix}{}", now_secs());
-                    sqlx::query(&format!("CREATE DATABASE \"{name}\""))
-                        .execute(&mut admin)
+                    admin
+                        .create_database(&name)
                         .await
                         .expect("create the template database");
 
-                    let pool = PgPool::connect(&swap_db(base_url, &name))
+                    let provisioned = Provisioned::Pg {
+                        base_url: base_url.to_string(),
+                        db_name: name.clone(),
+                    };
+                    let pool = lifecycle::open(&provisioned)
                         .await
                         .expect("connect to the template database");
                     nook_control::MIGRATOR
-                        .run(&pool)
+                        .run(pool.pg())
                         .await
                         .expect("migrate the template database");
-                    // `seed::run` takes the workspace pool type (`EnginePool`);
-                    // wrap the raw pool just for the seed. Fixtures + the field
-                    // stay raw Postgres.
-                    nook_control::seed::run(
-                        &EnginePool::from_pg(pool.clone()),
-                        &Config::for_test(),
-                    )
-                    .await
-                    .expect("seed the template database");
+                    nook_control::seed::run(&pool, &Config::for_test())
+                        .await
+                        .expect("seed the template database");
                     // Release every connection so the template can be cloned.
-                    pool.close().await;
+                    pool.pg().close().await;
                     name
                 }
             };
 
             reap_stale_templates(&mut admin, &name).await;
 
-            sqlx::query("SELECT pg_advisory_unlock($1)")
-                .bind(TEMPLATE_LOCK)
-                .execute(&mut admin)
-                .await
-                .ok();
-            admin.close().await.ok();
+            admin.advisory_unlock(TEMPLATE_LOCK).await;
+            admin.close().await;
             name
         })
         .await
@@ -208,19 +195,9 @@ async fn template_db(base_url: &str) -> &'static str {
 ///
 /// Best-effort throughout — a failure to tidy up must never fail a test run.
 /// Callers hold [`TEMPLATE_LOCK`].
-async fn reap_stale_templates(admin: &mut PgConnection, keep: &str) {
+async fn reap_stale_templates(admin: &mut AdminConn, keep: &str) {
     let cutoff = now_secs().saturating_sub(TEMPLATE_MAX_AGE_SECS);
-    let Ok(names) = sqlx::query_scalar::<_, String>(
-        "SELECT d.datname FROM pg_database d
-          WHERE d.datname LIKE 'nook_tmpl_%'
-            AND d.datname <> $1
-            AND NOT EXISTS (
-                  SELECT 1 FROM pg_stat_activity a WHERE a.datname = d.datname)",
-    )
-    .bind(keep)
-    .fetch_all(&mut *admin)
-    .await
-    else {
+    let Ok(names) = admin.unused_databases_like("nook_tmpl_%", keep).await else {
         return;
     };
 
@@ -235,28 +212,8 @@ async fn reap_stale_templates(admin: &mut PgConnection, keep: &str) {
         if !stale {
             continue;
         }
-        let _ = sqlx::query(&format!("DROP DATABASE IF EXISTS \"{name}\" WITH (FORCE)"))
-            .execute(&mut *admin)
-            .await;
+        admin.drop_database(&name).await.ok();
     }
-}
-
-/// What this bed created, and therefore what teardown has to undo. The two
-/// engines have nothing in common here: Postgres owns a database on a server
-/// reachable only through an admin connection, SQLite owns a file.
-enum Arm {
-    Pg {
-        /// `DATABASE_URL` — the server + base database, used for the admin
-        /// `CREATE`/`DROP DATABASE` statements (which cannot run against the
-        /// target).
-        base_url: String,
-        /// The unique database this bed created (e.g. `nook_test_<uuid>`).
-        db_name: String,
-    },
-    Sqlite {
-        /// The unique file this bed created.
-        path: PathBuf,
-    },
 }
 
 /// A prepared, **private** test world: a freshly created, migrated, and seeded
@@ -264,7 +221,7 @@ enum Arm {
 pub struct TestBed {
     /// The engine-agnostic pool, and the **only** one a test can reach.
     ///
-    /// The `pub pool: PgPool` escape hatch that sat beside this is gone
+    /// The raw-Postgres-pool escape hatch that sat beside this is gone
     /// (MAIN-268). While it existed, every consumer of it was a Postgres-leg
     /// test by construction, and on a SQLite bed it had to hold an inert
     /// handle aimed at a `.invalid` host so that using it failed instead of
@@ -274,7 +231,7 @@ pub struct TestBed {
     /// connection from [`TestBed::database_url`].
     db: EnginePool,
     /// What was created, and how to undo it.
-    arm: Arm,
+    arm: Provisioned,
     /// `NOOK_KEEP_TEST_DATA=1` keeps the database for debugging.
     keep: bool,
     /// Set once the database has been dropped, so teardown + Drop don't double.
@@ -317,84 +274,26 @@ impl TestBed {
         // fresh database arrives already migrated and seeded — no MIGRATOR, no
         // seed here.
         let template = template_db(&base_url).await;
-        let mut admin = PgConnection::connect(&base_url)
+        let mut admin = AdminConn::connect(&base_url)
             .await
             .expect("connect to the base database to create a test database");
-        sqlx::query(&format!(
-            "CREATE DATABASE \"{db_name}\" TEMPLATE \"{template}\""
-        ))
-        .execute(&mut admin)
-        .await
-        .expect("create the test database from the template");
-        admin.close().await.ok();
+        admin
+            .create_database_from_template(&db_name, template)
+            .await
+            .expect("create the test database from the template");
+        admin.close().await;
 
-        let pool = PgPool::connect(&swap_db(&base_url, &db_name))
+        let arm = Provisioned::Pg { base_url, db_name };
+        let db = lifecycle::open(&arm)
             .await
             .expect("connect to the fresh test database");
 
         TestBed {
-            db: EnginePool::from_pg(pool),
-            arm: Arm::Pg { base_url, db_name },
+            db,
+            arm,
             keep,
             dropped: false,
         }
-    }
-
-    /// The SQLite bed's pool (MAIN-295).
-    ///
-    /// Built here rather than through [`nook_db::connect`] because that function
-    /// pins SQLite to **one** connection deliberately — and, being production's
-    /// entry point, it should keep doing so until someone decides otherwise. (It
-    /// ignores its own `max_connections` argument on the SQLite arm, so passing a
-    /// bigger number there would silently do nothing; noted, not changed here.)
-    ///
-    /// A pool of one is a deadlock waiting for a caller: hold a connection — an
-    /// open transaction, a `fetch` still streaming — and ask for a second, and the
-    /// second waits for the first, which waits for the caller, until the acquire
-    /// gives up as `PoolTimedOut`. The Postgres bed has never had this shape, so a
-    /// test that passes there fails here for a reason that has nothing to do with
-    /// the test.
-    ///
-    /// ## Why more than one connection is safe here
-    ///
-    /// The worry with a wider SQLite pool is trading `PoolTimedOut` for `database
-    /// is locked`. Two things stop that, and a third was tried and dropped:
-    ///
-    /// * **`busy_timeout`** — SQLite serialises WRITERS. Without a timeout the loser
-    ///   of a write race fails immediately with `database is locked`; with one it
-    ///   waits. This is what turns a pool of writers from an error generator into a
-    ///   queue, and it is why the bump is safe rather than merely bigger.
-    /// * **A bounded size** — five, not fifty. A test needing a sixth concurrent
-    ///   connection is doing something a test should not, and a small ceiling keeps
-    ///   that visible instead of hiding it behind a large pool.
-    /// * **WAL was tried and is NOT set.** The card offers it for the case where a
-    ///   pool bump alone is insufficient; measured here, the bump is sufficient. No
-    ///   test in this file distinguishes WAL from the default journal — under the
-    ///   rollback journal an uncommitted writer holds only a RESERVED lock, so
-    ///   readers proceed anyway, and the window WAL actually removes (a reader
-    ///   during COMMIT) is a race with no deterministic test. Rather than ship a
-    ///   setting behind a justification nothing checks, it is left off; if a real
-    ///   contention problem shows up, it is one line and it should arrive with the
-    ///   failing case that motivated it.
-    ///
-    /// `foreign_keys` is carried over from `nook_db::connect` deliberately: the beds
-    /// enforce foreign keys today, and quietly dropping that here would change what
-    /// every existing test proves.
-    async fn sqlite_bed_pool(path: &Path) -> nook_db::DbPool {
-        use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
-
-        let opts = SqliteConnectOptions::new()
-            .filename(path)
-            .create_if_missing(true)
-            .foreign_keys(true)
-            .busy_timeout(std::time::Duration::from_secs(10));
-
-        let pool = SqlitePoolOptions::new()
-            .max_connections(5)
-            .connect_with(opts)
-            .await
-            .expect("open the private SQLite test database");
-        nook_db::EnginePool::from_sqlite(pool)
     }
 
     /// SQLite: a unique **file**, migrated through the SQLite track and seeded.
@@ -416,9 +315,11 @@ impl TestBed {
         // A stale file from a previous run with the same name is impossible
         // (uuid v7), but an existing file would silently skip migration, so be
         // explicit rather than lucky.
-        remove_sqlite_files(&path);
+        lifecycle::remove_sqlite_files(&path);
 
-        let db = Self::sqlite_bed_pool(&path).await;
+        let db = lifecycle::open_sqlite_bed(&path)
+            .await
+            .expect("open the private SQLite test database");
         // The SQLite track, never the Postgres one (AC-3). Running the wrong
         // dialect's DDL would fail loudly here rather than produce a subtly
         // wrong schema, but selecting it explicitly is what makes that a
@@ -433,14 +334,15 @@ impl TestBed {
 
         TestBed {
             db,
-            arm: Arm::Sqlite { path },
+            arm: Provisioned::Sqlite { path },
             keep,
             dropped: false,
         }
     }
 
     /// Which engine this bed is on — for tests that must gate on it, such as
-    /// ones that read `pg_database` or bind raw `sqlx` against [`TestBed::pool`].
+    /// ones that bind raw `sqlx` against their own connection from
+    /// [`TestBed::database_url`].
     pub fn engine(&self) -> Engine {
         self.db.engine()
     }
@@ -551,8 +453,8 @@ impl TestBed {
     /// caller and know which engine they are on.
     pub fn db_name(&self) -> &str {
         match &self.arm {
-            Arm::Pg { db_name, .. } => db_name,
-            Arm::Sqlite { path } => path.to_str().unwrap_or_default(),
+            Provisioned::Pg { db_name, .. } => db_name,
+            Provisioned::Sqlite { path } => path.to_str().unwrap_or_default(),
         }
     }
 
@@ -569,10 +471,7 @@ impl TestBed {
     /// exactly why chat's tables live in the control track there. Nothing has a
     /// second configuration to ask for, so there is nothing to hand out.
     pub fn database_url(&self) -> Option<String> {
-        match &self.arm {
-            Arm::Pg { base_url, db_name } => Some(swap_db(base_url, db_name)),
-            Arm::Sqlite { .. } => None,
-        }
+        lifecycle::database_url(&self.arm)
     }
 
     /// Drop the whole private database (unless `NOOK_KEEP_TEST_DATA`). Idempotent.
@@ -582,29 +481,14 @@ impl TestBed {
             return;
         }
         self.dropped = true;
+        // Close first: on Windows an open handle would block the unlink, and
+        // on Postgres releasing our own connections is tidier than making
+        // `WITH (FORCE)` sever them.
         match &self.arm {
-            Arm::Pg { base_url, db_name } => {
-                self.db.pg().close().await;
-                let _ = drop_database(base_url, db_name).await;
-            }
-            Arm::Sqlite { path } => {
-                // Close first: on Windows an open handle would block the
-                // unlink, and on unix it costs nothing to be tidy.
-                self.db.sqlite().close().await;
-                remove_sqlite_files(path);
-            }
+            Provisioned::Pg { .. } => self.db.pg().close().await,
+            Provisioned::Sqlite { .. } => self.db.sqlite().close().await,
         }
-    }
-}
-
-/// Remove a SQLite database and the sidecars sqlx leaves beside it. The `-wal`
-/// and `-shm` files are not optional housekeeping: leaving them next to a
-/// deleted database is how a later run finds a half-state, and they are the
-/// difference between "the file is gone" and "the database is gone".
-fn remove_sqlite_files(path: &Path) {
-    let _ = std::fs::remove_file(path);
-    for ext in ["-wal", "-shm"] {
-        let _ = std::fs::remove_file(format!("{}{ext}", path.display()));
+        lifecycle::destroy(&self.arm).await;
     }
 }
 
@@ -621,39 +505,6 @@ pub async fn deadline<T>(secs: u64, fut: impl std::future::Future<Output = T>) -
              (see MAIN-185); failing fast here instead of eating the CI job"
         ),
     }
-}
-
-/// Rewrite the database segment of a Postgres URL, preserving any query params.
-fn swap_db(base: &str, db: &str) -> String {
-    let (scheme, rest) = base.split_once("://").unwrap_or(("postgres", base));
-    let (authority_and_db, params) = match rest.split_once('?') {
-        Some((a, p)) => (a, Some(p)),
-        None => (rest, None),
-    };
-    let authority = authority_and_db
-        .rsplit_once('/')
-        .map(|(a, _)| a)
-        .unwrap_or(authority_and_db);
-    let mut out = format!("{scheme}://{authority}/{db}");
-    if let Some(p) = params {
-        out.push('?');
-        out.push_str(p);
-    }
-    out
-}
-
-/// Drop `db` from an admin connection to the base database. `WITH (FORCE)`
-/// terminates any stragglers (Postgres 13+); the dev/CI Postgres is 16.
-async fn drop_database(base_url: &str, db: &str) -> Result<()> {
-    let mut admin = PgConnection::connect(base_url)
-        .await
-        .context("connect to drop the test database")?;
-    sqlx::query(&format!("DROP DATABASE IF EXISTS \"{db}\" WITH (FORCE)"))
-        .execute(&mut admin)
-        .await
-        .context("drop the test database")?;
-    admin.close().await.ok();
-    Ok(())
 }
 
 impl Drop for TestBed {
@@ -673,9 +524,11 @@ impl Drop for TestBed {
         }
         self.dropped = true;
         match &self.arm {
-            Arm::Pg { base_url, db_name } => {
-                let base = base_url.clone();
-                let name = db_name.clone();
+            Provisioned::Pg { base_url, db_name } => {
+                let arm = Provisioned::Pg {
+                    base_url: base_url.clone(),
+                    db_name: db_name.clone(),
+                };
                 let _ = std::thread::spawn(move || {
                     let Ok(rt) = tokio::runtime::Builder::new_current_thread()
                         .enable_all()
@@ -683,9 +536,7 @@ impl Drop for TestBed {
                     else {
                         return;
                     };
-                    rt.block_on(async {
-                        let _ = drop_database(&base, &name).await;
-                    });
+                    rt.block_on(async { lifecycle::destroy(&arm).await });
                 })
                 .join();
             }
@@ -694,7 +545,7 @@ impl Drop for TestBed {
             // Postgres arm must not — see the note above. On unix the unlink
             // succeeds with the file still open, and the pool then drops
             // inertly on the test thread.
-            Arm::Sqlite { path } => remove_sqlite_files(path),
+            Provisioned::Sqlite { path } => lifecycle::remove_sqlite_files(path),
         }
     }
 }
@@ -715,18 +566,6 @@ mod tests {
     #[tokio::test]
     async fn deadline_passes_a_prompt_future_through() {
         assert_eq!(deadline(60, async { 7 }).await, 7);
-    }
-
-    #[test]
-    fn swap_db_rewrites_only_the_database_segment() {
-        assert_eq!(
-            swap_db("postgres://nook:nook@postgres:5432/nook", "nook_test_1"),
-            "postgres://nook:nook@postgres:5432/nook_test_1"
-        );
-        assert_eq!(
-            swap_db("postgres://u:p@h:5432/base?sslmode=disable", "t"),
-            "postgres://u:p@h:5432/t?sslmode=disable"
-        );
     }
 
     /// A dependent crate opens its own pool from this URL, so it must name the

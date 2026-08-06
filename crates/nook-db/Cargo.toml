@@ -25,5 +25,11 @@ thiserror = { workspace = true }
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+[features]
+# Database LIFECYCLE — CREATE/DROP DATABASE and the bed pools (MAIN-429). Off in
+# normal builds, matching nook-infra's `test-support`, so a release binary does
+# not carry database-administration code at all.
+test-support = []
+
 [dev-dependencies]
 tokio = { workspace = true }
