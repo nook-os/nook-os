@@ -125,8 +125,11 @@ async fn rotation_distributes_then_switches_then_retires() {
 
     // A node holding a live leaf signed by the old CA.
     let node = Uuid::now_v7();
+    // The expiry is computed in Rust and bound, not written as
+    // `now() + interval '30 days'` — a Postgres-only spelling, and this binary
+    // also runs on SQLite (MAIN-438).
     bed.db().exec("INSERT INTO nodes (id, tenant_id, name, node_token_hash, status, ca_id, cert_not_after)
-         VALUES ($1, $2, $3, $3, 'online', $4, now() + interval '30 days')", params![node, tenant, format!("n-{}", Uuid::now_v7().simple()), old.id])
+         VALUES ($1, $2, $3, $3, 'online', $4, $5)", params![node, tenant, format!("n-{}", Uuid::now_v7().simple()), old.id, chrono::Utc::now() + chrono::Duration::days(30)])
     .await
     .unwrap();
 

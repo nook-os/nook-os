@@ -156,8 +156,11 @@ async fn renews_after_expiry_and_across_a_rotation() {
     // its CA while nobody is looking.
     bed.db()
         .exec(
-            "UPDATE nodes SET cert_not_after = now() - interval '90 days' WHERE id = $1",
-            params![node],
+            // Computed in Rust and bound — `now() - interval '…'` is a
+            // Postgres-only spelling and this binary also runs on SQLite
+            // (MAIN-438).
+            "UPDATE nodes SET cert_not_after = $2 WHERE id = $1",
+            params![node, chrono::Utc::now() - chrono::Duration::days(90)],
         )
         .await
         .unwrap();
@@ -338,8 +341,8 @@ async fn a_revoked_node_is_refused() {
 
     bed.db()
         .exec(
-            "UPDATE nodes SET revoked_at = now() WHERE id = $1",
-            params![node],
+            "UPDATE nodes SET revoked_at = $2 WHERE id = $1",
+            params![node, chrono::Utc::now()],
         )
         .await
         .unwrap();
