@@ -59,7 +59,7 @@ export function useNewTerminal() {
       return;
     }
 
-    const { data: session, error, response } = await api.POST("/api/v1/sessions", {
+    const { data: session, error } = await api.POST("/api/v1/sessions", {
       body: {
         workspace_id: ws.id,
         node_id: target.location.node_id,
@@ -67,10 +67,14 @@ export function useNewTerminal() {
         path: target.location.path,
       },
     });
-    if (error || !response.ok) {
+    // Checked on the SESSION rather than on `response.ok`, because the id is
+    // what this is for — a 2xx carrying no body leaves nothing to open, and
+    // reporting that as success would strand you on the page you started on
+    // with no clue why.
+    if (error || !session?.id) {
       await notify(
         "Could not open a terminal",
-        error ? String((error as { error: unknown }).error) : response.statusText,
+        error ? String((error as { error: unknown }).error) : "the server returned no session",
       );
       return;
     }
@@ -78,6 +82,6 @@ export function useNewTerminal() {
     // their own. Invalidate broadly rather than naming them — a new session is
     // exactly the event every session surface wants.
     await queryClient.invalidateQueries({ queryKey: ["sessions"] });
-    if (session?.id) navigate(`/sessions/${session.id}`);
+    navigate(`/sessions/${session.id}`);
   };
 }

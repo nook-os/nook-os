@@ -46,7 +46,22 @@ const get = vi.hoisted(() =>
     if (path === "/api/v1/workspaces")
       return {
         data: [
-          { id: "w1", name: "api", locations: [] },
+          // `api` has exactly one live checkout, so a terminal opens straight
+          // into it; `web` has none, so the same action escalates to New Work.
+          // Both branches of `terminalTarget` are reachable from the tree.
+          {
+            id: "w1",
+            name: "api",
+            locations: [
+              {
+                node_id: "n1",
+                node_name: "azul",
+                node_status: "online",
+                path: "/w/api",
+                dirty: false,
+              },
+            ],
+          },
           { id: "w2", name: "web", locations: [] },
         ],
       };
@@ -244,5 +259,60 @@ describe("SessionNavigator — rename and stop live HERE (MAIN-416)", () => {
     fireEvent.click(await screen.findByText("Stop Session…"));
     await waitFor(() => expect(askConfirm).toHaveBeenCalled());
     expect(post).not.toHaveBeenCalled();
+  });
+});
+
+describe("SessionNavigator — right-click a workspace for a terminal", () => {
+  it("offers New Terminal on a workspace folder", async () => {
+    renderPane();
+    fireEvent.contextMenu(await screen.findByText("api"));
+    expect(await screen.findByText("New Terminal")).toBeTruthy();
+    expect(screen.getByText("Open Workspace")).toBeTruthy();
+  });
+
+  it("opens a terminal in the workspace's one live checkout", async () => {
+    renderPane();
+    fireEvent.contextMenu(await screen.findByText("api"));
+    fireEvent.click(await screen.findByText("New Terminal"));
+    // The node and the path come from the checkout, not from a guess: a shell
+    // on the wrong machine is the failure this rule exists to prevent.
+    await waitFor(() =>
+      expect(post).toHaveBeenCalledWith("/api/v1/sessions", {
+        body: {
+          workspace_id: "w1",
+          node_id: "n1",
+          runtime: "bash",
+          path: "/w/api",
+        },
+      }),
+    );
+  });
+
+  it("does not invent a checkout for a workspace cloned nowhere", async () => {
+    renderPane();
+    fireEvent.contextMenu(await screen.findByText("web"));
+    fireEvent.click(await screen.findByText("New Terminal"));
+    // `web` has no locations, so there is nowhere to put a shell. It escalates
+    // to New Work rather than POSTing a session at a node it made up.
+    await waitFor(() => expect(screen.queryByText("New Terminal")).toBeNull());
+    expect(post).not.toHaveBeenCalled();
+  });
+
+  it("keeps the folder menu separate from the session menu", async () => {
+    // Right-clicking the folder must not offer Stop — that ends one session,
+    // and the folder is the workspace, not any session in it.
+    renderPane();
+    fireEvent.contextMenu(await screen.findByText("api"));
+    expect(await screen.findByText("New Terminal")).toBeTruthy();
+    expect(screen.queryByText("Stop Session…")).toBeNull();
+  });
+
+  it("offers New Terminal Here on a session too", async () => {
+    renderPane();
+    fireEvent.contextMenu(await screen.findByText("alpha"));
+    // The session you just killed is the one you are looking at, so the way
+    // back should not require finding its folder header first.
+    expect(await screen.findByText("New Terminal Here")).toBeTruthy();
+    expect(screen.getByText("Stop Session…")).toBeTruthy();
   });
 });
