@@ -1,7 +1,7 @@
 ---
 name: nook-review
 description: "Review open PRs against their linked NookOS board issue and required GitHub checks, then post a three-group verdict with loop labels. Use when asked to run the loop's reviewer or review its PR queue. Designed for /loop; never merges or pushes code."
-version: 1.0.0
+version: 1.1.0
 author: NookOS
 license: MIT
 platforms: [linux, macos]
@@ -178,6 +178,50 @@ removing them so an absent label does not fail the command:
 - Scope conflict or no required CI: add `needs-human-review`; remove both
   `loop-approved` and `loop-changes-requested`; set "Safe to merge" to
   `No — human decision required.`
+
+Then put the same three names on the **board card**. That is what lets NookOS
+answer "does this PR need repair?" without reaching for GitHub: the control
+plane holds no GitHub credentials, and this one mirrored fact is what keeps the
+build loop from needing any.
+
+The board resolves a label by name and returns `404` for one that is not in the
+tenant's vocabulary yet — on removals as well as adds, because both go through
+the same lookup. So ensure the three exist first. `POST /api/v1/labels` returns
+the existing row instead of erroring, which makes this safe to re-run every
+pass:
+
+```bash
+NOOK_SERVER=$(grep '^server' ~/.config/nook/auth.toml | sed 's/.*"\(.*\)"/\1/')
+NOOK_TOKEN=$(grep '^token'  ~/.config/nook/auth.toml | sed 's/.*"\(.*\)"/\1/')
+for l in loop-approved loop-changes-requested needs-human-review; do
+  curl -s -X POST "$NOOK_SERVER/api/v1/labels" \
+    -H "Authorization: Bearer $NOOK_TOKEN" -H 'Content-Type: application/json' \
+    -d "{\"name\":\"$l\"}" -o /dev/null
+done
+```
+
+Then mirror whichever branch you just took, with the same adds and the same
+removals:
+
+```bash
+nook label <KEY> loop-approved                    # the verdict you set
+nook label <KEY> loop-changes-requested --remove  # each one that branch removes
+```
+
+Once the names exist, attach and detach are both idempotent — re-applying a
+verdict the card already carries, or removing one it does not, succeeds. The
+check-before-removing above is a `gh` workaround and is not needed here.
+
+The preservation rule crosses over intact: a pre-existing `needs-human-review`
+survives an otherwise-clean pass on the card exactly as it does on the PR, so a
+card can legitimately carry it alongside `loop-approved`. Only the escalation
+branch removes the other two outright.
+
+**Mirroring is best-effort.** If a call fails, say so in the pass output and
+carry on — the verdict comment is the record of truth, and a review that has
+already posted must not be failed by a label write. Best-effort is not silent:
+report it, because a mirror that quietly never ran would leave the build loop
+reading a card that looks unreviewed.
 
 The escalation path deliberately leaves the automated repair queue. A human
 must resolve the reason, change the issue or repository configuration as
