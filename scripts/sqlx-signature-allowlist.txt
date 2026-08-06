@@ -30,13 +30,11 @@
 crates/nook-chat/src/main.rs                 # PgConnectOptions — chat pins search_path=chat,public; nook_db::connect has no option for it
 crates/nook-chat/tests/auth_search_path.rs   # the subject IS the search_path pin
 crates/nook-chat/tests/migrations.rs         # its own sqlx::migrate::Migrator into the chat schema
-crates/nook-testkit/tests/teardown.rs        # queries pg_database and DROP DATABASE .. WITH (FORCE)
 crates/nook-control/tests/sqlite_person_id_default.rs  # sqlx::Row to read pragma_table_info on a raw SQLite handle
 
 # ── Awaiting MAIN-268's own AC-1 (the bed.pool removal) ─────────────────────
 
 # ── Awaiting the testkit conversion (MAIN-267 and its siblings) ─────────────
 # Each line goes when its file is converted.
-crates/nook-testkit/src/lib.rs               # Postgres DATABASE ADMINISTRATION, not the escape hatch: CREATE DATABASE .. TEMPLATE, DROP DATABASE, and the template reaper. MAIN-268 removed `pub pool: PgPool`; what is left has no engine-neutral equivalent because nook-db manages connections, not databases
 crates/nook-control/tests/oidc_degraded.rs   # sqlx::raw_sql runs the real 2-statement migration file verbatim; `Db` has no multi-statement path (MAIN-393), so it opens its own pool from bed.database_url()
 

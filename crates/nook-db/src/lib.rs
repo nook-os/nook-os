@@ -64,6 +64,14 @@ pub mod restamp;
 /// single-writer and the decided limit is one instance per file; this refuses a
 /// second one at boot instead of letting the two race. Postgres takes no lock.
 pub mod single_instance;
+
+/// Creating and destroying whole databases, for test harnesses (MAIN-429).
+///
+/// `CREATE DATABASE` cannot run through a pool aimed at the database being
+/// created, so this is the one part of the data layer that holds a raw driver
+/// connection. Gated so it never reaches a release build.
+#[cfg(feature = "test-support")]
+pub mod test_support;
 pub use single_instance::{acquire_for_url as acquire_single_instance_lock, InstanceLock};
 
 use std::fmt;
