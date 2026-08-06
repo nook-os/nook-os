@@ -288,6 +288,47 @@ pub fn warn_if_insecure(insecure_in_use: bool, server: &str) {
     }
 }
 
+/// The FLEET's GitHub credential, or `None` when this node has not been given
+/// one (MAIN-407).
+///
+/// `NOOK_GH_TOKEN` is the name the chart and compose provision, in the same
+/// shape as every other `NOOK_`-prefixed node setting. `GH_TOKEN` and
+/// `GITHUB_TOKEN` are honoured after it so a developer machine that already
+/// exports one for `gh` needs no second variable.
+///
+/// One accessor rather than two lookups, because the preflight that REFUSES a
+/// review job and the session export that CARRIES the token to `gh` have to
+/// agree: a node that fails preflight on a variable the session would have got —
+/// or worse, passes preflight and hands the session nothing — is the confusing
+/// failure AC-5 exists to prevent.
+///
+/// Empty and whitespace are not credentials. That is the shape an unset compose
+/// variable takes (`${NOOK_GH_TOKEN:-}`), and treating it as present would move
+/// the failure from this preflight to an opaque `gh` error inside a session.
+pub fn fleet_gh_token() -> Option<String> {
+    first_usable(
+        ["NOOK_GH_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"]
+            .iter()
+            .map(|k| std::env::var(k).ok()),
+    )
+}
+
+/// The choice itself, with the environment lifted out.
+///
+/// Extracted for the same reason `loop_job` once extracted `token_is_usable`,
+/// and the comment there is worth keeping alive: asserting this through the
+/// real accessor means mutating process-global environment variables, and two
+/// tests doing that in one binary race on parallel threads — an intermittent
+/// red nobody can reproduce. Pure, the tests touch no environment at all.
+///
+/// The emptiness test is INSIDE the search rather than after it. Compose always
+/// SETS `NOOK_GH_TOKEN` — to the empty string when the operator supplied
+/// nothing — so rejecting empties only at the end would let that empty value
+/// shadow a perfectly good `GH_TOKEN` on a developer machine.
+fn first_usable(values: impl Iterator<Item = Option<String>>) -> Option<String> {
+    values.flatten().find(|t| !t.trim().is_empty())
+}
+
 /// Where this machine's own certificate and key live — beside `node.toml`,
 /// `0600`. The key is generated locally and never leaves.
 pub fn cert_paths() -> Result<(PathBuf, PathBuf)> {
@@ -506,6 +547,43 @@ mod slug_tests {
             derived_tmux_socket("https://nook.hein.network"),
             derived_tmux_socket("https://other.example.com"),
         );
+    }
+}
+
+#[cfg(test)]
+mod gh_token_tests {
+    use super::*;
+
+    fn pick(vals: &[Option<&str>]) -> Option<String> {
+        first_usable(vals.iter().map(|v| v.map(str::to_string)))
+    }
+
+    /// MAIN-407 AC-2/AC-5: what counts as the fleet's credential, and in what
+    /// order. No environment is touched — see `first_usable`.
+    #[test]
+    fn the_fleet_variable_wins_and_empties_fall_through() {
+        // The fleet's own name is preferred when it carries something.
+        assert_eq!(
+            pick(&[Some("fleet"), Some("dev"), None]).as_deref(),
+            Some("fleet")
+        );
+        // …but an EMPTY fleet variable — the shape `${NOOK_GH_TOKEN:-}` takes in
+        // compose whenever the operator set nothing — must not shadow a real
+        // `GH_TOKEN` a developer already exports for `gh`.
+        assert_eq!(
+            pick(&[Some(""), Some("dev"), None]).as_deref(),
+            Some("dev"),
+            "an unset compose variable must fall through, not win"
+        );
+        assert_eq!(
+            pick(&[Some("   "), None, Some("gha")]).as_deref(),
+            Some("gha"),
+            "whitespace is not a credential either"
+        );
+        // Nothing anywhere is None, which is what makes the preflight refuse and
+        // the session export omit the variable entirely.
+        assert_eq!(pick(&[None, None, None]), None);
+        assert_eq!(pick(&[Some(""), Some("  "), None]), None);
     }
 }
 

@@ -44,6 +44,16 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.existingSecret }}
                   key: {{ .Values.secretKeys.joinToken }}
+            # The FLEET's GitHub credential (MAIN-407). `optional: true` so a
+            # Secret without the key still starts the pod: a node with no GitHub
+            # reach is a supported state — it just cannot take review work, and
+            # says so by name when asked to.
+            - name: NOOK_GH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.existingSecret }}
+                  key: {{ .Values.secretKeys.ghToken }}
+                  optional: true
             - name: NOOK_NODE_NAME
               value: {{ .Values.nodeName | quote }}
             - name: NOOK_WORKSPACE_ROOT

@@ -31,6 +31,51 @@ helm install operator ./charts/nook-operator-node \
 `values.server` and `values.existingSecret` are both required — the chart
 refuses to render half a join configuration.
 
+## The fleet's GitHub token (MAIN-407)
+
+Review jobs read pull requests and post their verdict, so the operator needs a
+GitHub credential. It goes in the SAME Secret as the join token, under the key
+`secretKeys.ghToken` (default `ghToken`), and reaches the pod as
+`NOOK_GH_TOKEN`:
+
+```bash
+kubectl create secret generic nook-operator-join \
+  --from-literal=joinToken=nook_join_XXXX \
+  --from-literal=ghToken=github_pat_XXXX
+```
+
+The key is `optional: true`, so an existing Secret without it still starts the
+pod. A node with no GitHub reach is a supported state — it simply cannot take
+review work, and says so by name at preflight rather than reading every PR as
+"nothing to review" and reporting a pass that examined nothing.
+
+The node exports the token into each session as `GH_TOKEN`, the name `gh`
+itself looks for, so an agent running there is never handed a credential by
+hand.
+
+### Least-privilege scopes
+
+This is a **fleet-wide** credential: everything it can do, every review job on
+this node can do. Use a **fine-grained** personal access token, limited to the
+repositories the fleet reviews, granting only:
+
+| Permission      | Level          | Why                                          |
+|-----------------|----------------|----------------------------------------------|
+| Pull requests   | Read and write | Read the diff; post the verdict; set `loop-*` labels |
+| Contents        | Read-only      | Read the tree the PR changes                 |
+| Metadata        | Read-only      | Mandatory; GitHub grants it implicitly       |
+
+Nothing else. In particular **not** Administration, **not** Actions, **not**
+Workflows, and **not** a classic token's `repo` scope — `repo` carries push and
+settings access to every repository the issuing account can reach, which is
+precisely the fleet-wide credential nobody audits later. If a classic token is
+unavoidable, `public_repo` is the nearest equivalent and works only for public
+repositories.
+
+The token is never written to a chart value or a committed file; it exists only
+in the Secret, and `scripts/check-secrets-untracked.test.sh` is what keeps that
+true.
+
 ## Persistence (AC-5)
 
 Three `volumeClaimTemplates` give the pod stable PersistentVolumeClaims it

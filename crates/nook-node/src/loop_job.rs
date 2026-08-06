@@ -297,31 +297,18 @@ pub fn deliver_message(job_id: &str, body: &str) -> Result<(), String> {
     crate::tmux::send_keys(&tmux_name, &line).map_err(|e| e.to_string())
 }
 
-/// Whether a token value is actually a credential.
-///
-/// A pure seam, and it exists for a testing reason as much as a reading one:
-/// asserting this through `gh_is_authenticated` means mutating process-global
-/// environment variables, and two tests doing that in one binary race on
-/// parallel threads — an intermittent red nobody can reproduce. With the
-/// predicate extracted, the tests touch no environment at all.
-///
-/// Empty and whitespace are NOT credentials: that is the shape an unset compose
-/// variable takes, and it would otherwise pass here and fail at the API.
-fn token_is_usable(v: Option<&str>) -> bool {
-    v.is_some_and(|t| !t.trim().is_empty())
-}
-
 /// Whether this node can act on GitHub at all (MAIN-406 AC-4 / MAIN-143 AC-5).
 ///
-/// `GH_TOKEN`/`GITHUB_TOKEN` first because that is how split 3 will provision
-/// the operator, then a logged-in `gh` for a developer machine. Checked as a
-/// PREFLIGHT rather than left to the skill: the skill's own escalation is a
-/// comment on a PR, which is precisely what it cannot post without this.
+/// The fleet token first — `NOOK_GH_TOKEN`, which MAIN-407 provisions, falling
+/// back to `GH_TOKEN`/`GITHUB_TOKEN` — then a logged-in `gh` for a developer
+/// machine. Checked as a PREFLIGHT rather than left to the skill: the skill's
+/// own escalation is a comment on a PR, which is precisely what it cannot post
+/// without this.
+///
+/// The lookup is [`crate::config::fleet_gh_token`], the same one the session
+/// export uses, so this cannot come to disagree with what a session receives.
 fn gh_is_authenticated() -> Result<(), String> {
-    let env = |k: &str| std::env::var(k).ok();
-    if token_is_usable(env("GH_TOKEN").as_deref())
-        || token_is_usable(env("GITHUB_TOKEN").as_deref())
-    {
+    if crate::config::fleet_gh_token().is_some() {
         return Ok(());
     }
     match std::process::Command::new("gh")
@@ -330,7 +317,7 @@ fn gh_is_authenticated() -> Result<(), String> {
     {
         Ok(o) if o.status.success() => Ok(()),
         Ok(_) => Err("gh is installed but not authenticated".into()),
-        Err(_) => Err("no GH_TOKEN and no gh on PATH".into()),
+        Err(_) => Err("no GitHub token (NOOK_GH_TOKEN) and no gh on PATH".into()),
     }
 }
 
@@ -1058,22 +1045,28 @@ mod tests {
 
     /// AC-4 / MAIN-143 AC-5: what counts as a credential.
     ///
-    /// Asserts the real predicate `gh_is_authenticated` uses, and touches NO
-    /// environment. The first cut set `GH_TOKEN` in one test and cleared it in
-    /// another in the same binary — Rust runs those on parallel threads, so a
-    /// `remove_var` landing between the other test's `set_var` and its read
-    /// made it fall through to `gh auth status` and fail on CI. The `unsafe`
-    /// block's SAFETY comment claimed this test was the only writer of those
-    /// names; it was not, and the comment was the wrong kind of confident.
+    /// The predicate moved to `config::fleet_gh_token` when MAIN-407 gave the
+    /// fleet its own variable, so the emptiness rule is asserted there, beside
+    /// the search order it now has to survive. What is checked HERE is the only
+    /// part this module still owns: that the preflight consults that one
+    /// accessor rather than reading the environment itself, which is what keeps
+    /// it from disagreeing with the token a session is handed.
     #[test]
-    fn an_empty_or_absent_token_is_not_a_credential() {
-        assert!(token_is_usable(Some("ghp_realish")));
-        assert!(!token_is_usable(Some("")), "empty is not a credential");
+    fn the_preflight_reads_the_shared_accessor() {
+        let src = include_str!("loop_job.rs");
+        let f = src
+            .split("fn gh_is_authenticated")
+            .nth(1)
+            .expect("gh_is_authenticated exists");
+        let body = &f[..f.find("\n}\n").expect("its body ends")];
         assert!(
-            !token_is_usable(Some("   ")),
-            "whitespace is the shape an unset compose variable takes"
+            body.contains("config::fleet_gh_token"),
+            "the preflight must go through the shared accessor, not its own env read"
         );
-        assert!(!token_is_usable(None), "absent is not a credential");
+        assert!(
+            !body.contains("std::env::var"),
+            "a second env lookup here is how the preflight and the session export drift"
+        );
     }
 
     /// AC-3: a missing cache is a NAMED failure, not a hang and not a clone.

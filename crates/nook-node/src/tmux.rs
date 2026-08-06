@@ -463,6 +463,22 @@ fn spawn(
         "-e",
         "GIT_SSH_COMMAND=nook get workspace git-ssh",
     ];
+    // The fleet's GitHub credential, as the name `gh` itself reads (MAIN-407).
+    // Exported here rather than at one call site so every session gets it —
+    // a review job's, and the terminal a human opens to see what that job saw.
+    // The node process holds it as `NOOK_GH_TOKEN`; `gh` only knows `GH_TOKEN`,
+    // so the rename happens here and an agent inside never has to be handed a
+    // credential by hand.
+    //
+    // Absent, nothing is exported at all. An empty `GH_TOKEN` is worse than no
+    // variable: `gh` prefers it over a logged-in account, so a session on a
+    // developer machine would lose the auth it already had.
+    let gh_pair;
+    if let Some(t) = crate::config::fleet_gh_token() {
+        gh_pair = format!("GH_TOKEN={t}");
+        args.push("-e");
+        args.push(&gh_pair);
+    }
     let ws_pair;
     if let Some(ws) = workspace_id {
         ws_pair = format!("NOOK_WORKSPACE_ID={ws}");
@@ -779,6 +795,41 @@ mod session_env_tests {
                 && spawn_body.contains("NOOK_WORKSPACE_ID="),
             "both must be set inside `spawn`; setting either in a caller is how \
              new_session and new_job_session diverged"
+        );
+    }
+
+    /// MAIN-407 AC-3: the fleet's GitHub token reaches a session, and does so
+    /// from the SAME accessor the review preflight consults.
+    ///
+    /// Asserted on the source for the same reason as its neighbours: `spawn`
+    /// hands its argument vector straight to the `tmux` binary, so the only
+    /// thing a unit test can pin without a tmux server is that the pair is
+    /// built here, once, for every constructor.
+    ///
+    /// The rename is the part worth guarding. The node holds the credential as
+    /// `NOOK_GH_TOKEN`; `gh` reads only `GH_TOKEN`. Exporting the node's own
+    /// name into a session would leave `gh` unauthenticated while every check
+    /// upstream reported a token present — a failure that surfaces as an opaque
+    /// `gh` error inside somebody's terminal, which is precisely what AC-5 is
+    /// written to prevent.
+    #[test]
+    fn a_session_gets_the_fleet_token_under_the_name_gh_reads() {
+        let src = source();
+        assert!(
+            src.contains("GH_TOKEN={t}"),
+            "a session must receive the token as GH_TOKEN — the name `gh` reads"
+        );
+        assert!(
+            src.contains("config::fleet_gh_token()"),
+            "the export must use the shared accessor, so it cannot disagree with \
+             the review preflight about whether this node has a credential"
+        );
+        // Scoped to an exported PAIR, not to the name appearing anywhere: the
+        // comment above the export has to be free to explain the rename.
+        assert!(
+            !src.contains("NOOK_GH_TOKEN={"),
+            "the node's own variable name must not be exported into a session; \
+             `gh` would not read it and the session would look authenticated"
         );
     }
 
