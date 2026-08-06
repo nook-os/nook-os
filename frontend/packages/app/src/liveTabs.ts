@@ -11,7 +11,6 @@
 import { useEffect } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "@nookos/api";
-import { useWorkspaceContext } from "./context";
 import { deriveTabs, useSessionTabPrefs, type SessionTab } from "./sessionTabsStore";
 
 export interface LiveTabs {
@@ -23,26 +22,18 @@ export interface LiveTabs {
   loaded: boolean;
 }
 
-export interface LiveTabsOptions {
-  /** Ignore the workspace context and return every workspace's sessions.
-   *
-   *  For the session navigator (MAIN-414), which exists to find a session you
-   *  have NOT got open — including one in a workspace you are not scoped to.
-   *  The strip keeps the scoping; this is an opt-in for the one caller whose
-   *  whole job is the wider view. */
-  allWorkspaces?: boolean;
-}
-
-export function useLiveTabs(opts: LiveTabsOptions = {}): LiveTabs {
+export function useLiveTabs(): LiveTabs {
   const prefs = useSessionTabPrefs((s) => s.prefs);
   const prune = useSessionTabPrefs((s) => s.prune);
-  const scoped = useWorkspaceContext((s) => s.selectedWorkspaceId);
-  const selectedWorkspaceId = opts.allWorkspaces ? null : scoped;
 
-  // Unscoped by workspace on purpose — the workspace context filters the strip
-  // below, but the QUERY must see everything or a session on another machine
-  // could not have a tab. The live bus invalidates `["sessions"]` on any
-  // session event, so this updates without a reload.
+  // Unscoped by workspace, and no longer optionally so. This carried an
+  // `allWorkspaces` opt-out for the navigator, which is the only caller left
+  // and always passed it — the strip stopped being workspace-scoped when
+  // MAIN-417 moved it onto the working set. An option whose one caller always
+  // sets it is not an option; it is the behaviour with a switch in front of it.
+  //
+  // The live bus invalidates `["sessions"]` on any session event, so this
+  // updates without a reload.
   const { data: sessions } = useQuery({
     queryKey: ["sessions", "tabs"],
     queryFn: async () =>
@@ -75,7 +66,7 @@ export function useLiveTabs(opts: LiveTabsOptions = {}): LiveTabs {
   );
   const names = Object.fromEntries((workspaces ?? []).map((w) => [w.id, w.name]));
   const nodeNames = Object.fromEntries((nodes ?? []).map((n) => [n.id, n.name]));
-  const tabs = deriveTabs(mine, names, prefs, selectedWorkspaceId, nodeNames);
+  const tabs = deriveTabs(mine, names, prefs, nodeNames);
 
   // Prefs outlive the sessions they name, so drop the dead ones. Keyed on the
   // full live list, not the visible strip, or switching workspace context would

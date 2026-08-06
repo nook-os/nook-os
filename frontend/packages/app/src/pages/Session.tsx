@@ -547,18 +547,19 @@ export function SessionPage() {
   const nodeName = nodes?.find((n) => n.id === session?.node_id)?.name;
   const git = useGitStatus(session?.workspace_id ?? null, session?.node_id);
 
-  // Opening a session from another workspace follows it: the switcher, tab
-  // strip, board, and activity all move to that workspace's context. (An
-  // explicit "all workspaces" context is left alone.)
+  // Opening a session from another workspace follows it: the switcher, board
+  // and activity all move to that workspace's context.
+  //
+  // It now follows from NO context too. The old guard skipped an unset context
+  // because unset meant "all workspaces", a deliberate choice to leave alone.
+  // With that mode gone, unset only means "hasn't picked yet" — so opening a
+  // session settles it, which is also what stops a fresh account sitting on
+  // "pick a workspace" forever with no obvious way out.
   const selectWorkspace = useWorkspaceContext((s) => s.select);
   const selectedWorkspaceId = useWorkspaceContext((s) => s.selectedWorkspaceId);
   useEffect(() => {
     // An ad-hoc terminal has no workspace, so there is no context to follow to.
-    if (
-      session?.workspace_id &&
-      selectedWorkspaceId &&
-      selectedWorkspaceId !== session.workspace_id
-    ) {
+    if (session?.workspace_id && selectedWorkspaceId !== session.workspace_id) {
       selectWorkspace(session.workspace_id);
     }
   }, [session, selectedWorkspaceId, selectWorkspace]);

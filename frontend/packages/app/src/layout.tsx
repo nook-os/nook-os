@@ -127,7 +127,10 @@ function WorkspaceSwitcher() {
   // session (which belongs to the old scope) goes back to `/sessions` — which
   // since MAIN-321 lands on the first session of the NEW scope, or its empty
   // state, rather than on a list.
-  const switchTo = (id: string | null) => {
+  // Takes an id, never null. "All workspaces" is gone (it stopped meaning
+  // anything once the strip became a working set), so the only way to change
+  // context is to name a workspace.
+  const switchTo = (id: string) => {
     select(id);
     setOpen(false);
     const path = location.pathname;
@@ -183,7 +186,7 @@ function WorkspaceSwitcher() {
       <button className="ws-switcher-btn" title="switch workspace" onClick={() => setOpen((o) => !o)}>
         <Boxes size={14} />
         <span className="slash">~/</span>
-        <span className="name">{current?.name ?? "all workspaces"}</span>
+        <span className="name">{current?.name ?? "pick a workspace"}</span>
         <ChevronDown size={13} />
       </button>
       {current && (
@@ -197,12 +200,6 @@ function WorkspaceSwitcher() {
       )}
       {open && (
         <div className="ws-switcher-menu">
-          <button
-            className={`ws-switcher-item${selectedWorkspaceId ? "" : " current"}`}
-            onClick={() => switchTo(null)}
-          >
-            <Boxes size={14} /> all workspaces
-          </button>
           {(workspaces ?? []).map((w) => (
             <button
               key={w.id}

@@ -134,17 +134,16 @@ describe("deriveTabs — view prefs order the strip", () => {
   });
 });
 
-describe("deriveTabs — workspace context", () => {
-  it("scopes to the selected workspace but keeps ad-hoc terminals", () => {
-    // An ad-hoc terminal belongs to no workspace, so a workspace filter would
-    // otherwise make it reachable from no context at all.
+describe("deriveTabs — no workspace scoping", () => {
+  // It used to take a workspace context and filter on it. MAIN-417 made the
+  // strip a set you curate yourself, so that was filtering your own choices a
+  // second time, and the only caller left was passing an opt-out to turn it
+  // off. Pinned here as the rule rather than left as an absence: a future
+  // reader adding "just scope it to the current workspace" should have to
+  // delete a test that says why not.
+  it("keeps every workspace's sessions, and the ad-hoc ones", () => {
     const sessions = [live("a", "w1"), live("b", "w2"), live("c")];
-    expect(ids(deriveTabs(sessions, {}, noPrefs, "w1"))).toEqual(["a", "c"]);
-  });
-
-  it("shows every workspace's sessions with no context selected", () => {
-    const sessions = [live("a", "w1"), live("b", "w2")];
-    expect(ids(deriveTabs(sessions, {}, noPrefs, null))).toEqual(["a", "b"]);
+    expect(ids(deriveTabs(sessions, {}, noPrefs))).toEqual(["a", "b", "c"]);
   });
 });
 

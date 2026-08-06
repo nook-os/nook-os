@@ -208,9 +208,9 @@ export function SessionNavigator({ activeId }: { activeId?: string }) {
   const sessionStatus = useLive((s) => s.sessionStatus);
   const viewportWidth = useViewportWidth();
 
-  // Every workspace, not the scoped one: the pane's job is finding a session
-  // you have NOT got open, and scoping it would hide exactly those.
-  const { tabs } = useLiveTabs({ allWorkspaces: true });
+  // Every session, never a scoped subset: the pane's job is finding one you
+  // have NOT got open, and hiding some would defeat it.
+  const { tabs } = useLiveTabs();
 
   const newTerminal = useNewTerminal();
   const showNewWork = useNewWork((s) => s.show);
