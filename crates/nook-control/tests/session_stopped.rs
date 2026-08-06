@@ -218,7 +218,11 @@ async fn mark_session_exited_reports_whether_it_ended_anything() {
     // A session that really crashed: the report ends it, and says so.
     let crashed = managed_session(&bed, &f).await;
     assert_eq!(
-        state.nodes.mark_session_exited(crashed, f.node).await.unwrap(),
+        state
+            .nodes
+            .mark_session_exited(crashed, f.node)
+            .await
+            .unwrap(),
         1,
         "an unannounced death IS an ending — the caller must be told so it can \
          publish `exited` and notify"
@@ -227,9 +231,17 @@ async fn mark_session_exited_reports_whether_it_ended_anything() {
     // A session we stopped ourselves: the node's report is the echo of our own
     // kill, and must read as "ended nothing".
     let stopped = managed_session(&bed, &f).await;
-    state.sessions.mark_stopped(f.tenant, stopped).await.unwrap();
+    state
+        .sessions
+        .mark_stopped(f.tenant, stopped)
+        .await
+        .unwrap();
     assert_eq!(
-        state.nodes.mark_session_exited(stopped, f.node).await.unwrap(),
+        state
+            .nodes
+            .mark_session_exited(stopped, f.node)
+            .await
+            .unwrap(),
         0,
         "a Stop's own echo must not read as an ending, or the handler announces \
          a crash that never happened"
@@ -238,7 +250,11 @@ async fn mark_session_exited_reports_whether_it_ended_anything() {
     // And a repeat of the same report — a redelivery, or a second node message
     // for a session already ended — is not a second ending either.
     assert_eq!(
-        state.nodes.mark_session_exited(crashed, f.node).await.unwrap(),
+        state
+            .nodes
+            .mark_session_exited(crashed, f.node)
+            .await
+            .unwrap(),
         0,
         "the second report of one death must not notify twice"
     );
