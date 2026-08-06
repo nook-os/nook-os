@@ -38,6 +38,9 @@ import { askConfirm, askText, notify } from "./dialogs";
 import { useLive } from "./live";
 import { useLiveTabs } from "./liveTabs";
 import { useTenantSwitch } from "./TenantSwitcher";
+import { useNewTerminal } from "./newTerminal";
+import { useNewWork } from "./newwork";
+import { ADHOC_GROUP } from "./tabGroups";
 import { checkSessionName, renameIsANoop, stopPrompt } from "./sessionActions";
 import {
   clampWidth,
@@ -205,9 +208,21 @@ export function SessionNavigator({ activeId }: { activeId?: string }) {
   const sessionStatus = useLive((s) => s.sessionStatus);
   const viewportWidth = useViewportWidth();
 
-  // Every workspace, not the scoped one: the pane's job is finding a session
-  // you have NOT got open, and scoping it would hide exactly those.
-  const { tabs } = useLiveTabs({ allWorkspaces: true });
+  // Every session, never a scoped subset: the pane's job is finding one you
+  // have NOT got open, and hiding some would defeat it.
+  const { tabs } = useLiveTabs();
+
+  const newTerminal = useNewTerminal();
+  const showNewWork = useNewWork((s) => s.show);
+  // A folder's key IS its workspace id (`tabGroups.groupTabs`), so the tree
+  // already knows which workspace you right-clicked — it just needs the row to
+  // find the checkouts.
+  const { data: workspaces } = useQuery({
+    queryKey: ["workspaces"],
+    queryFn: async () => (await api.GET("/api/v1/workspaces")).data ?? [],
+  });
+  const workspaceFor = (key: string) =>
+    key === ADHOC_GROUP ? undefined : (workspaces ?? []).find((w) => w.id === key);
 
   const width = dragWidth ?? prefs.width;
   const mode = paneMode({
@@ -305,15 +320,61 @@ export function SessionNavigator({ activeId }: { activeId?: string }) {
     queryClient.invalidateQueries();
   };
 
-  const itemMenu = (t: (typeof tabs)[number]): ContextMenuItem[] => [
-    { label: "Rename Session…", onSelect: () => void rename(t.id, t.name) },
-    {
-      label: "Copy Session ID",
-      onSelect: () => void navigator.clipboard?.writeText(t.id).catch(() => {}),
-    },
-    { separator: true },
-    { label: "Stop Session…", danger: true, onSelect: () => void stop(t) },
-  ];
+  const itemMenu = (t: (typeof tabs)[number]): ContextMenuItem[] => {
+    const ws = t.workspaceId ? workspaceFor(t.workspaceId) : undefined;
+    return [
+      // First, because it is the common thing. Stopping a managed session
+      // removes it for good (MAIN-324), so the answer to "I killed it and I
+      // want it back" should be one right-click from the session you killed —
+      // not a trip to a clone form.
+      ...(ws
+        ? [
+            {
+              label: "New Terminal Here",
+              onSelect: () => void newTerminal(ws),
+            } satisfies ContextMenuItem,
+            { separator: true } satisfies ContextMenuItem,
+          ]
+        : []),
+      { label: "Rename Session…", onSelect: () => void rename(t.id, t.name) },
+      {
+        label: "Copy Session ID",
+        onSelect: () => void navigator.clipboard?.writeText(t.id).catch(() => {}),
+      },
+      { separator: true },
+      { label: "Stop Session…", danger: true, onSelect: () => void stop(t) },
+    ];
+  };
+
+  /** The folder header's menu — the workspace, not any one session in it. */
+  const folderMenu = (key: string, label: string): ContextMenuItem[] => {
+    const ws = workspaceFor(key);
+    const isShut = shut.includes(key);
+    const toggle: ContextMenuItem = {
+      label: isShut ? `Expand ${label}` : `Collapse ${label}`,
+      onSelect: () =>
+        setShut((s) => (s.includes(key) ? s.filter((k) => k !== key) : [...s, key])),
+    };
+
+    // The ad-hoc folder is workspace-less terminals gathered under one label.
+    // There is no repo to open, and no checkout to put a shell in, so it gets
+    // the two things that DO apply rather than four disabled rows.
+    if (!ws) {
+      return [
+        { label: "New Work…", onSelect: () => showNewWork() },
+        { separator: true },
+        toggle,
+      ];
+    }
+
+    return [
+      { label: "New Terminal", onSelect: () => void newTerminal(ws) },
+      { label: "New Work…", onSelect: () => showNewWork({ workspaceId: ws.id }) },
+      { separator: true },
+      { label: "Open Workspace", onSelect: () => navigate(`/workspaces/${ws.id}`) },
+      toggle,
+    ];
+  };
 
   const folders = filterFolders(navFolders(tabs), term);
   const total = tabs.length;
@@ -364,22 +425,27 @@ export function SessionNavigator({ activeId }: { activeId?: string }) {
           const collapsed = shut.includes(f.key);
           return (
             <div className="session-nav-folder" key={f.key}>
-              <button
-                className={`session-nav-folder-head${collapsed ? " collapsed" : ""}`}
-                style={{ "--group-hue": f.hue } as React.CSSProperties}
-                onClick={() =>
-                  setShut((s) =>
-                    s.includes(f.key)
-                      ? s.filter((k) => k !== f.key)
-                      : [...s, f.key],
-                  )
-                }
-                title={collapsed ? `expand ${f.label}` : `collapse ${f.label}`}
+              <ContextMenuRegion
+                style={{ display: "contents" }}
+                items={() => folderMenu(f.key, f.label)}
               >
-                {collapsed ? <ChevronRight size={11} /> : <ChevronDown size={11} />}
-                <span className="session-nav-folder-name">{f.label}</span>
-                <span className="session-nav-folder-count">{f.sessions.length}</span>
-              </button>
+                <button
+                  className={`session-nav-folder-head${collapsed ? " collapsed" : ""}`}
+                  style={{ "--group-hue": f.hue } as React.CSSProperties}
+                  onClick={() =>
+                    setShut((s) =>
+                      s.includes(f.key)
+                        ? s.filter((k) => k !== f.key)
+                        : [...s, f.key],
+                    )
+                  }
+                  title={`${collapsed ? `expand ${f.label}` : `collapse ${f.label}`} — right-click for a terminal`}
+                >
+                  {collapsed ? <ChevronRight size={11} /> : <ChevronDown size={11} />}
+                  <span className="session-nav-folder-name">{f.label}</span>
+                  <span className="session-nav-folder-count">{f.sessions.length}</span>
+                </button>
+              </ContextMenuRegion>
               {!collapsed &&
                 f.sessions.map((s) => {
                   const st = sessionStatus[s.id];

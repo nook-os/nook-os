@@ -114,6 +114,33 @@ describe("SessionTabs — the strip is the working set", () => {
     // Otherwise the terminal below stays attached to a session with no tab.
     expect(await screen.findByText("THE INDEX")).toBeTruthy();
   });
+
+  // `fireEvent.auxClick` does not exist in this testing-library, so the DOM
+  // event React's `onAuxClick` listens for is dispatched directly.
+  const auxClick = (button: number) =>
+    new MouseEvent("auxclick", { button, bubbles: true, cancelable: true });
+
+  it("middle-click closes the tab, and ends nothing", async () => {
+    renderStrip();
+    await screen.findByText("beta");
+
+    fireEvent(screen.getByText("beta"), auxClick(1));
+
+    // Same contract as the ✕, asserted the same way: no confirm, no POST.
+    expect(askConfirm).not.toHaveBeenCalled();
+    expect(post).not.toHaveBeenCalled();
+    await waitFor(() => expect(screen.queryByText("beta")).toBeNull());
+    expect(screen.getByText("alpha")).toBeTruthy();
+  });
+
+  it("ignores the other buttons in an aux click", async () => {
+    // `onAuxClick` also fires for the RIGHT button, which opens the context
+    // menu — closing the tab out from under it would be its own bug.
+    renderStrip();
+    await screen.findByText("beta");
+    fireEvent(screen.getByText("beta"), auxClick(2));
+    expect(screen.getByText("beta")).toBeTruthy();
+  });
 });
 
 describe("SessionTabs — Stop is NOT reachable from a tab (MAIN-416 NG-2)", () => {

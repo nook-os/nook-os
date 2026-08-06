@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { MeResponse, TenantMembership } from "@nookos/api";
-import { tenantSwitcherModel } from "./tenants";
+import { tenantSwitchDestination, tenantSwitcherModel } from "./tenants";
 
 const tenant = (id: string, name: string, current: boolean): TenantMembership => ({
   id,
@@ -64,5 +64,25 @@ describe("tenantSwitcherModel", () => {
     expect(m.isMenu).toBe(false);
     expect(m.currentName).toBe("Solo");
     expect(m.currentId).toBe("t9");
+  });
+});
+
+describe("tenantSwitchDestination", () => {
+  it("keeps you in the section you were working in", () => {
+    expect(tenantSwitchDestination("/sessions")).toBe("/sessions");
+    expect(tenantSwitchDestination("/board")).toBe("/board");
+    expect(tenantSwitchDestination("/workspaces")).toBe("/workspaces");
+  });
+
+  // The whole point: a detail id belongs to the team you just left. Keeping it
+  // would 404, or — worse — resolve against something in the new team.
+  it("drops the detail route but keeps the section", () => {
+    expect(tenantSwitchDestination("/sessions/019f-abc")).toBe("/sessions");
+    expect(tenantSwitchDestination("/workspaces/019f-abc/ports")).toBe("/workspaces");
+  });
+
+  it("leaves the dashboard alone", () => {
+    expect(tenantSwitchDestination("/")).toBe("/");
+    expect(tenantSwitchDestination("")).toBe("/");
   });
 });

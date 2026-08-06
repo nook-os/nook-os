@@ -14,11 +14,11 @@
 // reloading the page.
 import React, { useEffect, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import { useNavigate } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router-dom";
 import { Building2, Check, ChevronDown } from "lucide-react";
 import { api, type MeResponse } from "@nookos/api";
 import { useWorkspaceContext } from "./context";
-import { tenantSwitcherModel } from "./tenants";
+import { tenantSwitchDestination, tenantSwitcherModel } from "./tenants";
 import { notify } from "./dialogs";
 
 /** The switcher's model plus the act of switching, so a SECOND control can
@@ -32,6 +32,7 @@ export function useTenantSwitch(me: MeResponse) {
   const [busy, setBusy] = useState(false);
   const queryClient = useQueryClient();
   const navigate = useNavigate();
+  const location = useLocation();
   const { select } = useWorkspaceContext();
   const model = tenantSwitcherModel(me);
 
@@ -50,7 +51,7 @@ export function useTenantSwitch(me: MeResponse) {
     // drop the scope, leave detail routes, then refetch everything so every
     // tenant-scoped surface re-loads against the new active tenant.
     select(null);
-    navigate("/");
+    navigate(tenantSwitchDestination(location.pathname));
     queryClient.invalidateQueries();
   };
 

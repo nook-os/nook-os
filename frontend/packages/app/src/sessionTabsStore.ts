@@ -104,22 +104,19 @@ export function reorderTabs(
  *  prefs say, which is what makes "the tabs ARE the sessions" true rather than
  *  merely usually true.
  *
- *  Scoping matches the old strip: a workspace context shows that workspace's
- *  sessions, plus ad-hoc terminals (which have no workspace and would otherwise
- *  be reachable from no context at all). */
+ *  NOT scoped by workspace. It was, until MAIN-417 made the strip a working set
+ *  you curate yourself — at which point filtering your own chosen set by
+ *  workspace was filtering it twice, and the only surviving caller was passing
+ *  an opt-out to switch it off. */
 export function deriveTabs(
   sessions: LiveSession[],
   workspaceNames: Record<string, string>,
   prefs: TabPrefs,
-  selectedWorkspaceId?: string | null,
   nodeNames: Record<string, string> = {},
 ): SessionTab[] {
   const pinned = new Set(prefs.pinned);
   const rank = new Map(prefs.order.map((id, i) => [id, i]));
   return sessions
-    .filter(
-      (s) => !selectedWorkspaceId || !s.workspace_id || s.workspace_id === selectedWorkspaceId,
-    )
     .map((s, i) => ({
       tab: {
         id: s.id,
