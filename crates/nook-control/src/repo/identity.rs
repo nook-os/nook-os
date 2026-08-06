@@ -996,9 +996,15 @@ impl IdentityRepository for DbIdentityRepository {
         self.db
             .exec(
                 &format!(
+                    // The whole expiry expression goes through the seam, not
+                    // just `now()` (MAIN-438). `make_interval(hours => $4)` is
+                    // Postgres's named-argument call syntax; SQLite reads the
+                    // `=>` as an unfinished `>` comparison. Routing `now()`
+                    // alone left the arithmetic behind and hid this behind a
+                    // construct that already looked engine-neutral.
                     "INSERT INTO sessions_auth (id, user_id, tenant_id, expires_at)
-         VALUES ($1, $2, $3, {now} + make_interval(hours => $4))",
-                    now = type_mapping(self.db.engine()).now()
+         VALUES ($1, $2, $3, {expires})",
+                    expires = time_math(self.db.engine()).now_plus_scaled("$4", "1 hour")
                 ),
                 params![id, user_id, tenant, ttl_hours],
             )
@@ -1491,17 +1497,11 @@ impl IdentityRepository for DbIdentityRepository {
                 params![pattern.clone()],
             )
             .await?;
-        let accounts: Vec<DevAccount> = self
+        let rows: Vec<(Uuid, String, String, String)> = self
             .db
             .query_all(
                 &format!(
-                    "SELECT u.email, u.display_name, t.slug AS tenant_slug,
-                    COALESCE(
-                        (SELECT array_agg(b.role_key ORDER BY b.role_key)
-                         FROM role_bindings b
-                         WHERE b.subject_id = u.id AND b.scope_type = 'deployment'),
-                        '{{}}'
-                    ) AS deployment_roles
+                    "SELECT u.id, u.email, u.display_name, t.slug AS tenant_slug
              FROM users u JOIN tenants t ON t.id = u.tenant_id
              WHERE {filter}
              ORDER BY u.created_at
@@ -1510,6 +1510,42 @@ impl IdentityRepository for DbIdentityRepository {
                 params![pattern, cap],
             )
             .await?;
+
+        // The deployment roles are fetched separately and grouped here rather
+        // than aggregated in SQL (MAIN-438). `array_agg` is Postgres-only and no
+        // aggregate spelling is common to both engines — SQLite has
+        // `json_group_array`, Postgres `json_agg` — so the choice was a new seam
+        // or a dialect branch at this call site, and AC-2 rules both out. The
+        // page is already capped by `$2`, so this is one more round trip over a
+        // bounded set, and `ORDER BY role_key` preserves the order `array_agg`
+        // produced.
+        let ids: Vec<Uuid> = rows.iter().map(|r| r.0).collect();
+        let mut roles: std::collections::HashMap<Uuid, Vec<String>> =
+            std::collections::HashMap::new();
+        if !ids.is_empty() {
+            let bindings: Vec<(Uuid, String)> = self
+                .db
+                .query_all(
+                    "SELECT subject_id, role_key FROM role_bindings
+                     WHERE scope_type = 'deployment' AND subject_id = ANY($1)
+                     ORDER BY role_key",
+                    params![ids],
+                )
+                .await?;
+            for (subject, key) in bindings {
+                roles.entry(subject).or_default().push(key);
+            }
+        }
+
+        let accounts: Vec<DevAccount> = rows
+            .into_iter()
+            .map(|(id, email, display_name, tenant_slug)| DevAccount {
+                email,
+                display_name,
+                tenant_slug,
+                deployment_roles: roles.remove(&id).unwrap_or_default(),
+            })
+            .collect();
         Ok((accounts, total))
     }
 

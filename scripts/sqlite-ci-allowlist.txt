@@ -65,10 +65,8 @@ squash_restamp             # raw sqlx / bed.pool in the test itself (MAIN-268)
 task_checkout_ids          # raw sqlx / bed.pool in the test itself (MAIN-268)
 
 # ── production still emits Postgres SQL (MAIN-423, the dialect-sweep residue) ──
-node_enrolment             # production still emits Postgres SQL on this path (MAIN-423)
 node_owner                 # production still emits Postgres SQL on this path (MAIN-423)
 nook_worker:lib            # production still emits Postgres SQL on this path (MAIN-423)
-overview_visibility        # production still emits Postgres SQL on this path (MAIN-423)
 task_workspace             # production still emits Postgres SQL on this path (MAIN-423)
 
 # ── still production Postgres SQL, re-tagged by MAIN-293 ──
@@ -80,8 +78,6 @@ task_workspace             # production still emits Postgres SQL on this path (M
 # gone; what remains here is the second, which is production emitting Postgres
 # SQL and belongs to the dialect sweep. `local_accounts` passed outright and its
 # line is deleted.
-dev_signin                 # production emits Postgres-only syntax (MAIN-423)
-tenant_ca                  # production emits Postgres-only syntax (MAIN-423)
 
 # ── chat's production SQL is still Postgres, re-tagged by MAIN-294 ──
 #

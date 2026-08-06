@@ -13,6 +13,7 @@
 //! node-cert path) stays in each service; this is only the database check that
 //! must be identical.
 
+use nook_db::dialect::type_mapping;
 use nook_db::{params, Db, DbPool};
 use uuid::Uuid;
 
@@ -98,13 +99,16 @@ pub async fn resolve_session_identity(
 ) -> Result<(Resolved, bool), AuthError> {
     let row: Option<(Uuid, Uuid, bool)> = pool
         .query_opt(
-            "SELECT sa.user_id, sa.tenant_id,
+            &format!(
+                "SELECT sa.user_id, sa.tenant_id,
                 EXISTS(SELECT 1 FROM tenant_members m
                        WHERE m.tenant_id = sa.tenant_id
                          AND m.principal_type = 'user'
                          AND m.principal_id = sa.user_id) AS is_member
          FROM sessions_auth sa
-         WHERE sa.id = $1 AND sa.expires_at > now()",
+         WHERE sa.id = $1 AND sa.expires_at > {now}",
+                now = type_mapping(pool.engine()).now()
+            ),
             params![session_id],
         )
         .await?;
@@ -126,8 +130,11 @@ pub async fn resolve_bearer(pool: &DbPool, token: &str) -> Result<Resolved, Auth
     let hash = hash_token(token);
     let row: Option<(Uuid, Uuid, Uuid)> = pool
         .query_opt(
-            "SELECT id, user_id, tenant_id FROM user_tokens
-         WHERE token_hash = $1 AND (expires_at IS NULL OR expires_at > now())",
+            &format!(
+                "SELECT id, user_id, tenant_id FROM user_tokens
+         WHERE token_hash = $1 AND (expires_at IS NULL OR expires_at > {now})",
+                now = type_mapping(pool.engine()).now()
+            ),
             params![hash],
         )
         .await?;
@@ -136,7 +143,10 @@ pub async fn resolve_bearer(pool: &DbPool, token: &str) -> Result<Resolved, Auth
     // Best-effort touch — a failed update must not fail the request.
     let _ = pool
         .exec(
-            "UPDATE user_tokens SET last_used_at = now() WHERE id = $1",
+            &format!(
+                "UPDATE user_tokens SET last_used_at = {now} WHERE id = $1",
+                now = type_mapping(pool.engine()).now()
+            ),
             params![token_id],
         )
         .await;

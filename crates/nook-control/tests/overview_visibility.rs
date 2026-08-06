@@ -496,8 +496,8 @@ async fn archived_tasks_do_not_label_a_checkout() {
 
     bed.db()
         .exec(
-            "UPDATE tasks SET archived_at = now() WHERE id = $1",
-            params![t],
+            "UPDATE tasks SET archived_at = $2 WHERE id = $1",
+            params![t, chrono::Utc::now()],
         )
         .await
         .expect("archive");
