@@ -154,10 +154,101 @@ column_via_sqlx!(
     f64,
     String,
     Vec<u8>,
-    uuid::Uuid,
     chrono::DateTime<chrono::Utc>,
     serde_json::Value,
 );
+
+// ── uuid — the one type whose SQLite storage is not uniform (MAIN-437) ──────
+//
+// Every uuid this workspace WRITES arrives as a 16-byte blob, because
+// `DbValue::Uuid` binds it that way (`pool.rs`). One column is not written by a
+// bind: `tenants.org_id` has a 36-char text DEFAULT in the SQLite `0001`, which
+// is frozen and hand-owned (MAIN-236), so the value is a string nothing here
+// ever encoded. Reads then failed with `ParseByteLength { len: 36 }` — and
+// because `org_of` is on the path of every `require(_, Scope::Tenant(_))`, the
+// tenant permission predicate had never executed on SQLite at all, while
+// `POST /nodes/join` 500'd on a desktop install's first call.
+//
+// Fixed HERE rather than at the three call sites: a dialect branch per caller is
+// the nested-dialect shape `check-nested-dialect.sh` exists to discourage, and
+// the next text-stored uuid would rediscover it.
+
+/// The strictness AC-2 asks for, in one place.
+///
+/// Only a well-formed **36-character hyphenated** uuid parses. That length is
+/// what makes it exact: at 36 characters `parse_str` accepts the hyphenated
+/// form and nothing else (simple is 32, braced 38, urn 45). A decoder that
+/// coerced anything looser — a nil uuid for garbage, a swallowed type error —
+/// would hide real corruption in every uuid column in the workspace, which is
+/// the declared cost of taking this approach and the thing that must not come
+/// true.
+fn parse_text_uuid(s: &str) -> Option<uuid::Uuid> {
+    (s.len() == 36)
+        .then(|| uuid::Uuid::parse_str(s).ok())
+        .flatten()
+}
+
+/// Name the column in the failure, so a bad value says which one it was.
+fn uuid_decode_error(column: String, detail: String) -> DbError {
+    DbError::Query(sqlx::Error::ColumnDecode {
+        index: column,
+        source: detail.into(),
+    })
+}
+
+/// Read a uuid from a SQLite row that may hold it as a blob OR as text.
+///
+/// The blob path is tried FIRST and returns before anything else happens, so
+/// the ordinary case is byte-for-byte what it was and the fallback is only
+/// reached by a value the normal decode could not read.
+///
+/// When both fail, the ORIGINAL blob error is returned: it describes the type
+/// actually present, where the text error would only say "not a string".
+fn sqlite_uuid(
+    blob: Result<uuid::Uuid, sqlx::Error>,
+    text: impl FnOnce() -> Result<String, sqlx::Error>,
+    column: impl FnOnce() -> String,
+) -> Result<uuid::Uuid, DbError> {
+    let original = match blob {
+        Ok(v) => return Ok(v),
+        Err(e) => e,
+    };
+    let Ok(s) = text() else {
+        return Err(original.into());
+    };
+    parse_text_uuid(&s).ok_or_else(|| {
+        uuid_decode_error(
+            column(),
+            format!("{s:?} is not a 36-character hyphenated uuid"),
+        )
+    })
+}
+
+impl FromDbColumn for uuid::Uuid {
+    fn from_db_column(row: &DbRow, name: &str) -> Result<Self, DbError> {
+        use sqlx::Row;
+        match row {
+            // Unchanged: Postgres has a real uuid type and always had.
+            DbRow::Pg(r) => r.try_get::<uuid::Uuid, _>(name).map_err(Into::into),
+            DbRow::Sqlite(r) => sqlite_uuid(
+                r.try_get::<uuid::Uuid, _>(name),
+                || r.try_get::<String, _>(name),
+                || name.to_string(),
+            ),
+        }
+    }
+    fn from_db_column_at(row: &DbRow, index: usize) -> Result<Self, DbError> {
+        use sqlx::Row;
+        match row {
+            DbRow::Pg(r) => r.try_get::<uuid::Uuid, _>(index).map_err(Into::into),
+            DbRow::Sqlite(r) => sqlite_uuid(
+                r.try_get::<uuid::Uuid, _>(index),
+                || r.try_get::<String, _>(index),
+                || index.to_string(),
+            ),
+        }
+    }
+}
 
 /// `Option<T>` for any mappable `T`, resolved by asking the ROW whether the
 /// column is NULL rather than by asking the type.
@@ -338,5 +429,88 @@ mod tests {
         // write" into "you have no notification levels", silently.
         let e = parse_text_array("not an array", "levels").unwrap_err();
         assert!(e.to_string().contains("levels"), "{e}");
+    }
+
+    // ── uuid on SQLite (MAIN-437) ───────────────────────────────────────────
+
+    /// One SQLite row from a literal `SELECT`, so a decode can be exercised
+    /// against a value stored exactly as the schema stores it.
+    async fn sqlite_row(select: &str) -> DbRow {
+        use sqlx::Executor;
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("in-memory sqlite");
+        let row = pool.fetch_one(select).await.expect("select");
+        DbRow::Sqlite(row)
+    }
+
+    /// The fix: `tenants.org_id`'s shape — a 36-char hyphenated string, written
+    /// by a schema DEFAULT and therefore never bound as a blob.
+    #[tokio::test]
+    async fn a_text_stored_uuid_decodes() {
+        let want = uuid::Uuid::parse_str("00000000-0000-0000-0000-0000000000a1").unwrap();
+        let row = sqlite_row("SELECT '00000000-0000-0000-0000-0000000000a1' AS org_id").await;
+        assert_eq!(uuid::Uuid::from_db_column(&row, "org_id").unwrap(), want);
+        assert_eq!(uuid::Uuid::from_db_column_at(&row, 0).unwrap(), want);
+    }
+
+    /// AC-3. The ordinary path is tried first and returns before the fallback is
+    /// reached, so a bound uuid is unaffected — proven by reading one back,
+    /// not by inspecting the branch.
+    #[tokio::test]
+    async fn a_blob_stored_uuid_is_unaffected() {
+        let want = uuid::Uuid::now_v7();
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("in-memory sqlite");
+        sqlx::query("CREATE TABLE t (id BLOB)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        // Bound exactly as `DbValue::Uuid` binds it — 16 bytes, not text.
+        sqlx::query("INSERT INTO t (id) VALUES (?)")
+            .bind(want)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let row = DbRow::Sqlite(
+            sqlx::query("SELECT id FROM t")
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+        );
+        assert_eq!(uuid::Uuid::from_db_column(&row, "id").unwrap(), want);
+    }
+
+    /// AC-2, and the cost this approach declares. A decoder that coerced
+    /// garbage into a nil uuid would hide real corruption in every uuid column
+    /// in the workspace; anything that is not a well-formed 36-char hyphenated
+    /// uuid must still fail, naming the column.
+    #[tokio::test]
+    async fn garbage_text_still_fails_and_names_the_column() {
+        for bad in [
+            "'definitely not a uuid'",
+            // Right length, wrong content — length alone is not the test.
+            "'zzzzzzzz-zzzz-zzzz-zzzz-zzzzzzzzzzzz'",
+            // A VALID uuid in the 32-char simple form: refused on purpose, so
+            // the accepted shape is exactly what the schema writes.
+            "'000000000000000000000000000000a1'",
+        ] {
+            let row = sqlite_row(&format!("SELECT {bad} AS org_id")).await;
+            let e = uuid::Uuid::from_db_column(&row, "org_id")
+                .expect_err("a malformed uuid must not decode");
+            assert!(
+                e.to_string().contains("org_id"),
+                "must name the column: {e}"
+            );
+        }
+    }
+
+    /// A value that is neither a blob nor text keeps the ORIGINAL decode error,
+    /// which describes the type actually present.
+    #[tokio::test]
+    async fn a_non_text_non_blob_value_reports_the_real_mismatch() {
+        let row = sqlite_row("SELECT 42 AS org_id").await;
+        assert!(uuid::Uuid::from_db_column(&row, "org_id").is_err());
     }
 }
