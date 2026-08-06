@@ -529,16 +529,14 @@ pub(crate) fn default_spec() -> SessionSpec {
 /// selector, or zero replicas. Everything else in an on tenant gets
 /// [`default_spec`], which is the auto-derive: no per-workspace opt-in, the
 /// tenant switch is the whole gate.
-async fn pass(state: &AppState, clones: &CloneThrottle) -> crate::error::ApiResult<()> {
-    // Explicit specs, keyed by workspace so the per-workspace lookup below is a
-    // map hit and not a query. Ids are uuids, unique across tenants, so a flat
-    // map is safe even though this crosses every tenant.
-    let explicit: std::collections::HashMap<WorkspaceId, SessionSpec> = managed_workspaces(state)
-        .await?
-        .into_iter()
-        .map(|(_, w, s)| (w, s))
-        .collect();
-
+/// Public so a test can drive one pass and assert what it did NOT do.
+///
+/// Removing access reconciliation is a change nothing could otherwise see: the
+/// planner tests exercise `plan_workspace` directly and stay green whether or
+/// not anything calls it with `ManagedPurpose::Access`. That is the same shape
+/// of gap that let the Stop notification bug ship — a guard proved at the layer
+/// below the one the user experiences.
+pub async fn pass(state: &AppState, clones: &CloneThrottle) -> crate::error::ApiResult<()> {
     for (tenant, value) in state.settings.tenants_with_value(KEY).await? {
         // The stored value is arbitrary JSON; a row can exist reading `false`.
         // Same truthiness as the per-tenant gate, so on/off agree everywhere.
@@ -549,21 +547,26 @@ async fn pass(state: &AppState, clones: &CloneThrottle) -> crate::error::ApiResu
         // work, so it answers to the loops switch as well as to this one.
         let loops_on = crate::services::loops::enabled(&*state.settings, tenant).await;
         for ws in state.workspaces.list(tenant).await? {
-            let spec = explicit.get(&ws.id).cloned().unwrap_or_else(default_spec);
-            if let Err(e) = reconcile_workspace(
-                state,
-                tenant,
-                ws.id,
-                &spec,
-                clones,
-                ManagedPurpose::Access,
-                Slots::EveryCheckout,
-            )
-            .await
-            {
-                // Per workspace, so one broken declaration does not stop the fleet.
-                tracing::warn!(workspace = %ws.id, error = %e, "workspace reconcile failed");
-            }
+            // NO ACCESS RECONCILIATION. A terminal you opened is yours, and the
+            // control plane does not have an opinion about how many of them
+            // there should be.
+            //
+            // This used to run `ManagedPurpose::Access` over `Slots::EveryCheckout`
+            // for every workspace in the tenant, so every checkout was owed a
+            // session forever. Stopping a terminal dropped `actual` below
+            // `desired` and the next pass started a replacement — Stop undid
+            // itself within a poll interval. In production that read as
+            // `desired=9 actual=12 stopping=3` with `cannot stop a managed
+            // session — node offline; retrying next pass` every ten seconds,
+            // indefinitely, because the reconciler also could not carry out the
+            // stops it wanted.
+            //
+            // The declarative engine is still the right thing; it was pointed at
+            // the wrong noun. A repo is a durable thing worth converging — a
+            // tmux session is not a repo, and a human opening and closing
+            // terminals is not drift to be corrected. What stays managed is the
+            // REVIEW LOOP below: system work, per workspace, that nobody opens
+            // by hand and that genuinely should come back on its own.
             if !loops_on {
                 continue;
             }
@@ -611,33 +614,17 @@ pub(crate) fn review_loop_spec() -> SessionSpec {
 
 /// Which of a workspace's checkouts a declaration may place into.
 ///
-/// The access spec takes them all — that is per-worktree placement, and a
-/// person wants a terminal in the worktree they are working in. The review loop
-/// takes only primary clones: it reviews the REPO's open PRs, which is one job
-/// per repo per node however many worktrees happen to sit beside the clone.
+/// One variant, deliberately: the review loop is the only managed purpose left,
+/// and it takes only primary clones — it reviews the REPO's open PRs, which is
+/// one job per repo per node however many worktrees sit beside the clone.
+///
+/// Kept as an enum rather than collapsed away because the DISTINCTION is the
+/// thing worth keeping. `EveryCheckout` existed for per-worktree access
+/// sessions; a future managed purpose that genuinely wants every worktree
+/// should have to name that choice here rather than find placement hardcoded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Slots {
-    EveryCheckout,
     ClonesOnly,
-}
-
-/// Every workspace with a `session_spec`, and the spec parsed. A spec that does
-/// not parse is skipped loudly rather than silently: it means somebody stored a
-/// shape this build does not understand, and guessing at it would converge to
-/// something nobody declared.
-async fn managed_workspaces(
-    state: &AppState,
-) -> crate::error::ApiResult<Vec<(TenantId, WorkspaceId, SessionSpec)>> {
-    let mut out = Vec::new();
-    for (tenant, id, raw) in state.workspaces.all_session_specs().await? {
-        match serde_json::from_value::<SessionSpec>(raw) {
-            Ok(spec) => out.push((tenant, id, spec)),
-            Err(e) => {
-                tracing::warn!(workspace = %id, error = %e, "unreadable SessionSpec — skipped")
-            }
-        }
-    }
-    Ok(out)
 }
 
 /// Has this workspace said what ports it binds (MAIN-361 AC-1/AC-2)?
@@ -709,7 +696,6 @@ async fn reconcile_workspace(
     // "rows that make a node a placement host" read, so `ClonesOnly` reuses the
     // definition of a clone rather than restating it.
     let allowed: Option<Vec<NodeWorkspaceId>> = match slots {
-        Slots::EveryCheckout => None,
         Slots::ClonesOnly => Some(
             state
                 .workspaces
