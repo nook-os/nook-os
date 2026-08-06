@@ -171,8 +171,15 @@ impl MessageRepository for DbMessageRepository {
         self.db
             .query_all::<ReactionRow>(
                 &format!(
+                    // `MAX(CASE …)` rather than `bool_or`, which is a Postgres
+                    // aggregate SQLite does not have (MAIN-439). "Did anyone in
+                    // this group match" is a maximum over 0/1, which both
+                    // engines compute; the `= 1` puts it back to a boolean, and
+                    // the COALESCE still turns the empty-group NULL into false
+                    // exactly as it did around `bool_or`.
                     "SELECT message_id, emoji, {cnt} AS count,
-                            COALESCE(bool_or(user_id = $2), false) AS reacted
+                            COALESCE(MAX(CASE WHEN user_id = $2 THEN 1 ELSE 0 END) = 1, false)
+                              AS reacted
                        FROM chat_reactions
                       WHERE message_id = ANY($1)
                       GROUP BY message_id, emoji
