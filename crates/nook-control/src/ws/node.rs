@@ -644,37 +644,61 @@ async fn handle_message(
             session_id,
             exit_code,
         } => {
-            state.nodes.mark_session_exited(session_id, node_id).await?;
+            // Did this report actually END anything? `mark_session_exited` is
+            // guarded on LIVE, so it rewrites nothing when the row already says
+            // `stopped` — which is the NORMAL case for a Stop, because
+            // `routes/sessions.rs` writes `stopped` BEFORE telling the node to
+            // kill the tmux. The report we get back is the echo of our own
+            // request.
+            //
+            // The guard was only ever half the fix. It protected the row and
+            // left every announcement below it unconditional, so a deliberate
+            // Stop still published `exited` twice — contradicting the row the
+            // guard had just protected — and recorded a `session.exited` event,
+            // which notifies as "Session ended" at warning level. Stopping a
+            // handful of terminals therefore spammed a crash alert for every
+            // one of them, and the UI briefly showed `exited` for sessions the
+            // database called `stopped`.
+            let ended = state.nodes.mark_session_exited(session_id, node_id).await? > 0;
+
+            // Housekeeping runs either way: the tmux really is gone, whoever
+            // asked. Secrets on disk, a stale agent spinner and a live
+            // attachment are all wrong now regardless of who ended it.
+            //
             // Ephemeral secrets exist on disk only while a session is using
             // them; the encrypted copy stays in the vault.
             crate::services::secrets::wipe_ephemeral_for_session(state, tenant, session_id).await;
-            state.registry.publish(
-                tenant,
-                UiEvent::SessionStatus {
-                    session_id,
-                    status: "exited".into(),
-                },
-            );
             // A dead session has no agent state — clear it so a spinner does not
             // outlive the terminal, on screen now or on the next reload.
             clear_agent_state(state, tenant, session_id);
             state.registry.publish_session(
                 session_id,
                 nook_proto::AttachServerMessage::Status {
-                    status: "exited".into(),
+                    status: if ended { "exited" } else { "stopped" }.into(),
                 },
             );
             state.registry.drop_attachment(session_id);
-            events::record(
-                state,
-                tenant,
-                EventDraft::new("session.exited")
-                    .actor("node", node_id.0)
-                    .session(session_id)
-                    .node(node_id)
-                    .payload(serde_json::json!({ "exit_code": exit_code })),
-            )
-            .await;
+
+            // The ANNOUNCEMENTS are only true when this report ended something.
+            if ended {
+                state.registry.publish(
+                    tenant,
+                    UiEvent::SessionStatus {
+                        session_id,
+                        status: "exited".into(),
+                    },
+                );
+                events::record(
+                    state,
+                    tenant,
+                    EventDraft::new("session.exited")
+                        .actor("node", node_id.0)
+                        .session(session_id)
+                        .node(node_id)
+                        .payload(serde_json::json!({ "exit_code": exit_code })),
+                )
+                .await;
+            }
         }
         // Tunnel frames go straight to whoever is waiting on this request —
         // locally, or on the replica that issued it (MAIN-402 AC-3/AC-4). The
