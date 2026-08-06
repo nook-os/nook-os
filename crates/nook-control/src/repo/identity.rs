@@ -1016,7 +1016,18 @@ impl IdentityRepository for DbIdentityRepository {
         let hit: Option<(bool,)> = self
             .db
             .query_opt(
-                "(SELECT true
+                // NOT `(SELECT … LIMIT 1) UNION ALL (SELECT … LIMIT 1)` (MAIN-436).
+                // Postgres accepts a LIMIT inside a parenthesised compound
+                // branch; SQLite refuses the parentheses outright — `near "(":
+                // syntax error` — because a compound SELECT there takes at most
+                // one trailing ORDER BY/LIMIT for the whole statement.
+                //
+                // So the limit moves OUT rather than away: one `LIMIT 1` on the
+                // compound stops the whole thing at the first row, which is
+                // strictly what `query_opt` wants and what the per-branch limits
+                // were approximating. Dropping it altogether would have made
+                // this scan both branches in full to answer a yes/no question.
+                "SELECT true
              FROM role_bindings b
              JOIN role_permissions rp ON rp.role_key = b.role_key
              WHERE b.subject_type = 'user'
@@ -1072,9 +1083,8 @@ impl IdentityRepository for DbIdentityRepository {
                      -- The exact tenant.
                   OR (b.scope_type = 'tenant' AND b.scope_id = $4)
                )
-             LIMIT 1)
              UNION ALL
-             (SELECT true
+             SELECT true
                 FROM users me
                 JOIN users seat ON seat.person_id = me.person_id
                 JOIN role_permissions rp ON rp.role_key = 'tenant_admin'
@@ -1087,7 +1097,7 @@ impl IdentityRepository for DbIdentityRepository {
                  AND seat.tenant_id = $4
                  AND seat.role IN ('owner', 'admin')
                  AND rp.permission_key = $2
-               LIMIT 1)",
+               LIMIT 1",
                 params![user_id.0, permission, org_id, tenant_id],
             )
             .await?;
