@@ -65,13 +65,53 @@ fn tmux(args: &[&str]) -> Result<String> {
         .output()
         .context("tmux not available")?;
     if !out.status.success() {
-        anyhow::bail!(
-            "tmux {:?} failed: {}",
-            args,
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
+        anyhow::bail!(failure_message(args, &out.stderr));
     }
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+/// What a failed tmux command reports — with environment VALUES removed.
+///
+/// This string does not stay local. `sessions.rs::session_failed` logs it and
+/// sends it to the control plane as `SessionFailed`, so whatever it contains
+/// leaves the machine. It used to be `format!("tmux {args:?} failed: …")` over
+/// the raw vector, which was harmless only for as long as nothing secret was in
+/// it — and a session's environment is exactly where credentials live: a loop
+/// job's `NOOK_TOKEN` (`loop_job.rs`, the agent's tenant-scoped credential) and
+/// now the fleet's `GH_TOKEN` (MAIN-407). A `new-session` against a working
+/// directory that has since been removed is enough to reach it.
+///
+/// Split out from [`tmux`] so the exact string that travels can be asserted
+/// without a tmux server: what needed pinning was the message, not the exec.
+fn failure_message(args: &[&str], stderr: &[u8]) -> String {
+    format!(
+        "tmux {:?} failed: {}",
+        redacted_args(args),
+        String::from_utf8_lossy(stderr).trim()
+    )
+}
+
+/// The argument vector as it may be shown, with every `-e` value replaced.
+///
+/// Keyed off tmux's `-e` flag rather than a list of secret NAMES: a variable
+/// added later must not have to be remembered here in order to stay out of the
+/// logs. The key survives, because "which variables was this session given" is
+/// the part of the vector worth reading in a diagnostic; the value never is.
+fn redacted_args(args: &[&str]) -> Vec<String> {
+    let mut out = Vec::with_capacity(args.len());
+    let mut value_next = false;
+    for a in args {
+        if value_next {
+            // `KEY=VALUE`; keep the key, drop everything after the first `=`.
+            let key = a.split('=').next().unwrap_or_default();
+            out.push(format!("{key}=<redacted>"));
+            value_next = false;
+        } else {
+            value_next = *a == "-e";
+            out.push((*a).to_string());
+        }
+    }
+    out
 }
 
 /// Live NookOS-managed tmux sessions on this machine — on THIS node's server
@@ -795,6 +835,69 @@ mod session_env_tests {
                 && spawn_body.contains("NOOK_WORKSPACE_ID="),
             "both must be set inside `spawn`; setting either in a caller is how \
              new_session and new_job_session diverged"
+        );
+    }
+
+    /// A failed tmux command must not carry a credential off the machine.
+    ///
+    /// The whole chain, which this asserts the near end of: `tmux()` formats its
+    /// argument vector into the error it returns; `sessions.rs::session_failed`
+    /// both `tracing::warn!`s that message and sends it to the control plane as
+    /// `SessionFailed`. A session's environment is where credentials live — a
+    /// loop job's `NOOK_TOKEN`, and the fleet's `GH_TOKEN` since MAIN-407 — so
+    /// the raw vector reaching that message put both in the node's log and on
+    /// the wire. `tmux new-session` against a working directory that has since
+    /// been removed is enough to trigger it.
+    ///
+    /// Asserted on `failure_message` rather than through `tmux()` because the
+    /// message is the thing that travels, and pinning it needs no tmux server.
+    #[test]
+    fn a_failed_command_never_reports_an_environment_value() {
+        let args = [
+            "new-session",
+            "-d",
+            "-s",
+            "nook_x",
+            "-c",
+            "/gone",
+            "-e",
+            "GH_TOKEN=ghp_supersecret_value",
+            "-e",
+            "NOOK_TOKEN=nook_user_supersecret",
+            "-e",
+            "LANG=C.UTF-8",
+            "bash",
+        ];
+        let msg = super::failure_message(&args, b"no such directory");
+
+        for secret in ["ghp_supersecret_value", "nook_user_supersecret"] {
+            assert!(
+                !msg.contains(secret),
+                "a credential reached the error that gets logged AND sent to the \
+                 control plane: {msg}"
+            );
+        }
+        // The diagnostic must still be worth reading: which variables were set,
+        // and what tmux actually said.
+        assert!(
+            msg.contains("GH_TOKEN=<redacted>"),
+            "the key survives: {msg}"
+        );
+        assert!(
+            msg.contains("NOOK_TOKEN=<redacted>"),
+            "every -e pair, not a name list: {msg}"
+        );
+        assert!(
+            msg.contains("LANG=<redacted>"),
+            "redaction is by position, not by guessing which look secret: {msg}"
+        );
+        assert!(
+            msg.contains("no such directory"),
+            "tmux's own words survive: {msg}"
+        );
+        assert!(
+            msg.contains("new-session") && msg.contains("/gone"),
+            "non-env args are untouched: {msg}"
         );
     }
 
