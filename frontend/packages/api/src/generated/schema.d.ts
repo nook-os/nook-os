@@ -3225,6 +3225,35 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workspaces/{id}/review-loop-status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * `GET /api/v1/workspaces/{id}/review-loop-status` — desired vs actual for the
+         *     review loop (MAIN-447 AC-4).
+         * @description The sibling of `/reconcile-status`, and separate from it on purpose: that
+         *     one reports the workspace's own `SessionSpec` and filters this purpose out,
+         *     because two declarations converge per workspace and neither should be able
+         *     to describe the other.
+         *
+         *     Both tenant gates are reported rather than one `enabled`, so the UI can name
+         *     the switch that is off (AC-5). `pass()` skips the workspace entirely when
+         *     `loops.enabled` is off, so a plan reported with that gate down is what WOULD
+         *     converge, not what is converging.
+         */
+        get: operations["get_review_loop_status"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workspaces/{id}/secrets": {
         parameters: {
             query?: never;
@@ -5892,6 +5921,62 @@ export interface components {
         ReviewLoopDeclaration: {
             /** Format: int32 */
             max_replicas?: number | null;
+        };
+        /**
+         * @description Desired versus actual for a workspace's REVIEW LOOP (MAIN-447 AC-4).
+         *
+         *     Separate from [`ReconcileStatus`], which reports the workspace's own
+         *     `SessionSpec` and deliberately excludes this purpose. Two declarations
+         *     converge per workspace and they must not be able to describe each other.
+         *
+         *     Computed by the SAME planner the reconciler runs, for the same reason
+         *     [`ReconcileStatus`] is: a ceiling above what the fleet can place has to read
+         *     as shortfall rather than as silent success, and a second calculation would
+         *     drift the moment `review_loop_spec` changes — which MAIN-448 will do when a
+         *     forge starts counting open PRs.
+         */
+        ReviewLoopStatus: {
+            /** @description Nodes that match `role=loop` but cannot be used yet. */
+            blocked: components["schemas"]["ReconcileBlocker"][];
+            /**
+             * Format: int32
+             * @description What the ceiling resolves to: `null` -> 1, `0` -> 0, `N` -> N.
+             */
+            desired: number;
+            /**
+             * Format: int32
+             * @description How many nodes match the selector and tolerate the taints.
+             */
+            eligible: number;
+            /**
+             * @description `loops.enabled` for the tenant. The review loop is agent work, so it
+             *     answers to this as well.
+             */
+            loops_enabled: boolean;
+            /**
+             * @description This workspace declares no ports, so it is held to one session per node
+             *     (MAIN-361). Carried separately from `blocked` because it is the one
+             *     cause of shortfall that never clears on its own.
+             */
+            port_capped: boolean;
+            /**
+             * @description `sessions.reconcile.enabled` for the tenant.
+             *
+             *     Both gates are reported separately, rather than as one `enabled`, because
+             *     the UI's job is to say WHICH switch is off — the two live in different
+             *     places and a person who turns on the wrong one has learnt nothing.
+             */
+            reconcile_enabled: boolean;
+            /**
+             * Format: int32
+             * @description Live review-loop sessions right now.
+             */
+            running: number;
+            /**
+             * Format: int32
+             * @description `desired - placed`: asked for more reviewers than the fleet can host.
+             */
+            shortfall: number;
         };
         RuntimeAuthAccepted: {
             /**
@@ -12991,6 +13076,33 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    get_review_loop_status: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ReviewLoopStatus"];
+                };
             };
             404: {
                 headers: {

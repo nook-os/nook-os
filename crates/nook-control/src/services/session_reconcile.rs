@@ -649,7 +649,7 @@ pub(crate) fn review_loop_spec(max_replicas: Option<i32>) -> SessionSpec {
 /// sessions; a future managed purpose that genuinely wants every worktree
 /// should have to name that choice here rather than find placement hardcoded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Slots {
+pub(crate) enum Slots {
     ClonesOnly,
 }
 
@@ -708,15 +708,21 @@ fn placement_slots(
         .collect()
 }
 
-async fn reconcile_workspace(
+/// What a declaration would converge to right now: the plan, and the sessions
+/// it was planned against.
+///
+/// Lifted out of [`reconcile_workspace`] so `GET /workspaces/{id}/
+/// review-loop-status` reports the plan the loop ACTS on instead of a parallel
+/// calculation (MAIN-447 AC-4). Two readers of one function cannot disagree;
+/// two functions computing the same number always eventually do.
+pub(crate) async fn plan_now(
     state: &AppState,
     tenant: TenantId,
     workspace: WorkspaceId,
     spec: &SessionSpec,
-    clones: &CloneThrottle,
     purpose: ManagedPurpose,
     slots: Slots,
-) -> crate::error::ApiResult<()> {
+) -> crate::error::ApiResult<(Plan, Vec<Actual>)> {
     let nodes = node_facts(state, tenant).await?;
     // Which checkouts this declaration may use. `clone_hosts` is the existing
     // "rows that make a node a placement host" read, so `ClonesOnly` reuses the
@@ -739,11 +745,10 @@ async fn reconcile_workspace(
             .await?,
         allowed.as_deref(),
     );
-    let actual = state
+    let actual: Vec<Actual> = state
         .sessions
         .live_managed(tenant, workspace, Some(purpose))
-        .await?;
-    let actual: Vec<Actual> = actual
+        .await?
         .into_iter()
         .map(|(session_id, checkout_id, node_id)| Actual {
             session_id,
@@ -757,6 +762,19 @@ async fn reconcile_workspace(
     // must lift the cap by itself on the next pass, with nothing to clear.
     let ports = port_safety(state, tenant, workspace).await?;
     let plan = plan(spec, &nodes, &checkouts, &actual, ports);
+    Ok((plan, actual))
+}
+
+async fn reconcile_workspace(
+    state: &AppState,
+    tenant: TenantId,
+    workspace: WorkspaceId,
+    spec: &SessionSpec,
+    clones: &CloneThrottle,
+    purpose: ManagedPurpose,
+    slots: Slots,
+) -> crate::error::ApiResult<()> {
+    let (plan, actual) = plan_now(state, tenant, workspace, spec, purpose, slots).await?;
 
     // AC-4's "logs desired-vs-actual". One line per workspace per pass, and
     // only when there is something to say — a converged workspace is silent, or

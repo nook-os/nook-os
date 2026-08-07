@@ -936,6 +936,44 @@ pub struct ReviewLoopDeclaration {
     pub max_replicas: Option<i32>,
 }
 
+/// Desired versus actual for a workspace's REVIEW LOOP (MAIN-447 AC-4).
+///
+/// Separate from [`ReconcileStatus`], which reports the workspace's own
+/// `SessionSpec` and deliberately excludes this purpose. Two declarations
+/// converge per workspace and they must not be able to describe each other.
+///
+/// Computed by the SAME planner the reconciler runs, for the same reason
+/// [`ReconcileStatus`] is: a ceiling above what the fleet can place has to read
+/// as shortfall rather than as silent success, and a second calculation would
+/// drift the moment `review_loop_spec` changes — which MAIN-448 will do when a
+/// forge starts counting open PRs.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ReviewLoopStatus {
+    /// `sessions.reconcile.enabled` for the tenant.
+    ///
+    /// Both gates are reported separately, rather than as one `enabled`, because
+    /// the UI's job is to say WHICH switch is off — the two live in different
+    /// places and a person who turns on the wrong one has learnt nothing.
+    pub reconcile_enabled: bool,
+    /// `loops.enabled` for the tenant. The review loop is agent work, so it
+    /// answers to this as well.
+    pub loops_enabled: bool,
+    /// What the ceiling resolves to: `null` -> 1, `0` -> 0, `N` -> N.
+    pub desired: u32,
+    /// Live review-loop sessions right now.
+    pub running: u32,
+    /// `desired - placed`: asked for more reviewers than the fleet can host.
+    pub shortfall: u32,
+    /// This workspace declares no ports, so it is held to one session per node
+    /// (MAIN-361). Carried separately from `blocked` because it is the one
+    /// cause of shortfall that never clears on its own.
+    pub port_capped: bool,
+    /// Nodes that match `role=loop` but cannot be used yet.
+    pub blocked: Vec<ReconcileBlocker>,
+    /// How many nodes match the selector and tolerate the taints.
+    pub eligible: u32,
+}
+
 /// Set or clear a workspace's review-loop ceiling (MAIN-445).
 ///
 /// The field is a raw JSON value on purpose. Typed as `Option<i32>` it would be
