@@ -103,16 +103,18 @@ pub async fn create(
             }
             // A person raising a job-scoped ask may do so only for a job whose
             // target they can see — same reach as any other view of the card.
+            // A person raising a job-scoped ask may do so only for a job whose
+            // subject they can see. `subject_visible` already answers that for
+            // a job with NO subject (`None => true`), which is exactly the
+            // tenant-visible rule MAIN-408 settled for review jobs — so this
+            // reuses it rather than growing a second copy of the branch.
             Principal::User => {
-                if !crate::services::tasks::visible_to(
-                    &load_task(state, tenant, job.target_task_id).await?,
-                    caller.user_id,
-                ) {
+                if !subject_visible(state, tenant, caller.user_id, job.target_task_id).await? {
                     return Err(ApiError::NotFound);
                 }
             }
         }
-        (Some(job_id), Some(job.target_task_id))
+        (Some(job_id), job.target_task_id)
     } else if let Some(t) = req.task_id {
         // Anchoring directly to a ticket: it must be visible to the caller.
         let task = load_task(state, tenant, t).await?;

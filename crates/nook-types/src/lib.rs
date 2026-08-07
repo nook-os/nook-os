@@ -2862,10 +2862,16 @@ pub struct GitCredential {
 pub struct LoopJob {
     pub id: JobId,
     pub tenant_id: TenantId,
-    /// `spec` (fill in a ticket) or `decompose` (break down an epic).
+    /// `spec` (fill in a ticket), `decompose` (break down an epic), or `review`
+    /// (review a repository).
     pub kind: String,
     /// The ticket a spec job targets, or the epic a decompose job breaks down.
-    pub target_task_id: TaskId,
+    /// `None` for a `review` job, which is about a repository and has no ticket
+    /// — migration 0040 made the column nullable and constrains the pair, so a
+    /// borrowed task id here would be a lie the executor has to work around.
+    pub target_task_id: Option<TaskId>,
+    /// Where the work happens. Required when `target_task_id` is `None`; the
+    /// database CHECK enforces exactly one of the two being present.
     pub workspace_id: Option<WorkspaceId>,
     pub requested_by: UserId,
     /// One of `queued|claimed|running|waiting_on_human|completed|failed|canceled`.
@@ -2921,6 +2927,23 @@ pub struct CreateLoopJobRequest {
     /// on the job, delivered into the run's session as its opening brief, and
     /// echoed as the first `human` transcript line. Omit it and the run starts
     /// from the ticket alone, exactly as before.
+    #[serde(default)]
+    pub seed: Option<String>,
+}
+
+/// Raise a `review` job against a WORKSPACE (MAIN-408) — the manual half of
+/// AC-2, beside the board-signal sweep of AC-1.
+///
+/// Separate from [`CreateLoopJobRequest`] because the two address different
+/// things: that one names a ticket, this one names a repository. Folding them
+/// into one request with two optional targets would make "exactly one of these"
+/// a runtime check in the service layer, which is precisely what migration
+/// 0040 moved into a database constraint.
+#[derive(Debug, Clone, Deserialize, ToSchema)]
+pub struct CreateReviewJobRequest {
+    /// The workspace to review, as a UUID or its name — resolved server-side.
+    pub workspace_id: String,
+    /// The opening brief, exactly as on a spec job. Optional.
     #[serde(default)]
     pub seed: Option<String>,
 }

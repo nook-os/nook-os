@@ -41,7 +41,9 @@ pub struct NewLoopJob {
     pub id: JobId,
     pub tenant: TenantId,
     pub kind: String,
-    pub target_task_id: TaskId,
+    /// `None` for a `review` job, which targets `workspace_id` instead. The
+    /// database CHECK from 0040 enforces exactly one of the two.
+    pub target_task_id: Option<TaskId>,
     pub workspace_id: Option<WorkspaceId>,
     pub requested_by: UserId,
     pub seed: Option<String>,
@@ -55,7 +57,8 @@ pub struct NewLoopJob {
 pub struct ReapedJob {
     pub id: JobId,
     pub tenant: TenantId,
-    pub target_task_id: TaskId,
+    /// `None` for a reaped `review` job — it has no ticket.
+    pub target_task_id: Option<TaskId>,
     pub node_last_seen_at: chrono::DateTime<chrono::Utc>,
 }
 
@@ -78,9 +81,28 @@ pub trait LoopJobRepository: Send + Sync {
 
     /// Unscoped — the node socket holds a job id before it knows the tenant,
     /// and authorizes on what comes back. Named so that is visible.
+    ///
+    /// `None` means "no ticket to name": either the job does not exist, or it
+    /// is a `review` job, which targets a workspace. Both callers publish a
+    /// ticket-keyed `UiEvent`, so both correctly do nothing in either case —
+    /// which is why the two are deliberately not distinguished here.
     async fn target_task_of_unscoped(&self, id: JobId) -> ApiResult<Option<TaskId>>;
 
     async fn create(&self, new: NewLoopJob) -> ApiResult<LoopJob>;
+
+    /// The ONE definition of "this workspace already has a review in flight"
+    /// (AC-3). Returns the live job, if any: `queued`, `claimed`, `running` or
+    /// `waiting_on_human` all count — terminal states do not.
+    ///
+    /// Both enqueue paths (the sweep and the manual endpoint) go through this
+    /// and nothing else. A second notion of "already queued" living beside it
+    /// is exactly how one workspace ends up reviewed twice concurrently, which
+    /// is the failure AC-3 names.
+    async fn active_review_for_workspace(
+        &self,
+        tenant: TenantId,
+        workspace: WorkspaceId,
+    ) -> ApiResult<Option<JobId>>;
 
     async fn list_for_task(&self, tenant: TenantId, task: TaskId) -> ApiResult<Vec<LoopJob>>;
 
@@ -99,8 +121,13 @@ pub trait LoopJobRepository: Send + Sync {
 
     /// Which tenant and ticket a job belongs to, unscoped — what the transcript
     /// append needs to aim its live nudge. Best-effort at the call site: a
-    /// missing job means no nudge, never a failed append.
-    async fn tenant_and_target_of(&self, id: JobId) -> ApiResult<Option<(TenantId, TaskId)>>;
+    /// missing job means no nudge, never a failed append. The inner `Option` is
+    /// `None` for a `review` job (no ticket); the outer is `None` for no such
+    /// job.
+    async fn tenant_and_target_of(
+        &self,
+        id: JobId,
+    ) -> ApiResult<Option<(TenantId, Option<TaskId>)>>;
 
     /// Which node a job was placed on. The outer `Option` is "no such job";
     /// the inner is "not placed yet".
@@ -177,11 +204,33 @@ impl LoopJobRepository for DbLoopJobRepository {
     }
 
     async fn target_task_of_unscoped(&self, id: JobId) -> ApiResult<Option<TaskId>> {
+        // `IS NOT NULL` rather than decoding a nullable scalar: a review job's
+        // row simply does not match, which yields the `None` the contract asks
+        // for without a NULL ever reaching `get_at`.
         Ok(self
             .db
             .query_scalar_opt::<TaskId>(
-                "SELECT target_task_id FROM loop_jobs WHERE id = $1",
+                "SELECT target_task_id FROM loop_jobs
+                 WHERE id = $1 AND target_task_id IS NOT NULL",
                 params![id],
+            )
+            .await?)
+    }
+
+    async fn active_review_for_workspace(
+        &self,
+        tenant: TenantId,
+        workspace: WorkspaceId,
+    ) -> ApiResult<Option<JobId>> {
+        Ok(self
+            .db
+            .query_scalar_opt::<JobId>(
+                "SELECT id FROM loop_jobs
+                  WHERE tenant_id = $1 AND workspace_id = $2 AND kind = 'review'
+                    AND state NOT IN ('completed', 'failed', 'canceled')
+                  ORDER BY created_at
+                  LIMIT 1",
+                params![tenant, workspace.0],
             )
             .await?)
     }
@@ -199,7 +248,7 @@ impl LoopJobRepository for DbLoopJobRepository {
                     new.id,
                     new.tenant,
                     new.kind,
-                    new.target_task_id,
+                    new.target_task_id.map(|t| t.0),
                     new.workspace_id.map(|w| w.0),
                     new.requested_by,
                     new.predecessor_job_id.map(|p| p.0),
@@ -272,7 +321,10 @@ impl LoopJobRepository for DbLoopJobRepository {
             .await?)
     }
 
-    async fn tenant_and_target_of(&self, id: JobId) -> ApiResult<Option<(TenantId, TaskId)>> {
+    async fn tenant_and_target_of(
+        &self,
+        id: JobId,
+    ) -> ApiResult<Option<(TenantId, Option<TaskId>)>> {
         Ok(self
             .db
             .query_opt(
@@ -308,7 +360,12 @@ impl LoopJobRepository for DbLoopJobRepository {
     }
 
     async fn reap_stale_executors(&self, grace_secs: i64) -> ApiResult<Vec<ReapedJob>> {
-        let rows: Vec<(JobId, TenantId, TaskId, chrono::DateTime<chrono::Utc>)> = self
+        let rows: Vec<(
+            JobId,
+            TenantId,
+            Option<TaskId>,
+            chrono::DateTime<chrono::Utc>,
+        )> = self
             .db
             .query_all(
                 &format!(
@@ -568,7 +625,27 @@ impl LoopJobRepository for FakeLoopJobRepository {
             .jobs
             .iter()
             .find(|j| j.id == id)
-            .map(|j| j.target_task_id))
+            .and_then(|j| j.target_task_id))
+    }
+
+    async fn active_review_for_workspace(
+        &self,
+        tenant: TenantId,
+        workspace: WorkspaceId,
+    ) -> ApiResult<Option<JobId>> {
+        let s = self.inner.lock().unwrap();
+        let mut live: Vec<&LoopJob> = s
+            .jobs
+            .iter()
+            .filter(|j| {
+                j.tenant_id == tenant
+                    && j.kind == "review"
+                    && j.workspace_id == Some(workspace)
+                    && !matches!(j.state.as_str(), "completed" | "failed" | "canceled")
+            })
+            .collect();
+        live.sort_by_key(|j| j.created_at);
+        Ok(live.first().map(|j| j.id))
     }
 
     async fn create(&self, new: NewLoopJob) -> ApiResult<LoopJob> {
@@ -597,7 +674,7 @@ impl LoopJobRepository for FakeLoopJobRepository {
         let mut out: Vec<LoopJob> = s
             .jobs
             .iter()
-            .filter(|j| j.tenant_id == tenant && j.target_task_id == task)
+            .filter(|j| j.tenant_id == tenant && j.target_task_id == Some(task))
             .cloned()
             .collect();
         out.sort_by_key(|j| std::cmp::Reverse(j.id.0));
@@ -661,7 +738,10 @@ impl LoopJobRepository for FakeLoopJobRepository {
             .ok_or(crate::error::ApiError::NotFound)
     }
 
-    async fn tenant_and_target_of(&self, id: JobId) -> ApiResult<Option<(TenantId, TaskId)>> {
+    async fn tenant_and_target_of(
+        &self,
+        id: JobId,
+    ) -> ApiResult<Option<(TenantId, Option<TaskId>)>> {
         Ok(self
             .inner
             .lock()

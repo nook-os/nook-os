@@ -399,6 +399,8 @@ pub fn build_router(state: AppState) -> Router {
         .route("/tasks/bulk", post(bulk::bulk_tasks))
         // Loop jobs (MAIN-127): detached spec/decompose work riding the queue.
         .route("/jobs", post(jobs::create))
+        // The manual half of MAIN-408: raise a review against a workspace.
+        .route("/reviews", post(jobs::enqueue_review))
         .route("/jobs/{id}", get(jobs::get))
         .route("/jobs/{id}/cancel", post(jobs::cancel))
         .route("/jobs/{id}/rerun", post(jobs::rerun))

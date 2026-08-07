@@ -200,6 +200,14 @@ enum Command {
     /// human decision without losing it to a dropped connection (MAIN-159).
     #[command(subcommand)]
     Interactions(InteractionsCommand),
+    /// Loop reviews of a workspace (MAIN-408).
+    ///
+    /// A review job is raised automatically by the board-signal sweep when a
+    /// card lands in a review column; these verbs are the manual half and the
+    /// sweep's own switch. A new noun group, per docs/cli-style.md — the top
+    /// level stays frozen.
+    #[command(subcommand)]
+    Reviews(ReviewsCommand),
     /// Tell the fleet something happened.
     ///
     /// Fans out to every connected UI and every configured channel (Slack,
@@ -651,6 +659,10 @@ async fn main() -> Result<()> {
         Command::Interactions(InteractionsCommand::Answer { id, response }) => {
             cli::interactions_answer(&id, &response).await
         }
+        Command::Reviews(ReviewsCommand::Enqueue { workspace, seed }) => {
+            cli::reviews_enqueue(&workspace, seed.as_deref()).await
+        }
+        Command::Reviews(ReviewsCommand::Sweep { state }) => cli::reviews_sweep(&state).await,
         Command::Notify {
             title,
             body,
@@ -1046,6 +1058,29 @@ enum OperatorCommand {
 }
 
 #[derive(clap::Subcommand)]
+enum ReviewsCommand {
+    /// Raise a review of a workspace now, without waiting for the sweep.
+    ///
+    /// Deduped against the sweep by the SAME rule the sweep uses: if a review
+    /// of that workspace is already queued or running, this prints that job
+    /// rather than starting a second one.
+    Enqueue {
+        /// The workspace, by id, slug or name.
+        workspace: String,
+        /// The opening brief for the run.
+        #[arg(long)]
+        seed: Option<String>,
+    },
+    /// Turn the board-signal sweep on or off for this tenant, or ask its state.
+    /// Default is OFF: a fresh deployment reviews nothing until asked.
+    Sweep {
+        /// `on` | `off` | `status` (omit for status).
+        #[arg(default_value = "status")]
+        state: String,
+    },
+}
+
+#[derive(Subcommand)]
 enum InteractionsCommand {
     /// Ask a human a question and persist it. Prints the interaction id.
     ///

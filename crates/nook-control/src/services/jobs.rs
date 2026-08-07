@@ -23,9 +23,17 @@ use crate::state::AppState;
 /// consumer (MAIN-160) filters `receive` on exactly this.
 pub const WORK_TYPE: &str = "loop.job";
 
-/// The two job kinds this slice knows. `spec` fills in a ticket; `decompose`
-/// breaks an epic into children.
+/// The job kinds [`create`] accepts — the TICKET-targeted ones. `spec` fills in
+/// a ticket; `decompose` breaks an epic into children.
+///
+/// `review` is deliberately absent: it targets a workspace, not a ticket, so it
+/// cannot be raised through a path whose whole input is a task id. It has its
+/// own entry point, [`enqueue_review`], which is also where the dedupe lives.
 const KINDS: [&str; 2] = ["spec", "decompose"];
+
+/// The workspace-targeted job kind (MAIN-408). Matches the `loop_jobs_kind_check`
+/// constraint added by migration 0040.
+pub const REVIEW_KIND: &str = "review";
 
 /// The runtime a loop job needs authorized on its executor (MAIN-160). Both
 /// kinds drive the `nook-spec` / `nook-epic` skills under Claude Code, so the
@@ -75,23 +83,38 @@ async fn load_target(state: &AppState, tenant: TenantId, task_id: TaskId) -> Api
         .ok_or(ApiError::NotFound)
 }
 
-/// Load a job AND enforce that `viewer` may see its target card — mirroring the
-/// create-side check so get/cancel/rerun never expose a private card's job (and
-/// its transcript) to a tenant member who cannot see the card (MAIN-76). Returns
+/// Load a job AND enforce that `viewer` may see it — mirroring the create-side
+/// check so get/cancel/rerun never expose a private card's job (and its
+/// transcript) to a tenant member who cannot see the card (MAIN-76). Returns
 /// `NotFound` for both a missing job and an invisible target, so the two are
 /// indistinguishable to the caller.
+///
+/// **A job with no target card is TENANT-VISIBLE** (MAIN-408, Ryan's ruling):
+/// a `review` job is about a repository, not somebody's card, and the sweep
+/// raises it with no human requester — so there is no owner to scope to and
+/// `visible_to` has nothing to evaluate. Any member of the tenant may see it,
+/// its notifications and its transcript; tenant scoping is still enforced by
+/// `load`. This matches the rule `interactions::subject_visible` has always
+/// applied to a job-less ask (`None => true`), so the two surfaces agree.
+///
+/// The knowing cost: in a multi-team tenant every member can read any review
+/// transcript. The alternative considered and rejected was workspace-scoping,
+/// which would need a workspace-visibility predicate that does not exist.
 async fn load_visible(
     state: &AppState,
     tenant: TenantId,
     viewer: UserId,
     id: JobId,
-) -> ApiResult<(LoopJob, TaskItem)> {
+) -> ApiResult<(LoopJob, Option<TaskItem>)> {
     let job = load(state, tenant, id).await?;
-    let target = load_target(state, tenant, job.target_task_id).await?;
+    let Some(task_id) = job.target_task_id else {
+        return Ok((job, None));
+    };
+    let target = load_target(state, tenant, task_id).await?;
     if !crate::services::tasks::visible_to(&target, viewer) {
         return Err(ApiError::NotFound);
     }
-    Ok((job, target))
+    Ok((job, Some(target)))
 }
 
 async fn transcript(state: &AppState, id: JobId) -> ApiResult<Vec<LoopJobTranscriptEntry>> {
@@ -114,7 +137,8 @@ pub async fn create(
 ) -> ApiResult<LoopJobDetail> {
     if !KINDS.contains(&req.kind.as_str()) {
         return Err(ApiError::BadRequest(format!(
-            "unknown job kind {:?} — expected one of spec, decompose",
+            "unknown job kind {:?} — expected spec or decompose. A review job \
+             targets a workspace, not a ticket: raise it with POST /api/v1/reviews.",
             req.kind
         )));
     }
@@ -153,7 +177,7 @@ pub async fn create(
             id,
             tenant,
             kind: req.kind.clone(),
-            target_task_id: target_id,
+            target_task_id: Some(target_id),
             workspace_id: target.workspace_id,
             requested_by,
             seed: seed.clone(),
@@ -183,6 +207,77 @@ pub async fn create(
 
     record_job_event(state, tenant, "job.created", &job, is_private(&target)).await;
     detail(state, job).await
+}
+
+/// Raise a `review` job against a workspace, unless one is already in flight
+/// (MAIN-408 AC-2/AC-3).
+///
+/// **This is the ONLY way a review job is created** — both the manual endpoint
+/// and the board-signal sweep call it, and neither has its own notion of
+/// "already queued". That is AC-3 stated as code: two enqueue paths with two
+/// dedupe rules is how one workspace ends up reviewed twice concurrently, and
+/// the way to make that impossible is to leave only one path.
+///
+/// Returns `Ok(None)` when a live review already exists — deduped, not an
+/// error, because both callers treat "already covered" as success. That is also
+/// what makes AC-4 hold: the sweep may run forever without the queue growing,
+/// since a `queued`, `claimed`, `running` or `waiting_on_human` review all count
+/// as in flight.
+pub async fn enqueue_review(
+    state: &AppState,
+    tenant: TenantId,
+    requested_by: UserId,
+    workspace: WorkspaceId,
+    seed: Option<String>,
+) -> ApiResult<Option<LoopJobDetail>> {
+    if state
+        .jobs
+        .active_review_for_workspace(tenant, workspace)
+        .await?
+        .is_some()
+    {
+        return Ok(None);
+    }
+
+    let seed = seed
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+
+    let job: LoopJob = state
+        .jobs
+        .create(crate::repo::jobs::NewLoopJob {
+            id: JobId::new(),
+            tenant,
+            kind: REVIEW_KIND.to_string(),
+            // No ticket, by design — 0040's CHECK requires the workspace instead.
+            target_task_id: None,
+            workspace_id: Some(workspace),
+            requested_by,
+            seed: seed.clone(),
+            predecessor_job_id: None,
+        })
+        .await?;
+
+    if let Some(seed) = seed.as_deref() {
+        append_transcript(state, job.id, "human", seed).await.ok();
+    }
+
+    // Enqueue AFTER the row exists, so a consumer racing us always finds it —
+    // the same ordering `create` relies on.
+    state
+        .queue
+        .enqueue(NewWork::new(
+            tenant.0,
+            WORK_TYPE,
+            serde_json::to_vec(&job.id).unwrap_or_default(),
+        ))
+        .await?;
+
+    // Tenant-visible by ruling, so never suppressed as private.
+    record_job_event(state, tenant, "job.created", &job, false).await;
+    Ok(Some(detail(state, job).await?))
 }
 
 /// Read a job with its transcript (AC-3). 404 if it is not this tenant's, or if
@@ -242,18 +337,15 @@ pub async fn transition(
     // Privacy of the target card gates the notification (not the activity
     // event) — a private card's state changes must not ring the tenant-wide
     // bell. A vanished target is treated as private (fail closed).
-    let private = load_target(state, tenant, updated.target_task_id)
-        .await
-        .map(|t| is_private(&t))
-        .unwrap_or(true);
+    let private = target_is_private(state, tenant, updated.target_task_id).await;
     record_job_event(state, tenant, "job.state_changed", &updated, private).await;
     // Nudge the ticket's live Loop panel that the job changed (MAIN-128 AC-2).
-    state.registry.publish(
-        tenant,
-        nook_proto::UiEvent::JobChanged {
-            task_id: updated.target_task_id,
-        },
-    );
+    // Only a ticketed job has a Loop panel to nudge; a review job has none.
+    if let Some(task_id) = updated.target_task_id {
+        state
+            .registry
+            .publish(tenant, nook_proto::UiEvent::JobChanged { task_id });
+    }
 
     // MAIN-162: a job that fails or is canceled cancels any pending interaction
     // it raised — a paused human ask on dead work is moot. (A human who then
@@ -348,7 +440,14 @@ pub async fn rerun(
         ))
         .await?;
 
-    record_job_event(state, tenant, "job.created", &job, is_private(&target)).await;
+    record_job_event(
+        state,
+        tenant,
+        "job.created",
+        &job,
+        private_target(target.as_ref()),
+    )
+    .await;
     detail(state, job).await
 }
 
@@ -435,7 +534,8 @@ pub async fn append_transcript(
     // Nudge the ticket's live Loop panel that a new transcript line landed
     // (MAIN-128 AC-2 — the run "streams" as narration arrives). Best-effort: a
     // missing job row just means no live nudge, never a failed append.
-    if let Ok(Some((tenant, task_id))) = state.jobs.tenant_and_target_of(id).await {
+    // A review job has no ticket and therefore no Loop panel — nothing to nudge.
+    if let Ok(Some((tenant, Some(task_id)))) = state.jobs.tenant_and_target_of(id).await {
         state
             .registry
             .publish(tenant, nook_proto::UiEvent::JobChanged { task_id });
@@ -446,6 +546,26 @@ pub async fn append_transcript(
 /// Is the target card private (creator + assignee only)?
 fn is_private(target: &TaskItem) -> bool {
     target.visibility == "private"
+}
+
+/// The same question for a job that may have no card. No card means nothing to
+/// keep private — a review job is tenant-visible, so its bell rings.
+fn private_target(target: Option<&TaskItem>) -> bool {
+    target.is_some_and(is_private)
+}
+
+/// Is the job's target card private? The single answer for every call site that
+/// has only a job (not a loaded card): `None` target → not private (a review job
+/// is tenant-visible by ruling), a target that will not load → private, failing
+/// closed exactly as before.
+async fn target_is_private(state: &AppState, tenant: TenantId, target: Option<TaskId>) -> bool {
+    match target {
+        None => false,
+        Some(t) => load_target(state, tenant, t)
+            .await
+            .map(|t| is_private(&t))
+            .unwrap_or(true),
+    }
 }
 
 /// Record a job lifecycle event on the UI bus (AC-4). `target_private` is carried
@@ -468,6 +588,8 @@ async fn record_job_event(
             .payload(json!({
                 "job_id": job.id,
                 "task_id": job.target_task_id,
+                // A review job has no task_id; the workspace is what it is about.
+                "workspace_id": job.workspace_id,
                 "kind": job.kind,
                 "state": job.state,
                 "target_private": target_private,
@@ -567,10 +689,7 @@ pub async fn select_executor(
 
     match claimed {
         Some(job) => {
-            let private = load_target(state, tenant, job.target_task_id)
-                .await
-                .map(|t| is_private(&t))
-                .unwrap_or(true);
+            let private = target_is_private(state, tenant, job.target_task_id).await;
             record_job_event(state, tenant, "job.state_changed", &job, private).await;
             Ok(job)
         }
@@ -673,8 +792,18 @@ pub fn skill_for_kind(kind: &str) -> &'static str {
 }
 
 /// The target ticket's board key (e.g. `MAIN-42`) — what the skill is pointed
-/// at. Empty string if the row has vanished (the caller fails the job).
-async fn task_key(state: &AppState, tenant: TenantId, task_id: TaskId) -> ApiResult<String> {
+/// at. Empty string when there is no key to send: the row has vanished (the
+/// caller fails the job), or the job is a `review`, which is pointed at a
+/// repository rather than a ticket. The wire field stays a `String` because
+/// changing the node protocol is MAIN-408's NG-1.
+async fn task_key(
+    state: &AppState,
+    tenant: TenantId,
+    task_id: Option<TaskId>,
+) -> ApiResult<String> {
+    let Some(task_id) = task_id else {
+        return Ok(String::new());
+    };
     let key: Option<String> = state.tasks.key_of(tenant, task_id).await?;
     Ok(key.unwrap_or_default())
 }
@@ -882,10 +1011,7 @@ pub async fn reap_stale_executors(state: &AppState, grace_secs: u64) -> ApiResul
         // tenant-wide bell. (The atomic UPDATE above already made the state
         // change; this is only its announcement.)
         if let Ok(job) = load(state, *tenant, *id).await {
-            let private = load_target(state, *tenant, *target)
-                .await
-                .map(|t| is_private(&t))
-                .unwrap_or(true);
+            let private = target_is_private(state, *tenant, *target).await;
             record_job_event(state, *tenant, "job.state_changed", &job, private).await;
         }
     }

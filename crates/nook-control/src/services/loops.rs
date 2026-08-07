@@ -77,11 +77,15 @@ pub async fn set(
 
 /// A stored value that means "on".
 ///
+/// `pub(crate)` so the review sweep (MAIN-408) reuses this exact definition
+/// rather than growing a second one — two switches disagreeing about whether
+/// `"true"` counts as on is the kind of drift a shared helper prevents.
+///
 /// The setting is written as a JSON boolean by both the CLI and the UI, but the
 /// settings endpoint takes arbitrary JSON, so a hand-`PUT` string is entirely
 /// possible. Accepting `true`/`"true"`/`1` costs nothing; anything else — and
 /// crucially anything absent — is off.
-fn truthy(v: Option<&serde_json::Value>) -> bool {
+pub(crate) fn truthy(v: Option<&serde_json::Value>) -> bool {
     match v {
         Some(serde_json::Value::Bool(b)) => *b,
         Some(serde_json::Value::String(s)) => s.eq_ignore_ascii_case("true"),

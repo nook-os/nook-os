@@ -27,7 +27,7 @@ async fn queued(repo: &FakeLoopJobRepository, t: TenantId, task: TaskId) -> JobI
         id,
         tenant: t,
         kind: "spec".into(),
-        target_task_id: task,
+        target_task_id: Some(task),
         workspace_id: None,
         requested_by: UserId::new(),
         seed: None,

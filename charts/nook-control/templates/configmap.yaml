@@ -51,6 +51,9 @@ data:
   NOOK_SQS_REGION: {{ . | quote }}
   {{- end }}
   {{- end }}
+  {{- with $c.reviewSweepIntervalSecs }}
+  NOOK_REVIEW_SWEEP_INTERVAL_SECS: {{ . | quote }}
+  {{- end }}
   NOOK_ARTIFACT_STORE: {{ $c.artifactStore | quote }}
   {{- with $c.s3.bucket }}
   NOOK_S3_BUCKET: {{ . | quote }}
