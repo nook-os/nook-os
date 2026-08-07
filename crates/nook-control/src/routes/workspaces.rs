@@ -156,17 +156,30 @@ pub async fn reconcile_status(
         .live_managed(auth.tenant_id, id, Some(ManagedPurpose::Access))
         .await?
         .into_iter()
-        .map(|(session_id, checkout_id, node_id)| recon::Actual {
-            session_id,
-            checkout_id,
-            node_id,
+        .map(|s| recon::Actual {
+            session_id: s.id,
+            checkout_id: s.checkout_id,
+            node_id: s.node_id,
+            shard: nook_types::ShardAssignment {
+                index: s.managed_shard.max(0) as u32,
+                of: s.managed_shards.max(1) as u32,
+            },
         })
         .collect();
     // The same question the reconciler asks, asked the same way (MAIN-361), so
     // the number on screen is the number the loop is acting on rather than a
     // second opinion about it.
     let ports = recon::port_safety(&state, auth.tenant_id, id).await?;
-    let plan = recon::plan(&spec, &nodes, &checkouts, &actual, ports);
+    // The WORKSPACE's own declaration counts nodes, not shards — a person's
+    // terminal in every checkout is what it asks for (MAIN-446).
+    let plan = recon::plan(
+        &spec,
+        &nodes,
+        &checkouts,
+        &actual,
+        ports,
+        recon::Spread::PerCheckout,
+    );
 
     // Names, so the UI can say "waiting on a clone to dev-box" rather than
     // printing a uuid at somebody.
@@ -1022,18 +1035,16 @@ pub async fn delete(
     // part waits on node ops, and a reconcile pass landing in the gap would
     // start fresh managed sessions for a workspace we are about to cascade —
     // which is the orphaned-tmux case this whole ordering exists to avoid.
-    for (session, _checkout, node) in &managed {
-        if !state.registry.send_to_node(
-            *node,
-            ControlToNode::KillSession {
-                session_id: *session,
-            },
-        ) {
+    for m in &managed {
+        if !state
+            .registry
+            .send_to_node(m.node_id, ControlToNode::KillSession { session_id: m.id })
+        {
             stranded += 1;
             continue;
         }
-        if let Err(e) = state.sessions.mark_ended(auth.tenant_id, *session).await {
-            tracing::warn!(workspace = %id, session = %session, error = %e, "could not end a managed session while deleting its workspace");
+        if let Err(e) = state.sessions.mark_ended(auth.tenant_id, m.id).await {
+            tracing::warn!(workspace = %id, session = %m.id, error = %e, "could not end a managed session while deleting its workspace");
         }
     }
 

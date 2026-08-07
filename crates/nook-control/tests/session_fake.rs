@@ -41,6 +41,8 @@ async fn start(
         checkout_id: None,
         managed: false,
         managed_purpose: ManagedPurpose::Access,
+        managed_shard: 0,
+        managed_shards: 1,
     })
     .await
     .unwrap()
@@ -272,6 +274,8 @@ async fn a_sessions_checkout_summary_is_filled_from_its_binding() {
             checkout_id: Some(checkout),
             managed: false,
             managed_purpose: ManagedPurpose::Access,
+            managed_shard: 0,
+            managed_shards: 1,
         })
         .await
         .unwrap();

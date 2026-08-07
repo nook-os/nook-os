@@ -75,6 +75,8 @@ async fn a_session(
             checkout_id: checkout,
             managed,
             managed_purpose: ManagedPurpose::Access,
+            managed_shard: 0,
+            managed_shards: 1,
         })
         .await?
         .id)
@@ -120,8 +122,8 @@ async fn only_sessions_the_reconciler_marked_are_visible_to_it() {
         .await
         .expect("read");
     assert_eq!(seen.len(), 1, "only the marked one");
-    assert_eq!(seen[0].0, mine);
-    assert_ne!(seen[0].0, hand_started);
+    assert_eq!(seen[0].id, mine);
+    assert_ne!(seen[0].id, hand_started);
 
     bed.teardown().await;
 }

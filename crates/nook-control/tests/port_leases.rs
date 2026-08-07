@@ -60,6 +60,8 @@ async fn session_on(
             checkout_id: None,
             managed: false,
             managed_purpose: ManagedPurpose::Access,
+            managed_shard: 0,
+            managed_shards: 1,
         })
         .await
         .expect("session")

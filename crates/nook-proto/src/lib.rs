@@ -406,6 +406,15 @@ pub enum ControlToNode {
         /// should be able to choose what runs on a machine.
         #[serde(default)]
         managed_purpose: Option<nook_types::ManagedPurpose>,
+        /// Which slice of the repo's work this session owns (MAIN-446), when it
+        /// is one of several sharing a declaration. `None` — everything that is
+        /// not a sharded review loop — means the whole of it.
+        ///
+        /// Travels as a PAIR for the reason the type gives: an index is only
+        /// valid against the divisor it was computed with, and two independent
+        /// fields on a wire can arrive disagreeing.
+        #[serde(default)]
+        shard: Option<nook_types::ShardAssignment>,
     },
     /// Install a runtime credential this node did not obtain (MAIN-283).
     ///

@@ -67,6 +67,8 @@ async fn managed_session(bed: &TestBed, f: &Fixture) -> SessionId {
             checkout_id: Some(f.checkout),
             managed: true,
             managed_purpose: ManagedPurpose::Access,
+            managed_shard: 0,
+            managed_shards: 1,
         })
         .await
         .expect("session")
@@ -104,7 +106,7 @@ async fn a_stopped_managed_session_still_satisfies_the_declaration() {
         1,
         "a stopped managed session still counts — nothing to replace"
     );
-    assert_eq!(after[0].0, id, "and it is the same session, not a new one");
+    assert_eq!(after[0].id, id, "and it is the same session, not a new one");
 
     bed.teardown().await;
 }
@@ -334,6 +336,8 @@ async fn a_workspace_with_no_checkout_is_still_unsatisfied() {
             checkout_id: None,
             managed: true,
             managed_purpose: ManagedPurpose::Access,
+            managed_shard: 0,
+            managed_shards: 1,
         })
         .await
         .expect("session")

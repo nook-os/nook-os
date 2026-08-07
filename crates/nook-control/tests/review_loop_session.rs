@@ -45,6 +45,21 @@ async fn declared(
     checkout: NodeWorkspaceId,
     purpose: ManagedPurpose,
 ) -> nook_control::error::ApiResult<SessionId> {
+    declared_shard(bed, tenant, workspace, node, checkout, purpose, 0, 1).await
+}
+
+/// The same, for one SHARD of a divided declaration (MAIN-446).
+#[allow(clippy::too_many_arguments)]
+async fn declared_shard(
+    bed: &TestBed,
+    tenant: TenantId,
+    workspace: WorkspaceId,
+    node: NodeId,
+    checkout: NodeWorkspaceId,
+    purpose: ManagedPurpose,
+    shard: i32,
+    shards: i32,
+) -> nook_control::error::ApiResult<SessionId> {
     Ok(bed
         .app_state()
         .await
@@ -53,12 +68,14 @@ async fn declared(
             tenant,
             workspace_id: Some(workspace),
             node_id: node,
-            name: format!("{purpose}"),
+            name: format!("{purpose} {shard}/{shards}"),
             runtime: "claude".to_string(),
             created_by: None,
             checkout_id: Some(checkout),
             managed: true,
             managed_purpose: purpose,
+            managed_shard: shard,
+            managed_shards: shards,
         })
         .await?
         .id)
@@ -116,6 +133,77 @@ async fn two_replicas_cannot_both_start_the_review_loop() {
     bed.teardown().await;
 }
 
+/// MAIN-446's half of the same index. Several reviewers now share one clone —
+/// on a fleet with one `role=loop` node that is the only place they can be — so
+/// the SHARD has to be part of the key. Before it was, the second reviewer's
+/// insert was refused and a count above one could never be satisfied.
+#[tokio::test]
+async fn one_checkout_holds_several_reviewers_one_per_shard() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let tenant = bed.tenant("recon").await;
+    let (_, person) = bed.user(tenant, "owner").await;
+    let node = bed.node(tenant, person).await;
+    let ws = bed.workspace(tenant).await;
+    let co = a_checkout(&bed, tenant, node, ws, "/w/clone").await;
+
+    let mut ids = Vec::new();
+    for shard in 0..3 {
+        ids.push(
+            declared_shard(
+                &bed,
+                tenant,
+                ws,
+                node,
+                co,
+                ManagedPurpose::ReviewLoop,
+                shard,
+                3,
+            )
+            .await
+            .unwrap_or_else(|e| panic!("shard {shard} of 3 must be its own slot: {e}")),
+        );
+    }
+    ids.sort();
+    ids.dedup();
+    assert_eq!(ids.len(), 3, "three distinct sessions in one checkout");
+
+    // The round trip the planner's stability rests on: a shard is only stable
+    // across passes if the READ gives it back. `live_managed` is the whole of
+    // what the reconciler knows about a running session.
+    let seen: Vec<(i32, i32)> = bed
+        .app_state()
+        .await
+        .sessions
+        .live_managed(tenant, ws, Some(ManagedPurpose::ReviewLoop))
+        .await
+        .expect("live managed")
+        .into_iter()
+        .map(|m| (m.managed_shard, m.managed_shards))
+        .collect();
+    assert_eq!(seen, vec![(0, 3), (1, 3), (2, 3)]);
+
+    // …and the race arbitration survives it: the SHARD is what distinguishes
+    // them, so a second replica reaching for shard 1 still loses. The DIVISOR is
+    // not in the key, so re-declaring the same index under a different count is
+    // refused too — one index under two divisors is one slot described twice.
+    assert!(
+        declared_shard(&bed, tenant, ws, node, co, ManagedPurpose::ReviewLoop, 1, 3)
+            .await
+            .is_err(),
+        "a second reviewer must not take a shard that is already placed"
+    );
+    assert!(
+        declared_shard(&bed, tenant, ws, node, co, ManagedPurpose::ReviewLoop, 1, 4)
+            .await
+            .is_err(),
+        "changing the divisor must not conjure a second slot for shard 1"
+    );
+
+    bed.teardown().await;
+}
+
 /// The planner's `actual` set is also its STOP list, so a declaration that
 /// could see the other's sessions would stop them as strays. `None` is the
 /// unfiltered read workspace deletion needs — a review loop is equally
@@ -149,7 +237,7 @@ async fn live_managed_narrows_by_purpose_and_none_takes_both() {
                 .await
                 .expect("read")
                 .into_iter()
-                .map(|(id, _, _)| id)
+                .map(|m| m.id)
                 .collect::<Vec<_>>()
         }
     };
@@ -196,7 +284,7 @@ async fn an_ended_review_loop_is_replaceable_and_leaves_the_terminal_alone() {
             .await
             .unwrap()
             .into_iter()
-            .map(|(id, _, _)| id)
+            .map(|m| m.id)
             .collect::<Vec<_>>(),
         vec![access],
         "the person's terminal was never involved"

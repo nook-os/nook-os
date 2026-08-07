@@ -552,6 +552,10 @@ pub async fn restart(
             // job: a review loop restarted as a bare terminal would sit there
             // reviewing nothing (MAIN-326).
             managed_purpose: session.managed.then_some(session.managed_purpose),
+            // …and doing the same PART of it (MAIN-446). Read off the row, not
+            // recomputed: a reviewer that came back as shard 0 when it had been
+            // shard 2 would double-review one sibling's PRs and abandon its own.
+            shard: session_queries::shard_of(&session),
         },
     );
     if !sent {

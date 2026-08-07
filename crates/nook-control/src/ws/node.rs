@@ -797,8 +797,10 @@ async fn handle_message(
                     unsatisfied: fresh.unsatisfied,
                     attempt: attempt + 1,
                     // Re-leasing after a port clash is still the same declared
-                    // session; it must come back doing its job (MAIN-326).
+                    // session; it must come back doing its job (MAIN-326) — and
+                    // the same slice of it (MAIN-446).
                     managed_purpose: session.managed.then_some(session.managed_purpose),
+                    shard: crate::services::session_queries::shard_of(&session),
                 },
             );
         }

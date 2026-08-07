@@ -53,6 +53,29 @@ pub struct NewSession {
     /// the race, so setting it afterwards would let two declarations each think
     /// they had won the checkout.
     pub managed_purpose: ManagedPurpose,
+    /// Which slice of the declaration this session owns (MAIN-446). On the
+    /// INSERT for the reason `managed_purpose` is: it is part of the unique
+    /// index, so it is what lets a second reviewer take the same clone rather
+    /// than be refused as the first one's duplicate.
+    pub managed_shard: i32,
+    /// The divisor of `managed_shard`. Carried on the row so a restart re-sends
+    /// the same partition; not part of the index, because two sessions with one
+    /// index and two divisors are one slot described twice.
+    pub managed_shards: i32,
+}
+
+/// One managed session, as the reconciler sees it.
+///
+/// A named row rather than a tuple because the shard pair (MAIN-446) took it to
+/// five fields, and `.3`/`.4` at the call site is exactly how an index and its
+/// divisor get swapped.
+#[derive(Debug, Clone, nook_db::FromDbRow)]
+pub struct ManagedSession {
+    pub id: SessionId,
+    pub checkout_id: NodeWorkspaceId,
+    pub node_id: NodeId,
+    pub managed_shard: i32,
+    pub managed_shards: i32,
 }
 
 /// Which sessions a list call wants.
@@ -168,7 +191,7 @@ pub trait SessionRepository: Send + Sync {
         tenant: TenantId,
         workspace: WorkspaceId,
         purpose: Option<ManagedPurpose>,
-    ) -> ApiResult<Vec<(SessionId, NodeWorkspaceId, NodeId)>>;
+    ) -> ApiResult<Vec<ManagedSession>>;
 
     /// End a managed session — the scale-down half of converging.
     async fn mark_ended(&self, tenant: TenantId, id: SessionId) -> ApiResult<u64>;
@@ -293,8 +316,10 @@ impl SessionRepository for DbSessionRepository {
             .query_one(
                 "INSERT INTO sessions
                    (id, tenant_id, workspace_id, node_id, name, runtime, status,
-                    created_by, checkout_id, managed, managed_purpose)
-                 VALUES ($1, $2, $3, $4, $5, $6, 'starting', $7, $8, $9, $10) RETURNING *",
+                    created_by, checkout_id, managed, managed_purpose,
+                    managed_shard, managed_shards)
+                 VALUES ($1, $2, $3, $4, $5, $6, 'starting', $7, $8, $9, $10, $11, $12)
+                 RETURNING *",
                 params![
                     SessionId::new(),
                     new.tenant,
@@ -305,7 +330,9 @@ impl SessionRepository for DbSessionRepository {
                     new.created_by.map(|u| u.0),
                     new.checkout_id.map(|c| c.0),
                     new.managed,
-                    new.managed_purpose
+                    new.managed_purpose,
+                    new.managed_shard,
+                    new.managed_shards
                 ],
             )
             .await?)
@@ -478,19 +505,20 @@ impl SessionRepository for DbSessionRepository {
         tenant: TenantId,
         workspace: WorkspaceId,
         purpose: Option<ManagedPurpose>,
-    ) -> ApiResult<Vec<(SessionId, NodeWorkspaceId, NodeId)>> {
+    ) -> ApiResult<Vec<ManagedSession>> {
         // `$3 IS NULL OR …` rather than two query strings: one shape to read,
         // and the planner's filter cannot drift from the unfiltered count.
         Ok(self
             .db
             .query_all(
                 &format!(
-                    "SELECT id, checkout_id, node_id FROM sessions
+                    "SELECT id, checkout_id, node_id, managed_shard, managed_shards
+                 FROM sessions
                  WHERE tenant_id = $1 AND workspace_id = $2 AND managed
                    AND ($3 IS NULL OR managed_purpose = $3)
                    AND checkout_id IS NOT NULL
                    AND status IN ({declared})
-                 ORDER BY checkout_id",
+                 ORDER BY checkout_id, managed_shard",
                     declared = session_status::DECLARED_SQL
                 ),
                 params![tenant, workspace, purpose.map(|p| p.as_str().to_string())],
@@ -761,7 +789,10 @@ impl SessionRepository for FakeSessionRepository {
         // let a caller test pass against behaviour the database does not have.
         // Null checkout is excluded exactly as the partial index excludes it,
         // and the purpose is part of the key exactly as it is there — an access
-        // session must not refuse the review loop its own slot (MAIN-326).
+        // session must not refuse the review loop its own slot (MAIN-326), and
+        // shard 1 must not refuse shard 0 its own (MAIN-446). The DIVISOR is
+        // absent from the key here for the reason the index gives: one index
+        // under two divisors is one slot described twice.
         if new.managed {
             let rows = self.inner.lock().unwrap();
             if new.checkout_id.is_some()
@@ -769,6 +800,7 @@ impl SessionRepository for FakeSessionRepository {
                     x.managed
                         && x.checkout_id == new.checkout_id
                         && x.managed_purpose == new.managed_purpose
+                        && x.managed_shard == new.managed_shard
                         && session_status::is_declared(&x.status)
                 })
             {
@@ -794,6 +826,8 @@ impl SessionRepository for FakeSessionRepository {
             checkout_id: new.checkout_id,
             managed: new.managed,
             managed_purpose: new.managed_purpose,
+            managed_shard: new.managed_shard,
+            managed_shards: new.managed_shards,
             checkout: None,
             node_online: None,
             leased_ports: Vec::new(),
@@ -948,8 +982,8 @@ impl SessionRepository for FakeSessionRepository {
         tenant: TenantId,
         workspace: WorkspaceId,
         purpose: Option<ManagedPurpose>,
-    ) -> ApiResult<Vec<(SessionId, NodeWorkspaceId, NodeId)>> {
-        let mut out: Vec<(SessionId, NodeWorkspaceId, NodeId)> = self
+    ) -> ApiResult<Vec<ManagedSession>> {
+        let mut out: Vec<ManagedSession> = self
             .inner
             .lock()
             .unwrap()
@@ -962,9 +996,15 @@ impl SessionRepository for FakeSessionRepository {
                     && x.checkout_id.is_some()
                     && session_status::is_live(&x.status)
             })
-            .map(|x| (x.id, x.checkout_id.unwrap(), x.node_id))
+            .map(|x| ManagedSession {
+                id: x.id,
+                checkout_id: x.checkout_id.unwrap(),
+                node_id: x.node_id,
+                managed_shard: x.managed_shard,
+                managed_shards: x.managed_shards,
+            })
             .collect();
-        out.sort_by_key(|(_, c, _)| c.0);
+        out.sort_by_key(|s| (s.checkout_id.0, s.managed_shard));
         Ok(out)
     }
 

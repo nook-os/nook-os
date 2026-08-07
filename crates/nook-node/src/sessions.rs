@@ -62,6 +62,9 @@ pub enum Cmd {
         /// — a person's terminal — just opens the runtime, which is everything
         /// this ever did.
         managed_purpose: Option<nook_types::ManagedPurpose>,
+        /// Which slice of the repo's work this session owns (MAIN-446), when it
+        /// is one of several sharing a declaration. `None` is the whole of it.
+        shard: Option<nook_types::ShardAssignment>,
     },
     StartAuth {
         session_id: SessionId,
@@ -155,6 +158,7 @@ impl Manager {
                 workspace_id,
                 tenant_id,
                 managed_purpose,
+                shard,
             } => self.start(
                 session_id,
                 &runtime,
@@ -166,6 +170,7 @@ impl Manager {
                 workspace_id.as_deref(),
                 tenant_id.as_deref(),
                 managed_purpose,
+                shard,
             ),
             Cmd::StartAuth {
                 session_id,
@@ -218,6 +223,7 @@ impl Manager {
         workspace_id: Option<&str>,
         tenant_id: Option<&str>,
         managed_purpose: Option<nook_types::ManagedPurpose>,
+        shard: Option<nook_types::ShardAssignment>,
     ) {
         // The runtime string is the executable to launch. Restrict to the
         // known set so the control plane can't run arbitrary commands.
@@ -255,6 +261,11 @@ impl Manager {
             // The canonical (hyphenated) uuid, not the tmux name's simple form,
             // so `GET /api/v1/sessions/{id}` inside the session resolves.
             let sid = session_id.0.to_string();
+            let shard_env = shard_env(shard);
+            let extra: Vec<(&str, &str)> = shard_env
+                .iter()
+                .map(|(k, v)| (k.as_str(), v.as_str()))
+                .collect();
             if let Err(e) = tmux::new_session(
                 &tmux_name,
                 workspace_path,
@@ -266,6 +277,7 @@ impl Manager {
                 unsatisfied,
                 workspace_id,
                 tenant_id,
+                &extra,
             ) {
                 return self.session_failed(session_id, e.to_string());
             }
@@ -562,6 +574,26 @@ fn drive_skill(purpose: nook_types::ManagedPurpose) -> Option<&'static str> {
     }
 }
 
+/// The environment a shard assignment becomes (MAIN-446).
+///
+/// Named HERE and not in `tmux.rs` for the reason `drive_skill` is: which skill
+/// a purpose drives, and what that skill reads, are one fact about the review
+/// loop. `tmux::spawn` stays a general env-injection point that knows nothing
+/// about reviewing.
+///
+/// Nothing at all for an unsharded session. An absent variable has to keep
+/// meaning "review every PR" — that is what every existing deployment reads,
+/// and what a single reviewer must go on reading.
+fn shard_env(shard: Option<nook_types::ShardAssignment>) -> Vec<(String, String)> {
+    match shard.filter(|s| s.of > 1) {
+        Some(s) => vec![
+            ("NOOK_REVIEW_SHARD".to_string(), s.index.to_string()),
+            ("NOOK_REVIEW_SHARDS".to_string(), s.of.to_string()),
+        ],
+        None => Vec::new(),
+    }
+}
+
 /// The runtime needs a beat to come up before it can take input. We do not read
 /// its output to decide when it is ready — the same constraint `loop_job` works
 /// under — so wait a fixed moment, then type.
@@ -608,6 +640,33 @@ mod tests {
             drive_skill(ManagedPurpose::Access),
             None,
             "a person's terminal is theirs — typing into it types over them"
+        );
+    }
+
+    /// MAIN-446 AC-2. The pair the reviewer skill reads, spelled exactly as the
+    /// skill spells it — a typo here is a reviewer that silently reviews every
+    /// PR, which looks like success until two of them post the same verdict.
+    #[test]
+    fn a_sharded_session_carries_the_pair_the_skill_reads() {
+        assert_eq!(
+            shard_env(Some(nook_types::ShardAssignment { index: 2, of: 3 })),
+            vec![
+                ("NOOK_REVIEW_SHARD".to_string(), "2".to_string()),
+                ("NOOK_REVIEW_SHARDS".to_string(), "3".to_string()),
+            ]
+        );
+    }
+
+    /// Absent has to keep meaning "review every PR": that is what a single
+    /// reviewer reads, and what every deployment that has never set a count
+    /// reads. Exporting `SHARDS=1` instead would work, but only until something
+    /// tested `[ -n "$NOOK_REVIEW_SHARDS" ]`.
+    #[test]
+    fn an_unsharded_session_carries_nothing_at_all() {
+        assert!(shard_env(None).is_empty());
+        assert!(
+            shard_env(Some(nook_types::ShardAssignment::SOLO)).is_empty(),
+            "one shard is no partition"
         );
     }
 }
