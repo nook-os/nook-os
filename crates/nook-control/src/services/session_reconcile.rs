@@ -448,11 +448,18 @@ fn plan_per_checkout(
 /// is the single primary clone — several reviewers in one working copy, which
 /// is fine because a reviewer reads PRs on the forge and never writes the tree.
 ///
-/// The DIVISOR is the declared count, not the number actually placed. A fleet
-/// that can host two of three reviewers leaves the third shard's PRs unreviewed
-/// until it can host it — the trade NG-1 records — where re-dividing by two
-/// would silently repartition the two that are running every time capacity
-/// moved.
+/// The DIVISOR is the number actually PLACED, not the declared count. Dividing
+/// by what was asked for hands the survivors slices belonging to reviewers
+/// nobody created: an undeclared workspace at `max_replicas: 3` is held to one
+/// session by MAIN-361's cap, and that one would take only PRs where
+/// `number % 3 == 0` — two thirds of them unreviewed, permanently. NG-1's trade
+/// covers a reviewer that is TEMPORARILY down and will come back to its shard;
+/// a port cap is policy, and does not move the way capacity does.
+///
+/// This divides by capacity, not by liveness, which is what keeps AC-5 true: a
+/// reviewer dying does not shrink the fleet's room for it, so the divisor holds
+/// and the others keep their shards. Only a real capacity change — a node
+/// leaving, a clone landing, ports being declared — repartitions.
 fn plan_sharded(
     spec: &SessionSpec,
     eligible_nodes: &[&NodeFacts],
@@ -503,31 +510,42 @@ fn plan_sharded(
         })
         .collect();
 
-    let of = target.max(1) as u32;
-    let mut desired: Vec<(&CheckoutSlot, nook_types::ShardAssignment)> = Vec::new();
+    let mut slots: Vec<&CheckoutSlot> = Vec::new();
     let mut round = 0usize;
-    while desired.len() < target {
-        let before = desired.len();
+    while slots.len() < target {
+        let before = slots.len();
         for (node, cos) in &hosts {
-            if desired.len() >= target {
+            if slots.len() >= target {
                 break;
             }
             if round >= capacity(node) {
                 continue;
             }
-            let index = desired.len() as u32;
-            desired.push((
-                cos[round % cos.len()],
-                nook_types::ShardAssignment { index, of },
-            ));
+            slots.push(cos[round % cos.len()]);
         }
         // Nothing landed this round: every host is at its capacity, so another
         // round would spin forever on a target the fleet cannot reach.
-        if desired.len() == before {
+        if slots.len() == before {
             break;
         }
         round += 1;
     }
+
+    // WHERE they go is settled above; only now is WHAT they are handed knowable.
+    let of = slots.len().max(1) as u32;
+    let desired: Vec<(&CheckoutSlot, nook_types::ShardAssignment)> = slots
+        .into_iter()
+        .enumerate()
+        .map(|(i, c)| {
+            (
+                c,
+                nook_types::ShardAssignment {
+                    index: i as u32,
+                    of,
+                },
+            )
+        })
+        .collect();
 
     let mut out = Plan {
         needs_clone,
@@ -1000,8 +1018,7 @@ async fn reconcile_workspace(
     slots: Slots,
     spread: Spread,
 ) -> crate::error::ApiResult<()> {
-    let (plan, actual) =
-        plan_now(state, tenant, workspace, spec, purpose, slots, spread).await?;
+    let (plan, actual) = plan_now(state, tenant, workspace, spec, purpose, slots, spread).await?;
 
     // AC-4's "logs desired-vs-actual". One line per workspace per pass, and
     // only when there is something to say — a converged workspace is silent, or
@@ -1017,6 +1034,10 @@ async fn reconcile_workspace(
             starting = plan.actions.iter().filter(|a| matches!(a, Action::Start { .. })).count(),
             stopping = plan.actions.iter().filter(|a| matches!(a, Action::Stop { .. })).count(),
             shortfall = plan.shortfall,
+            // Without this a port cap and a fleet that is simply too small read
+            // identically — `desired=3 actual=1 shortfall=2` forever — and they
+            // have completely different remedies.
+            capped = plan.capped,
             needs_clone = plan.needs_clone.len(),
             "reconciling workspace"
         );
@@ -2190,11 +2211,19 @@ mod tests {
     }
 
     /// AC-6. Asking for more than the fleet can host is reported, never capped
-    /// away — and the DIVISOR stays at what was asked for, so the shard that
-    /// went unplaced keeps its PRs waiting instead of the placed reviewers
-    /// silently re-dividing the repo between them (NG-1).
+    /// away — and the reviewers that DID land divide the repo between just
+    /// themselves, so every PR still has an owner.
+    ///
+    /// Dividing by the declared count instead would hand these two `of=3` and
+    /// leave a third of the repo owned by a reviewer nobody placed. The count
+    /// is still reported as short, which is the honest part; the coverage is
+    /// not something to be honest about losing.
+    ///
+    /// This divides by CAPACITY, not by liveness — NG-1's trade is untouched.
+    /// A reviewer whose session died has not shrunk the room the fleet has for
+    /// it, so the divisor holds and its PRs wait for it to come back.
     #[test]
-    fn a_count_past_capacity_is_shortfall_and_does_not_redivide() {
+    fn a_count_past_capacity_divides_between_the_reviewers_that_landed() {
         let p = plan(
             &review_loop_spec(Some(3)),
             &[loop_node(1, 2)],
@@ -2204,10 +2233,24 @@ mod tests {
             Spread::Sharded,
         );
         let node = NodeId(Uuid::from_u128(1));
-        assert_eq!(placements(&p), vec![(node, 0, 3), (node, 1, 3)]);
+        assert_eq!(placements(&p), vec![(node, 0, 2), (node, 1, 2)]);
         assert_eq!(p.placed, 2);
-        assert_eq!(p.desired, 3);
+        assert_eq!(
+            p.desired, 3,
+            "what was asked for is still what was asked for"
+        );
         assert_eq!(p.shortfall, 1, "the third is reported, not hidden");
+
+        // The two of them between them own everything — the property the
+        // declared divisor broke.
+        let shards: Vec<ShardAssignment> = placements(&p)
+            .into_iter()
+            .map(|(_, index, of)| ShardAssignment { index, of })
+            .collect();
+        assert!(
+            (1u64..200).all(|pr| shards.iter().filter(|s| s.owns(pr)).count() == 1),
+            "every PR owned exactly once by the reviewers that exist"
+        );
     }
 
     /// Two loop nodes get one reviewer each before either gets two. Not a
@@ -2358,9 +2401,16 @@ mod tests {
             PortSafety::Undeclared,
             Spread::Sharded,
         );
-        assert_eq!(placements(&capped).len(), 1);
+        // The `of` is the point, not just the count. Handing the survivor
+        // `of=3` would leave it reviewing only PRs divisible by three, with the
+        // other two shards belonging to reviewers the cap will never allow —
+        // permanently, because a port cap is policy and does not move.
+        assert_eq!(placements(&capped), vec![(nodes[0].id, 0, 1)]);
         assert!(capped.capped, "and the plan says why");
-        assert_eq!(capped.shortfall, 2);
+        assert_eq!(
+            capped.shortfall, 2,
+            "still honest about what it cannot host"
+        );
 
         let declared = plan(
             &review_loop_spec(Some(3)),

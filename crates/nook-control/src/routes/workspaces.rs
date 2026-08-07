@@ -366,6 +366,10 @@ pub async fn review_loop_status(
         &spec,
         ManagedPurpose::ReviewLoop,
         recon::Slots::ClonesOnly,
+        // The review loop divides by SHARD, not by checkout (MAIN-446). Passing
+        // the pass's own spread is what keeps this a report rather than a
+        // second opinion.
+        recon::Spread::Sharded,
     )
     .await?;
 
