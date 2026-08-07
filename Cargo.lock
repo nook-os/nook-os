@@ -2718,6 +2718,7 @@ dependencies = [
  "lettre",
  "nook-control",
  "nook-db",
+ "nook-testkit",
  "redis",
  "reqwest",
  "serde",

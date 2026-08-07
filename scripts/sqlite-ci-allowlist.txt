@@ -51,8 +51,6 @@ dispatch_ownership         # raw sqlx / bed.pool in the test itself (MAIN-268)
 executor_selection         # raw sqlx / bed.pool in the test itself (MAIN-268)
 invite_registration        # raw sqlx / bed.pool in the test itself (MAIN-268)
 job_reaper                 # raw sqlx / bed.pool in the test itself (MAIN-268)
-loop_job_messages          # raw sqlx / bed.pool in the test itself (MAIN-268)
-loop_jobs                  # raw sqlx / bed.pool in the test itself (MAIN-268)
 loops_switch               # raw sqlx / bed.pool in the test itself (MAIN-268)
 managed_content            # raw sqlx / bed.pool in the test itself (MAIN-268)
 migrate_dev_tolerance      # raw sqlx / bed.pool in the test itself (MAIN-268)
@@ -66,7 +64,6 @@ task_checkout_ids          # raw sqlx / bed.pool in the test itself (MAIN-268)
 
 # ── production still emits Postgres SQL (MAIN-423, the dialect-sweep residue) ──
 node_owner                 # production still emits Postgres SQL on this path (MAIN-423)
-nook_worker:lib            # MEASURED (MAIN-440): `near ">": syntax error` — nook-infra/src/queue/database.rs emits `make_interval(secs => $n)` at :87, :154, :203, Postgres named-argument call syntax (MAIN-444)
 task_workspace             # MEASURED (MAIN-440): NOT a dialect slip. A bound timestamp never compares equal to what CURRENT_TIMESTAMP wrote, so the optimistic-concurrency guard `updated_at = $11` matches 0 rows and every guarded edit conflicts (MAIN-442)
 
 # ── still production Postgres SQL, re-tagged by MAIN-293 ──

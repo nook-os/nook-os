@@ -18,7 +18,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use nook_db::dialect::{atomic_claim, type_mapping};
+use nook_db::dialect::{atomic_claim, time_math, type_mapping};
 use nook_db::{params, Db, DbPool};
 use uuid::Uuid;
 
@@ -66,8 +66,10 @@ impl DbQueue {
     }
 }
 
-/// Postgres wants an interval; a `Duration` becomes fractional seconds fed to
-/// `make_interval(secs => …)`.
+/// A `Duration` as fractional seconds, the count the interval seam multiplies
+/// by `interval '1 second'` (Postgres) or feeds to a `'N seconds'` modifier
+/// (SQLite). Fractional on purpose — a sub-second visibility timeout must not
+/// silently round to zero.
 fn secs(d: Duration) -> f64 {
     d.as_secs_f64()
 }
@@ -76,15 +78,26 @@ fn secs(d: Duration) -> f64 {
 impl Queue for DbQueue {
     async fn enqueue(&self, work: NewWork) -> Result<Uuid> {
         let id = Uuid::now_v7();
-        // `now()` routes through the type-mapping seam (MAIN-211); `make_interval`
-        // is an interval construct outside this (b) card and stays inline.
+        // Both halves go through their seams now (MAIN-444). `now()` did from
+        // MAIN-211; the interval stayed inline as `make_interval(secs => $6)`,
+        // Postgres's named-argument call syntax, which SQLite reads as an
+        // unfinished `>` — `near ">": syntax error`.
+        //
+        // `coalesce(…, {now})` is load-bearing and survives the swap: `$6` is
+        // NULL when the work has no delay, and on BOTH engines that makes the
+        // whole expression NULL (Postgres: NULL * interval; SQLite: printf
+        // renders NULL as empty, and `' seconds'` is not a valid modifier, so
+        // `datetime()` returns NULL). The coalesce then yields `now`, i.e.
+        // "visible immediately" — the same answer as before, reached the same
+        // way. `an_undelayed_enqueue_is_visible_immediately` pins it.
         let now = type_mapping(self.db.engine()).now();
+        let visible_at = time_math(self.db.engine()).now_plus_scaled("$6", "1 second");
         self.db
             .exec(
                 &format!(
                     "INSERT INTO work_queue \
                (id, tenant_id, work_type, payload, attempts, max_attempts, not_before, enqueued_at) \
-             VALUES ($1, $2, $3, $4, 0, $5, coalesce({now} + make_interval(secs => $6), {now}), {now})",
+             VALUES ($1, $2, $3, $4, 0, $5, coalesce({visible_at}, {now}), {now})",
                 ),
                 params![
                     id,
@@ -105,14 +118,6 @@ impl Queue for DbQueue {
         max: usize,
         visibility: Duration,
     ) -> Result<Vec<WorkEnvelope>> {
-        // An empty type slice matches everything; otherwise filter to the
-        // consumer's types. `None` binds as SQL NULL, short-circuiting the AND.
-        let type_filter: Option<Vec<String>> = if types.is_empty() {
-            None
-        } else {
-            Some(types.to_vec())
-        };
-
         let mut tx = self.db.begin().await?;
 
         // Claim candidates. The row locks taken here are what make two
@@ -120,23 +125,46 @@ impl Queue for DbQueue {
         // engine's lock-and-skip clause (Postgres: `FOR UPDATE SKIP LOCKED`),
         // so the Postgres-specific SQL lives in the trait, not inline here
         // (MAIN-199). Behavior is bit-identical.
+        //
+        // The type filter is BUILT rather than short-circuited (MAIN-444). It
+        // used to be one statement with `({cast} IS NULL OR work_type = ANY($1))`
+        // and a NULL bind for "match everything" — which reads as engine-neutral
+        // and is not: SQLite still has to PARSE the `ANY`, whatever the branch
+        // evaluates to, and has no such function.
+        //
+        // Binding the types as a LIST is the other half. nook-db rewrites
+        // `= ANY($n)` into `IN ($n, $n+1, …)` on SQLite, but only for a value
+        // `is_list()` accepts — and `Option<Vec<String>>` binds as
+        // `OptTextArray`, an array-COLUMN bind that is deliberately never
+        // expanded. So the old form reached SQLite verbatim even though the
+        // rewriter existed. `DbValue::TextList` is the membership form.
         let now = type_mapping(self.db.engine()).now();
+        let (type_clause, mut binds) = if types.is_empty() {
+            (String::new(), Vec::new())
+        } else {
+            (
+                " AND work_type = ANY($1)".to_string(),
+                vec![nook_db::DbValue::TextList(types.to_vec())],
+            )
+        };
+        // `max` is bound last, so its placeholder number follows the filter's
+        // presence — $1 with no filter, $2 with one. On SQLite the list
+        // expansion renumbers both together.
+        let limit_placeholder = binds.len() + 1;
+        binds.push(nook_db::DbValue::I64(Some(max as i64)));
+
         let claim_sql = format!(
             "SELECT id, tenant_id, work_type, payload, attempts, max_attempts, \
                     not_before, enqueued_at \
              FROM work_queue \
              WHERE (locked_until IS NULL OR locked_until <= {now}) \
-               AND not_before <= {now} \
-               AND ({tf_cast} IS NULL OR work_type = ANY($1)) \
+               AND not_before <= {now}{type_clause} \
              ORDER BY enqueued_at \
              {lock} \
-             LIMIT $2",
-            tf_cast = type_mapping(self.db.engine()).cast("$1", "text[]"),
+             LIMIT ${limit_placeholder}",
             lock = atomic_claim(self.db.engine()).claim_lock_clause(),
         );
-        let candidates: Vec<WorkRow> = tx
-            .query_all(&claim_sql, params![type_filter, max as i64])
-            .await?;
+        let candidates: Vec<WorkRow> = tx.query_all(&claim_sql, binds).await?;
 
         let mut delivered = Vec::with_capacity(candidates.len());
         for row in candidates {
@@ -147,11 +175,11 @@ impl Queue for DbQueue {
                 dead_letter(&mut tx, row.id, "max attempts exhausted").await?;
                 continue;
             }
-            let now = type_mapping(self.db.engine()).now();
+            let locked_until = time_math(self.db.engine()).now_plus_scaled("$2", "1 second");
             tx.exec(
                 &format!(
                     "UPDATE work_queue \
-                 SET attempts = attempts + 1, locked_until = {now} + make_interval(secs => $2) \
+                 SET attempts = attempts + 1, locked_until = {locked_until} \
                  WHERE id = $1",
                 ),
                 params![row.id, secs(visibility)],
@@ -196,12 +224,10 @@ impl Queue for DbQueue {
     }
 
     async fn extend_visibility(&self, id: Uuid, visibility: Duration) -> Result<()> {
-        let now = type_mapping(self.db.engine()).now();
+        let locked_until = time_math(self.db.engine()).now_plus_scaled("$2", "1 second");
         self.db
             .exec(
-                &format!(
-                    "UPDATE work_queue SET locked_until = {now} + make_interval(secs => $2) WHERE id = $1",
-                ),
+                &format!("UPDATE work_queue SET locked_until = {locked_until} WHERE id = $1",),
                 params![id, secs(visibility)],
             )
             .await?;
