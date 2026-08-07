@@ -66,22 +66,6 @@ task_checkout_ids          # raw sqlx / bed.pool in the test itself (MAIN-268)
 node_owner                 # production still emits Postgres SQL on this path (MAIN-423)
 task_workspace             # MEASURED (MAIN-440): NOT a dialect slip. A bound timestamp never compares equal to what CURRENT_TIMESTAMP wrote, so the optimistic-concurrency guard `updated_at = $11` matches 0 rows and every guarded edit conflicts (MAIN-442)
 
-# ── TRANSITIONAL: delete this line when MAIN-444 merges ──
-#
-# `review_sweep` is new in MAIN-408 and fails on SQLite with `near ">": syntax
-# error` — not from anything MAIN-408 wrote, but because raising a review
-# enqueues work, and the queue emits `make_interval(secs => $6)` at
-# nook-infra/src/queue/database.rs:87. Rewriting another card's SQL from here
-# would cross MAIN-408's NG-1.
-#
-# It is transitional rather than pending, and that is MEASURED, not hoped for:
-# with MAIN-444's branch merged into this one, all nine `review_sweep` tests
-# pass on SQLite. So this line's cause is already fixed in an open PR, and the
-# guard's own stale-entry check will demand its deletion the moment that lands.
-# Whoever merges second deletes it — that is the intended outcome, not a
-# surprise.
-review_sweep               # queue emits make_interval(secs => $n); fixed by MAIN-444, delete on its merge (MAIN-444)
-
 # ── still production Postgres SQL, re-tagged by MAIN-293 ──
 #
 # These carried a MAIN-293 tag because that card's evidence was gathered with a
