@@ -1,0 +1,529 @@
+//! The forge seam (MAIN-448): how much review work a repository has.
+//!
+//! ## The control plane holds the forge, deliberately
+//!
+//! Everywhere else, talking to GitHub is the NODE's job — `nook-review` runs
+//! `gh` inside a session, and the control plane only decides where that session
+//! runs. This module is the exception, and the reason is scale-to-zero.
+//!
+//! `review_loop_max_replicas` is a ceiling, and the target shape is
+//! `desired = min(open_prs, ceiling)`. Deciding whether to run a reviewer AT
+//! ALL therefore requires knowing whether there is work — and if the answer
+//! came from the reviewers themselves, a repo at zero reviewers would have
+//! nobody left to report that a PR had appeared. It could never come back. The
+//! knowledge has to live where the decision is made.
+//!
+//! ## What crosses this seam
+//!
+//! One number, and nothing else. [`Forge`] is the whole surface: no PR ids, no
+//! JSON shapes, no `gh`, no api.github.com outside [`GithubForge`]. A second
+//! forge lands as a second implementation and nothing above here changes.
+//!
+//! Read-only, and it stays read-only (NG-4): verdicts are still posted by
+//! `nook-review` on the node, with the node's own credential.
+
+use std::collections::HashMap;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
+
+use nook_types::WorkspaceId;
+
+/// One repository, as the forge names it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Repo {
+    pub owner: String,
+    pub name: String,
+}
+
+/// What the reconciler needs to know about a repository's review queue.
+///
+/// One operation, because one is all this card needs and a trait with methods
+/// nobody calls is a shape guess rather than a seam. Build status, check runs
+/// and mergeability are deliberately absent (NG-2).
+#[async_trait::async_trait]
+pub trait Forge: Send + Sync {
+    /// How many open pull requests need review right now.
+    ///
+    /// An error is an OUTAGE, never a zero. The caller's whole failure policy
+    /// depends on those being different values, so an implementation that
+    /// cannot reach the forge must return `Err` rather than report an empty
+    /// queue.
+    async fn open_prs_needing_review(&self, repo: &Repo) -> anyhow::Result<u32>;
+}
+
+/// Is this remote a GitHub repository, and which one?
+///
+/// Reuses `discovery::normalize_remote`, which already reduces every URL shape
+/// the fleet stores — scp-style, https, ssh, with or without credentials and
+/// `.git` — to `host/path`. Parsing the raw URL again here would be a second
+/// implementation of a thing that has one.
+///
+/// `None` for a local path (`/workspace/nook-dogfood.git`), a self-hosted
+/// forge, or anything with more or fewer than two path segments. That is the
+/// "no forge configured" case, and it is a supported state, not a failure.
+pub fn github_repo(remote: &str) -> Option<Repo> {
+    let normalized = crate::services::discovery::normalize_remote(remote);
+    let (host, path) = normalized.split_once('/')?;
+    if host != "github.com" {
+        return None;
+    }
+    let mut parts = path.split('/');
+    let owner = parts.next()?;
+    let name = parts.next()?;
+    if owner.is_empty() || name.is_empty() || parts.next().is_some() {
+        return None;
+    }
+    Some(Repo {
+        owner: owner.to_string(),
+        name: name.to_string(),
+    })
+}
+
+/// The environment variables carrying the fleet's GitHub credential.
+///
+/// The SAME names, in the same order, that `nook_node::config::fleet_gh_token`
+/// reads (MAIN-407) — this is that credential, reached from the other process,
+/// not a second mechanism (NG-5). The list is duplicated because the two
+/// binaries share no crate that could hold it; `the_token_variables_match_the_nodes`
+/// below reads the node's source and fails if they ever diverge.
+const TOKEN_VARS: [&str; 3] = ["NOOK_GH_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"];
+
+/// The fleet token, or `None` when this deployment has not been given one.
+///
+/// Empty and whitespace are not credentials, and the emptiness test is INSIDE
+/// the search for the reason the node states: compose always SETS
+/// `NOOK_GH_TOKEN`, to the empty string when the operator supplied nothing, so
+/// rejecting empties only at the end would let that shadow a real `GH_TOKEN`.
+fn fleet_gh_token() -> Option<String> {
+    TOKEN_VARS
+        .iter()
+        .filter_map(|k| std::env::var(k).ok())
+        .find(|t| !t.trim().is_empty())
+}
+
+/// GitHub, over its REST API.
+pub struct GithubForge {
+    http: reqwest::Client,
+    token: String,
+}
+
+impl GithubForge {
+    /// Build one from the fleet credential, or `None` when there is no token.
+    ///
+    /// No token means NO FORGE, not an unauthenticated one. An anonymous client
+    /// cannot see a private repo's PRs at all and would report zero — which is
+    /// the one answer that must never be guessed, because it reads as "nothing
+    /// to review" and stops every reviewer. Without a token the deployment
+    /// falls back to the pre-MAIN-448 behaviour: the ceiling is the count.
+    pub fn from_env() -> Option<Self> {
+        let token = fleet_gh_token()?;
+        Some(Self {
+            // Ten seconds, matching `notify`'s client and for the same reason: a
+            // forge that never answers must not hold the reconcile pass open.
+            http: reqwest::Client::builder()
+                .timeout(Duration::from_secs(10))
+                .build()
+                .unwrap_or_default(),
+            token,
+        })
+    }
+}
+
+/// One page is all we read. The answer is clamped by the workspace's ceiling,
+/// which is a single-digit number, so a repo with more than this many open PRs
+/// and a page-two count would still place the same reviewers.
+const PAGE: usize = 100;
+
+#[async_trait::async_trait]
+impl Forge for GithubForge {
+    async fn open_prs_needing_review(&self, repo: &Repo) -> anyhow::Result<u32> {
+        let url = format!(
+            "https://api.github.com/repos/{}/{}/pulls?state=open&per_page={PAGE}",
+            repo.owner, repo.name
+        );
+        let resp = self
+            .http
+            .get(&url)
+            .bearer_auth(&self.token)
+            .header("Accept", "application/vnd.github+json")
+            .header("X-GitHub-Api-Version", "2022-11-28")
+            // GitHub refuses a request with no User-Agent.
+            .header("User-Agent", "nook-control")
+            .send()
+            .await?;
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            anyhow::bail!(
+                "{} {}",
+                status.as_u16(),
+                body.trim().chars().take(300).collect::<String>()
+            );
+        }
+        let prs: Vec<serde_json::Value> = resp.json().await?;
+        Ok(count_needing_review(&prs))
+    }
+}
+
+/// Which of a repository's open PRs a reviewer would actually pick up.
+///
+/// **Drafts are out, everything else is in.** `nook-review` skips a draft
+/// outright, so counting one would place a reviewer with nothing to do; every
+/// other open PR is at least a candidate.
+///
+/// It is deliberately no finer than that. The skill also skips a PR it has
+/// already reviewed at the current head — but establishing that means reading
+/// every PR's comments, and being WRONG in that direction stops reviewers that
+/// should be running. An over-count costs an idle agent doing a no-op pass; an
+/// under-count is a repo that silently goes unreviewed, which AC-3 names as the
+/// failure to design against. So the cheap, inclusive definition wins.
+fn count_needing_review(prs: &[serde_json::Value]) -> u32 {
+    prs.iter()
+        .filter(|pr| pr.get("draft").and_then(|d| d.as_bool()) != Some(true))
+        .count() as u32
+}
+
+/// How long a count stands before it is asked for again.
+///
+/// The reconcile pass runs every ten seconds and there is one forge call per
+/// workspace, so without this a fleet of twenty repos would spend its whole
+/// rate limit on a question whose answer changes when somebody opens a PR. A
+/// minute is the delay between opening a PR and a reviewer starting, which is
+/// the right order for work a human is about to wait on anyway.
+const TTL: Duration = Duration::from_secs(60);
+
+/// What we last learned about one workspace.
+struct Cached {
+    /// The last count the forge actually answered. `None` means it has never
+    /// answered — a fresh boot into an outage.
+    count: Option<u32>,
+    fetched: Instant,
+    /// Whether the last attempt failed, so the log speaks once per transition
+    /// rather than once per pass.
+    failing: bool,
+}
+
+/// The reconciler's view of review demand: cached counts, and a failure policy.
+///
+/// **A forge failure is not a scale-down (AC-4).** An outage that read as "no
+/// open PRs" would stop every reviewer in the fleet, and they would stay
+/// stopped for as long as it lasted — the loudest possible failure, arriving as
+/// silence. So an error returns the last count we were told, and a fleet that
+/// has never had an answer falls back to the ceiling, which is what a
+/// deployment with no forge at all runs (AC-6).
+pub struct ReviewDemand {
+    forge: Option<Box<dyn Forge>>,
+    ttl: Duration,
+    seen: Mutex<HashMap<WorkspaceId, Cached>>,
+}
+
+impl ReviewDemand {
+    /// The real thing: GitHub if this deployment has a token, otherwise a
+    /// [`ReviewDemand`] that answers `None` for every workspace — which is
+    /// exactly the pre-forge behaviour.
+    pub fn from_env() -> Self {
+        match GithubForge::from_env() {
+            Some(f) => {
+                tracing::info!(
+                    "forge: GitHub (fleet token present) — review loops scale to open PRs"
+                );
+                Self::new(Some(Box::new(f)), TTL)
+            }
+            None => {
+                tracing::info!(
+                    "forge: none (no NOOK_GH_TOKEN) — review loops run at their declared ceiling"
+                );
+                Self::new(None, TTL)
+            }
+        }
+    }
+
+    pub fn new(forge: Option<Box<dyn Forge>>, ttl: Duration) -> Self {
+        Self {
+            forge,
+            ttl,
+            seen: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// How many open PRs this workspace has, or `None` when there is nothing to
+    /// ask.
+    ///
+    /// `None` is the answer for a workspace with no remote, a remote that is not
+    /// a forge this build knows, a deployment with no token, and a forge that
+    /// has failed every time we have asked. All four mean the same thing to the
+    /// caller — *we do not know, so run what the repo declared* — and collapsing
+    /// them here keeps that judgement in one place instead of four.
+    pub async fn open_prs(&self, workspace: WorkspaceId, remote: Option<&str>) -> Option<u32> {
+        let forge = self.forge.as_ref()?;
+        let repo = github_repo(remote?)?;
+
+        if let Some(fresh) = self.fresh(workspace) {
+            return fresh;
+        }
+        match forge.open_prs_needing_review(&repo).await {
+            Ok(count) => {
+                self.record_ok(workspace, count, &repo);
+                Some(count)
+            }
+            Err(e) => self.record_err(workspace, &repo, &e),
+        }
+    }
+
+    /// The cached answer if it is still inside the TTL. The outer `Option` is
+    /// "we have something to say", the inner one is what we would say.
+    fn fresh(&self, workspace: WorkspaceId) -> Option<Option<u32>> {
+        let seen = self.seen.lock().ok()?;
+        let cached = seen.get(&workspace)?;
+        (cached.fetched.elapsed() < self.ttl).then_some(cached.count)
+    }
+
+    fn record_ok(&self, workspace: WorkspaceId, count: u32, repo: &Repo) {
+        let Ok(mut seen) = self.seen.lock() else {
+            return;
+        };
+        let was_failing = seen.get(&workspace).is_some_and(|c| c.failing);
+        if was_failing {
+            tracing::info!(
+                %workspace, repo = %format!("{}/{}", repo.owner, repo.name),
+                open_prs = count,
+                "forge recovered — review loops are scaling to the real count again"
+            );
+        }
+        seen.insert(
+            workspace,
+            Cached {
+                count: Some(count),
+                fetched: Instant::now(),
+                failing: false,
+            },
+        );
+    }
+
+    /// Report the failure ONCE, keep the last known count, and stamp the clock
+    /// so a hard-down forge is asked once per TTL rather than once per pass.
+    fn record_err(
+        &self,
+        workspace: WorkspaceId,
+        repo: &Repo,
+        error: &anyhow::Error,
+    ) -> Option<u32> {
+        let Ok(mut seen) = self.seen.lock() else {
+            return None;
+        };
+        let last = seen.get(&workspace).and_then(|c| c.count);
+        let was_failing = seen.get(&workspace).is_some_and(|c| c.failing);
+        if !was_failing {
+            tracing::warn!(
+                %workspace, repo = %format!("{}/{}", repo.owner, repo.name),
+                error = %error,
+                last_known_open_prs = ?last,
+                "forge unreachable — holding the last known review demand; \
+                 this is NOT a scale-down"
+            );
+        }
+        seen.insert(
+            workspace,
+            Cached {
+                count: last,
+                fetched: Instant::now(),
+                failing: true,
+            },
+        );
+        last
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use uuid::Uuid;
+
+    fn ws() -> WorkspaceId {
+        WorkspaceId(Uuid::from_u128(7))
+    }
+
+    /// A forge whose answers the test dictates, counting how often it was asked.
+    struct Fake {
+        answers: Mutex<Vec<anyhow::Result<u32>>>,
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl Fake {
+        /// Not `new`: it hands back the call counter alongside the forge, and a
+        /// `new` that returns a tuple is the one clippy asks about.
+        fn answering(answers: Vec<anyhow::Result<u32>>) -> (Box<dyn Forge>, Arc<AtomicUsize>) {
+            let calls = Arc::new(AtomicUsize::new(0));
+            (
+                Box::new(Fake {
+                    answers: Mutex::new(answers),
+                    calls: calls.clone(),
+                }),
+                calls,
+            )
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Forge for Fake {
+        async fn open_prs_needing_review(&self, _repo: &Repo) -> anyhow::Result<u32> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let mut a = self.answers.lock().unwrap();
+            if a.is_empty() {
+                anyhow::bail!("fake ran out of answers");
+            }
+            a.remove(0)
+        }
+    }
+
+    const REMOTE: &str = "git@github.com:nook-os/nook-os.git";
+
+    #[test]
+    fn every_url_shape_the_fleet_stores_resolves_to_one_repo() {
+        let expected = Repo {
+            owner: "nook-os".into(),
+            name: "nook-os".into(),
+        };
+        for url in [
+            "git@github.com:nook-os/nook-os.git",
+            "https://github.com/nook-os/nook-os.git",
+            "https://github.com/nook-os/nook-os",
+            "ssh://git@github.com/nook-os/nook-os.git",
+            "https://user:pass@github.com/nook-os/nook-os.git",
+            "https://github.com/nook-os/nook-os/",
+        ] {
+            assert_eq!(github_repo(url).as_ref(), Some(&expected), "{url}");
+        }
+    }
+
+    /// AC-6's detection, at the level it is actually made. A local path is what
+    /// the dogfood workspace has, and it must read as "no forge" rather than as
+    /// a repo we then fail to reach.
+    #[test]
+    fn anything_that_is_not_a_github_repo_is_no_forge() {
+        for url in [
+            "/workspace/nook-dogfood.git",
+            "git.hein.network:repositories/nookos.git",
+            "https://gitlab.com/nook-os/nook-os.git",
+            "https://github.com/nook-os",
+            "https://github.com/nook-os/nook-os/tree/main",
+            "",
+        ] {
+            assert_eq!(github_repo(url), None, "{url}");
+        }
+    }
+
+    /// Drafts are the one exclusion, and it is the skill's own rule: it skips
+    /// them, so a reviewer placed for one would have nothing to do.
+    #[test]
+    fn drafts_do_not_count_and_everything_else_does() {
+        let prs = serde_json::json!([
+            { "number": 1, "draft": false },
+            { "number": 2, "draft": true },
+            // Absent `draft` is not a draft — an older API shape must not read
+            // as one and quietly shrink the count.
+            { "number": 3 },
+        ]);
+        assert_eq!(count_needing_review(prs.as_array().unwrap()), 2);
+        assert_eq!(count_needing_review(&[]), 0);
+    }
+
+    #[tokio::test]
+    async fn no_forge_configured_answers_none_without_asking_anything() {
+        let (fake, calls) = Fake::answering(vec![Ok(5)]);
+        let d = ReviewDemand::new(Some(fake), TTL);
+        // No remote at all, and a remote that is not a forge.
+        assert_eq!(d.open_prs(ws(), None).await, None);
+        assert_eq!(d.open_prs(ws(), Some("/workspace/local.git")).await, None);
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn a_deployment_with_no_token_never_asks() {
+        let d = ReviewDemand::new(None, TTL);
+        assert_eq!(d.open_prs(ws(), Some(REMOTE)).await, None);
+    }
+
+    #[tokio::test]
+    async fn the_count_is_cached_for_its_ttl() {
+        let (fake, calls) = Fake::answering(vec![Ok(4), Ok(9)]);
+        let d = ReviewDemand::new(Some(fake), Duration::from_secs(300));
+        assert_eq!(d.open_prs(ws(), Some(REMOTE)).await, Some(4));
+        assert_eq!(
+            d.open_prs(ws(), Some(REMOTE)).await,
+            Some(4),
+            "still cached"
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "one call, not one per pass"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_expired_entry_is_asked_again() {
+        let (fake, calls) = Fake::answering(vec![Ok(4), Ok(9)]);
+        let d = ReviewDemand::new(Some(fake), Duration::ZERO);
+        assert_eq!(d.open_prs(ws(), Some(REMOTE)).await, Some(4));
+        assert_eq!(d.open_prs(ws(), Some(REMOTE)).await, Some(9));
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    /// AC-4, the load-bearing one. The forge going down must not read as an
+    /// empty queue, because an empty queue stops every reviewer in the fleet.
+    #[tokio::test]
+    async fn a_forge_failure_holds_the_last_count_instead_of_reporting_zero() {
+        let (fake, _) = Fake::answering(vec![
+            Ok(3),
+            Err(anyhow::anyhow!("503 upstream")),
+            Err(anyhow::anyhow!("503 upstream")),
+            Ok(1),
+        ]);
+        let d = ReviewDemand::new(Some(fake), Duration::ZERO);
+        assert_eq!(d.open_prs(ws(), Some(REMOTE)).await, Some(3));
+        assert_eq!(
+            d.open_prs(ws(), Some(REMOTE)).await,
+            Some(3),
+            "outage holds"
+        );
+        assert_eq!(d.open_prs(ws(), Some(REMOTE)).await, Some(3), "still holds");
+        assert_eq!(d.open_prs(ws(), Some(REMOTE)).await, Some(1), "recovered");
+    }
+
+    /// An outage that starts before we ever get an answer falls back to "we do
+    /// not know", which the caller turns into the declared ceiling — the same
+    /// thing a deployment with no forge runs. Booting into an outage must not
+    /// mean booting with no reviewers.
+    #[tokio::test]
+    async fn a_failure_with_nothing_cached_is_unknown_not_zero() {
+        let (fake, _) = Fake::answering(vec![Err(anyhow::anyhow!("network down"))]);
+        let d = ReviewDemand::new(Some(fake), Duration::ZERO);
+        assert_eq!(d.open_prs(ws(), Some(REMOTE)).await, None);
+    }
+
+    /// Two processes read the fleet credential and they must read the same
+    /// variables. There is no crate both can share, so the node's source is the
+    /// authority and this test is the link — a rename there fails here.
+    #[test]
+    fn the_token_variables_match_the_nodes() {
+        let node = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../nook-node/src/config.rs"
+        ))
+        .expect("the node's config must be readable");
+        let list = node
+            .split("pub fn fleet_gh_token()")
+            .nth(1)
+            .expect("nook-node must still have fleet_gh_token");
+        for var in TOKEN_VARS {
+            assert!(
+                list.contains(var),
+                "the node no longer reads {var}; the control plane's forge would \
+                 look for a credential the fleet does not provision"
+            );
+        }
+    }
+}

@@ -56,6 +56,7 @@ pub async fn tenant_slug(
 pub mod activity_queries;
 pub mod claim_reaper;
 pub mod discovery;
+pub mod forge;
 pub mod identity;
 pub mod interactions;
 pub mod job_dispatch;

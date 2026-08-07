@@ -249,6 +249,28 @@ impl Manager {
                 );
             }
         }
+        // …and a review loop with no GitHub credential is worse than one with
+        // no skill, because it does not look broken (MAIN-448 AC-7). `gh` with
+        // no token lists nothing, so every PR reads as "nothing to review" and
+        // the agent reports a clean pass forever. That was already
+        // indistinguishable from a quiet repo; MAIN-448 makes a quiet repo a
+        // real, expected, scaled-to-zero state, so without this guard the two
+        // become impossible to tell apart at all.
+        //
+        // The same predicate `loop_job` refuses a review JOB with, so a node
+        // cannot pass one check and fail the other.
+        if managed_purpose.is_some_and(needs_github) {
+            if let Err(e) = crate::loop_job::gh_is_authenticated() {
+                return self.session_failed(
+                    session_id,
+                    format!(
+                        "{e} — a review loop needs a GitHub credential (NOOK_GH_TOKEN, or a \
+                         logged-in gh). Without one every PR reads as \"nothing to review\" \
+                         and the loop would report clean passes having examined none."
+                    ),
+                );
+            }
+        }
         let tmux_name = format!("{}{}", tmux::SESSION_PREFIX, session_id.0.simple());
         // Restart of an ended session: discard the old PTY before re-attaching.
         self.sessions.remove(&session_id);
@@ -574,6 +596,20 @@ fn drive_skill(purpose: nook_types::ManagedPurpose) -> Option<&'static str> {
     }
 }
 
+/// Does this declared purpose need the fleet's GitHub credential (MAIN-448)?
+///
+/// A table keyed by purpose, beside `drive_skill` and for its reason: the two
+/// answers are about the same session, and a purpose added later should have to
+/// answer both here rather than inherit either by accident. `Access` is a
+/// person's terminal — it needs nothing, and refusing to open one because the
+/// fleet has no token would be absurd.
+fn needs_github(purpose: nook_types::ManagedPurpose) -> bool {
+    match purpose {
+        nook_types::ManagedPurpose::Access => false,
+        nook_types::ManagedPurpose::ReviewLoop => true,
+    }
+}
+
 /// The environment a shard assignment becomes (MAIN-446).
 ///
 /// Named HERE and not in `tmux.rs` for the reason `drive_skill` is: which skill
@@ -640,6 +676,37 @@ mod tests {
             drive_skill(ManagedPurpose::Access),
             None,
             "a person's terminal is theirs — typing into it types over them"
+        );
+    }
+
+    /// MAIN-448 AC-7. A review loop is the one purpose that cannot work without
+    /// a GitHub credential, and a person's terminal must never be refused for
+    /// the lack of one.
+    #[test]
+    fn only_the_review_loop_needs_a_github_credential() {
+        assert!(needs_github(ManagedPurpose::ReviewLoop));
+        assert!(
+            !needs_github(ManagedPurpose::Access),
+            "a terminal is a terminal whether or not the fleet can reach GitHub"
+        );
+    }
+
+    /// The refusal is the JOB's, reached rather than retyped. Two copies of
+    /// "can this node reach GitHub" is two answers about one machine, and the
+    /// confusing half is the one that passes: a session started against a check
+    /// the job would have failed reports clean passes having examined nothing.
+    #[test]
+    fn the_session_refuses_with_the_same_predicate_the_job_does() {
+        let src = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/sessions.rs"))
+            .expect("this file must be readable");
+        let body = src
+            .split("\n    pub fn start(")
+            .nth(1)
+            .expect("start must exist");
+        assert!(
+            body.contains("crate::loop_job::gh_is_authenticated()"),
+            "the managed-session guard must call the job's own predicate, not a \
+             second implementation of it"
         );
     }
 

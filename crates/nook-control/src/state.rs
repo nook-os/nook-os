@@ -100,6 +100,13 @@ pub struct AppState {
     /// direct compare, needing no userinfo round-trip); each entry is a person
     /// the token resolved to (MAIN-102).
     pub mcp_auth_cache: Arc<dashmap::DashMap<u64, (std::time::Instant, nook_mcp::McpCaller)>>,
+    /// How much review work each repo has, cached behind a TTL (MAIN-448).
+    ///
+    /// Shared rather than owned by the reconcile loop, because the review-loop
+    /// STATUS endpoint has to report the number the loop is acting on. Two
+    /// caches would mean two answers to "how many reviewers does this repo
+    /// want", and the UI would be reporting the one nobody converges toward.
+    pub review_demand: Arc<crate::services::forge::ReviewDemand>,
     /// Per-tenant budget for `POST /notify`, which node tokens may call.
     pub notify_limit: Arc<crate::services::notify::RateLimiter>,
     /// Per-IP budget for the UNAUTHENTICATED invite preview. Keyed by a uuid
@@ -188,6 +195,7 @@ impl AppState {
             cfg: Arc::new(cfg),
             oidc,
             mcp_auth_cache: Arc::new(dashmap::DashMap::new()),
+            review_demand: Arc::new(crate::services::forge::ReviewDemand::from_env()),
             notify_limit: Arc::new(Default::default()),
             preview_limit: Arc::new(Default::default()),
             cookie_key,
