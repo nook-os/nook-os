@@ -52,6 +52,35 @@ else
   echo "  ok:   no literal join token"
 fi
 
+# ── the fleet's GitHub credential (MAIN-143 AC-2, provisioned by MAIN-407) ──
+#
+# `optional: true` is the load-bearing part: a Secret carrying only the join
+# token must still start the pod. A node with no GitHub reach is a supported
+# state — it cannot take review work, and a review job then refuses by name
+# rather than reporting a pass that examined nothing.
+need "gh token env"                '^            - name: NOOK_GH_TOKEN$' 1
+need "gh token secretKeyRef"       '^                  key: ghToken$' 1
+need "gh token key is optional"    '^                  optional: true$' 1
+
+# The key name is configurable, so assert the value is followed rather than the
+# default happening to match.
+renamed="$(render "${min[@]}" --set secretKeys.ghToken=fleetPat)"
+if grep -qE '^                  key: fleetPat$' <<<"$renamed"; then
+  echo "  ok:   secretKeys.ghToken is honoured"
+else
+  echo "  FAIL: secretKeys.ghToken was not honoured"
+  fail=1
+fi
+
+# Same rule as the join token: references only. GitHub's classic tokens are
+# `ghp_`/`gho_`/`ghs_`/`ghu_`/`ghr_`; fine-grained ones are `github_pat_`.
+if grep -nE '(gh[posur]_|github_pat_)[A-Za-z0-9_]{3,}' <<<"$out" >/dev/null; then
+  echo "  FAIL: rendered manifest contains a literal GitHub token"
+  fail=1
+else
+  echo "  ok:   no literal GitHub token"
+fi
+
 # Guardrails must stop a misconfigured install with a clear message. Capture
 # first — helm exits non-zero here (by design), which pipefail would surface.
 noserver="$(render --set existingSecret=nook-operator-join 2>&1 || true)"
