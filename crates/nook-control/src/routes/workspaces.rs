@@ -238,8 +238,8 @@ fn validate_spec(spec: &SessionSpec) -> ApiResult<()> {
     Ok(())
 }
 
-/// `GET /api/v1/workspaces/{id}/review-loop` — how many review loops this repo
-/// is owed (MAIN-445 AC-2).
+/// `GET /api/v1/workspaces/{id}/review-loop` — the ceiling on review loops for
+/// this repo (MAIN-445 AC-2).
 ///
 /// Reports the RAW column, unlike `/ports` which resolves its default before
 /// answering. The difference is deliberate: a port declaration's default is a
@@ -261,12 +261,12 @@ pub async fn get_review_loop(
         .await?
         .ok_or(ApiError::NotFound)?;
     Ok(Json(ReviewLoopDeclaration {
-        replicas: ws.review_loop_replicas,
+        max_replicas: ws.review_loop_max_replicas,
     }))
 }
 
 /// `PUT /api/v1/workspaces/{id}/review-loop` — set it, or clear it back to
-/// unset with `{"replicas": null}` (MAIN-445 AC-2).
+/// unset with `{"max_replicas": null}` (MAIN-445 AC-2).
 #[utoipa::path(put, path = "/api/v1/workspaces/{id}/review-loop",
     operation_id = "set_review_loop",
     params(("id" = String, Path,)),
@@ -281,14 +281,14 @@ pub async fn set_review_loop(
     // A person declares desired state; a node credential is not a person — the
     // same rule `set_session_spec` applies, for the same reason.
     auth.require_user()?;
-    let replicas = parse_replicas(&req.replicas)?;
+    let max_replicas = parse_max_replicas(&req.max_replicas)?;
     let ws = state
         .workspaces
-        .set_review_loop_replicas(auth.tenant_id, id, replicas)
+        .set_review_loop_max_replicas(auth.tenant_id, id, max_replicas)
         .await?
         .ok_or(ApiError::NotFound)?;
     Ok(Json(ReviewLoopDeclaration {
-        replicas: ws.review_loop_replicas,
+        max_replicas: ws.review_loop_max_replicas,
     }))
 }
 
@@ -296,21 +296,21 @@ pub async fn set_review_loop(
 /// column (AC-2). Every rejection names the field, because the caller's next
 /// move is to fix that key and a message that does not say which one costs a
 /// round trip.
-fn parse_replicas(v: &serde_json::Value) -> ApiResult<Option<i32>> {
+fn parse_max_replicas(v: &serde_json::Value) -> ApiResult<Option<i32>> {
     if v.is_null() {
         return Ok(None);
     }
-    let n = v
-        .as_i64()
-        .ok_or_else(|| ApiError::BadRequest("replicas must be a non-negative integer".into()))?;
+    let n = v.as_i64().ok_or_else(|| {
+        ApiError::BadRequest("max_replicas must be a non-negative integer".into())
+    })?;
     if n < 0 {
         return Err(ApiError::BadRequest(
-            "replicas must be a non-negative integer".into(),
+            "max_replicas must be a non-negative integer".into(),
         ));
     }
     i32::try_from(n)
         .map(Some)
-        .map_err(|_| ApiError::BadRequest("replicas is too large".into()))
+        .map_err(|_| ApiError::BadRequest("max_replicas is too large".into()))
 }
 
 /// `PUT /api/v1/workspaces/{id}/session-spec` — declare it, or clear it with

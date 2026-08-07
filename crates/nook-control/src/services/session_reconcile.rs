@@ -46,8 +46,8 @@
 //! has a second thing it wants of every repo — an always-on review loop on the
 //! deployment's loop node — and that is [`review_loop_spec`]: selected onto
 //! `role=loop`, running `nook-review` forever. Its shape is this build's and
-//! not a caller's; only its COUNT is a workspace declaration (MAIN-445), read
-//! from `review_loop_replicas` on every pass.
+//! not a caller's; only its CEILING is a workspace declaration (MAIN-445), read
+//! from `review_loop_max_replicas` on every pass.
 //!
 //! It is the same planner, the same clone-on-demand and the same self-healing;
 //! the only additions are which checkouts it may use ([`Slots`]) and a
@@ -575,7 +575,7 @@ pub async fn pass(state: &AppState, clones: &CloneThrottle) -> crate::error::Api
                 state,
                 tenant,
                 ws.id,
-                &review_loop_spec(ws.review_loop_replicas),
+                &review_loop_spec(ws.review_loop_max_replicas),
                 clones,
                 ManagedPurpose::ReviewLoop,
                 Slots::ClonesOnly,
@@ -599,31 +599,37 @@ pub async fn pass(state: &AppState, clones: &CloneThrottle) -> crate::error::Api
 /// runtime and the `role=loop` selector remain this build's, not a caller's. A
 /// repo still cannot ask for its reviewer on somebody's laptop.
 ///
-/// `replicas` is the workspace's `review_loop_replicas` column, and its three
-/// states are three different statements:
+/// `max_replicas` is the workspace's column, and it is a CEILING rather than a
+/// count. The target shape is `desired = min(open_prs, max_replicas)` — a repo
+/// with two open PRs gets two reviewers, a quiet repo gets none. Nothing can
+/// measure open PRs yet (no forge), so today `desired = max_replicas` and the
+/// ceiling is the count. When the forge lands, only this function changes.
+///
+/// Its three states are three different statements:
 ///
 /// - `None` — unset. `Replicas::Single`, the value every workspace had before
 ///   this was settable, which is what makes the upgrade a no-op (AC-5).
 /// - `Some(0)` — off. `Count{0}` desires nothing, so the ordinary scale-down
-///   path stops a session this repo already has. Note this is NOT the same as
-///   skipping the workspace: skipping would leave the session running forever,
-///   which is "unmanaged", not "off".
-/// - `Some(n)` — n reviewers. The planner still places at most one per node
-///   (NG-1), so on a one-loop-node fleet `n>1` reports honest shortfall until
-///   MAIN-446 makes the sharding real. Reporting the gap is the point; silently
-///   capping to one would hide a declaration nobody can satisfy.
+///   path stops a session this repo already has. Two things it is NOT: not
+///   "unmanaged" (skipping would leave the session running forever), and not
+///   the same as a repo idling at zero under a forge — that one scales back up
+///   when a PR appears, a zeroed one never does.
+/// - `Some(n)` — at most n reviewers. The planner still places at most one per
+///   node (NG-1), so on a one-loop-node fleet `n>1` reports honest shortfall
+///   until MAIN-446 makes the sharding real. Reporting the gap is the point;
+///   silently capping to one would hide a declaration nobody can satisfy.
 ///
 /// A negative value cannot arrive — the route rejects it (AC-2) — but the cast
 /// saturates at zero rather than wrapping, because a column is a wider contract
 /// than the one endpoint that writes it today.
-pub(crate) fn review_loop_spec(replicas: Option<i32>) -> SessionSpec {
+pub(crate) fn review_loop_spec(max_replicas: Option<i32>) -> SessionSpec {
     SessionSpec {
         runtime: crate::services::jobs::LOOP_RUNTIME.into(),
         node_selector: [("role".to_string(), "loop".to_string())]
             .into_iter()
             .collect(),
         tolerations: vec![],
-        replicas: match replicas {
+        replicas: match max_replicas {
             None => Replicas::Single,
             Some(n) => Replicas::Count {
                 count: n.max(0) as u32,

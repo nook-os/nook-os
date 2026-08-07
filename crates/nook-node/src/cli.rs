@@ -4252,8 +4252,13 @@ pub async fn reviews_enqueue(workspace: &str, seed: Option<&str>) -> Result<()> 
     Ok(())
 }
 
-/// `nook reviews scale <workspace> [n]` (MAIN-445 AC-4) — how many review
-/// loops this repo is owed, or read the current declaration with no count.
+/// `nook reviews scale <workspace> [n]` (MAIN-445 AC-4) — the CEILING on this
+/// repo's review loops, or read the current declaration with no count.
+///
+/// A ceiling, not a count: the target is `min(open_prs, max)`. No forge exists
+/// to count open PRs yet, so the ceiling is currently what runs — which the
+/// output says out loud, because "max 2" that always runs 2 would otherwise
+/// look like a bug the first time somebody set it on a repo with no PRs.
 ///
 /// The read prints "unset (default 1)" rather than a bare "1" on purpose: those
 /// are the same effective number and different facts, and a person checking
@@ -4272,7 +4277,7 @@ pub async fn reviews_scale(workspace: &str, count: Option<&str>) -> Result<()> {
         // NULL/0 split exists to prevent.
         Some("unset") | Some("null") => {
             client
-                .put(&path, serde_json::json!({ "replicas": null }))
+                .put(&path, serde_json::json!({ "max_replicas": null }))
                 .await?
         }
         Some(raw) => {
@@ -4283,21 +4288,24 @@ pub async fn reviews_scale(workspace: &str, count: Option<&str>) -> Result<()> {
                 format!("'{raw}' is not a non-negative whole number (or `unset`)")
             })?;
             client
-                .put(&path, serde_json::json!({ "replicas": n }))
+                .put(&path, serde_json::json!({ "max_replicas": n }))
                 .await?
         }
     };
 
-    match current["replicas"].as_i64() {
+    match current["max_replicas"].as_i64() {
         None => println!(
-            "review loops: {} — the build's default",
+            "review loops: {} — the build's default ceiling",
             crate::style::ok_c("unset (default 1)")
         ),
         Some(0) => println!(
             "review loops: {} — this repo's PRs are not reviewed",
             crate::style::ok_c("0 (off)")
         ),
-        Some(n) => println!("review loops: {}", crate::style::ok_c(&n.to_string())),
+        Some(n) => println!(
+            "review loops: {} — no forge yet, so {n} run regardless of open PRs",
+            crate::style::ok_c(&format!("max {n}"))
+        ),
     }
     Ok(())
 }

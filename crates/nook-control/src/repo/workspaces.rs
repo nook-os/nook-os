@@ -153,7 +153,7 @@ pub trait WorkspaceRepository: Send + Sync {
     /// `None` clears it back to unset, which is the build's default of one —
     /// deliberately reachable, so a person can undo a 0 without knowing what
     /// the default happens to be.
-    async fn set_review_loop_replicas(
+    async fn set_review_loop_max_replicas(
         &self,
         tenant: TenantId,
         id: WorkspaceId,
@@ -639,7 +639,7 @@ impl WorkspaceRepository for DbWorkspaceRepository {
             .await?)
     }
 
-    async fn set_review_loop_replicas(
+    async fn set_review_loop_max_replicas(
         &self,
         tenant: TenantId,
         id: WorkspaceId,
@@ -649,7 +649,7 @@ impl WorkspaceRepository for DbWorkspaceRepository {
             .db
             .query_opt(
                 &format!(
-                    "UPDATE workspaces SET review_loop_replicas = $3, updated_at = {}
+                    "UPDATE workspaces SET review_loop_max_replicas = $3, updated_at = {}
                      WHERE tenant_id = $1 AND id = $2
                      RETURNING *",
                     type_mapping(self.db.engine()).now()
@@ -1925,7 +1925,7 @@ impl FakeWorkspaceRepository {
             port_requirements: None,
             session_spec: None,
             git_credential_id: None,
-            review_loop_replicas: None,
+            review_loop_max_replicas: None,
         }
     }
 }
@@ -1966,7 +1966,7 @@ impl WorkspaceRepository for FakeWorkspaceRepository {
             }))
     }
 
-    async fn set_review_loop_replicas(
+    async fn set_review_loop_max_replicas(
         &self,
         tenant: TenantId,
         id: WorkspaceId,
@@ -1977,7 +1977,7 @@ impl WorkspaceRepository for FakeWorkspaceRepository {
             .iter_mut()
             .find(|w| w.id == id && w.tenant_id == tenant)
             .map(|w| {
-                w.review_loop_replicas = replicas;
+                w.review_loop_max_replicas = replicas;
                 w.clone()
             }))
     }
