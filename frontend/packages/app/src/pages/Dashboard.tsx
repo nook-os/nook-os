@@ -4,7 +4,7 @@ import { Link } from "react-router-dom";
 import { api } from "@nookos/api";
 import { Empty, Panel, Pill, StatusDot, statusTone } from "@nookos/ui";
 import { useLive } from "../live";
-import { ActivityFeed } from "./Activity";
+import { QueuePanel } from "../QueuePanel";
 import { WorkspaceLocations } from "../WorkspaceLocations";
 import { SessionOwner } from "../sessionOwner";
 
@@ -104,9 +104,10 @@ export function Dashboard() {
         )}
       </Panel>
 
-      <Panel title="Activity" style={{ gridRow: "1 / span 2" }}>
-        <ActivityFeed limit={80} />
-      </Panel>
+      {/* The dashboard's biggest slot answers what is ABOUT to happen rather
+          than what already did (MAIN-451). Activity keeps its own route and its
+          own page; it simply stopped being the first thing anyone sees. */}
+      <QueuePanel />
 
       <Panel title={`Workspaces (${(workspaces ?? []).length})`}>
         {(workspaces ?? []).length === 0 ? (
