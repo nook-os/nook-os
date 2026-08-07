@@ -45,3 +45,7 @@ test-support = []
 # nook-control only for tests. A downstream worker linking nook-infra never
 # pulls nook-control in, so the shared crate stays lightweight.
 nook-control = { workspace = true }
+# MAIN-444's interval-seam test needs a private migrated database. TestBed is
+# the tree's one way to get one, and it already rides the same dev-only cycle
+# nook-control does above.
+nook-testkit = { workspace = true }
