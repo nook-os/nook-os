@@ -8,6 +8,7 @@
 
 use nook_control::auth::{AuthCtx, Principal};
 use nook_control::repo::sessions::NewSession;
+use nook_db::Db;
 use nook_testkit::TestBed;
 use nook_types::*;
 use uuid::Uuid;
@@ -494,6 +495,83 @@ async fn another_tenants_workspace_has_no_status() {
     )
     .await
     .is_err());
+
+    bed.teardown().await;
+}
+
+/// A terminal you opened is YOURS. The reconciler has no opinion about how many
+/// there should be, and one pass must not create any.
+///
+/// This is the guard for the change that removed access reconciliation. It was
+/// `ManagedPurpose::Access` over `Slots::EveryCheckout`, run for every workspace
+/// in every reconcile-on tenant, so every checkout was owed a session forever —
+/// which meant Stop undid itself within a poll interval, and production sat at
+/// `desired=9 actual=12` retrying stops it could not perform every ten seconds.
+///
+/// Asserting an ABSENCE, deliberately. The planner tests all pass whether or not
+/// anything calls the planner with `Access`, because they exercise
+/// `plan_workspace` directly — so nothing below this level can notice the
+/// regression. If a later change reinstates access reconciliation, this is the
+/// test that has to be deleted to do it.
+#[tokio::test]
+async fn a_reconcile_pass_creates_no_access_sessions() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let state = bed.app_state().await;
+
+    let tenant = bed.tenant("noaccess").await;
+    let (_user, person) = bed.user(tenant, "owner").await;
+    let node = bed.node(tenant, person).await;
+    let workspace = bed.workspace(tenant).await;
+    // A present clone, which is exactly the slot the old behaviour filled.
+    a_checkout(&bed, tenant, node, workspace, "/w/repo").await;
+
+    // Reconcile ON for this tenant — without it the pass returns early and the
+    // assertion below would hold for the wrong reason.
+    state
+        .settings
+        .put(nook_control::repo::admin::SettingWrite {
+            tenant,
+            scope: "tenant".to_string(),
+            user: None,
+            key: nook_control::services::session_reconcile::KEY.to_string(),
+            value: serde_json::Value::Bool(true),
+        })
+        .await
+        .expect("switch on");
+
+    // The node must be ONLINE, or this test proves nothing: placement skips an
+    // offline node, so the pass would create no session whether or not access
+    // reconciliation exists. Verified by reinstating the old call and watching
+    // this test stay green — a false guard caught before it shipped.
+    let (tx, _rx) = tokio::sync::mpsc::channel(8);
+    state.registry.register_node(
+        node,
+        nook_control::ws::registry::NodeHandle {
+            tenant_id: tenant,
+            tx,
+        },
+    );
+
+    let throttle = nook_control::services::session_reconcile::CloneThrottle::default();
+    nook_control::services::session_reconcile::pass(&state, &throttle)
+        .await
+        .expect("one pass");
+
+    let sessions: i64 = bed
+        .db()
+        .query_scalar(
+            "SELECT count(*) FROM sessions WHERE tenant_id = $1 AND managed_purpose = 'access'",
+            nook_db::params![tenant],
+        )
+        .await
+        .expect("count");
+    assert_eq!(
+        sessions, 0,
+        "the reconciler created an access session — a human's terminal is not \
+         drift to be corrected"
+    );
 
     bed.teardown().await;
 }

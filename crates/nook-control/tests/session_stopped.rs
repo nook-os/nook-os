@@ -194,6 +194,74 @@ async fn the_node_reporting_a_dead_tmux_does_not_turn_a_stop_into_a_crash() {
     bed.teardown().await;
 }
 
+/// The guard has to be *legible to its caller*, not merely effective.
+///
+/// The LIVE guard protected the row and nothing else, because the websocket
+/// handler threw the result away — so a deliberate Stop still published
+/// `exited` to the UI and recorded a `session.exited` event, which notifies as
+/// "Session ended" at warning level. Stopping a handful of terminals raised a
+/// crash alert for every one of them.
+///
+/// The fix reads the rows-affected count to decide whether this report ENDED
+/// anything, so that count is now load-bearing rather than incidental. This
+/// pins it in both directions: a stop reports nothing, a real crash reports
+/// one. A future change that makes the update unconditional would keep the
+/// row-status test above green and break only this one.
+#[tokio::test]
+async fn mark_session_exited_reports_whether_it_ended_anything() {
+    let Some(mut bed) = TestBed::new().await else {
+        return;
+    };
+    let f = fixture(&bed).await;
+    let state = bed.app_state().await;
+
+    // A session that really crashed: the report ends it, and says so.
+    let crashed = managed_session(&bed, &f).await;
+    assert_eq!(
+        state
+            .nodes
+            .mark_session_exited(crashed, f.node)
+            .await
+            .unwrap(),
+        1,
+        "an unannounced death IS an ending — the caller must be told so it can \
+         publish `exited` and notify"
+    );
+
+    // A session we stopped ourselves: the node's report is the echo of our own
+    // kill, and must read as "ended nothing".
+    let stopped = managed_session(&bed, &f).await;
+    state
+        .sessions
+        .mark_stopped(f.tenant, stopped)
+        .await
+        .unwrap();
+    assert_eq!(
+        state
+            .nodes
+            .mark_session_exited(stopped, f.node)
+            .await
+            .unwrap(),
+        0,
+        "a Stop's own echo must not read as an ending, or the handler announces \
+         a crash that never happened"
+    );
+
+    // And a repeat of the same report — a redelivery, or a second node message
+    // for a session already ended — is not a second ending either.
+    assert_eq!(
+        state
+            .nodes
+            .mark_session_exited(crashed, f.node)
+            .await
+            .unwrap(),
+        0,
+        "the second report of one death must not notify twice"
+    );
+
+    bed.teardown().await;
+}
+
 #[tokio::test]
 async fn stopping_something_already_dead_changes_nothing() {
     let Some(mut bed) = TestBed::new().await else {
