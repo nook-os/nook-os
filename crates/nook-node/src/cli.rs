@@ -4252,6 +4252,56 @@ pub async fn reviews_enqueue(workspace: &str, seed: Option<&str>) -> Result<()> 
     Ok(())
 }
 
+/// `nook reviews scale <workspace> [n]` (MAIN-445 AC-4) — how many review
+/// loops this repo is owed, or read the current declaration with no count.
+///
+/// The read prints "unset (default 1)" rather than a bare "1" on purpose: those
+/// are the same effective number and different facts, and a person checking
+/// whether anyone has touched this needs to tell them apart. Printing "1" would
+/// send them hunting for a switch nobody ever set.
+pub async fn reviews_scale(workspace: &str, count: Option<&str>) -> Result<()> {
+    let client = Client::from_config()?;
+    let id = resolve_workspace(&client, workspace).await?;
+    let path = format!("/api/v1/workspaces/{id}/review-loop");
+
+    let current = match count {
+        None => client.get(&path).await?,
+        // `unset` is how the third state is reachable from a terminal. Without
+        // it a person who set 0 could never get back to "use the default"
+        // without knowing what the default is — which is the confusion the
+        // NULL/0 split exists to prevent.
+        Some("unset") | Some("null") => {
+            client
+                .put(&path, serde_json::json!({ "replicas": null }))
+                .await?
+        }
+        Some(raw) => {
+            // Parsed here so a typo is a CLI error naming the argument, rather
+            // than a round trip that comes back as a 400 about a JSON field the
+            // person never typed.
+            let n: u32 = raw.parse().with_context(|| {
+                format!("'{raw}' is not a non-negative whole number (or `unset`)")
+            })?;
+            client
+                .put(&path, serde_json::json!({ "replicas": n }))
+                .await?
+        }
+    };
+
+    match current["replicas"].as_i64() {
+        None => println!(
+            "review loops: {} — the build's default",
+            crate::style::ok_c("unset (default 1)")
+        ),
+        Some(0) => println!(
+            "review loops: {} — this repo's PRs are not reviewed",
+            crate::style::ok_c("0 (off)")
+        ),
+        Some(n) => println!("review loops: {}", crate::style::ok_c(&n.to_string())),
+    }
+    Ok(())
+}
+
 /// `nook reviews sweep [on|off|status]` (MAIN-408 AC-1) — the board-signal
 /// sweep's switch, default OFF.
 pub async fn reviews_sweep(state: &str) -> Result<()> {

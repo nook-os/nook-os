@@ -1,0 +1,21 @@
+-- Per-workspace review-loop replicas (MAIN-445 AC-1).
+--
+-- How many always-on review loops the control plane owes this repo.
+-- `review_loop_spec()` used to return a hardcoded `Replicas::Single` for every
+-- workspace in the tenant, so a repo could neither opt out nor ask for more.
+--
+-- NULLABLE IS THE DESIGN, and NULL is not 0. Three distinct states:
+--
+--   NULL  unset — use the build's default of one. Every existing row reads this
+--         on upgrade, which is what makes the change a no-op for the fleet.
+--   0     off — this repo is not reviewed. The reconciler still manages the
+--         workspace and STOPS a session it already has; "off" is a declaration,
+--         not an absence of one.
+--   N>=1  N reviewers. Placement is MAIN-446's; until it lands N>1 reports an
+--         honest shortfall rather than silently capping.
+--
+-- A NOT NULL DEFAULT 1 would have collapsed unset into an explicit 1 and made
+-- the CLI unable to say "unset (default 1)" — the distinction a person needs to
+-- know whether anyone ever touched this.
+ALTER TABLE public.workspaces
+    ADD COLUMN IF NOT EXISTS review_loop_replicas integer;

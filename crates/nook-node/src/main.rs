@@ -662,6 +662,9 @@ async fn main() -> Result<()> {
         Command::Reviews(ReviewsCommand::Enqueue { workspace, seed }) => {
             cli::reviews_enqueue(&workspace, seed.as_deref()).await
         }
+        Command::Reviews(ReviewsCommand::Scale { workspace, count }) => {
+            cli::reviews_scale(&workspace, count.as_deref()).await
+        }
         Command::Reviews(ReviewsCommand::Sweep { state }) => cli::reviews_sweep(&state).await,
         Command::Notify {
             title,
@@ -1070,6 +1073,18 @@ enum ReviewsCommand {
         /// The opening brief for the run.
         #[arg(long)]
         seed: Option<String>,
+    },
+    /// How many review loops a workspace is owed, or read the current value.
+    ///
+    /// `0` turns reviewing off for that repo and stops the session it has;
+    /// `unset` returns it to the build's default of one. Placement of more than
+    /// one per node is not built yet, so a count above the fleet's loop nodes
+    /// reports a shortfall rather than silently capping.
+    Scale {
+        /// The workspace, by id, slug or name.
+        workspace: String,
+        /// The count, `0` to turn it off, or `unset`. Omit to read.
+        count: Option<String>,
     },
     /// Turn the board-signal sweep on or off for this tenant, or ask its state.
     /// Default is OFF: a fresh deployment reviews nothing until asked.

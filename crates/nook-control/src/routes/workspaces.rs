@@ -238,6 +238,81 @@ fn validate_spec(spec: &SessionSpec) -> ApiResult<()> {
     Ok(())
 }
 
+/// `GET /api/v1/workspaces/{id}/review-loop` — how many review loops this repo
+/// is owed (MAIN-445 AC-2).
+///
+/// Reports the RAW column, unlike `/ports` which resolves its default before
+/// answering. The difference is deliberate: a port declaration's default is a
+/// fact about what will be leased, while `null` here is a fact about what
+/// nobody has decided. Resolving it to `1` would erase exactly the distinction
+/// AC-4 needs to print "unset (default 1)".
+#[utoipa::path(get, path = "/api/v1/workspaces/{id}/review-loop",
+    operation_id = "get_review_loop",
+    params(("id" = String, Path,)),
+    responses((status = 200, body = ReviewLoopDeclaration), (status = 404)))]
+pub async fn get_review_loop(
+    State(state): State<AppState>,
+    auth: AuthCtx,
+    Path(id): Path<WorkspaceId>,
+) -> ApiResult<Json<ReviewLoopDeclaration>> {
+    let ws = state
+        .workspaces
+        .get(auth.tenant_id, id)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    Ok(Json(ReviewLoopDeclaration {
+        replicas: ws.review_loop_replicas,
+    }))
+}
+
+/// `PUT /api/v1/workspaces/{id}/review-loop` — set it, or clear it back to
+/// unset with `{"replicas": null}` (MAIN-445 AC-2).
+#[utoipa::path(put, path = "/api/v1/workspaces/{id}/review-loop",
+    operation_id = "set_review_loop",
+    params(("id" = String, Path,)),
+    request_body = SetReviewLoopRequest,
+    responses((status = 200, body = ReviewLoopDeclaration), (status = 400), (status = 404)))]
+pub async fn set_review_loop(
+    State(state): State<AppState>,
+    auth: AuthCtx,
+    Path(id): Path<WorkspaceId>,
+    Json(req): Json<SetReviewLoopRequest>,
+) -> ApiResult<Json<ReviewLoopDeclaration>> {
+    // A person declares desired state; a node credential is not a person — the
+    // same rule `set_session_spec` applies, for the same reason.
+    auth.require_user()?;
+    let replicas = parse_replicas(&req.replicas)?;
+    let ws = state
+        .workspaces
+        .set_review_loop_replicas(auth.tenant_id, id, replicas)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    Ok(Json(ReviewLoopDeclaration {
+        replicas: ws.review_loop_replicas,
+    }))
+}
+
+/// `null` clears; anything else must be a non-negative integer that fits the
+/// column (AC-2). Every rejection names the field, because the caller's next
+/// move is to fix that key and a message that does not say which one costs a
+/// round trip.
+fn parse_replicas(v: &serde_json::Value) -> ApiResult<Option<i32>> {
+    if v.is_null() {
+        return Ok(None);
+    }
+    let n = v
+        .as_i64()
+        .ok_or_else(|| ApiError::BadRequest("replicas must be a non-negative integer".into()))?;
+    if n < 0 {
+        return Err(ApiError::BadRequest(
+            "replicas must be a non-negative integer".into(),
+        ));
+    }
+    i32::try_from(n)
+        .map(Some)
+        .map_err(|_| ApiError::BadRequest("replicas is too large".into()))
+}
+
 /// `PUT /api/v1/workspaces/{id}/session-spec` — declare it, or clear it with
 /// `{"spec": null}` to return the workspace to unmanaged (MAIN-315 AC-2).
 #[utoipa::path(put, path = "/api/v1/workspaces/{id}/session-spec",

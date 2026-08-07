@@ -924,6 +924,33 @@ pub struct SetSessionSpecRequest {
     pub spec: Option<SessionSpec>,
 }
 
+/// A workspace's review-loop declaration (MAIN-445), as the API reports it.
+///
+/// `replicas: null` is UNSET — the build's default of one applies. It is a
+/// different statement from `0`, which is an explicit "do not review this
+/// repo", and the two must stay distinguishable all the way out to the caller;
+/// flattening them here is what would make the CLI unable to say
+/// "unset (default 1)".
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ReviewLoopDeclaration {
+    pub replicas: Option<i32>,
+}
+
+/// Set or clear a workspace's review-loop count (MAIN-445).
+///
+/// The field is a raw JSON value on purpose. Typed as `Option<i32>` it would be
+/// axum's 422 that answered `{"replicas": "3"}` or `-1`, and AC-2 asks for a
+/// 400 NAMING the field for anything that is not a non-negative integer — so
+/// the parse has to happen where the error message can be written.
+///
+/// The key itself is required, matching [`SetSessionSpecRequest`]: an absent
+/// key is a malformed request, not a silent "leave it alone".
+#[derive(Debug, Clone, Deserialize, ToSchema)]
+pub struct SetReviewLoopRequest {
+    #[schema(value_type = Option<i32>)]
+    pub replicas: serde_json::Value,
+}
+
 /// Toggle a node's `shared` designation (MAIN-135). Owner-only at the route.
 #[derive(Debug, Clone, Deserialize, ToSchema)]
 pub struct SetSharedRequest {
@@ -1059,6 +1086,15 @@ pub struct Workspace {
     /// is what public repos and local paths have always used.
     #[serde(default)]
     pub git_credential_id: Option<GitCredentialId>,
+    /// How many always-on review loops this repo is owed (MAIN-445).
+    ///
+    /// `None` is UNSET, not zero: the build's default of one applies, which is
+    /// what every workspace reads on upgrade. `Some(0)` is an explicit "off" —
+    /// a managed review session it already has is stopped. `Some(n)` asks for
+    /// n; placement beyond one per node is MAIN-446's, so n>1 currently reports
+    /// shortfall rather than being silently capped.
+    #[serde(default)]
+    pub review_loop_replicas: Option<i32>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

@@ -3196,6 +3196,35 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workspaces/{id}/review-loop": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * `GET /api/v1/workspaces/{id}/review-loop` — how many review loops this repo
+         *     is owed (MAIN-445 AC-2).
+         * @description Reports the RAW column, unlike `/ports` which resolves its default before
+         *     answering. The difference is deliberate: a port declaration's default is a
+         *     fact about what will be leased, while `null` here is a fact about what
+         *     nobody has decided. Resolving it to `1` would erase exactly the distinction
+         *     AC-4 needs to print "unset (default 1)".
+         */
+        get: operations["get_review_loop"];
+        /**
+         * `PUT /api/v1/workspaces/{id}/review-loop` — set it, or clear it back to
+         *     unset with `{"replicas": null}` (MAIN-445 AC-2).
+         */
+        put: operations["set_review_loop"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workspaces/{id}/secrets": {
         parameters: {
             query?: never;
@@ -5851,6 +5880,19 @@ export interface components {
             message: string;
             sent: boolean;
         };
+        /**
+         * @description A workspace's review-loop declaration (MAIN-445), as the API reports it.
+         *
+         *     `replicas: null` is UNSET — the build's default of one applies. It is a
+         *     different statement from `0`, which is an explicit "do not review this
+         *     repo", and the two must stay distinguishable all the way out to the caller;
+         *     flattening them here is what would make the CLI unable to say
+         *     "unset (default 1)".
+         */
+        ReviewLoopDeclaration: {
+            /** Format: int32 */
+            replicas?: number | null;
+        };
         RuntimeAuthAccepted: {
             /**
              * Format: uuid
@@ -6105,6 +6147,21 @@ export interface components {
              *     nothing", which is a different statement and is honoured as one.
              */
             requirements?: components["schemas"]["PortRequirement"][] | null;
+        };
+        /**
+         * @description Set or clear a workspace's review-loop count (MAIN-445).
+         *
+         *     The field is a raw JSON value on purpose. Typed as `Option<i32>` it would be
+         *     axum's 422 that answered `{"replicas": "3"}` or `-1`, and AC-2 asks for a
+         *     400 NAMING the field for anything that is not a non-negative integer — so
+         *     the parse has to happen where the error message can be written.
+         *
+         *     The key itself is required, matching [`SetSessionSpecRequest`]: an absent
+         *     key is a malformed request, not a silent "leave it alone".
+         */
+        SetReviewLoopRequest: {
+            /** Format: int32 */
+            replicas?: number | null;
         };
         /**
          * @description Set or clear a workspace's [`SessionSpec`] (MAIN-315). `spec: null` clears
@@ -7012,6 +7069,17 @@ export interface components {
              *     nothing" and is honoured as the different statement it is.
              */
             port_requirements?: unknown;
+            /**
+             * Format: int32
+             * @description How many always-on review loops this repo is owed (MAIN-445).
+             *
+             *     `None` is UNSET, not zero: the build's default of one applies, which is
+             *     what every workspace reads on upgrade. `Some(0)` is an explicit "off" —
+             *     a managed review session it already has is stopped. `Some(n)` asks for
+             *     n; placement beyond one per node is MAIN-446's, so n>1 currently reports
+             *     shortfall rather than being silently capped.
+             */
+            review_loop_replicas?: number | null;
             /**
              * @description The desired session state (MAIN-315), or `None` for an UNMANAGED
              *     workspace. Nothing reconciles it yet.
@@ -12852,6 +12920,70 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["ReconcileStatus"];
                 };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    get_review_loop: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ReviewLoopDeclaration"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    set_review_loop: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SetReviewLoopRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ReviewLoopDeclaration"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             404: {
                 headers: {

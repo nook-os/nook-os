@@ -153,6 +153,10 @@ pub fn build_router(state: AppState) -> Router {
             get(workspaces::get_session_spec).put(workspaces::set_session_spec),
         )
         .route(
+            "/workspaces/{id}/review-loop",
+            get(workspaces::get_review_loop).put(workspaces::set_review_loop),
+        )
+        .route(
             "/workspaces/{id}/ports",
             get(workspaces::get_port_requirements).put(workspaces::set_port_requirements),
         )
