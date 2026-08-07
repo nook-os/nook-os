@@ -11014,7 +11014,6 @@
           "id",
           "tenant_id",
           "kind",
-          "target_task_id",
           "requested_by",
           "state",
           "created_at",
@@ -11041,7 +11040,7 @@
           },
           "kind": {
             "type": "string",
-            "description": "`spec` (fill in a ticket) or `decompose` (break down an epic)."
+            "description": "`spec` (fill in a ticket), `decompose` (break down an epic), or `review`\n(review a repository)."
           },
           "predecessor_job_id": {
             "oneOf": [
@@ -11076,8 +11075,15 @@
             "description": "One of `queued|claimed|running|waiting_on_human|completed|failed|canceled`."
           },
           "target_task_id": {
-            "$ref": "#/components/schemas/TaskId",
-            "description": "The ticket a spec job targets, or the epic a decompose job breaks down."
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/TaskId",
+                "description": "The ticket a spec job targets, or the epic a decompose job breaks down.\n`None` for a `review` job, which is about a repository and has no ticket\n— migration 0040 made the column nullable and constrains the pair, so a\nborrowed task id here would be a lie the executor has to work around."
+              }
+            ]
           },
           "tenant_id": {
             "$ref": "#/components/schemas/TenantId"
@@ -11092,7 +11098,8 @@
                 "type": "null"
               },
               {
-                "$ref": "#/components/schemas/WorkspaceId"
+                "$ref": "#/components/schemas/WorkspaceId",
+                "description": "Where the work happens. Required when `target_task_id` is `None`; the\ndatabase CHECK enforces exactly one of the two being present."
               }
             ]
           }

@@ -194,6 +194,12 @@ async fn serve(db: nook_db::DbPool, cfg: Config) -> Result<()> {
     // Gated on `sessions.reconcile.enabled`, default off.
     nook_control::services::session_reconcile::start(state.clone());
 
+    // The board-signal review sweep (MAIN-408). Gated on its OWN setting,
+    // `reviews.sweep.enabled`, default off — deliberately not `loops.enabled`,
+    // because "run the loop machinery" and "review repositories unprompted" are
+    // separate consents.
+    nook_control::services::review_sweep::start(state.clone());
+
     // One signal, every listener. A single task watches for SIGTERM/SIGINT and
     // flips a watch channel; the browser door, the agent door, and the grace
     // timer each hold a receiver, so a rolling update drains all of them at once

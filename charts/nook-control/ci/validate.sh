@@ -41,6 +41,11 @@ need "ConfigMap"                   '^kind: ConfigMap$' 1
 need "ServiceAccount"              '^kind: ServiceAccount$' 1
 need "no chart-created Secret"     '^kind: Secret$' 0
 need "required secretKeyRefs"      'key: (DATABASE_URL|SESSION_SECRET)' 2
+# MAIN-408: the review sweep's cadence is operator-tunable from the chart. The
+# switch that turns the sweep ON is a per-tenant runtime setting, not a chart
+# value — deliberately, so enabling agents to review repositories is a decision
+# made against a live tenant rather than baked into a deploy.
+need "review sweep interval"       'NOOK_REVIEW_SWEEP_INTERVAL_SECS' 1
 need "liveness /livez"             'path: /livez' 2
 need "readiness /healthz"          'path: /healthz' 1
 

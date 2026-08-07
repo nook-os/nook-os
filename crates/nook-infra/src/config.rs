@@ -236,6 +236,13 @@ pub struct Config {
     /// transient unmount or a moved directory heals with its id intact. Default
     /// 604800 (7 days).
     pub workspace_missing_retention_secs: u64,
+
+    /// How often the board-signal review sweep scans, in seconds (MAIN-408).
+    /// The sweep is idempotent, so this is a responsiveness/cost dial rather
+    /// than a correctness one: a longer interval only delays a review, it can
+    /// never let a second job through — the dedupe does that, not the clock.
+    /// Default 60.
+    pub review_sweep_interval_secs: u64,
 }
 
 /// Parse one entry of `NOOK_TRUSTED_PROXIES`: a CIDR (`10.0.0.0/8`) or a bare
@@ -372,6 +379,11 @@ impl Config {
             workspace_missing_retention_secs: env_opt("NOOK_WORKSPACE_MISSING_RETENTION_SECS")
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(604_800),
+
+            review_sweep_interval_secs: env_opt("NOOK_REVIEW_SWEEP_INTERVAL_SECS")
+                .and_then(|v| v.parse().ok())
+                .filter(|n| *n > 0)
+                .unwrap_or(60),
         };
 
         if cfg.is_production() && cfg.auth_dev_mode {
@@ -510,6 +522,7 @@ impl Config {
             max_claim_secs: 14_400,
             claim_reap_scan_secs: 30,
             workspace_missing_retention_secs: 604_800,
+            review_sweep_interval_secs: 60,
         }
     }
 }

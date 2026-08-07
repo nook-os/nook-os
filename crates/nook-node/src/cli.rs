@@ -4228,3 +4228,83 @@ mod tests {
         assert_eq!(unique_id_len(&[]), 0);
     }
 }
+
+/// `nook reviews enqueue <workspace>` (MAIN-408 AC-2) — raise a review now.
+///
+/// Deduped server-side against the sweep by the shared rule, so running this
+/// twice is safe: the second call prints the job the first one raised. The CLI
+/// deliberately does not decide that itself — a second notion of "already
+/// queued" out here is exactly what AC-3 forbids.
+pub async fn reviews_enqueue(workspace: &str, seed: Option<&str>) -> Result<()> {
+    let client = Client::from_config()?;
+    let mut body = serde_json::json!({ "workspace_id": workspace });
+    if let Some(seed) = seed {
+        body["seed"] = serde_json::Value::String(seed.to_string());
+    }
+    let job = client.post("/api/v1/reviews", body).await?;
+
+    let id = job["id"].as_str().unwrap_or("?");
+    let state = job["state"].as_str().unwrap_or("?");
+    println!("review job {} — {}", crate::style::ok_c(id), state);
+    if state != "queued" {
+        println!("  A review of this workspace was already in flight; this is that job.");
+    }
+    Ok(())
+}
+
+/// `nook reviews sweep [on|off|status]` (MAIN-408 AC-1) — the board-signal
+/// sweep's switch, default OFF.
+pub async fn reviews_sweep(state: &str) -> Result<()> {
+    let client = Client::from_config()?;
+
+    let want = match state {
+        "on" | "enable" | "enabled" => Some(true),
+        "off" | "disable" | "disabled" => Some(false),
+        "status" | "" => None,
+        other => anyhow::bail!("unknown state {other:?} — expected on, off, or status"),
+    };
+
+    if let Some(on) = want {
+        client
+            .put(
+                "/api/v1/settings/reviews.sweep.enabled",
+                serde_json::json!({ "scope": "tenant", "value": on }),
+            )
+            .await?;
+        println!(
+            "review sweep {}",
+            if on {
+                crate::style::ok_c("enabled")
+            } else {
+                crate::style::dim("disabled")
+            }
+        );
+        if on {
+            println!("  A workspace with a card in a review column gets one review job.");
+        } else {
+            println!("  No reviews are raised automatically; `nook reviews enqueue` still works.");
+        }
+        return Ok(());
+    }
+
+    // Status. An absent setting is the default — say so, rather than a bare
+    // "off", so nobody hunts for a switch they never flipped.
+    let settings = client.get("/api/v1/settings").await?;
+    let row = settings.as_array().and_then(|a| {
+        a.iter().find(|s| {
+            s["key"].as_str() == Some("reviews.sweep.enabled")
+                && s["scope"].as_str() == Some("tenant")
+        })
+    });
+    match row {
+        Some(r) if r["value"].as_bool() == Some(true) => {
+            println!("review sweep {}", crate::style::ok_c("enabled"))
+        }
+        Some(_) => println!("review sweep {}", crate::style::dim("disabled")),
+        None => println!(
+            "review sweep {} — no setting stored yet",
+            crate::style::dim("disabled (default)")
+        ),
+    }
+    Ok(())
+}

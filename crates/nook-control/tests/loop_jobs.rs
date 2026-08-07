@@ -607,7 +607,7 @@ async fn jobs_accept_a_board_key_and_reject_unknown() {
     )
     .await
     .expect("create by key");
-    assert_eq!(by_key.job.target_task_id, task_id);
+    assert_eq!(by_key.job.target_task_id, Some(task_id));
 
     // create by UUID string still works (AC-4 parity).
     let by_uuid = jobs::create(
@@ -622,7 +622,7 @@ async fn jobs_accept_a_board_key_and_reject_unknown() {
     )
     .await
     .expect("create by uuid");
-    assert_eq!(by_uuid.job.target_task_id, task_id);
+    assert_eq!(by_uuid.job.target_task_id, Some(task_id));
 
     // an unknown key 404s — not a 422 or a 500.
     let unknown = jobs::create(
@@ -684,7 +684,7 @@ async fn a_second_dispatcher_cannot_re_place_a_job_that_is_already_claimed() {
             id,
             tenant,
             kind: "spec".into(),
-            target_task_id: target,
+            target_task_id: Some(target),
             workspace_id: None,
             requested_by: user,
             seed: None,

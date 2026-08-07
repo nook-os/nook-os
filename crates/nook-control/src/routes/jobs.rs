@@ -27,6 +27,55 @@ pub async fn create(
     ))
 }
 
+/// Raise a review job by hand (MAIN-408 AC-2) — the manual counterpart to the
+/// board-signal sweep, for reviewing something without waiting for the tick.
+///
+/// Deliberately NOT gated on `reviews.sweep.enabled`: that switch governs the
+/// automatic sweep, and a person asking for one review is not the thing an
+/// operator turns off when they say "stop sweeping". (An operator who wants no
+/// reviews at all removes the ability to reach this route, as with any other
+/// endpoint.)
+///
+/// **Dedupe is shared with the sweep, not reimplemented** (AC-3): a workspace
+/// that already has a review in flight returns that existing job with 200,
+/// because "already covered" is success from the caller's point of view and a
+/// 409 would push every caller into writing its own retry rule.
+#[utoipa::path(post, path = "/api/v1/reviews",
+    operation_id = "review_enqueue",
+    request_body = CreateReviewJobRequest,
+    responses((status = 200, body = LoopJobDetail)))]
+pub async fn enqueue_review(
+    State(state): State<AppState>,
+    auth: AuthCtx,
+    Json(req): Json<CreateReviewJobRequest>,
+) -> ApiResult<Json<LoopJobDetail>> {
+    // A person's action, like every other enqueue — a node token cannot raise
+    // reviews on the tenant's behalf.
+    auth.require_user()?;
+    let workspace = crate::services::workspace_queries::resolve_by_key(
+        &*state.workspaces,
+        auth.tenant_id,
+        &req.workspace_id,
+    )
+    .await
+    .map_err(|e| crate::error::ApiError::BadRequest(e.to_string()))?;
+
+    match jobs::enqueue_review(&state, auth.tenant_id, auth.user_id, workspace, req.seed).await? {
+        Some(detail) => Ok(Json(detail)),
+        // Already in flight: hand back the existing run rather than a second one.
+        None => {
+            let existing = state
+                .jobs
+                .active_review_for_workspace(auth.tenant_id, workspace)
+                .await?
+                .ok_or(crate::error::ApiError::NotFound)?;
+            Ok(Json(
+                jobs::get(&state, auth.tenant_id, auth.user_id, existing).await?,
+            ))
+        }
+    }
+}
+
 #[utoipa::path(get, path = "/api/v1/jobs/{id}",
     operation_id = "job_get",
     params(("id" = String, Path,)),

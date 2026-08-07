@@ -4690,7 +4690,10 @@ export interface components {
             created_at: string;
             executor_node_id?: null | components["schemas"]["NodeId"];
             id: components["schemas"]["JobId"];
-            /** @description `spec` (fill in a ticket) or `decompose` (break down an epic). */
+            /**
+             * @description `spec` (fill in a ticket), `decompose` (break down an epic), or `review`
+             *     (review a repository).
+             */
             kind: string;
             predecessor_job_id?: null | components["schemas"]["JobId"];
             /**
@@ -4707,8 +4710,7 @@ export interface components {
             seed?: string | null;
             /** @description One of `queued|claimed|running|waiting_on_human|completed|failed|canceled`. */
             state: string;
-            /** @description The ticket a spec job targets, or the epic a decompose job breaks down. */
-            target_task_id: components["schemas"]["TaskId"];
+            target_task_id?: null | components["schemas"]["TaskId"];
             tenant_id: components["schemas"]["TenantId"];
             /** Format: date-time */
             updated_at: string;
