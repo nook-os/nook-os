@@ -14,7 +14,10 @@ import { api, type Interaction } from "@nookos/api";
 
 /** The pending list is the one query both surfaces read; keeping the key here
  *  means the live-event invalidation and every caller agree on it. */
-const PENDING_KEY = ["interactions", "pending"] as const;
+/// The pending-asks cache. Exported because the browser-tab title reads it
+/// (MAIN-450) — reading the key beats re-typing the array, which is how two
+/// copies of one cache key start disagreeing.
+export const PENDING_KEY = ["interactions", "pending"] as const;
 
 async function fetchPending(): Promise<Interaction[]> {
   return (await api.GET("/api/v1/interactions")).data ?? [];

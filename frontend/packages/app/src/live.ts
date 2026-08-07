@@ -7,7 +7,7 @@ import { notifyEvent } from "./notify";
 import { runJobFollowUp, useJobs } from "./jobs";
 import { resyncSealedSecrets } from "./secretkeys";
 import { useAppPassword } from "./apppassword";
-import { useToasts } from "./Notifications";
+import { NOTIFICATIONS_KEY, useToasts } from "./Notifications";
 import { chimeFor } from "./notify";
 import type { Notification } from "@nookos/api";
 import { api } from "@nookos/api";
@@ -153,7 +153,7 @@ export function startLive(queryClient: QueryClient) {
       // if nobody looks until tomorrow.
       const n = event.data.notification as Notification;
       useToasts.getState().push(n);
-      queryClient.invalidateQueries({ queryKey: ["notifications"] });
+      queryClient.invalidateQueries({ queryKey: NOTIFICATIONS_KEY });
       // The chime and desktop notification stay: they reach you when the tab
       // is not focused, which a toast cannot.
       chimeFor(n.level, n.title, n.body, n.link ?? "");

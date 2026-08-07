@@ -146,13 +146,18 @@ export function Toasts() {
   );
 }
 
+/// The notification cache. Exported for the same reason `PENDING_KEY` is: the
+/// browser-tab title reads it (MAIN-450), and a second hand-typed copy of a
+/// cache key is a bug waiting for somebody to rename one of them.
+export const NOTIFICATIONS_KEY = ["notifications"] as const;
+
 /** The bell, its unread count, and the inbox behind it. */
 export function NotificationBell() {
   const [open, setOpen] = useState(false);
   const qc = useQueryClient();
 
   const { data } = useQuery({
-    queryKey: ["notifications"],
+    queryKey: NOTIFICATIONS_KEY,
     queryFn: async () => (await api.GET("/api/v1/notifications")).data ?? null,
     // The websocket pushes new ones, so this is only a safety net for a client
     // that reconnected while something was raised.
@@ -164,15 +169,15 @@ export function NotificationBell() {
 
   const markAll = async () => {
     await api.POST("/api/v1/notifications/read", { body: {} });
-    qc.invalidateQueries({ queryKey: ["notifications"] });
+    qc.invalidateQueries({ queryKey: NOTIFICATIONS_KEY });
   };
   const markOne = async (id: string) => {
     await api.POST("/api/v1/notifications/read", { body: { id } });
-    qc.invalidateQueries({ queryKey: ["notifications"] });
+    qc.invalidateQueries({ queryKey: NOTIFICATIONS_KEY });
   };
   const clearAll = async () => {
     await api.DELETE("/api/v1/notifications");
-    qc.invalidateQueries({ queryKey: ["notifications"] });
+    qc.invalidateQueries({ queryKey: NOTIFICATIONS_KEY });
   };
 
   return (
