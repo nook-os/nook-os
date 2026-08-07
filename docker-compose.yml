@@ -333,6 +333,11 @@ services:
       # regardless of what is listed here.
       NOOK_LOOP_KINDS: spec,decompose,review,epic-run
       NOOK_MAX_LOOP_JOBS: "2"
+      # The FLEET's GitHub token (MAIN-407) — never a literal here, only the
+      # variable, so a real credential lives in .env and nothing committed can
+      # carry one. Empty is the honest default: a review job then refuses by
+      # name instead of reading every PR as "nothing to review".
+      NOOK_GH_TOKEN: ${NOOK_GH_TOKEN:-}
       # The ports this node leases to sessions (MAIN-301). A session gets one
       # per listener its WORKSPACE declared, each as the env var that workspace
       # named, so two worktrees of the same app run side by side instead of
