@@ -313,6 +313,77 @@ fn parse_max_replicas(v: &serde_json::Value) -> ApiResult<Option<i32>> {
         .map_err(|_| ApiError::BadRequest("max_replicas is too large".into()))
 }
 
+/// `GET /api/v1/workspaces/{id}/review-loop-status` — desired vs actual for the
+/// review loop (MAIN-447 AC-4).
+///
+/// The sibling of `/reconcile-status`, and separate from it on purpose: that
+/// one reports the workspace's own `SessionSpec` and filters this purpose out,
+/// because two declarations converge per workspace and neither should be able
+/// to describe the other.
+///
+/// Both tenant gates are reported rather than one `enabled`, so the UI can name
+/// the switch that is off (AC-5). `pass()` skips the workspace entirely when
+/// `loops.enabled` is off, so a plan reported with that gate down is what WOULD
+/// converge, not what is converging.
+#[utoipa::path(get, path = "/api/v1/workspaces/{id}/review-loop-status",
+    operation_id = "get_review_loop_status",
+    params(("id" = String, Path,)),
+    responses((status = 200, body = ReviewLoopStatus), (status = 404)))]
+pub async fn review_loop_status(
+    State(state): State<AppState>,
+    auth: AuthCtx,
+    Path(id): Path<WorkspaceId>,
+) -> ApiResult<Json<ReviewLoopStatus>> {
+    use crate::services::session_reconcile as recon;
+
+    let ws = state
+        .workspaces
+        .get(auth.tenant_id, id)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+
+    let spec = recon::review_loop_spec(ws.review_loop_max_replicas);
+    // The same call `pass()` makes, with the same purpose and the same slots —
+    // so this reports the plan the loop acts on rather than a second opinion
+    // that drifts when `review_loop_spec` changes (MAIN-448 will change it).
+    let (plan, actual) = recon::plan_now(
+        &state,
+        auth.tenant_id,
+        id,
+        &spec,
+        ManagedPurpose::ReviewLoop,
+        recon::Slots::ClonesOnly,
+    )
+    .await?;
+
+    let named: std::collections::HashMap<_, _> = state
+        .nodes
+        .list(auth.tenant_id, None, None)
+        .await?
+        .into_iter()
+        .map(|n| (n.id, n.name))
+        .collect();
+
+    Ok(Json(ReviewLoopStatus {
+        reconcile_enabled: recon::enabled(&*state.settings, auth.tenant_id).await,
+        loops_enabled: crate::services::loops::enabled(&*state.settings, auth.tenant_id).await,
+        desired: plan.desired as u32,
+        running: actual.len() as u32,
+        shortfall: plan.shortfall as u32,
+        port_capped: plan.capped,
+        blocked: plan
+            .needs_clone
+            .iter()
+            .map(|id| ReconcileBlocker {
+                node_id: *id,
+                node_name: named.get(id).cloned().unwrap_or_default(),
+                reason: "needs_clone".to_string(),
+            })
+            .collect(),
+        eligible: (plan.desired.saturating_sub(plan.shortfall)) as u32,
+    }))
+}
+
 /// `PUT /api/v1/workspaces/{id}/session-spec` — declare it, or clear it with
 /// `{"spec": null}` to return the workspace to unmanaged (MAIN-315 AC-2).
 #[utoipa::path(put, path = "/api/v1/workspaces/{id}/session-spec",

@@ -7604,6 +7604,41 @@
         }
       }
     },
+    "/api/v1/workspaces/{id}/review-loop-status": {
+      "get": {
+        "tags": [
+          "crate::routes::workspaces"
+        ],
+        "summary": "`GET /api/v1/workspaces/{id}/review-loop-status` — desired vs actual for the\nreview loop (MAIN-447 AC-4).",
+        "description": "The sibling of `/reconcile-status`, and separate from it on purpose: that\none reports the workspace's own `SessionSpec` and filters this purpose out,\nbecause two declarations converge per workspace and neither should be able\nto describe the other.\n\nBoth tenant gates are reported rather than one `enabled`, so the UI can name\nthe switch that is off (AC-5). `pass()` skips the workspace entirely when\n`loops.enabled` is off, so a plan reported with that gate down is what WOULD\nconverge, not what is converging.",
+        "operationId": "get_review_loop_status",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReviewLoopStatus"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      }
+    },
     "/api/v1/workspaces/{id}/secrets": {
       "get": {
         "tags": [
@@ -13458,6 +13493,65 @@
               "null"
             ],
             "format": "int32"
+          }
+        }
+      },
+      "ReviewLoopStatus": {
+        "type": "object",
+        "description": "Desired versus actual for a workspace's REVIEW LOOP (MAIN-447 AC-4).\n\nSeparate from [`ReconcileStatus`], which reports the workspace's own\n`SessionSpec` and deliberately excludes this purpose. Two declarations\nconverge per workspace and they must not be able to describe each other.\n\nComputed by the SAME planner the reconciler runs, for the same reason\n[`ReconcileStatus`] is: a ceiling above what the fleet can place has to read\nas shortfall rather than as silent success, and a second calculation would\ndrift the moment `review_loop_spec` changes — which MAIN-448 will do when a\nforge starts counting open PRs.",
+        "required": [
+          "reconcile_enabled",
+          "loops_enabled",
+          "desired",
+          "running",
+          "shortfall",
+          "port_capped",
+          "blocked",
+          "eligible"
+        ],
+        "properties": {
+          "blocked": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ReconcileBlocker"
+            },
+            "description": "Nodes that match `role=loop` but cannot be used yet."
+          },
+          "desired": {
+            "type": "integer",
+            "format": "int32",
+            "description": "What the ceiling resolves to: `null` -> 1, `0` -> 0, `N` -> N.",
+            "minimum": 0
+          },
+          "eligible": {
+            "type": "integer",
+            "format": "int32",
+            "description": "How many nodes match the selector and tolerate the taints.",
+            "minimum": 0
+          },
+          "loops_enabled": {
+            "type": "boolean",
+            "description": "`loops.enabled` for the tenant. The review loop is agent work, so it\nanswers to this as well."
+          },
+          "port_capped": {
+            "type": "boolean",
+            "description": "This workspace declares no ports, so it is held to one session per node\n(MAIN-361). Carried separately from `blocked` because it is the one\ncause of shortfall that never clears on its own."
+          },
+          "reconcile_enabled": {
+            "type": "boolean",
+            "description": "`sessions.reconcile.enabled` for the tenant.\n\nBoth gates are reported separately, rather than as one `enabled`, because\nthe UI's job is to say WHICH switch is off — the two live in different\nplaces and a person who turns on the wrong one has learnt nothing."
+          },
+          "running": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Live review-loop sessions right now.",
+            "minimum": 0
+          },
+          "shortfall": {
+            "type": "integer",
+            "format": "int32",
+            "description": "`desired - placed`: asked for more reviewers than the fleet can host.",
+            "minimum": 0
           }
         }
       },

@@ -7,7 +7,7 @@
 import React, { useEffect, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Plus, X } from "lucide-react";
-import { api } from "@nookos/api";
+import { api, type Schemas } from "@nookos/api";
 import { Empty, Panel, Pill } from "@nookos/ui";
 import { notify } from "./dialogs";
 
@@ -371,6 +371,231 @@ export function SessionPolicy({ workspaceId }: { workspaceId: string }) {
           </div>
         </div>
       )}
+      <ReviewLoop workspaceId={workspaceId} />
     </Panel>
+  );
+}
+
+/** The three states the API keeps distinct, in the words the CLI already prints.
+ *
+ *  Exported because this is the assertion that matters: `null` and `1` must not
+ *  render the same string. Flattening them is what leaves somebody hunting for
+ *  a switch nobody ever set, and it is the whole reason the column is nullable
+ *  rather than defaulting to 1 in the schema. */
+export function reviewLoopSummary(max: number | null): {
+  state: string;
+  detail: string;
+} {
+  if (max === null) {
+    return { state: "unset (default 1)", detail: "the build's default ceiling" };
+  }
+  if (max === 0) {
+    return { state: "0 (off)", detail: "this repo's PRs are not reviewed" };
+  }
+  return {
+    state: `max ${max}`,
+    // The ceiling is not yet a ceiling: nothing counts open PRs, so the number
+    // IS what runs. The terminal says so already, and a surface that is quieter
+    // than the terminal is how somebody concludes the number scales.
+    detail: `no forge yet, so ${max} run regardless of open PRs`,
+  };
+}
+
+type ReviewStatus = Schemas["ReviewLoopStatus"];
+
+/** Which tenant switch is stopping this, named the way the person can fix it.
+ *
+ *  Reported in the order `pass()` checks them: reconciling is the outer gate,
+ *  so naming loops first would send somebody to throw a switch that changes
+ *  nothing while the real one stays off. */
+export function reviewLoopGate(
+  status: ReviewStatus | null | undefined,
+): { key: string; what: string; where: string } | null {
+  if (!status) return null;
+  if (!status.reconcile_enabled) {
+    return {
+      key: "sessions.reconcile.enabled",
+      what: "Reconciling is off for this team, so nothing converges.",
+      where: "Settings → Sessions",
+    };
+  }
+  if (!status.loops_enabled) {
+    return {
+      key: "loops.enabled",
+      what: "Loops are off for this team, and a review loop is agent work.",
+      where: "Settings → Loops",
+    };
+  }
+  return null;
+}
+
+/** The server's own words for a refused write.
+ *
+ *  Its 400 names `max_replicas` — the field just typed into — so passing it
+ *  through beats any sentence written here from a guess about which rule broke. */
+function refusalText(error: unknown): string {
+  const e = error as { error?: string } | undefined;
+  return e?.error ?? JSON.stringify(error);
+}
+
+/** The per-repo review-loop ceiling, on the surface that holds the repo's other
+ *  declarations (MAIN-447).
+ *
+ *  Its numbers come from `/review-loop-status`, which plans through the SAME
+ *  `plan_now` the reconciler runs — not from counting sessions here. A count
+ *  taken locally would be right today and wrong the moment MAIN-448's forge
+ *  makes the desired number `min(open_prs, max)`, with nothing to notice it. */
+export function ReviewLoop({ workspaceId }: { workspaceId: string }) {
+  const queryClient = useQueryClient();
+  const [draft, setDraft] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [refusal, setRefusal] = useState<string | null>(null);
+
+  const { data: decl } = useQuery({
+    queryKey: ["review-loop", workspaceId],
+    queryFn: async () =>
+      (
+        await api.GET("/api/v1/workspaces/{id}/review-loop", {
+          params: { path: { id: workspaceId } },
+        })
+      ).data ?? null,
+  });
+  const { data: status } = useQuery({
+    queryKey: ["review-loop-status", workspaceId],
+    queryFn: async () =>
+      ((
+        await api.GET("/api/v1/workspaces/{id}/review-loop-status", {
+          params: { path: { id: workspaceId } },
+        })
+      ).data as ReviewStatus | undefined) ?? null,
+    refetchInterval: 10000,
+  });
+
+  // `undefined` is "not fetched yet" and `null` is "no declaration" — kept
+  // apart because collapsing them renders the loading state as "unset (default
+  // 1)", which is a claim about the repo rather than about the request. A
+  // workspace set to 0 would announce the opposite of its own setting until the
+  // fetch landed.
+  const loaded = decl !== undefined;
+  const max = decl ? ((decl as { max_replicas?: number | null }).max_replicas ?? null) : null;
+  const gate = reviewLoopGate(status);
+  const summary = reviewLoopSummary(max);
+  const editing = draft !== null;
+
+  const save = async (next: number | null) => {
+    setBusy(true);
+    setRefusal(null);
+    const { error } = await api.PUT("/api/v1/workspaces/{id}/review-loop", {
+      params: { path: { id: workspaceId } },
+      body: { max_replicas: next },
+    });
+    setBusy(false);
+    if (error) {
+      setRefusal(refusalText(error));
+      return;
+    }
+    setDraft(null);
+    queryClient.invalidateQueries({ queryKey: ["review-loop", workspaceId] });
+    queryClient.invalidateQueries({ queryKey: ["review-loop-status", workspaceId] });
+  };
+
+  return (
+    <div className="review-loop" data-testid="review-loop">
+      <div className="small" style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <b>Review loop</b>
+        {status && (
+          <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
+            <Pill tone={status.shortfall > 0 ? "warn" : "ok"}>
+              {status.running}/{status.desired} running
+            </Pill>
+            {status.shortfall > 0 && (
+              <span className="faint small" data-testid="review-loop-shortfall">
+                {status.shortfall} short
+                {status.blocked.length > 0 && (
+                  <>
+                    {" — waiting on a clone to "}
+                    {status.blocked.map((b) => b.node_name || b.node_id).join(", ")}
+                  </>
+                )}
+                {status.blocked.length === 0 && status.port_capped && (
+                  <> — this repo declares no ports, so it is held to one per node</>
+                )}
+              </span>
+            )}
+          </span>
+        )}
+      </div>
+
+      {!loaded ? (
+        <div className="policy-summary small mono faint">reading the declaration…</div>
+      ) : !editing ? (
+        <div className="policy-summary small mono">
+          <div data-testid="review-loop-state">{summary.state}</div>
+          <div className="faint">{summary.detail}</div>
+        </div>
+      ) : (
+        <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 4 }}>
+          <input
+            className="input small"
+            type="number"
+            min={0}
+            aria-label="review loop maximum"
+            value={draft}
+            disabled={busy}
+            onChange={(e) => setDraft(e.target.value)}
+          />
+          <button
+            className="btn primary small"
+            disabled={busy}
+            onClick={() => save(draft.trim() === "" ? null : Number(draft))}
+          >
+            save
+          </button>
+          <button className="btn small" disabled={busy} onClick={() => setDraft(null)}>
+            cancel
+          </button>
+        </div>
+      )}
+
+      {refusal && (
+        <div className="small" data-testid="review-loop-refusal" style={{ color: "var(--err)" }}>
+          {refusal}
+        </div>
+      )}
+
+      {/* Disabled and explained, rather than hidden: a control that vanishes
+          teaches nothing about why, which is the dead end MAIN-297 named. */}
+      {gate && (
+        <div className="faint small" data-testid="review-loop-gate">
+          {gate.what} Turn it on in {gate.where}.
+        </div>
+      )}
+
+      {!editing && (
+        <div style={{ display: "flex", gap: 6, marginTop: 4 }}>
+          <button
+            className="btn small"
+            disabled={busy || !!gate}
+            title={gate ? gate.what : undefined}
+            onClick={() => setDraft(max === null ? "" : String(max))}
+          >
+            set a maximum
+          </button>
+          {/* Clearing has to be reachable, and it is not the same as typing 1
+              (AC-2) — this is the only control that can put the column back to
+              the state a fresh workspace is in. */}
+          {max !== null && (
+            <button
+              className="btn small"
+              disabled={busy || !!gate}
+              title="back to unset — the build's default ceiling"
+              onClick={() => save(null)}
+            >
+              clear
+            </button>
+          )}
+        </div>
+      )}
+    </div>
   );
 }
